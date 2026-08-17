@@ -4,11 +4,13 @@
 	"authors": [],
 	"version": "0.1.0",
 	"dependency-search-paths": ["lib"],
-	// quickjs and mcp are M3 dependencies and are deliberately not here yet:
-	// listing a dependency links its static library into every build, and the
-	// base stage has nothing that imports either of them. They go in when
-	// `js/` and `mcp/` do.
-	"dependencies": ["vk", "c3w", "gltf", "image", "collision"],
+	// quickjs and mcp arrived with M3, which is what `js/` and `mcp/` are.
+	//
+	// **quickjs has a submodule of its own** — `vendor/quickjs-ng`, which its
+	// shim `#include`s. A checkout without `--recursive` leaves that directory
+	// empty and the build fails in the C compiler rather than anywhere that
+	// mentions submodules. `git submodule update --init --recursive` fixes it.
+	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp"],
 	"features": [],
 	"script-dir": "./",
 	// Compiled into `c3c test` alongside the default target's sources, so a

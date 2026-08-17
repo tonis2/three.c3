@@ -394,6 +394,22 @@ fn void Scene.set_visible(&self, NodeId id, bool visible)
 	node.dirty = true;
 }
 
+<*
+ Rename a node.
+
+ The scene owns every name — `create_slot` copies what it is given and `kill`
+ frees it — so this frees the old one before taking a copy of the new. Anything
+ else would either leak on every rename or leave `Scene.free` freeing a string
+ that came from somewhere else.
+*>
+fn void Scene.set_name(&self, NodeId id, String name)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	if (node.name.len > 0) node.name.free(mem);
+	node.name = name.len > 0 ? name.copy(mem) : "";
+}
+
 fn void Scene.touch(&self, NodeId id)
 {
 	Node* node = self.node(id);
