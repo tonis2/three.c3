@@ -48,6 +48,7 @@ fn void JsRuntime.install_bindings(&self)
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
+	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "assetPath", &js_asset_path, 1);
 	self.bind(host, "meshNames", &js_mesh_names, 1);
 

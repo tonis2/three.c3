@@ -562,6 +562,412 @@ fn void a_bad_path_says_which_path() @test
 }
 
 // ============================================================================
+// Shapes
+// ============================================================================
+//
+// `scene/primitive.c3` builds them and `test/primitive_test.c3` checks what they
+// are shaped like, with no device in sight. What is left for here is the part
+// that only exists once there is one: that a shape uploads, that it reaches the
+// screen, that it can be picked, and — the claim the whole design turns on —
+// that constructing the same one a hundred times costs one asset and one draw
+// call.
+
+<*
+ A scene with no file in it, and the Three.js habit costing nothing.
+
+ **A geometry per mesh is what an agent will write**, because that is what
+ Three.js requires; under Three.js it is also N uploads and N draws unless the
+ author knows about `InstancedMesh`. The dedup in `Assets.primitive` is what
+ makes the naive loop the fast one here, and this is the assertion that it is:
+ a hundred separately constructed `BoxGeometry`s, one unique mesh, one draw.
+*>
+fn void a_shape_needs_no_file_and_a_hundred_of_them_is_one_draw() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			for (let i = 0; i < 100; i++) {
+				const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				cube.position.set((i % 10) * 2, 0, Math.floor(i / 10) * 2);
+				scene.add(cube);
+			}
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+			return scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.instances == 100, "a hundred instances, got %d", result.stats.instances);
+		test::@check(result.stats.unique_meshes == 1, "one unique mesh, got %d", result.stats.unique_meshes);
+		test::@check(result.stats.draw_calls == 1, "one draw call, got %d", result.stats.draw_calls);
+		// Twelve triangles a box, so the count also says the box is a box.
+		test::@check(result.stats.triangles == 1200, "1200 triangles, got %d", result.stats.triangles);
+	};
+}
+
+<*
+ Two sizes are two assets, and scale is the free axis.
+
+ The other half of the dedup, and the half worth telling an agent about: a
+ hundred *different* `BoxGeometry`s are a hundred uploads and a hundred draws,
+ while a hundred copies of one box under a hundred scales are one of each. Both
+ halves are asserted here because a test for the first alone would pass on an
+ implementation that returned the same asset for every box regardless of its
+ numbers — which would be the wrong shape rather than a slow scene.
+*>
+fn void two_sizes_are_two_assets_and_scale_is_free() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult sizes = run.run(`
+			const scene = new three.Scene();
+			for (let i = 0; i < 8; i++) {
+				scene.add(new three.Mesh(new three.BoxGeometry(1 + i, 1, 1)));
+			}
+			return scene.stats();
+		`);
+		defer sizes.free();
+
+		test::@check(sizes.ok, "the script succeeded: %s", sizes.error);
+		test::@check(sizes.stats.unique_meshes == 8, "eight sizes are eight meshes, got %d", sizes.stats.unique_meshes);
+		test::@check(sizes.stats.draw_calls == 8, "and eight draws, got %d", sizes.stats.draw_calls);
+
+		three::RunResult scaled = run.run(`
+			const scene = new three.Scene();
+			const box = new three.BoxGeometry(1, 1, 1);
+			for (let i = 0; i < 8; i++) {
+				const m = new three.Mesh(box);
+				m.scale.set(1 + i, 1, 1);
+				scene.add(m);
+			}
+			return scene.stats();
+		`);
+		defer scaled.free();
+
+		test::@check(scaled.ok, "the script succeeded: %s", scaled.error);
+		test::@check(scaled.stats.instances == 8, "eight instances, got %d", scaled.stats.instances);
+		test::@check(scaled.stats.draw_calls == 1, "the same eight sizes by scale are one draw, got %d", scaled.stats.draw_calls);
+	};
+}
+
+<*
+ A cone and the cylinder that spells it are one asset.
+
+ `ConeGeometry(r, h)` asks the host for `cylinder(0, r, h)`, so the two reach the
+ same key and the same upload. Asserted through `stats()` rather than by
+ comparing the two `asset` numbers, because the number being equal is the
+ mechanism and the draw call being one is the point.
+*>
+fn void a_cone_and_the_cylinder_that_spells_it_are_one_draw() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const cone = new three.Mesh(new three.ConeGeometry(1, 2, 32, 1));
+			const spelt = new three.Mesh(new three.CylinderGeometry(0, 1, 2, 32, 1));
+			spelt.position.x = 3;
+			scene.add(cone, spelt);
+			return { stats: scene.stats(), same: cone.geometry.asset === spelt.geometry.asset };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.instances == 2, "both were placed, got %d", result.stats.instances);
+		test::@check(result.stats.draw_calls == 1, "and they bucket together, got %d", result.stats.draw_calls);
+		test::@check(result.value.contains(`"same":true`), "the two spellings share an asset: %s", result.value);
+	};
+}
+
+<*
+ Every shape reaches the screen.
+
+ The complement to `primitive_test.c3`'s winding checks, and deliberately a
+ weaker claim made a different way: that one says the triangles face outward by
+ arithmetic on the triangles, and this one says the whole path — build, upload,
+ index buffer, buffer device address, draw — puts pixels in the frame for each
+ of the six. Neither substitutes for the other. An inside-out sphere would pass
+ this and fail that; a shape that was never uploaded fails this and passes that.
+
+ The threshold is deliberately low. `frameAll` fits a bounding sphere with room
+ around it, so a torus seen edge-on covers a small fraction of the image and the
+ assertion worth making is "something recognisably large is there", not a
+ coverage number that has to be re-tuned whenever the camera fit changes.
+*>
+fn void every_shape_reaches_the_screen() @test
+{
+	String[6] shapes = {
+		"new three.BoxGeometry(1, 1, 1)",
+		"new three.SphereGeometry(1, 32, 16)",
+		"new three.PlaneGeometry(2, 2)",
+		"new three.CylinderGeometry(1, 1, 2)",
+		"new three.ConeGeometry(1, 2)",
+		"new three.TorusGeometry(1, 0.4)",
+	};
+
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		foreach (shape : shapes)
+		{
+			three::RunResult built = run.run(string::tformat(`
+				const scene = new three.Scene();
+				scene.add(new three.Mesh(%s));
+				three.camera.lookAt(0, 0, 0);
+				three.camera.orbit(35, 25);
+				three.camera.frameAll();
+				three.render(scene, three.camera);
+			`, shape));
+			defer built.free();
+			test::@check(built.ok, "%s drew: %s", shape, built.error);
+
+			image::Image frame = run.renderer.capture()!!;
+			defer frame.free();
+
+			int back_r = (int)frame.pixels[0];
+			int back_g = (int)frame.pixels[1];
+			int back_b = (int)frame.pixels[2];
+
+			usz drawn = 0;
+			for (usz at = 0; at < (usz)frame.width * frame.height * 4; at += 4)
+			{
+				int dr = (int)frame.pixels[at] - back_r;
+				int dg = (int)frame.pixels[at + 1] - back_g;
+				int db = (int)frame.pixels[at + 2] - back_b;
+				if (math::abs(dr) + math::abs(dg) + math::abs(db) > 24) drawn++;
+			}
+
+			usz total = (usz)frame.width * frame.height;
+			test::@check(
+				drawn > total / 50,
+				"%s covered more than a fiftieth of the frame, got %d of %d pixels", shape, drawn, total
+			);
+		}
+	};
+}
+
+<*
+ A generated shape can be picked, and the hit is where the shape's surface is.
+
+ The BVH is built from the generated positions, so this is the check that they
+ are the positions the shape claims: a unit box at the origin seen from +Z has
+ its front face at z = 0.5, and a picker that agreed with a box of some other
+ size — or with no tree at all — would answer somewhere else or not at all.
+
+ It also closes the loop between the two halves of this feature. `stats()` says
+ how many triangles were placed and a screenshot says something was drawn; only
+ a pick says *the geometry is where the parameters put it*.
+*>
+fn void a_generated_shape_can_be_picked_where_its_surface_is() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			cube.name = "cube";
+			scene.add(cube);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 5);
+
+			const { width, height } = three.renderSize();
+			const hit = scene.pick(width / 2, height / 2);
+			if (hit === null) return { hit: null };
+			return {
+				name: hit.name,
+				same: hit.object === cube,
+				z: Math.round(hit.point.z * 1000) / 1000,
+				normal: Math.round(hit.normal.z * 1000) / 1000,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"name":"cube","same":true,"z":0.5,"normal":1}`,
+			"the centre pick lands on the box's front face at z = 0.5 facing +Z; got %s", result.value
+		);
+	};
+}
+
+<*
+ A shape is named by its own constructor, and remembers what it was asked for.
+
+ `parameters` is Three.js's, and it earns its place here for a reason Three.js
+ does not have: an agent that has just built a scene and wants to know what is in
+ it reads it back out of `toJSON`, and "BoxGeometry" with no numbers would leave
+ it re-deriving sizes from world positions.
+*>
+fn void a_shape_says_what_it_is_and_what_it_was_asked_for() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const box = new three.BoxGeometry(2, 1, 3);
+			const mesh = new three.Mesh(box);
+			return {
+				type: box.type,
+				name: box.name,
+				parameters: box.parameters,
+				geometryIsTheOnePassed: mesh.geometry === box,
+				isGeometry: box instanceof three.Geometry && box instanceof three.BoxGeometry,
+				defaults: new three.SphereGeometry().parameters,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"type":"BoxGeometry"`), "it knows its type: %s", result.value);
+		test::@check(
+			result.value.contains(`"parameters":{"width":2,"height":1,"depth":3,"widthSegments":1,"heightSegments":1,"depthSegments":1}`),
+			"and what it was asked for, defaults filled in: %s", result.value
+		);
+		test::@check(result.value.contains(`"geometryIsTheOnePassed":true`), "mesh.geometry is it: %s", result.value);
+		test::@check(result.value.contains(`"isGeometry":true`), "and it is a Geometry: %s", result.value);
+		// Three.js's defaults, which are what an agent will assume when it leaves
+		// the arguments out.
+		test::@check(
+			result.value.contains(`"defaults":{"radius":1,"widthSegments":32,"heightSegments":16}`),
+			"a bare SphereGeometry is Three.js's default sphere: %s", result.value
+		);
+	};
+}
+
+<*
+ `new three.Mesh(geometry, material)` — Three.js's two arguments, in Three.js's
+ order.
+
+ The material goes through the same setter an assignment would, so the type
+ check and the "not in the scene yet" replay are the ones already tested; what
+ is new is that the argument exists at all, and that a bad one throws at the
+ constructor rather than at the add.
+*>
+fn void a_mesh_takes_its_material_in_the_constructor() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.ShaderMaterial({
+				uniforms: { tint: [1, 0, 0] },
+				fragment: "float3 shade(Surface s) { return tint * lambert(s.normal); }",
+			});
+			const scene = new three.Scene();
+			const ball = new three.Mesh(new three.SphereGeometry(1), mat);
+			scene.add(ball);
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+
+			let refused = "";
+			try {
+				new three.Mesh(new three.BoxGeometry(1, 1, 1), { fragment: "not a material" });
+			} catch (e) {
+				refused = e.message;
+			}
+			return { assigned: ball.material === mat, refused, stats: scene.stats() };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"assigned":true`), "the material was assigned: %s", result.value);
+		test::@check(
+			result.value.contains("ShaderMaterial"),
+			"and something that is not one is refused by name: %s", result.value
+		);
+		test::@check(result.stats.draw_calls == 1, "the shaded sphere is one draw, got %d", result.stats.draw_calls);
+	};
+}
+
+<*
+ A shape that cannot be built says which number was wrong.
+
+ Every one of these is a typo an agent will make, and each message names the
+ argument rather than the failure — `RangeError: ... width must be a positive
+ number, got 0` is a line it can fix without reading this file.
+*>
+fn void a_shape_that_cannot_be_built_names_the_number() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = [];
+			const refuse = (what, f) => {
+				try { f(); said.push(what + ": nothing was thrown"); }
+				catch (e) { said.push(what + ": " + e.message); }
+			};
+
+			refuse("zero width", () => new three.BoxGeometry(0, 1, 1));
+			refuse("negative radius", () => new three.SphereGeometry(-1));
+			refuse("too few segments", () => new three.CylinderGeometry(1, 1, 1, 2));
+			refuse("too many segments", () => new three.SphereGeometry(1, 4096, 16));
+			refuse("a cone with no radius at all", () => new three.CylinderGeometry(0, 0, 1));
+			refuse("nothing at all", () => new three.BoxGeometry(undefined, NaN, 1));
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("width must be a positive number, got 0"), "%s", result.value);
+		test::@check(result.value.contains("radius must be a positive number, got -1"), "%s", result.value);
+		test::@check(result.value.contains("radialSegments must be at least 3, got 2"), "%s", result.value);
+		test::@check(result.value.contains("widthSegments is capped at 512"), "%s", result.value);
+		test::@check(result.value.contains("both radii are zero"), "%s", result.value);
+		test::@check(result.value.contains("height must be a positive number, got NaN"), "%s", result.value);
+		test::@check(!result.value.contains("nothing was thrown"), "every one of them threw: %s", result.value);
+	};
+}
+
+<*
+ A made-up shape name is refused by the host verb, with the real ones listed.
+
+ Only reachable by calling `__three.primitive` directly, which is not the API —
+ but the flat verb layer is readable from a script and a forged call has to be
+ answered with a sentence rather than with a switch falling through to a box.
+*>
+fn void a_shape_the_host_does_not_build_says_which_it_does() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			try { __three.primitive("teapot", 1, 1, 1, 1, 1, 1, false); }
+			catch (e) { return e.message; }
+			return "nothing was thrown";
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("teapot"), "the name is in the message: %s", result.value);
+		test::@check(result.value.contains("box, sphere, plane, cylinder, torus"), "and the real ones: %s", result.value);
+	};
+}
+
+<*
+ Building a shape without a device says so, the way `three.load` does.
+
+ The scene-math runtime has no GPU, and "cannot read property of null" is not an
+ answer an agent can act on.
+*>
+fn void building_a_shape_without_a_device_says_so() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			try { new three.BoxGeometry(1, 1, 1); }
+			catch (e) { return e.message; }
+			return "nothing was thrown";
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value.contains("GPU device"),
+			"it says a device is what is missing: %s", result.value
+		);
+	};
+}
+
+// ============================================================================
 // Picking
 // ============================================================================
 //

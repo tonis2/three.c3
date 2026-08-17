@@ -16,6 +16,17 @@ N `nodes` rather than N copies of the same triangles. Three.js agents build scen
 out of `BoxGeometry` because that is what the API contains; three.c3 agents build
 scenes out of real assets because that is what *this* API contains.
 
+**There is a `BoxGeometry` now, and the paragraph above still holds.** The two
+were never one claim. What crosses from JavaScript is a shape's name and its
+numbers; what comes back is an ordinary asset index, and no script can read a
+vertex, write one or hand an array of them over. The rule that a shape is
+*parametric* is what keeps it that way: there is no `BufferGeometry` and no
+attribute access, and there will not be. What it bought is that a scene no longer
+needs a file to exist — an agent asked for a room can lay one out in a single
+script and swap the kit in later. `scene/primitive.c3` carries the full argument,
+including why the Three.js habit of a fresh geometry per mesh costs one upload
+and one draw call here.
+
 The second thesis: **the agent must be able to see what it made.** A render call, a
 screenshot, and a `scene.stats()` that reports draw calls, unique meshes, instance
 count and triangle budget. An agent that can look at its own output and read its
@@ -62,8 +73,10 @@ declared beside it.
 object under a pixel of the rendered image — and so does tier 2: an agent writes
 `float3 shade(Surface s)`, three.c3 writes the module around it, and a bad body
 throws a JS error carrying Slang's own diagnostic with the line number the agent
-wrote. `c3c test --trust=full` runs a hundred and twenty-seven checks, all
-headless, leak-clean.
+wrote. **The parametric shapes are in too** — `new three.BoxGeometry(1, 1, 1)`
+and its five siblings, with Three.js's signatures, defaults and orientations, so
+a scene no longer needs a `.glb` to exist. `c3c test --trust=full` runs a hundred
+and forty-eight checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -316,6 +329,9 @@ src/
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
   scene/material.c3 built  a pipeline plus the push-block bytes that go with it
   scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space
+  scene/primitive.c3
+                    built  the parametric shapes, keyed by their parameters so the
+                           same numbers are the same asset (§4, and see below)
   render/pass.c3    built  cull, bucket, upload the instance array, one instanced draw each
   js/runtime.c3     built  the QuickJS context, the run contract, the interrupt/timeout
   js/prelude.js     built  the Three.js-shaped API itself, $embed-ed  (§4, and see below)
@@ -333,6 +349,8 @@ test/
   asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
   scene_test.c3     built  world matrices, bucketing, culling, picking, the instance buffer
   js_test.c3        built  the run contract, handles, staleness, the scene from JavaScript
+  primitive_test.c3 built  what the shapes are shaped like, which way they face, when
+                           two of them are one asset — no device anywhere in it
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -611,6 +629,28 @@ Everything an agent needs to build a level is here, none of it can produce
 unoptimized output, and none of it needs a runtime shader compiler. This is where
 the whole thesis lives.
 
+**Tier 1 also has the shapes, and they take the same asset reference.**
+
+```js
+const scene = new three.Scene();
+for (let i = 0; i < 100; i++) {
+  const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));  // one asset, not a hundred
+  cube.position.set(i % 10, 0, Math.floor(i / 10));
+  scene.add(cube);
+}
+return scene.stats();   // { drawCalls: 1, uniqueMeshes: 1, instances: 100, ... }
+```
+
+`BoxGeometry`, `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`,
+`ConeGeometry`, `TorusGeometry` — Three.js's constructor signatures, defaults and
+orientations, built on the host and handed back as an asset index. The
+parameters *are* the identity, so the Three.js habit of constructing a geometry
+per mesh is one upload and one instanced draw here rather than N of each; two
+different sizes are two assets, and `mesh.scale` is the free axis. See
+`scene/primitive.c3` for why this does not spend the thesis and for the winding
+argument, which matters more here than in Three.js because the pipeline culls
+back faces.
+
 **Naming rule: copy Three.js exactly where the semantics match, and clearly
 diverge where they do not.** `Scene`, `Object3D`, `Mesh`, `position/rotation/scale`,
 `add`, `remove`, `traverse`, `lookAt` mean what they mean in Three.js or they are
@@ -831,6 +871,37 @@ three.ShaderMaterial({ uniforms, fragment })` where `fragment` is one
 `m5_stage.md` is the step-by-step record, including which injected bug each new
 regression test was proved against, and the injection that was too weak on the
 first attempt.
+
+**M5a — the parametric shapes.** `BoxGeometry`, `SphereGeometry`,
+`PlaneGeometry`, `CylinderGeometry`, `ConeGeometry` and `TorusGeometry`, built by
+`scene/primitive.c3` and handed to JavaScript as ordinary asset references. Not
+in the original plan, and §"What it is" now carries the argument for why adding
+them leaves the thesis where it was: a script names a shape and its numbers, and
+still cannot touch a vertex.
+
+Three decisions are worth keeping in view:
+
+- **The parameters are the identity.** An asset is keyed by
+  `<box 1.000000x1.000000x1.000000 1x1x1>` the way a loaded file is keyed by its
+  path, so a fresh `BoxGeometry` per mesh — which is what an agent that has
+  memorized Three.js will write — is one upload and one draw call. Six decimals
+  is the resolution at which two shapes are one shape, which is deliberate: a
+  bit-exact key would make a width computed as `3 / 3` and one written as `1`
+  two draw calls.
+- **A cone is a cylinder with a top radius of zero**, normalised on the way in,
+  so `ConeGeometry(1, 2)` and `CylinderGeometry(0, 1, 2)` share an asset instead
+  of uploading the same triangles twice.
+- **Three.js's formulas are copied rather than re-derived**, which carries the
+  winding and the UV layout across for free. That matters more here than there:
+  `render/pass.c3` culls back faces, so a face wound the wrong way is a hole
+  rather than a dark patch — and an inside-out shape passes every check a
+  screenshot can make, because it fills the same silhouette. `primitive_test.c3`
+  asserts the winding against the triangles instead, and was proved against seven
+  injected bugs, including a single box face handed a left-handed frame.
+
+`m5a_stage.md` is the step-by-step record, including the injection table and the
+one injection that was too weak on the first attempt — which is what measured the
+split between what the arithmetic tests see and what the pixels do.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash
