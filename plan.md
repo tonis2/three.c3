@@ -56,8 +56,9 @@ assets and textures deduplicated across files, frustum culling, one instanced
 draw per unique mesh, `stats()`, and a raycast — then a QuickJS context, the
 tier-1 scene API and three MCP tools over it — and now Slang at runtime, with the
 descriptor set layout and the push block read out of the module rather than
-declared beside it. `c3c test --trust=full` runs seventy-two checks, all
-headless, leak-clean.
+declared beside it — and, with M5 opening, picking reaches JavaScript:
+`scene.pick(x, y)` answers with the object under a pixel of the rendered image.
+`c3c test --trust=full` runs eighty checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -89,10 +90,11 @@ knowing. On a machine with another Slang on the default search path —
 and the binary dies at startup in dyld naming a version nobody asked for.
 Measured, not imagined; slang.c3l's README has the message.
 
-M5 onward is still a plan. Everything below the milestone list describes intent
-rather than behaviour except where it is marked otherwise; `base_stage.md`,
-`m2_stage.md`, `m3_stage.md` and `m4_stage.md` have the built parts broken out
-step by step, each with its own record of what was verified and how.
+M5 is half built and M6 is still a plan. Everything below the milestone list
+describes intent rather than behaviour except where it is marked otherwise;
+`base_stage.md`, `m2_stage.md`, `m3_stage.md`, `m4_stage.md` and `m5_stage.md`
+have the built parts broken out step by step, each with its own record of what
+was verified and how.
 
 **What M0/M1 settled that the rest of the plan assumed:**
 
@@ -738,13 +740,36 @@ its libraries from an installed SDK; bundling them was tried and reverted, and
 `m4_stage.md` §S2 records both what that cost and the load-time failure it turned
 up on the way.
 
-**M5 — tier 2 materials, and picking.** `ShaderMaterial` with a fragment function
-over M4's reflection, validation errors routed into the thrown JS exception, and
-`scene.raycast()` exposed to JS. The raycast itself landed at M2 — `scene/pick.c3`
-is built and tested — because it is how the scene-math checks assert without a
-GPU; what is left here is the binding and `scene/material.c3`. Done when an
-agent-written fragment shader renders and a bad one throws a JS error carrying
-the Slang diagnostic.
+**M5 — tier 2 materials, and picking. Picking is done; materials are not.**
+`ShaderMaterial` with a fragment function over M4's reflection, validation errors
+routed into the thrown JS exception, and the raycast exposed to JS. The raycast
+itself landed at M2 — `scene/pick.c3` is built and tested — because it is how the
+scene-math checks assert without a GPU. Done when an agent-written fragment
+shader renders and a bad one throws a JS error carrying the Slang diagnostic.
+
+The binding shipped first, as three verbs: `scene.pick(x, y)` for a pixel of the
+rendered image, `scene.raycast(origin, direction)` for a world ray, and
+`three.renderSize()` because the first of those takes pixels and nothing else in
+the API said how big the image is. Both answer with the `Mesh` the script is
+holding — not a handle, not a rebuilt copy — or with `null`.
+
+Two things cost time and neither is visible in a diff:
+
+- **It is not a `Raycaster`, deliberately.** Three.js's answers with a sorted
+  array of every intersection and takes the objects to consider; this answers
+  with the closest drawable node in the whole scene. An array that never held
+  more than one element would be a fact about the implementation wearing
+  Three.js's name — §4's half-match, which is worse than a new name.
+- **The picker was biased half a pixel** and had been since M2. `screen_ray`
+  mapped a pixel to its left edge while the rasterizer decides coverage at the
+  pixel's centre, so picks and pixels disagreed at edges — one column in a
+  hundred and sixty, which is why nothing had noticed. Found by comparing a row
+  of picks against the decoded screenshot from the same `run_script` call, and
+  now pinned by a round trip with no rasterizer in it.
+
+`m5_stage.md` is the step-by-step record, including which injected bug each new
+regression test was proved against, and the injection that was too weak on the
+first attempt.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash
@@ -797,6 +822,12 @@ Each of these cost real time in crig and none are visible in a diff.
   API that takes the identical argv does not. Two modules, no error either way,
   and a rendered picture convincing enough that four tests had to say so. The
   only trustworthy check is comparing the artifacts.
+- **A pixel is a square, and its coordinate is a corner.** The rasterizer decides
+  whether a triangle covers a pixel by testing the pixel's *centre*, so anything
+  that claims to agree with the picture — a picker, a hit test, a readback
+  comparison — has to add the half. Leaving it out is a bias rather than noise:
+  it is always in the same direction, invisible except at an edge, and an edge is
+  where the question is being asked. Found at M5, present since M2.
 - **Slang diagnostics are only useful if they are surfaced.** A compile that fails
   and falls back to a previous pipeline is a shader edit that appears to work and
   changes nothing on screen — the runtime version of crig's `$embed` trap.
@@ -842,6 +873,11 @@ expensive ones:
   Built at M2. The case worth keeping from writing it: an instance with a
   non-uniform scale, where the local-space hit parameter is not a world distance
   and comparing two instances' hits without converting picks the wrong one.
+  M5 added the exact version of "the ray goes where the picture goes": cast
+  through a pixel, project the hit back through the same view-projection, and
+  require it to land in the middle of that pixel. No rasterizer, no tolerance
+  beyond floating point, and it fails on every pixel rather than on the one where
+  an edge happens to fall in the wrong half.
 - **The MCP wire** — driven **in-process**, raw JSON-RPC in and parsed JSON out,
   no socket and no subprocess. Assert the tool surface end to end at unit-test
   speed, including that a malformed request is an error response rather than a

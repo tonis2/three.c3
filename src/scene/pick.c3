@@ -130,8 +130,23 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
  what makes "the ray goes where the picture goes" true by construction rather
  than by two implementations staying in step.
 
- @param x : `Pixels from the left edge.`
- @param y : `Pixels from the top edge, the way a window reports a cursor.`
+ ## The ray goes through the middle of the pixel, not its corner
+
+ `x` and `y` name a pixel, and the ray is cast through its **centre** — the half
+ a pixel added below. The rasterizer decides whether a triangle covers a pixel
+ by testing that same centre, so without the half the picker is biased by half a
+ pixel against the picture it is supposed to agree with. Measured rather than
+ reasoned: a row of 160 picks across a rendered fixture disagreed with the
+ rasterized row on exactly one column, the left edge of a quad, and the half
+ removes it. `a_pick_returns_to_the_middle_of_the_pixel_it_named` is the check.
+
+ It is small enough to never be seen except at an edge, which is the argument
+ for fixing it rather than against: an edge is where picking is asked the hard
+ question, and "off by half a pixel, always in the same direction" is a bias
+ that no amount of averaging removes.
+
+ @param x : `The pixel's column, counted from the left.`
+ @param y : `The pixel's row, counted from the top — the way a window reports a cursor.`
 *>
 fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint height)
 {
@@ -142,8 +157,8 @@ fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint 
 	// binds a negative-height viewport, so a pixel row counted from the top maps
 	// to NDC +Y up without a second flip — the same reasoning that keeps
 	// `Camera.projection` free of one.
-	float ndc_x = (x / (float)width) * 2.0f - 1.0f;
-	float ndc_y = (y / (float)height) * 2.0f - 1.0f;
+	float ndc_x = ((x + 0.5f) / (float)width) * 2.0f - 1.0f;
+	float ndc_y = ((y + 0.5f) / (float)height) * 2.0f - 1.0f;
 
 	Vec3 near_point = unproject(inverse_view_projection, ndc_x, ndc_y, 0.0f);
 	Vec3 far_point  = unproject(inverse_view_projection, ndc_x, ndc_y, 1.0f);

@@ -78,6 +78,25 @@
 		toString() { return `Vector3(${this._x}, ${this._y}, ${this._z})`; }
 	}
 
+	// Read a position or a direction out of whatever the script had to hand: a
+	// Vector3, a plain `{x, y, z}`, or a three-element array. An agent that
+	// wrote `[0, -1, 0]` should not have to find out which one this wanted, and
+	// the three are unambiguous.
+	function readVector(v, where) {
+		let x, y, z;
+		if (Array.isArray(v) && v.length >= 3) {
+			[x, y, z] = v;
+		} else if (v !== null && typeof v === 'object' && 'x' in v) {
+			({ x, y, z } = v);
+		} else {
+			throw new TypeError(`${where} wants a Vector3, an {x, y, z} or an [x, y, z]`);
+		}
+		if (!(Number.isFinite(+x) && Number.isFinite(+y) && Number.isFinite(+z))) {
+			throw new TypeError(`${where} was given a vector with a non-finite component`);
+		}
+		return [+x, +y, +z];
+	}
+
 	// -----------------------------------------------------------------------
 	// Object3D
 
@@ -278,6 +297,61 @@
 			this._check();
 			return H.stats();
 		}
+
+		// -------------------------------------------------------------------
+		// Picking
+		//
+		// Not Three.js's `Raycaster`, and named so. `intersectObjects` answers
+		// with a sorted array of every intersection and takes the objects to
+		// consider; this answers with the closest drawable hit in the whole
+		// scene, or null. An array that never held more than one element would
+		// be a fact about this implementation wearing Three.js's name — which
+		// is the half-match `plan.md` §4 says is worse than a new name.
+
+		// What a world-space ray hits. The direction need not be normalised;
+		// `distance` comes back in world units either way, so hits on
+		// differently scaled objects compare directly.
+		raycast(origin, direction) {
+			this._check();
+			const o = readVector(origin, 'scene.raycast(origin, direction)');
+			const d = readVector(direction, 'scene.raycast(origin, direction)');
+			return this._intersection(H.raycast(o[0], o[1], o[2], d[0], d[1], d[2]));
+		}
+
+		// What is under a pixel of the rendered image — (0, 0) is its top-left
+		// corner, the same corner the PNG starts at, and three.renderSize()
+		// says how big it is. Invisible objects and anything under an invisible
+		// parent are skipped: picking what cannot be seen is never what was
+		// meant.
+		pick(x, y) {
+			this._check();
+			if (!(Number.isFinite(+x) && Number.isFinite(+y))) {
+				throw new TypeError('scene.pick(x, y) wants two pixel coordinates');
+			}
+			return this._intersection(H.pick(+x, +y));
+		}
+
+		// A host hit becomes the object the script is holding. The search is a
+		// walk rather than a lookup table because a table would have to be kept
+		// in step with every add, remove and re-parent, and a picked hit is one
+		// per user gesture — the walk is not the expensive part of a raycast.
+		//
+		// `object` is null only for a node this scene did not build: `three
+		// <file.glb>` opens one from the command line, and `name` is what
+		// identifies it then.
+		_intersection(raw) {
+			if (raw === null) return null;
+			const [i, g] = raw.node;
+			let object = null;
+			this.traverse(o => { if (object === null && o._i === i && o._g === g) object = o; });
+			return {
+				object,
+				name: raw.name,
+				distance: raw.distance,
+				point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
+				normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+			};
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -406,6 +480,13 @@
 
 		stats() { return H.stats(); },
 
+		// What `scene.pick(x, y)` counts in, and what the PNG comes back as.
+		// It is the offscreen target's, never a window's (`plan.md` §1).
+		renderSize() {
+			const [width, height] = H.renderSize();
+			return { width, height };
+		},
+
 		getApiDocs() { return DOCS; },
 	};
 
@@ -430,6 +511,7 @@
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
 			'No materials yet. A mesh draws with the base colour and texture its glTF material carried.',
+			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
@@ -437,7 +519,10 @@
 			Scene: {
 				construct: 'new three.Scene()',
 				note: 'Empties the one host scene and becomes its root. It is an Object3D, so moving it moves everything.',
-				methods: ['add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()'],
+				methods: [
+					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
+					'pick(x, y)', 'raycast(origin, direction)',
+				],
 				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
 			},
 			Mesh: {
@@ -465,7 +550,14 @@
 			'three.load(path)': 'Load a .glb or .gltf. Loading the same path twice returns the same asset.',
 			'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
+			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
+			'scene.pick(x, y)':
+				'What is under a pixel of the rendered image, counted from its top-left corner. ' +
+				'Answers with an intersection (below) or null. Needs a GPU device.',
+			'scene.raycast(origin, direction)':
+				'What a world-space ray hits. Either vector may be a Vector3, an {x, y, z} or an [x, y, z], ' +
+				'and the direction need not be normalised. Answers with an intersection (below) or null.',
 			'three.camera.orbit(yaw, pitch, distance)': 'Degrees, degrees, world units. Any argument may be omitted to leave it alone.',
 			'three.camera.lookAt(x, y, z)': 'Point the turntable at a world position.',
 			'three.camera.frameAll()': 'Aim at everything in the scene and back off far enough to see it.',
@@ -480,6 +572,13 @@
 			textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 			textureBytes: 'What those cost.',
 			culledLastFrame: 'Instances the frustum dropped in the last render().',
+		},
+		intersection: {
+			object: 'The Mesh that was hit. Null only for a node this script did not build — one opened from the command line.',
+			name: 'Its name, which identifies it even when object is null.',
+			distance: 'World units along the ray. Comparable across objects however each of them is scaled.',
+			point: 'Where the ray met the surface, world space, as a Vector3.',
+			normal: 'The surface normal there, world space, unit length.',
 		},
 		example: [
 			'const kit = three.load("assets/kit.glb");',
