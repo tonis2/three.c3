@@ -63,6 +63,29 @@ macro @with_renderer(; @body(three::Renderer* renderer))
 }
 
 <*
+ The same device, with the Khronos layer loaded and the messenger installed.
+
+ Kept apart from `@with_gpu` rather than made a parameter of it, because the
+ unvalidated path is the one that ships: a suite that only ever ran with the
+ layer loaded would stop saying anything about the configuration users get.
+
+ The layer is not on every machine, and `create_instance` skips it rather than
+ failing when it is missing. So `gpu.validation` is the honest answer to "is
+ there a messenger at all", and every check below reads it instead of assuming.
+*>
+macro @with_validating_gpu(; @body(three::Gpu* gpu))
+{
+	vk::Instance instance = three::create_instance(true, headless: true)!!;
+	defer instance.free();
+
+	three::Gpu gpu;
+	gpu.init(instance, (vk::SurfaceKHR)null, validate: true)!!;
+	defer gpu.free();
+
+	@body(&gpu);
+}
+
+<*
  Bring a device up and take it down again.
 
  Under leak tracking this is the check that says the instance, the device, the
@@ -80,6 +103,278 @@ fn void device_comes_up_headless() @test
 		test::@check(gpu.limits.buffer_device_address, "bufferDeviceAddress is off; geometry has no route to the shader");
 		test::@check(gpu.limits.dynamic_rendering, "dynamicRendering is off; this project has no VkRenderPass path");
 		test::@check(gpu.limits.max_push_constants_size >= 128, "maxPushConstantsSize is %d, below the 128 every device must offer", gpu.limits.max_push_constants_size);
+		test::@check(gpu.limits.push_descriptor, "pushDescriptor is off; since M5 there are no descriptor sets to fall back to");
+	};
+}
+
+// ============================================================================
+// Validation reaches the caller
+// ============================================================================
+
+<*
+ Without the Khronos layer, none of the checks below are checks.
+
+ Six of them here and five in `mcp_test.c3` open with `if (!gpu.validation)
+ return;`, because the product has to work on a machine that has no Vulkan SDK.
+ On such a machine every one of them passes without executing a line — `plan.md`
+ §7's unexercised regression test exactly: a green suite that has quietly stopped
+ asking the question. Measured, not feared: renaming the layer to something not
+ installed leaves this file at 92 passed, 0 failed.
+
+ So the absence is reported here instead of being inferred from nothing. This is
+ about the machine the suite runs on, not about the product —
+ `asking_for_validation_never_costs_the_device` is what says the product copes.
+*>
+fn void without_the_validation_layer_none_of_these_are_tests() @test
+{
+	test::@check(
+		three::validation_layer_present(),
+		"VK_LAYER_KHRONOS_validation is not installed, so every validation check in this "
+		"suite passed without running. Install the Vulkan SDK, or read this one failure as "
+		"'the validation half of M5 is untested on this machine'."
+	);
+}
+
+<*
+ A real validation error, and a safe one.
+
+ A zero-size buffer breaks VUID-VkBufferCreateInfo-size-00912, which the layer
+ checks *before* it forwards the call — so the message is a genuine one from the
+ Khronos layer about a real device, and nothing invalid ever reaches the driver.
+ That second half is why this and not a bad descriptor binding: `plan.md` §4's
+ own example of a validation bug is a hang, and a test suite is the wrong place
+ to find one.
+*>
+fn void provoke_validation_error(three::Gpu* gpu)
+{
+	vk::Buffer? refused = vk::bufferCreateInfo()
+		.setSize(0)
+		.setUsage((vk::BufferUsageFlags)vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT)
+		.build(gpu.handle);
+	// The layer refuses it, so there is normally nothing here. Guarded rather
+	// than assumed: without the layer the call succeeds and this would leak.
+	if (try made = refused) vk::destroyBuffer(gpu.handle, made, null);
+}
+
+<*
+ Hand a message of any severity to the loader, which routes it to every
+ registered messenger whose mask matches.
+
+ Not the same thing as calling the callback: this goes through
+ `vkSubmitDebugUtilsMessageEXT`, so what is under test is the *registration* —
+ the severity and type masks, and whether `pUserData` reached the callback — and
+ not just the function body. It is the only way to ask about a severity this
+ project has deliberately not subscribed to.
+*>
+fn void submit_message(
+	three::Gpu* gpu,
+	vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
+	ZString id,
+	ZString text
+)
+{
+	vk::DebugUtilsMessengerCallbackDataEXT data = vk::debugUtilsMessengerCallbackDataEXT()
+		.setMessageIdName((char*)id)
+		.setMessage((char*)text);
+	vk::submitDebugUtilsMessageEXT(
+		gpu.instance,
+		severity,
+		(vk::DebugUtilsMessageTypeFlagsEXT)vk::DebugUtilsMessageTypeFlagBitsEXT.DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+		&data
+	);
+}
+
+<*
+ Asking for validation never costs the device, whether or not the layer is there.
+
+ `vkCreateInstance` fails outright with ERROR_LAYER_NOT_PRESENT when it is handed
+ a layer that is not installed, so the naive version of this feature is a
+ three.c3 that will not start on a machine without the Vulkan SDK. Refusing to
+ run because the *diagnostics* are missing is the wrong trade.
+
+ The second check is the one that keeps the first honest: `gpu.validation` has to
+ agree with what is actually installed. A flag stuck on `true` would leave
+ `js/runtime.c3` arming a capture against a messenger that does not exist, and
+ every run would report a clean device it never heard from.
+*>
+fn void asking_for_validation_never_costs_the_device() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		bool installed = three::validation_layer_present();
+
+		test::@check(gpu.handle != null, "asking for validation lost the device");
+		test::@check(
+			gpu.validation == installed,
+			"validation reports %s while the layer is installed: %s",
+			gpu.validation,
+			installed
+		);
+		test::@check(
+			(gpu.debug != null) == gpu.validation,
+			"the messenger and the flag disagree: messenger %s, flag %s",
+			gpu.debug != null,
+			gpu.validation
+		);
+	};
+}
+
+<*
+ A message the layer really produced lands in the sink, with enough of it left to
+ act on.
+
+ The assertion is on the captured text, not on `gpu.validation` — a flag says the
+ messenger was asked for, and this says the whole chain works: the layer is
+ loaded, the messenger is registered at ERROR severity, `pUserData` arrived, the
+ by-value/by-pointer cast in the callback signature is right, and the VUID
+ survived. Every one of those can be broken on its own.
+*>
+fn void a_real_validation_error_lands_in_the_sink() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.validation)
+		{
+			// Nothing to say on a machine with no layer, and saying it loudly
+			// beats a green test that checked nothing.
+			io::printn("  (skipped: VK_LAYER_KHRONOS_validation is not installed)");
+			return;
+		}
+
+		gpu.begin_capture();
+		provoke_validation_error(gpu);
+		String captured = gpu.sink.errors.str_view();
+		gpu.end_capture();
+
+		test::@check(captured.len > 0, "nothing was captured from a call the layer rejects");
+		test::@check(captured.contains("validation ERROR"), "the severity is in the text: %s", captured);
+		test::@check(
+			captured.contains("VUID-VkBufferCreateInfo-size"),
+			"and the VUID, which is the part that can be looked up: %s",
+			captured
+		);
+		test::@check(gpu.sink.warnings.str_view().len == 0, "and it did not also arrive as a warning");
+	};
+}
+
+<*
+ A warning is not an error, and the sink keeps them apart.
+
+ The whole reason there are two buffers: `js/runtime.c3` fails a run on the first
+ and only logs the second, so a warning that landed in `errors` would fail runs
+ for advice.
+*>
+fn void a_warning_does_not_land_where_the_errors_go() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.validation) return;
+
+		gpu.begin_capture();
+		submit_message(
+			gpu,
+			vk::DebugUtilsMessageSeverityFlagBitsEXT.DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+			"THREE-TEST-WARNING",
+			"a warning the loader was asked to deliver"
+		);
+		String warnings = gpu.sink.warnings.str_view();
+		String errors = gpu.sink.errors.str_view();
+		gpu.end_capture();
+
+		test::@check(warnings.contains("validation WARNING"), "it is labelled a warning: %s", warnings);
+		test::@check(warnings.contains("THREE-TEST-WARNING"), "and named: %s", warnings);
+		test::@check(errors.len == 0, "and nothing reached the errors: %s", errors);
+	};
+}
+
+<*
+ VERBOSE is not subscribed to, and this is the assertion on the subscription
+ rather than on the code that reads it.
+
+ `vk::setupDebugMessenger` asks for VERBOSE and then prints it, which on a
+ validating instance is a running commentary on every object created. None of it
+ is a defect, so none of it belongs in a run's answer — and the way to keep it
+ out is to never be told, not to filter after the fact.
+*>
+fn void verbose_messages_are_not_delivered_at_all() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.validation) return;
+
+		gpu.begin_capture();
+		submit_message(
+			gpu,
+			vk::DebugUtilsMessageSeverityFlagBitsEXT.DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+			"THREE-TEST-VERBOSE",
+			"chatter that should never reach a script"
+		);
+		String warnings = gpu.sink.warnings.str_view();
+		String errors = gpu.sink.errors.str_view();
+		gpu.end_capture();
+
+		test::@check(warnings.len == 0, "verbose reached the warnings: %s", warnings);
+		test::@check(errors.len == 0, "verbose reached the errors: %s", errors);
+	};
+}
+
+<*
+ With nothing capturing, a message is printed and the buffer is left as it was
+ found.
+
+ Two things at once, and both matter. The printing is what `--validate` on the
+ command line has always been, and this project may not quietly take it away.
+ The rewind is what keeps a server that has been up for a week from accumulating
+ every message it ever saw between runs — and what stops the *next* run
+ inheriting the previous one's complaints, which would be a validation error
+ attributed to the wrong script.
+*>
+fn void a_message_outside_a_capture_does_not_stay_in_the_sink() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.validation) return;
+
+		// No begin_capture: this is the CLI's state, not a run's.
+		provoke_validation_error(gpu);
+
+		test::@check(gpu.sink.errors.str_view().len == 0, "the sink kept a message nobody was capturing: %s", gpu.sink.errors.str_view());
+		test::@check(gpu.sink.warnings.str_view().len == 0, "and the same for warnings");
+
+		// **The same call again, capturing.** Without this the check above holds
+		// just as well for a provocation the layer never looked at, and an empty
+		// sink would prove nothing. The runner swallows stdout, so the printing
+		// half cannot be asserted here — only that the buffer was left clean.
+		gpu.begin_capture();
+		provoke_validation_error(gpu);
+		String caught = gpu.sink.errors.str_view();
+		gpu.end_capture();
+		test::@check(caught.len > 0, "the provocation produces no message at all, so nothing above was tested");
+	};
+}
+
+<*
+ A new capture does not inherit the last one's messages.
+
+ The failure this catches is a run reporting the *previous* run's validation
+ error, which is worse than reporting none: the agent fixes the script it is
+ holding and the error does not move.
+*>
+fn void a_capture_starts_empty_even_after_a_noisy_one() @test
+{
+	@with_validating_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.validation) return;
+
+		gpu.begin_capture();
+		provoke_validation_error(gpu);
+		test::@check(gpu.sink.errors.str_view().len > 0, "the first capture caught something to inherit");
+		gpu.end_capture();
+
+		gpu.begin_capture();
+		String second = gpu.sink.errors.str_view();
+		gpu.end_capture();
+		test::@check(second.len == 0, "the second capture began holding the first one's error: %s", second);
 	};
 }
 

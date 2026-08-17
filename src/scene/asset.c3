@@ -13,8 +13,8 @@
  - **Textures deduplicated by content hash across every asset already loaded**
    (`plan.md` §2), not merely within one file. Two kit pieces exported from the
    same source share their images, and the whole point is that a scene built out
-   of a kit uploads each image once. That is why the texture list, the descriptor
-   sets and the 1x1 white stand-in live on `Assets` rather than on `Asset`.
+   of a kit uploads each image once. That is why the texture list and the 1x1
+   white stand-in live on `Assets` rather than on `Asset`.
 
  - **A `TriBVH` per unique mesh, built at upload.** It is not read until
    `scene/pick.c3` needs it, but it is per *mesh* rather than per instance —
@@ -23,12 +23,28 @@
    stating: the positions and a triangle index array stay resident on the CPU
    for the life of the asset, because the tree points at them.
 
- ## Descriptor pools are per load, never grown
+ ## There are no descriptor pools
 
- One pool sized for exactly the textures a single `load` added, and a separate
- one-set pool for the white stand-in. A pool that has to grow is a pool that has
- to be recreated with every set in it rebound; a pool per load is a handful of
- objects and no rebinding. A load that adds no new textures creates no pool.
+ There were, until M5: one pool sized for exactly the textures a single `load`
+ added, plus a one-set pool for the white stand-in, with a `sets` list running
+ parallel to `textures`. All of it is gone. `VK_KHR_push_descriptor` lets the
+ draw loop specify the image and sampler inline in the command buffer, so there
+ is no set to allocate, no pool to size, and no lifetime to keep in step with the
+ texture list.
+
+ What that bought is not the deleted code, it is the deleted *coupling*:
+ `Assets.load` used to take a `MeshPipeline*` for the sole purpose of allocating
+ sets against its descriptor layout, which meant the asset table knew what a
+ pipeline was and every texture set was bound to one particular layout. Materials
+ made that actively uncomfortable — a set baked against the mesh pipeline's
+ layout, bound into a material pipeline's, is legal only by an argument about
+ layout compatibility that a future shader could quietly break. Now the question
+ does not arise.
+
+ The extension is required, not probed-and-worked-around, exactly as
+ `VK_KHR_dynamic_rendering` is: `Gpu.limits.push_descriptor` is queried and a
+ device without it is refused with a sentence. Both are baseline on every driver
+ this targets.
 *>
 module three;
 
@@ -107,14 +123,12 @@ struct Assets
 {
 	List{Asset} assets;
 
-	// Shared across every asset. `sets` is parallel to `textures`: one
-	// descriptor set per unique image, allocated once when the image is.
+	// Shared across every asset. Since M5 there is nothing parallel to this:
+	// the image and its sampler are pushed straight into the command buffer at
+	// draw time, so a texture is a texture and not also a descriptor set.
 	List{Texture} textures;
-	List{vk::DescriptorSet} sets;
-	List{vk::DescriptorPool} pools;
 
 	Texture white;
-	vk::DescriptorSet white_set;
 	bool has_white;
 
 	// Set once an image the decoder does not handle has been reported, so a
@@ -138,8 +152,6 @@ fn Assets* Assets.init(&self)
 {
 	self.assets.init(mem, 4);
 	self.textures.init(mem, 8);
-	self.sets.init(mem, 8);
-	self.pools.init(mem, 4);
 	self.started = true;
 	return self;
 }
@@ -202,12 +214,18 @@ fn usz Assets.texture_bytes(&self)
 }
 
 <*
- The set a mesh draws with: its own texture's, or the white stand-in's.
+ The texture a mesh draws with: its own, or the white stand-in.
+
+ Answers with the `Texture` rather than a descriptor set because there are no
+ descriptor sets any more — `MeshPass.record` pushes the image and sampler into
+ the command buffer directly. The white fallback is unchanged and still does the
+ same job: the binding is always occupied, so a textured mesh and an untextured
+ one are the same pipeline and there is no shader permutation to manage.
 *>
-fn vk::DescriptorSet Assets.set_for(&self, GpuMesh* mesh)
+fn Texture* Assets.texture_for(&self, GpuMesh* mesh)
 {
-	if (mesh.texture < 0 || mesh.texture >= self.sets.len()) return self.white_set;
-	return self.sets[mesh.texture];
+	if (mesh.texture < 0 || mesh.texture >= self.textures.len()) return &self.white;
+	return &self.textures[mesh.texture];
 }
 
 // ============================================================================
@@ -226,7 +244,7 @@ fn vk::DescriptorSet Assets.set_for(&self, GpuMesh* mesh)
  @return `The asset's index, for Scene.add_mesh.`
  @return? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
 *>
-fn uint? Assets.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
+fn uint? Assets.load(&self, Gpu* gpu, String path)
 {
 	if (!self.started) self.init();
 
@@ -242,8 +260,7 @@ fn uint? Assets.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
 
 	if (stream.gltf.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
-	self.ensure_white(gpu, pipeline)!;
-	sz textures_before = self.textures.len();
+	self.ensure_white(gpu)!;
 
 	Asset asset = { .path = path.copy(mem) };
 	asset.meshes.init(mem, 8);
@@ -280,7 +297,6 @@ fn uint? Assets.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
 
 	if (asset.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
-	self.build_descriptors(gpu, pipeline, textures_before)!;
 
 	self.assets.push(asset);
 	return (uint)self.assets.len() - 1;
@@ -541,76 +557,43 @@ fn String image_type_name(gltf::ImageType mime)
 // ============================================================================
 
 <*
- The white stand-in and its set, created once for the whole table.
+ The 1x1 white stand-in, created once for the whole table.
 
- It is what keeps this to a single pipeline: the descriptor binding is always
+ It is what keeps this to a single pipeline: the sampler binding is always
  occupied, so an untextured mesh and a textured one are the same pipeline and
  there is no permutation to manage.
+
+ Took a `MeshPipeline*` until M5, for the sole purpose of allocating a descriptor
+ set against its layout. With push descriptors there is no set to allocate, and
+ the asset table no longer needs to know that pipelines exist — which is the
+ coupling this change was worth making for. A material with its own shader used
+ to mean texture sets baked against a *different* pipeline's layout, legal only
+ by an argument about layout compatibility that somebody had to keep true.
 *>
-fn void? Assets.ensure_white(&self, Gpu* gpu, MeshPipeline* pipeline)
+fn void? Assets.ensure_white(&self, Gpu* gpu)
 {
 	if (self.has_white) return;
 
 	self.white = gpu.create_white_texture()!;
-	vk::DescriptorPool pool = vk::descriptorPoolCreateInfo().setMaxSets(1)
-		.setPoolSizes(
-			(vk::DescriptorPoolSize[]) { { .type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 } }
-		)
-		.build(gpu.handle)!;
-	self.pools.push(pool);
-
-	self.white_set = self.allocate_set(gpu, pipeline, pool, &self.white)!;
 	self.has_white = true;
 }
 
 <*
- One descriptor set for each texture this load added.
+ The descriptor write for a texture, ready to push.
 
- Sized for exactly that count, after every texture in the load is known. A load
- that reused every image it referenced adds no textures and creates no pool.
+ Built per draw rather than once per texture, which is the trade push descriptors
+ make: no pool, no allocation, no lifetime, and the cost is re-specifying sixteen
+ bytes of image info at each bucket. At this project's draw counts — the whole
+ thesis is that a thousand instances are one draw — that is not a cost worth
+ caching to avoid.
 *>
-fn void? Assets.build_descriptors(&self, Gpu* gpu, MeshPipeline* pipeline, sz textures_before)
+fn vk::DescriptorImageInfo Texture.descriptor(&self)
 {
-	uint count = (uint)(self.textures.len() - textures_before);
-	if (count == 0) return;
-
-	vk::DescriptorPool pool = vk::descriptorPoolCreateInfo().setMaxSets(count)
-		.setPoolSizes(
-			(vk::DescriptorPoolSize[]) { { .type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = count } }
-		)
-		.build(gpu.handle)!;
-	self.pools.push(pool);
-
-	for (sz i = textures_before; i < self.textures.len(); i++)
-	{
-		self.sets.push(self.allocate_set(gpu, pipeline, pool, &self.textures[i])!);
-	}
-}
-
-fn vk::DescriptorSet? Assets.allocate_set(
-	&self,
-	Gpu* gpu,
-	MeshPipeline* pipeline,
-	vk::DescriptorPool pool,
-	Texture* texture
-)
-{
-	vk::DescriptorSet set;
-	vk::DescriptorSetAllocateInfo info = vk::descriptorSetAllocateInfo().setDescriptorPool(pool)
-		.setSetLayouts((vk::DescriptorSetLayout[]) { pipeline.descriptor_layout });
-	vk::allocateDescriptorSets(gpu.handle, &info, &set)!;
-
-	vk::DescriptorImageInfo image_info = {
-		.sampler = texture.sampler,
-		.imageView = texture.view,
+	return {
+		.sampler = self.sampler,
+		.imageView = self.view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	};
-	vk::WriteDescriptorSet write = vk::writeDescriptorSet().setDstSet(set).setDstBinding(0)
-		.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-		.setImageInfo({ image_info });
-	vk::updateDescriptorSets(gpu.handle, 1, &write, 0, null);
-
-	return set;
 }
 
 // ============================================================================
@@ -630,7 +613,7 @@ fn vk::DescriptorSet? Assets.allocate_set(
 
  @return `The asset's index, for Scene.add_mesh.`
 *>
-fn uint? Assets.load_triangle(&self, Gpu* gpu, MeshPipeline* pipeline)
+fn uint? Assets.load_triangle(&self, Gpu* gpu)
 {
 	if (!self.started) self.init();
 
@@ -638,7 +621,7 @@ fn uint? Assets.load_triangle(&self, Gpu* gpu, MeshPipeline* pipeline)
 	Vec3[3] normals   = { { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 } };
 	uint[3] indices   = { 0, 1, 2 };
 
-	self.ensure_white(gpu, pipeline)!;
+	self.ensure_white(gpu)!;
 
 	Asset asset = { .path = "<triangle>".copy(mem) };
 	asset.meshes.init(mem, 1);
@@ -716,7 +699,6 @@ fn void Assets.free(&self, Gpu* gpu)
 
 	foreach (&texture : self.textures) texture.free(gpu);
 	self.textures.free();
-	self.sets.free();
 
 	if (self.has_white)
 	{
@@ -724,8 +706,6 @@ fn void Assets.free(&self, Gpu* gpu)
 		self.has_white = false;
 	}
 
-	foreach (pool : self.pools) vk::destroyDescriptorPool(gpu.handle, pool, null);
-	self.pools.free();
 
 	*self = { };
 }

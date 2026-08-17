@@ -82,6 +82,19 @@ struct Node
 	uint asset;
 	uint mesh;
 
+	// How this node draws. Indexes `MeshPass.materials`; `DEFAULT_MATERIAL` is
+	// the built-in shader every node starts on, and it is a shared index rather
+	// than a per-node copy because `a_thousand_instances_are_one_draw_call`
+	// stops being true the moment two nodes with the same mesh disagree here.
+	//
+	// Deliberately *not* inherited, unlike `visible`. Three.js resolves a
+	// child's material entirely on the child, and `plan.md` §4's rule is that a
+	// name means what it means in Three.js or it is not called that. The
+	// mechanism to inherit exists and is nearly free — `world_visible` is
+	// recomputed on every walk anyway — so this is a semantic choice, not a cost
+	// one.
+	uint material;
+
 	// `visible` is this node's own flag; `world_visible` is it AND every
 	// ancestor's, resolved in the same walk that builds the world matrices.
 	// Three.js hides a whole subtree by hiding its root, and a flat scan of the

@@ -9,6 +9,7 @@
 	scalarBlockLayout    true
 	bufferDeviceAddress  true
 	dynamicRendering     true
+	pushDescriptor       true       <- no descriptor pools anywhere since M5
 	fillModeNonSolid     false      <- wireframes are line-list index buffers
 	maxPushConstantsSize 256        <- budget stays 128, the portable minimum
 
@@ -41,6 +42,26 @@
  reading must be double-buffered**. crig's pose palette tore for exactly this
  reason. Nothing here is per-frame-mutable yet; the rule applies the moment the
  first uniform or instance buffer arrives.
+
+ ## Validation goes to the script, not to stdout
+
+ `plan.md` §4: "a bad descriptor binding in Vulkan is a hang if you are unlucky
+ ... install a debug messenger that routes validation errors into the thrown JS
+ exception". A message printed to a terminal is invisible to the agent that
+ caused it, and the agent is the only caller that can act on it.
+
+ So the messenger below is this project's, not `vk::setupDebugMessenger`, for
+ three reasons that one cannot give: it carries a `pUserData`, so the callback
+ can reach somewhere other than stdout; it drops VERBOSE, which the vendored one
+ subscribes to only in order to print it; and it keeps `pMessageIdName`, which is
+ the difference between a message an agent can look up and one it can only read.
+
+ **The sink is single-threaded, and that is an assumption rather than a
+ guarantee.** The spec allows the driver to call the messenger on any thread. In
+ three.c3 every Vulkan call is made from the one thread that owns the loop
+ (`main.c3`, `mcp/server.c3`), so the callback arrives on that thread too, and
+ the sink is not locked. A future worker thread submitting work would break this
+ and would have to bring a lock with it.
 *>
 module three;
 
@@ -51,6 +72,7 @@ import vk;
 faultdef
 	NO_BUFFER_DEVICE_ADDRESS,
 	NO_DYNAMIC_RENDERING,
+	NO_PUSH_DESCRIPTOR,
 	NO_SUITABLE_GPU,
 	PORTABILITY_DRIVER_ONLY;
 
@@ -64,9 +86,43 @@ struct GpuLimits
 	bool scalar_block_layout;
 	bool buffer_device_address;
 	bool dynamic_rendering;
+	bool push_descriptor;
 	bool fill_mode_non_solid;
 	uint max_push_constants_size;
 	char[256] device_name;
+}
+
+// The layer that produces the messages, and the instance extension that carries
+// them. Named once because `create_instance` asks whether the first is
+// installed and `Gpu.init` asks whether the second was enabled.
+const ZString VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
+const ZString DEBUG_UTILS_EXTENSION = "VK_EXT_debug_utils";
+
+// Spelled out because vulkan.c3l declares the severity bits in a `constdef`,
+// whose members are only visible unqualified inside module vk. Every other use
+// of them here is inferred from a builder's parameter type; this one is a
+// comparison and has nothing to infer from.
+const uint SEVERITY_ERROR @local = (uint)vk::DebugUtilsMessageSeverityFlagBitsEXT.DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+
+<*
+ What the debug messenger heard, kept apart by severity.
+
+ Two buffers rather than one tagged buffer because the two are answered with
+ differently (`plan.md` §4): an ERROR becomes the exception the script gets back,
+ a WARNING becomes a line in its log. One buffer would mean the runtime parsing
+ its own text back out to tell them apart.
+
+ Null and unallocated when validation is off. The messenger that fills this does
+ not exist then, so there is nothing for it to hold — and every `DString` call
+ used here is null-safe, so nothing has to check.
+*>
+struct ValidationSink
+{
+	DString errors;
+	DString warnings;
+	// Armed for the length of one script run and nothing else. Off means print,
+	// which is what `--validate` on the command line has always done.
+	bool capturing;
 }
 
 struct Gpu
@@ -81,7 +137,34 @@ struct Gpu
 	vk::DeviceQueue graphics;
 	vk::MemoryAllocator allocator;
 	GpuLimits limits;
+	// **Whether validation is running, not whether it was asked for.** A machine
+	// with no Khronos layer installed sets this false even under `--validate`,
+	// and `js/runtime.c3` reads it to decide whether there is a sink worth
+	// arming.
 	bool validation;
+	ValidationSink sink;
+}
+
+<*
+ Is the Khronos validation layer installed on this machine?
+
+ Asked rather than assumed. `vkCreateInstance` fails outright with
+ ERROR_LAYER_NOT_PRESENT when a layer it is handed is not there, so naming the
+ layer unconditionally would mean a machine without the Vulkan SDK cannot start
+ three.c3 at all. Refusing to run because the *diagnostics* are missing is the
+ wrong trade — `plan.md` §4 wants validation running whenever a script is, and a
+ machine that cannot run it should still run the scripts.
+
+ Not cached. It is only asked when validation was requested, it costs one
+ enumeration at startup, and a `false` cached from before `vk::init()` bound the
+ loader would be a lie with no expiry.
+*>
+fn bool validation_layer_present()
+{
+	vk::StringList? installed = vk::getValidationLayers();
+	if (catch err = installed) return false;
+	defer installed.release();
+	return installed.contains(VALIDATION_LAYER.str_view());
 }
 
 <*
@@ -104,7 +187,11 @@ fn void push_surface_extensions(vk::ZStringList* out)
  No portability implementation is asked for or accepted — see the note on
  `VK_KHR_portability_enumeration` below, and the header of this file.
 
- @param validate : `Enable the Khronos validation layer and VK_EXT_debug_utils.`
+ Validation is a request, not an instruction: a layer that is not installed is
+ skipped with a line on stdout rather than failing the instance. See
+ `validation_layer_present`.
+
+ @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed.`
  @param headless : `Skip the surface extensions entirely — nothing will present.`
  @param bundled_driver : `Prefer the driver vulkan.c3l ships over whatever the loader discovers. Deterministic, which is what makes screenshots reproducible across machines.`
 *>
@@ -112,10 +199,19 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 {
 	vk::init()!;
 
+	// Both the layer and the extension are gated on the same answer. Without the
+	// layer nothing produces a validation message, so a debug messenger with
+	// nothing to say is not worth an extension.
+	bool validating = validate && validation_layer_present();
+	if (validate && !validating)
+	{
+		io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
+	}
+
 	vk::ZStringList extensions;
 	defer extensions.free();
 	if (!headless) push_surface_extensions(&extensions);
-	if (validate) extensions.push("VK_EXT_debug_utils");
+	if (validating) extensions.push(DEBUG_UTILS_EXTENSION);
 
 	// VK_KHR_portability_enumeration is deliberately *not* requested, and its
 	// instance flag deliberately not set. That flag is the spec's own switch for
@@ -164,9 +260,9 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 
 	vk::ZStringList layers;
 	defer layers.free();
-	if (validate)
+	if (validating)
 	{
-		layers.push("VK_LAYER_KHRONOS_validation");
+		layers.push(VALIDATION_LAYER);
 		info = info.setEnabledLayerNames(layers.array_view());
 	}
 
@@ -262,21 +358,37 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
  Bring up the logical device, its queue and its allocator.
 
  @param surface : `Null for headless. With one, VK_KHR_swapchain is required of the device; without, it is not asked for.`
+ @param validate : `Must be the same answer create_instance was given. Vulkan has no way to ask an instance what it enabled, so this is taken on trust and then checked against what is installed.`
  @return? NO_BUFFER_DEVICE_ADDRESS : `Geometry reaches the shader through buffer device addresses (plan.md §1); there is no vertex-input fallback to degrade to.`
  @return? NO_DYNAMIC_RENDERING : `There is no VkRenderPass anywhere in this project, by decision.`
+ @return? NO_PUSH_DESCRIPTOR : `Since M5 there are no descriptor pools and no descriptor sets here at all — the draw loop names the image and the sampler inline. Required rather than probed and worked around, for the same reason dynamic rendering is: it is baseline on every driver this targets, and a fallback path would be a second renderer nobody exercises.`
 *>
 fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool validate = false)
 {
 	self.instance = instance;
 	self.surface = surface;
-	self.validation = validate;
 
-	if (validate) self.debug = vk::setupDebugMessenger(instance)!;
+	// Asked twice, because neither question is sufficient on its own.
+	//
+	// The layer probe is the same one `create_instance` used, and it has to be
+	// repeated rather than remembered: there is no way to ask an instance which
+	// extensions it was created with, so `validate` here is a *claim* about what
+	// `create_instance` was told, and installing a messenger on an instance
+	// without VK_EXT_debug_utils is undefined rather than an error.
+	//
+	// The entry point is the second lock. It cannot be the only one — the loader
+	// resolves instance-extension commands it knows about whether or not the
+	// caller enabled them — but a null here is conclusive the other way.
+	self.validation = validate
+		&& validation_layer_present()
+		&& vk::extensions.vkCreateDebugUtilsMessengerEXT != null;
+	if (self.validation) self.install_debug_messenger()!;
 
 	vk::ZStringList extensions;
 	defer extensions.free();
 	if (surface != null) extensions.push("VK_KHR_swapchain");
 	extensions.push("VK_KHR_dynamic_rendering");
+	extensions.push("VK_KHR_push_descriptor");
 
 	vk::DeviceSelection selection = select_device(instance, surface, extensions)!;
 	self.pdevice = selection.device;
@@ -301,13 +413,26 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	vk::PhysicalDeviceFeatures2 features = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
 	vk::getPhysicalDeviceFeatures2(self.pdevice, &features);
 
-	vk::PhysicalDeviceProperties properties;
-	vk::getPhysicalDeviceProperties(self.pdevice, &properties);
+	// Through properties2 rather than the v1 call, because that is the only way
+	// to reach `maxPushDescriptors`. A device without VK_KHR_push_descriptor
+	// walks past the struct it has never heard of and leaves it as it was, so
+	// the zero this is initialised with *is* the answer — no separate extension
+	// query, and no way for the two to disagree.
+	vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES,
+	};
+	vk::PhysicalDeviceProperties2 properties2 = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+		.pNext = &push_descriptor,
+	};
+	vk::getPhysicalDeviceProperties2(self.pdevice, &properties2);
+	vk::PhysicalDeviceProperties properties = properties2.properties;
 
 	self.limits = {
 		.scalar_block_layout = v12.scalarBlockLayout == vk::TRUE,
 		.buffer_device_address = v12.bufferDeviceAddress == vk::TRUE,
 		.dynamic_rendering = v13.dynamicRendering == vk::TRUE,
+		.push_descriptor = push_descriptor.maxPushDescriptors > 0,
 		.fill_mode_non_solid = features.features.fillModeNonSolid == vk::TRUE,
 		.max_push_constants_size = properties.limits.maxPushConstantsSize,
 		.device_name = properties.deviceName,
@@ -315,6 +440,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 
 	if (!self.limits.buffer_device_address) return NO_BUFFER_DEVICE_ADDRESS~;
 	if (!self.limits.dynamic_rendering) return NO_DYNAMIC_RENDERING~;
+	if (!self.limits.push_descriptor) return NO_PUSH_DESCRIPTOR~;
 
 	vk::DeviceQueueCreateInfo queue_info = vk::deviceQueueCreateInfo()
 		.setQueueFamilyIndex(self.graphics.index)
@@ -341,12 +467,153 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	return *self;
 }
 
+// ============================================================================
+// The debug messenger and its sink
+// ============================================================================
+
+<*
+ Install the messenger that turns validation output into something a script can
+ be handed.
+
+ **WARNING and ERROR only.** `vk::setupDebugMessenger` also subscribes to
+ VERBOSE, which on a validating instance is a running commentary on every object
+ created — thousands of lines that exist only to be printed. None of it is a
+ defect, so none of it belongs in a run's answer, and a log an agent has to skim
+ is a log it stops reading. INFO is left off for the same reason. All three
+ message *types* are kept: a PERFORMANCE warning is advice worth having, and a
+ GENERAL one is where the loader says the thing nobody else will.
+
+ `pUserData` is the sink and nothing else — the callback has no use for the rest
+ of `Gpu`, and a narrower pointer is a narrower lifetime to argue about. That
+ argument: the sink is a field of `Gpu`, `Gpu` is a field of `Renderer`, and both
+ are function-scope locals that are never copied or reallocated after `init`
+ (`main.c3` `run`, and the test fixtures). `Gpu.free` destroys the messenger
+ *before* it releases the sink, so there is no window in which the driver can
+ call back into freed memory.
+*>
+fn void? Gpu.install_debug_messenger(&self)
+{
+	self.sink.errors.init(mem, 1024);
+	self.sink.warnings.init(mem, 1024);
+
+	self.debug = vk::debugUtilsMessengerCreateInfoEXT()
+		.setMessageSeverity(
+			DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
+		)
+		.setMessageType(
+			DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+				| DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT
+		)
+		// See `validation_message` for why this cast is here and why it is not a
+		// bug being papered over.
+		.setPfnUserCallback((vk::PFN_vkDebugUtilsMessengerCallbackEXT)&validation_message)
+		.setUserData(&self.sink)
+		.build(self.instance)!;
+}
+
+<*
+ Capture the next run's validation output instead of printing it, and drop
+ whatever the last one left.
+
+ Armed by `JsRuntime.run` for exactly the length of one script and by nothing
+ else, which is what makes a captured message attributable to the script that
+ caused it. Outside that window a message is printed, which is what `--validate`
+ on the command line has always done and still does.
+
+ A no-op when validation is off: there is no messenger to capture from, and an
+ armed flag would be a claim this cannot keep.
+*>
+fn void Gpu.begin_capture(&self)
+{
+	if (!self.validation) return;
+	self.sink.errors.clear();
+	self.sink.warnings.clear();
+	self.sink.capturing = true;
+}
+
+<*
+ Stop capturing. **Read the sink before calling this, not after** — a message
+ arriving in between goes down the printing path and is gone.
+*>
+fn void Gpu.end_capture(&self)
+{
+	self.sink.capturing = false;
+}
+
+<*
+ Every warning and error the layer produces, captured for the running script or
+ printed when there is none.
+
+ **This returns `uint`, and that is not pedantry.** The ABI wants a 4-byte
+ VkBool32 here; vulkan.c3l's own `debugCallback` returns a one-byte C3 `bool`,
+ which leaves the rest of the return register holding whatever was there before.
+ A non-zero read tells the loader to abort the API call that was being
+ validated — a validation *warning* would start failing draws.
+
+ The cast at the install site is the other half of the same problem.
+ `PFN_vkDebugUtilsMessengerCallbackEXT` in `vk/extra.c3` declares the message
+ struct **by value** where Vulkan passes a pointer. That file is vendored and not
+ this project's to correct, so the signature here is the right one and the
+ function pointer is cast on the way in — the same workaround `setupDebugMessenger`
+ uses, kept for the same reason.
+
+ @param user : `The sink, from Gpu.init. Outlives the messenger, which Gpu.free destroys first.`
+ @return `Always FALSE: a messenger that aborted the call it was reporting on would turn a diagnostic into a second failure.`
+*>
+fn uint validation_message(
+	vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
+	vk::DebugUtilsMessageTypeFlagsEXT type,
+	vk::DebugUtilsMessengerCallbackDataEXT* data,
+	void* user
+) @local
+{
+	ValidationSink* sink = (ValidationSink*)user;
+	if (sink == null || data == null) return vk::FALSE;
+
+	bool fatal = (uint)severity >= SEVERITY_ERROR;
+	// Both are documented as possibly-null and a validating driver is exactly
+	// where a null would arrive.
+	String id = data.pMessageIdName != null ? ((ZString)data.pMessageIdName).str_view() : "";
+	String text = data.pMessage != null ? ((ZString)data.pMessage).str_view() : "";
+
+	DString* into = fatal ? &sink.errors : &sink.warnings;
+	sz mark = into.len();
+
+	into.append_string(fatal ? "validation ERROR" : "validation WARNING");
+	// The VUID, or whatever else named this. The Khronos layer repeats it inside
+	// pMessage, so this is not the only copy — but the loader's own GENERAL
+	// messages carry no such prose, and it is the part an agent can look up, so
+	// it goes at the front where it is findable rather than mid-sentence.
+	if (id.len > 0)
+	{
+		into.append_char(' ');
+		into.append_string(id);
+	}
+	into.append_string(": ");
+	into.append_string(text);
+
+	if (!sink.capturing)
+	{
+		// Composed in the buffer and then rewound rather than formatted twice,
+		// so the line a human reads and the line a script is handed cannot drift.
+		io::printn(into.str_view()[mark..]);
+		into.chop(mark);
+		return vk::FALSE;
+	}
+
+	// Only on the captured path: the lines stack, and a log wants them apart.
+	into.append_char('\n');
+	return vk::FALSE;
+}
+
 fn void Gpu.report(&self)
 {
 	io::printfn("device       %s", (ZString)&self.limits.device_name);
+	io::printfn("  validation           %s", self.validation ? "on" : "off");
 	io::printfn("  scalarBlockLayout    %s", self.limits.scalar_block_layout);
 	io::printfn("  bufferDeviceAddress  %s", self.limits.buffer_device_address);
 	io::printfn("  dynamicRendering     %s", self.limits.dynamic_rendering);
+	io::printfn("  pushDescriptor       %s", self.limits.push_descriptor);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);
 }
@@ -369,4 +636,10 @@ fn void Gpu.free(&self)
 		self.debug.free(self.instance);
 		self.debug = (vk::DebugUtilsMessengerEXT)null;
 	}
+	// **After the messenger, never before.** Until it is destroyed the driver is
+	// entitled to call back into this, and the callback writes here.
+	self.sink.errors.free();
+	self.sink.warnings.free();
+	self.sink.capturing = false;
+	self.validation = false;
 }

@@ -18,8 +18,10 @@ module three_tests::js;
 import three;
 import vk;
 import qjs;
+import image;
 import std::core::test;
 import std::io;
+import std::math;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -835,5 +837,529 @@ fn void picking_without_a_device_says_which_verb_needs_one() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains(`"cast":null`), "the empty scene was cast through: %s", result.value);
 		test::@check(result.value.contains("GPU device"), "and the pick named the reason: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Materials
+//
+// `plan.md` §5's done condition for M5: an agent-written fragment shader renders
+// and a bad one throws a JS error carrying the Slang diagnostic. Both halves are
+// asserted here, on a device, through the same `run_script` surface an agent
+// drives — not against the assembly layer, which `three_tests::material` covers.
+// ============================================================================
+
+<*
+ How many pixels are close to a given colour.
+
+ Blunt on purpose, in the same spirit as `scene_test.c3`'s `count_drawn`: it
+ answers "is the thing on screen the colour the material asked for", which no
+ return value from the script can. The tolerance is wide because the default
+ shader's lighting is not being asserted here — only which shader ran.
+*>
+fn uint count_near(image::Image* shot, int r, int g, int b, int tolerance = 40)
+{
+	uint found = 0;
+	for (sz i = 0; i < shot.pixels.len; i += 4)
+	{
+		int dr = (int)shot.pixels[i] - r;
+		int dg = (int)shot.pixels[i + 1] - g;
+		int db = (int)shot.pixels[i + 2] - b;
+		if (math::abs(dr) <= tolerance && math::abs(dg) <= tolerance && math::abs(db) <= tolerance) found++;
+	}
+	return found;
+}
+
+<*
+ A fragment body an agent wrote reaches the screen and changes it.
+
+ The claim is not that a material compiles — `three_tests::material` proves that
+ without a GPU. It is that the compiled thing is *bound and drawn*, and only a
+ picture can say so. The same quad is rendered twice, once on the default shader
+ and once on a material whose whole body is `return float3(1, 0, 0)`, and the
+ frames are compared by counting red pixels.
+
+ A material that compiled and was then never bound leaves the two frames
+ identical — which is exactly the silent failure `plan.md` §6 warns about: "a
+ compile that fails and falls back to a previous pipeline is a shader edit that
+ appears to work and changes nothing on screen". Asserting on `drawCalls` here
+ would report success for that.
+*>
+fn void an_agent_written_shader_reaches_the_screen() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult before = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			globalThis.scene = new three.Scene();
+			globalThis.quad = new three.Mesh(kit.mesh("quad_left"));
+			globalThis.quad.position.set(0, 0, 0);
+			globalThis.scene.add(globalThis.quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(globalThis.scene);
+		`);
+		defer before.free();
+		test::@check(before.ok, "the first run succeeded: %s", before.error);
+
+		image::Image plain = run.renderer.capture()!!;
+		defer plain.free();
+		uint red_before = count_near(&plain, 255, 0, 0);
+
+		three::RunResult after = run.run(`
+			globalThis.quad.material = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(1.0, 0.0, 0.0); }"
+			});
+			three.render(globalThis.scene);
+		`);
+		defer after.free();
+		test::@check(after.ok, "the second run succeeded: %s", after.error);
+
+		image::Image shaded = run.renderer.capture()!!;
+		defer shaded.free();
+		uint red_after = count_near(&shaded, 255, 0, 0);
+
+		test::@check(
+			red_after > 500,
+			"the agent's shader painted the quad red, got %d red pixels",
+			red_after
+		);
+		test::@check(
+			red_after > red_before * 4,
+			"and that is a change: %d red pixels before, %d after",
+			red_before,
+			red_after
+		);
+	};
+}
+
+<*
+ The material's uniform is what the pixels are.
+
+ The strongest form of "assert on the thing, not the flag" available here: a
+ material whose whole body is `return tint` makes the rendered colour a direct
+ read of the uniform. Red, then green through the *same* material — so this also
+ proves that writing `mat.uniforms.tint` after a render takes effect, which a
+ material that only uploaded its uniforms at construction would fail while
+ leaving every JavaScript-side value correct.
+
+ Reading the value back out of `mat.uniforms` would assert nothing about the
+ GPU at all, and an earlier version of this test did exactly that under this
+ name.
+*>
+fn void a_uniform_is_what_the_pixels_are() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult first = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			globalThis.scene = new three.Scene();
+			const quad = new three.Mesh(kit.mesh("quad_left"));
+			globalThis.mat = new three.ShaderMaterial({
+				uniforms: { tint: [1, 0, 0] },
+				fragment: "float3 shade(Surface s) { return tint; }"
+			});
+			quad.material = globalThis.mat;
+			globalThis.scene.add(quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(globalThis.scene);
+		`);
+		defer first.free();
+		test::@check(first.ok, "the first run succeeded: %s", first.error);
+
+		image::Image red_frame = run.renderer.capture()!!;
+		defer red_frame.free();
+
+		three::RunResult second = run.run(`
+			globalThis.mat.uniforms.tint = [0, 1, 0];
+			three.render(globalThis.scene);
+		`);
+		defer second.free();
+		test::@check(second.ok, "the second run succeeded: %s", second.error);
+
+		image::Image green_frame = run.renderer.capture()!!;
+		defer green_frame.free();
+
+		uint red = count_near(&red_frame, 255, 0, 0);
+		uint green = count_near(&green_frame, 0, 255, 0);
+		uint red_still = count_near(&green_frame, 255, 0, 0);
+
+		test::@check(red > 500, "the quad rendered red, got %d red pixels", red);
+		test::@check(green > 500, "and after the write it rendered green, got %d green pixels", green);
+		test::@check(
+			red_still == 0,
+			"with no red left over — %d pixels are still red, so the write did not reach the GPU",
+			red_still
+		);
+	};
+}
+
+<*
+ Two materials in one frame each get their own shader.
+
+ The bucket loop binds a pipeline per bucket and skips the call when it has not
+ changed, which is an optimization built on the draw list being sorted
+ material-major. If the bind were hoisted back out of the loop — where it lived
+ until M5 — or if the skip compared the wrong thing, the second bucket would draw
+ with the first material's pipeline and its own push block.
+
+ Two quads, one red and one green, both on screen at once. Either failure paints
+ both of them the same colour, and no draw-call count would notice.
+*>
+fn void two_materials_at_once_each_get_their_own_shader() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+
+			const left = new three.Mesh(kit.mesh("quad_left"));
+			left.material = new three.ShaderMaterial({
+				uniforms: { tint: [1, 0, 0] },
+				fragment: "float3 shade(Surface s) { return tint; }"
+			});
+
+			// A *different body*, not just a different uniform. Two materials
+			// with identical source share one VkPipeline through the cache —
+			// correctly — and then binding once would be right and this test
+			// would prove nothing about the per-bucket bind.
+			const right = new three.Mesh(kit.mesh("quad_right"));
+			right.material = new three.ShaderMaterial({
+				uniforms: { level: 1 },
+				fragment: "float3 shade(Surface s) { return float3(0.0, level, 0.0); }"
+			});
+
+			scene.add(left, right);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(scene);
+			return three.stats().drawCalls;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "2", "two materials are two draws, got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		uint red = count_near(&shot, 255, 0, 0);
+		uint green = count_near(&shot, 0, 255, 0);
+		test::@check(red > 500, "the left quad is red, got %d red pixels", red);
+		test::@check(green > 500, "the right quad is green, got %d green pixels", green);
+	};
+}
+
+<*
+ A bad body throws, and the message names the line the agent wrote.
+
+ The done condition. The error must arrive at construction — not at the next
+ render, and not as a black screen — and it must carry Slang's own text, whose
+ line number `#line` has already remapped to the agent's body rather than to the
+ generated preamble around it.
+
+ The typo is on the body's third line so a passing test cannot be an accident of
+ the preamble happening to be exactly the right length.
+*>
+fn void a_bad_material_throws_with_the_line_the_agent_wrote() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			try {
+				new three.ShaderMaterial({
+					uniforms: { tint: [1, 0, 0] },
+					fragment: [
+						"float3 shade(Surface s)",
+						"{",
+						"    return s.albedo * tintt;",
+						"}"
+					].join("\n")
+				});
+				return "no throw";
+			} catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script survived to report: %s", result.error);
+		test::@check(result.value.contains("tintt"), "the diagnostic names the typo: %s", result.value);
+		test::@check(
+			result.value.contains("material:3"),
+			"and points at line 3 of the body the agent wrote, not into the preamble: %s",
+			result.value
+		);
+	};
+}
+
+<*
+ The material verbs say which piece is missing, and which of them needs one.
+
+ Same pairing as `picking_without_a_device_says_which_verb_needs_one`: the
+ interesting claim is not that it fails, it is that the sentence names the
+ device. A material *is* a pipeline, so unlike `raycast` there is no meaningful
+ answer to give without one.
+*>
+fn void a_material_without_a_device_says_so() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			try {
+				new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return s.albedo; }" });
+				return "no throw";
+			} catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script survived to report: %s", result.error);
+		test::@check(result.value.contains("GPU device"), "the message names the device: %s", result.value);
+	};
+}
+
+<*
+ A uniform that was never declared cannot be assigned, and says so.
+
+ `mat.uniforms` is sealed with an accessor per declared name, so a typo is a
+ throw rather than a silent write to a property nothing reads. That is the whole
+ reason the accessors are built from the names instead of the object being a
+ plain bag — a bag would make `mat.uniforms.tnit = 1` a no-op that renders
+ unchanged and looks like a shader bug.
+*>
+fn void an_undeclared_uniform_cannot_be_assigned() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.ShaderMaterial({
+				uniforms: { tint: [1, 0, 0] },
+				fragment: "float3 shade(Surface s) { return tint; }"
+			});
+			const said = [];
+			try { mat.uniforms.tnit = [0, 1, 0]; said.push("no throw"); }
+			catch (e) { said.push("threw"); }
+			try { mat.uniforms.tint = "red"; said.push("no throw"); }
+			catch (e) { said.push(e.message); }
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("threw"), "the misspelt name was refused: %s", result.value);
+		test::@check(result.value.contains("tint"), "and the bad value named the uniform: %s", result.value);
+	};
+}
+
+<*
+ A material outlives the scene that used it.
+
+ `new three.Scene()` empties the graph and every node handle in it goes stale,
+ but a material is not a node — it lives on the pass beside the assets, for the
+ same reason a loaded `.glb` does. An agent that rebuilds its scene each run
+ should not have to recompile its shaders to do it.
+*>
+fn void a_material_survives_a_new_scene() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const mat = new three.ShaderMaterial({
+				uniforms: { tint: [0.2, 0.4, 0.8] },
+				fragment: "float3 shade(Surface s) { return tint * s.albedo; }"
+			});
+
+			const first = new three.Scene();
+			first.add(new three.Mesh(kit.mesh("quad_left"))).children[0].material = mat;
+
+			const second = new three.Scene();
+			const quad = new three.Mesh(kit.mesh("quad_right"));
+			quad.material = mat;
+			second.add(quad);
+			three.render(second);
+
+			return { draws: three.stats().drawCalls, tint: mat.uniforms.tint };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"draws":1,"tint":[0.2,0.4,0.8]}`,
+			"the material still draws and still knows its uniforms; got %s",
+			result.value
+		);
+	};
+}
+
+<*
+ Two meshes on one material bucket together; two materials split them.
+
+ The M2 thesis, restated for M5: what makes a draw call is now (asset, mesh,
+ material), and the agent can see the consequence in `stats()` rather than
+ having to infer it. `uniqueMeshes` staying at one while `drawCalls` goes to two
+ is the whole point of reporting them separately.
+*>
+fn void two_materials_over_one_mesh_are_two_draws() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			const ref = kit.mesh("quad_left");
+
+			const a = new three.Mesh(ref);
+			const b = new three.Mesh(ref);
+			b.position.set(2, 0, 0);
+			scene.add(a, b);
+			const shared = three.stats();
+
+			const mat = new three.ShaderMaterial({
+				uniforms: { k: 0.5 },
+				fragment: "float3 shade(Surface s) { return s.albedo * k; }"
+			});
+			b.material = mat;
+			const split = three.stats();
+
+			b.material = null;
+			const rejoined = three.stats();
+
+			return {
+				shared: [shared.drawCalls, shared.uniqueMeshes],
+				split: [split.drawCalls, split.uniqueMeshes],
+				rejoined: [rejoined.drawCalls, rejoined.uniqueMeshes],
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"shared":[1,1],"split":[2,1],"rejoined":[1,1]}`,
+			"one material is one draw, two are two, and null returns to the default; got %s",
+			result.value
+		);
+	};
+}
+
+<*
+ Every name the API exposes is documented where it belongs.
+
+ `the_docs_describe_the_surface` checks that the dump contains two string
+ literals, which asserts that docs exist rather than that they are true: adding
+ `ShaderMaterial` and never mentioning it passed that test green. `plan.md` §4
+ calls `getApiDocs()` the cheapest possible mitigation for the agent not having
+ memorized this API, and a doc that has silently stopped covering the surface is
+ worth less than none, because it is trusted.
+
+ So this asks the surface itself — the module's exports, and every public member
+ of every exported class walked off the prototype chain — and requires each to be
+ documented *in its own entry*. A sweep of the whole dump was written first and
+ was too weak to catch anything: renaming the `ShaderMaterial` entry to
+ `_ShaderMaterialUndocumented` still contains the string `ShaderMaterial`, and
+ prose in `differences` mentioning a class counted as documenting it.
+*>
+fn void the_docs_name_everything_the_api_exposes() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const docs = three.getApiDocs();
+			const elsewhere = JSON.stringify(docs.functions) + JSON.stringify(Object.keys(docs.classes));
+
+			const members = (ctor) => {
+				const out = new Set();
+				let p = ctor.prototype;
+				while (p && p !== Object.prototype) {
+					for (const n of Object.getOwnPropertyNames(p)) {
+						if (n !== 'constructor' && !n.startsWith('_')) out.add(n);
+					}
+					p = Object.getPrototypeOf(p);
+				}
+				return [...out];
+			};
+
+			const missing = [];
+			for (const name of Object.keys(three)) {
+				const exported = three[name];
+				const isClass = typeof exported === 'function' && /^[A-Z]/.test(name);
+				if (!isClass) {
+					if (!elsewhere.includes(name)) missing.push(name);
+					continue;
+				}
+				const entry = docs.classes[name];
+				if (!entry) { missing.push('classes.' + name); continue; }
+				const text = JSON.stringify(entry);
+				for (const m of members(exported)) {
+					if (!text.includes(m)) missing.push(name + '.' + m);
+				}
+			}
+			return missing;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == "[]",
+			"every exported name is documented in its own entry; these are not: %s",
+			result.value
+		);
+	};
+}
+
+<*
+ Many consecutive push-descriptor draws each keep their own state.
+
+ `plan.md`'s M0/M1 findings recorded that KosmicKrisp's `vkCmdPushDescriptorSetKHR`
+ "breaks subsequent draws when descriptorWriteCount > 0", and M5 moved the whole
+ texture path onto exactly that call. If the defect is still present, the first
+ bucket draws correctly and the rest do not — which is why this asserts on four
+ buckets rather than two, and on four *distinct* colours rather than on a count.
+
+ Four materials over one mesh, so every bucket pushes a descriptor and a block
+ and draws. A driver that dropped or corrupted the state after the first push
+ leaves the last three quads sharing the first's appearance.
+*>
+fn void consecutive_push_descriptor_draws_each_keep_their_own_state() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			const ref = kit.mesh("quad_left");
+			const colours = [[1,0,0],[0,1,0],[0,0,1],[1,1,0]];
+
+			colours.forEach((c, i) => {
+				const m = new three.Mesh(ref);
+				m.position.set(i * 1.2, 0, 0);
+				m.material = new three.ShaderMaterial({
+					uniforms: { tint: c },
+					fragment: "float3 shade(Surface s) { return tint; }"
+				});
+				scene.add(m);
+			});
+
+			three.camera.lookAt(1.8, 0, 0);
+			three.camera.orbit(0, 0, 7);
+			three.render(scene);
+			return three.stats().drawCalls;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "4", "four materials are four draws, got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		uint red = count_near(&shot, 255, 0, 0);
+		uint green = count_near(&shot, 0, 255, 0);
+		uint blue = count_near(&shot, 0, 0, 255);
+		uint yellow = count_near(&shot, 255, 255, 0);
+
+		test::@check(red > 200, "the first quad is red, got %d", red);
+		test::@check(green > 200, "the second survived the first push, got %d green", green);
+		test::@check(blue > 200, "and the third, got %d blue", blue);
+		test::@check(yellow > 200, "and the fourth, got %d yellow", yellow);
 	};
 }

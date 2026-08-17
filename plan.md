@@ -56,9 +56,14 @@ assets and textures deduplicated across files, frustum culling, one instanced
 draw per unique mesh, `stats()`, and a raycast — then a QuickJS context, the
 tier-1 scene API and three MCP tools over it — and now Slang at runtime, with the
 descriptor set layout and the push block read out of the module rather than
-declared beside it — and, with M5 opening, picking reaches JavaScript:
-`scene.pick(x, y)` answers with the object under a pixel of the rendered image.
-`c3c test --trust=full` runs eighty checks, all headless, leak-clean.
+declared beside it.
+
+**M5 is built.** Picking reaches JavaScript — `scene.pick(x, y)` answers with the
+object under a pixel of the rendered image — and so does tier 2: an agent writes
+`float3 shade(Surface s)`, three.c3 writes the module around it, and a bad body
+throws a JS error carrying Slang's own diagnostic with the line number the agent
+wrote. `c3c test --trust=full` runs a hundred and twenty-four checks, all
+headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -90,7 +95,7 @@ knowing. On a machine with another Slang on the default search path —
 and the binary dies at startup in dyld naming a version nobody asked for.
 Measured, not imagined; slang.c3l's README has the message.
 
-M5 is half built and M6 is still a plan. Everything below the milestone list
+M5 is built and M6 is still a plan. Everything below the milestone list
 describes intent rather than behaviour except where it is marked otherwise;
 `base_stage.md`, `m2_stage.md`, `m3_stage.md`, `m4_stage.md` and `m5_stage.md`
 have the built parts broken out step by step, each with its own record of what
@@ -114,6 +119,25 @@ was verified and how.
 - **`VK_KHR_push_descriptor` is not requested.** Nothing uses it — KosmicKrisp's
   `vkCmdPushDescriptorSetKHR` breaks subsequent draws when `descriptorWriteCount
   > 0` — and requiring an unused extension can only turn devices away.
+
+  **Overtaken at M5, and the defect did not reproduce.** It is now required, and
+  it is the only way a texture reaches a draw: there are no descriptor pools or
+  sets anywhere in the project. Both halves of the old reasoning had expired —
+  something uses it now, and the driver bug was re-measured rather than assumed
+  stale, because "we avoided it because it was broken" is the worst possible
+  thing to carry forward on trust.
+
+  Two checks, deliberately not one. `consecutive_push_descriptor_draws_each_keep_their_own_state`
+  draws four buckets that each push and draw, and requires four distinct colours
+  — but every push there carries the *same* image, so a driver that ignored
+  writes after the first would still pass it. `two_draws_with_different_textures_do_not_bleed`
+  is the one that settles it: the 1x1 white stand-in and a real texture, back to
+  back, with every pixel either draw painted required to be unchanged by the
+  other's presence. Self-calibrating, so it asserts no colour constants.
+
+  If this ever regresses on another KosmicKrisp build, the second test names it
+  precisely, and the fallback is a descriptor pool — which is what the code
+  looked like before M5 and is in the history.
 
 **What M2 settled:**
 
@@ -278,22 +302,26 @@ src/
   shader/load.c3    built  .slang source from disk, never $embed
   shader/compile.c3 built  Slang at runtime: the session, the flags, the diagnostic
   shader/reflect.c3 built  Slang reflection -> descriptor set layout + push-block map
+  shader/material_source.c3
+                    built  wraps an agent's fragment body into a whole Slang module
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
-  scene/material.c3        material params + which pipeline they resolve to
+  scene/material.c3 built  a pipeline plus the push-block bytes that go with it
   scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space
   render/pass.c3    built  cull, bucket, upload the instance array, one instanced draw each
   js/runtime.c3     built  the QuickJS context, the run contract, the interrupt/timeout
   js/prelude.js     built  the Three.js-shaped API itself, $embed-ed  (§4, and see below)
   js/bind_scene.c3  built  the flat host verbs prelude.js is written against
   js/bind_asset.c3  built  load(), asset paths, mesh names
-  js/bind_shader.c3        the material/shader surface (tier 2, §4)
+  js/bind_shader.c3 built  the material/shader surface (tier 2, §4)
   mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
                            compiled at startup from this file; there is no .spv
+  material.slang    built  the ShaderMaterial template: the same module with the
+                           shading lifted out into shade(Surface) and three markers
 test/
   gpu_test.c3       built  device, target, headless render, readback, reproducibility
   asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
@@ -301,6 +329,7 @@ test/
   js_test.c3        built  the run contract, handles, staleness, the scene from JavaScript
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
+  material_test.c3  built  source assembly, the #line remap, the uniform budget
   fixtures/         built  textured.glb and the generator that writes it
 ```
 
@@ -314,8 +343,8 @@ because the Three.js-isms are written in the language that has them.
 `m3_stage.md` S1 has the full argument, including why `$embed` here does not
 contradict `shader/load.c3`'s "never `$embed`".
 
-**`scene/material.c3` is the one planned file M2 did not produce**, and that is
-deliberate rather than an omission to find later. At M2 a material is a base
+**`scene/material.c3` was the one planned file M2 did not produce**, and that was
+deliberate rather than an omission to find later. It arrived at M5, as predicted. At M2 a material is a base
 colour factor and a texture index, both carried on `GpuMesh`, and both resolve
 to the one pipeline — a `Material` struct with exactly those two fields would be
 a name for something that already has one. It arrives at M5 with
@@ -740,7 +769,7 @@ its libraries from an installed SDK; bundling them was tried and reverted, and
 `m4_stage.md` §S2 records both what that cost and the load-time failure it turned
 up on the way.
 
-**M5 — tier 2 materials, and picking. Picking is done; materials are not.**
+**M5 — tier 2 materials, and picking. Done.**
 `ShaderMaterial` with a fragment function over M4's reflection, validation errors
 routed into the thrown JS exception, and the raycast exposed to JS. The raycast
 itself landed at M2 — `scene/pick.c3` is built and tested — because it is how the
@@ -766,6 +795,32 @@ Two things cost time and neither is visible in a diff:
   hundred and sixty, which is why nothing had noticed. Found by comparing a row
   of picks against the decoded screenshot from the same `run_script` call, and
   now pinned by a round trip with no rasterizer in it.
+
+Materials landed as `plan.md` §4's tier-2 example, verbatim: `new
+three.ShaderMaterial({ uniforms, fragment })` where `fragment` is one
+`float3 shade(Surface s)`. Four more things cost time:
+
+- **A material's uniforms live in the push block**, not a uniform buffer. 68
+  bytes were free after the mesh contract, and Slang reports a `ConstantBuffer`
+  as one opaque binding whose members `lib/slang.c3l` has no externs to walk. The
+  push path was already reflected by name and offset and tested byte-for-byte.
+  `check_push_block` had to stop capping the block at `MeshPush::size`, which
+  left four spare bytes and made this impossible.
+- **The bucket key is `(asset, mesh, material)` — all three.** §"Source tree"
+  wrote `(mesh, material)`, and dropping `asset` collapses two byte-identical
+  assets into one bucket that draws one's geometry with the other's instances.
+  `two_assets_sharing_an_image_upload_it_once` is the test that says so.
+- **`three.render()` from a script had been drawing nothing since M3.**
+  `MeshPass.ready` gates the whole draw and was set only by the three CLI
+  loaders; the JS path calls `Assets.load` directly. No JS test had ever asserted
+  on pixels, and `mcp_test` checks a PNG comes back — a blank one does. Found by
+  fixing a test of this milestone's that claimed to compare frames and actually
+  compared draw counts.
+- **Descriptor sets are gone entirely**, replaced by `VK_KHR_push_descriptor`.
+  That deletes the coupling where `Assets.load` took a `MeshPipeline*` only to
+  allocate sets against its layout. It also meant re-measuring the M0/M1 finding
+  that this call was broken on KosmicKrisp — it does not reproduce, and two
+  tests now hold that down.
 
 `m5_stage.md` is the step-by-step record, including which injected bug each new
 regression test was proved against, and the injection that was too weak on the
@@ -799,8 +854,23 @@ Each of these cost real time in crig and none are visible in a diff.
 - **`SomeEnum::values`** (`::`, not `.`) is how c3c spells enum reflection.
 - **`Element.widget_as`-style casts are unchecked** in cui, and the same hazard
   applies to any `void*`-keyed handle table here. Compare identity, not type.
-- **Two Vulkan drivers on this machine.** Never assume an optional feature; query
-  it and fall back.
+- **Two Vulkan drivers on this machine. Query every optional feature — but
+  querying is not the same as falling back.** This bullet used to end "query it
+  and fall back", and that was already wrong when it was written:
+  `VK_KHR_dynamic_rendering` is pushed unconditionally and a device without it is
+  refused by name, because there is no `VkRenderPass` anywhere in this project to
+  fall back *to*. M5 made the same call for `VK_KHR_push_descriptor`.
+
+  The real rule is: decide whether an extension is baseline for the devices this
+  targets — KosmicKrisp and mid-range Vulkan parts, not the whole installed base
+  — and then either require it and say so in one sentence at startup, or write
+  the fallback and test both paths. What is forbidden is the third thing:
+  *assuming* it and finding out at draw time. A fallback nobody exercises is
+  worse than a requirement, because it is only reached on the machine you do not
+  have.
+
+  Note the API version this requests is 1.3, so push descriptors are an
+  extension here rather than the core feature they became in 1.4.
 - **Two frames in flight means any buffer the GPU may still be reading must be
   double-buffered.** crig's pose palette tore for exactly this reason. The
   per-frame instance buffer has the same shape — it is one buffer per frame slot

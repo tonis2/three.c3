@@ -159,12 +159,19 @@ struct MeshPipeline
 *>
 fn void? check_push_block(ShaderLayout* layout)
 {
-	if (layout.push_size > MeshPush::size)
+	// Against the budget, not against `MeshPush::size`. The doc comment above has
+	// always said extra fields are allowed, but until M5 this line capped the
+	// whole block at the 64 bytes the mesh struct occupies, which left exactly
+	// four spare and made a material uniform impossible. What the cap is actually
+	// for is that `MeshPass.record` pushes into a `PUSH_BUDGET`-sized staging
+	// block — so the budget is the real bound, and the device's own limit is
+	// checked separately in `MeshPipeline.init`.
+	if (layout.push_size > PUSH_BUDGET)
 	{
 		io::eprintfn(
-			"shader: the push block is %d bytes and MeshPush is %d",
+			"shader: the push block is %d bytes and the budget is %d",
 			layout.push_size,
-			MeshPush::size
+			PUSH_BUDGET
 		);
 		return PUSH_BLOCK_MISMATCH~;
 	}
@@ -242,7 +249,11 @@ fn void? check_entry_points(ShaderModule* mod)
 fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, vk::CullModeFlags cull)
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
-	if (MeshPush::size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
+	// The *shader's* block, not `MeshPush::size`. Since M5 a material appends its
+	// uniforms to the tail, so what gets pushed is no longer bounded by the C3
+	// struct — checking the struct would have let a 128-byte material block
+	// through on a device offering 64.
+	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
 
 	check_entry_points(mod)!;
 	check_push_block(&mod.layout)!;
@@ -275,7 +286,12 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 			});
 		}
 
+		// `PUSH_DESCRIPTOR_BIT` makes this a layout that is never allocated from.
+		// Sets for it are specified inline by `cmdPushDescriptorSetKHR` at draw
+		// time, which is why `Assets` has no pool, no set list and — the part that
+		// mattered — no reason to know a pipeline exists. See `scene/asset.c3`.
 		self.descriptor_layout = vk::descriptorSetLayoutCreateInfo()
+			.setFlags(DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT)
 			.setBindings(bindings.array_view())
 			.build(gpu.handle)!;
 	};
@@ -435,7 +451,21 @@ fn void PipelineCache.init(&self)
 <*
  The pipeline for this source and this render state, compiling it if it is new.
 
+ ## Who gets the diagnostic
+
+ Until M5 this printed the Slang diagnostic to stderr and returned a bare fault,
+ which threw the text away for every caller. That was right while the only shader
+ was `mesh.slang` and the only reader was whoever started the process; it is
+ wrong the moment an agent's own fragment body is what failed, because
+ `plan.md` §5's done condition for M5 is a JS error *carrying* the diagnostic.
+
+ So `diagnostic`, when non-null, receives the text — on failure and on success
+ alike, since a warning arrives with `ok == true` and is worth surfacing too.
+ The caller owns the string. Passing null keeps the old behaviour exactly, which
+ is what the CLI and the built-in mesh pipeline still want.
+
  @param name : `What diagnostics call the source.`
+ @param [out] diagnostic : `Receives Slang's output verbatim, or is left alone if null. Set on warnings as well as errors — check the fault, not this.`
  @return `A pointer owned by the cache. Valid until the cache is freed.`
 *>
 fn MeshPipeline*? PipelineCache.acquire(
@@ -444,7 +474,8 @@ fn MeshPipeline*? PipelineCache.acquire(
 	Target* target,
 	String source,
 	String name,
-	vk::CullModeFlags cull
+	vk::CullModeFlags cull,
+	String* diagnostic = null
 )
 {
 	ulong hash = content_hash((char[])source) ^ ((ulong)cull * 0x9e3779b97f4a7c15);
@@ -461,16 +492,19 @@ fn MeshPipeline*? PipelineCache.acquire(
 	defer mod.free();
 	self.compiles++;
 
+	// Handed over before the `ok` check, because a successful compile can still
+	// warn and the caller asked for the text, not for the failures.
+	if (diagnostic != null && mod.diagnostic.len > 0) *diagnostic = mod.diagnostic.copy(mem);
+
 	if (!mod.ok)
 	{
-		// The diagnostic is the product on this path — printing it here means a
-		// shader error reaches a person even when the caller only propagates a
-		// fault. `plan.md` §6: a compile that fails quietly is the runtime
-		// version of the `$embed` trap.
-		io::eprintn(mod.diagnostic);
+		// Printed only when nobody took delivery. `plan.md` §6: a compile that
+		// fails quietly is the runtime version of the `$embed` trap, so the text
+		// has to reach *someone* on every path.
+		if (diagnostic == null) io::eprintn(mod.diagnostic);
 		return SHADER_COMPILE_FAILED~;
 	}
-	if (mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
+	if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
 
 	// Built into a local first, so a pipeline that fails to build leaves nothing
 	// half-allocated behind. Nothing here can fail after this line.
