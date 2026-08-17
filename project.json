@@ -29,8 +29,14 @@
 		// --trust=full, or c3c skips the exec and still reports success.
 		"shaders": {
 			"type": "prepare",
+			// -force-glsl-scalar-layout is not optional and is not decoration:
+			// without it slangc emits a *different* module, and the tightly
+			// packed float3/float2 streams the C3 side uploads are then read at
+			// std430 strides. Building through this target and building by hand
+			// have to produce the same bytes or the disagreement shows up as
+			// geometry read a third of the way off.
 			"exec": [
-				"slangc ./shaders/mesh.slang -target spirv -emit-spirv-directly -fvk-use-entrypoint-name -o ./shaders/mesh.spv"
+				"slangc ./shaders/mesh.slang -target spirv -emit-spirv-directly -fvk-use-entrypoint-name -force-glsl-scalar-layout -o ./shaders/mesh.spv"
 			]
 		}
 	},

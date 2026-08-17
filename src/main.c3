@@ -11,6 +11,7 @@
 	--height <n>          offscreen render height (default 720)
 	--headless            no window, no surface, no swapchain
 	--validate            Vulkan validation layers + debug messenger
+	--grid <n>            n instances of the model, to see M2's claim hold
 *>
 module three;
 
@@ -32,6 +33,7 @@ struct Options
 	String shader;
 	bool system_driver;
 	bool stress_resize;
+	uint grid;
 	bool help;
 }
 
@@ -69,6 +71,9 @@ fn Options? parse_args(String[] args)
 			case "--height":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.height = args[++i].to_uint()!;
+			case "--grid":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.grid = args[++i].to_uint()!;
 			default:
 				if (arg.starts_with("-"))
 				{
@@ -102,6 +107,7 @@ fn void usage()
 	io::printn("  --headless            no window, no surface, no swapchain");
 	io::printn("  --validate            Vulkan validation layers + debug messenger");
 	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
+	io::printn("  --grid <n>            place n instances of the model in a grid");
 	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");
 	io::printn("  --shader <path>       a mesh.spv other than the one on the search path");
 	io::printn("  -h, --help            this");
@@ -193,7 +199,11 @@ fn void? run(Options opts)
 	// and re-running slangc changes the picture with no rebuild of this binary.
 	renderer.pass.init(&renderer.gpu, &renderer.target, opts.shader)!;
 
-	if (opts.model.len > 0)
+	if (opts.grid > 0)
+	{
+		renderer.pass.instance_grid(&renderer.gpu, opts.model, opts.grid)!;
+	}
+	else if (opts.model.len > 0)
 	{
 		renderer.pass.load(&renderer.gpu, opts.model)!;
 	}
@@ -202,13 +212,18 @@ fn void? run(Options opts)
 		renderer.pass.load_triangle(&renderer.gpu)!;
 	}
 
-	PassStats stats = renderer.pass.stats();
+	// The line an agent reads its own cost off. `instances` next to `draw calls`
+	// is the whole M2 claim in two numbers: a grid of a thousand is a thousand
+	// and one, not a thousand and a thousand.
+	SceneStats stats = renderer.pass.stats();
 	io::printfn(
-		"%s: %d draw calls, %d meshes, %d textures, %d triangles",
+		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
 		opts.model.len > 0 ? opts.model : "built-in triangle",
 		stats.draw_calls,
-		stats.meshes,
+		stats.instances,
+		stats.unique_meshes,
 		stats.textures,
+		stats.texture_bytes / 1024,
 		stats.triangles
 	);
 

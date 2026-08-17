@@ -52,3 +52,32 @@ fn vk::Memory? Gpu.upload_indices(&self, void* data, sz size)
 		data_size: size,
 	);
 }
+
+<*
+ A buffer the CPU rewrites every frame and the shader reads by address — the
+ per-frame instance array and the frame block.
+
+ **Host-visible rather than device-local-with-a-staging-copy**, which is the
+ opposite of `upload_stream`, and for the opposite reason: this content changes
+ every frame, so a staged upload would be a copy command and a barrier per frame
+ to save a read that happens once per vertex. Coherent, so there is nothing to
+ flush; `Memory.upload` is a memcpy into the mapped page.
+
+ **One of these per frame in flight, never one shared.** `gpu/frame.c3` states
+ the rule and this is the first thing in the project it applies to: the GPU may
+ still be reading last frame's instance array, and crig's pose palette tore for
+ exactly this reason. Writing a slot is only safe after that slot's fence has
+ been waited on, which is what `Renderer.frame` and `Renderer.capture` do before
+ they record.
+
+ @require size > 0
+*>
+fn vk::Memory? Gpu.create_dynamic(&self, sz size)
+{
+	return vk::new_buffer(
+		&self.allocator,
+		usage: BUFFER_USAGE_STORAGE_BUFFER_BIT | BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data_size: size,
+	);
+}

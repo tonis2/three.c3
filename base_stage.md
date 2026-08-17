@@ -2,6 +2,10 @@
 
 Companion to `plan.md`. That file is the whole project; this one is only the first
 two milestones, at the level of "which file, in what order, done when".
+`m2_stage.md` picks up from here with the scene graph and instancing, and
+records the two M1 mistakes it had to fix on the way — a mesh name pointing at
+freed memory, and a shader build flag present in the docs and absent from the
+manifest.
 
 Everything here is `module three` in one flat namespace, folders for subject only.
 

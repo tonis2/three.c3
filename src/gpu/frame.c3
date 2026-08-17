@@ -152,8 +152,8 @@ struct Renderer
 	Target target;
 	Viewer viewer;
 	Frames frames;
-	// The one thing drawn at M1. M2 replaces its innards with a scene graph and
-	// an instance table; the frame path above does not notice either way.
+	// The scene graph, the asset table and the one pipeline that draws them.
+	// The frame path above does not know any of that is in there.
 	MeshPass pass;
 	bool windowed;
 	float[4] clear;
@@ -203,15 +203,20 @@ fn void Renderer.free(&self)
  Everything drawn into the target, between `begin_render` and `end_render`.
 
  One call, on purpose: the frame path should not grow a branch per kind of
- thing that can be drawn. M2 makes `MeshPass.record` a loop over buckets and
- nothing in this file changes.
+ thing that can be drawn. M2 made `MeshPass.record` a loop over buckets with an
+ instance array behind it, and this stayed one line.
+
+ `frames.slot` is passed down because the instance array is per frame in flight
+ (see the rule at the top of this file). It is read here rather than threaded
+ through a parameter because both callers advance it only *after* recording, so
+ it is the current slot in both.
 
  A pass that was never given a pipeline records nothing, which is what lets the
  M0 tests and a headless clear-colour render work with no shader on disk.
 *>
 fn void? Renderer.draw(&self, vk::CommandBuffer cmd)
 {
-	self.pass.record(cmd, &self.target);
+	return self.pass.record(&self.gpu, cmd, &self.target, self.frames.slot);
 }
 
 <*

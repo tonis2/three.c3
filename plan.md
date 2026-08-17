@@ -47,20 +47,24 @@ language, one surface, one place a feature lands.
 
 ## Status
 
-**M0 and M1 are built.** A window, a Vulkan device, an offscreen colour+depth
-target, a swapchain that blits it, an exact screenshot, a triangle through a
-buffer device address, and a `.glb` on screen with its base colour texture.
-`c3c test --trust=full` runs eleven checks, all headless, leak-clean.
+**M0, M1 and M2 are built.** A window, a Vulkan device, an offscreen
+colour+depth target, a swapchain that blits it, an exact screenshot, a triangle
+through a buffer device address, a `.glb` on screen with its base colour
+texture — and then a scene graph over all of it: `Object3D` with world-matrix
+propagation, assets and textures deduplicated across files, frustum culling,
+one instanced draw per unique mesh, `stats()`, and a raycast. `c3c test
+--trust=full` runs twenty-seven checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
+	three <file.glb> --grid 1000        a thousand copies, one draw call
 	three <file.glb> --screenshot a.png render one frame, exit
 	three --validate                    validation layers + a device report
 	c3c --trust=full build shaders      compile shaders/mesh.slang
 
-M2 onward is still a plan. Everything below the milestone list describes intent
-rather than behaviour except where it is marked otherwise; `base_stage.md` has
-the built part broken out step by step, with its own record of what was
-verified and how.
+M3 onward is still a plan. Everything below the milestone list describes intent
+rather than behaviour except where it is marked otherwise; `base_stage.md` and
+`m2_stage.md` have the built parts broken out step by step, each with its own
+record of what was verified and how.
 
 **What M0/M1 settled that the rest of the plan assumed:**
 
@@ -80,6 +84,26 @@ verified and how.
 - **`VK_KHR_push_descriptor` is not requested.** Nothing uses it — KosmicKrisp's
   `vkCmdPushDescriptorSetKHR` breaks subsequent draws when `descriptorWriteCount
   > 0` — and requiring an unused extension can only turn devices away.
+
+**What M2 settled:**
+
+- **The 128-byte push budget held, and holding it cost something.** The old
+  block spent 64 of its bytes on a per-draw `mvp`, and 124 + an 8-byte instance
+  pointer is 132. The view-projection and the light are not per-draw and moved
+  into a `FrameBlock` reached through one pointer; the block is now 64 bytes.
+  §1's rule — "when something new wants to ride in here, it goes in a buffer
+  instead" — was applied rather than relaxed.
+- **`scene/pick.c3` exists now rather than at M5**, because a raycast is how the
+  M2 scene-math tests assert without a GPU. §7 already argued this; it turned
+  out to be the cheaper way to test M2, not only the eventual feature.
+- **A per-instance normal matrix is carried, not derived from the model
+  matrix.** The upper-3x3 shortcut is only correct for rotation and uniform
+  scale, and `scale.set(1, 2, 1)` is legal in this API. An `Instance` is
+  therefore 128 bytes, not 64.
+- **Geometry is *not* deduplicated across assets, only textures and materials
+  are** — which is what §2 says, and is worth stating because "linked, not
+  duplicated" invites the other reading. Two files whose triangles happen to
+  match are two uploads.
 
 ## Dependencies
 
@@ -182,12 +206,12 @@ src/
   shader/load.c3    built  .spv from disk, never $embed  (becomes compile_slang at M4)
   shader/reflect.c3        SPIR-V/Slang reflection -> descriptor set layout + uniform map
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
-  scene/asset.c3    built  a loaded glTF: one mesh per glTF mesh, textures deduplicated
-  scene/node.c3            Object3D: parent, children, local TRS, world matrix, dirty flag
-  scene/scene.c3           the graph root, traversal, the instance table, stats()
+  scene/asset.c3    built  the asset table: meshes per file, textures shared across them
+  scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
+  scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
   scene/material.c3        material params + which pipeline they resolve to
-  scene/pick.c3            scene raycast over collision::TriBVH, in instance-local space
-  render/pass.c3    built  bind, push, draw  (cull/batch/instance buffer at M2)
+  scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space
+  render/pass.c3    built  cull, bucket, upload the instance array, one instanced draw each
   js/runtime.c3            the QuickJS context, module loading, the interrupt/timeout
   js/bind_scene.c3         Scene/Object3D/Mesh prototypes and accessors
   js/bind_asset.c3         load(), asset handles, instancing
@@ -198,8 +222,19 @@ shaders/
 test/
   gpu_test.c3       built  device, target, headless render, readback, reproducibility
   asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
+  scene_test.c3     built  world matrices, bucketing, culling, picking, the instance buffer
   fixtures/         built  textured.glb and the generator that writes it
 ```
+
+**`scene/material.c3` is the one planned file M2 did not produce**, and that is
+deliberate rather than an omission to find later. At M2 a material is a base
+colour factor and a texture index, both carried on `GpuMesh`, and both resolve
+to the one pipeline — a `Material` struct with exactly those two fields would be
+a name for something that already has one. It arrives at M5 with
+`ShaderMaterial`, which is the first thing that makes a material a choice
+between pipelines. The consequence to know about: the instance table's bucket
+key is `(asset, mesh)` rather than `(mesh, material)`, and those are the same
+key only for as long as this stays true.
 
 `scene/camera.c3` is an addition to the plan, from M1: something has to decide
 where the eye is before a `.glb` can be looked at, and it is what
@@ -502,11 +537,27 @@ Two things cost time and neither is visible in a diff:
   real leak — a primitive that failed partway had already put buffers on the
   device and nothing else knew about them yet.
 
-**M2 — the scene graph and instancing.** `Object3D`, world-matrix propagation,
-asset dedup, bucketing, the instance buffer, one instanced draw per bucket,
-`stats()`. Build a `collision::TriBVH` per unique mesh as assets are uploaded —
-not for picking yet, but because it is what the M2 tests assert against without
-needing a GPU. Done when 1000 instances of one asset is one draw call.
+**M2 — the scene graph and instancing. Done.** `Object3D`, world-matrix
+propagation, asset dedup, bucketing, the instance buffer, one instanced draw per
+bucket, `stats()`, and a `collision::TriBVH` per unique mesh built as assets are
+uploaded. 1000 instances of one asset is one draw call, and `--grid 1000` is
+that claim on screen rather than only in a test.
+
+Three things cost time and none are visible in a diff:
+
+- **The push block ran out of room**, and the fix was to notice that two of the
+  things in it were never per-draw. See the findings above.
+- **A `String` from a closed glTF document is freed memory.** `GpuMesh.name`
+  had held `gltf::Mesh.name` since M1, which `GltfStream.close` frees — invisible
+  for as long as nothing read a name, and M2 is where naming a mesh starts to
+  matter.
+- **`project.json`'s shader target was missing `-force-glsl-scalar-layout`**, so
+  `c3c build shaders` and the documented `slangc` line produced different
+  modules. Nothing had noticed, because the offsets that differ are the ones M1
+  never used.
+
+`m2_stage.md` is the step-by-step record, including which tests catch which
+bug and the runs that proved it.
 
 **M3 — the agent loop closes.** QuickJS context, the tier-1 scene prototypes
 (`load`/`Mesh`/`add`/transform accessors/`render`/`stats`), and the three MCP
@@ -530,10 +581,11 @@ descriptor layout is derived rather than declared.
 
 **M5 — tier 2 materials, and picking.** `ShaderMaterial` with a fragment function
 over M4's reflection, validation errors routed into the thrown JS exception, and
-`scene/pick.c3` — `scene.raycast()` over the per-unique-mesh BVHs M2 already
-built, the ray transformed into instance-local space. Done when an agent-written
-fragment shader renders and a bad one throws a JS error carrying the Slang
-diagnostic.
+`scene.raycast()` exposed to JS. The raycast itself landed at M2 — `scene/pick.c3`
+is built and tested — because it is how the scene-math checks assert without a
+GPU; what is left here is the binding and `scene/material.c3`. Done when an
+agent-written fragment shader renders and a bad one throws a JS error carrying
+the Slang diagnostic.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash
@@ -563,7 +615,19 @@ Each of these cost real time in crig and none are visible in a diff.
   it and fall back.
 - **Two frames in flight means any buffer the GPU may still be reading must be
   double-buffered.** crig's pose palette tore for exactly this reason. The
-  per-frame instance buffer has the same shape and will have the same bug.
+  per-frame instance buffer has the same shape — it is one buffer per frame slot
+  in `render/pass.c3`, written and grown only after that slot's fence has been
+  waited on, and `the_instance_buffer_grows_and_stays_stable` is the check.
+- **A `String` handed out by a parsed document dies with the document.**
+  `gltf::Mesh.name` is freed by `GltfStream.close`, so anything keeping a name
+  past the load has to own a copy. This cost time at M2 and was invisible for
+  the whole of M1, because nothing read a name until something wanted to look a
+  mesh up by one.
+- **A build step and its documented equivalent can drift silently.**
+  `project.json`'s `slangc` line was missing `-force-glsl-scalar-layout` while
+  the header of `mesh.slang` said to pass it — two different SPIR-V modules, no
+  error either way. If a command appears in both a manifest and a comment, one
+  of them is going to be wrong eventually.
 - **Slang diagnostics are only useful if they are surfaced.** A compile that fails
   and falls back to a previous pipeline is a shader edit that appears to work and
   changes nothing on screen — the runtime version of crig's `$embed` trap.
@@ -602,6 +666,9 @@ expensive ones:
   the suite that catches a projection and a raycast that disagree, which is the
   half of a 3D app that fails *silently*: everything still renders, it just puts
   things somewhere other than where they were asked for. No GPU, no window.
+  Built at M2. The case worth keeping from writing it: an instance with a
+  non-uniform scale, where the local-space hit parameter is not a world distance
+  and comparing two instances' hits without converting picks the wrong one.
 - **The MCP wire** — driven **in-process**, raw JSON-RPC in and parsed JSON out,
   no socket and no subprocess. Assert the tool surface end to end at unit-test
   speed, including that a malformed request is an error response rather than a

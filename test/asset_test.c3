@@ -25,6 +25,7 @@ import three;
 import vk;
 import image;
 import gltf;
+import collision;
 import std::core::test;
 import std::io;
 import std::io::file;
@@ -123,8 +124,8 @@ fn void several_meshes_stay_several_meshes() @test
 	{
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
 
-		three::PassStats stats = renderer.pass.stats();
-		test::@check(stats.meshes == 2, "the fixture's two meshes came back as %d", stats.meshes);
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.unique_meshes == 2, "the fixture's two meshes came back as %d", stats.unique_meshes);
 		test::@check(stats.triangles == 4, "two quads should be 4 triangles, got %d", stats.triangles);
 		test::@check(stats.vertices == 8, "two quads should be 8 vertices, got %d", stats.vertices);
 	};
@@ -144,7 +145,7 @@ fn void identical_textures_upload_once() @test
 	{
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
 
-		three::PassStats stats = renderer.pass.stats();
+		three::SceneStats stats = renderer.pass.stats();
 		test::@check(stats.textures == 1, "two byte-identical images uploaded as %d textures", stats.textures);
 	};
 }
@@ -224,7 +225,7 @@ fn void asset_bounds_cover_the_geometry() @test
 	{
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
 
-		gltf::Aabb bounds = renderer.pass.asset.bounds;
+		collision::Aabb3 bounds = renderer.pass.bounds();
 		test::@check(bounds.min[0] < -1.2 && bounds.max[0] > 1.2, "x bounds came back [%f, %f], expected about [-1.25, 1.25]", bounds.min[0], bounds.max[0]);
 		test::@check(bounds.min[1] < -0.4 && bounds.max[1] > 0.4, "y bounds came back [%f, %f], expected about [-0.5, 0.5]", bounds.min[1], bounds.max[1]);
 	};
