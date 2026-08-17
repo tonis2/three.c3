@@ -47,24 +47,26 @@ language, one surface, one place a feature lands.
 
 ## Status
 
-**M0, M1 and M2 are built.** A window, a Vulkan device, an offscreen
-colour+depth target, a swapchain that blits it, an exact screenshot, a triangle
-through a buffer device address, a `.glb` on screen with its base colour
-texture — and then a scene graph over all of it: `Object3D` with world-matrix
-propagation, assets and textures deduplicated across files, frustum culling,
-one instanced draw per unique mesh, `stats()`, and a raycast. `c3c test
---trust=full` runs twenty-seven checks, all headless, leak-clean.
+**M0 through M3 are built, and the loop this project exists for is closed.** A
+window, a Vulkan device, an offscreen colour+depth target, a swapchain that blits
+it, an exact screenshot, a triangle through a buffer device address, a `.glb` on
+screen with its base colour texture — then a scene graph over all of it:
+`Object3D` with world-matrix propagation, assets and textures deduplicated across
+files, frustum culling, one instanced draw per unique mesh, `stats()`, and a
+raycast — and then a QuickJS context, the tier-1 scene API, and three MCP tools
+over it. `c3c test --trust=full` runs sixty checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
+	three --mcp                         serve the agent tools on 127.0.0.1:8808
 	three <file.glb> --grid 1000        a thousand copies, one draw call
 	three <file.glb> --screenshot a.png render one frame, exit
 	three --validate                    validation layers + a device report
 	c3c --trust=full build shaders      compile shaders/mesh.slang
 
-M3 onward is still a plan. Everything below the milestone list describes intent
-rather than behaviour except where it is marked otherwise; `base_stage.md` and
-`m2_stage.md` have the built parts broken out step by step, each with its own
-record of what was verified and how.
+M4 onward is still a plan. Everything below the milestone list describes intent
+rather than behaviour except where it is marked otherwise; `base_stage.md`,
+`m2_stage.md` and `m3_stage.md` have the built parts broken out step by step,
+each with its own record of what was verified and how.
 
 **What M0/M1 settled that the rest of the plan assumed:**
 
@@ -104,6 +106,32 @@ record of what was verified and how.
   are** — which is what §2 says, and is worth stating because "linked, not
   duplicated" invites the other reading. Two files whose triangles happen to
   match are two uploads.
+
+**What M3 settled:**
+
+- **The Three.js-shaped surface is written in JavaScript, not in the binding.**
+  `js/prelude.js` is `$embed`ed and builds `Scene`/`Mesh`/`Group`/`Vector3` on
+  top of eighteen flat host verbs. §4 assumed the classes would be assembled out
+  of `Context.accessor` calls; in the language that already has classes they are
+  a third of the code and match Three.js more exactly. See `m3_stage.md` S1.
+- **`NodeId`'s generation paid for itself.** Every host verb that names a node
+  revalidates the handle and throws, which is §1's requirement, and it needed no
+  change to `Scene` at all — which is what M2 bought by paying for the
+  generation early.
+- **A script is an async function body**, so top-level `await` and `return` both
+  work. `JS_EVAL_FLAG_ASYNC` would do it natively and quickjs.c3l's shim does not
+  expose it, so the wrapper is textual — with no newline after the open brace, so
+  a stack trace's line numbers are the script's own.
+- **An object is not in the scene until it is `add`ed**, as in Three.js. The
+  cheaper alternative renders a mesh that was never added, which is precisely the
+  half-match §4 says is worse than a new name.
+- **There is one scene at a time, and it says so.** `new three.Scene()` empties
+  the host scene; the previous `Scene` throws rather than quietly operating on
+  the new one's nodes.
+- **`--test-noleak` cannot see a one-byte-per-call leak.** `DString.copy_str`
+  allocates even when empty, so freeing on `len > 0` leaks whichever result
+  fields a run left empty — unbounded in an agent loop, invisible in a suite that
+  runs a script once. Only the tracked run caught it.
 
 ## Dependencies
 
@@ -212,19 +240,32 @@ src/
   scene/material.c3        material params + which pipeline they resolve to
   scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space
   render/pass.c3    built  cull, bucket, upload the instance array, one instanced draw each
-  js/runtime.c3            the QuickJS context, module loading, the interrupt/timeout
-  js/bind_scene.c3         Scene/Object3D/Mesh prototypes and accessors
-  js/bind_asset.c3         load(), asset handles, instancing
+  js/runtime.c3     built  the QuickJS context, the run contract, the interrupt/timeout
+  js/prelude.js     built  the Three.js-shaped API itself, $embed-ed  (§4, and see below)
+  js/bind_scene.c3  built  the flat host verbs prelude.js is written against
+  js/bind_asset.c3  built  load(), asset paths, mesh names
   js/bind_shader.c3        the material/shader surface (tier 2, §4)
-  mcp/server.c3            three tools and no more: run_script, screenshot, get_api_docs
+  mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
 test/
   gpu_test.c3       built  device, target, headless render, readback, reproducibility
   asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
   scene_test.c3     built  world matrices, bucketing, culling, picking, the instance buffer
+  js_test.c3        built  the run contract, handles, staleness, the scene from JavaScript
+  mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   fixtures/         built  textured.glb and the generator that writes it
 ```
+
+**`js/prelude.js` is an addition to this list, and `js/bind_scene.c3` is not what
+its line above originally said.** The plan assumed the `Scene`/`Object3D`/`Mesh`
+prototypes would be assembled in the host out of `Context.accessor` calls. They
+are instead written in JavaScript — `class Mesh extends Object3D`, a `children`
+array that *is* an array — over a flat verb layer that takes numbers and answers
+with numbers. It is a third of the code and matches Three.js more exactly,
+because the Three.js-isms are written in the language that has them.
+`m3_stage.md` S1 has the full argument, including why `$embed` here does not
+contradict `shader/load.c3`'s "never `$embed`".
 
 **`scene/material.c3` is the one planned file M2 did not produce**, and that is
 deliberate rather than an omission to find later. At M2 a material is a base
@@ -559,20 +600,38 @@ Three things cost time and none are visible in a diff:
 `m2_stage.md` is the step-by-step record, including which tests catch which
 bug and the runs that proved it.
 
-**M3 — the agent loop closes.** QuickJS context, the tier-1 scene prototypes
-(`load`/`Mesh`/`add`/transform accessors/`render`/`stats`), and the three MCP
-tools over them: `run_script`, `screenshot`, `get_api_docs`. Done when the example
-in §4 arrives over JSON-RPC as a string, runs, and comes back as a PNG plus the
-stats block.
+**M3 — the agent loop closes. Done.** QuickJS context, the tier-1 scene API
+(`load`/`Mesh`/`Group`/`add`/transform accessors/`render`/`stats`/`getApiDocs`),
+and the three MCP tools over it: `run_script`, `screenshot`, `get_api_docs`.
+§4's example arrives over JSON-RPC as a string, runs, and comes back as a PNG
+plus the stats block — asserted in `three_tests::mcp` and driven by hand over a
+real socket.
 
-These ship together and cannot be split, which is the consequence of the
-three-tool decision: `run_script` *is* the JS binding surface, so there is no
-useful MCP milestone before the bindings exist. Test the wire **in-process** — raw
-JSON-RPC in, parsed JSON out, no socket and no subprocess — so the whole surface
-runs at unit-test speed.
+They shipped together, which is the consequence of the three-tool decision:
+`run_script` *is* the JS binding surface, so there was no useful MCP milestone
+before the bindings existed. The wire is tested **in-process** — raw JSON-RPC in,
+parsed JSON out, no socket and no subprocess — which keeps the whole tool surface
+at unit-test speed.
 
-This is the milestone the project is for. Everything before it is scaffolding and
-everything after it is improvement.
+Four things cost time and none are visible in a diff:
+
+- **`lib/quickjs.c3l` has a submodule of its own** and it was uninitialised, so
+  the build failed inside the C compiler with no mention of submodules anywhere.
+  This file already warned that `--recursive` is not optional; `project.json` now
+  says it at the line that adds the dependency.
+- **The Three.js-shaped classes belong in JavaScript**, not in the binding. See
+  the source-tree note above and `m3_stage.md` S1.
+- **`await` at the top level needed a decision.** quickjs.c3l's shim does not
+  expose `JS_EVAL_FLAG_ASYNC`, so every script is textually wrapped in an async
+  IIFE — with no newline after the open brace, or every stack trace would be off
+  by one line and nobody would notice until they tried to fix a script by the
+  number in the error.
+- **A one-byte leak per call is invisible without leak tracking.**
+  `DString.copy_str` allocates even when empty, so freeing on `len > 0` leaks
+  whichever result fields a run left empty. `--test-noleak` passes it happily.
+
+`m3_stage.md` is the step-by-step record, including which injected bug each new
+regression test was proved against.
 
 **M4 — Slang at runtime.** `lib/slang.c3l`, the twelve compile functions, the
 reflection walk, the pipeline hash cache, diagnostics as strings. Done when the
@@ -592,11 +651,11 @@ the Slang diagnostic.
 across every source file. Done when a scene built by a script round-trips through
 `.glb` and loads back with the same draw-call count.
 
-M0–M2 are ordinary graphics work. **M3 is where the project starts being the thing
-it is for** — everything before it is scaffolding. M4 is the interesting one and
-now looks like days rather than weeks. M6 is where the "linked, not duplicated"
-thesis stops being an internal detail and becomes something another engine can
-load.
+M0–M2 were ordinary graphics work. **M3 is where the project started being the
+thing it is for**, and it is done: an agent can drive this over JSON-RPC today.
+M4 is the interesting one and still looks like days rather than weeks. M6 is
+where the "linked, not duplicated" thesis stops being an internal detail and
+becomes something another engine can load.
 
 ## 6. Traps carried over
 

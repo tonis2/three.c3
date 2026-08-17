@@ -1,24 +1,33 @@
 <*
- three.c3 — boot, CLI, the window loop.
-
- The base stage is driven by CLI arguments and nothing else. QuickJS and MCP
- arrive at M3; until then this is the whole driving surface.
+ three.c3 — boot, CLI, the window loop, and the MCP server.
 
 	three [file.glb] [options]
 
+	--mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
 	--screenshot <path>   render one frame, write a PNG, exit
 	--width <n>           offscreen render width  (default 1280)
 	--height <n>          offscreen render height (default 720)
 	--headless            no window, no surface, no swapchain
 	--validate            Vulkan validation layers + debug messenger
 	--grid <n>            n instances of the model, to see M2's claim hold
+
+ **`--mcp` is the driving surface M3 exists for**; everything else here is the
+ CLI the base stage was driven by, kept because it is how a human looks at a
+ file and how `--stress-resize` and `--grid` stay runnable.
+
+ The server's handlers run on *this* thread — `Listener` moves bytes on its own
+ and `pump` runs the work on the caller's — so a script, the scene it builds and
+ the device it draws with are all touched from one place, and none of the three
+ needs a lock.
 *>
 module three;
 
 import std::io;
+import std::thread;
 import c3w;
 import vk;
 import image;
+import mcp;
 
 const String VERSION = "0.1.0";
 
@@ -34,8 +43,12 @@ struct Options
 	bool system_driver;
 	bool stress_resize;
 	uint grid;
+	// 0 for "do not serve". The port is only ever bound on 127.0.0.1.
+	int mcp_port;
 	bool help;
 }
+
+const int DEFAULT_MCP_PORT = 8808;
 
 faultdef BAD_ARGUMENT, MISSING_VALUE, RESIZE_HAD_NO_EFFECT;
 
@@ -74,6 +87,19 @@ fn Options? parse_args(String[] args)
 			case "--grid":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.grid = args[++i].to_uint()!;
+			case "--mcp":
+				// The port is optional, so a following argument is consumed only
+				// when it actually looks like one — otherwise `three --mcp
+				// model.glb` would swallow the model and then report no file.
+				opts.mcp_port = DEFAULT_MCP_PORT;
+				if (i + 1 < args.len)
+				{
+					if (try port = args[i + 1].to_int())
+					{
+						opts.mcp_port = port;
+						i++;
+					}
+				}
 			default:
 				if (arg.starts_with("-"))
 				{
@@ -90,6 +116,8 @@ fn Options? parse_args(String[] args)
 	if (opts.screenshot.len > 0) opts.headless = true;
 	// The probe drives a real window; there is nothing to resize without one.
 	if (opts.stress_resize) opts.headless = false;
+	// A server that rendered one frame and exited would be no server at all.
+	if (opts.mcp_port > 0) opts.screenshot = "";
 
 	return opts;
 }
@@ -101,6 +129,7 @@ fn void usage()
 	io::printn("");
 	io::printn("  three [file.glb] [options]");
 	io::printn("");
+	io::printn("  --mcp [port]          serve the agent tools on 127.0.0.1 (default 8808)");
 	io::printn("  --screenshot <path>   render one frame, write a PNG, exit");
 	io::printn("  --width <n>           offscreen render width  (default 1280)");
 	io::printn("  --height <n>          offscreen render height (default 720)");
@@ -227,6 +256,14 @@ fn void? run(Options opts)
 		stats.triangles
 	);
 
+	// Before every one-shot path below: a server does not render one frame and
+	// exit, and it works with or without a window.
+	if (opts.mcp_port > 0)
+	{
+		serve(&renderer, windowed ? &window : null, opts.mcp_port)!;
+		return;
+	}
+
 	if (opts.screenshot.len > 0)
 	{
 		renderer.screenshot(opts.screenshot)!;
@@ -257,6 +294,65 @@ fn void? run(Options opts)
 		c3w::EventMap events = window.getEvent();
 		if (events.is_pressed(ESCAPE)) break;
 		renderer.frame()!;
+	}
+}
+
+<*
+ Serve the three tools until the window closes, or until interrupted when there
+ is no window.
+
+ **The handlers run on this loop's thread.** `Listener` gives its own thread to
+ moving bytes — accept, read one message, queue it — and `pump` is where
+ `handle_message` actually runs, which is what makes the scene, the JS context
+ and the Vulkan device reachable from a tool without a lock between them. All
+ three are single-threaded and none of them is prepared to be otherwise.
+
+ @param window : `Null when headless: the loop then only serves, and there is nothing to present.`
+*>
+fn void? serve(Renderer* renderer, c3w::Window* window, int port)
+{
+	JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!;
+	defer runtime.close();
+
+	// Addressed by pointer from every tool, so it must not move while the
+	// server lives — which is why it is a local of the function that owns the
+	// loop rather than something returned from a builder.
+	ToolHost host = { .runtime = &runtime, .renderer = renderer };
+	mcp::Server server = new_mcp_server(&host);
+
+	mcp::Listener listener;
+	listener.start(port)!;
+	defer listener.stop();
+
+	io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
+	io::printn("     run_script, screenshot, get_api_docs");
+	if (window == null) io::printn("     headless — ctrl-c to stop");
+
+	while (true)
+	{
+		if (window != null)
+		{
+			if (window.should_close()) break;
+			c3w::EventMap events = window.getEvent();
+			if (events.is_pressed(ESCAPE)) break;
+		}
+
+		usz handled = listener.pump(&server);
+
+		if (window != null)
+		{
+			// Kept running whether or not anything arrived: a window that only
+			// redrew when a tool was called would stop responding between
+			// requests, which reads as a hung application.
+			renderer.frame()!;
+		}
+		else if (handled == 0)
+		{
+			// A tight loop here would peg a core for as long as the server is
+			// idle, which is most of its life.
+			thread::sleep_ms(4)!!;
+		}
 	}
 }
 

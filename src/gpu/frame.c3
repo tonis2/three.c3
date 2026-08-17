@@ -359,6 +359,41 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 }
 
 <*
+ Render one frame into the target and stop there.
+
+ `capture` without the readback, which is what `three.render(scene)` from a
+ script wants: the pixels are read back once at the end of a run, and a script
+ that calls `render()` in a loop should not pay for a buffer allocation and a
+ host copy each time. It exists at all — rather than `render()` being a no-op
+ that lets the final capture do the work — so that a scene which cannot be drawn
+ says so at the line that asked for it.
+*>
+fn void? Renderer.render_offscreen(&self)
+{
+	uint slot       = self.frames.slot;
+	vk::Fence fence = self.frames.fences[slot];
+	fence.wait(self.gpu.handle)!;
+	fence.reset(self.gpu.handle)!;
+
+	vk::CommandBuffer cmd = self.frames.buffers[slot];
+	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
+	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
+
+	self.target.begin_render(cmd, self.clear);
+	self.draw(cmd)!;
+	self.target.end_render(cmd);
+
+	vk::endCommandBuffer(cmd)!;
+	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
+
+	// Waited on here rather than left to the next frame's fence: the instance
+	// buffer for this slot is rewritten on the next record, and the rule at the
+	// top of this file is that it may not be while the GPU is still reading it.
+	fence.wait(self.gpu.handle)!;
+	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+<*
  Render one frame and write it to `path` as a PNG.
 *>
 fn void? Renderer.screenshot(&self, String path)
