@@ -1,24 +1,34 @@
 <*
- A loaded glTF: its meshes uploaded, its textures deduplicated.
+ Loaded glTF files: meshes uploaded once, textures deduplicated across all of
+ them.
 
- Two decisions here are cheap now and expensive later, so `base_stage.md` S9
- asks for both at M1 rather than at M2:
+ Three decisions here are cheap now and expensive later:
 
- - **One uploaded mesh per glTF mesh. Never a soup.** crig's `gltf/source.c3`
-   deliberately welds a whole scene into a single triangle soup, because a
-   rigger wants one mesh. three.c3 wants the exact opposite: the thesis is that
-   an instance is an immutable asset reference plus a transform, so M2 has to be
-   able to name a mesh and place N copies of it. Flattening here is a decision
-   that has to be unpicked later, and unpicking it means re-reading the file.
+ - **One uploaded mesh per glTF primitive. Never a soup.** crig's
+   `gltf/source.c3` deliberately welds a whole scene into a single triangle
+   soup, because a rigger wants one mesh. three.c3 wants the exact opposite: the
+   thesis is that an instance is an immutable asset reference plus a transform,
+   so `Scene` has to be able to name a mesh and place N copies of it.
 
- - **Textures deduplicated by content hash from the first upload.** Two kit
-   pieces exported from the same source share their images. Retrofitting the
-   dedup after two assets already share one is more work than doing it now, and
-   it is the same rule the M6 exporter needs.
+ - **Textures deduplicated by content hash across every asset already loaded**
+   (`plan.md` §2), not merely within one file. Two kit pieces exported from the
+   same source share their images, and the whole point is that a scene built out
+   of a kit uploads each image once. That is why the texture list, the descriptor
+   sets and the 1x1 white stand-in live on `Assets` rather than on `Asset`.
 
- What is deliberately *not* here: a scene graph, node transforms, instancing,
- or a material model. Those are M2 and M5. This reads meshes and their base
- colour, and stops.
+ - **A `TriBVH` per unique mesh, built at upload.** It is not read until
+   `scene/pick.c3` needs it, but it is per *mesh* rather than per instance —
+   a thousand copies of a wall cost one tree — and building it here is what makes
+   that true without a second pass over the file. The cost is honest and worth
+   stating: the positions and a triangle index array stay resident on the CPU
+   for the life of the asset, because the tree points at them.
+
+ ## Descriptor pools are per load, never grown
+
+ One pool sized for exactly the textures a single `load` added, and a separate
+ one-set pool for the white stand-in. A pool that has to grow is a pool that has
+ to be recreated with every set in it rebound; a pool per load is a handful of
+ objects and no rebinding. A load that adds no new textures creates no pool.
 *>
 module three;
 
@@ -31,6 +41,7 @@ import gltf;
 import image;
 import image::png;
 import image::jpeg;
+import collision;
 
 faultdef ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE;
 
@@ -39,12 +50,17 @@ faultdef ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE;
 
  A glTF *mesh* is a list of primitives, each with its own material, and the
  renderer's unit of work is the primitive rather than the mesh — so this is what
- M2's instance table will key on. The mesh's name is carried on every primitive
- it produced so a mesh can still be found by name.
+ the instance table keys on. The mesh's name is carried on every primitive it
+ produced so a mesh can still be found by name.
 *>
 struct GpuMesh
 {
+	// **Owned.** `gltf::Mesh.name` is freed by `GltfStream.close`, so keeping
+	// the pointer would leave every mesh named by freed memory — invisible until
+	// something actually reads a name, which is exactly what `Assets.find_mesh`
+	// does.
 	String name;
+
 	// Streams, tightly packed. `positions` is the only one that must exist.
 	vk::Memory positions;
 	vk::Memory normals;
@@ -55,34 +71,57 @@ struct GpuMesh
 	bool has_normals;
 	bool has_uvs;
 	float[4] base_color;
-	// Index into `Asset.textures`, or -1 for "no texture": the material samples
+	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
 	int texture;
-	gltf::Aabb bounds;
+	collision::Aabb3 bounds;
+
+	// Picking, in mesh-local space. The tree holds raw pointers into the two
+	// arrays beside it, so all three live and die together.
+	Vec3[] hull_positions;
+	collision::Triangle[] hull_triangles;
+	collision::TriBVHNode* bvh;
 }
 
 struct Asset
 {
-	String path;
+	String path; // owned
 	List{GpuMesh} meshes;
+	collision::Aabb3 bounds;
+	// The number of live `Mesh` nodes pointing here (`plan.md` §2). Maintained
+	// so that an unused asset is *knowable*; dropping to zero does not unload
+	// yet, because unloading under two frames in flight needs the deferred
+	// delete queue and nothing asks for it before M6.
+	uint refs;
+}
+
+fn collision::Aabb3 Asset.aabb(&self) => self.bounds;
+
+<*
+ Every loaded asset, and everything shared between them.
+
+ A `GpuMesh*` or `Asset*` handed out from here is valid only until the next
+ `load` — the pools are `List`s and growing one moves its contents.
+*>
+struct Assets
+{
+	List{Asset} assets;
+
+	// Shared across every asset. `sets` is parallel to `textures`: one
+	// descriptor set per unique image, allocated once when the image is.
 	List{Texture} textures;
-	// The 1x1 white stand-in every untextured material samples. Owned here so
-	// one exists per asset load; M2's shared asset table takes it over.
-	Texture white;
-	// One descriptor set per texture, plus one for `white`, allocated from a
-	// pool sized once at load. Push descriptors would avoid the pool, but
-	// KosmicKrisp's vkCmdPushDescriptorSetKHR breaks subsequent draws when
-	// descriptorWriteCount > 0 — see vulkan.c3l's textured_cube example.
-	vk::DescriptorPool pool;
 	List{vk::DescriptorSet} sets;
+	List{vk::DescriptorPool} pools;
+
+	Texture white;
 	vk::DescriptorSet white_set;
-	gltf::Aabb bounds;
+	bool has_white;
+
 	// Set once an image the decoder does not handle has been reported, so a
 	// file with ninety KTX2 textures says so once rather than ninety times.
 	bool warned_unsupported_image;
+	bool started;
 }
-
-fn gltf::Aabb Asset.aabb(&self) => self.bounds;
 
 <*
  Give every list the heap before anything is pushed into it.
@@ -95,24 +134,106 @@ fn gltf::Aabb Asset.aabb(&self) => self.bounds;
  teardown, a long way from the cause. vulkan.c3l's MemoryAllocator carries the
  same note for the same reason.
 *>
-fn void Asset.init_lists(&self)
+fn Assets* Assets.init(&self)
 {
-	self.meshes.init(mem, 8);
-	self.textures.init(mem, 4);
-	self.sets.init(mem, 4);
+	self.assets.init(mem, 4);
+	self.textures.init(mem, 8);
+	self.sets.init(mem, 8);
+	self.pools.init(mem, 4);
+	self.started = true;
+	return self;
 }
+
+<*
+ A mesh by asset and index, or null.
+
+ Bounds-checked rather than asserted because the indices reaching here come out
+ of `Scene`, and a node holding a stale asset index should draw nothing rather
+ than read a freed list.
+*>
+fn GpuMesh* Assets.mesh(&self, uint asset, uint mesh)
+{
+	if (asset >= self.assets.len()) return null;
+	Asset* owner = &self.assets[asset];
+	if (mesh >= owner.meshes.len()) return null;
+	return &owner.meshes[mesh];
+}
+
+<*
+ Find a mesh inside an asset by its glTF name — `kit.mesh("wall_corner_02")`.
+
+ A glTF mesh with several primitives produced several `GpuMesh` entries sharing
+ one name; this returns the first, which is the one a caller naming a mesh means.
+
+ @return `An index into the asset's meshes, or -1.`
+*>
+fn int Assets.find_mesh(&self, uint asset, String name)
+{
+	if (asset >= self.assets.len()) return -1;
+	foreach (i, &mesh : self.assets[asset].meshes)
+	{
+		if (mesh.name == name) return (int)i;
+	}
+	return -1;
+}
+
+fn void Assets.retain(&self, uint asset)
+{
+	if (asset < self.assets.len()) self.assets[asset].refs++;
+}
+
+fn void Assets.release(&self, uint asset)
+{
+	if (asset < self.assets.len() && self.assets[asset].refs > 0) self.assets[asset].refs--;
+}
+
+<*
+ What every unique texture costs on the device, as `stats()` reports it.
+
+ Counted off the deduplicated list, so two kit pieces sharing an image are
+ counted once — which is the number worth showing an agent, because it is the
+ one that changes when the sharing breaks.
+*>
+fn usz Assets.texture_bytes(&self)
+{
+	usz total = 0;
+	foreach (&texture : self.textures) total += (usz)texture.width * texture.height * 4;
+	return total;
+}
+
+<*
+ The set a mesh draws with: its own texture's, or the white stand-in's.
+*>
+fn vk::DescriptorSet Assets.set_for(&self, GpuMesh* mesh)
+{
+	if (mesh.texture < 0 || mesh.texture >= self.sets.len()) return self.white_set;
+	return self.sets[mesh.texture];
+}
+
+// ============================================================================
+// Loading
+// ============================================================================
 
 <*
  Load a `.glb` or `.gltf`, upload everything it needs to draw, and close the
  file.
 
+ Loading the same path twice returns the first load. That is the coarse half of
+ "linked, not duplicated" — the fine half is the content-hash texture dedup
+ below, which catches two *different* files sharing an image.
+
  @param path : `A .glb or a .gltf; gltf.c3l reads both.`
+ @return `The asset's index, for Scene.add_mesh.`
  @return? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
 *>
-fn Asset? Asset.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
+fn uint? Assets.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
 {
-	self.path = path;
-	self.init_lists();
+	if (!self.started) self.init();
+
+	foreach (i, &existing : self.assets)
+	{
+		if (existing.path == path) return (uint)i;
+	}
 
 	gltf::GltfStream stream = gltf::open(path)!;
 	defer stream.close();
@@ -121,35 +242,48 @@ fn Asset? Asset.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
 
 	if (stream.gltf.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
-	self.white = gpu.create_white_texture()!;
+	self.ensure_white(gpu, pipeline)!;
+	sz textures_before = self.textures.len();
+
+	Asset asset = { .path = path.copy(mem) };
+	asset.meshes.init(mem, 8);
+	// Everything below this point can fail, and a half-loaded asset is not on
+	// `self.assets` yet — so its own buffers are its own to undo.
+	defer catch
+	{
+		foreach (&mesh : asset.meshes) mesh.free_buffers();
+		asset.meshes.free();
+		asset.path.free(mem);
+	}
 
 	bool first_bounds = true;
 
 	foreach (mesh : stream.gltf.meshes)
 	{
-		gltf::Aabb mesh_bounds = stream.gltf.mesh_aabb(mesh);
-		if (first_bounds)
-		{
-			self.bounds = mesh_bounds;
-			first_bounds = false;
-		}
-		else
-		{
-			self.bounds = self.bounds.merge(mesh_bounds);
-		}
-
 		foreach (primitive : mesh.primitives)
 		{
 			GpuMesh uploaded = self.upload_primitive(gpu, &stream, mesh, primitive)!;
 			if (uploaded.vertex_count == 0) continue;
-			self.meshes.push(uploaded);
+
+			if (first_bounds)
+			{
+				asset.bounds = uploaded.bounds;
+				first_bounds = false;
+			}
+			else
+			{
+				asset.bounds.expand_by_aabb(uploaded.bounds);
+			}
+			asset.meshes.push(uploaded);
 		}
 	}
 
-	if (self.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
+	if (asset.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
-	self.build_descriptors(gpu, pipeline)!;
-	return *self;
+	self.build_descriptors(gpu, pipeline, textures_before)!;
+
+	self.assets.push(asset);
+	return (uint)self.assets.len() - 1;
 }
 
 <*
@@ -161,7 +295,7 @@ fn Asset? Asset.load(&self, Gpu* gpu, MeshPipeline* pipeline, String path)
  GPU is always tightly packed, which is what the shader's scalar-layout
  `float3*` reads expect.
 *>
-fn GpuMesh? Asset.upload_primitive(
+fn GpuMesh? Assets.upload_primitive(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
@@ -169,7 +303,7 @@ fn GpuMesh? Asset.upload_primitive(
 	gltf::Primitive primitive
 )
 {
-	GpuMesh out = { .name = mesh.name, .texture = -1, .base_color = { 1, 1, 1, 1 } };
+	GpuMesh out = { .texture = -1, .base_color = { 1, 1, 1, 1 } };
 
 	// A primitive that fails halfway has already put buffers on the device, and
 	// nothing else knows about them yet — the mesh is only handed to `meshes`
@@ -178,7 +312,7 @@ fn GpuMesh? Asset.upload_primitive(
 	// from the cause.
 	defer catch out.free_buffers();
 
-	// Heap-backed for the same reason as `init_lists`, even though these are
+	// Heap-backed for the same reason as `Assets.init`, even though these are
 	// freed in this scope: `@each_texcoord` formats an attribute name through
 	// the temp arena, so this function already touches it.
 	List{Vec3} positions;
@@ -211,9 +345,12 @@ fn GpuMesh? Asset.upload_primitive(
 		for (uint i = 0; i < positions.len(); i++) indices.push(i);
 	}
 
+	out.name = mesh.name.copy(mem);
 	out.vertex_count = (uint)positions.len();
 	out.index_count = (uint)indices.len();
-	out.bounds = stream.gltf.primitive_aabb(primitive);
+
+	gltf::Aabb box = stream.gltf.primitive_aabb(primitive);
+	out.bounds = { .min = box.min, .max = box.max };
 
 	out.positions = gpu.upload_stream(positions.entries, Vec3::size * positions.len())!;
 	out.indices = gpu.upload_indices(indices.entries, uint::size * indices.len())!;
@@ -226,6 +363,8 @@ fn GpuMesh? Asset.upload_primitive(
 
 	out.has_uvs = uvs.len() == positions.len();
 	if (out.has_uvs) out.uvs = gpu.upload_stream(uvs.entries, Vec2::size * uvs.len())!;
+
+	out.build_bvh(positions.array_view(), indices.array_view());
 
 	// The material, if the primitive names one.
 	sz? material_index = primitive.attributes.get("material");
@@ -245,6 +384,35 @@ fn GpuMesh? Asset.upload_primitive(
 	}
 
 	return out;
+}
+
+<*
+ Build the picking tree, and keep the geometry it points at.
+
+ `collision::TriBVHNode` stores raw pointers to the vertex and triangle arrays
+ rather than copying them, so these two allocations are part of the tree and are
+ freed with it. That is the memory cost named in the header: roughly 24 bytes per
+ vertex-and-triangle pair, resident for as long as the asset is loaded.
+
+ A degenerate primitive — fewer than three indices — gets no tree rather than a
+ tree of nothing, because `create_indexed_tri_bvh` requires a positive triangle
+ count.
+*>
+fn void GpuMesh.build_bvh(&self, Vec3[] positions, uint[] indices)
+{
+	usz triangle_count = indices.len / 3;
+	if (triangle_count == 0 || positions.len == 0) return;
+
+	self.hull_positions = mem::new_array(Vec3, (sz)positions.len);
+	self.hull_positions[..] = positions[..];
+
+	self.hull_triangles = mem::new_array(collision::Triangle, (sz)triangle_count);
+	for (usz i = 0; i < triangle_count; i++)
+	{
+		self.hull_triangles[i] = { indices[i * 3], indices[i * 3 + 1], indices[i * 3 + 2] };
+	}
+
+	self.bvh = collision::create_indexed_tri_bvh(self.hull_positions.ptr, self.hull_triangles.ptr, (sz)triangle_count);
 }
 
 <*
@@ -278,16 +446,17 @@ fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{u
 }
 
 <*
- Decode and upload a material's base colour texture, or reuse one already here.
+ Decode and upload a material's base colour texture, or reuse one already here
+ — from this file or from any file loaded before it.
 
  The hash is over the decoded RGBA rather than the encoded file, so two images
  that differ only in how they were compressed still count as one. Dimensions are
  compared too — a hash match with different extents would be a collision, and
  sharing on one would corrupt both.
 
- @return `An index into Asset.textures, or -1 when the material has no base colour texture.`
+ @return `An index into Assets.textures, or -1 when the material has no base colour texture.`
 *>
-fn int? Asset.load_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream, gltf::Material material)
+fn int? Assets.load_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream, gltf::Material material)
 {
 	int texture_index = material.baseColorTexture.source;
 	if (texture_index < 0) return -1;
@@ -367,35 +536,67 @@ fn String image_type_name(gltf::ImageType mime)
 	}
 }
 
+// ============================================================================
+// Descriptors
+// ============================================================================
+
 <*
- One descriptor set per texture plus one for the white stand-in.
+ The white stand-in and its set, created once for the whole table.
 
- Allocated in a single pool sized once, after every texture is known — a pool
- that has to grow is a pool that has to be recreated with every set in it
- rebound, and the count is known here for nothing.
+ It is what keeps this to a single pipeline: the descriptor binding is always
+ occupied, so an untextured mesh and a textured one are the same pipeline and
+ there is no permutation to manage.
 *>
-fn void? Asset.build_descriptors(&self, Gpu* gpu, MeshPipeline* pipeline)
+fn void? Assets.ensure_white(&self, Gpu* gpu, MeshPipeline* pipeline)
 {
-	uint count = (uint)self.textures.len() + 1;
+	if (self.has_white) return;
 
-	self.pool = vk::descriptorPoolCreateInfo().setMaxSets(count)
+	self.white = gpu.create_white_texture()!;
+	vk::DescriptorPool pool = vk::descriptorPoolCreateInfo().setMaxSets(1)
+		.setPoolSizes(
+			(vk::DescriptorPoolSize[]) { { .type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 } }
+		)
+		.build(gpu.handle)!;
+	self.pools.push(pool);
+
+	self.white_set = self.allocate_set(gpu, pipeline, pool, &self.white)!;
+	self.has_white = true;
+}
+
+<*
+ One descriptor set for each texture this load added.
+
+ Sized for exactly that count, after every texture in the load is known. A load
+ that reused every image it referenced adds no textures and creates no pool.
+*>
+fn void? Assets.build_descriptors(&self, Gpu* gpu, MeshPipeline* pipeline, sz textures_before)
+{
+	uint count = (uint)(self.textures.len() - textures_before);
+	if (count == 0) return;
+
+	vk::DescriptorPool pool = vk::descriptorPoolCreateInfo().setMaxSets(count)
 		.setPoolSizes(
 			(vk::DescriptorPoolSize[]) { { .type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = count } }
 		)
 		.build(gpu.handle)!;
+	self.pools.push(pool);
 
-	self.white_set = self.allocate_set(gpu, pipeline, &self.white)!;
-	foreach (&texture : self.textures)
+	for (sz i = textures_before; i < self.textures.len(); i++)
 	{
-		self.sets.push(self.allocate_set(gpu, pipeline, texture)!);
+		self.sets.push(self.allocate_set(gpu, pipeline, pool, &self.textures[i])!);
 	}
-	return;
 }
 
-fn vk::DescriptorSet? Asset.allocate_set(&self, Gpu* gpu, MeshPipeline* pipeline, Texture* texture)
+fn vk::DescriptorSet? Assets.allocate_set(
+	&self,
+	Gpu* gpu,
+	MeshPipeline* pipeline,
+	vk::DescriptorPool pool,
+	Texture* texture
+)
 {
 	vk::DescriptorSet set;
-	vk::DescriptorSetAllocateInfo info = vk::descriptorSetAllocateInfo().setDescriptorPool(self.pool)
+	vk::DescriptorSetAllocateInfo info = vk::descriptorSetAllocateInfo().setDescriptorPool(pool)
 		.setSetLayouts((vk::DescriptorSetLayout[]) { pipeline.descriptor_layout });
 	vk::allocateDescriptorSets(gpu.handle, &info, &set)!;
 
@@ -412,14 +613,9 @@ fn vk::DescriptorSet? Asset.allocate_set(&self, Gpu* gpu, MeshPipeline* pipeline
 	return set;
 }
 
-<*
- The set a mesh draws with: its own texture's, or the white stand-in's.
-*>
-fn vk::DescriptorSet Asset.set_for(&self, GpuMesh* mesh)
-{
-	if (mesh.texture < 0 || mesh.texture >= self.sets.len()) return self.white_set;
-	return self.sets[mesh.texture];
-}
+// ============================================================================
+// The built-in triangle
+// ============================================================================
 
 <*
  A hardcoded triangle, uploaded through exactly the same path as a glTF mesh.
@@ -431,20 +627,24 @@ fn vk::DescriptorSet Asset.set_for(&self, GpuMesh* mesh)
 
  Wound counter-clockwise as seen from +Z, which is glTF's front-face
  convention, so it is culled by the same rule real geometry is.
+
+ @return `The asset's index, for Scene.add_mesh.`
 *>
-fn Asset? Asset.load_triangle(&self, Gpu* gpu, MeshPipeline* pipeline)
+fn uint? Assets.load_triangle(&self, Gpu* gpu, MeshPipeline* pipeline)
 {
-	self.path = "<triangle>";
-	self.init_lists();
+	if (!self.started) self.init();
 
 	Vec3[3] positions = { { -0.5, -0.5, 0 }, { 0.5, -0.5, 0 }, { 0.0, 0.5, 0 } };
 	Vec3[3] normals   = { { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 } };
 	uint[3] indices   = { 0, 1, 2 };
 
-	self.white = gpu.create_white_texture()!;
+	self.ensure_white(gpu, pipeline)!;
+
+	Asset asset = { .path = "<triangle>".copy(mem) };
+	asset.meshes.init(mem, 1);
 
 	GpuMesh mesh = {
-		.name = "triangle",
+		.name = "triangle".copy(mem),
 		.vertex_count = 3,
 		.index_count = 3,
 		.has_normals = true,
@@ -452,21 +652,33 @@ fn Asset? Asset.load_triangle(&self, Gpu* gpu, MeshPipeline* pipeline)
 		.texture = -1,
 		.bounds = { .min = { -0.5, -0.5, 0 }, .max = { 0.5, 0.5, 0 } },
 	};
+	defer catch
+	{
+		mesh.free_buffers();
+		asset.meshes.free();
+		asset.path.free(mem);
+	}
+
 	mesh.positions = gpu.upload_stream(&positions, Vec3::size * 3)!;
 	mesh.normals = gpu.upload_stream(&normals, Vec3::size * 3)!;
 	mesh.indices = gpu.upload_indices(&indices, uint::size * 3)!;
+	mesh.build_bvh(positions[..], indices[..]);
 
-	self.meshes.push(mesh);
-	self.bounds = mesh.bounds;
+	asset.bounds = mesh.bounds;
+	asset.meshes.push(mesh);
 
-	self.build_descriptors(gpu, pipeline)!;
-	return *self;
+	self.assets.push(asset);
+	return (uint)self.assets.len() - 1;
 }
 
+// ============================================================================
+// Teardown
+// ============================================================================
+
 <*
- Release just this mesh's device memory. Separate from `Asset.free` because a
- primitive that fails partway through uploading has to undo its own work before
- anything else has heard of it.
+ Release just this mesh's memory, device and host. Separate from `Assets.free`
+ because a primitive that fails partway through uploading has to undo its own
+ work before anything else has heard of it.
 *>
 fn void GpuMesh.free_buffers(&self)
 {
@@ -474,22 +686,46 @@ fn void GpuMesh.free_buffers(&self)
 	if (self.indices.buffer != null) self.indices.free();
 	if (self.normals.buffer != null) self.normals.free();
 	if (self.uvs.buffer != null) self.uvs.free();
+
+	// `free_indexed` rather than `free`: the root owns the sorted-index array
+	// that every node below it points into, and the plain `free` leaves it.
+	if (self.bvh != null)
+	{
+		self.bvh.free_indexed();
+		mem::free(self.bvh);
+		self.bvh = null;
+	}
+	if (self.hull_positions.len > 0) mem::free(self.hull_positions);
+	if (self.hull_triangles.len > 0) mem::free(self.hull_triangles);
+	self.hull_positions = {};
+	self.hull_triangles = {};
+
+	if (self.name.len > 0) self.name.free(mem);
+	self.name = "";
 }
 
-fn void Asset.free(&self, Gpu* gpu)
+fn void Assets.free(&self, Gpu* gpu)
 {
-	foreach (&mesh : self.meshes) mesh.free_buffers();
-	self.meshes.free();
+	foreach (&asset : self.assets)
+	{
+		foreach (&mesh : asset.meshes) mesh.free_buffers();
+		asset.meshes.free();
+		if (asset.path.len > 0) asset.path.free(mem);
+	}
+	self.assets.free();
 
 	foreach (&texture : self.textures) texture.free(gpu);
 	self.textures.free();
-	self.white.free(gpu);
 	self.sets.free();
 
-	if (self.pool != null)
+	if (self.has_white)
 	{
-		vk::destroyDescriptorPool(gpu.handle, self.pool, null);
-		self.pool = (vk::DescriptorPool)null;
+		self.white.free(gpu);
+		self.has_white = false;
 	}
+
+	foreach (pool : self.pools) vk::destroyDescriptorPool(gpu.handle, pool, null);
+	self.pools.free();
+
 	*self = { };
 }

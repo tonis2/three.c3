@@ -11,22 +11,29 @@
 
  ## The push block
 
- Mirrors `shaders/mesh.slang` exactly. The offsets below are the ones slangc's
- reflection reports, checked rather than assumed:
+ Mirrors `shaders/mesh.slang` exactly:
 
-	mvp          0    64
-	base_color  64    16
-	light       80    16
-	positions   96     8
-	normals    104     8
-	uvs        112     8
-	flags      120     4      = 124 used, 128 with tail padding
+	frame        0     8      -> FrameBlock, one per frame in flight
+	instances    8     8      -> Instance[], already offset to this bucket
+	positions   16     8
+	normals     24     8
+	uvs         32     8
+	base_color  40    16
+	flags       56     4      = 60 used, 64 with tail padding
 
  **128 bytes is the budget and it is not a coincidence** — it is the push
  constant size every Vulkan implementation is required to offer, so this pass
  can never be refused by a device. crig's block grew to 192 and needed a
  `check_push_limit` that turns some machines away. When something new wants to
  ride in here, it goes in a buffer instead.
+
+ M2 is the first time that rule had to be obeyed rather than merely stated. The
+ old block spent 64 of its 128 bytes on a per-draw `mvp`, which left no room for
+ the instance-array pointer instancing needs — 124 + 8 is 132. The two things in
+ it that were never per-draw, the view-projection and the light, moved into a
+ `FrameBlock` written once a frame and reached through one pointer. What is left
+ is 60 bytes and genuinely per-draw, and the budget stopped being tight rather
+ than being widened.
 *>
 module three;
 
@@ -44,18 +51,34 @@ const uint FLAG_HAS_UVS     = 2;
 // to grow into.
 const uint PUSH_BUDGET = 128;
 
+<*
+ What every draw in a frame shares. One per frame in flight, written before
+ recording and read through `MeshPush.frame`.
+*>
+struct FrameBlock
+{
+	Matrix4f view_projection;
+	float[4] light; // xyz surface-to-light (world), w ambient floor
+}
+
 struct MeshPush
 {
-	Matrix4f mvp;
-	float[4] base_color; // rgb albedo factor, a material alpha
-	float[4] light; // xyz surface-to-light (world), w ambient floor
+	ulong frame; // FrameBlock*
+	ulong instances; // Instance*, offset to this bucket's first
 	ulong positions;
 	ulong normals;
 	ulong uvs;
+	float[4] base_color; // rgb albedo factor, a material alpha
 	uint flags;
 }
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
+// Not a bound but an equality, because these two numbers are a wire format
+// shared with `shaders/mesh.slang` and a silent change to either side is a
+// misread buffer rather than an error. `Instance` is in `scene/scene.c3`.
+$assert MeshPush::size == 64 : "the push block no longer matches the layout documented above";
+$assert FrameBlock::size == 80 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert Instance::size == 128 : "Instance no longer matches shaders/mesh.slang";
 
 struct MeshPipeline
 {
