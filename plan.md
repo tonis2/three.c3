@@ -52,6 +52,10 @@ Nothing is built. The seven submodules are in place and nothing else — no
 description. When something lands, move it from **Milestones** into a section that
 describes how it actually works, and keep this file honest about the difference.
 
+**M0 and M1 are broken out step by step in `base_stage.md`** — which file, in what
+order, done when. This file stays the whole shape; that one is the next two
+milestones.
+
 ## Dependencies
 
 Added as git submodules under `lib/`, matching crig's layout:
