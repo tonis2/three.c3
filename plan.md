@@ -77,8 +77,10 @@ wrote. **The parametric shapes are in too** — `new three.BoxGeometry(1, 1, 1)`
 and its five siblings, with Three.js's signatures, defaults and orientations, so
 a scene no longer needs a `.glb` to exist — and **so is the per-copy channel**:
 `mesh.color` and `mesh.variant` vary inside a single instanced draw, so a
-thousand cubes in a thousand colours is still one call. `c3c test --trust=full`
-runs a hundred and sixty checks, all headless, leak-clean.
+thousand cubes in a thousand colours is still one call. **The window is a
+control as well as a viewer** — drag to orbit, right-drag to pan, scroll to
+zoom, writing the same camera a script writes. `c3c test --trust=full` runs a
+hundred and seventy-two checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -326,6 +328,7 @@ src/
   shader/material_source.c3
                     built  wraps an agent's fragment body into a whole Slang module
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
+  scene/controls.c3 built  the mouse as camera movement: orbit, pan, zoom (M5c)
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
@@ -353,6 +356,8 @@ test/
   js_test.c3        built  the run contract, handles, staleness, the scene from JavaScript
   primitive_test.c3 built  what the shapes are shaped like, which way they face, when
                            two of them are one asset — no device anywhere in it
+  controls_test.c3  built  which way a drag turns the scene, and the state machine
+                           behind it — no device and no window anywhere in it
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -940,6 +945,30 @@ Three things are worth keeping in view:
 
 `m5b_stage.md` is the step-by-step record, including the six injections and the
 test that passed for the wrong reason until one of them exposed it.
+
+**M5c — the window becomes a control.** Drag to orbit, right-drag to pan, scroll
+to zoom, in `scene/controls.c3`. There is no new camera model: orbit *is* the
+turntable's yaw, pitch and distance, which is why the file is short and why the
+`--stress-resize` loop and the server loop could both pick it up in one line
+each.
+
+**It writes the same `pass.camera` a script writes**, so a hand on the window
+and `three.camera.orbit(...)` compose with no arbitration and neither knows
+about the other. Nothing about it is a JS API, and that is the seam the next
+milestone builds on rather than around.
+
+Two things it is worth having found out here rather than later:
+
+- **The pure part has no idea what a window is.** `PointerState` is four numbers
+  and two flags. That is the only reason any of this is under test, since the
+  suite is headless and a control scheme verified by nobody is a control scheme
+  that drifts.
+- **The window lies about the mouse.** A button arrives as a latch, and the
+  release that should clear it is swallowed by AppKit's own event loop whenever
+  the window is dragged by its title bar — so the scene turns by itself from
+  then on. `Controls` will not believe a held button until it has seen one
+  button-free frame. See `event_loop.md`, which is also where the per-frame
+  script hook and the keyboard are written down.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

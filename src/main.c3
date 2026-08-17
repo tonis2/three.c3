@@ -13,6 +13,12 @@
 	--no-validate         turn them off — --mcp turns them on by default
 	--grid <n>            n instances of the model, to see M2's claim hold
 
+ The window is a viewer and now also a control: drag to orbit, right-drag to
+ pan, scroll to zoom. It writes the same `pass.camera` a script writes through
+ `three.camera`, so the two compose with no arbitration — see
+ `scene/controls.c3`, and `event_loop.md` for the per-frame script hook that
+ does not exist yet.
+
  **`--mcp` is the driving surface M3 exists for**; everything else here is the
  CLI the base stage was driven by, kept because it is how a human looks at a
  file and how `--stress-resize` and `--grid` stay runnable.
@@ -345,12 +351,53 @@ fn void? run(Options opts)
 		return;
 	}
 
+	Controls controls = default_controls();
 	while (!window.should_close())
 	{
 		c3w::EventMap events = window.getEvent();
 		if (events.is_pressed(ESCAPE)) break;
+		drive_camera(renderer: &renderer, window: &window, controls: &controls, events: events);
 		renderer.frame()!;
 	}
+}
+
+<*
+ Read the pointer and let it move the camera. One call per frame, in every loop
+ that has a window.
+
+ **The units are the whole content of this function.** `c3w` reports the cursor
+ in the platform's own coordinates — logical points on macOS — and
+ `viewer.extent` is in device pixels, which on a retina display is twice as
+ many. Handing the raw extent to `Controls.apply` would halve the pan speed on
+ exactly the machines this is developed on, and it would look like a taste
+ problem rather than a units bug. `get_scale` is the ratio, and it is the same
+ number `c3w` sets the Metal layer's `contentsScale` to.
+
+ The extent is read rather than the window's own size because the frame loop
+ keeps it current through a live resize drag and `Window.width` is only what
+ `new` was asked for.
+*>
+fn void drive_camera(Renderer* renderer, c3w::Window* window, Controls* controls, c3w::EventMap events)
+{
+	float[<2>] at = window.getMousePos();
+	PointerState pointer = {
+		.orbit = events.is_pressed(LEFT_MOUSE),
+		// Middle alongside right because a trackpad has no third button and a
+		// three-button mouse has no natural second drag; both spellings are in
+		// use and neither is worth making somebody look up.
+		.pan = events.is_pressed(RIGHT_MOUSE) || events.is_pressed(MIDDLE_MOUSE),
+		.x = at[0],
+		.y = at[1],
+		.scroll = window.get_scroll(),
+	};
+
+	float scale = window.get_scale();
+	// Zero while minimised, and negative never — but the division is guarded
+	// rather than assumed, because the fallback is "pan does nothing this frame"
+	// and the alternative is an infinity in the camera target.
+	float height = scale > 0.0f ? (float)renderer.viewer.extent.height / scale : 0.0f;
+
+	controls.apply(&renderer.pass.camera, pointer, height);
 }
 
 <*
@@ -383,7 +430,16 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 
 	io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
 	io::printn("     run_script, screenshot, get_api_docs");
-	if (window == null) io::printn("     headless — ctrl-c to stop");
+	if (window == null)
+	{
+		io::printn("     headless — ctrl-c to stop");
+	}
+	else
+	{
+		io::printn("     drag to orbit, right-drag to pan, scroll to zoom");
+	}
+
+	Controls controls = default_controls();
 
 	while (true)
 	{
@@ -392,6 +448,10 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			if (window.should_close()) break;
 			c3w::EventMap events = window.getEvent();
 			if (events.is_pressed(ESCAPE)) break;
+			// Before `pump`, so a drag and a script that arrives in the same
+			// iteration resolve in the order they happened rather than the
+			// script's camera being overwritten by a stale anchor.
+			drive_camera(renderer: renderer, window: window, controls: &controls, events: events);
 		}
 
 		usz handled = listener.pump(&server);
