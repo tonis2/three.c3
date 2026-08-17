@@ -34,8 +34,8 @@ import qjs;
 *>
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "createMaterial", &js_create_material, 3);
-	self.bind(host, "setUniform", &js_set_uniform, 7);
+	self.bind(host, "createMaterial", &js_create_material, 4);
+	self.bind(host, "setUniform", &js_set_uniform, 9);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 }
 
@@ -92,17 +92,31 @@ fn void js_create_material(
 		String fragment = arg_text(&js, argc, args, 0, tmem);
 		String names = arg_text(&js, argc, args, 1, tmem);
 		String widths = arg_text(&js, argc, args, 2, tmem);
+		// A third joined list, for the same reason as the second: the shape of a
+		// uniform is now two numbers, and a table's row count has to cross with
+		// its width or the shader declares a scalar where the script wrote a
+		// column. Absent means every uniform is one row, which is what every
+		// material written before tables existed meant.
+		String rows = arg_text(&js, argc, args, 3, tmem);
 
 		List{String} name_list;
 		List{String} width_list;
+		List{String} row_list;
 		name_list.tinit(4);
 		width_list.tinit(4);
+		row_list.tinit(4);
 		split_commas(names, &name_list);
 		split_commas(widths, &width_list);
+		split_commas(rows, &row_list);
 
 		if (name_list.len() != width_list.len())
 		{
 			*out = js.raise("every uniform needs a value — a name arrived without one");
+			return;
+		}
+		if (row_list.len() > 0 && row_list.len() != name_list.len())
+		{
+			*out = js.raise("every uniform needs a row count when any of them has one");
 			return;
 		}
 
@@ -121,7 +135,21 @@ fn void js_create_material(
 				);
 				return;
 			}
-			uniforms.push({ .name = name, .components = (uint)components });
+
+			int declared_rows = row_list.len() > 0 ? (row_list[i].to_int() ?? 0) : 1;
+			if (declared_rows < 1)
+			{
+				*out = js.raise(
+					string::tformat("uniform '%s' is a table with no rows in it", name)
+				);
+				return;
+			}
+
+			uniforms.push({
+				.name = name,
+				.components = (uint)components,
+				.rows = (uint)declared_rows,
+			});
 		}
 
 		// The diagnostic is the product here, not a side effect. `plan.md` §5's
@@ -192,9 +220,12 @@ fn String material_failure(fault err, String diagnostic) @local
 <*
  `material.uniforms.<name> = value` — write one uniform's bytes.
 
- Arity seven: material, name, and four floats plus the count of them. The count
- is passed rather than inferred from trailing zeroes, because `[0, 0, 0]` is a
- perfectly ordinary colour and guessing would make it a one-component write.
+ Arity nine: material, name, four floats, the count of them, and the row and row
+ count for a table column. The count is passed rather than inferred from trailing
+ zeroes, because `[0, 0, 0]` is a perfectly ordinary colour and guessing would
+ make it a one-component write; the row count is passed for `Material.set_uniform`'s
+ reason — it is what keeps the width check exact once a field can hold more than
+ one value.
 *>
 fn void js_set_uniform(
 	qjs::ContextRef ctx,
@@ -232,7 +263,21 @@ fn void js_set_uniform(
 			return;
 		}
 
-		if (catch err = material.set_uniform(name, values[:count]))
+		// Absent means the plain case, so a caller that predates tables — a
+		// script reaching for `__three.setUniform` itself — still writes the one
+		// value it means to.
+		int row = argc > 7 ? arg_int(&js, argc, args, 7) : 0;
+		int rows = argc > 8 ? arg_int(&js, argc, args, 8) : 1;
+		if (rows < 1) rows = 1;
+		if (row < 0 || row >= rows)
+		{
+			*out = js.raise(string::tformat(
+				"uniform '%s' has %d row%s and row %d is not one of them", name, rows, rows == 1 ? "" : "s", row
+			));
+			return;
+		}
+
+		if (catch err = material.set_uniform(name, values[:count], (uint)row, (uint)rows))
 		{
 			*out = js.raise(
 				err == MATERIAL_UNIFORM_WIDTH

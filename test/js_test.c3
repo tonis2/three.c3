@@ -968,6 +968,355 @@ fn void building_a_shape_without_a_device_says_so() @test
 }
 
 // ============================================================================
+// Per copy: colour and variant
+// ============================================================================
+//
+// The two channels a copy of a mesh may differ in without becoming a second
+// draw call. `scene_test.c3` asserts that they reach the instance record and do
+// not split a bucket, with no device; what is left for here is the half only a
+// picture can answer — that the value the script set is the value the shader
+// read, in one call, for copies that disagree.
+
+<*
+ A thousand copies in three colours, drawn once.
+
+ **The draw-call count and the pixels are both required, and neither is enough.**
+ An implementation that ignored `mesh.color` entirely would keep the count at one
+ and paint everything white; one that made a bucket per colour would paint the
+ right pixels in three calls. So this asserts a single call *and* that all three
+ colours are in the frame at the same time — which no return value can say.
+*>
+fn void a_thousand_colours_are_still_one_draw_call() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const box = new three.BoxGeometry(1, 1, 1);
+			const colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+
+			for (let i = 0; i < 1000; i++) {
+				const cube = new three.Mesh(box);
+				// Three columns, each its own colour and each far enough from the
+				// next to survive being rendered at 200 x 150.
+				cube.position.set((i % 3) * 3 - 3, 0, -Math.floor(i / 3) * 0.02);
+				cube.color = colors[i % 3];
+				scene.add(cube);
+			}
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 12);
+			three.render(scene, three.camera);
+			return scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.instances == 1000, "a thousand instances, got %d", result.stats.instances);
+		test::@check(result.stats.draw_calls == 1, "in one draw call, got %d", result.stats.draw_calls);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		// Lit by the default shader, so nothing is fully saturated — the tint is
+		// asserted by which channel dominates rather than by a value.
+		uint reds = 0;
+		uint greens = 0;
+		uint blues = 0;
+		for (sz i = 0; i < frame.pixels.len; i += 4)
+		{
+			int r = (int)frame.pixels[i];
+			int g = (int)frame.pixels[i + 1];
+			int b = (int)frame.pixels[i + 2];
+			if (r < 40 && g < 40 && b < 40) continue;   // the clear colour
+			if (r > g + 30 && r > b + 30) reds++;
+			if (g > r + 30 && g > b + 30) greens++;
+			if (b > r + 30 && b > g + 30) blues++;
+		}
+
+		test::@check(reds > 100, "the red column is red, got %d pixels", reds);
+		test::@check(greens > 100, "the green column is green, got %d pixels", greens);
+		test::@check(blues > 100, "the blue column is blue, got %d pixels", blues);
+	};
+}
+
+<*
+ One material, one draw call, two looks — chosen per copy.
+
+ This is the whole point of `variant`. Two quads share a geometry *and* a
+ material, so they are one bucket and one `vkCmdDrawIndexed`; they differ only in
+ which row of the material's table they read. A variant that never reached the
+ shader paints both of them row zero's colour, and the draw-call count would
+ still be one — so the count alone proves nothing here and the pixels are the
+ evidence.
+*>
+fn void a_variant_picks_a_row_of_the_material_table() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			globalThis.mat = new three.ShaderMaterial({
+				uniforms: { palette: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] },
+				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+			});
+
+			globalThis.scene = new three.Scene();
+			// quad_left is centred on x = -0.75; +0.75 puts each over the axis.
+			for (let i = 0; i < 3; i++) {
+				const quad = new three.Mesh(kit.mesh("quad_left"), globalThis.mat);
+				quad.position.set(0.75 + (i - 1) * 1.2, 0, 0);
+				quad.variant = i;
+				globalThis.scene.add(quad);
+			}
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(globalThis.scene, three.camera);
+			return globalThis.scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.instances == 3, "three quads, got %d", result.stats.instances);
+		test::@check(result.stats.draw_calls == 1, "one material and one mesh is one draw, got %d", result.stats.draw_calls);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		uint red = count_near(&frame, 255, 0, 0);
+		uint green = count_near(&frame, 0, 255, 0);
+		uint blue = count_near(&frame, 0, 0, 255);
+
+		test::@check(red > 200, "row 0 painted its quad red, got %d pixels", red);
+		test::@check(green > 200, "row 1 painted its quad green, got %d pixels", green);
+		test::@check(blue > 200, "row 2 painted its quad blue, got %d pixels", blue);
+
+		// A row past the end is the last row, not a read off the end of the push
+		// block — which would be some other uniform's bytes as a colour, or the
+		// same colour by luck. Asserted as "still exactly three colours, and the
+		// third one grew" rather than by naming a pixel.
+		three::RunResult past = run.run(`
+			globalThis.scene.children[0].variant = 99;
+			three.render(globalThis.scene, three.camera);
+		`);
+		defer past.free();
+		test::@check(past.ok, "the second run succeeded: %s", past.error);
+
+		image::Image clamped = run.renderer.capture()!!;
+		defer clamped.free();
+
+		test::@check(count_near(&clamped, 255, 0, 0) < 50, "row 99 stopped being red, got %d", count_near(&clamped, 255, 0, 0));
+		test::@check(
+			count_near(&clamped, 0, 0, 255) > blue + 200,
+			"and became the last row instead: %d blue pixels, up from %d",
+			count_near(&clamped, 0, 0, 255), blue
+		);
+	};
+}
+
+<*
+ A table is written a row at a time, and the write reaches the GPU.
+
+ `mat.uniforms.palette[1] = [...]` is the line an agent will write, and the
+ obvious implementation of `uniforms` hands back the stored JavaScript array —
+ where that line mutates a value nothing ever reads again. It renders unchanged,
+ with no error, which is the same silent no-op `an_undeclared_uniform_cannot_be_assigned`
+ was written for one level up.
+*>
+fn void a_table_row_can_be_written_on_its_own() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult first = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			globalThis.mat = new three.ShaderMaterial({
+				uniforms: { palette: [[1, 0, 0], [1, 0, 0]] },
+				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+			});
+			globalThis.scene = new three.Scene();
+			const quad = new three.Mesh(kit.mesh("quad_left"), globalThis.mat);
+			quad.position.set(0.75, 0, 0);
+			quad.variant = 1;
+			globalThis.scene.add(quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(globalThis.scene, three.camera);
+		`);
+		defer first.free();
+		test::@check(first.ok, "the first run succeeded: %s", first.error);
+
+		image::Image red_frame = run.renderer.capture()!!;
+		defer red_frame.free();
+		test::@check(count_near(&red_frame, 255, 0, 0) > 500, "it started red");
+
+		three::RunResult second = run.run(`
+			globalThis.mat.uniforms.palette[1] = [0, 1, 0];
+			three.render(globalThis.scene, three.camera);
+			return globalThis.mat.uniforms.palette[1];
+		`);
+		defer second.free();
+		test::@check(second.ok, "the second run succeeded: %s", second.error);
+		test::@check(second.value == "[0,1,0]", "the row reads back as it was written, got %s", second.value);
+
+		image::Image green_frame = run.renderer.capture()!!;
+		defer green_frame.free();
+		test::@check(count_near(&green_frame, 0, 255, 0) > 500, "and row 1 is green now");
+		test::@check(
+			count_near(&green_frame, 255, 0, 0) == 0,
+			"with no red left, so the write reached the device rather than a JavaScript array"
+		);
+		// Row 0 was not touched. Asserted because a `_setRow` that wrote at the
+		// field's own offset regardless of the row would pass every check above.
+		three::RunResult row_zero = run.run(`return globalThis.mat.uniforms.palette[0];`);
+		defer row_zero.free();
+		test::@check(row_zero.value == "[1,0,0]", "row 0 was left alone, got %s", row_zero.value);
+	};
+}
+
+<*
+ A colour set before the object is added survives the add.
+
+ The same replay `_materialize` does for the transform, the name and the
+ material, and the same reason: an object is a detached description until it is
+ added, and a script that sets a colour and then adds must not lose it. Checked
+ with the default shader, so it also says the instance colour reaches
+ `mesh.slang` and not only a `ShaderMaterial`.
+*>
+fn void a_colour_set_before_the_add_survives_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		// A generated box rather than the textured fixture, deliberately: the
+		// fixture's quads carry a warm base colour texture, so "the frame is
+		// reddish" would be true whether or not the tint arrived. Measured — the
+		// first version of this test passed with the replay in `_materialize`
+		// deleted.
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			cube.color = [1, 0, 0];
+			cube.variant = 2;
+			scene.add(cube);          // everything above was set while detached
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(20, 15, 3);
+			three.render(scene, three.camera);
+			return { color: cube.color, variant: cube.variant };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"variant":2`), "the variant reads back: %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+		// Lit, so not saturated — the red channel simply has to dominate.
+		uint reds = 0;
+		for (sz i = 0; i < frame.pixels.len; i += 4)
+		{
+			if ((int)frame.pixels[i] > (int)frame.pixels[i + 1] + 40) reds++;
+		}
+		test::@check(reds > 500, "the cube is red without a material, got %d red pixels", reds);
+	};
+}
+
+<*
+ A colour is whatever a script had to hand, and a wrong one says so.
+
+ The four spellings are the ones an agent will actually type, and hex is the
+ Three.js habit. It is divided by 255 and not de-gamma'd — there is no colour
+ management anywhere in this project, and doing half of it here would be worse
+ than doing none — so `0xff0000` and `[1, 0, 0]` must be the same colour.
+*>
+fn void a_colour_is_whatever_the_script_had_to_hand() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const box = new three.BoxGeometry(1, 1, 1);
+			const spellings = [[1, 0, 0], [1, 0, 0, 1], { r: 1, g: 0, b: 0 }, 0xff0000];
+			const read = spellings.map(s => {
+				const m = new three.Mesh(box);
+				m.color = s;
+				scene.add(m);
+				return m.color.join(',');
+			});
+
+			const said = [];
+			const refuse = f => { try { f(); said.push("nothing was thrown"); } catch (e) { said.push(e.message); } };
+			refuse(() => { new three.Mesh(box).color = "red"; });
+			refuse(() => { new three.Mesh(box).color = [1, 0]; });
+			refuse(() => { new three.Mesh(box).color = [1, NaN, 0]; });
+			refuse(() => { new three.Mesh(box).variant = -1; });
+
+			return { read, agree: new Set(read).size === 1, said };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"agree":true`), "all four spellings are one colour: %s", result.value);
+		test::@check(result.value.contains("1,0,0,1"), "and it is opaque red: %s", result.value);
+		test::@check(result.value.contains("0xff8800"), "a bad colour says what it wanted: %s", result.value);
+		test::@check(result.value.contains("non-finite"), "a NaN component is named: %s", result.value);
+		test::@check(result.value.contains("row index of 0 or more"), "and a negative row: %s", result.value);
+		test::@check(!result.value.contains("nothing was thrown"), "every one of them threw: %s", result.value);
+	};
+}
+
+<*
+ A ragged table is refused in JavaScript, before a shader is written.
+
+ The host refuses it too — `columns_of_different_heights_are_refused` — and this
+ is the layer that can name both columns at the line that declared them, which is
+ `plan.md` §4's argument for where a check belongs when both layers can make it.
+*>
+fn void a_ragged_table_is_refused_by_name() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = [];
+			const refuse = f => { try { f(); said.push("nothing was thrown"); } catch (e) { said.push(e.message); } };
+
+			// Two real columns, two and three rows deep. A sheen of
+			// [0.1, 0.2, 0.3] would *not* be ragged — that is one row three
+			// floats wide, and a plain uniform beside a table is ordinary.
+			refuse(() => new three.ShaderMaterial({
+				uniforms: { palette: [[1, 0, 0], [0, 1, 0]], sheen: [[0.1], [0.2], [0.3]] },
+				fragment: "float3 shade(Surface s) { return palette[s.variant] * sheen[s.variant]; }",
+			}));
+			refuse(() => new three.ShaderMaterial({
+				uniforms: { palette: [[1, 0, 0], [0, 1]] },
+				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+			}));
+			refuse(() => {
+				const mat = new three.ShaderMaterial({
+					uniforms: { palette: [[1, 0, 0], [0, 1, 0]] },
+					fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+				});
+				mat.uniforms.palette[5] = [0, 0, 1];
+			});
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// `sheen: [0.1, 0.2, 0.3]` is three floats in one row, not three rows —
+		// so the ragged case has to be spelled with two real tables.
+		test::@check(
+			result.value.contains("same number of rows") || result.value.contains("same width"),
+			"a ragged table is named: %s", result.value
+		);
+		test::@check(result.value.contains("every row of a table has to be the same width"), "%s", result.value);
+		test::@check(result.value.contains("row 5 is not one of them"), "and a row past the end: %s", result.value);
+		test::@check(!result.value.contains("nothing was thrown"), "every one of them threw: %s", result.value);
+	};
+}
+
+// ============================================================================
 // Picking
 // ============================================================================
 //

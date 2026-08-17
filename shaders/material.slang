@@ -11,6 +11,7 @@
 // free. Each is replaced by zero or more lines:
 //
 //     //@uniforms   one field per material uniform, appended to the push block
+//     //@rows       `static const uint MATERIAL_ROWS = N;`
 //     //@defines    one `#define name (push.name)` per uniform
 //     //@shade      `#line`, the agent's fragment body, `#line` back, `#undef`
 //
@@ -24,12 +25,15 @@
 // `the_material_push_block_keeps_the_mesh_contract`, which reflects an assembled
 // material and checks it field by field against `MESH_PUSH_FIELDS`.
 
-// One instance: where a copy of the mesh is, and how its normals rotate. Byte
-// for byte what `mesh.slang` and `scene/scene.c3` declare; 128 bytes.
+// One instance: where a copy of the mesh is, how its normals rotate, and the two
+// things copies of one mesh may disagree about without costing a draw call. Byte
+// for byte what `mesh.slang` and `scene/scene.c3` declare; 148 bytes.
 struct Instance
 {
     float4x4 model;
     float4x4 normal;
+    float4 color;
+    uint variant;
 };
 
 // What every draw in the frame shares, written once per frame. 80 bytes.
@@ -70,17 +74,25 @@ static const uint FLAG_HAS_UVS     = 2u;
 // layout and the same pipeline.
 [vk::binding(0, 0)] Sampler2D base_color_map;
 
-// **The contract with the agent.** Four values, all of them in world space or
-// texture space, none of them a pointer and none of them a Vulkan concept. A
-// body that only ever touches `Surface` cannot address the wrong buffer, which
-// is most of what `plan.md` §4 means by "removes almost every Vulkan failure
-// mode".
+// **The contract with the agent.** Six values, all of them in world space, in
+// texture space, or per instance; none of them a pointer and none of them a
+// Vulkan concept. A body that only ever touches `Surface` cannot address the
+// wrong buffer, which is most of what `plan.md` §4 means by "removes almost every
+// Vulkan failure mode".
 struct Surface
 {
-    float3 albedo;          // base colour factor, times the texture where there is one
+    float3 albedo;          // base colour factor, times the texture and the instance colour
     float3 normal;          // normalized, world space
     float2 uv;
     float3 position;        // world space
+    // This copy's own colour, raw — `albedo` already has it. Here for a body
+    // that wants it as something other than a tint: an emissive amount, a
+    // per-instance parameter, a selection highlight.
+    float4 color;
+    // Which row of this material's table this copy selected, **already clamped**
+    // to the rows the material declared. So `palette[s.variant]` is always in
+    // bounds, whatever a script set, and a material with no table sees zero.
+    uint variant;
 };
 
 struct VertexOutput
@@ -96,8 +108,19 @@ struct VertexOutput
     // and spelling an interpolated output that way invites the reader to confuse
     // it with `sv_position`, which is in clip space and is not this.
     float3 world : TEXCOORD1;
+    // COLOR0 and TEXCOORD2 are `mesh.slang`'s too, in the same order: the two
+    // shaders read one `Instance` array written by one `build_draw_list`, and
+    // the varyings that carry it across the stages are as much a shared format
+    // as the struct is.
+    float4 color : COLOR0;
+    nointerpolation uint variant : TEXCOORD2;
     float4 sv_position : SV_Position;
 };
+
+// How many rows the material's uniform arrays have, or 1 when it declared none.
+// Generated, because `s.variant` is clamped against it and a table is the only
+// thing that gives a variant meaning.
+//@rows
 
 // `mesh.slang`'s light as a single factor, so a body can ask for the default
 // look without reproducing it. `return s.albedo * lambert(s.normal);` is the
@@ -132,6 +155,9 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     output.uv = float2(0.0, 0.0);
     if ((push.flags & FLAG_HAS_UVS) != 0) output.uv = push.uvs[vid];
 
+    output.color = instance.color;
+    output.variant = instance.variant;
+
     return output;
 }
 
@@ -152,7 +178,11 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
     Surface s;
-    s.albedo = push.base_color.rgb;
+    // The instance colour is folded into albedo here, exactly as `mesh.slang`
+    // folds it: a body that writes `return s.albedo * lambert(s.normal)` — the
+    // default look — respects `mesh.color` without knowing it exists, and a body
+    // that wants the raw value has `s.color`.
+    s.albedo = push.base_color.rgb * input.color.rgb;
     if ((push.flags & FLAG_HAS_UVS) != 0)
     {
         s.albedo *= base_color_map.Sample(input.uv).rgb;
@@ -160,6 +190,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.normal = normalize(input.normal);
     s.uv = input.uv;
     s.position = input.world;
+    s.color = input.color;
+    // Clamped once, here, rather than at each use: an out-of-range index into a
+    // push-constant array is undefined behaviour that reads whatever is next in
+    // the block — a wrong colour with no error anywhere, which is precisely the
+    // class of failure this project spends its comments on.
+    s.variant = min(input.variant, MATERIAL_ROWS - 1u);
 
     // **Alpha is not the agent's to return.** `shade` answers with linear rgb and
     // the alpha comes from the material's base colour, so a body cannot make

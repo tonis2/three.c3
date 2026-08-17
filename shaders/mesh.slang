@@ -43,10 +43,19 @@
 // deliberately allows a non-uniform one — under which the shortcut leaves
 // normals no longer perpendicular to the surface and the object is lit as
 // though it were not stretched. Nothing about that reads as an error.
+// **`color` and `variant` are the only things two copies of a mesh may disagree
+// about.** Everything else that decides how a draw looks — the pipeline, the
+// uniforms, the texture — is pushed once for the whole vkCmdDrawIndexed, so a
+// disagreement about any of it is a second bucket and a second draw. These two
+// are read per instance, so a thousand differently coloured copies are still one
+// call. `scene/scene.c3` writes them; `variant` means nothing to this shader and
+// selects a row of the material's table in `material.slang`.
 struct Instance
 {
     float4x4 model;
     float4x4 normal;
+    float4 color;
+    uint variant;
 };
 
 // What every draw in the frame shares. Written once per frame rather than
@@ -91,6 +100,13 @@ struct VertexOutput
 {
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // The instance's own colour, carried to the fragment stage because that is
+    // where albedo is assembled. Interpolating it is a no-op — it is constant
+    // across every vertex of an instance — and it is not marked
+    // `nointerpolation` so that the two shaders declare the same varyings in the
+    // same order, which `material.slang`'s header explains is a wire format
+    // rather than a coincidence.
+    float4 color : COLOR0;
     float4 sv_position : SV_Position;
 };
 
@@ -114,13 +130,19 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     output.uv = float2(0.0, 0.0);
     if ((push.flags & FLAG_HAS_UVS) != 0) output.uv = push.uvs[vid];
 
+    output.color = instance.color;
+
     return output;
 }
 
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
-    float3 albedo = push.base_color.rgb;
+    // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
+    // 0]` works with no material at all — which is the point of it being here
+    // rather than only in `material.slang`. White is the identity and is what
+    // every node starts at.
+    float3 albedo = push.base_color.rgb * input.color.rgb;
     if ((push.flags & FLAG_HAS_UVS) != 0)
     {
         albedo *= base_color_map.Sample(input.uv).rgb;

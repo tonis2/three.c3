@@ -78,6 +78,37 @@
 		toString() { return `Vector3(${this._x}, ${this._y}, ${this._z})`; }
 	}
 
+	// Read a colour out of whatever the script had to hand: `[r, g, b]`,
+	// `[r, g, b, a]`, `{ r, g, b }`, or Three.js's hex — `0xff8800`.
+	//
+	// **The components are what the pixel gets, and there is no colour
+	// management anywhere in this project.** A hex value is therefore divided by
+	// 255 and not de-gamma'd: `mesh.color = 0xff8800` renders the byte values it
+	// spells, which is also what `base_color` out of a glTF does. Three.js
+	// converts sRGB to linear on the way in and back on the way out, and doing
+	// half of that here would be worse than doing neither.
+	function readColor(v, where) {
+		if (typeof v === 'number') {
+			if (!Number.isFinite(v) || v < 0 || v > 0xffffff) {
+				throw new RangeError(`${where} wants a hex colour between 0x000000 and 0xffffff, got ${v}`);
+			}
+			const hex = Math.floor(v);
+			return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255, 1];
+		}
+		let c;
+		if (Array.isArray(v) && v.length >= 3 && v.length <= 4) {
+			c = [+v[0], +v[1], +v[2], v.length === 4 ? +v[3] : 1];
+		} else if (v !== null && typeof v === 'object' && 'r' in v) {
+			c = [+v.r, +v.g, +v.b, v.a === undefined ? 1 : +v.a];
+		} else {
+			throw new TypeError(`${where} wants [r, g, b], [r, g, b, a], {r, g, b} or a hex number like 0xff8800`);
+		}
+		for (const n of c) {
+			if (!Number.isFinite(n)) throw new TypeError(`${where} was given a non-finite component`);
+		}
+		return c;
+	}
+
 	// Read a position or a direction out of whatever the script had to hand: a
 	// Vector3, a plain `{x, y, z}`, or a three-element array. An agent that
 	// wrote `[0, -1, 0]` should not have to find out which one this wanted, and
@@ -145,6 +176,13 @@
 			this._flush();
 			if (!this._visible) H.setVisible(i, g, false);
 			if (this._material) H.setMaterial(i, g, this._material._m);
+			// Only when they are not the identity: `_materialize` runs once per
+			// object added, and a scene of ten thousand default-coloured meshes
+			// should not pay twenty thousand crossings to say "white, row zero".
+			if (this._color && !(this._color[0] === 1 && this._color[1] === 1 && this._color[2] === 1 && this._color[3] === 1)) {
+				H.setColor(i, g, ...this._color);
+			}
+			if (this._variant) H.setVariant(i, g, this._variant);
 			for (const child of this.children) child._materialize(this);
 		}
 
@@ -278,10 +316,30 @@
 			// lists keys. So the names cross as a joined string — see
 			// js/bind_shader.c3.
 			const names = Object.keys(uniforms);
-			const widths = names.map(n => ShaderMaterial._width(n, uniforms[n]));
+			const shapes = names.map(n => ShaderMaterial._shape(n, uniforms[n]));
+			// Every table in one material is a column of the same table, so the
+			// row counts have to agree. Checked here as well as in the host so
+			// the message can name both columns before a shader is written.
+			const tabled = names.filter((n, i) => shapes[i][1] > 1);
+			if (tabled.length > 1) {
+				const rows = tabled.map(n => shapes[names.indexOf(n)][1]);
+				if (rows.some(r => r !== rows[0])) {
+					throw new TypeError(
+						`the arrays in one material are columns of one table and must have the same number of rows: `
+						+ tabled.map((n, i) => `${n} has ${rows[i]}`).join(', ')
+					);
+				}
+			}
 
-			this._m = H.createMaterial(fragment, names.join(','), widths.join(','));
+			this._m = H.createMaterial(
+				fragment,
+				names.join(','),
+				shapes.map(s => s[0]).join(','),
+				shapes.map(s => s[1]).join(','),
+			);
 			this.fragment = fragment;
+			this._rows = {};
+			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 
 			// A Proxy rather than accessors on a sealed object, because a script is
 			// not evaluated in strict mode: assigning an unknown property to a
@@ -294,7 +352,16 @@
 			const declared = new Set(names);
 			const owner = this;
 			this.uniforms = new Proxy({}, {
-				get(_, name) { return owner._values[name]; },
+				get(_, name) {
+					// A table hands back a proxy of its own, so that
+					// `mat.uniforms.palette[2] = [1, 0, 0]` writes row 2 to the
+					// device. Handing back the plain array instead would make that
+					// line mutate a JavaScript value nothing ever reads again —
+					// the same silent no-op the `set` trap below exists to
+					// prevent, one level down.
+					if (owner._rows[name] > 1) return owner._column(name);
+					return owner._values[name];
+				},
 				has(_, name) { return declared.has(name); },
 				ownKeys() { return [...declared]; },
 				getOwnPropertyDescriptor(_, name) {
@@ -314,15 +381,52 @@
 			for (const name of names) this._set(name, uniforms[name]);
 		}
 
-		static _width(name, v) {
-			if (typeof v === 'number') return 1;
-			if (Array.isArray(v) && v.length >= 1 && v.length <= 4) return v.length;
+		// A uniform's shape: how many floats wide, and how many rows.
+		//
+		// `[1, 0, 0]` is one row of three. `[[1, 0, 0], [0, 1, 0]]` is two rows
+		// of three — a **column of the material's table**, indexed in the shader
+		// by `s.variant`, which each mesh sets for itself. That is what lets one
+		// material give a thousand copies four different looks in one draw call.
+		static _shape(name, v) {
+			if (typeof v === 'number') return [1, 1];
+			if (Array.isArray(v) && v.length >= 1 && v.length <= 4 && v.every(c => typeof c === 'number')) {
+				return [v.length, 1];
+			}
+			if (Array.isArray(v) && v.length >= 1 && v.every(Array.isArray)) {
+				const width = v[0].length;
+				if (!(width >= 1 && width <= 4)) {
+					throw new TypeError(`uniform '${name}': each row is a number or up to four numbers`);
+				}
+				if (v.some(row => row.length !== width)) {
+					throw new TypeError(`uniform '${name}': every row of a table has to be the same width, and the first is ${width}`);
+				}
+				return [width, v.length];
+			}
 			throw new TypeError(
-				`uniform '${name}' wants a number or an array of up to four numbers`
+				`uniform '${name}' wants a number, an array of up to four numbers, or an array of those for a table`
 			);
 		}
 
+		// The whole uniform: one row, or every row of a column.
 		_set(name, v) {
+			if (this._rows[name] > 1) {
+				if (!Array.isArray(v) || v.length !== this._rows[name]) {
+					throw new TypeError(
+						`uniform '${name}' is a table of ${this._rows[name]} rows — assign all of them, or one at a time with ${name}[i] = ...`
+					);
+				}
+				this._values[name] = [];
+				for (let i = 0; i < v.length; i++) this._setRow(name, i, v[i]);
+				return;
+			}
+			this._setRow(name, 0, v);
+		}
+
+		_setRow(name, row, v) {
+			const rows = this._rows[name] ?? 1;
+			if (!(row >= 0 && row < rows)) {
+				throw new RangeError(`uniform '${name}' has ${rows} row${rows === 1 ? '' : 's'}, so row ${row} is not one of them`);
+			}
 			const n = typeof v === 'number' ? [v] : v;
 			if (!Array.isArray(n) || n.length < 1 || n.length > 4) {
 				throw new TypeError(`uniform '${name}' wants a number or an array of up to four numbers`);
@@ -332,8 +436,40 @@
 					throw new TypeError(`uniform '${name}' was given a non-finite value`);
 				}
 			}
-			H.setUniform(this._m, name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length);
-			this._values[name] = typeof v === 'number' ? +v : n.map(Number);
+			H.setUniform(
+				this._m, name,
+				+n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length,
+				row, rows,
+			);
+			const stored = typeof v === 'number' ? +v : n.map(Number);
+			if (rows > 1) {
+				this._values[name][row] = stored;
+			} else {
+				this._values[name] = stored;
+			}
+		}
+
+		// A live view of one column: reads give the row, writes send it to the
+		// device. Rebuilt per access rather than cached, because it holds nothing
+		// but the name and a script that keeps one is holding a view rather than
+		// a copy either way.
+		_column(name) {
+			const owner = this;
+			return new Proxy(owner._values[name], {
+				get(rows, key) {
+					if (key === 'length') return rows.length;
+					if (typeof key === 'string' && /^\d+$/.test(key)) return rows[+key];
+					const value = rows[key];
+					return typeof value === 'function' ? value.bind(rows) : value;
+				},
+				set(_, key, v) {
+					if (!(typeof key === 'string' && /^\d+$/.test(key))) {
+						throw new TypeError(`uniform '${name}' is a table — write a row, like ${name}[0] = [1, 0, 0]`);
+					}
+					owner._setRow(name, +key, v);
+					return true;
+				},
+			});
 		}
 
 		toJSON() {
@@ -363,11 +499,46 @@
 			this._mesh = geometry;
 			this._name = geometry.name ?? '';
 			this._material = null;
+			// White and row zero: the identity for both per-instance channels.
+			this._color = [1, 1, 1, 1];
+			this._variant = 0;
 			if (material !== null && material !== undefined) this.material = material;
 		}
 
 		_ref() { return this._mesh; }
 		get geometry() { return this._mesh; }
+
+		// -------------------------------------------------------------------
+		// The two per-copy channels
+		//
+		// **These are the only things two meshes sharing a geometry and a
+		// material may disagree about without becoming two draw calls.** A
+		// different material is a different pipeline and a different push block,
+		// which is bucket state; these two are read out of the instance array by
+		// the GPU, so a thousand differently coloured copies stay one call.
+		//
+		// It is a plain `[r, g, b, a]` rather than a live object like `position`,
+		// because there is nothing to write through *to* — the value is copied
+		// into the instance record at render time either way, and a Color class
+		// would be a Three.js name for something that is not Three.js's Color.
+
+		get color() { return [...this._color]; }
+		set color(v) {
+			this._color = readColor(v, 'mesh.color');
+			if (this._i >= 0) H.setColor(this._i, this._g, ...this._color);
+		}
+
+		// Which row of the material's table this copy draws with. Zero, and
+		// meaningless, until the material declares one — see ShaderMaterial.
+		get variant() { return this._variant; }
+		set variant(v) {
+			const n = Math.floor(+v);
+			if (!Number.isFinite(n) || n < 0) {
+				throw new RangeError(`mesh.variant wants a row index of 0 or more, got ${v}`);
+			}
+			this._variant = n;
+			if (this._i >= 0) H.setVariant(this._i, this._g, n);
+		}
 
 		// Assignable before the mesh is in a scene, like `name` and `visible`, and
 		// replayed by `_materialize` for the same reason: an object is a detached
@@ -832,6 +1003,9 @@
 			'Geometry is parametric only: BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry and TorusGeometry are built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
 			'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
 			'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
+			'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
+			'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row.',
+			'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
@@ -859,6 +1033,8 @@
 					+ 'AND one material is one draw call.',
 				properties: [
 					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'material', 'children', 'parent',
+					'color (per copy, free: [r,g,b], [r,g,b,a] or 0xff8800)',
+					'variant (per copy, free: which row of the material\'s table)',
 				],
 				methods: ['add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()', 'toJSON()'],
 			},
@@ -866,10 +1042,15 @@
 				construct: "new three.ShaderMaterial({ fragment, uniforms })",
 				note:
 					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
-					+ 'Surface has albedo, normal, uv and position, all world space. Each uniform is readable '
-					+ 'in the body by its own name. Compiles on construction, so a bad shader throws here, '
-					+ 'carrying the Slang diagnostic with the line number you wrote. Needs a GPU device.',
-				properties: ['uniforms (live: mat.uniforms.tint = [1, 0, 0])', 'fragment'],
+					+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo) '
+					+ 'and variant (its row of the table, clamped). Each uniform is readable in the body by '
+					+ 'its own name; a uniform written as an array of arrays is a table column, read as '
+					+ 'name[s.variant]. Compiles on construction, so a bad shader throws here, carrying the '
+					+ 'Slang diagnostic with the line number you wrote. Needs a GPU device.',
+				properties: [
+					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
+					'fragment',
+				],
 				methods: ['toJSON()'],
 			},
 			Group: {
@@ -965,7 +1146,16 @@
 				+ 'material are one draw call; giving two of them different materials makes two.',
 			'material.uniforms.<name>':
 				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
-				+ 'construction exist; assigning to any other name throws.',
+				+ 'construction exist; assigning to any other name throws. A uniform declared as a table is '
+				+ 'written a row at a time — material.uniforms.palette[1] = [0, 1, 0] — or all at once.',
+			'mesh.color':
+				'This copy\'s own tint, multiplied into albedo. [r, g, b], [r, g, b, a], {r, g, b} or a hex '
+				+ 'number like 0xff8800. Costs no draw call: copies of one mesh may all differ. Works with no '
+				+ 'material at all, and reaches a shade() body as s.color with albedo already tinted.',
+			'mesh.variant':
+				'Which row of the material\'s uniform table this copy draws with, as s.variant in the body. '
+				+ 'Costs no draw call either. Zero and meaningless until the material declares a table; past '
+				+ 'the end it is clamped to the last row rather than reading rubbish.',
 			'scene.pick(x, y)':
 				'What is under a pixel of the rendered image, counted from its top-left corner. ' +
 				'Answers with an intersection (below) or null. Needs a GPU device.',

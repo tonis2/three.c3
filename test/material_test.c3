@@ -78,7 +78,7 @@ fn uint line_containing(String source, String needle)
 *>
 fn void the_example_from_the_plan_compiles_verbatim() @test
 {
-	three::MaterialUniform[2] uniforms = { { "tint", 3 }, { "time", 1 } };
+	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
 	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
 	defer source.free(mem);
@@ -107,7 +107,7 @@ fn void the_example_from_the_plan_compiles_verbatim() @test
 *>
 fn void every_newline_in_the_module_is_really_a_newline() @test
 {
-	three::MaterialUniform[2] uniforms = { { "tint", 3 }, { "time", 1 } };
+	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
 	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
 	defer source.free(mem);
@@ -140,7 +140,7 @@ fn void every_newline_in_the_module_is_really_a_newline() @test
 *>
 fn void the_material_push_block_keeps_the_mesh_contract() @test
 {
-	three::MaterialUniform[2] uniforms = { { "tint", 3 }, { "time", 1 } };
+	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
 	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
 	defer source.free(mem);
@@ -225,7 +225,7 @@ fn void a_material_without_uniforms_is_exactly_the_mesh_push_block() @test
 fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 {
 	three::MaterialUniform[4] uniforms = {
-		{ "one", 1 }, { "two", 2 }, { "three", 3 }, { "four", 4 },
+		{ "one", 1, 1 }, { "two", 2, 1 }, { "three", 3, 1 }, { "four", 4, 1 },
 	};
 
 	String source = three::material_source(
@@ -273,7 +273,7 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 *>
 fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 {
-	three::MaterialUniform[1] uniforms = { { "tint", 3 } };
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s) { return s.albedo * tint; }`,
@@ -325,7 +325,7 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 *>
 fn void a_bad_body_reports_the_line_the_agent_wrote() @test
 {
-	three::MaterialUniform[2] uniforms = { { "tint", 3 }, { "time", 1 } };
+	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s)
@@ -368,7 +368,7 @@ fn void a_bad_body_reports_the_line_the_agent_wrote() @test
 *>
 fn void the_numbering_goes_back_to_the_template_after_the_body() @test
 {
-	three::MaterialUniform[1] uniforms = { { "tint", 3 } };
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s, float k)
@@ -455,7 +455,7 @@ fn void a_warning_compiles_and_still_says_something() @test
 *>
 fn void a_body_can_read_the_world_position() @test
 {
-	three::MaterialUniform[1] uniforms = { { "scale", 1 } };
+	three::MaterialUniform[1] uniforms = { { "scale", 1, 1 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s) { return s.albedo * frac(s.position * scale); }`,
@@ -508,7 +508,7 @@ fn void the_default_look_is_one_call_away() @test
 *>
 fn void a_uniform_named_after_a_swizzle_cannot_reach_the_template() @test
 {
-	three::MaterialUniform[1] uniforms = { { "a", 1 } };
+	three::MaterialUniform[1] uniforms = { { "a", 1, 1 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s) { return s.albedo * a; }`,
@@ -537,7 +537,7 @@ fn void a_uniform_named_after_a_swizzle_cannot_reach_the_template() @test
 *>
 fn void an_empty_body_is_refused_before_the_compiler_sees_it() @test
 {
-	three::MaterialUniform[1] uniforms = { { "tint", 3 } };
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
 	String? assembled = three::material_source("  \n\t \n", uniforms[..]);
 	fault refused = @catch(assembled);
@@ -559,7 +559,7 @@ fn void an_empty_body_is_refused_before_the_compiler_sees_it() @test
 *>
 fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 {
-	three::MaterialUniform[1] uniforms = { { "2fast", 3 } };
+	three::MaterialUniform[1] uniforms = { { "2fast", 3, 1 } };
 
 	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..]);
 	fault refused = @catch(assembled);
@@ -581,7 +581,7 @@ fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 *>
 fn void a_uniform_name_the_template_already_uses_is_refused() @test
 {
-	three::MaterialUniform[1] mine = { { "push", 4 } };
+	three::MaterialUniform[1] mine = { { "push", 4, 1 } };
 	String? theirs = three::material_source(PLAN_EXAMPLE, mine[..]);
 	fault refused = @catch(theirs);
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "'push' is refused, got %s", refused);
@@ -591,7 +591,7 @@ fn void a_uniform_name_the_template_already_uses_is_refused() @test
 		three::material_diagnostic()
 	);
 
-	three::MaterialUniform[1] keyword = { { "float", 1 } };
+	three::MaterialUniform[1] keyword = { { "float", 1, 1 } };
 	String? typed = three::material_source(PLAN_EXAMPLE, keyword[..]);
 	fault also = @catch(typed);
 	test::@check(also == three::MATERIAL_NAME_INVALID, "'float' is refused, got %s", also);
@@ -611,7 +611,7 @@ fn void a_uniform_name_the_template_already_uses_is_refused() @test
 *>
 fn void a_uniform_declared_twice_is_refused() @test
 {
-	three::MaterialUniform[3] uniforms = { { "tint", 3 }, { "time", 1 }, { "tint", 4 } };
+	three::MaterialUniform[3] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 }, { "tint", 4, 1 } };
 
 	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..]);
 	fault refused = @catch(assembled);
@@ -633,7 +633,7 @@ fn void a_uniform_declared_twice_is_refused() @test
 *>
 fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
 {
-	three::MaterialUniform[1] wide = { { "matrix_ish", 5 } };
+	three::MaterialUniform[1] wide = { { "matrix_ish", 5, 1 } };
 	String? too_wide = three::material_source(PLAN_EXAMPLE, wide[..]);
 	fault refused = @catch(too_wide);
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "five components is refused, got %s", refused);
@@ -643,7 +643,7 @@ fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
 		three::material_diagnostic()
 	);
 
-	three::MaterialUniform[1] empty = { { "nothing", 0 } };
+	three::MaterialUniform[1] empty = { { "nothing", 0, 1 } };
 	String? zero = three::material_source(PLAN_EXAMPLE, empty[..]);
 	fault also = @catch(zero);
 	test::@check(also == three::MATERIAL_NAME_INVALID, "zero components is refused, got %s", also);
@@ -679,7 +679,7 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 	);
 
 	three::MaterialUniform[5] exact = {
-		{ "a0", 4 }, { "a1", 4 }, { "a2", 4 }, { "a3", 4 }, { "a4", 1 },
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 }, { "a4", 1, 1 },
 	};
 	test::@check(
 		three::material_uniform_bytes(exact[..]) == three::MATERIAL_UNIFORM_BUDGET,
@@ -704,7 +704,7 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 	);
 
 	three::MaterialUniform[6] over = {
-		{ "a0", 4 }, { "a1", 4 }, { "a2", 4 }, { "a3", 4 }, { "a4", 1 }, { "a5", 1 },
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 }, { "a4", 1, 1 }, { "a5", 1, 1 },
 	};
 	String? refused_source = three::material_source(PLAN_EXAMPLE, over[..]);
 	fault refused = @catch(refused_source);
@@ -714,5 +714,121 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		three::material_diagnostic().contains("72") && three::material_diagnostic().contains("68"),
 		"saying how many bytes were asked for and how many exist: %s",
 		three::material_diagnostic()
+	);
+}
+
+// ============================================================================
+// Tables
+// ============================================================================
+
+<*
+ A uniform with rows becomes an array, and the module says how many.
+
+ The two halves are one feature. `float3 palette[4]` is what a body indexes with
+ `s.variant`, and `MATERIAL_ROWS` is what `fragmentMain` clamps that variant
+ against — so a generated module missing either one is a material whose table
+ cannot be read, or one that can be read past its end.
+
+ Compiled rather than only assembled, because "the text contains `[4]`" says
+ nothing about whether Slang accepted an array in a push block at all.
+*>
+fn void a_uniform_with_rows_becomes_an_array() @test
+{
+	three::MaterialUniform[2] uniforms = { { "palette", 3, 4 }, { "sheen", 1, 4 } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return palette[s.variant] * (lambert(s.normal) + sheen[s.variant]); }`,
+		uniforms[..]
+	)!!;
+	defer source.free(mem);
+
+	test::@check(source.contains("float3 palette[4];"), "the column is declared as an array:\n%s", source);
+	test::@check(source.contains("float sheen[4];"), "and so is the second one");
+	test::@check(source.contains("MATERIAL_ROWS = 4u"), "and the row count is generated");
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "a table compiles: %s", mod.diagnostic);
+
+	// 16 floats of table plus the 60 the mesh contract pins.
+	three::ShaderField* field = mod.layout.field_of("palette");
+	test::@check(field != null, "the column reflects");
+	test::@check(field.size == 48, "as all four rows of three floats, got %d bytes", field == null ? 0 : field.size);
+	test::@check(
+		field.offset >= three::MATERIAL_PUSH_START,
+		"after the mesh contract, at %d", field == null ? 0 : field.offset
+	);
+}
+
+<*
+ A material with no table still declares one row.
+
+ `s.variant` is clamped against `MATERIAL_ROWS - 1`, so a generated zero would
+ make the clamp `min(x, 0xffffffff)` — no clamp at all — and every material
+ written before tables existed is one with no table.
+*>
+fn void a_material_with_no_table_has_one_row() @test
+{
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return tint * lambert(s.normal); }`, uniforms[..]
+	)!!;
+	defer source.free(mem);
+
+	test::@check(source.contains("MATERIAL_ROWS = 1u"), "one row, not zero:\n%s", source);
+	test::@check(source.contains("float3 tint;"), "and a plain uniform is not an array");
+}
+
+<*
+ Columns of different heights are refused, with both of them named.
+
+ One material is one table: every column has to have the same number of rows, or
+ `s.variant`'s single clamp is right for one column and wrong for the other —
+ which is a read past the end of the short one, which is a colour nobody can
+ explain.
+*>
+fn void columns_of_different_heights_are_refused() @test
+{
+	three::MaterialUniform[2] ragged = { { "palette", 3, 4 }, { "sheen", 1, 2 } };
+
+	String? refused_source = three::material_source(
+		`float3 shade(Surface s) { return palette[s.variant]; }`, ragged[..]
+	);
+	fault refused = @catch(refused_source);
+
+	test::@check(refused == three::MATERIAL_NAME_INVALID, "a ragged table is refused, got %s", refused);
+	String said = three::material_diagnostic();
+	test::@check(said.contains("palette") && said.contains("sheen"), "naming both columns: %s", said);
+	test::@check(said.contains("4") && said.contains("2"), "and both row counts: %s", said);
+}
+
+<*
+ A table costs its rows of the budget, and the budget is the same 68 bytes.
+
+ The failure this pins is an implementation that charges a column once rather
+ than once per row: four rows of four floats is 64 bytes, and counting it as 16
+ would let a material declare four times the push block it has and be refused by
+ Vulkan at pipeline creation instead of here, with a message about ranges rather
+ than about uniforms.
+*>
+fn void a_table_costs_a_row_at_a_time() @test
+{
+	three::MaterialUniform[1] four_rows = { { "palette", 4, 4 } };
+	test::@check(
+		three::material_uniform_bytes(four_rows[..]) == 64,
+		"four rows of four floats is 64 bytes, got %d",
+		three::material_uniform_bytes(four_rows[..])
+	);
+
+	three::MaterialUniform[1] too_many = { { "palette", 4, 5 } };
+	String? refused_source = three::material_source(
+		`float3 shade(Surface s) { return palette[s.variant].rgb; }`, too_many[..]
+	);
+	fault refused = @catch(refused_source);
+	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "a fifth row does not fit, got %s", refused);
+	test::@check(
+		three::material_diagnostic().contains("80"),
+		"saying what it asked for: %s", three::material_diagnostic()
 	);
 }

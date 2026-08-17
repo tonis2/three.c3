@@ -42,15 +42,40 @@ import collision;
 <*
  One instance, exactly as the GPU reads it. Mirrored in `shaders/mesh.slang`.
 
- 128 bytes: two `float4x4` under scalar layout, which is 4-byte aligned, so an
- array of these is tightly packed and indexable by `SV_InstanceID` with no
- padding rules to get wrong. `normal` carries the inverse transpose in its upper
- 3x3 — see `normal_matrix` for why the model matrix will not do.
+ 148 bytes: two `float4x4`, a `float4` and a `uint` under scalar layout, which is
+ 4-byte aligned, so an array of these is tightly packed and indexable by
+ `SV_InstanceID` with no padding rules to get wrong. `normal` carries the inverse
+ transpose in its upper 3x3 — see `normal_matrix` for why the model matrix will
+ not do.
+
+ ## Why `color` and `variant` are here rather than in the material
+
+ **This is the only per-copy channel a draw call has.** Everything else a mesh
+ draws with — the pipeline, the uniforms, the texture — is bucket state, pushed
+ once for the whole `vkCmdDrawIndexed`, so two copies that disagree about any of
+ it are two buckets and two draws. These two disagree for free: they are read
+ out of this array by `SV_InstanceID`, so a thousand differently coloured copies
+ of one mesh stay one draw call.
+
+ That is the shape the API needs, because before this the only way to give two
+ boxes different colours was two materials, which is two pipelines' worth of
+ bucket state and two draws. `a_thousand_colours_are_still_one_draw_call` is the
+ check.
+
+ `variant` selects a row of the material's uniform table (`shader/material_source.c3`)
+ and is nothing at all to the default shader. `color` multiplies albedo in both.
 *>
 struct Instance
 {
 	Matrix4f model;
 	Matrix4f normal;
+	// Multiplies albedo. The alpha is carried for a `shade()` body to read; the
+	// opaque pipeline does not blend with it.
+	float[4] color;
+	// Which row of the material's table. Clamped in the shader against the row
+	// count the material declared, so a variant past the end is the last row
+	// rather than a read off the end of the push block.
+	uint variant;
 }
 
 <*
@@ -262,6 +287,12 @@ fn NodeId Scene.create_slot(&self, NodeId parent, uint asset, uint mesh, String 
 	// it would draw with a stranger's shader. `a_reused_slot_does_not_inherit_a_material`
 	// is the check.
 	node.material = DEFAULT_MATERIAL;
+	// White and row zero: the identity for both channels, so a node that never
+	// touches them draws exactly as it did before they existed. Reset here for
+	// `material`'s reason — a recycled slot must not hand a new node the last
+	// one's colour.
+	node.color = { 1, 1, 1, 1 };
+	node.variant = 0;
 	node.visible = true;
 	node.world_visible = true;
 	node.dirty = true;
@@ -433,6 +464,39 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.material = material;
+}
+
+<*
+ Tint one copy, without costing a draw call.
+
+ Neither this nor `set_variant` marks the node dirty: `dirty` drives the
+ world-matrix walk, and these two are copied into the instance record on every
+ `build_draw_list` regardless. Marking it would be a wasted subtree traversal
+ per colour change, which for a script recolouring a thousand nodes is a
+ thousand of them.
+
+ @param color : `Linear rgb and an alpha. Multiplies albedo; the alpha reaches shade() and is not blended with.`
+*>
+fn void Scene.set_color(&self, NodeId id, float[4] color)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.color = color;
+}
+
+<*
+ Point one copy at a row of its material's table.
+
+ Not validated against the material here, and deliberately: a node may be given
+ a variant before it is given the material that gives the number meaning, and
+ the shader clamps against the row count it was compiled with — so the failure
+ mode is the last row rather than a refusal at the wrong moment.
+*>
+fn void Scene.set_variant(&self, NodeId id, uint variant)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.variant = variant;
 }
 
 <*
@@ -719,7 +783,12 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 		}
 
 		Node* node = &self.nodes[draw.slot];
-		self.instances.push({ .model = node.world, .normal = node.normal });
+		self.instances.push({
+			.model = node.world,
+			.normal = node.normal,
+			.color = node.color,
+			.variant = node.variant,
+		});
 		self.buckets[self.buckets.len() - 1].count++;
 	}
 }
