@@ -48,7 +48,7 @@ fn void js_load(
 			return;
 		}
 
-		uint? asset = self.pass.assets.load(&self.renderer.gpu, &self.pass.pipeline, path);
+		uint? asset = self.pass.assets.load(&self.renderer.gpu, self.pass.pipeline, path);
 		if (catch err = asset)
 		{
 			// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are

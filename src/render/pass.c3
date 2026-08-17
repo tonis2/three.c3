@@ -36,7 +36,10 @@ const sz INITIAL_INSTANCES = 64;
 
 struct MeshPass
 {
-	MeshPipeline pipeline;
+	// Compiled on demand and kept by content hash. `pipeline` is borrowed from
+	// it — the cache owns every pipeline it hands out and frees them all.
+	PipelineCache pipelines;
+	MeshPipeline* pipeline;
 	Assets assets;
 	Scene scene;
 	Camera camera;
@@ -53,19 +56,25 @@ struct MeshPass
 }
 
 <*
- Build the pipeline from a SPIR-V module on disk.
+ Compile the mesh shader and build the pipeline from it.
 
- @param spirv_path : `Empty to look in the usual places for mesh.spv.`
+ M1 read a `.spv` here that a build step had produced. M4 reads the `.slang`
+ source and compiles it — which is why editing `shaders/mesh.slang` and re-running
+ now shows the change with no build step of any kind in between.
+
+ @param shader_path : `Empty to look in the usual places for mesh.slang.`
 *>
-fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String spirv_path = "")
+fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path = "")
 {
-	String path = spirv_path;
+	self.pipelines.init();
+
+	String path = shader_path;
 	@pool()
 	{
-		if (path.len == 0) path = find_shader("mesh.spv", tmem)!;
+		if (path.len == 0) path = find_shader("mesh.slang", tmem)!;
 
-		char[] spirv = load_spirv(path, tmem)!;
-		self.pipeline.init(gpu, target, spirv, CULL_MODE_BACK_BIT)!;
+		String source = load_source(path, tmem)!;
+		self.pipeline = self.pipelines.acquire(gpu, target, source, path, CULL_MODE_BACK_BIT)!;
 	};
 
 	self.assets.init();
@@ -84,7 +93,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String spirv_path = 
 *>
 fn void? MeshPass.load(&self, Gpu* gpu, String path)
 {
-	uint asset = self.assets.load(gpu, &self.pipeline, path)!;
+	uint asset = self.assets.load(gpu, self.pipeline, path)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
 	self.ready = true;
@@ -100,7 +109,7 @@ fn void? MeshPass.load(&self, Gpu* gpu, String path)
 *>
 fn void? MeshPass.load_triangle(&self, Gpu* gpu)
 {
-	uint asset = self.assets.load_triangle(gpu, &self.pipeline)!;
+	uint asset = self.assets.load_triangle(gpu, self.pipeline)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
 	self.ready = true;
@@ -145,8 +154,8 @@ fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
 	if (count == 0) return;
 
 	uint asset = path.len > 0
-		? self.assets.load(gpu, &self.pipeline, path)!
-		: self.assets.load_triangle(gpu, &self.pipeline)!;
+		? self.assets.load(gpu, self.pipeline, path)!
+		: self.assets.load_triangle(gpu, self.pipeline)!;
 
 	// Clear whatever `load` put there; the grid is the whole scene.
 	self.scene.remove(self.scene.root);
@@ -230,12 +239,27 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.base_color = mesh.base_color,
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | (mesh.has_uvs ? FLAG_HAS_UVS : 0),
 		};
+		// **The reflected size, not `MeshPush::size`.** They are not the same
+		// number: Slang reports the 60 bytes the shader uses and the C3 struct
+		// occupies 64 with its tail padding, and pushing 64 into a 60-byte range
+		// is a validation error.
+		//
+		// Worth knowing how it fails, because it is not how it sounds: the
+		// picture is **pixel-identical** either way on this driver, so no test
+		// here catches it and only `--validate` does, naming both numbers. It is
+		// still undefined behaviour, and a driver that took the spec literally
+		// would drop the push and render nothing at all.
+		//
+		// Both this and the range in `MeshPipeline.init` read the same reflected
+		// field, so they cannot drift without an edit that hardcodes one of them.
+		// `check_push_block` has already proved the first `push_size` bytes of
+		// `MeshPush` are exactly the fields the shader declares.
 		vk::cmdPushConstants(
 			cmd,
 			self.pipeline.layout,
-			SHADER_STAGE_VERTEX_BIT | SHADER_STAGE_FRAGMENT_BIT,
+			self.pipeline.shader.stages,
 			0,
-			MeshPush::size,
+			self.pipeline.shader.push_size,
 			&push
 		);
 
@@ -304,6 +328,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	}
 	self.scene.free();
 	self.assets.free(gpu);
-	self.pipeline.free(gpu);
+	self.pipelines.free(gpu);
+	self.pipeline = null;
 	self.ready = false;
 }

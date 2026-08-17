@@ -1,17 +1,17 @@
 // three.c3 mesh pass.
 //
-// Rebuild with `c3c --trust=full build shaders`, or just run slangc yourself:
+// **Compiled at runtime, from this file, every time the app starts.** There is
+// no build step, no slangc invocation anywhere in the project, and no .spv on
+// disk — src/shader/compile.c3 reads this text and hands Slang the string.
+// Editing it and re-running shows the change; nothing is rebuilt, not even the
+// shader.
 //
-//     slangc shaders/mesh.slang -target spirv -emit-spirv-directly \
-//         -fvk-use-entrypoint-name -force-glsl-scalar-layout -o shaders/mesh.spv
-//
-// The .spv is **read from disk at startup, never $embed-ed**. That is a
-// deliberate departure from crig, which embeds and pays for it: `c3c build
-// shaders` without --trust=full skips the exec, reports success, leaves the
-// .spv untouched, and $embed picks up the previous binary — a shader edit that
-// compiles cleanly and changes nothing on screen. Reading the file makes
-// iteration a re-run rather than a rebuild, and makes M4 a one-function swap:
-// load_spirv(path) becomes compile_slang(source) and nothing above it changes.
+// M1 read a slangc-produced mesh.spv here and M4 replaced it. The two are not
+// merely equivalent: the runtime compile emits the **byte-identical module**
+// that `slangc -target spirv -emit-spirv-directly -fvk-use-entrypoint-name
+// -force-glsl-scalar-layout` did. Getting there needed one flag that was never
+// in that command line — `-matrix-layout-column-major`, which slangc defaults
+// to and the compile-request API does not. See SLANG_ARGUMENTS.
 //
 // **There is no vertex input state anywhere in this project.** Geometry arrives
 // as buffer device addresses in the push block and is indexed by SV_VertexID;

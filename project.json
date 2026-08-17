@@ -10,36 +10,44 @@
 	// shim `#include`s. A checkout without `--recursive` leaves that directory
 	// empty and the build fails in the C compiler rather than anywhere that
 	// mentions submodules. `git submodule update --init --recursive` fixes it.
-	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp"],
+	//
+	// **slang arrived with M4** and is the one dependency needing a step of its
+	// own: it links a Slang SDK, which is 35 MB of somebody else's build and
+	// machine-specific, so `lib/slang.c3l/lib/` holds symlinks that are not in
+	// git. Run `./lib/slang.c3l/native/stage-slang.sh` once per checkout — it
+	// uses an installed SDK if there is one and downloads the pinned release,
+	// checksum-verified, if there is not.
+	//
+	// **It does not always fail at the linker when you forget.** A machine with
+	// another Slang on the default search path — /usr/local/lib, from an
+	// installer — links against that one instead and dies at startup in dyld
+	// naming a version nobody asked for. Measured; see slang.c3l's README.
+	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang"],
 	"features": [],
+	// c3c defaults to 11.0 and the Slang SDK is built for 15.0, so every link
+	// drew "building for macOS-11.0, but linking with dylib ... built for newer
+	// version 15.0". Raising it states the truth rather than hiding it: a binary
+	// that links libslang cannot claim to run where libslang will not load, and
+	// a warning on every build is how a real one gets missed. It has to be set
+	// here — c3c rejects `macos-min-version` in a dependency's manifest, so
+	// slang.c3l can only document it.
+	"macos-min-version": "15.0",
 	"script-dir": "./",
 	// Compiled into `c3c test` alongside the default target's sources, so a
 	// check here reaches anything in src/ without needing a target of its own.
 	"test-sources": ["test/**"],
+	// **No `shaders` prepare target, as of M4.** `shaders/mesh.slang` is
+	// compiled at startup by `src/shader/compile.c3`, so there is no `slangc`
+	// invocation anywhere in this project and no `.spv` to go stale. That
+	// removes two traps at once: crig's (a prepare target without --trust=full
+	// silently does nothing and reports success) and this project's own from M2
+	// (the manifest's slangc line and the shader's documented one drifted apart
+	// on -force-glsl-scalar-layout, producing two different modules and no
+	// error). The flags now live in exactly one place, `SLANG_ARGUMENTS`.
 	"targets": {
 		"three": {
 			"type": "executable",
 			"sources": ["src/**"]
-		},
-		// A convenience, never the only way the .spv gets there: shaders/mesh.spv
-		// is read from disk at startup, so re-running slangc by hand changes the
-		// picture without rebuilding the app.
-		//
-		// **Last on purpose.** `c3c build` with no target builds the first one
-		// listed; a prepare target at the top turns every plain build into a
-		// shader compile that reports success and produces no binary. Needs
-		// --trust=full, or c3c skips the exec and still reports success.
-		"shaders": {
-			"type": "prepare",
-			// -force-glsl-scalar-layout is not optional and is not decoration:
-			// without it slangc emits a *different* module, and the tightly
-			// packed float3/float2 streams the C3 side uploads are then read at
-			// std430 strides. Building through this target and building by hand
-			// have to produce the same bytes or the disagreement shows up as
-			// geometry read a third of the way off.
-			"exec": [
-				"slangc ./shaders/mesh.slang -target spirv -emit-spirv-directly -fvk-use-entrypoint-name -force-glsl-scalar-layout -o ./shaders/mesh.spv"
-			]
 		}
 	},
 	"output": "./build"

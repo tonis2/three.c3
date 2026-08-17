@@ -138,7 +138,7 @@ fn void usage()
 	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
 	io::printn("  --grid <n>            place n instances of the model in a grid");
 	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");
-	io::printn("  --shader <path>       a mesh.spv other than the one on the search path");
+	io::printn("  --shader <path>       a mesh.slang other than the one on the search path");
 	io::printn("  -h, --help            this");
 }
 
@@ -162,13 +162,21 @@ fn int main(String[] args)
 	{
 		io::printfn("three: %s", err);
 		// The one failure with an obvious next step, and the one most likely to
-		// be hit on a fresh checkout: the .spv is not embedded and a plain
-		// `c3c build` does not produce it.
+		// be hit: the shader is read from disk relative to the working
+		// directory, so running from anywhere but the project root finds
+		// nothing. There is no build step to suggest any more — M4 compiles
+		// the source at startup.
 		if (err == SHADER_NOT_FOUND)
 		{
-			io::printn("  shaders/mesh.spv is missing. Build it with:");
-			io::printn("      c3c --trust=full build shaders");
-			io::printn("  or point at one with --shader <path>.");
+			io::printn("  shaders/mesh.slang is not on the search path.");
+			io::printn("  Run from the project root, or point at one with --shader <path>.");
+		}
+		// Not a shader error — a shader error is a Slang diagnostic, already
+		// printed above this by the compiler with a line and a column.
+		if (err == SLANG_UNAVAILABLE)
+		{
+			io::printn("  Slang would not start. The libraries it loads are staged with:");
+			io::printn("      ./lib/slang.c3l/native/stage-slang.sh");
 		}
 		// Two different ways of saying "the only driver here is MoltenVK": the
 		// loader refuses to make the instance when that is all it has, and the
@@ -224,8 +232,9 @@ fn void? run(Options opts)
 
 	if (opts.validate) renderer.gpu.report();
 
-	// The pipeline is built from mesh.spv on disk, so editing shaders/mesh.slang
-	// and re-running slangc changes the picture with no rebuild of this binary.
+	// The shader is compiled here, from shaders/mesh.slang on disk. Editing it
+	// and re-running changes the picture — no rebuild of this binary, and since
+	// M4 no build step for the shader either.
 	renderer.pass.init(&renderer.gpu, &renderer.target, opts.shader)!;
 
 	if (opts.grid > 0)

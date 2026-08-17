@@ -19,3 +19,6 @@
 [submodule "lib/mcp.c3l"]
 	path = lib/mcp.c3l
 	url = git@github.com:tonis2/mcp.c3l.git
+[submodule "lib/slang.c3l"]
+	path = lib/slang.c3l
+	url = https://github.com/tonis2/slang.c3.git

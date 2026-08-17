@@ -47,26 +47,52 @@ language, one surface, one place a feature lands.
 
 ## Status
 
-**M0 through M3 are built, and the loop this project exists for is closed.** A
-window, a Vulkan device, an offscreen colour+depth target, a swapchain that blits
-it, an exact screenshot, a triangle through a buffer device address, a `.glb` on
-screen with its base colour texture — then a scene graph over all of it:
-`Object3D` with world-matrix propagation, assets and textures deduplicated across
-files, frustum culling, one instanced draw per unique mesh, `stats()`, and a
-raycast — and then a QuickJS context, the tier-1 scene API, and three MCP tools
-over it. `c3c test --trust=full` runs sixty checks, all headless, leak-clean.
+**M0 through M4 are built, the loop this project exists for is closed, and the
+shader compiler is inside it.** A window, a Vulkan device, an offscreen
+colour+depth target, a swapchain that blits it, an exact screenshot, a triangle
+through a buffer device address, a `.glb` on screen with its base colour texture
+— then a scene graph over all of it: `Object3D` with world-matrix propagation,
+assets and textures deduplicated across files, frustum culling, one instanced
+draw per unique mesh, `stats()`, and a raycast — then a QuickJS context, the
+tier-1 scene API and three MCP tools over it — and now Slang at runtime, with the
+descriptor set layout and the push block read out of the module rather than
+declared beside it. `c3c test --trust=full` runs seventy-two checks, all
+headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
 	three <file.glb> --grid 1000        a thousand copies, one draw call
 	three <file.glb> --screenshot a.png render one frame, exit
 	three --validate                    validation layers + a device report
-	c3c --trust=full build shaders      compile shaders/mesh.slang
 
-M4 onward is still a plan. Everything below the milestone list describes intent
+**There is no shader build step.** `shaders/mesh.slang` is compiled at startup,
+so editing it and re-running shows the change with nothing rebuilt — not the app,
+not the shader. What that removes is in §6: a prepare target that silently does
+nothing without `--trust=full`, and a documented `slangc` line that drifted from
+the manifest's for a whole milestone.
+
+**One dependency needs a step of its own.**
+[`lib/slang.c3l`](https://github.com/tonis2/slang.c3) links a Slang SDK: 35 MB of
+somebody else's build, machine-specific, so its `lib/` holds symlinks that are
+not in git.
+
+	./lib/slang.c3l/native/stage-slang.sh    # once per checkout
+
+It uses an installed SDK when there is one and downloads the pinned release —
+checksum-verified, pruned to 36 MB — when there is not, so a checkout with no
+Slang anywhere still builds without anyone being told to go and install
+something.
+
+**Forgetting it does not reliably fail at the linker**, which is the part worth
+knowing. On a machine with another Slang on the default search path —
+`/usr/local/lib`, from an installer package — `-lslang` finds that one, links,
+and the binary dies at startup in dyld naming a version nobody asked for.
+Measured, not imagined; slang.c3l's README has the message.
+
+M5 onward is still a plan. Everything below the milestone list describes intent
 rather than behaviour except where it is marked otherwise; `base_stage.md`,
-`m2_stage.md` and `m3_stage.md` have the built parts broken out step by step,
-each with its own record of what was verified and how.
+`m2_stage.md`, `m3_stage.md` and `m4_stage.md` have the built parts broken out
+step by step, each with its own record of what was verified and how.
 
 **What M0/M1 settled that the rest of the plan assumed:**
 
@@ -146,10 +172,21 @@ Added as git submodules under `lib/`, matching crig's layout:
 | `lib/image.c3l` | `tonis2/image.c3` | `image` | PNG/JPEG decode for textures |
 | `lib/collision.c3l` | `tonis2/collision.c3` | `collision` | BVH, AABB, raycast — scene picking and test assertions |
 | `lib/mcp.c3l` | `tonis2/mcp.c3l` | `mcp` | JSON-RPC over HTTP/stdio — the agent's driving surface |
+| `lib/slang.c3l` | `tonis2/slang.c3` | `slang` | Shader compilation and reflection at runtime — written for this project |
 
 `git clone --recursive`, or `git submodule update --init --recursive` after the
 fact. `lib/quickjs.c3l` has its own submodule (`vendor/quickjs-ng`), so the
 `--recursive` is not optional.
+
+`lib/slang.c3l` needs one more step — `native/stage-slang.sh`, which symlinks an
+installed Slang SDK into place. It is the only dependency that does.
+
+**Why it is not bundled, unlike `quickjs.c3l`'s archives.** Both were tried. The
+quickjs archives are 1.3 MB each and freeze a build; libslang is 27 MB and
+freezes an *SDK*, so every version bump would add another 14 MB of pack that no
+later commit can remove — a repository that grows by a Slang release every time
+Slang has one. 1.3 MB to skip a 4-second compile is a good trade; 14 MB and
+rising to skip a one-line script is not.
 
 **Deliberately absent:**
 
@@ -197,8 +234,11 @@ build, and an unused one is link time and confusing link errors for nothing.
 	"langrev": "1",
 	"warnings": ["no-unused"],
 	"dependency-search-paths": ["lib"],
-	"dependencies": ["vk", "c3w", "quickjs", "gltf", "image", "collision", "mcp"],
+	"dependencies": ["vk", "c3w", "quickjs", "gltf", "image", "collision", "mcp", "slang"],
 	"version": "0.1.0",
+	// Not optional once `slang` is in the list: its dylibs are built for 15.0,
+	// c3c targets 11.0, and a manifest is not allowed to say so.
+	"macos-min-version": "15.0",
 	"script-dir": "./",
 	"test-sources": ["test/**"],
 	"output": "./build",
@@ -214,7 +254,9 @@ build, and an unused one is link time and confusing link errors for nothing.
 No `shaders` prepare target. Shaders compile at runtime (§3) — that is the whole
 point — so there is no `slangc` invocation at build time and no `$embed` of a
 `.spv`. This alone removes crig's worst trap (`c3c build shaders` without
-`--trust=full` silently doing nothing).
+`--trust=full` silently doing nothing). **Built at M4**, and it removed a second
+trap on the way: with no offline invocation there is nothing for the runtime one
+to drift from. See §6, and `m4_stage.md` for the flag that drifted anyway.
 
 ## Source tree
 
@@ -230,9 +272,10 @@ src/
   gpu/swapchain.c3  built  surface, swapchain, resize/recreate — blits gpu/target, nothing more
   gpu/buffer.c3     built  device-local uploads + BDA handles
   gpu/texture.c3    built  images, samplers, content-hash dedup
-  gpu/pipeline.c3   built  the mesh pipeline + the push block  (reflection + hash cache at M4)
-  shader/load.c3    built  .spv from disk, never $embed  (becomes compile_slang at M4)
-  shader/reflect.c3        SPIR-V/Slang reflection -> descriptor set layout + uniform map
+  gpu/pipeline.c3   built  the mesh pipeline, the push block, the derived layout, the hash cache
+  shader/load.c3    built  .slang source from disk, never $embed
+  shader/compile.c3 built  Slang at runtime: the session, the flags, the diagnostic
+  shader/reflect.c3 built  Slang reflection -> descriptor set layout + push-block map
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
@@ -248,12 +291,14 @@ src/
   mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
+                           compiled at startup from this file; there is no .spv
 test/
   gpu_test.c3       built  device, target, headless render, readback, reproducibility
   asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
   scene_test.c3     built  world matrices, bucketing, culling, picking, the instance buffer
   js_test.c3        built  the run contract, handles, staleness, the scene from JavaScript
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
+  shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   fixtures/         built  textured.glb and the generator that writes it
 ```
 
@@ -411,11 +456,14 @@ from JS), name the entry points, `spCompile`, then read back.
 
 Two details that matter:
 
-- **`spGetEntryPointCode` returns a raw `void const*` and a size**, with lifetime
-  tied to the request. That is the whole reason to prefer it over
-  `spGetEntryPointCodeBlob` — the blob variant hands back an `ISlangBlob**` and
-  drags COM refcounting into the binding for no gain. Copy the bytes out before
-  destroying the request.
+- **The right function is `spGetCompileRequestCode`, not `spGetEntryPointCode`** —
+  corrected at M4, measured. Both return a raw `void const*` and a size with
+  lifetime tied to the request, which is the reason to prefer either over the
+  `*Blob` variants that drag COM refcounting in for no gain. But the per-entry-point
+  one answers with a **null pointer and a length of zero** under
+  `-emit-spirv-directly`, and reports no error: the emitted module holds every
+  entry point together, so the whole program is the artifact. Copy the bytes out
+  before destroying the request — the next request reuses the address.
 - **`spGetDiagnosticOutput` returns a plain `char const*`.** This is the agent's
   error message, and routing it verbatim into the thrown JS exception is most of
   what makes the loop work. A compile error must read like a JS `SyntaxError`, not
@@ -424,8 +472,16 @@ Two details that matter:
 **`spProcessCommandLineArguments(request, argv, argc)` is also exported**, and is
 the shortcut worth taking: it accepts the exact flags the CLI takes, so
 `-force-glsl-scalar-layout -fvk-use-entrypoint-name -emit-spirv-directly` can be
-passed as an argv array instead of hand-mapping every option onto a setter. The
-runtime compile and any offline `slangc` invocation then cannot drift.
+passed as an argv array instead of hand-mapping every option onto a setter.
+
+**It is not sufficient on its own, and the last sentence of this paragraph used
+to say it was.** `slangc` and the compile-request API have different *defaults*
+underneath the same flags: the CLI is column-major and the API is row-major, so
+passing the documented command line verbatim produced a different module with
+every transform read transposed. Adding `-matrix-layout-column-major` makes the
+runtime compile **byte-identical** to `slangc`'s. The general lesson is worse
+than §6's version of it — two invocations passing the same flags is not enough.
+See `m4_stage.md`.
 
 **Reflection — 172 flat symbols, and this is the actual requirement.** Compiling
 the shader is the easy half. What makes Three.js's `ShaderMaterial` feel effortless
@@ -451,17 +507,31 @@ cache on `hash(source, entry points, target flags, render state)`; a cache hit m
 skip the Slang call entirely, not just the pipeline creation, because compilation
 is the expensive half.
 
-**Linking, and the deployment caveat.** The binding is a `.c3l` of its own
-(`lib/slang.c3l`) following `quickjs.c3l`'s manifest shape — `linklib-dir`,
-per-target `linked-libraries: ["slang"]`, and a `c-include-dirs` if any shim is
-needed. The SDK path here is machine-specific
-(`/Users/tonis/binaries/slang/{include,lib}`), so it needs either vendoring under
-the `.c3l` or an env-var-driven search path; hardcoding an absolute path into the
-manifest will break on the next machine. Size is the real cost: `libslang.dylib`
-is 28 MB and `libslang-llvm.dylib` is 107 MB. **`libslang-llvm` is only needed for
-CPU/host codegen targets and can be omitted** for a SPIR-V-only build; verify that
-before assuming the 107 MB is unavoidable. Even so, this is an editor-weight
-dependency, not something to link into a shipped game.
+**Linking, and the deployment caveat. Built at M4, and no shim was needed** —
+nothing in the `sp*` family passes anything by value that is not a scalar or a
+pointer, so `lib/slang.c3l` is one `.c3` file and a manifest with `linklib-dir`
+and per-target `linked-libraries: ["slang"]`.
+
+The SDK path is machine-specific, so nothing records it:
+`native/stage-slang.sh` symlinks the libraries out of an installed SDK into
+`lib/<target>/`, finding it through `$SLANG_SDK`, then `slangc` on `PATH`, then
+the usual places. The symlinks are gitignored and the manifest carries two
+*relative* rpaths.
+
+Vendoring them into git instead was built and then reverted — see the note in
+`m4_stage.md` §S2 for what that measured and why 14 MB per SDK bump, forever, was
+the wrong price for skipping a one-line script.
+
+**Two libraries, measured.** `libslang-llvm` (102 MB) is indeed only needed for
+CPU and host codegen and is omitted — but `libslang-glslang` (8 MB) is *not*
+optional, which this paragraph did not anticipate: Slang loads it as the
+downstream `spirv-opt` and without it every compile fails with "failed to load
+downstream compiler". So 35 MB, not 28 and not 137. Still editor-weight, not
+something to link into a shipped game.
+
+**The `sp*` family is formally deprecated** — `slang-deprecated.h` says it is kept
+for compatibility and will be dropped over time. All 258 symbols are exported by
+the SDK here. The exposure is one file.
 
 ## 4. The JS API
 
@@ -633,10 +703,40 @@ Four things cost time and none are visible in a diff:
 `m3_stage.md` is the step-by-step record, including which injected bug each new
 regression test was proved against.
 
-**M4 — Slang at runtime.** `lib/slang.c3l`, the twelve compile functions, the
-reflection walk, the pipeline hash cache, diagnostics as strings. Done when the
-same shader that M1 compiled offline compiles from a string at startup and the
-descriptor layout is derived rather than declared.
+**M4 — Slang at runtime. Done.** `lib/slang.c3l` with no shim, the compile
+functions, the reflection walk, the pipeline hash cache, and diagnostics carried
+back as strings on the success path as well as the failure one. The shader M1
+compiled offline now compiles from a string at startup — **byte-identically**, md5
+for md5, to what the documented `slangc` line produced — and the descriptor set
+layout and the push block are read out of the module rather than declared beside
+it. The prepare target and `shaders/mesh.spv` are gone.
+
+Four things cost time and none are visible in a diff:
+
+- **`slangc` and the compile-request API have different defaults under the same
+  flags.** Column-major versus row-major matrices, so the documented command line
+  passed verbatim gave a different module. The truck rendered a completely
+  convincing picture with every transform transposed; only the built-in triangle
+  collapsed, to fourteen pixels. See §3.
+- **`spGetEntryPointCode` is the wrong function** and says so by returning a null
+  pointer, a length of zero, and no error at all.
+- **`libslang-glslang` is not optional**, though `libslang-llvm` is. Slang loads
+  the first as `spirv-opt` on the SPIR-V path.
+- **Reflection reports the bytes the shader uses, not the bytes the struct
+  occupies** — 60 against 64 — and mixing them is a push-constant range that
+  validation rejects and that renders a *pixel-identical* picture anyway. No test
+  catches it; `--validate` does.
+
+`m4_stage.md` is the step-by-step record, including which injected bug each new
+regression test was proved against, and the one that no test catches.
+
+**M4a — the binding is its own library.** `lib/slang.c3l` is now a submodule of
+[`tonis2/slang.c3`](https://github.com/tonis2/slang.c3), with eleven tests of its
+own that need no GPU — the diagnostic's line number, a failed compile arriving as
+`ok: false` rather than a fault, and every reflected descriptor. It still stages
+its libraries from an installed SDK; bundling them was tried and reverted, and
+`m4_stage.md` §S2 records both what that cost and the load-time failure it turned
+up on the way.
 
 **M5 — tier 2 materials, and picking.** `ShaderMaterial` with a fragment function
 over M4's reflection, validation errors routed into the thrown JS exception, and
@@ -653,9 +753,13 @@ across every source file. Done when a scene built by a script round-trips throug
 
 M0–M2 were ordinary graphics work. **M3 is where the project started being the
 thing it is for**, and it is done: an agent can drive this over JSON-RPC today.
-M4 is the interesting one and still looks like days rather than weeks. M6 is
-where the "linked, not duplicated" thesis stops being an internal detail and
-becomes something another engine can load.
+M4 was the interesting one and took days rather than weeks, as estimated — the
+flat C API really is as easy as §3 hoped, and all of the cost was in defaults
+that differ silently rather than in anything hard. M5 is now the short one: the
+compiler, the reflection and the diagnostics it needs are all in place, and what
+is left is the JS surface over them. M6 is where the "linked, not duplicated"
+thesis stops being an internal detail and becomes something another engine can
+load.
 
 ## 6. Traps carried over
 
@@ -686,7 +790,13 @@ Each of these cost real time in crig and none are visible in a diff.
   `project.json`'s `slangc` line was missing `-force-glsl-scalar-layout` while
   the header of `mesh.slang` said to pass it — two different SPIR-V modules, no
   error either way. If a command appears in both a manifest and a comment, one
-  of them is going to be wrong eventually.
+  of them is going to be wrong eventually. M4 deleted the build step, which is
+  the only real fix.
+- **And passing the same flags is not enough, because the defaults underneath
+  them differ.** `slangc` defaults to column-major matrices; the compile-request
+  API that takes the identical argv does not. Two modules, no error either way,
+  and a rendered picture convincing enough that four tests had to say so. The
+  only trustworthy check is comparing the artifacts.
 - **Slang diagnostics are only useful if they are surfaced.** A compile that fails
   and falls back to a previous pipeline is a shader edit that appears to work and
   changes nothing on screen — the runtime version of crig's `$embed` trap.
@@ -717,9 +827,13 @@ expensive ones:
 - **Asset dedup** — that two `.glb` files sharing a texture upload it once.
 - **Slang** — that a known-good shader compiles to non-empty SPIR-V, that a
   known-bad one produces a diagnostic containing the line number, and that the
-  pipeline cache returns the identical handle for identical source.
+  pipeline cache returns the identical handle for identical source *and skips the
+  compile to do it*. Built at M4.
 - **Reflection** — a shader with known bindings, asserted against the derived
   descriptor layout. Getting this wrong produces a black screen, not an error.
+  Built at M4, against a fixture with six bindings across two sets rather than
+  against `mesh.slang`, which has one descriptor and would pass any walk that
+  only ever looked at binding range zero.
 - **Picking** — a ray through a known screen point hits the expected instance, on
   a scene with two overlapping copies of one asset at different transforms. This is
   the suite that catches a projection and a raycast that disagree, which is the

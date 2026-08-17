@@ -1,18 +1,24 @@
 <*
- SPIR-V from disk.
+ Shader source from disk.
 
- **Never `$embed`.** crig embeds its shader and pays for it: `c3c build shaders`
- without `--trust=full` skips the exec, reports the target as built, leaves the
- `.spv` untouched, and `$embed` picks up the previous binary. The result is a
- shader edit that compiles cleanly and changes nothing on screen, which is the
- most expensive kind of failure because it looks like a rendering bug. Reading
- the file removes the trap entirely and makes iteration a re-run rather than a
- rebuild.
+ **Never `$embed`, and at M4 that stopped being a preference and became free.**
 
- It is also what makes M4 cheap: `load_spirv(path)` becomes
- `compile_slang(source)` and nothing above this file changes. The whole point of
- keeping the loading behind one function is that the runtime compiler slots into
- the same hole.
+ M1's reason was crig's: `c3c build shaders` without `--trust=full` skips the
+ exec, reports the target as built, leaves the `.spv` untouched, and `$embed`
+ picks up the previous binary — a shader edit that compiles cleanly and changes
+ nothing on screen, which is the most expensive kind of failure because it looks
+ like a rendering bug.
+
+ M4 removes the build step entirely. There is no `.spv`, no prepare target and no
+ `slangc` invocation anywhere in this project; `shader/compile.c3` compiles
+ `mesh.slang` at startup. Editing the shader and re-running now shows the change
+ with no rebuild of anything — not of the shader, not of the app.
+
+ That is also why the source is read rather than embedded, unlike `js/prelude.js`
+ next door, which is `$embed`-ed. The prelude *defines* an API that must exist
+ wherever the binary runs; a shader is content the loop iterates on. A binary
+ carried away from its checkout needs `--shader <path>`, which is the same
+ contract M1 had.
 *>
 module three;
 
@@ -20,22 +26,16 @@ import std::io;
 import std::io::file;
 import std::io::path;
 
-faultdef SHADER_NOT_FOUND, SHADER_NOT_SPIRV;
-
-// The SPIR-V magic number, little-endian. Checked because the failure it
-// catches — a stale, truncated or wrong-format file — otherwise surfaces as a
-// driver error message about an invalid module, several layers from the cause.
-const uint SPIRV_MAGIC = 0x07230203;
+faultdef SHADER_NOT_FOUND;
 
 <*
- Where `mesh.spv` is looked for when nothing says otherwise.
+ Where `mesh.slang` is looked for when nothing says otherwise.
 
  Both candidates are relative to the working directory, because `c3c run`, a
- shell at the project root and `c3c test` all start there, and that is where
- the edit-and-rerun loop lives. `--shader <path>` is the way to point somewhere
- else; a binary carried away from its checkout needs it.
+ shell at the project root and `c3c test` all start there, and that is where the
+ edit-and-rerun loop lives. `--shader <path>` is the way to point somewhere else.
 
- @return? SHADER_NOT_FOUND : `Build it with c3c --trust=full build shaders, or run slangc by hand. The .spv is not embedded and a plain c3c build does not produce it.`
+ @return? SHADER_NOT_FOUND : `No shader by that name on the search path. Run from the project root, or point at one with --shader.`
 *>
 fn String? find_shader(String name, alloc::Allocator allocator = mem)
 {
@@ -54,29 +54,21 @@ fn String? find_shader(String name, alloc::Allocator allocator = mem)
 }
 
 <*
- Read a SPIR-V module.
+ Read shader source.
 
- @return? SHADER_NOT_SPIRV : `The file is not a multiple of four bytes long, or does not start with the SPIR-V magic number — a stale or truncated build.`
+ There is no format check here and there was one in M1's `load_spirv`, which
+ checked the SPIR-V magic number to catch a stale or truncated build. That check
+ did not disappear; it moved to `shader/compile.c3`, where it now guards what the
+ compiler returned rather than what a build step wrote. Anything wrong with the
+ *text* is a Slang diagnostic with a line and a column, which is a better error
+ than anything this function could produce.
+
  @return? SHADER_NOT_FOUND : `No such file.`
- @return `The module's bytes, owned by the caller.`
+ @return `The source, owned by the caller.`
 *>
-fn char[]? load_spirv(String path, alloc::Allocator allocator = mem)
+fn String? load_source(String path, alloc::Allocator allocator = mem)
 {
 	if (!file::is_file(path)) return SHADER_NOT_FOUND~;
-
 	char[] bytes = file::load(allocator, path)!;
-	if (bytes.len < 4 || bytes.len % 4 != 0)
-	{
-		alloc::free(allocator, bytes);
-		return SHADER_NOT_SPIRV~;
-	}
-
-	uint magic = *(uint*)bytes.ptr;
-	if (magic != SPIRV_MAGIC)
-	{
-		alloc::free(allocator, bytes);
-		return SHADER_NOT_SPIRV~;
-	}
-
-	return bytes;
+	return (String)bytes;
 }
