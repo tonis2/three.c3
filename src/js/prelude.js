@@ -341,15 +341,29 @@
 		}
 	}
 
+	// `new three.Mesh(geometry, material)`, and `geometry` is either half of what
+	// this project can draw: a shape three.c3 built (`new three.BoxGeometry(...)`)
+	// or a mesh inside a file somebody made (`kit.mesh("wall_corner_02")`). Both
+	// are an asset index and a mesh index, which is the whole of what a Mesh
+	// holds — see the Geometry section.
+	//
+	// The material argument is Three.js's second one and is optional here as it
+	// is there. It goes through the `material` setter rather than into the field,
+	// so passing something that is not a ShaderMaterial throws at the
+	// constructor's line instead of at the add().
 	class Mesh extends Object3D {
-		constructor(ref) {
+		constructor(geometry, material = null) {
 			super();
-			if (!ref || typeof ref.asset !== 'number' || typeof ref.mesh !== 'number') {
-				throw new TypeError('new three.Mesh(ref) wants a mesh reference from asset.mesh(name)');
+			if (!geometry || typeof geometry.asset !== 'number' || typeof geometry.mesh !== 'number') {
+				throw new TypeError(
+					'new three.Mesh(geometry) wants a shape like new three.BoxGeometry(1, 1, 1), '
+					+ 'or a mesh reference from asset.mesh(name)'
+				);
 			}
-			this._mesh = ref;
-			this._name = ref.name ?? '';
+			this._mesh = geometry;
+			this._name = geometry.name ?? '';
 			this._material = null;
+			if (material !== null && material !== undefined) this.material = material;
 		}
 
 		_ref() { return this._mesh; }
@@ -496,6 +510,192 @@
 	}
 
 	// -----------------------------------------------------------------------
+	// Geometry
+	//
+	// The shapes Three.js has, with Three.js's constructor signatures, its
+	// defaults and its orientations: a plane faces +Z, a cylinder's axis is Y, a
+	// torus lies in the XY plane, a cone points up. `scene/primitive.c3` builds
+	// them, and says there why the formulas are copied rather than re-derived —
+	// the winding and the UV layout come along with the positions, and a face
+	// wound the wrong way is a hole rather than a dark patch.
+	//
+	// ## A geometry *is* an asset reference
+	//
+	// `new three.BoxGeometry(1, 1, 1)` answers with something carrying `asset`
+	// and `mesh`, which is exactly what `asset.mesh("wall_corner_02")` answers
+	// with. `new three.Mesh(...)` takes either and cannot tell them apart, and
+	// the thesis is intact either way: a script named a shape and got a handle,
+	// never a vertex.
+	//
+	// ## The same numbers are the same asset
+	//
+	// A fresh geometry per mesh is the Three.js habit, and here it is free — the
+	// host keys the built mesh by its parameters, so a thousand identical
+	// `BoxGeometry`s are one upload and one instanced draw call.
+	//
+	// Two boxes of *different* sizes are two assets and two draw calls. That is
+	// the one thing worth knowing before generating a hundred of them: a scene
+	// of one box scaled a hundred ways is one draw call, and a scene of a
+	// hundred BoxGeometries is a hundred. `mesh.scale` is the cheap axis.
+
+	// Shared by every shape: what it is called, what it was asked for, and the
+	// asset the host built or reused.
+	class Geometry {
+		constructor(type, name, parameters, asset) {
+			this.type = type;
+			this.name = name;
+			this.parameters = parameters;
+			this.asset = asset;
+			// A generated shape is one mesh, always. Named `mesh` because that is
+			// what an asset reference calls it, which is what lets Mesh take both.
+			this.mesh = 0;
+		}
+
+		toJSON() { return { type: this.type, parameters: this.parameters }; }
+		toString() { return `${this.type}(${Object.values(this.parameters).join(', ')})`; }
+	}
+
+	// A size that can produce triangles. Zero and negative are refused rather
+	// than clamped: `new three.BoxGeometry(0, 1, 1)` is a typo every time, and a
+	// box silently one unit wide is a bug an agent debugs by looking at the
+	// picture, which is the loop this API exists to keep short.
+	function positiveSize(value, where, what) {
+		const n = +value;
+		if (!Number.isFinite(n) || n <= 0) {
+			throw new RangeError(`${where}: ${what} must be a positive number, got ${value}`);
+		}
+		return n;
+	}
+
+	// Likewise, but zero is allowed — a cone is a cylinder with one radius of it.
+	function radius(value, where, what) {
+		const n = +value;
+		if (!Number.isFinite(n) || n < 0) {
+			throw new RangeError(`${where}: ${what} cannot be negative, got ${value}`);
+		}
+		return n;
+	}
+
+	// `least` is 3 for anything going around an axis — two segments enclose no
+	// volume — and 1 for a subdivision that is allowed to be a single quad. The
+	// ceiling is MAX_PRIMITIVE_SEGMENTS in scene/primitive.c3, which clamps
+	// rather than throws; the throw is here so that asking for more is answered
+	// with a sentence instead of with a different shape.
+	function segmentCount(value, where, what, least) {
+		const n = Math.floor(+value);
+		if (!Number.isFinite(n) || n < least) {
+			throw new RangeError(`${where}: ${what} must be at least ${least}, got ${value}`);
+		}
+		if (n > 512) {
+			throw new RangeError(`${where}: ${what} is capped at 512 — ${n} segments is a mesh nobody meant to ask for`);
+		}
+		return n;
+	}
+
+	class BoxGeometry extends Geometry {
+		constructor(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1) {
+			const where = 'new three.BoxGeometry(width, height, depth)';
+			const w = positiveSize(width, where, 'width');
+			const h = positiveSize(height, where, 'height');
+			const d = positiveSize(depth, where, 'depth');
+			const ws = segmentCount(widthSegments, where, 'widthSegments', 1);
+			const hs = segmentCount(heightSegments, where, 'heightSegments', 1);
+			const ds = segmentCount(depthSegments, where, 'depthSegments', 1);
+			super(
+				'BoxGeometry', 'box',
+				{ width: w, height: h, depth: d, widthSegments: ws, heightSegments: hs, depthSegments: ds },
+				H.primitive('box', w, h, d, ws, hs, ds, false),
+			);
+		}
+	}
+
+	class SphereGeometry extends Geometry {
+		constructor(radius_ = 1, widthSegments = 32, heightSegments = 16) {
+			const where = 'new three.SphereGeometry(radius, widthSegments, heightSegments)';
+			const r = positiveSize(radius_, where, 'radius');
+			const ws = segmentCount(widthSegments, where, 'widthSegments', 3);
+			const hs = segmentCount(heightSegments, where, 'heightSegments', 2);
+			super(
+				'SphereGeometry', 'sphere',
+				{ radius: r, widthSegments: ws, heightSegments: hs },
+				H.primitive('sphere', r, 0, 0, ws, hs, 1, false),
+			);
+		}
+	}
+
+	class PlaneGeometry extends Geometry {
+		constructor(width = 1, height = 1, widthSegments = 1, heightSegments = 1) {
+			const where = 'new three.PlaneGeometry(width, height)';
+			const w = positiveSize(width, where, 'width');
+			const h = positiveSize(height, where, 'height');
+			const ws = segmentCount(widthSegments, where, 'widthSegments', 1);
+			const hs = segmentCount(heightSegments, where, 'heightSegments', 1);
+			super(
+				'PlaneGeometry', 'plane',
+				{ width: w, height: h, widthSegments: ws, heightSegments: hs },
+				H.primitive('plane', w, h, 0, ws, hs, 1, false),
+			);
+		}
+	}
+
+	class CylinderGeometry extends Geometry {
+		constructor(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false) {
+			const where = 'new three.CylinderGeometry(radiusTop, radiusBottom, height)';
+			const rt = radius(radiusTop, where, 'radiusTop');
+			const rb = radius(radiusBottom, where, 'radiusBottom');
+			if (rt === 0 && rb === 0) {
+				throw new RangeError(`${where}: both radii are zero, which describes a line rather than a shape`);
+			}
+			const h = positiveSize(height, where, 'height');
+			const rs = segmentCount(radialSegments, where, 'radialSegments', 3);
+			const hs = segmentCount(heightSegments, where, 'heightSegments', 1);
+			super(
+				'CylinderGeometry', 'cylinder',
+				{ radiusTop: rt, radiusBottom: rb, height: h, radialSegments: rs, heightSegments: hs, openEnded: !!openEnded },
+				H.primitive('cylinder', rt, rb, h, rs, hs, 1, !openEnded),
+			);
+		}
+	}
+
+	// Three.js's ConeGeometry is a CylinderGeometry with no top, and so is this
+	// one — right down to sharing its asset. `new three.ConeGeometry(1, 2)` and
+	// `new three.CylinderGeometry(0, 1, 2)` are the same triangles, so they are
+	// the same upload and, placed together, the same draw call.
+	class ConeGeometry extends Geometry {
+		constructor(radius_ = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false) {
+			const where = 'new three.ConeGeometry(radius, height)';
+			const r = positiveSize(radius_, where, 'radius');
+			const h = positiveSize(height, where, 'height');
+			const rs = segmentCount(radialSegments, where, 'radialSegments', 3);
+			const hs = segmentCount(heightSegments, where, 'heightSegments', 1);
+			super(
+				'ConeGeometry', 'cone',
+				{ radius: r, height: h, radialSegments: rs, heightSegments: hs, openEnded: !!openEnded },
+				H.primitive('cylinder', 0, r, h, rs, hs, 1, !openEnded),
+			);
+		}
+	}
+
+	class TorusGeometry extends Geometry {
+		constructor(radius_ = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48) {
+			const where = 'new three.TorusGeometry(radius, tube)';
+			const r = positiveSize(radius_, where, 'radius');
+			const t = positiveSize(tube, where, 'tube');
+			const rs = segmentCount(radialSegments, where, 'radialSegments', 3);
+			const ts = segmentCount(tubularSegments, where, 'tubularSegments', 3);
+			// Three.js's constructor takes radialSegments (around the tube) before
+			// tubularSegments (around the ring), and the builder wants them the
+			// other way up. The swap is here so the constructor keeps the order an
+			// agent has memorized.
+			super(
+				'TorusGeometry', 'torus',
+				{ radius: r, tube: t, radialSegments: rs, tubularSegments: ts },
+				H.primitive('torus', r, t, 0, ts, rs, 1, false),
+			);
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// The camera
 	//
 	// A turntable, not a free Object3D, and named so. Three.js's
@@ -563,6 +763,17 @@
 		ShaderMaterial,
 		camera,
 
+		// The shapes. `Geometry` is exported for `instanceof`, not to be
+		// constructed: there is no BufferGeometry and no attribute access, which
+		// is the thesis rather than an omission — see scene/primitive.c3.
+		Geometry,
+		BoxGeometry,
+		SphereGeometry,
+		PlaneGeometry,
+		CylinderGeometry,
+		ConeGeometry,
+		TorusGeometry,
+
 		// Synchronous, despite reading like Three.js's async loader: the file is
 		// read and uploaded on this thread and there is nothing to yield to.
 		// `await three.load(...)` still works — awaiting a plain value is a
@@ -618,6 +829,9 @@
 			'invoke and no way to write an unbatched scene.',
 		differences: [
 			'three.load(path) is synchronous; await works but is not needed.',
+			'Geometry is parametric only: BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry and TorusGeometry are built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
+			'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
+			'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
@@ -638,8 +852,11 @@
 				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
 			},
 			Mesh: {
-				construct: 'new three.Mesh(assetRef)',
-				note: 'assetRef comes from asset.mesh(name) or asset.meshAt(i). N meshes sharing one ref is one draw call.',
+				construct: 'new three.Mesh(geometry, material)',
+				note:
+					'geometry is a generated shape (new three.BoxGeometry(1, 1, 1)) or a reference from '
+					+ 'asset.mesh(name) / asset.meshAt(i). material is optional. N meshes sharing one geometry '
+					+ 'AND one material is one draw call.',
 				properties: [
 					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'material', 'children', 'parent',
 				],
@@ -676,6 +893,58 @@
 				construct: 'three.load(path)',
 				properties: ['path', 'meshes (names, in load order)'],
 				methods: ['mesh(name)', 'meshAt(index)', 'toJSON()'],
+			},
+			Geometry: {
+				construct: 'not constructible — use one of the six shapes below',
+				note:
+					'What every shape is: a handle three.c3 built, carrying the numbers you asked for. Hand it '
+					+ 'to new three.Mesh(). Constructing the same shape twice answers with the same asset, so a '
+					+ 'geometry per mesh costs nothing and a thousand identical ones are one draw call; two '
+					+ 'different sizes are two. There is no BufferGeometry and no attribute access — a script '
+					+ 'names shapes, never vertices. Sizes are world units and must be positive, segment counts '
+					+ 'are capped at 512, Y is up, and every shape is centred on its own origin.',
+				properties: ['type', 'name', 'parameters (what you asked for, defaults filled in)', 'asset', 'mesh'],
+				methods: ['toJSON()', 'toString()'],
+			},
+			BoxGeometry: {
+				construct:
+					'new three.BoxGeometry(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1)',
+				note: 'A box centred on the origin. The segment counts subdivide it and change nothing about its size.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			SphereGeometry: {
+				construct: 'new three.SphereGeometry(radius = 1, widthSegments = 32, heightSegments = 16)',
+				note: 'A UV sphere with its poles on the Y axis.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			PlaneGeometry: {
+				construct: 'new three.PlaneGeometry(width = 1, height = 1, widthSegments = 1, heightSegments = 1)',
+				note:
+					'A one-sided rectangle in the XY plane, facing +Z — Three.js\'s orientation, which is '
+					+ 'vertical. A floor is this with rotation.x = -Math.PI / 2. From behind it is invisible, '
+					+ 'because back faces are culled.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			CylinderGeometry: {
+				construct:
+					'new three.CylinderGeometry(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false)',
+				note: 'A cylinder or a truncated cone about the Y axis. Either radius may be 0, but not both.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			ConeGeometry: {
+				construct:
+					'new three.ConeGeometry(radius = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false)',
+				note:
+					'A cone about the Y axis with its point up. The same triangles as '
+					+ 'CylinderGeometry(0, radius, height) — and the same asset, so the two spellings share a draw call.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			TorusGeometry: {
+				construct: 'new three.TorusGeometry(radius = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48)',
+				note:
+					'A ring in the XY plane. radius is measured to the centre of the tube, so the shape is '
+					+ '2 * (radius + tube) across and 2 * tube thick.',
+				methods: ['toJSON()', 'toString()'],
 			},
 		},
 		functions: {
@@ -726,6 +995,34 @@
 			normal: 'The surface normal there, world space, unit length.',
 		},
 		example: [
+			'const scene = new three.Scene();',
+			'',
+			'// One geometry per mesh is fine — the same numbers are the same asset,',
+			'// so this whole grid is a single instanced draw call.',
+			'for (let x = -4; x <= 4; x++) {',
+			'  for (let z = -4; z <= 4; z++) {',
+			'    const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));',
+			'    cube.position.set(x * 1.5, 0, z * 1.5);',
+			'    cube.scale.y = 1 + Math.abs(x + z) * 0.4;   // scale is free, a new size is not',
+			'    scene.add(cube);',
+			'  }',
+			'}',
+			'',
+			'const ball = new three.Mesh(',
+			'  new three.SphereGeometry(1.2, 48, 24),',
+			'  new three.ShaderMaterial({',
+			'    uniforms: { tint: [1, 0.4, 0.2] },',
+			'    fragment: "float3 shade(Surface s) { return lambert(s.normal) * tint; }",',
+			'  }),',
+			');',
+			'ball.position.y = 3;',
+			'scene.add(ball);',
+			'',
+			'three.camera.frameAll();',
+			'three.render(scene, three.camera);',
+			'return scene.stats();   // { drawCalls: 2, uniqueMeshes: 2, instances: 82, ... }',
+		].join('\n'),
+		exampleFromFile: [
 			'const kit = three.load("assets/kit.glb");',
 			'const wall = kit.mesh("wall_corner_02");',
 			'const scene = new three.Scene();',
