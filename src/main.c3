@@ -1,0 +1,304 @@
+<*
+ three.c3 — boot, CLI, the window loop.
+
+ The base stage is driven by CLI arguments and nothing else. QuickJS and MCP
+ arrive at M3; until then this is the whole driving surface.
+
+	three [file.glb] [options]
+
+	--screenshot <path>   render one frame, write a PNG, exit
+	--width <n>           offscreen render width  (default 1280)
+	--height <n>          offscreen render height (default 720)
+	--headless            no window, no surface, no swapchain
+	--validate            Vulkan validation layers + debug messenger
+*>
+module three;
+
+import std::io;
+import c3w;
+import vk;
+import image;
+
+const String VERSION = "0.1.0";
+
+struct Options
+{
+	String model;
+	String screenshot;
+	uint width;
+	uint height;
+	bool headless;
+	bool validate;
+	String shader;
+	bool system_driver;
+	bool stress_resize;
+	bool help;
+}
+
+faultdef BAD_ARGUMENT, MISSING_VALUE, RESIZE_HAD_NO_EFFECT;
+
+fn Options? parse_args(String[] args)
+{
+	Options opts = { .width = 1280, .height = 720 };
+
+	for (usz i = 1; i < args.len; i++)
+	{
+		String arg = args[i];
+		switch (arg)
+		{
+			case "--help":
+			case "-h":
+				opts.help = true;
+			case "--headless":
+				opts.headless = true;
+			case "--validate":
+				opts.validate = true;
+			case "--system-driver":
+				opts.system_driver = true;
+			case "--stress-resize":
+				opts.stress_resize = true;
+			case "--shader":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.shader = args[++i];
+			case "--screenshot":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.screenshot = args[++i];
+			case "--width":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.width = args[++i].to_uint()!;
+			case "--height":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.height = args[++i].to_uint()!;
+			default:
+				if (arg.starts_with("-"))
+				{
+					io::printfn("unknown option: %s", arg);
+					return BAD_ARGUMENT~;
+				}
+				opts.model = arg;
+		}
+	}
+
+	// A screenshot is a one-shot render and has no use for a window; asking for
+	// one without --headless is the common case, so imply it rather than
+	// opening a window that flashes for a frame.
+	if (opts.screenshot.len > 0) opts.headless = true;
+	// The probe drives a real window; there is nothing to resize without one.
+	if (opts.stress_resize) opts.headless = false;
+
+	return opts;
+}
+
+fn void usage()
+{
+	io::printn("three.c3 — a Three.js-shaped scene API over C3 and Vulkan");
+	io::printfn("version %s", VERSION);
+	io::printn("");
+	io::printn("  three [file.glb] [options]");
+	io::printn("");
+	io::printn("  --screenshot <path>   render one frame, write a PNG, exit");
+	io::printn("  --width <n>           offscreen render width  (default 1280)");
+	io::printn("  --height <n>          offscreen render height (default 720)");
+	io::printn("  --headless            no window, no surface, no swapchain");
+	io::printn("  --validate            Vulkan validation layers + debug messenger");
+	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
+	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");
+	io::printn("  --shader <path>       a mesh.spv other than the one on the search path");
+	io::printn("  -h, --help            this");
+}
+
+fn int main(String[] args)
+{
+	Options? parsed = parse_args(args);
+	if (catch err = parsed)
+	{
+		usage();
+		return 1;
+	}
+	Options opts = parsed;
+
+	if (opts.help)
+	{
+		usage();
+		return 0;
+	}
+
+	if (catch err = run(opts))
+	{
+		io::printfn("three: %s", err);
+		// The one failure with an obvious next step, and the one most likely to
+		// be hit on a fresh checkout: the .spv is not embedded and a plain
+		// `c3c build` does not produce it.
+		if (err == SHADER_NOT_FOUND)
+		{
+			io::printn("  shaders/mesh.spv is missing. Build it with:");
+			io::printn("      c3c --trust=full build shaders");
+			io::printn("  or point at one with --shader <path>.");
+		}
+		// Two different ways of saying "the only driver here is MoltenVK": the
+		// loader refuses to make the instance when that is all it has, and the
+		// device filter refuses the device if one reaches it anyway. Neither
+		// message says what to do about it, so this does.
+		if (err == PORTABILITY_DRIVER_ONLY || err == vk::E_ERROR_INCOMPATIBLE_DRIVER)
+		{
+			io::printn("  No supported Vulkan driver. three.c3 renders through KosmicKrisp,");
+			io::printn("  which vulkan.c3l bundles; MoltenVK is not supported.");
+			if (opts.system_driver) io::printn("  Drop --system-driver to use the bundled one.");
+		}
+		return 1;
+	}
+	return 0;
+}
+
+fn void? run(Options opts)
+{
+	// The window is a viewer, never a render target (plan.md §1). It is opened
+	// first only because the surface has to come from somewhere; nothing about
+	// it reaches the offscreen target's extent or format.
+	c3w::Window window;
+	bool windowed = !opts.headless;
+	if (windowed)
+	{
+		window = c3w::new(
+			params: { .x = 0, .y = 0, .width = (int)opts.width, .height = (int)opts.height },
+			name: "three.c3"
+		)!;
+	}
+	defer if (windowed) window.free();
+
+	vk::Instance instance = create_instance(
+		opts.validate,
+		headless: opts.headless,
+		bundled_driver: !opts.system_driver
+	)!;
+	defer instance.free();
+
+	vk::SurfaceKHR surface;
+	if (windowed)
+	{
+		surface = (vk::SurfaceKHR)window.create_vk_surface(
+			instance,
+			(c3w::VkGetInstanceProcAddrFn)vk::getInstanceProcAddr
+		)!;
+	}
+	defer if (windowed) surface.free(instance);
+
+	Renderer renderer;
+	renderer.init(instance, surface, opts.width, opts.height, opts.validate)!;
+	defer renderer.free();
+
+	if (opts.validate) renderer.gpu.report();
+
+	// The pipeline is built from mesh.spv on disk, so editing shaders/mesh.slang
+	// and re-running slangc changes the picture with no rebuild of this binary.
+	renderer.pass.init(&renderer.gpu, &renderer.target, opts.shader)!;
+
+	if (opts.model.len > 0)
+	{
+		renderer.pass.load(&renderer.gpu, opts.model)!;
+	}
+	else
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!;
+	}
+
+	PassStats stats = renderer.pass.stats();
+	io::printfn(
+		"%s: %d draw calls, %d meshes, %d textures, %d triangles",
+		opts.model.len > 0 ? opts.model : "built-in triangle",
+		stats.draw_calls,
+		stats.meshes,
+		stats.textures,
+		stats.triangles
+	);
+
+	if (opts.screenshot.len > 0)
+	{
+		renderer.screenshot(opts.screenshot)!;
+		io::printfn("wrote %s (%dx%d)", opts.screenshot, opts.width, opts.height);
+		return;
+	}
+
+	// Headless with nothing to write is still worth running: it exercises the
+	// whole render path with no window server, which is exactly what the tests
+	// do.
+	if (!windowed)
+	{
+		image::Image frame = renderer.capture()!;
+		defer frame.free();
+		io::printfn("rendered %dx%d headless", frame.width, frame.height);
+		return;
+	}
+
+	if (opts.stress_resize)
+	{
+		stress_resize(&renderer, &window)!;
+		io::printn("resize stress complete");
+		return;
+	}
+
+	while (!window.should_close())
+	{
+		c3w::EventMap events = window.getEvent();
+		if (events.is_pressed(ESCAPE)) break;
+		renderer.frame()!;
+	}
+}
+
+<*
+ Walk the window through a spread of sizes, then a minimise and a restore,
+ rendering the whole way. Run it under `--validate`: the pass condition is that
+ nothing is printed.
+
+ The sizes are deliberately awkward — a near-square, a very wide one, a very
+ tall one, one small enough to be mostly title bar — because the bugs here are
+ in the blit's destination rect and in swapchain images being destroyed while a
+ presentation still refers to them, and both hide at comfortable aspect ratios.
+*>
+fn void? stress_resize(Renderer* renderer, c3w::Window* window)
+{
+	int[2][*] sizes = {
+		{ 900, 500 }, { 1600, 1000 }, { 320, 240 }, { 1440, 200 }, { 240, 900 }, { 1024, 768 },
+	};
+
+	// Checked, not assumed: a `set_size` that silently did nothing would leave
+	// every frame below rendering at one extent, and "no validation errors"
+	// would still hold. The test would pass by never testing anything.
+	uint changes = 0;
+	vk::Extent2D previous = renderer.viewer.extent;
+
+	foreach (size : sizes)
+	{
+		window.set_size(size[0], size[1]);
+		pump(renderer, window, 20)!;
+
+		vk::Extent2D now = renderer.viewer.extent;
+		if (now.width != previous.width || now.height != previous.height) changes++;
+		io::printfn("  %d x %d requested -> surface %d x %d", size[0], size[1], now.width, now.height);
+		previous = now;
+	}
+
+	if (changes == 0) return RESIZE_HAD_NO_EFFECT~;
+
+	// Minimised, the surface reports a zero extent and there is nothing to
+	// build a swapchain for. The frame path has to notice and skip rather than
+	// spin on an acquire that keeps failing.
+	//
+	// `set_minimized(false)` restores on macOS, X11 and Win32 but is a no-op on
+	// Wayland, where xdg-shell has no un-minimise request — so on Wayland the
+	// frames after this are the minimised case running twice, which is a
+	// weaker check rather than a broken one.
+	window.set_minimized(true);
+	pump(renderer, window, 30)!;
+	window.set_minimized(false);
+	pump(renderer, window, 30)!;
+}
+
+fn void? pump(Renderer* renderer, c3w::Window* window, uint frames)
+{
+	for (uint i = 0; i < frames; i++)
+	{
+		window.getEvent();
+		renderer.frame()!;
+	}
+}

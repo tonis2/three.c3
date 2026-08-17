@@ -47,14 +47,39 @@ language, one surface, one place a feature lands.
 
 ## Status
 
-Nothing is built. The seven submodules are in place and nothing else — no
-`project.json`, no `src/`, no first triangle. Everything below is a plan, not a
-description. When something lands, move it from **Milestones** into a section that
-describes how it actually works, and keep this file honest about the difference.
+**M0 and M1 are built.** A window, a Vulkan device, an offscreen colour+depth
+target, a swapchain that blits it, an exact screenshot, a triangle through a
+buffer device address, and a `.glb` on screen with its base colour texture.
+`c3c test --trust=full` runs eleven checks, all headless, leak-clean.
 
-**M0 and M1 are broken out step by step in `base_stage.md`** — which file, in what
-order, done when. This file stays the whole shape; that one is the next two
-milestones.
+	three <file.glb>                    open a window on it
+	three <file.glb> --screenshot a.png render one frame, exit
+	three --validate                    validation layers + a device report
+	c3c --trust=full build shaders      compile shaders/mesh.slang
+
+M2 onward is still a plan. Everything below the milestone list describes intent
+rather than behaviour except where it is marked otherwise; `base_stage.md` has
+the built part broken out step by step, with its own record of what was
+verified and how.
+
+**What M0/M1 settled that the rest of the plan assumed:**
+
+- **`scalarBlockLayout` is available and is used.** Apple M5 reports it true
+  under KosmicKrisp, so the `float4`-never-`float3` tax does not apply and
+  vertex streams are uploaded tightly packed exactly as glTF stored them.
+  `gpu/pipeline.c3` refuses a device that lacks it rather than reading geometry
+  at the wrong stride. Recorded at the top of `gpu/device.c3` as §1 asks.
+- **Drivers do disagree**, as warned: MoltenVK, while it was still being
+  selected, reported `fillModeNonSolid` true and `maxPushConstantsSize` 4096
+  where KosmicKrisp reports false and 256. Nothing optional is assumed anywhere.
+- **MoltenVK is not supported and is actively refused.** The driver is the
+  KosmicKrisp `vulkan.c3l` bundles; `VK_KHR_portability_enumeration` is left off
+  the instance and `select_device` skips any portability device. See the header
+  of `gpu/device.c3`.
+- **The push block is 124 bytes** and the 128-byte budget holds.
+- **`VK_KHR_push_descriptor` is not requested.** Nothing uses it — KosmicKrisp's
+  `vkCmdPushDescriptorSetKHR` breaks subsequent draws when `descriptorWriteCount
+  > 0` — and requiring an unused extension can only turn devices away.
 
 ## Dependencies
 
@@ -110,6 +135,11 @@ wrong.
 
 ### `project.json` to start with
 
+The built `project.json` carries only the five the base stage imports — `vk`,
+`c3w`, `gltf`, `image`, `collision`. `quickjs` and `mcp` go in at M3 with the
+code that uses them: listing a dependency links its static library into every
+build, and an unused one is link time and confusing link errors for nothing.
+
 ```json
 {
 	"langrev": "1",
@@ -134,35 +164,52 @@ point — so there is no `slangc` invocation at build time and no `$embed` of a
 `.spv`. This alone removes crig's worst trap (`c3c build shaders` without
 `--trust=full` silently doing nothing).
 
-## Planned source tree
+## Source tree
 
-One flat `module three`, folders for subject only, on crig's precedent:
+One flat `module three`, folders for subject only, on crig's precedent. Files
+marked **built** exist and do what the line says; the rest are still a plan.
 
 ```
 src/
-  main.c3           boot, CLI, the window loop, the MCP server
-  gpu/device.c3     instance, physical device selection, logical device, queues
-  gpu/target.c3     the offscreen colour+depth attachment and its readback (§1)
-  gpu/frame.c3      command buffer submission, per-frame sync, two frames in flight
-  gpu/swapchain.c3  surface, swapchain, resize/recreate — blits gpu/target, nothing more
-  gpu/buffer.c3     allocation + BDA handles; upload staging
-  gpu/texture.c3    images, samplers, the growable descriptor array
-  gpu/pipeline.c3   pipeline creation from reflected layout + the hash cache (§3)
-  shader/slang.c3   the flat-C Slang binding: compile source -> SPIR-V (§3)
-  shader/reflect.c3 SPIR-V/Slang reflection -> descriptor set layout + uniform map
-  scene/node.c3     Object3D: parent, children, local TRS, world matrix, dirty flag
-  scene/scene.c3    the graph root, traversal, the instance table, stats()
-  scene/asset.c3    a loaded glTF: unique meshes, materials, textures; refcounted
-  scene/material.c3 material params + which pipeline they resolve to
-  scene/pick.c3     scene raycast over collision::TriBVH, in instance-local space
-  render/pass.c3    cull, batch by (mesh, material), write instance buffer, draw
-  js/runtime.c3     the QuickJS context, module loading, the interrupt/timeout
-  js/bind_scene.c3  Scene/Object3D/Mesh prototypes and accessors
-  js/bind_asset.c3  load(), asset handles, instancing
-  js/bind_shader.c3 the material/shader surface (tier 2, §4)
-  mcp/server.c3     three tools and no more: run_script, screenshot, get_api_docs
+  main.c3           built  boot, CLI, the window loop  (+ the MCP server at M3)
+  gpu/device.c3     built  instance, device selection, queues, allocator, limits
+  gpu/target.c3     built  the offscreen colour+depth attachment and its readback (§1)
+  gpu/frame.c3      built  command submission, per-frame sync, two frames in flight
+  gpu/swapchain.c3  built  surface, swapchain, resize/recreate — blits gpu/target, nothing more
+  gpu/buffer.c3     built  device-local uploads + BDA handles
+  gpu/texture.c3    built  images, samplers, content-hash dedup
+  gpu/pipeline.c3   built  the mesh pipeline + the push block  (reflection + hash cache at M4)
+  shader/load.c3    built  .spv from disk, never $embed  (becomes compile_slang at M4)
+  shader/reflect.c3        SPIR-V/Slang reflection -> descriptor set layout + uniform map
+  scene/camera.c3   built  a turntable camera and how it frames what it is shown
+  scene/asset.c3    built  a loaded glTF: one mesh per glTF mesh, textures deduplicated
+  scene/node.c3            Object3D: parent, children, local TRS, world matrix, dirty flag
+  scene/scene.c3           the graph root, traversal, the instance table, stats()
+  scene/material.c3        material params + which pipeline they resolve to
+  scene/pick.c3            scene raycast over collision::TriBVH, in instance-local space
+  render/pass.c3    built  bind, push, draw  (cull/batch/instance buffer at M2)
+  js/runtime.c3            the QuickJS context, module loading, the interrupt/timeout
+  js/bind_scene.c3         Scene/Object3D/Mesh prototypes and accessors
+  js/bind_asset.c3         load(), asset handles, instancing
+  js/bind_shader.c3        the material/shader surface (tier 2, §4)
+  mcp/server.c3            three tools and no more: run_script, screenshot, get_api_docs
+shaders/
+  mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
 test/
+  gpu_test.c3       built  device, target, headless render, readback, reproducibility
+  asset_test.c3     built  mesh counts, texture dedup, index width, pixels on screen
+  fixtures/         built  textured.glb and the generator that writes it
 ```
+
+`scene/camera.c3` is an addition to the plan, from M1: something has to decide
+where the eye is before a `.glb` can be looked at, and it is what
+`PerspectiveCamera` will replace.
+
+`--stress-resize` is what makes `base_stage.md`'s "aggressive resize produces no
+validation errors" checkable without a human at the mouse. The window poking it
+needs — `set_size` and `set_minimized` — went into `c3w` rather than living
+here: it is a window capability, not a rendering one, and three.c3 is not the
+only project that will want to drive a resize from a test.
 
 ## 1. Load-bearing decisions
 
@@ -225,10 +272,11 @@ every access revalidates that id against the live scene. A stale handle throws
 rather than dereferencing freed memory, and a runaway script leaks nothing because
 it never owned anything. Scene teardown is explicit, per script run.
 
-**Assume no optional Vulkan feature.** Two drivers are installed on this machine
-(MoltenVK and Mesa KosmicKrisp) and only one reports `fillModeNonSolid`; the same
-is true of `wideLines`. Anything drawn as a wireframe is a line-list index buffer,
-not `POLYGON_MODE_LINE`.
+**Assume no optional Vulkan feature.** The bundled KosmicKrisp does not report
+`fillModeNonSolid`, and the same is true of `wideLines`. Anything drawn as a
+wireframe is a line-list index buffer, not `POLYGON_MODE_LINE`. Support is
+KosmicKrisp-only — a portability implementation is refused rather than worked
+around — but that narrows *which* driver answers, not whether it is asked.
 
 ## 2. The scene model
 
@@ -422,20 +470,37 @@ gets back.
 
 ## 5. Milestones
 
-**M0 — a window, and something in it.** `project.json`, `src/main.c3`, `c3w`
-window, Vulkan instance and device, the offscreen colour+depth target, a swapchain
-that blits it, and a clear colour. Plus `--screenshot <path>`, which is a readback
-of the *offscreen* image and therefore already exact. Done when resize works with
-no validation errors and the screenshot is byte-identical across runs.
+**M0 — a window, and something in it. Done.** `project.json`, `src/main.c3`,
+`c3w` window, Vulkan instance and device, the offscreen colour+depth target, a
+swapchain that blits it, and a clear colour. Plus `--screenshot <path>`, which
+is a readback of the *offscreen* image and therefore already exact.
 
-Get `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` right here. Resize is the
-only genuinely fiddly part of the window path and leaving it half-done means every
-later milestone is debugged through an intermittent failure that has nothing to do
-with it.
+Resize was got right here rather than later, and `--stress-resize` is how it
+stays right: six aspect ratios and a minimise/restore, rendering throughout,
+clean under validation on both installed drivers. `SUBOPTIMAL_KHR` needed the
+raw `VkResult` — it is a *success* code, so the binding does not turn it into a
+fault and there is nothing to catch. A surface-extent poll at the top of the
+frame turned out to be the primary resize path rather than a backstop: a live
+macOS drag routinely resizes the surface without either the acquire or the
+present ever reporting `OUT_OF_DATE`.
 
-**M1 — a triangle, then a glTF.** BDA geometry upload, one hand-written Slang
-shader compiled *offline* for now, one draw. Then `gltf.c3l` in, one mesh on
-screen with its base colour texture. Done when a kit `.glb` renders with materials.
+**M1 — a triangle, then a glTF. Done.** BDA geometry upload, one hand-written
+Slang shader compiled offline into `shaders/mesh.spv` and read from disk, one
+draw. Then `gltf.c3l` in, meshes on screen with their base colour texture.
+
+Two things cost time and neither is visible in a diff:
+
+- **The negative-height viewport does not reverse triangle winding.** It exists
+  to *undo* Vulkan's Y-down NDC so a glm-convention projection works unchanged,
+  and undoing a flip is not a flip. Setting `FRONT_FACE_CLOCKWISE` on that
+  reasoning culled every visible face and produced an empty frame with no
+  validation message at all.
+- **A texture format the decoder does not handle must not fail the load.** KTX2
+  (`KHR_texture_basisu`) is common in shipped assets and `image.c3l` does not
+  decode it; a 141-mesh terrain rendering untextured with one warning is worth
+  far more than the same file rendering nothing. Finding that also surfaced a
+  real leak — a primitive that failed partway had already put buffers on the
+  device and nothing else knew about them yet.
 
 **M2 — the scene graph and instancing.** `Object3D`, world-matrix propagation,
 asset dedup, bucketing, the instance buffer, one instanced draw per bucket,

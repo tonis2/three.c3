@@ -5,6 +5,14 @@ two milestones, at the level of "which file, in what order, done when".
 
 Everything here is `module three` in one flat namespace, folders for subject only.
 
+## Built
+
+**All nine steps are done and the five "Done" conditions hold.** See the
+verification record at the bottom of this file for what was checked and how.
+The step descriptions below are kept as written — they are the reasoning that
+produced the code, and where the code diverged from them the divergence is
+recorded in place.
+
 ## Scope
 
 **In:** a window, a Vulkan device, an offscreen render target, a swapchain that
@@ -81,9 +89,10 @@ quirks on this machine. In order:
 2. Instance extensions: `VK_KHR_surface` plus the platform surface extension —
    `VK_EXT_metal_surface` on macOS, `VK_KHR_win32_surface`, or
    `VK_KHR_wayland_surface`/`VK_KHR_xcb_surface` chosen from `window.getBackend()`.
-3. **`VK_KHR_portability_enumeration` is probed, not assumed.** It is implemented
-   by the loader, not the driver; request it and the matching instance flag only
-   when `vk::checkInstanceExtensionSupport` says it is there.
+3. **`VK_KHR_portability_enumeration` is deliberately not enabled.** It is the
+   spec's switch for accepting portability implementations, and three.c3 renders
+   through the conformant KosmicKrisp `vulkan.c3l` bundles. Leaving it off keeps
+   MoltenVK's device out of the enumeration entirely.
 4. `apiVersion` 1.3. Debug messenger behind a `--validate` flag.
 5. Surface: `window.create_vk_surface(instance, vk::getInstanceProcAddr)` — hand it
    the loader's proc-addr rather than letting it `dlopen` its own, or it can bind a
@@ -262,7 +271,7 @@ this machine. Read it; do not depend on it.
 
 | Step | cui reference |
 |---|---|
-| S2 instance, portability probe, surface | `Renderer.new`, lines ~197–335 |
+| S2 instance, driver selection, surface | `Renderer.new`, lines ~197–335 |
 | S2 feature chain, device, allocator | `Renderer.new`, lines ~336–430 |
 | S5 swapchain create / rebuild | `Renderer.create_swapchain`, `Renderer.rebuild_surface` |
 | S5 semaphore and fence layout | `Renderer.new`, lines ~440–450 |
@@ -277,12 +286,13 @@ reads back a target it chose the format of and needs neither.
 
 - **`init_loader()` first.** Anything before it crashes on a null command pointer
   and reads like a broken driver.
-- **`VK_KHR_portability_enumeration` is a loader extension.** Probe it; a build
-  linking a driver directly does not advertise it.
-- **Two Vulkan drivers on this machine** (MoltenVK and Mesa KosmicKrisp), and only
-  one reports `fillModeNonSolid`; the same is true of `wideLines`. Query every
-  optional feature and fall back. A wireframe, if it ever arrives, is a line-list
-  index buffer.
+- **`VK_KHR_portability_enumeration` stays off**, which is what refuses MoltenVK.
+  Its absence has a second effect worth knowing: headless, unvalidated, bundled
+  driver, the instance extension list is then genuinely empty, and the builder
+  takes `&names[0]` — guard the call or it panics on the empty slice.
+- **KosmicKrisp does not report `fillModeNonSolid`**; the same is true of
+  `wideLines`. Query every optional feature and fall back. A wireframe, if it
+  ever arrives, is a line-list index buffer.
 - **HiDPI:** the swapchain is sized in *physical pixels* (`window.get_scale()`),
   while window coordinates are logical. Since the offscreen target has its own
   extent, this affects only the blit destination — but getting it wrong gives a
@@ -311,3 +321,61 @@ Item 5 is the one that will be tempting to skip, and it is the one that makes M2
 onward cheap: **a headless render into a buffer, asserted on pixels, is the only
 test that tells you the renderer still works** — and it costs nothing extra,
 because the offscreen path was built first on purpose.
+
+## Verification record
+
+What was actually checked, and how, so a later regression has a baseline to be
+measured against rather than a claim to be taken on trust.
+
+| Done item | How it was checked | Result |
+|---|---|---|
+| 1. `three <file.glb>` opens a window on the model | Windowed runs under `--validate`, plus a screen capture of the window | Window opens and blits the target; the model itself was confirmed through the identical offscreen render the window blits. The final window-with-model capture could not be taken — the screen locked — so the *picture in the window* is verified for the clear colour and by the resize stress with a model loaded, not by a photograph of the model in the window |
+| 2. `--screenshot` is byte-identical across runs, exits 0 | Two runs of the triangle, two of `textured.glb`, `shasum` compared; also rendered at 512x384, 640x480, 800x600, 1280x720 | Identical, exit 0 |
+| 3. Aggressive resize, minimise and restore produce no validation errors | `--stress-resize --validate`: 900x500, 1600x1000, 320x240, 1440x200, 240x900, 1024x768, then minimise and restore, 20–30 frames each | Clean on the bundled KosmicKrisp *and* on an installed one (`--system-driver`), with and without a model loaded |
+| 4. Editing the `.slang` and rerunning slangc changes the picture with no rebuild | Recompiled a tinted variant over `shaders/mesh.spv`, re-ran the same binary, compared the PNG and the binary's mtime | Picture changed, binary untouched |
+| 5. `c3c test --test-noleak` covers device bring-up, target at two extents, headless render + readback, glTF counts | 11 checks in `test/gpu_test.c3` and `test/asset_test.c3` | All pass, and all pass again *with* leak tracking |
+
+Two of the regression tests were verified by re-introducing the bug they claim
+to catch, on the principle that an unexercised regression test is an
+assumption: reading ushort indices as uint fails
+`ushort_indices_are_not_read_as_uint`, and dropping the content-hash comparison
+fails `identical_textures_upload_once`. The front-face test
+(`the_builtin_triangle_reaches_the_screen`) was written *because* the bug
+happened — see the note below.
+
+### What the steps got wrong, and what the code does instead
+
+- **S5's front face.** The negative-height viewport does not reverse winding.
+  It undoes Vulkan's Y-down NDC so a glm-convention projection works unchanged,
+  and undoing a flip is not a flip — so glTF's counter-clockwise front faces
+  stay counter-clockwise. Reasoning the other way culled every visible face,
+  which validation is entirely happy about and which reads as a broken pipeline
+  rather than a raster setting.
+- **S2's `VK_KHR_push_descriptor`.** Not requested. Nothing uses it, and
+  requiring an unused extension can only turn devices away. The base colour
+  texture uses an ordinary descriptor set, which is also what vulkan.c3l's own
+  example does after finding that KosmicKrisp's `vkCmdPushDescriptorSetKHR`
+  breaks subsequent draws.
+- **S2's scalar block layout answer: yes.** `scalarBlockLayout` is true on
+  KosmicKrisp, so vertex streams are uploaded tightly packed exactly as glTF
+  stored them and there is no repack anywhere. `gpu/pipeline.c3` refuses a
+  device that lacks it rather than reading geometry at the wrong stride.
+- **MoltenVK is refused, not accommodated.** An earlier revision enabled
+  `VK_KHR_portability_subset` after selection, because a device advertising it
+  must have it enabled. That has been removed along with the instance's
+  portability enumeration: three.c3 supports the KosmicKrisp `vulkan.c3l` bundles
+  and nothing else. `select_device` skips portability devices as a second lock,
+  and `PORTABILITY_DRIVER_ONLY` distinguishes "wrong driver" from "no GPU". On a
+  machine where MoltenVK is the *only* ICD, the loader gets there first and
+  fails instance creation with `ERROR_INCOMPATIBLE_DRIVER`; `main.c3` prints the
+  same advice for both.
+- **S9 says "one hardcoded directional light"; an unsupported texture must not
+  be fatal.** KTX2 (`KHR_texture_basisu`) is not decoded by `image.c3l`, and a
+  141-mesh terrain rendering untextured with one warning beats the same file
+  rendering nothing.
+- **One addition to the planned tree**: `scene/camera.c3`, because something has
+  to decide where the eye is before a `.glb` can be looked at.
+- **`--stress-resize` drives the window through `c3w`**, which grew
+  `Window.set_size` and `Window.set_minimized` for it. Those belong to the
+  window library rather than here — item 3 above is otherwise only checkable by
+  hand, and that is true of any project using c3w, not just this one.
