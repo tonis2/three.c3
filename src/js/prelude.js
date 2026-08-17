@@ -144,6 +144,7 @@
 			this._g = g;
 			this._flush();
 			if (!this._visible) H.setVisible(i, g, false);
+			if (this._material) H.setMaterial(i, g, this._material._m);
 			for (const child of this.children) child._materialize(this);
 		}
 
@@ -245,6 +246,101 @@
 
 	class Group extends Object3D {}
 
+	// A shader written by whoever is driving, compiled the moment it is
+	// constructed.
+	//
+	// Three.js's ShaderMaterial takes a whole vertex and fragment program and a
+	// uniforms object of `{ value }` wrappers. This takes a fragment *function* —
+	// `float3 shade(Surface s)` — and a flat uniforms object, because three.c3
+	// supplies the vertex stage, the Surface, the descriptor layout and the push
+	// block. That is what `plan.md` §4 calls tier 2, and it is what removes almost
+	// every Vulkan failure mode while keeping the property that makes Three.js
+	// pleasant to generate for.
+	//
+	// Compiling in the constructor rather than at first use is deliberate: the
+	// error names the line the agent wrote, and it arrives at the line that wrote
+	// it rather than three statements later inside render().
+	class ShaderMaterial {
+		constructor(options) {
+			if (options === null || typeof options !== 'object') {
+				throw new TypeError('new three.ShaderMaterial({ fragment, uniforms }) wants an options object');
+			}
+			const { fragment, uniforms = {} } = options;
+			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
+				throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
+			}
+			if (uniforms === null || typeof uniforms !== 'object') {
+				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
+			}
+
+			// The enumeration happens here because it cannot happen in the host:
+			// the QuickJS shim exposes property *get* by name and nothing that
+			// lists keys. So the names cross as a joined string — see
+			// js/bind_shader.c3.
+			const names = Object.keys(uniforms);
+			const widths = names.map(n => ShaderMaterial._width(n, uniforms[n]));
+
+			this._m = H.createMaterial(fragment, names.join(','), widths.join(','));
+			this.fragment = fragment;
+
+			// A Proxy rather than accessors on a sealed object, because a script is
+			// not evaluated in strict mode: assigning an unknown property to a
+			// sealed object *silently does nothing* there, so `mat.uniforms.tnit =
+			// [0, 1, 0]` would be a no-op that renders unchanged and reads like a
+			// shader bug. A set trap throws either way. Measured, not assumed —
+			// the sealed version was written first and
+			// `an_undeclared_uniform_cannot_be_assigned` caught it.
+			this._values = {};
+			const declared = new Set(names);
+			const owner = this;
+			this.uniforms = new Proxy({}, {
+				get(_, name) { return owner._values[name]; },
+				has(_, name) { return declared.has(name); },
+				ownKeys() { return [...declared]; },
+				getOwnPropertyDescriptor(_, name) {
+					if (!declared.has(name)) return undefined;
+					return { enumerable: true, configurable: true, value: owner._values[name] };
+				},
+				set(_, name, v) {
+					if (!declared.has(name)) {
+						throw new TypeError(
+							`this material has no uniform called '${String(name)}' — it declared ${[...declared].join(', ') || 'none'}`
+						);
+					}
+					owner._set(name, v);
+					return true;
+				},
+			});
+			for (const name of names) this._set(name, uniforms[name]);
+		}
+
+		static _width(name, v) {
+			if (typeof v === 'number') return 1;
+			if (Array.isArray(v) && v.length >= 1 && v.length <= 4) return v.length;
+			throw new TypeError(
+				`uniform '${name}' wants a number or an array of up to four numbers`
+			);
+		}
+
+		_set(name, v) {
+			const n = typeof v === 'number' ? [v] : v;
+			if (!Array.isArray(n) || n.length < 1 || n.length > 4) {
+				throw new TypeError(`uniform '${name}' wants a number or an array of up to four numbers`);
+			}
+			for (const c of n) {
+				if (!Number.isFinite(+c)) {
+					throw new TypeError(`uniform '${name}' was given a non-finite value`);
+				}
+			}
+			H.setUniform(this._m, name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length);
+			this._values[name] = typeof v === 'number' ? +v : n.map(Number);
+		}
+
+		toJSON() {
+			return { fragment: this.fragment, uniforms: { ...this._values } };
+		}
+	}
+
 	class Mesh extends Object3D {
 		constructor(ref) {
 			super();
@@ -253,10 +349,24 @@
 			}
 			this._mesh = ref;
 			this._name = ref.name ?? '';
+			this._material = null;
 		}
 
 		_ref() { return this._mesh; }
 		get geometry() { return this._mesh; }
+
+		// Assignable before the mesh is in a scene, like `name` and `visible`, and
+		// replayed by `_materialize` for the same reason: an object is a detached
+		// description until it is added, and a script that sets up a mesh and then
+		// adds it must not lose the setup.
+		get material() { return this._material; }
+		set material(v) {
+			if (v !== null && !(v instanceof ShaderMaterial)) {
+				throw new TypeError('mesh.material wants a three.ShaderMaterial, or null for the default');
+			}
+			this._material = v;
+			if (this._i >= 0) H.setMaterial(this._i, this._g, v === null ? 0 : v._m);
+		}
 	}
 
 	// There is one scene at a time, and `new three.Scene()` is what empties it.
@@ -450,6 +560,7 @@
 		Group,
 		Vector3,
 		Asset,
+		ShaderMaterial,
 		camera,
 
 		// Synchronous, despite reading like Three.js's async loader: the file is
@@ -510,7 +621,8 @@
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
-			'No materials yet. A mesh draws with the base colour and texture its glTF material carried.',
+			'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
+			'A mesh with no material draws with the base colour and texture its glTF material carried.',
 			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
@@ -521,29 +633,49 @@
 				note: 'Empties the one host scene and becomes its root. It is an Object3D, so moving it moves everything.',
 				methods: [
 					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
-					'pick(x, y)', 'raycast(origin, direction)',
+					'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()', 'toJSON()',
 				],
 				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
 			},
 			Mesh: {
 				construct: 'new three.Mesh(assetRef)',
 				note: 'assetRef comes from asset.mesh(name) or asset.meshAt(i). N meshes sharing one ref is one draw call.',
-				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent'],
-				methods: ['add(...)', 'remove(...)', 'traverse(fn)', 'getWorldPosition()'],
+				properties: [
+					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'material', 'children', 'parent',
+				],
+				methods: ['add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()', 'toJSON()'],
+			},
+			ShaderMaterial: {
+				construct: "new three.ShaderMaterial({ fragment, uniforms })",
+				note:
+					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
+					+ 'Surface has albedo, normal, uv and position, all world space. Each uniform is readable '
+					+ 'in the body by its own name. Compiles on construction, so a bad shader throws here, '
+					+ 'carrying the Slang diagnostic with the line number you wrote. Needs a GPU device.',
+				properties: ['uniforms (live: mat.uniforms.tint = [1, 0, 0])', 'fragment'],
+				methods: ['toJSON()'],
 			},
 			Group: {
 				construct: 'new three.Group()',
 				note: 'Transforms its children and draws nothing itself.',
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'toJSON()',
+				],
+				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
 			},
 			Vector3: {
 				construct: 'new three.Vector3(null, x, y, z)',
 				note: 'position/rotation/scale are live Vector3s: writing x, y, z or calling set() moves the object.',
-				methods: ['set(x,y,z)', 'copy(v)', 'add(v)', 'sub(v)', 'multiplyScalar(s)', 'length()', 'clone()', 'toArray()'],
+				methods: [
+					'set(x,y,z)', 'copy(v)', 'add(v)', 'sub(v)', 'multiplyScalar(s)', 'length()', 'clone()',
+					'toArray()', 'toJSON()', 'toString()',
+				],
 			},
 			Asset: {
 				construct: 'three.load(path)',
 				properties: ['path', 'meshes (names, in load order)'],
-				methods: ['mesh(name)', 'meshAt(index)'],
+				methods: ['mesh(name)', 'meshAt(index)', 'toJSON()'],
 			},
 		},
 		functions: {
@@ -552,6 +684,19 @@
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
+			'toJSON() / toString()':
+				'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
+				+ 'return an object from a script. Objects report their name, transform and children; a '
+				+ 'Vector3 reports [x, y, z]; a ShaderMaterial reports its fragment and uniforms.',
+			'new three.ShaderMaterial({ fragment, uniforms })':
+				'Compile a fragment function into a material. Uniforms are at most 68 bytes in total '
+				+ '(17 floats); each is a number or an array of up to four numbers.',
+			'mesh.material':
+				'Assign a ShaderMaterial, or null for the default shader. Meshes sharing a mesh ref AND a '
+				+ 'material are one draw call; giving two of them different materials makes two.',
+			'material.uniforms.<name>':
+				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
+				+ 'construction exist; assigning to any other name throws.',
 			'scene.pick(x, y)':
 				'What is under a pixel of the rendered image, counted from its top-left corner. ' +
 				'Answers with an intersection (below) or null. Needs a GPU device.',

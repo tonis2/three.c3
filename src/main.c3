@@ -9,11 +9,20 @@
 	--height <n>          offscreen render height (default 720)
 	--headless            no window, no surface, no swapchain
 	--validate            Vulkan validation layers + debug messenger
+	--no-validate         turn them off — --mcp turns them on by default
 	--grid <n>            n instances of the model, to see M2's claim hold
 
  **`--mcp` is the driving surface M3 exists for**; everything else here is the
  CLI the base stage was driven by, kept because it is how a human looks at a
  file and how `--stress-resize` and `--grid` stay runnable.
+
+ **`--mcp` implies `--validate`.** `plan.md` §4: "run the validation layers
+ whenever a script is executing". Serving is when scripts execute, and a
+ validation error only becomes part of `run_script`'s answer if the layer that
+ produces it is loaded — so leaving it to the caller would mean the third of the
+ four things a run answers with is usually absent. `--no-validate` is the way
+ back out; a machine with no layer installed needs neither, because
+ `create_instance` skips it and says so.
 
  The server's handlers run on *this* thread — `Listener` moves bytes on its own
  and `pump` runs the work on the caller's — so a script, the scene it builds and
@@ -39,6 +48,9 @@ struct Options
 	uint height;
 	bool headless;
 	bool validate;
+	// Kept apart from `validate` so that "not asked for" and "asked to be off"
+	// stay distinguishable while --mcp is deciding the default.
+	bool no_validate;
 	String shader;
 	bool system_driver;
 	bool stress_resize;
@@ -68,6 +80,8 @@ fn Options? parse_args(String[] args)
 				opts.headless = true;
 			case "--validate":
 				opts.validate = true;
+			case "--no-validate":
+				opts.no_validate = true;
 			case "--system-driver":
 				opts.system_driver = true;
 			case "--stress-resize":
@@ -118,6 +132,12 @@ fn Options? parse_args(String[] args)
 	if (opts.stress_resize) opts.headless = false;
 	// A server that rendered one frame and exited would be no server at all.
 	if (opts.mcp_port > 0) opts.screenshot = "";
+	// Serving is when scripts run, and a script's validation errors are part of
+	// what `run_script` answers with — see the header. `--no-validate` wins
+	// outright rather than by position, because a flag whose meaning depends on
+	// what came before it on the line is a flag people get wrong.
+	if (opts.no_validate) { opts.validate = false; }
+	else if (opts.mcp_port > 0) { opts.validate = true; }
 
 	return opts;
 }
@@ -135,6 +155,7 @@ fn void usage()
 	io::printn("  --height <n>          offscreen render height (default 720)");
 	io::printn("  --headless            no window, no surface, no swapchain");
 	io::printn("  --validate            Vulkan validation layers + debug messenger");
+	io::printn("  --no-validate         turn them off — --mcp turns them on by default");
 	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
 	io::printn("  --grid <n>            place n instances of the model in a grid");
 	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");

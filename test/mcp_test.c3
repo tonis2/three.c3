@@ -20,6 +20,7 @@ import three;
 import vk;
 import image;
 import mcp;
+import qjs;
 import std::core::test;
 import std::io;
 import std::encoding::base64;
@@ -51,6 +52,116 @@ macro @with_server(; @body(mcp::Server* server))
 	mcp::Server server = three::new_mcp_server(&host);
 
 	@body(&server);
+}
+
+<*
+ The same server with the validation layer loaded, which is what `--mcp` gives a
+ caller by default (`main.c3`, and `plan.md` §4: run the layers whenever a script
+ is executing).
+
+ It also installs two host functions of its own. That is the point of the
+ fixture: the claim under test is that a validation error *raised by a script*
+ becomes that script's error, and asserting it needs something the script can
+ call. Installing them from the test rather than putting a hook in `js/runtime.c3`
+ keeps the production surface exactly what an agent gets — the functions go in
+ the same way `install_console` puts `console` there, through the public context.
+
+ The layer is not on every machine and `create_instance` skips it when it is
+ missing, so every check below asks `gpu.validation` first rather than assuming
+ there is anything to capture.
+*>
+macro @with_validating_server(; @body(mcp::Server* server, three::JsRuntime* runtime))
+{
+	vk::Instance instance = three::create_instance(true, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 160, 120, validate: true)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, &renderer)!!;
+	defer runtime.close();
+
+	qjs::Value global = runtime.js.global();
+	runtime.js.set_property(
+		global,
+		"provokeValidationError",
+		runtime.js.function(&js_provoke_error, "provokeValidationError", 0, &renderer)
+	);
+	runtime.js.set_property(
+		global,
+		"provokeValidationWarning",
+		runtime.js.function(&js_provoke_warning, "provokeValidationWarning", 0, &renderer)
+	);
+	runtime.js.release(global);
+
+	three::ToolHost host = { .runtime = &runtime, .renderer = &renderer };
+	mcp::Server server = three::new_mcp_server(&host);
+
+	@body(&server, &runtime);
+}
+
+<*
+ `provokeValidationError()` in a script: a real error from the Khronos layer,
+ raised from inside the run.
+
+ A zero-size buffer breaks VUID-VkBufferCreateInfo-size-00912, and the layer
+ checks it *before* forwarding the call — so the message is genuine and nothing
+ invalid ever reaches the driver. `plan.md` §4's own example of a validation bug
+ is a hang; a test suite is the wrong place to find one.
+*>
+fn void js_provoke_error(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	three::Renderer* renderer = (three::Renderer*)opaque;
+	vk::Buffer? refused = vk::bufferCreateInfo()
+		.setSize(0)
+		.setUsage((vk::BufferUsageFlags)vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT)
+		.build(renderer.gpu.handle);
+	// The layer refuses it, so there is normally nothing here. Guarded rather
+	// than assumed: without the layer the call succeeds and this would leak.
+	if (try made = refused) vk::destroyBuffer(renderer.gpu.handle, made, null);
+}
+
+<*
+ `provokeValidationWarning()` in a script.
+
+ Handed to the loader rather than provoked, because the interesting warnings are
+ driver-specific and none of them can be relied on to appear. Going through
+ `vkSubmitDebugUtilsMessageEXT` keeps what is under test honest anyway: the
+ loader dispatches to registered messengers, so the severity mask and the
+ `pUserData` are exercised exactly as a real message would exercise them.
+*>
+fn void js_provoke_warning(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	three::Renderer* renderer = (three::Renderer*)opaque;
+	ZString id = "THREE-TEST-WARNING";
+	ZString text = "advice, not a defect";
+	vk::DebugUtilsMessengerCallbackDataEXT data = vk::debugUtilsMessengerCallbackDataEXT()
+		.setMessageIdName((char*)id)
+		.setMessage((char*)text);
+	vk::submitDebugUtilsMessageEXT(
+		renderer.gpu.instance,
+		vk::DebugUtilsMessageSeverityFlagBitsEXT.DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+		(vk::DebugUtilsMessageTypeFlagsEXT)vk::DebugUtilsMessageTypeFlagBitsEXT.DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+		&data
+	);
 }
 
 <*
@@ -223,7 +334,10 @@ fn void the_tier_one_example_arrives_as_a_string_and_comes_back_as_a_png() @test
 		String response = call(server, "run_script", arguments);
 		defer response.free(mem);
 
-		test::@check(!response.contains(`"error"`), "the call succeeded: %s", response);
+		// Escaped, because the report is a JSON string inside the content array
+		// and its keys arrive as `\"error\"`. Spelled `"error"` this never
+		// matched anything and the check was decoration.
+		test::@check(!response.contains(`\"error\"`), "the call succeeded: %s", response);
 		test::@check(response.contains(`\"drawCalls\":1`), "one draw call in the stats block: %s", response);
 		test::@check(response.contains(`\"instances\":12`), "twelve instances");
 		test::@check(response.contains(`\"ok\":true`), "and the run reported success");
@@ -291,6 +405,210 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
 		defer response.free(mem);
 
 		test::@check(response.contains("source"), "the missing argument is named: %s", response);
+	};
+}
+
+// ============================================================================
+// Validation, from the script that caused it to the reply
+// ============================================================================
+
+<*
+ Serving turns the layers on, and `--no-validate` turns them off again.
+
+ `plan.md` §4 asks for validation whenever a script is executing, and serving is
+ the mode where scripts execute. Left to the caller it would be off almost
+ always, and the third of the four things a run answers with would be
+ permanently empty — which from the outside looks exactly like a device that
+ never complains.
+
+ The last case is the one worth writing down: `--no-validate` wins wherever it
+ appears, because a flag whose meaning depends on what came before it on the
+ line is a flag people get wrong.
+*>
+fn void serving_turns_validation_on_and_no_validate_turns_it_off() @test
+{
+	String[*] serving = { "three", "--mcp", "--headless" };
+	three::Options on = three::parse_args(serving[..])!!;
+	test::@check(on.validate, "--mcp left validation off");
+
+	String[*] refused = { "three", "--mcp", "--no-validate", "--headless" };
+	three::Options off = three::parse_args(refused[..])!!;
+	test::@check(!off.validate, "--no-validate did not turn it off");
+
+	String[*] plain = { "three", "--headless", "model.glb" };
+	three::Options cli = three::parse_args(plain[..])!!;
+	test::@check(!cli.validate, "validation leaked into the plain CLI path");
+
+	String[*] both = { "three", "--validate", "--no-validate", "--mcp" };
+	three::Options wins = three::parse_args(both[..])!!;
+	test::@check(!wins.validate, "--no-validate lost to a --validate that came first");
+}
+
+<*
+ A validation error raised by the script fails the run and arrives as the run's
+ error.
+
+ This is `plan.md` §4's "routes validation errors into the thrown JS exception",
+ asserted on the thing rather than on the flag: nothing in JavaScript threw, and
+ the run still has to come back failed with the layer's own words in it.
+
+ `value` is checked alongside, because §4's other rule is that a run answers with
+ all four whatever happened. A validation failure that threw away what the script
+ returned would be the same "guess how far it got" the whole contract exists to
+ remove.
+*>
+fn void a_validation_error_from_a_script_fails_the_run() @test
+{
+	@with_validating_server(; mcp::Server* server, three::JsRuntime* runtime)
+	{
+		if (!runtime.renderer.gpu.validation)
+		{
+			io::printn("  (skipped: VK_LAYER_KHRONOS_validation is not installed)");
+			return;
+		}
+
+		three::RunResult result = runtime.run(`provokeValidationError(); return 7;`);
+		defer result.free();
+
+		test::@check(!result.ok, "the run reported success anyway: error=%s", result.error);
+		test::@check(
+			result.error.contains("VUID-VkBufferCreateInfo-size"),
+			"the layer's own VUID is the error: %s",
+			result.error
+		);
+		test::@check(result.error.contains("validation ERROR"), "with its severity: %s", result.error);
+		test::@check(result.value == "7", "and the script's value survived: %s", result.value);
+	};
+}
+
+<*
+ The same error, all the way out through `run_script`.
+
+ The last link in the chain and the only one an agent actually sees. It is
+ asserted separately from the `RunResult` check above because the report only
+ emits `error` when the run failed — so an implementation that captured the
+ message and left `ok` alone would pass that check and drop the text here.
+*>
+fn void a_validation_error_comes_back_through_run_script() @test
+{
+	@with_validating_server(; mcp::Server* server, three::JsRuntime* runtime)
+	{
+		if (!runtime.renderer.gpu.validation) return;
+
+		String arguments = script_arguments(`console.log("built the scene"); provokeValidationError();`);
+		defer arguments.free(mem);
+
+		String response = call(server, "run_script", arguments);
+		defer response.free(mem);
+
+		test::@check(response.contains(`\"ok\":false`), "the run reported failure: %s", response);
+		test::@check(response.contains(`\"error\"`), "and the reply has an error field");
+		test::@check(response.contains("VUID-VkBufferCreateInfo-size"), "carrying the VUID: %s", response);
+		test::@check(response.contains("built the scene"), "and the log came back too");
+
+		String payload = image_payload(response);
+		defer payload.free(mem);
+		test::@check(payload.len > 0, "and a frame, as a failed run always does");
+	};
+}
+
+<*
+ A run that did nothing wrong does not acquire an error from the layer being on.
+
+ The check that keeps this feature honest. A messenger that captured the frame
+ *before* it, or a sink that was never cleared, both show up as a clean script
+ failing — and a false validation error is worse than none, because the agent
+ goes looking for a bug that is not there.
+*>
+fn void a_clean_script_gains_no_validation_error() @test
+{
+	@with_validating_server(; mcp::Server* server, three::JsRuntime* runtime)
+	{
+		if (!runtime.renderer.gpu.validation) return;
+
+		// The tier-one example, not an empty scene. A clean render is the claim,
+		// and it is only worth making about the path that actually uploads
+		// geometry and a texture and issues an instanced draw — an empty scene
+		// records nothing and would hold however broken the draw was.
+		String arguments = script_arguments(`
+			const kit  = await three.load("test/fixtures/textured.glb");
+			const wall = kit.mesh(kit.meshes[0]);
+			const scene = new three.Scene();
+			for (let i = 0; i < 12; i++) {
+			  const m = new three.Mesh(wall);
+			  m.position.set(i * 2, 0, 0);
+			  scene.add(m);
+			}
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+			return "fine";
+		`);
+		defer arguments.free(mem);
+
+		String response = call(server, "run_script", arguments);
+		defer response.free(mem);
+
+		test::@check(response.contains(`\"ok\":true`), "the clean run succeeded: %s", response);
+		test::@check(!response.contains(`\"error\"`), "and gained no error: %s", response);
+	};
+}
+
+<*
+ A warning is logged and the run still succeeds.
+
+ Warnings and errors are answered with differently on purpose: an agent that
+ cannot tell advice from a defect stops believing either, and a PERFORMANCE
+ warning failing a run would make the layer unusable to leave on. So the text has
+ to be somewhere it can be read, and `ok` has to stay true.
+*>
+fn void a_validation_warning_is_logged_without_failing_the_run() @test
+{
+	@with_validating_server(; mcp::Server* server, three::JsRuntime* runtime)
+	{
+		if (!runtime.renderer.gpu.validation) return;
+
+		String arguments = script_arguments(`provokeValidationWarning(); return "fine";`);
+		defer arguments.free(mem);
+
+		String response = call(server, "run_script", arguments);
+		defer response.free(mem);
+
+		test::@check(response.contains(`\"ok\":true`), "a warning did not fail the run: %s", response);
+		test::@check(!response.contains(`\"error\"`), "and produced no error field: %s", response);
+		test::@check(response.contains("THREE-TEST-WARNING"), "and it is in the log where it can be read: %s", response);
+		test::@check(response.contains("validation WARNING"), "labelled as advice, not a defect");
+	};
+}
+
+<*
+ A script that threw *and* tripped validation keeps both.
+
+ The two are different facts and the second rarely explains the first. Replacing
+ the script's own message with the layer's would hand the agent a Vulkan VUID for
+ a plain TypeError three lines earlier, which is a worse error than either.
+*>
+fn void a_script_that_threw_keeps_its_own_error_beside_the_validation_one() @test
+{
+	@with_validating_server(; mcp::Server* server, three::JsRuntime* runtime)
+	{
+		if (!runtime.renderer.gpu.validation) return;
+
+		three::RunResult result = runtime.run(
+			`provokeValidationError(); throw new Error("the script had its own complaint");`
+		);
+		defer result.free();
+
+		test::@check(!result.ok, "the run failed");
+		test::@check(
+			result.error.contains("the script had its own complaint"),
+			"the script's message survived: %s",
+			result.error
+		);
+		test::@check(
+			result.error.contains("VUID-VkBufferCreateInfo-size"),
+			"and the layer's is there too: %s",
+			result.error
+		);
 	};
 }
 

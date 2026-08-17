@@ -331,6 +331,94 @@ fn void interleaved_meshes_still_bucket() @test
 }
 
 <*
+ One mesh under two materials is two draws and one mesh.
+
+ The exact moment `SceneStats`' header predicted from M2 — "`draw_calls` and
+ `unique_meshes` will stop being the same number the moment one mesh can be drawn
+ under two materials". Until M5 `unique_meshes` was literally `buckets.len()`, so
+ it would have answered two here and been wrong while looking right.
+
+ No GPU shader is compiled: the material indices are written straight onto the
+ nodes, because what is under test is the bucket key and the count, not the
+ pipeline behind them. Index 1 and 2 need not resolve for this — `stats()` never
+ looks a material up, and the draw loop that does is not running.
+*>
+fn void one_mesh_under_two_materials_is_two_draws_and_one_mesh() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		three::NodeId first = scene.add_mesh(0, 0);
+		three::NodeId second = scene.add_mesh(0, 0);
+		three::NodeId third = scene.add_mesh(0, 0);
+
+		three::SceneStats shared = renderer.pass.stats();
+		test::@check(shared.draw_calls == 1, "four copies on one material took %d draws", shared.draw_calls);
+		test::@check(shared.unique_meshes == 1, "and are %d unique meshes", shared.unique_meshes);
+
+		// Two of them move to a second material, one to a third.
+		scene.set_material(first, 1);
+		scene.set_material(second, 1);
+		scene.set_material(third, 2);
+
+		three::SceneStats split = renderer.pass.stats();
+		test::@check(split.draw_calls == 3, "three materials over one mesh took %d draws", split.draw_calls);
+		test::@check(
+			split.unique_meshes == 1,
+			"the mesh was drawn three ways and is still one mesh, got %d",
+			split.unique_meshes
+		);
+		test::@check(split.instances == 4, "no instance was lost or invented, got %d", split.instances);
+
+		// The slices must still tile the instance array exactly, or a bucket's
+		// pointer offset lands in another material's transforms.
+		uint total = 0;
+		foreach (bucket : scene.buckets)
+		{
+			test::@check(bucket.first == total, "bucket starts at %d, expected %d", bucket.first, total);
+			total += bucket.count;
+		}
+		test::@check(total == split.instances, "the buckets cover %d of %d", total, split.instances);
+	};
+}
+
+<*
+ A node built in a recycled slot does not inherit the last tenant's material.
+
+ `create_slot` resets every field but `children` and `generation`, and a field
+ left out of that block is a stale value from whoever held the slot before —
+ invisible until the slot is actually reused, which `a_removed_node_leaves_a_stale_handle`
+ proves does happen. For a material the symptom would be a new mesh silently
+ drawing with a stranger's shader.
+*>
+fn void a_reused_slot_does_not_inherit_a_material() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::NodeId first = scene.add_mesh(0, 0);
+		scene.set_material(first, 3);
+		uint slot = first.index;
+		scene.remove(first);
+
+		three::NodeId second = scene.add_mesh(0, 0);
+		test::@check(second.index == slot, "the slot was not reused, so this test proved nothing");
+
+		three::Node* node = scene.node(second);
+		test::@check(node != null, "the new node resolves");
+		test::@check(
+			node.material == three::DEFAULT_MATERIAL,
+			"a recycled slot came back on material %d instead of the default",
+			node.material
+		);
+	};
+}
+
+<*
  Culling drops instances outside the frustum, and `stats()` does not see it.
 
  Two triangles a kilometre apart with the camera on one of them. Culling on:
@@ -801,5 +889,110 @@ fn void instances_land_where_their_transforms_say() @test
 
 		test::@check(left_half > 20, "only %d lit pixels on the left; the instance at x = -2 is missing", left_half);
 		test::@check(right_half > 20, "only %d lit pixels on the right; both instances drew at the same transform", right_half);
+	};
+}
+
+<*
+ Two draws with different descriptors each get the one they pushed.
+
+ `plan.md`'s M0/M1 findings recorded that KosmicKrisp's `vkCmdPushDescriptorSetKHR`
+ "breaks subsequent draws when descriptorWriteCount > 0". M5 moved the entire
+ texture path onto that call, so that finding has to be re-measured rather than
+ assumed stale — it was the stated reason the extension was left out.
+
+ The sharpest case available: the 1x1 white stand-in and a real texture, which
+ are two genuinely different descriptors pushed back to back. A driver that let
+ the first push leak into the second would draw the textured quads white, or the
+ triangle textured.
+
+ Self-calibrating rather than asserting colour constants. Each half is rendered
+ alone to learn what it looks like, then both together, and every pixel either
+ half painted must be unchanged by the other's presence. That needs the two not
+ to overlap, which is what the triangle's offset is for.
+*>
+fn void two_draws_with_different_textures_do_not_bleed() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
+		uint triangle = renderer.pass.assets.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		three::NodeId tri = scene.add_mesh(triangle, 0);
+		scene.set_position(tri, { 0, 2.2, 0 });
+
+		// Every node the fixture placed, so they can be hidden as a group.
+		three::NodeId[2] quads;
+		uint found = 0;
+		foreach (slot, &node : scene.nodes)
+		{
+			if (!node.alive || node.asset != 0 || node.mesh == three::NO_MESH) continue;
+			if (found < 2) quads[found++] = { .index = (uint)slot, .generation = node.generation };
+		}
+		test::@check(found == 2, "the fixture placed %d quads, expected 2", found);
+
+		renderer.pass.camera.target = { 0, 1, 0 };
+		renderer.pass.camera.yaw = 0;
+		renderer.pass.camera.pitch = 0;
+		renderer.pass.camera.distance = 8;
+
+		// The triangle alone.
+		foreach (id : quads) scene.set_visible(id, false);
+		renderer.render_offscreen()!!;
+		image::Image alone_tri = renderer.capture()!!;
+		defer alone_tri.free();
+
+		// The textured quads alone.
+		scene.set_visible(tri, false);
+		foreach (id : quads) scene.set_visible(id, true);
+		renderer.render_offscreen()!!;
+		image::Image alone_quads = renderer.capture()!!;
+		defer alone_quads.free();
+
+		// Both, which is two buckets and two different descriptors.
+		scene.set_visible(tri, true);
+		renderer.render_offscreen()!!;
+		image::Image both = renderer.capture()!!;
+		defer both.free();
+
+		float[4] clear = renderer.clear;
+		uint tri_pixels = count_drawn(&alone_tri, clear);
+		uint quad_pixels = count_drawn(&alone_quads, clear);
+		test::@check(tri_pixels > 100, "the triangle drew %d pixels on its own", tri_pixels);
+		test::@check(quad_pixels > 100, "the quads drew %d pixels on their own", quad_pixels);
+
+		uint changed_tri = 0;
+		uint changed_quads = 0;
+		for (sz i = 0; i < both.pixels.len; i += 4)
+		{
+			bool tri_here = alone_tri.pixels[i] != both.pixels[i]
+				|| alone_tri.pixels[i + 1] != both.pixels[i + 1]
+				|| alone_tri.pixels[i + 2] != both.pixels[i + 2];
+			bool quad_here = alone_quads.pixels[i] != both.pixels[i]
+				|| alone_quads.pixels[i + 1] != both.pixels[i + 1]
+				|| alone_quads.pixels[i + 2] != both.pixels[i + 2];
+
+			// A pixel the triangle painted must look the same with the quads there.
+			int dr = (int)alone_tri.pixels[i] - (int)(char)(uint)(clear[0] * 255.0 + 0.5);
+			int dg = (int)alone_tri.pixels[i + 1] - (int)(char)(uint)(clear[1] * 255.0 + 0.5);
+			int db = (int)alone_tri.pixels[i + 2] - (int)(char)(uint)(clear[2] * 255.0 + 0.5);
+			if (dr * dr + dg * dg + db * db > 12 && tri_here) changed_tri++;
+
+			int qr = (int)alone_quads.pixels[i] - (int)(char)(uint)(clear[0] * 255.0 + 0.5);
+			int qg = (int)alone_quads.pixels[i + 1] - (int)(char)(uint)(clear[1] * 255.0 + 0.5);
+			int qb = (int)alone_quads.pixels[i + 2] - (int)(char)(uint)(clear[2] * 255.0 + 0.5);
+			if (qr * qr + qg * qg + qb * qb > 12 && quad_here) changed_quads++;
+		}
+
+		test::@check(
+			changed_tri == 0,
+			"%d of the triangle's pixels changed once a textured draw joined it — the pushed descriptor bled",
+			changed_tri
+		);
+		test::@check(
+			changed_quads == 0,
+			"%d of the quads' pixels changed once the untextured draw joined them — the pushed descriptor bled",
+			changed_quads
+		);
 	};
 }

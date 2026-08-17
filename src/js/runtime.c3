@@ -32,6 +32,14 @@
  GLOBAL or MODULE and nothing else. Reaching it would mean changing that
  submodule.
 
+ ## The device gets to speak into the error too
+
+ A validation error caused by the script is the script's error, even though
+ nothing in JavaScript threw. `plan.md` §4 asks for exactly that route, and the
+ alternative is a message on a terminal nobody is looking at. `collect_validation`
+ is where the two meet; the window it covers, and the one it does not, are
+ written down there.
+
  ## A script cannot run forever
 
  `Context.on_interrupt` is armed for the whole run and is the only thing that
@@ -216,6 +224,10 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>")
 	self.log.clear();
 	self.value.clear();
 	self.error.clear();
+	// The fourth thing cleared, for the same reason as the other three: what the
+	// device complained about during *this* run is what this run answers with.
+	// See `collect_validation`.
+	if (self.renderer != null) self.renderer.gpu.begin_capture();
 	self.timed_out = false;
 	self.settled = false;
 	self.rejected = false;
@@ -245,6 +257,8 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>")
 			self.await_settled(started);
 		}
 	};
+
+	self.collect_validation();
 
 	SceneStats stats = self.pass != null ? self.pass.stats() : (SceneStats){};
 
@@ -332,6 +346,55 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 fn String timeout_message() @local
 {
 	return string::tformat("the script ran for longer than %d ms and was stopped", JS_BUDGET_MS);
+}
+
+<*
+ Fold what the validation layer said during the run into the run's answer.
+
+ This is `plan.md` §4's "routes validation errors into the thrown JS exception".
+ **An ERROR fails the run**, because a run that reports `ok: true` beside a frame
+ the driver refused to draw is the loop lying to the agent, and the agent has no
+ other way to find out. A WARNING does not fail it: a warning is advice, and an
+ agent that cannot tell advice from a defect stops believing either. So warnings
+ go where the script's own `console.warn` would have gone.
+
+ **The script's own error is kept.** Validation text is appended after it, never
+ in place of it — they are two different facts, and the second rarely explains
+ the first. A script that threw *because* the render failed needs both halves to
+ say so.
+
+ The sink is read **before** capture is released. In between, a message would
+ take the messenger's printing path and be gone; the two statements are adjacent
+ and on one thread, so in between is nothing, and it stays nothing only because
+ the order is written down.
+
+ What this does not reach: anything the layer says *after* the run returns.
+ `mcp/server.c3` renders the reply's PNG once the RunResult has been built, and
+ a message from that render lands in a buffer the next `begin_capture` clears. A
+ script that calls `three.render()` itself is inside the window — `render_offscreen`
+ waits on its fence — which is what makes the messages attributable at all.
+*>
+fn void JsRuntime.collect_validation(&self)
+{
+	if (self.renderer == null) return;
+	Gpu* gpu = &self.renderer.gpu;
+	if (!gpu.validation) return;
+
+	String warnings = gpu.sink.warnings.str_view();
+	if (warnings.len > 0) self.log.append_string(warnings);
+
+	String errors = gpu.sink.errors.str_view();
+	if (errors.len > 0)
+	{
+		if (self.error.len() > 0) self.error.append_char('\n');
+		// The sink newline-terminates its lines so they stack; an error is one
+		// string handed to one caller and should not trail off into one.
+		self.error.append_string(errors[errors.len - 1] == '\n' ? errors[:errors.len - 1] : errors);
+		self.rejected = true;
+		self.settled = true;
+	}
+
+	gpu.end_capture();
 }
 
 // ============================================================================

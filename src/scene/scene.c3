@@ -65,6 +65,7 @@ struct Bucket
 {
 	uint asset;
 	uint mesh;
+	uint material;
 	uint first;
 	uint count;
 }
@@ -72,9 +73,15 @@ struct Bucket
 <*
  What an agent reads its own cost off (`plan.md`'s second thesis).
 
- `draw_calls` and `unique_meshes` are the same number at M2 and will stop being
- so the moment one mesh can be drawn under two materials — they are reported
- separately now so that the day they diverge is not the day the field is added.
+ `draw_calls` and `unique_meshes` were the same number from M2 to M4 and the
+ header said they would stop being so "the moment one mesh can be drawn under two
+ materials". M5 is that moment. `draw_calls` is the bucket count; `unique_meshes`
+ counts distinct (asset, mesh) pairs across those buckets, so one mesh drawn under
+ two materials is now two draws and one mesh.
+
+ Reporting them separately before they diverged is what made this a one-line
+ change rather than a wire-format change — the day they diverged was not the day
+ the field was added.
 *>
 struct SceneStats
 {
@@ -91,9 +98,17 @@ struct SceneStats
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
-// buckets. The key packs (asset, mesh) so the sort is one integer compare.
+// buckets. `key` packs (asset, mesh); `material` is kept beside it rather than
+// folded in because `bucket_key` already spends all 64 bits on two full-range
+// uints and narrowing either half to make room would be a silent wrap rather
+// than an error. Two compares instead of one is the cheaper price.
+//
+// Material leads the sort so that consecutive buckets share a pipeline wherever
+// they can, which is what keeps the per-bucket `cmdBindPipeline` from thrashing
+// once a scene uses more than one material.
 struct Draw @local
 {
+	uint material;
 	ulong key;
 	uint slot;
 }
@@ -242,6 +257,11 @@ fn NodeId Scene.create_slot(&self, NodeId parent, uint asset, uint mesh, String 
 	node.normal = matrix::IDENTITY4{float};
 	node.asset = asset;
 	node.mesh = mesh;
+	// Reset like everything else here, and for a sharper reason: this slot may
+	// have belonged to a node with a `ShaderMaterial`, and a new node inheriting
+	// it would draw with a stranger's shader. `a_reused_slot_does_not_inherit_a_material`
+	// is the check.
+	node.material = DEFAULT_MATERIAL;
 	node.visible = true;
 	node.world_visible = true;
 	node.dirty = true;
@@ -392,6 +412,27 @@ fn void Scene.set_visible(&self, NodeId id, bool visible)
 	// Visibility is inherited, and inheritance is resolved in the same walk the
 	// world matrices are, so a change to it is a dirty node like any other.
 	node.dirty = true;
+}
+
+<*
+ Draw this node with a different material.
+
+ No `dirty` flag, unlike `set_visible` and the transform setters. Those three
+ feed the world-matrix walk, which caches its result; the material feeds the
+ bucket key, and `build_draw_list` throws the whole draw list away and rebuilds
+ it from scratch every frame. Setting a flag for it would be a flag nothing ever
+ reads.
+
+ The index is not validated here — `Scene` has no view of `MeshPass.materials`,
+ and reaching for one would put the render pass inside the scene graph. The JS
+ verb validates before it calls, and `MeshPass.record` skips a bucket whose
+ material does not resolve.
+*>
+fn void Scene.set_material(&self, NodeId id, uint material)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.material = material;
 }
 
 <*
@@ -640,26 +681,38 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 			continue;
 		}
 
-		self.draws.push({ .key = bucket_key(node.asset, node.mesh), .slot = (uint)slot });
+		self.draws.push({
+			.material = node.material,
+			.key = bucket_key(node.asset, node.mesh),
+			.slot = (uint)slot,
+		});
 	}
 
 	if (self.draws.len() == 0) return;
 
 	quicksort(self.draws.array_view(), fn int(Draw a, Draw b) {
+		if (a.material < b.material) return -1;
+		if (a.material > b.material) return 1;
 		if (a.key < b.key) return -1;
 		if (a.key > b.key) return 1;
 		return 0;
 	});
 
-	ulong open = self.draws[0].key + 1; // deliberately not equal to the first key
+	// Deliberately not equal to the first draw, so the first iteration always
+	// opens a bucket. `open_material` has to be part of that sentinel now: two
+	// materials over one mesh are adjacent in the sort and share a key.
+	ulong open = self.draws[0].key + 1;
+	uint open_material = self.draws[0].material;
 	foreach (draw : self.draws)
 	{
-		if (draw.key != open)
+		if (draw.key != open || draw.material != open_material)
 		{
 			open = draw.key;
+			open_material = draw.material;
 			self.buckets.push({
 				.asset = (uint)(draw.key >> 32),
 				.mesh = (uint)(draw.key & 0xffffffff),
+				.material = draw.material,
 				.first = (uint)self.instances.len(),
 				.count = 0,
 			});
@@ -672,6 +725,39 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 }
 
 fn ulong bucket_key(uint asset, uint mesh) @inline => ((ulong)asset << 32) | (ulong)mesh;
+
+<*
+ How many distinct meshes the buckets cover.
+
+ Was `buckets.len()` until M5, when it stopped meaning that: one mesh drawn under
+ two materials is two buckets and one mesh. `SceneStats`' own header predicted
+ this — "they are reported separately now so that the day they diverge is not the
+ day the field is added" — and the divergence is the point of the field.
+
+ A quadratic scan rather than a set, because the buckets are sorted
+ material-major and (asset, mesh) pairs are therefore not adjacent, and because
+ the count is bucket-sized: a scene with two hundred distinct meshes does forty
+ thousand integer compares once per `stats()` call, which is not a number worth a
+ hash table and an allocation.
+*>
+fn uint count_unique_meshes(Bucket[] buckets)
+{
+	uint unique = 0;
+	foreach (i, bucket : buckets)
+	{
+		bool seen = false;
+		for (sz j = 0; j < i; j++)
+		{
+			if (buckets[j].asset == bucket.asset && buckets[j].mesh == bucket.mesh)
+			{
+				seen = true;
+				break;
+			}
+		}
+		if (!seen) unique++;
+	}
+	return unique;
+}
 
 <*
  The numbers, computed fresh with culling off.
@@ -688,7 +774,7 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 
 	SceneStats stats = {
 		.draw_calls = (uint)self.buckets.len(),
-		.unique_meshes = (uint)self.buckets.len(),
+		.unique_meshes = count_unique_meshes(self.buckets.array_view()),
 		.instances = (uint)self.instances.len(),
 		.textures = (uint)assets.textures.len(),
 		.texture_bytes = assets.texture_bytes(),

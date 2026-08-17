@@ -67,6 +67,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "pick", &js_pick, 2);
 	self.bind(host, "raycast", &js_raycast, 6);
 
+	// Materials (js/bind_shader.c3)
+	self.bind_shader_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "render", &js_render, 0);

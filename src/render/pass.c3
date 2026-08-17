@@ -5,7 +5,8 @@
 
 	scene.update      world matrices, cull, sort, write Instance records
 	upload            the frame block and the instance array, this slot's copies
-	per bucket        bind the texture set, push 60 bytes, vkCmdDrawIndexed(N)
+	per bucket        bind the material's pipeline if it changed, push the
+	                  texture, push the block, vkCmdDrawIndexed(N)
 
  There is no single-instance shortcut. A lone mesh is a bucket of one, drawn by
  the same call with an instance count of one, reading its transform out of the
@@ -27,6 +28,7 @@ import std::io;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
+import std::collections::list;
 import vk;
 import collision;
 
@@ -40,6 +42,12 @@ struct MeshPass
 	// it — the cache owns every pipeline it hands out and frees them all.
 	PipelineCache pipelines;
 	MeshPipeline* pipeline;
+	// Every material any node can name. Index 0 is `DEFAULT_MATERIAL`, built in
+	// `init` from `pipeline`, so a scene that never mentions a material still has
+	// one. Lives here rather than on `JsRuntime` for the same reason `assets`
+	// does: `new three.Scene()` resets the graph, and a material an agent
+	// compiled should survive that exactly as a loaded `.glb` does.
+	List{Material} materials;
 	Assets assets;
 	Scene scene;
 	Camera camera;
@@ -77,11 +85,42 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 		self.pipeline = self.pipelines.acquire(gpu, target, source, path, CULL_MODE_BACK_BIT)!;
 	};
 
+	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
+	// a material, so `Node.material` never has to mean "none". Its uniform block
+	// is empty: `mesh.slang` declares no fields past `flags`, so nothing above
+	// `MATERIAL_PUSH_START` is ever read out of it.
+	self.materials.init(mem, 4);
+	self.materials.push({ .pipeline = self.pipeline, .fragment = "" });
+
 	self.assets.init();
 	self.scene.init();
 	self.camera = default_camera();
 	self.light = { 0.35, 0.80, 0.45, 0.25 };
+
+	// Set here rather than by the loaders, which is where it used to be set and
+	// was a bug: `ready` guards `record` against running without a *pipeline*,
+	// and the pipeline exists as of this function. Gating it on a load instead
+	// meant the three CLI entry points switched rendering on and the JS path —
+	// which calls `Assets.load` directly and never touches these — did not, so
+	// `three.render()` from a script drew nothing at all. Nothing caught it
+	// because no JS test asserted on pixels; `mcp_test` checks that a PNG comes
+	// back, and a blank PNG comes back fine.
+	//
+	// An empty scene is already handled a few lines into `record`, where zero
+	// buckets returns, so this is not a weaker guard than what it replaces.
+	self.ready = true;
 	return *self;
+}
+
+<*
+ Resolve a material index.
+
+ @return `The material, or null if the index names nothing — which the draw loop treats as "skip this bucket" rather than as a fault.`
+*>
+fn Material* MeshPass.material(&self, uint index)
+{
+	if (index >= self.materials.len()) return null;
+	return &self.materials[index];
 }
 
 <*
@@ -93,10 +132,9 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 *>
 fn void? MeshPass.load(&self, Gpu* gpu, String path)
 {
-	uint asset = self.assets.load(gpu, self.pipeline, path)!;
+	uint asset = self.assets.load(gpu, path)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
-	self.ready = true;
 }
 
 <*
@@ -109,10 +147,9 @@ fn void? MeshPass.load(&self, Gpu* gpu, String path)
 *>
 fn void? MeshPass.load_triangle(&self, Gpu* gpu)
 {
-	uint asset = self.assets.load_triangle(gpu, self.pipeline)!;
+	uint asset = self.assets.load_triangle(gpu)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
-	self.ready = true;
 }
 
 <*
@@ -154,8 +191,8 @@ fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
 	if (count == 0) return;
 
 	uint asset = path.len > 0
-		? self.assets.load(gpu, self.pipeline, path)!
-		: self.assets.load_triangle(gpu, self.pipeline)!;
+		? self.assets.load(gpu, path)!
+		: self.assets.load_triangle(gpu)!;
 
 	// Clear whatever `load` put there; the grid is the whole scene.
 	self.scene.remove(self.scene.root);
@@ -181,7 +218,6 @@ fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
 	}
 
 	self.frame_camera();
-	self.ready = true;
 }
 
 <*
@@ -217,15 +253,40 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	ulong frame_address = self.write_frame_block(gpu, slot, &frame)!;
 	ulong instance_address = self.write_instances(gpu, slot)!;
 
-	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+	// Bound per bucket since M5, because a bucket is now (asset, mesh, material)
+	// and the material chooses the pipeline. `build_draw_list` sorts
+	// material-major precisely so this stays one bind per material rather than
+	// one per bucket — `bound` is what turns that ordering into skipped calls.
+	vk::Pipeline bound = (vk::Pipeline)null;
 
 	foreach (bucket : self.scene.buckets)
 	{
 		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
 		if (mesh == null) continue;
 
-		vk::DescriptorSet set = self.assets.set_for(mesh);
-		vk::cmdBindDescriptorSets(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.layout, 0, 1, &set, 0, null);
+		// A bucket whose material does not resolve is skipped rather than drawn
+		// with the default. Falling back would put the wrong shader on screen and
+		// look like a shader bug; drawing nothing looks like what it is.
+		Material* material = self.material(bucket.material);
+		if (material == null) continue;
+		MeshPipeline* pipeline = material.pipeline;
+
+		if (pipeline.handle != bound)
+		{
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			bound = pipeline.handle;
+		}
+
+		// Pushed, not bound. There is no descriptor set anywhere in this project:
+		// the image and sampler are specified inline against this pipeline's own
+		// layout, so a material's shader gets its texture through its own layout
+		// rather than through one baked at load time against a different pipeline.
+		// `scene/asset.c3`'s header has the argument.
+		vk::DescriptorImageInfo image_info = self.assets.texture_for(mesh).descriptor();
+		vk::WriteDescriptorSet write = vk::writeDescriptorSet().setDstBinding(0)
+			.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.setImageInfo({ image_info });
+		vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &write);
 
 		MeshPush push = {
 			.frame = frame_address,
@@ -254,14 +315,25 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// field, so they cannot drift without an edit that hardcodes one of them.
 		// `check_push_block` has already proved the first `push_size` bytes of
 		// `MeshPush` are exactly the fields the shader declares.
-		vk::cmdPushConstants(
-			cmd,
-			self.pipeline.layout,
-			self.pipeline.shader.stages,
-			0,
-			self.pipeline.shader.push_size,
-			&push
-		);
+		// The mesh contract first, the material's uniforms on top of it. A
+		// `Material.block` is laid out *as the push block itself* rather than as a
+		// list of values, so this is two memcpys with no per-uniform loop and no
+		// offset arithmetic here — Slang decided those offsets and reflection read
+		// them back. Everything below `MATERIAL_PUSH_START` in the material's copy
+		// is dead space that this overwrites every draw.
+		char[PUSH_BUDGET] staging;
+		uint push_size = pipeline.shader.push_size;
+		mem::copy(&staging[0], (char*)&push, MeshPush::size);
+		if (push_size > MATERIAL_PUSH_START)
+		{
+			mem::copy(
+				&staging[MATERIAL_PUSH_START],
+				&material.block[MATERIAL_PUSH_START],
+				(sz)(push_size - MATERIAL_PUSH_START)
+			);
+		}
+
+		vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, push_size, &staging);
 
 		// Index binding is independent of vertex bindings, which is why the
 		// pass can have an index buffer and no vertex input state at all.
@@ -318,6 +390,47 @@ fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
 *>
 fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
 
+<*
+ Compile a material from an agent's fragment body.
+
+ The pipeline comes from the same `PipelineCache` the built-in shader uses, keyed
+ on the assembled source, so two `ShaderMaterial`s written with identical bodies
+ share one `VkPipeline` and the second one skips the Slang call entirely
+ (`plan.md` §7). They are still two materials — uniform values are pushed per
+ draw, so two materials over one pipeline are two buckets with different bytes.
+
+ The diagnostic is handed back rather than printed, which is the whole point:
+ `plan.md` §5's done condition for M5 is that a bad shader throws a JS error
+ carrying the Slang text. It is set on success too, because a warning arrives
+ with `ok == true` and an agent that never sees its warnings writes the same
+ mistake twice.
+
+ @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
+ @return `The material index, for Node.material.`
+*>
+fn uint? MeshPass.create_material(
+	&self,
+	Gpu* gpu,
+	Target* target,
+	String fragment,
+	MaterialUniform[] uniforms,
+	String* diagnostic = null
+)
+{
+	uint index;
+	@pool()
+	{
+		String source = material_source(fragment, uniforms, tmem)!;
+		MeshPipeline* pipeline = self.pipelines.acquire(
+			gpu, target, source, "three.material", CULL_MODE_BACK_BIT, diagnostic
+		)!;
+
+		index = (uint)self.materials.len();
+		self.materials.push({ .pipeline = pipeline, .fragment = fragment.copy(mem) });
+	};
+	return index;
+}
+
 fn void MeshPass.free(&self, Gpu* gpu)
 {
 	for (uint i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -328,6 +441,9 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	}
 	self.scene.free();
 	self.assets.free(gpu);
+	// Before the cache, which owns the pipelines these borrow.
+	foreach (&material : self.materials) material.free();
+	self.materials.free();
 	self.pipelines.free(gpu);
 	self.pipeline = null;
 	self.ready = false;
