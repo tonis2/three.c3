@@ -683,8 +683,21 @@ fn void a_pick_returns_to_the_middle_of_the_pixel_it_named() @test
 
 			test::@check(math::abs(clip[3]) > 1e-6f, "pixel (%d, %d) projected to a degenerate w", column, row);
 
+			// Vulkan's viewport transform, with the viewport `gpu/target.c3`
+			// actually binds: `.y = height, .height = -height`. That gives
+			//
+			//     y_framebuffer = y_vp + h_vp * (ndc_y + 1) / 2
+			//                   = height - height * (ndc_y + 1) / 2
+			//                   = height * (1 - ndc_y) / 2
+			//
+			// so the row axis runs *opposite* to NDC +Y. Writing the y mapping
+			// the same way as the x one is what let a flipped `screen_ray` pass
+			// this check for a whole milestone: the round trip cancelled a sign
+			// error that both halves of it shared. See
+			// `a_pick_agrees_with_the_pixels_it_was_counted_in`, which asks the
+			// rendered frame instead of asking this test's own arithmetic.
 			float back_x = ((clip[0] / clip[3]) * 0.5f + 0.5f) * (float)W;
-			float back_y = ((clip[1] / clip[3]) * 0.5f + 0.5f) * (float)H;
+			float back_y = (1.0f - (clip[1] / clip[3])) * 0.5f * (float)H;
 
 			test::@check(
 				close(back_x, (float)column + 0.5f, 0.01f),

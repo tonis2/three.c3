@@ -62,14 +62,22 @@ declared beside it.
 object under a pixel of the rendered image — and so does tier 2: an agent writes
 `float3 shade(Surface s)`, three.c3 writes the module around it, and a bad body
 throws a JS error carrying Slang's own diagnostic with the line number the agent
-wrote. `c3c test --trust=full` runs a hundred and twenty-four checks, all
+wrote. `c3c test --trust=full` runs a hundred and twenty-seven checks, all
 headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
+	three --mcp-stdio                   relay stdin/stdout to that server
 	three <file.glb> --grid 1000        a thousand copies, one draw call
 	three <file.glb> --screenshot a.png render one frame, exit
 	three --validate                    validation layers + a device report
+
+**`.mcp.json` is checked in**, and names the relay rather than a URL. A client
+asks who a server is the moment it launches and may write it off for the rest of
+its run if that fails, so a URL would mean three has to be up before the client
+and stay up for as long as it. The relay is up either way: the handshake and the
+tool list are answered from the build, and a call made while nothing is serving
+comes back naming the port instead of vanishing.
 
 **There is no shader build step.** `shaders/mesh.slang` is compiled at startup,
 so editing it and re-running shows the change with nothing rebuilt — not the app,
@@ -116,9 +124,7 @@ was verified and how.
   the instance and `select_device` skips any portability device. See the header
   of `gpu/device.c3`.
 - **The push block is 124 bytes** and the 128-byte budget holds.
-- **`VK_KHR_push_descriptor` is not requested.** Nothing uses it — KosmicKrisp's
-  `vkCmdPushDescriptorSetKHR` breaks subsequent draws when `descriptorWriteCount
-  > 0` — and requiring an unused extension can only turn devices away.
+
 
   **Overtaken at M5, and the defect did not reproduce.** It is now required, and
   it is the only way a texture reaches a draw: there are no descriptor pools or

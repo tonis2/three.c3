@@ -112,6 +112,14 @@ every pixel it tries rather than on one in a hundred and sixty. It deliberately
 avoids the exact centre of the image: at the middle of an even-sized target the
 half cancels against the symmetry and a picker with no half at all passes.
 
+**This paragraph was half wrong, and S8 is what it cost.** A round trip through
+one mapping and back cannot see an error that the mapping and its inverse share —
+which is exactly what a flipped Y is. Dropping the pixel comparison for it left
+the picker able to answer the top of the image with what was drawn at the bottom,
+for the rest of the milestone. Both tests are needed, and they are not the same
+check written twice: the round trip pins the half-pixel, the pixels pin the
+direction.
+
 After the fix, the same row comparison over the wire disagrees on **0 of 160**
 columns.
 
@@ -338,6 +346,57 @@ attributes the next frame to the script that just finished, or restructuring the
 reply. Neither is worth it for a message the script did not cause. Everything the
 script itself triggers is covered, including a `three.render()` inside it, because
 `render_offscreen` waits on its fence before returning.
+
+### S8 — the picker's Y ran the wrong way (found after the milestone closed)
+
+Found by opening the window, serving MCP into it, and building a ring of 252
+panels from a script: a pick aimed near the bottom of the ring kept naming a
+panel from the top of it.
+
+    scene.pick(640, 185)   the WHITE quad's pixels, world y = +2  ->  DOWN_red, y -2.01
+    scene.pick(640, 535)   the RED quad's pixels,   world y = -2  ->  UP_white, y +2.02
+
+`screen_ray` built NDC Y in the same direction as the row index:
+
+    float ndc_y = ((y + 0.5f) / (float)height) * 2.0f - 1.0f;   // top row -> -1
+
+with a comment arguing that the negative-height viewport in `gpu/target.c3`
+removes the need for a flip. The premise is true and the conclusion is backwards:
+`.y = height, .height = -height` is precisely what puts NDC +1 at the **top** row,
+so a row index counted from the top runs from +1 down to −1 and the flip is
+required. The renderer was never wrong — a quad at world y = +2 draws at the top
+of the image — only the picker was.
+
+**Every existing picking test passed with the bug in**, and the first injection
+run failed exactly one check out of 127 — the new one. Why each of the others
+missed it:
+
+- `picking_the_centre_of_the_image_finds_what_is_centred` picks the centre, and
+  the centre row is the one row a flip leaves alone.
+- `picking_respects_an_instance_scale` and `picking_skips_what_is_invisible` use
+  fixtures symmetric about that centre.
+- `a_pick_returns_to_the_middle_of_the_pixel_it_named` — S2's round trip, written
+  *because* the pixel comparison was called "a coin flip dressed as a check" —
+  was blind to it for a reason worth spelling out. It projected a point on the
+  ray back to a pixel with `back_y = (ndc_y * 0.5 + 0.5) * H`, which is the
+  un-flipped mapping written out by hand: the same wrong assumption `screen_ray`
+  held. The round trip therefore proved the two halves were inverses of each
+  other, which they were, and said nothing about which way either pointed.
+
+That second finding is the larger one. The correct back projection is not a
+convention this suite gets to choose — it is Vulkan's viewport transform applied
+to the viewport `gpu/target.c3` binds, `y_framebuffer = height * (1 - ndc_y) / 2`
+— so the test now derives it and cites where it comes from. **With that
+corrected, putting the flip back fails two checks rather than one**, and the
+half-pixel bug S2 found is still caught by the round trip alone. The two are not
+the same check written twice: the round trip pins the half-pixel, the pixels pin
+the direction.
+
+The new check takes its ground truth from the frame instead of from arithmetic:
+render two quads either side of the target, scan the image for the topmost row
+with anything drawn in it, and require a pick on that row to name the quad the
+renderer put there. A picture is the one source a shared convention error cannot
+corrupt. It is `a_pick_agrees_with_the_pixels_it_was_counted_in`.
 
 ## Where this departed from `plan.md`
 

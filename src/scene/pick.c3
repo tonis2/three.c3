@@ -153,12 +153,19 @@ fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint 
 	float aspect = (float)width / (float)height;
 	Matrix4f inverse_view_projection = invert(camera.view_projection(aspect));
 
-	// To normalised device coordinates. Y is *not* flipped: `gpu/target.c3`
-	// binds a negative-height viewport, so a pixel row counted from the top maps
-	// to NDC +Y up without a second flip — the same reasoning that keeps
-	// `Camera.projection` free of one.
+	// To normalised device coordinates. **Y is flipped, and the negative-height
+	// viewport is the reason rather than the exemption.** `gpu/target.c3` binds
+	// `.y = height, .height = -height`, which puts NDC +Y at the *top* row of
+	// the image; a pixel row counted from the top therefore runs from +1 down to
+	// -1, the opposite direction to the column.
+	//
+	// Getting this backwards is invisible to every test that asks the picker to
+	// agree with itself — a round trip through the same mapping, a pick at the
+	// centre, a symmetric fixture — because the centre row is the one row a flip
+	// leaves alone. It shows up only against the rendered image, which is what
+	// `a_pick_agrees_with_the_pixels_it_was_counted_in` compares it to.
 	float ndc_x = ((x + 0.5f) / (float)width) * 2.0f - 1.0f;
-	float ndc_y = ((y + 0.5f) / (float)height) * 2.0f - 1.0f;
+	float ndc_y = 1.0f - ((y + 0.5f) / (float)height) * 2.0f;
 
 	Vec3 near_point = unproject(inverse_view_projection, ndc_x, ndc_y, 0.0f);
 	Vec3 far_point  = unproject(inverse_view_projection, ndc_x, ndc_y, 1.0f);

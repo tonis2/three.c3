@@ -23,7 +23,10 @@ import mcp;
 import qjs;
 import std::core::test;
 import std::io;
+import std::io::file;
+import std::collections::object;
 import std::encoding::base64;
+import std::encoding::json;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -442,6 +445,99 @@ fn void serving_turns_validation_on_and_no_validate_turns_it_off() @test
 	String[*] both = { "three", "--validate", "--no-validate", "--mcp" };
 	three::Options wins = three::parse_args(both[..])!!;
 	test::@check(!wins.validate, "--no-validate lost to a --validate that came first");
+}
+
+// ============================================================================
+// The stdio relay, which is what a client actually launches
+// ============================================================================
+
+<*
+ `--mcp-stdio` names a port however it is written.
+
+ The flag's whole job is to reach the port the *other* process bound, and
+ getting that wrong fails in the one way that is hard to read: a relay pointed
+ at 8808 while three serves on 9100 answers the handshake perfectly — the
+ catalog does not need the application — and then fails every call after it,
+ which looks like a broken tool rather than like a mistyped port.
+
+ The last case is the trap `--mcp` already documents. The port is optional, so a
+ following argument is consumed only when it really is one; without that,
+ `three --mcp-stdio model.glb` would relay to nowhere and report no file.
+*>
+fn void the_relay_flag_names_a_port_in_every_order() @test
+{
+	String[*] bare = { "three", "--mcp-stdio" };
+	three::Options plain = three::parse_args(bare[..])!!;
+	test::@check(plain.relay_stdio, "--mcp-stdio did not ask for the relay");
+	test::@check(
+		plain.mcp_port == three::DEFAULT_MCP_PORT,
+		"a bare --mcp-stdio relays to %d rather than the default", plain.mcp_port
+	);
+
+	String[*] after = { "three", "--mcp", "9100", "--mcp-stdio" };
+	three::Options follows = three::parse_args(after[..])!!;
+	test::@check(follows.relay_stdio && follows.mcp_port == 9100, "--mcp 9100 --mcp-stdio went to %d", follows.mcp_port);
+
+	String[*] before = { "three", "--mcp-stdio", "--mcp", "9200" };
+	three::Options precedes = three::parse_args(before[..])!!;
+	test::@check(precedes.relay_stdio && precedes.mcp_port == 9200, "--mcp-stdio --mcp 9200 went to %d", precedes.mcp_port);
+
+	String[*] own = { "three", "--mcp-stdio", "9300" };
+	three::Options carried = three::parse_args(own[..])!!;
+	test::@check(carried.relay_stdio && carried.mcp_port == 9300, "--mcp-stdio 9300 went to %d", carried.mcp_port);
+
+	String[*] with_model = { "three", "--mcp-stdio", "model.glb" };
+	three::Options kept = three::parse_args(with_model[..])!!;
+	test::@check(kept.model == "model.glb", "--mcp-stdio swallowed the model: '%s'", kept.model);
+	test::@check(kept.mcp_port == three::DEFAULT_MCP_PORT, "and left the port at %d", kept.mcp_port);
+}
+
+<*
+ The `.mcp.json` in the repository names a command line this binary accepts.
+
+ That file is read by a client before it launches anything, and nothing else in
+ this suite would notice it drifting: rename the flag, and every test here still
+ passes while every session that reads the file finds a "server" that prints
+ usage and exits. So the arguments are taken from the file as written and put
+ through the real `parse_args`, and the answer has to be a relay.
+
+ The command is checked by name rather than by opening it, because `c3c test`
+ builds a test binary and need not have built `./build/three` at all — a check
+ that failed on a clean checkout would be one people learn to ignore.
+*>
+fn void the_checked_in_mcp_json_launches_this_binary() @test
+{
+	char[]? bytes = file::load_temp(".mcp.json");
+	if (catch err = bytes)
+	{
+		test::@check(false, "no .mcp.json at the project root: %s", err);
+		return;
+	}
+
+	Object*? parsed = json::parse(tmem, (String)bytes);
+	if (catch err = parsed)
+	{
+		test::@check(false, ".mcp.json is not valid JSON: %s", err);
+		return;
+	}
+	Object* config = parsed;
+
+	Object* entry = config.get("mcpServers")!!.get("three")!!;
+	String command = entry.get_string("command")!!;
+	test::@check(command.ends_with("three"), "the command is '%s', which is not this project's binary", command);
+
+	Object* listed = entry.get("args")!!;
+	String[8] argv;
+	usz argc = 0;
+	argv[argc++] = command;
+	for (sz i = 0; i < listed.get_len(); i++)
+	{
+		argv[argc++] = listed.get_string_at(i)!!;
+	}
+
+	three::Options opts = three::parse_args(argv[0:argc])!!;
+	test::@check(opts.relay_stdio, "the arguments in .mcp.json do not start a relay");
+	test::@check(opts.mcp_port > 0, "the relay has no port to reach");
 }
 
 <*
