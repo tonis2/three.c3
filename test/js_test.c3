@@ -558,3 +558,282 @@ fn void a_bad_path_says_which_path() @test
 		test::@check(result.error.contains("no/such/file.glb"), "the path is in the message: %s", result.error);
 	};
 }
+
+// ============================================================================
+// Picking
+// ============================================================================
+//
+// `plan.md` §7 calls the raycast "the suite that catches a projection and a
+// raycast that disagree" — the half of a 3D app that fails silently, where
+// everything still renders and things land somewhere other than where they were
+// asked for. `scene_test.c3` makes that check against `Scene` directly; what is
+// left for here is the binding: that a hit comes back as the object the script
+// is holding, that a miss is `null` rather than something falsy-but-not-null,
+// and that the two verbs treat a missing device differently on purpose.
+//
+// The fixture's geometry is exact and worth having to hand: `quad_left` spans
+// x from -1.25 to -0.25, `quad_right` spans 0.25 to 1.25, both are one unit
+// tall about y = 0 and both lie flat in the plane z = 0 facing +Z.
+
+<*
+ A hit answers with the `Mesh` the script built, not with a handle.
+
+ That is the whole point of the binding — `hit.object.position.set(...)` is the
+ line an agent writes next — and it is asserted by identity rather than by name,
+ because a rebuilt-from-the-handle object would compare equal on every field and
+ still be the wrong thing to hold.
+
+ The second copy five units behind the first is there so that returning the
+ first node found rather than the closest has something wrong to return.
+*>
+fn void a_hit_answers_with_the_object_the_script_built() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+
+			const near = new three.Mesh(kit.mesh("quad_left"));
+			near.name = "near";
+			scene.add(near);
+
+			const far = new three.Mesh(kit.mesh("quad_left"));
+			far.name = "far";
+			far.position.set(0, 0, -5);
+			scene.add(far);
+
+			// -0.75 is the centre of quad_left; the ray runs down -Z from ten out.
+			const hit = scene.raycast([-0.75, 0, 10], [0, 0, -1]);
+			return {
+				same: hit.object === near,
+				name: hit.name,
+				distance: Math.abs(hit.distance - 10) < 1e-3,
+				point: Math.abs(hit.point.x + 0.75) < 1e-3 && Math.abs(hit.point.z) < 1e-3,
+				normal: Math.abs(hit.normal.z - 1) < 1e-3,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"same":true,"name":"near","distance":true,"point":true,"normal":true}`,
+			"the near quad came back whole; got %s", result.value
+		);
+	};
+}
+
+<*
+ The object a hit hands back is the live one, not a copy of it.
+
+ Moving it moves the node, which the second cast proves by finding nothing where
+ the first one hit. A binding that rebuilt an `Object3D` around the handle would
+ pass every check above and fail this one silently — the script would place
+ things and nothing would move.
+*>
+fn void the_object_a_hit_returns_is_the_live_one() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			const quad = new three.Mesh(kit.mesh("quad_left"));
+			scene.add(quad);
+
+			const hit = scene.raycast([-0.75, 0, 10], [0, 0, -1]);
+			hit.object.position.x = 40;
+
+			return {
+				moved: scene.raycast([-0.75, 0, 10], [0, 0, -1]) === null,
+				followed: scene.raycast([39.25, 0, 10], [0, 0, -1]) !== null,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"moved":true,"followed":true}`,
+			"the returned object drove the node; got %s", result.value);
+	};
+}
+
+<*
+ A miss is `null`, and it is `null` rather than an empty array.
+
+ Three.js's `intersectObjects` answers with a list, so a script written from
+ memory may well test `hits.length`. On an empty array that reads false and on
+ `null` it throws — which is the loud half of the divergence, and is why the
+ docs say so in `differences` rather than leaving it to be discovered.
+*>
+fn void a_miss_is_null_not_an_empty_list() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(kit.mesh("quad_left")));
+
+			// x = 0 is the gap between the two quads, so this is a miss over a
+			// scene that plainly has geometry in it.
+			const miss = scene.raycast([0, 0, 10], [0, 0, -1]);
+			return { isNull: miss === null, notArray: !Array.isArray(miss) };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"isNull":true,"notArray":true}`,
+			"a miss answered null; got %s", result.value);
+	};
+}
+
+<*
+ What cannot be seen cannot be picked, and hiding a parent hides its children.
+
+ `Scene.raycast` skips on `world_visible`, which is resolved in the same walk
+ that builds the world matrices — so this also asserts that the walk ran before
+ the cast rather than after it.
+*>
+fn void picking_skips_what_is_invisible() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+
+			const near = new three.Mesh(kit.mesh("quad_left"));
+			near.name = "near";
+			scene.add(near);
+
+			// The far one lives under a group, so hiding the group has to hide it.
+			const group = new three.Group();
+			const far = new three.Mesh(kit.mesh("quad_left"));
+			far.name = "far";
+			far.position.set(0, 0, -5);
+			group.add(far);
+			scene.add(group);
+
+			const down = [[-0.75, 0, 10], [0, 0, -1]];
+			const first = scene.raycast(...down).name;
+
+			near.visible = false;
+			const second = scene.raycast(...down).name;
+
+			group.visible = false;
+			const third = scene.raycast(...down);
+
+			return { first, second, third };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"first":"near","second":"far","third":null}`,
+			"visibility drove the picks; got %s", result.value);
+	};
+}
+
+<*
+ A pick through the centre of the image finds what is in the centre of it.
+
+ The camera is the one the renderer draws with and the ray comes out of the same
+ view-projection, so this is the binding's version of §7's projection-and-raycast
+ check. The second copy twenty units to the left is there so a `pick` that
+ ignored its arguments still has something wrong to return.
+
+ `renderSize` is asserted alongside because it is the only way a script can know
+ what to halve, and a `pick` counted against the wrong extent misses by a
+ proportion rather than failing.
+*>
+fn void picking_the_centre_of_the_image_finds_what_is_centred() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+
+			// quad_left is centred on x = -0.75, so this puts it over the origin.
+			const centred = new three.Mesh(kit.mesh("quad_left"));
+			centred.name = "centred";
+			centred.position.set(0.75, 0, 0);
+			scene.add(centred);
+
+			const aside = new three.Mesh(kit.mesh("quad_left"));
+			aside.name = "aside";
+			aside.position.set(-20, 0, 0);
+			scene.add(aside);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 5);
+
+			const { width, height } = three.renderSize();
+			const hit = scene.pick(width / 2, height / 2);
+			const corner = scene.pick(0, 0);
+
+			return { size: [width, height], name: hit.object.name, corner };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"size":[200,150],"name":"centred","corner":null}`,
+			"the centre picked the centred quad and the corner picked nothing; got %s", result.value);
+	};
+}
+
+<*
+ A ray needs somewhere to point, and a vector has to be readable.
+
+ Both messages name the argument rather than the failure, because the script
+ that produces them is being written by something that cannot see this file.
+*>
+fn void a_ray_that_points_nowhere_says_so() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const said = [];
+			try { scene.raycast([0, 0, 0], [0, 0, 0]); } catch (e) { said.push(e.message); }
+			try { scene.raycast("here", [0, 0, -1]); } catch (e) { said.push(e.message); }
+			try { scene.pick("middle", 0); } catch (e) { said.push(e.message); }
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("points nowhere"), "the zero direction was named: %s", result.value);
+		test::@check(result.value.contains("Vector3"), "the unreadable vector said what it wanted: %s", result.value);
+		test::@check(result.value.contains("pixel coordinates"), "and so did the bad pick: %s", result.value);
+	};
+}
+
+<*
+ Without a device the two verbs differ, and the difference is deliberate.
+
+ A world-space raycast needs no GPU: with nothing loaded there is nothing to hit,
+ and `null` is the true answer rather than an error. A `pick` needs the extent of
+ an image that does not exist, so it says which piece is missing — the same
+ shape as `three.load`'s and `three.render`'s messages.
+*>
+fn void picking_without_a_device_says_which_verb_needs_one() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const cast = scene.raycast([0, 0, 10], [0, 0, -1]);
+			try {
+				scene.pick(1, 1);
+				return { cast, picked: "no throw" };
+			} catch (e) {
+				return { cast, picked: e.message };
+			}
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"cast":null`), "the empty scene was cast through: %s", result.value);
+		test::@check(result.value.contains("GPU device"), "and the pick named the reason: %s", result.value);
+	};
+}

@@ -30,6 +30,7 @@ module three;
 import std::io;
 import std::math;
 import std::math::vector;
+import collision;
 import qjs;
 
 <*
@@ -62,9 +63,14 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "worldPosition", &js_world_position, 2);
 
+	// Picking
+	self.bind(host, "pick", &js_pick, 2);
+	self.bind(host, "raycast", &js_raycast, 6);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "render", &js_render, 0);
+	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "frameAll", &js_frame_all, 0);
@@ -365,6 +371,111 @@ fn void js_world_position(
 }
 
 // ============================================================================
+// Picking
+// ============================================================================
+
+<*
+ A `Hit` as JavaScript sees it, or `null` for a miss.
+
+ **A miss is `null` rather than an empty list**, which is where this diverges
+ from Three.js's `intersectObjects`. `Scene.raycast` answers with the closest
+ drawable node and nothing behind it, so a list would never hold more than one
+ thing and its length would be a fact about this implementation rather than
+ about the scene. A name Three.js does not have (`pick`) and a shape that cannot
+ be mistaken for its array is `plan.md` §4's rule for a divergence.
+
+ The node handle rides along so `prelude.js` can hand back the `Object3D` a
+ script built rather than an index, and the name rides along because a scene
+ opened from the command line has nodes no script ever made an object for —
+ `object: null` with nothing beside it would be a dead end.
+*>
+fn qjs::Value hit_value(JsRuntime* self, qjs::Context* js, Hit hit)
+{
+	if (!hit.hit) return qjs::null_value();
+
+	qjs::Value found = js.object();
+	js.set_property(found, "node", handle_value(js, hit.node));
+	js.set_property(found, "distance", qjs::number_value(hit.distance));
+	js.set_property(found, "point", vec3_value(js, hit.point));
+	js.set_property(found, "normal", vec3_value(js, hit.normal));
+
+	Node* node = self.pass.scene.node(hit.node);
+	js.set_property(found, "name", js.string(node == null ? "" : node.name));
+	return found;
+}
+
+<*
+ `pick(x, y)` — what is under a pixel of the rendered image.
+
+ The extent is the **offscreen target's**, which is the image `screenshot` hands
+ back, so the coordinates an agent reads off the PNG it was given are the
+ coordinates this takes. A window, if there is one, never comes into it —
+ `plan.md` §1's decision that the swapchain is a consumer and not the target is
+ what makes that true without a second code path.
+
+ `screen_ray` derives the ray from the same view-projection the renderer draws
+ with, so "the ray goes where the picture goes" holds by construction.
+*>
+fn void js_pick(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("picking by screen position needs a GPU device and this context has none");
+		return;
+	}
+
+	collision::Ray ray = screen_ray(
+		&self.pass.camera,
+		arg_float(&js, argc, args, 0),
+		arg_float(&js, argc, args, 1),
+		self.renderer.target.extent.width,
+		self.renderer.target.extent.height,
+	);
+	*out = hit_value(self, &js, self.pass.scene.raycast(&self.pass.assets, ray));
+}
+
+<*
+ `raycast(ox, oy, oz, dx, dy, dz)` — a world-space ray.
+
+ No device is needed and none is asked for: with nothing loaded there is nothing
+ to hit and the answer is `null`, which is the truth rather than an error.
+
+ The direction is normalised here rather than being required to arrive that way.
+ `Hit.distance` is measured along a unit ray, so an unnormalised direction would
+ silently return a distance in units of its own length — the same class of
+ mistake `Scene.raycast` already guards against between instance scales.
+*>
+fn void js_raycast(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Vec3 origin = {
+		arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2)
+	};
+	Vec3 direction = {
+		arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5)
+	};
+
+	float length = direction.length();
+	if (length < 1e-12f)
+	{
+		*out = js.raise("raycast wants a direction with a length — (0, 0, 0) points nowhere");
+		return;
+	}
+
+	collision::Ray ray = { .origin = origin, .direction = direction / length };
+	*out = hit_value(self, &js, self.pass.scene.raycast(&self.pass.assets, ray));
+}
+
+// ============================================================================
 // The frame
 // ============================================================================
 
@@ -413,6 +524,33 @@ fn void js_render(
 	{
 		*out = js.raise(string::tformat("the frame could not be drawn: %s", err));
 	}
+}
+
+<*
+ `renderSize()` — the offscreen target's extent, as `[width, height]`.
+
+ Without it `pick(x, y)` would take pixels of an image whose size a script has
+ no way to ask for: the agent driving over MCP learns it from `screenshot`, and
+ a script running inside one call would have to be told. `pick(w / 2, h / 2)`
+ is the line this exists for.
+*>
+fn void js_render_size(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is no render target without a GPU device, so it has no size");
+		return;
+	}
+
+	qjs::Value pair = js.array();
+	js.set_index(pair, 0, qjs::int_value((int)self.renderer.target.extent.width));
+	js.set_index(pair, 1, qjs::int_value((int)self.renderer.target.extent.height));
+	*out = pair;
 }
 
 fn void js_camera_get(

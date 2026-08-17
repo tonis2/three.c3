@@ -544,6 +544,74 @@ fn void a_ray_through_the_screen_centre_hits_what_is_centred() @test
 	};
 }
 
+<*
+ A ray cast through a pixel comes back to the middle of that pixel.
+
+ `screen_ray` unprojects and `view_projection` projects, so sending a hit point
+ back through the matrix the renderer draws with has to land where the pick
+ started. That makes the check exact — no rasterizer, no tolerance beyond
+ floating point — and it pins the half-pixel that the rest of this suite cannot
+ see: the rasterizer decides coverage at a pixel's *centre*, so a picker that
+ casts through its corner is biased by half a pixel, always the same way.
+
+ That bias is what this was written against. Comparing picks against rendered
+ pixels catches it too, but only when a triangle edge happens to fall in the
+ right half of a pixel — one column in a hundred and sixty, on one particular
+ camera. This catches it on every pixel it tries.
+
+ Several pixels rather than one, and none of them the centre: at the exact
+ middle of an even-sized image the half cancels against the symmetry and a
+ picker with no half at all passes.
+*>
+fn void a_pick_returns_to_the_middle_of_the_pixel_it_named() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
+
+		three::Camera camera = three::default_camera();
+		camera.target = { 0, 0, 0 };
+		camera.yaw = 0;
+		camera.pitch = 0;
+		camera.distance = 4;
+
+		float aspect = (float)W / (float)H;
+		Matrix4f view_projection = camera.view_projection(aspect);
+
+		uint[4] columns = { 0, 37, 100, W - 1 };
+		uint[4] rows = { 0, 22, 75, H - 1 };
+
+		foreach (i, column : columns)
+		{
+			uint row = rows[i];
+			collision::Ray ray = three::screen_ray(&camera, (float)column, (float)row, W, H);
+
+			// One unit along the ray is as good as any other point on it: the
+			// projection of every point on a ray through the eye is the same
+			// pixel, which is what makes this independent of what is in the way.
+			Vec3 point = ray.origin + ray.direction;
+			float[<4>] homogeneous = { point.x, point.y, point.z, 1.0f };
+			float[<4>] clip = view_projection * homogeneous;
+
+			test::@check(math::abs(clip[3]) > 1e-6f, "pixel (%d, %d) projected to a degenerate w", column, row);
+
+			float back_x = ((clip[0] / clip[3]) * 0.5f + 0.5f) * (float)W;
+			float back_y = ((clip[1] / clip[3]) * 0.5f + 0.5f) * (float)H;
+
+			test::@check(
+				close(back_x, (float)column + 0.5f, 0.01f),
+				"a ray through column %d came back at %f, expected %f — the ray is not going through the pixel's centre",
+				column, back_x, (float)column + 0.5f
+			);
+			test::@check(
+				close(back_y, (float)row + 0.5f, 0.01f),
+				"a ray through row %d came back at %f, expected %f",
+				row, back_y, (float)row + 0.5f
+			);
+		}
+	};
+}
+
 // ============================================================================
 // The instance buffer
 // ============================================================================
