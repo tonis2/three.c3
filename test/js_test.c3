@@ -784,6 +784,109 @@ fn void picking_the_centre_of_the_image_finds_what_is_centred() @test
 }
 
 <*
+ A pick agrees with the picture it was counted in.
+
+ **This is the check the other picking tests cannot make.** Every one of them
+ asks the picker to agree with itself: a round trip through the same mapping, a
+ pick at the centre of the image, a fixture symmetric about that centre. A
+ vertical flip survives all three, because the centre row is the one row a flip
+ leaves alone — so the suite was green while `scene.pick` answered the top of
+ the image with what was drawn at the bottom.
+
+ The ground truth here is the frame instead. Two quads are placed either side of
+ the camera's target, the scene is rendered, and the *topmost* row with anything
+ drawn in it is found by scanning the pixels. Only the higher quad is drawn up
+ there, so a pick on that row has exactly one correct answer, and it is the one
+ the renderer put there rather than the one the picker derives.
+
+ Found by driving the API through the MCP server against a window: a pick near
+ the bottom of a ring of panels kept naming a panel from the top of it.
+ `screen_ray` built NDC Y in the same direction as the row index, while
+ `gpu/target.c3` binds `.height = -height`, which puts the top row at +1 — the
+ two ran opposite ways, and only a pixel could say so.
+*>
+fn void a_pick_agrees_with_the_pixels_it_was_counted_in() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			globalThis.scene = scene;
+
+			// quad_left is centred on x = -0.75, so +0.75 puts each over the axis:
+			// the only thing separating them is height.
+			const high = new three.Mesh(kit.mesh("quad_left"));
+			high.name = "high";
+			high.position.set(0.75, 1.5, 0);
+			scene.add(high);
+
+			const low = new three.Mesh(kit.mesh("quad_left"));
+			low.name = "low";
+			low.position.set(0.75, -1.5, 0);
+			scene.add(low);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 8);
+			three.render(scene, three.camera);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		// The clear colour, read out of a corner rather than assumed, so this
+		// keeps working if the background ever changes.
+		int back_r = (int)frame.pixels[0];
+		int back_g = (int)frame.pixels[1];
+		int back_b = (int)frame.pixels[2];
+
+		int top_x = -1;
+		int top_y = -1;
+		for (uint row = 0; row < frame.height && top_y < 0; row++)
+		{
+			for (uint col = 0; col < frame.width; col++)
+			{
+				usz at = ((usz)row * frame.width + col) * 4;
+				int dr = (int)frame.pixels[at] - back_r;
+				int dg = (int)frame.pixels[at + 1] - back_g;
+				int db = (int)frame.pixels[at + 2] - back_b;
+				if (math::abs(dr) + math::abs(dg) + math::abs(db) > 24)
+				{
+					top_x = (int)col;
+					top_y = (int)row;
+					break;
+				}
+			}
+		}
+
+		test::@check(top_y >= 0, "the frame has something drawn in it");
+		// Not an assertion about picking — an assertion that the fixture is the
+		// one this test reasons about. Two quads either side of the target, and
+		// the first geometry from the top belongs to the upper one.
+		test::@check(
+			top_y < (int)frame.height / 2,
+			"the topmost geometry is above the middle of the image, got row %d of %d", top_y, frame.height
+		);
+
+		// A few rows in from the silhouette, so an edge cannot decide this.
+		String question = string::tformat(
+			`const hit = globalThis.scene.pick(%d, %d); return hit ? hit.name : null;`, top_x, top_y + 4
+		);
+		three::RunResult picked = run.run(question);
+		defer picked.free();
+
+		test::@check(picked.ok, "the pick ran: %s", picked.error);
+		test::@check(
+			picked.value == `"high"`,
+			"a pick at (%d, %d) — a pixel the renderer drew the upper quad on — names it; got %s",
+			top_x, top_y + 4, picked.value
+		);
+	};
+}
+
+<*
  A ray needs somewhere to point, and a vector has to be readable.
 
  Both messages name the argument rather than the failure, because the script

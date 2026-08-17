@@ -4,6 +4,7 @@
 	three [file.glb] [options]
 
 	--mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
+	--mcp-stdio [port]    relay stdin/stdout to a three that is already serving
 	--screenshot <path>   render one frame, write a PNG, exit
 	--width <n>           offscreen render width  (default 1280)
 	--height <n>          offscreen render height (default 720)
@@ -55,8 +56,13 @@ struct Options
 	bool system_driver;
 	bool stress_resize;
 	uint grid;
-	// 0 for "do not serve". The port is only ever bound on 127.0.0.1.
+	// 0 for "do not serve". The port is only ever bound on 127.0.0.1 — and under
+	// `--mcp-stdio` it is the port *connected to* rather than bound, which is
+	// what makes `--mcp 9000 --mcp-stdio` relay to 9000.
 	int mcp_port;
+	// Be the stdio end of somebody else's server rather than a server: no
+	// window, no device, no scene. See `serve_relay`.
+	bool relay_stdio;
 	bool help;
 }
 
@@ -114,6 +120,20 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
+			case "--mcp-stdio":
+				// The same optional port, for the same reason — and a port
+				// already named by an earlier `--mcp` is kept, so the two flags
+				// compose in either order.
+				opts.relay_stdio = true;
+				if (opts.mcp_port == 0) opts.mcp_port = DEFAULT_MCP_PORT;
+				if (i + 1 < args.len)
+				{
+					if (try port = args[i + 1].to_int())
+					{
+						opts.mcp_port = port;
+						i++;
+					}
+				}
 			default:
 				if (arg.starts_with("-"))
 				{
@@ -150,6 +170,7 @@ fn void usage()
 	io::printn("  three [file.glb] [options]");
 	io::printn("");
 	io::printn("  --mcp [port]          serve the agent tools on 127.0.0.1 (default 8808)");
+	io::printn("  --mcp-stdio [port]    be the stdio end of a three that is already serving");
 	io::printn("  --screenshot <path>   render one frame, write a PNG, exit");
 	io::printn("  --width <n>           offscreen render width  (default 1280)");
 	io::printn("  --height <n>          offscreen render height (default 720)");
@@ -178,6 +199,11 @@ fn int main(String[] args)
 		usage();
 		return 0;
 	}
+
+	// Before anything that opens a window or a device, and before anything that
+	// could print: this process is the stdio end of another one's server, and
+	// the only thing a client will tolerate on its stdout is JSON-RPC.
+	if (opts.relay_stdio) return serve_relay(opts.mcp_port);
 
 	if (catch err = run(opts))
 	{
@@ -384,6 +410,40 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			thread::sleep_ms(4)!!;
 		}
 	}
+}
+
+<*
+ Answer JSON-RPC on stdin and stdout by forwarding it to a `three --mcp` that is
+ already running. This is `three --mcp-stdio`, and it is what `.mcp.json` names.
+
+ **What it buys over pointing a client at the port is lifetime.** A client asks
+ who a server is the moment it launches, and is entitled to write that server
+ off for the whole of its run if the question fails — so a bare URL means three
+ has to be up before the client and stay up for as long as it. A relay is up
+ whether or not three is, and a call that cannot reach one comes back as an
+ error naming the port rather than as a server that never started.
+
+ **It is not a second server.** It binds nothing, opens no window, creates no
+ device and holds no scene: `mcp::relay` makes one connection per message and
+ closes it, which is the contract `Listener` already keeps at the other end.
+ Several may run at once beside a windowed three without any of them knowing
+ about the others.
+
+ The catalog answers the four questions a client asks before it has done
+ anything — `initialize`, `ping`, `tools/list`, `resources/list` — out of the
+ registration table, so those answers are the same whether or not three is up.
+ It is registered over a zeroed `ToolHost` on this stack and nothing ever
+ dereferences it: `Server.answers_offline` lets only those four through, and all
+ three handlers begin by refusing a null runtime or renderer in any case.
+
+ @return `0 when stdin ends, which is how the client says it is finished.`
+*>
+fn int serve_relay(int port)
+{
+	ToolHost catalog_host = {};
+	mcp::Server catalog = new_mcp_server(&catalog_host);
+	mcp::relay("127.0.0.1", port, &catalog);
+	return 0;
 }
 
 <*

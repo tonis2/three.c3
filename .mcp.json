@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "three": {
+      "type": "stdio",
+      "command": "./build/three",
+      "args": ["--mcp-stdio"]
+    }
+  }
+}
