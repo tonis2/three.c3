@@ -1,0 +1,38 @@
+{
+	"langrev": "1",
+	"warnings": ["no-unused"],
+	"authors": [],
+	"version": "0.1.0",
+	"dependency-search-paths": ["lib"],
+	// quickjs and mcp are M3 dependencies and are deliberately not here yet:
+	// listing a dependency links its static library into every build, and the
+	// base stage has nothing that imports either of them. They go in when
+	// `js/` and `mcp/` do.
+	"dependencies": ["vk", "c3w", "gltf", "image", "collision"],
+	"features": [],
+	"script-dir": "./",
+	// Compiled into `c3c test` alongside the default target's sources, so a
+	// check here reaches anything in src/ without needing a target of its own.
+	"test-sources": ["test/**"],
+	"targets": {
+		"three": {
+			"type": "executable",
+			"sources": ["src/**"]
+		},
+		// A convenience, never the only way the .spv gets there: shaders/mesh.spv
+		// is read from disk at startup, so re-running slangc by hand changes the
+		// picture without rebuilding the app.
+		//
+		// **Last on purpose.** `c3c build` with no target builds the first one
+		// listed; a prepare target at the top turns every plain build into a
+		// shader compile that reports success and produces no binary. Needs
+		// --trust=full, or c3c skips the exec and still reports success.
+		"shaders": {
+			"type": "prepare",
+			"exec": [
+				"slangc ./shaders/mesh.slang -target spirv -emit-spirv-directly -fvk-use-entrypoint-name -o ./shaders/mesh.spv"
+			]
+		}
+	},
+	"output": "./build"
+}
