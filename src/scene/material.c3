@@ -110,18 +110,38 @@ struct Material
  `positions` through this door would corrupt a BDA pointer and crash in the
  driver rather than here.
 
+ ## One row at a time, because a table is a column of them
+
+ A uniform declared with rows is `float3 tint[4]` in the shader — one column of
+ the material's table, selected per instance by `Surface.variant`. It is written
+ a row at a time rather than whole, so the caller needs no view of the whole
+ column and `material.uniforms.tint[2] = [1, 0, 0]` is one crossing.
+
+ **The shape is stated rather than inferred**, which is what keeps the width
+ check exact. `field.size` alone cannot tell a `float4` from two `float2`s, so
+ asking the caller for both numbers and requiring `width * rows` to be the size
+ the shader reflected refuses a caller that has the shape wrong — instead of
+ silently writing half a row.
+
  @param values : `One to four floats. Must match the width the shader declared.`
+ @param row : `Which row of the column, 0 for a plain uniform.`
+ @param rows : `How many rows the caller believes the column has. 1 for a plain uniform.`
  @return? MATERIAL_UNIFORM_UNKNOWN : `No uniform of that name in this material.`
- @return? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components.`
+ @return? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components, a different number of rows, or the row is past the end.`
 *>
-fn void? Material.set_uniform(&self, String name, float[] values)
+fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, uint rows = 1)
 {
 	ShaderField* field = self.pipeline.shader.field_of(name);
 	if (field == null || field.offset < MATERIAL_PUSH_START) return MATERIAL_UNIFORM_UNKNOWN~;
-	if (field.size != values.len * float::size) return MATERIAL_UNIFORM_WIDTH~;
-	if (field.offset + field.size > PUSH_BUDGET) return MATERIAL_UNIFORM_WIDTH~;
 
-	mem::copy(&self.block[field.offset], values.ptr, field.size);
+	uint width = (uint)(values.len * float::size);
+	if (width == 0 || rows == 0 || row >= rows) return MATERIAL_UNIFORM_WIDTH~;
+	if (field.size != width * rows) return MATERIAL_UNIFORM_WIDTH~;
+
+	uint at = field.offset + row * width;
+	if (at + width > PUSH_BUDGET) return MATERIAL_UNIFORM_WIDTH~;
+
+	mem::copy(&self.block[at], values.ptr, width);
 }
 
 <*

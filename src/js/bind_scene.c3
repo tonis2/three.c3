@@ -62,6 +62,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setTransform", &js_set_transform, 11);
 	self.bind(host, "setVisible", &js_set_visible, 3);
 	self.bind(host, "setName", &js_set_name, 3);
+	self.bind(host, "setColor", &js_set_color, 6);
+	self.bind(host, "setVariant", &js_set_variant, 3);
 	self.bind(host, "worldPosition", &js_world_position, 2);
 
 	// Picking
@@ -350,6 +352,58 @@ fn void js_set_name(
 	{
 		self.pass.scene.set_name(id, arg_text(&js, argc, args, 2, tmem));
 	};
+}
+
+<*
+ `setColor(index, generation, r, g, b, a)` — this copy's own tint.
+
+ Four scalars rather than an array for `setTransform`'s reason: the shim reads
+ numbers cheaply and arrays through a property walk, and a colour is written far
+ more often than it is read.
+
+ **This is one of the two verbs that do not cost a draw call**, which is the
+ whole point of them: the value lands in the node's `Instance` record and is read
+ by `SV_InstanceID`, so two copies of one mesh may disagree about it and stay in
+ one bucket. Everything else that changes how a mesh looks is bucket state.
+*>
+fn void js_set_color(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	self.pass.scene.set_color(id, {
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4),
+		arg_float(&js, argc, args, 5),
+	});
+}
+
+<*
+ `setVariant(index, generation, row)` — which row of the material's table.
+
+ Negative is clamped to zero rather than refused: the row is a `uint` on the way
+ to the GPU, and a script that computed `i - 1` at `i = 0` should get the first
+ row rather than four billion. The far end is clamped in the shader against the
+ rows the material actually declared — see `shaders/material.slang`.
+*>
+fn void js_set_variant(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	int variant = arg_int(&js, argc, args, 2);
+	self.pass.scene.set_variant(id, variant < 0 ? 0 : (uint)variant);
 }
 
 <*

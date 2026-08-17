@@ -111,7 +111,7 @@ $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 byt
 // misread buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 64 : "the push block no longer matches the layout documented above";
 $assert FrameBlock::size == 80 : "FrameBlock no longer matches shaders/mesh.slang";
-$assert Instance::size == 128 : "Instance no longer matches shaders/mesh.slang";
+$assert Instance::size == 148 : "Instance no longer matches shaders/mesh.slang";
 
 <*
  One field of the push block as this side lays it out.

@@ -95,6 +95,16 @@ struct Node
 	// one.
 	uint material;
 
+	// The two per-copy channels, written straight into this node's `Instance`
+	// and read by `SV_InstanceID`. **They are what a node may disagree with its
+	// neighbours about without costing a draw call** — everything else that
+	// changes how a mesh looks is bucket state. See `Instance`.
+	//
+	// Not inherited, for `material`'s reason: a name Three.js resolves on the
+	// object itself is not one to resolve up the tree here.
+	float[4] color;
+	uint variant;
+
 	// `visible` is this node's own flag; `world_visible` is it AND every
 	// ancestor's, resolved in the same walk that builds the world matrices.
 	// Three.js hides a whole subtree by hiding its root, and a flat scan of the

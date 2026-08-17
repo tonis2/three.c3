@@ -75,8 +75,10 @@ object under a pixel of the rendered image — and so does tier 2: an agent writ
 throws a JS error carrying Slang's own diagnostic with the line number the agent
 wrote. **The parametric shapes are in too** — `new three.BoxGeometry(1, 1, 1)`
 and its five siblings, with Three.js's signatures, defaults and orientations, so
-a scene no longer needs a `.glb` to exist. `c3c test --trust=full` runs a hundred
-and forty-eight checks, all headless, leak-clean.
+a scene no longer needs a `.glb` to exist — and **so is the per-copy channel**:
+`mesh.color` and `mesh.variant` vary inside a single instanced draw, so a
+thousand cubes in a thousand colours is still one call. `c3c test --trust=full`
+runs a hundred and sixty checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -471,6 +473,18 @@ Rendering is: traverse, cull, bucket by `(mesh, material)`, write one transform 
 instance into a per-frame instance buffer, and issue one instanced draw per bucket.
 The bucketing is what makes the "linked, not duplicated" claim true at runtime; the
 node-per-instance glTF writer is what makes it true on disk.
+
+**The instance record carries two things besides the transform, and they are the
+only per-copy channel there is.** A `color` that multiplies albedo and a `variant`
+that selects a row of the material's uniform table. Everything else that decides
+how a draw looks — the pipeline, the push block, the texture — is bucket state,
+pushed once for the whole call, so two copies that disagree about any of it are
+two buckets and two draws. These two are read by `SV_InstanceID`, so a thousand
+copies in a thousand colours stay one draw call, and one material with a table
+gives many meshes many looks without becoming many materials. That is the
+answer to "how would a game vary these", and it is deliberately *two* channels
+rather than an open per-instance struct: an arbitrary attribute stream would put
+vertex-adjacent data back in JavaScript's hands, which §"What it is" refuses.
 
 `scene.stats()` returns that bucketing as numbers — draw calls, unique meshes,
 instances, triangles, texture bytes. It exists so the agent can read its own cost.
@@ -902,6 +916,30 @@ Three decisions are worth keeping in view:
 `m5a_stage.md` is the step-by-step record, including the injection table and the
 one injection that was too weak on the first attempt — which is what measured the
 split between what the arithmetic tests see and what the pixels do.
+
+**M5b — per-copy colour and variant.** `mesh.color` and `mesh.variant`, carried in
+the instance record (§2) and read by `SV_InstanceID`, plus material uniforms that
+may be **tables**: `{ palette: [[1,0,0], [0,1,0]] }` becomes `float3 palette[2]`
+in the push block and `mesh.variant` picks the row. Together they are the answer
+to a scene that wants variety without draw calls — a thousand cubes in a thousand
+colours is one call, and one material serves many meshes through one index.
+
+Three things are worth keeping in view:
+
+- **Two named channels, not an attribute stream.** An open per-instance buffer
+  would put vertex-adjacent data back in JavaScript's hands. A colour and a row
+  index cover what varies per copy in practice and neither is geometry.
+- **The variant is clamped in the shader**, against a `MATERIAL_ROWS` constant
+  generated beside the table. An out-of-range index into a push-constant array is
+  undefined behaviour that reads the next bytes of the block — a wrong colour with
+  no error anywhere.
+- **A table is capped by the same 68-byte uniform budget**, so it is four rows of
+  four floats or five of three. A table of hundreds needs a device buffer behind a
+  BDA in the push block, which is a change to make when something wants it and not
+  before.
+
+`m5b_stage.md` is the step-by-step record, including the six injections and the
+test that passed for the wrong reason until one of them exposed it.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

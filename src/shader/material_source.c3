@@ -61,11 +61,23 @@ faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY;
 
 <*
  One material uniform, as the JS side described it.
+
+ `rows` is what makes a uniform a **column of a table** rather than a single
+ value: one row is `float3 tint;` and three rows are `float3 tint[3];`, indexed
+ in the body by `s.variant` — the per-instance row selector in `scene/scene.c3`.
+ That is the whole of "one material, many appearances, one draw call": the
+ pipeline and the push block are bucket state and cannot vary per copy, so the
+ variation has to be a *lookup* the copies do rather than a value they carry.
+
+ Every column of one material must have the same number of rows. It is a table,
+ not a bag of arrays — and it is also what makes `s.variant`'s clamp exact, since
+ there is then one row count to clamp against instead of one per column.
 *>
 struct MaterialUniform
 {
 	String name;      // borrowed from the caller
 	uint components;  // 1..4 floats
+	uint rows;        // 1 for a plain uniform, N for a column of an N-row table
 }
 
 <*
@@ -107,6 +119,7 @@ const String MATERIAL_PREAMBLE_NAME = "three.material";
 // The marker lines in `shaders/material.slang`. Matched after trimming, so the
 // template can indent them to read naturally.
 const String MARKER_UNIFORMS @local = "//@uniforms";
+const String MARKER_ROWS @local = "//@rows";
 const String MARKER_DEFINES @local = "//@defines";
 const String MARKER_SHADE @local = "//@shade";
 
@@ -132,7 +145,7 @@ const String[*] MATERIAL_RESERVED @local = {
 	// What the template declares.
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
-	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS",
+	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "MATERIAL_ROWS",
 	// The seven push fields the mesh contract pins.
 	"frame", "instances", "positions", "normals", "uvs", "base_color", "flags",
 	// Types.
@@ -192,8 +205,29 @@ fn void material_note(String message) @local
 fn uint material_uniform_bytes(MaterialUniform[] uniforms)
 {
 	uint total = 0;
-	foreach (uniform : uniforms) total += uniform.components * 4;
+	foreach (uniform : uniforms) total += uniform.components * material_rows_of(uniform) * 4;
 	return total;
+}
+
+fn uint material_rows_of(MaterialUniform uniform) @local => uniform.rows < 1 ? 1 : uniform.rows;
+
+<*
+ How many rows this material's table has, or 1 when it declared none.
+
+ Generated into the module as `MATERIAL_ROWS` and used to clamp `s.variant`, so
+ every `column[s.variant]` in a body is in bounds by construction. A material
+ with no arrays gets 1 and therefore a variant of 0 for every copy, which is the
+ truth: there is no table for a variant to select from.
+*>
+fn uint material_rows(MaterialUniform[] uniforms)
+{
+	uint rows = 1;
+	foreach (uniform : uniforms)
+	{
+		uint declared = material_rows_of(uniform);
+		if (declared > rows) rows = declared;
+	}
+	return rows;
 }
 
 fn String slang_type_of(uint components) @local
@@ -279,6 +313,24 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
 					"material: uniform '%s' is %d floats wide; a uniform is 1 to 4",
 					uniform.name,
 					uniform.components
+				));
+				return MATERIAL_NAME_INVALID~;
+			}
+
+			// One table, not a bag of arrays — see `MaterialUniform`. Checked
+			// against the first column that has more than one row rather than
+			// against the maximum, so the message can name both of them.
+			uint rows = material_rows_of(uniform);
+			foreach (other : uniforms)
+			{
+				uint other_rows = material_rows_of(other);
+				if (other_rows == 1 || rows == 1 || other_rows == rows) continue;
+				material_note(string::tformat(
+					"material: '%s' has %d rows and '%s' has %d; every array in one material is a column of the same table and they must agree",
+					uniform.name,
+					rows,
+					other.name,
+					other_rows
 				));
 				return MATERIAL_NAME_INVALID~;
 			}
@@ -373,10 +425,28 @@ fn String? material_source(String fragment, MaterialUniform[] uniforms, alloc::A
 			{
 				foreach (uniform : uniforms)
 				{
-					out.appendf("    %s %s;", slang_type_of(uniform.components), uniform.name)!!;
+					uint rows = material_rows_of(uniform);
+					if (rows > 1)
+					{
+						out.appendf("    %s %s[%d];", slang_type_of(uniform.components), uniform.name, rows)!!;
+					}
+					else
+					{
+						out.appendf("    %s %s;", slang_type_of(uniform.components), uniform.name)!!;
+					}
 					out.append_char('\n');
 					physical++;
 				}
+				continue;
+			}
+			if (marker == MARKER_ROWS)
+			{
+				// A `static const` rather than a `#define`, so it is a typed value
+				// the clamp in `fragmentMain` can use and not a token the agent's
+				// body could accidentally shadow.
+				out.appendf("static const uint MATERIAL_ROWS = %du;", material_rows(uniforms))!!;
+				out.append_char('\n');
+				physical++;
 				continue;
 			}
 			if (marker == MARKER_DEFINES)

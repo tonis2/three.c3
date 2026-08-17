@@ -415,7 +415,85 @@ fn void a_reused_slot_does_not_inherit_a_material() @test
 			"a recycled slot came back on material %d instead of the default",
 			node.material
 		);
+		test::@check(
+			node.color[0] == 1 && node.color[1] == 1 && node.color[2] == 1 && node.color[3] == 1,
+			"a recycled slot came back tinted (%s, %s, %s, %s) instead of white",
+			node.color[0], node.color[1], node.color[2], node.color[3]
+		);
+		test::@check(node.variant == 0, "a recycled slot came back on row %d instead of 0", node.variant);
 	};
+}
+
+<*
+ The per-copy channels reach the instance record, and do not split a bucket.
+
+ **This is the claim the whole feature rests on.** A colour that cost a draw
+ call would be no better than a second material, and a colour that never reached
+ the `Instance` array would render as white with nothing to say so. So both
+ halves are asserted at once: a hundred nodes in a hundred colours, one bucket,
+ and the bytes the GPU will read checked against what was set.
+
+ The instance array is read after `stats()` because that is what rebuilds the
+ draw list — the same order `a_thousand_instances_are_one_draw_call` relies on.
+*>
+fn void a_colour_per_copy_costs_no_draw_call() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::NodeId[100] made;
+		for (uint i = 0; i < 100; i++)
+		{
+			made[i] = scene.add_mesh(0, 0);
+			scene.set_position(made[i], { (float)i * 2.0f, 0, 0 });
+			scene.set_color(made[i], { (float)i / 100.0f, 0.25f, 1.0f - (float)i / 100.0f, 1.0f });
+			scene.set_variant(made[i], i % 4);
+		}
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.draw_calls == 1, "a hundred colours took %d draw calls", stats.draw_calls);
+		test::@check(scene.buckets.len() == 1, "and %d buckets", scene.buckets.len());
+
+		// The triangle loaded above is instance 0 and is white; the hundred
+		// follow it in add order, which is the order `build_draw_list` walks.
+		test::@check(scene.instances.len() == 101, "%d instances were written", scene.instances.len());
+		for (uint i = 0; i < 100; i++)
+		{
+			three::Instance* record = &scene.instances[(sz)i + 1];
+			test::@check(
+				close(record.color[0], (float)i / 100.0f) && close(record.color[2], 1.0f - (float)i / 100.0f),
+				"instance %d carries its own colour, got (%s, %s, %s)",
+				i, record.color[0], record.color[1], record.color[2]
+			);
+			test::@check(record.variant == i % 4, "instance %d carries row %d, got %d", i, i % 4, record.variant);
+		}
+	};
+}
+
+<*
+ A node starts white on row zero, which is the identity for both channels.
+
+ Worth its own check rather than being assumed by the one above: these are the
+ values every scene built before this feature existed implicitly had, and a
+ default of black or of an uninitialised slot's leftovers would change how every
+ existing scene renders without changing a line of it.
+*>
+fn void a_node_starts_white_and_on_row_zero() @test
+{
+	three::Scene scene;
+	scene.init();
+	defer scene.free();
+
+	three::Node* node = scene.node(scene.add_mesh(0, 0));
+	test::@check(node != null, "the node resolves");
+	test::@check(
+		node.color[0] == 1 && node.color[1] == 1 && node.color[2] == 1 && node.color[3] == 1,
+		"a new node is white, got (%s, %s, %s, %s)",
+		node.color[0], node.color[1], node.color[2], node.color[3]
+	);
+	test::@check(node.variant == 0, "a new node is on row 0, got %d", node.variant);
 }
 
 <*
