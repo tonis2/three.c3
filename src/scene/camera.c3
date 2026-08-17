@@ -43,6 +43,13 @@ fn Camera default_camera()
 	};
 }
 
+// How far the eye may be lifted, in degrees. One short of the pole, and the
+// missing degree is load-bearing: at exactly 90 the eye sits on the up axis,
+// `look_at`'s cross product is zero, and the view matrix comes back full of
+// NaN. Nothing errors — the frame renders empty, which reads as "the scene is
+// gone" rather than as "the camera is broken".
+const float CAMERA_PITCH_LIMIT = 89.0f;
+
 fn Vec3 Camera.eye(&self)
 {
 	float yaw        = math::deg_to_rad(self.yaw);
@@ -50,6 +57,76 @@ fn Vec3 Camera.eye(&self)
 	float horizontal = math::cos(pitch);
 	return self.target + (Vec3) { horizontal * math::sin(yaw), math::sin(pitch), horizontal * math::cos(yaw) }
 		* self.distance;
+}
+
+<*
+ Keep the eye off the pole and the yaw in [-180, 180).
+
+ The yaw wrap is not cosmetic. Yaw accumulates one drag delta at a time and
+ nothing else ever resets it, so a long session walks it into the thousands,
+ where a float's spacing is coarse enough that a slow drag starts to step.
+*>
+fn void Camera.clamp_angles(&self)
+{
+	self.pitch = math::clamp(self.pitch, -CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT);
+	self.yaw -= 360.0f * math::floor((self.yaw + 180.0f) / 360.0f);
+}
+
+<*
+ Put the near and far planes back where the distance says they belong.
+
+ **The planes are derived, never set.** A fixed near plane against a model a
+ kilometre wide spends the whole depth buffer on the first few metres, which is
+ z-fighting across the entire scene and reads as a rendering bug rather than as
+ a camera setting.
+
+ `frame_bounds` does *not* call this and is not meant to: it knows the model's
+ radius, so it can put the far plane just beyond the geometry instead of at a
+ multiple of the distance. Everything that only moves the camera — `cameraSet`,
+ an orbit drag, a scroll — has no radius to work from and comes here.
+*>
+fn void Camera.derive_planes(&self)
+{
+	self.near_plane = math::max(self.distance * 0.001f, 0.0001f);
+	self.far_plane = self.distance * 8.0f;
+}
+
+<*
+ The camera's right and up axes in world space.
+
+ @param right : `Out. Screen +X, world space, normalized.`
+ @param up : `Out. Screen +Y, world space, normalized.`
+*>
+fn void Camera.basis(&self, Vec3* right, Vec3* up)
+{
+	Vec3 forward = (self.target - self.eye()).normalize();
+	Vec3 sideways = forward.cross((Vec3) { 0, 1, 0 });
+
+	// The pitch clamp is what normally keeps this from happening, but the clamp
+	// is applied where angles are *written* and a caller can reach these fields
+	// directly. A zero-length cross would normalize to NaN and silently poison
+	// the target, so degeneracy falls back to a fixed axis instead.
+	if (sideways.length() < 1e-6f) sideways = (Vec3) { 1, 0, 0 };
+
+	*right = sideways.normalize();
+	*up = right.cross(forward);
+}
+
+<*
+ How much world space one screen point covers, at the distance the camera is
+ focused on.
+
+ This is what makes a pan track the cursor rather than merely follow it: the
+ point under the mouse when the drag started is the point under the mouse for
+ the whole drag, at any distance and any field of view.
+
+ @param viewport_height : `The viewport's height in the same units the pointer is reported in.`
+*>
+fn float Camera.world_per_point(&self, float viewport_height)
+{
+	if (viewport_height < 1.0f) return 0.0f;
+	float visible = 2.0f * self.distance * math::tan(math::deg_to_rad(self.fov) * 0.5f);
+	return visible / viewport_height;
 }
 
 fn Matrix4f Camera.view(&self)

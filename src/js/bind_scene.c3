@@ -634,10 +634,9 @@ fn void js_camera_get(
  `cameraSet(tx, ty, tz, yaw, pitch, distance, fov)`.
 
  The near and far planes are re-derived from the distance rather than taken from
- the caller: a fixed near plane against a model a kilometre wide spends the whole
- depth buffer on the first few metres, which is z-fighting across the entire
- scene and reads as a rendering bug rather than as a camera setting. This is the
- same rule `Camera.frame_bounds` follows.
+ the caller — see `Camera.derive_planes` for why — and the angles are clamped
+ the same way a mouse drag clamps them, so a script and a hand on the window
+ cannot put the camera in two different sets of states.
 *>
 fn void js_camera_set(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -653,8 +652,8 @@ fn void js_camera_set(
 	camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0001f);
 	camera.fov = math::clamp(arg_float(&js, argc, args, 6), 1.0f, 179.0f);
 
-	camera.near_plane = math::max(camera.distance * 0.001f, 0.0001f);
-	camera.far_plane = camera.distance * 8.0f;
+	camera.clamp_angles();
+	camera.derive_planes();
 }
 
 fn void js_frame_all(
