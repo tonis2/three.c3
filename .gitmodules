@@ -1,0 +1,21 @@
+[submodule "lib/vulkan.c3l"]
+	path = lib/vulkan.c3l
+	url = git@github.com:tonis2/Vulkan.c3.git
+[submodule "lib/quickjs.c3l"]
+	path = lib/quickjs.c3l
+	url = git@github.com:tonis2/quickjs.c3.git
+[submodule "lib/gltf.c3l"]
+	path = lib/gltf.c3l
+	url = https://github.com/tonis2/gltf.c3.git
+[submodule "lib/window.c3l"]
+	path = lib/window.c3l
+	url = https://github.com/tonis2/Window.c3.git
+[submodule "lib/image.c3l"]
+	path = lib/image.c3l
+	url = https://github.com/tonis2/image.c3.git
+[submodule "lib/collision.c3l"]
+	path = lib/collision.c3l
+	url = https://github.com/tonis2/collision.c3.git
+[submodule "lib/mcp.c3l"]
+	path = lib/mcp.c3l
+	url = git@github.com:tonis2/mcp.c3l.git
