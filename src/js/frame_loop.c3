@@ -94,17 +94,62 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 }
 
 <*
- Whether a tick would do anything: is anything registered at all.
+ Whether a tick would do anything: is anything registered at all, **or is a clip
+ playing**.
 
  Exposed because it is also the host's "may this window go to sleep" condition,
  and the two must be the same sentence. A loop that idled while a callback was
  registered would stop it dead; a `tick` that ran with nothing registered would
  keep the loop awake forever. Written once, read twice — see `main.c3`.
+
+ The clip term is `game.md` G3/S6, and it is the term that is easy to miss: a
+ game with no `setAnimationLoop` at all can still have a door swinging open, and
+ without this the window sleeps in the middle of it. Nothing about that reads as
+ a bug in the animation code — the clip is playing, the player is stepping, and
+ the frames simply stop arriving.
 *>
 fn bool JsRuntime.is_animating(&self)
 {
+	if (self.pass != null && self.pass.scene.is_animating()) return true;
 	return self.frame_active || self.key_handler_count > 0 || self.click_active;
 }
+
+<*
+ Turn the host's monotonic clock into a delta and advance every playing clip.
+
+ **The runtime keeps no clock**, for `tick`'s reason: a step that read the wall
+ clock could only be tested by waiting. What it keeps is the last reading it was
+ given, which is the smallest possible amount of state for turning "milliseconds
+ since the host started" into "seconds since the previous frame".
+
+ Two guards, both for the same class of problem — a delta that is not a frame:
+
+ - **The first tick contributes nothing.** `elapsed_ms` is measured from process
+   start, so the first one carries the whole boot: window creation, device
+   selection, the script's own load. A clip played during boot would begin
+   half a second in.
+ - **A delta is clamped to 100 ms.** A longer one means the process was stalled
+   — a breakpoint, a swap storm, a `run_script` that took its whole budget —
+   and no clip should teleport through a second of itself because of it. This
+   cannot mask a *sleeping* window, because a playing clip is precisely what
+   stops the window sleeping.
+*>
+fn void JsRuntime.step_animations(&self, double elapsed_ms)
+{
+	if (self.pass == null) return;
+
+	double delta_ms = self.clock_started ? elapsed_ms - self.last_elapsed_ms : 0;
+	self.last_elapsed_ms = elapsed_ms;
+	self.clock_started = true;
+
+	if (delta_ms <= 0) return;
+	if (delta_ms > ANIMATION_MAX_STEP_MS) delta_ms = ANIMATION_MAX_STEP_MS;
+
+	self.pass.scene.step_animations((float)(delta_ms / 1000.0));
+}
+
+// The longest single step any clip will take. See `step_animations`.
+const double ANIMATION_MAX_STEP_MS = 100.0;
 
 <*
  Run the callback once, if there is one.
@@ -127,6 +172,14 @@ fn bool JsRuntime.is_animating(&self)
 fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 {
 	self.take_input(input);
+
+	// **Animation first, and above the early return.** `game.md` G3/S6: the step
+	// happens in the host frame *before* the callback, so a callback can read
+	// where a character got to this frame rather than where it was last frame —
+	// and so a clip plays with no `setAnimationLoop` registered at all, which is
+	// the case the early return below would otherwise refuse.
+	self.step_animations(elapsed_ms);
+
 	if (!self.is_animating()) return false;
 
 	self.frame_ticks++;

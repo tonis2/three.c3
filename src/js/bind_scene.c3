@@ -32,6 +32,7 @@ import std::math;
 import std::math::vector;
 import collision;
 import qjs;
+import std::collections::list;
 
 <*
  Install `__three` on the global object.
@@ -52,6 +53,11 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "assetPath", &js_asset_path, 2);
 	self.bind(host, "meshNames", &js_mesh_names, 2);
+	self.bind(host, "assetNodes", &js_asset_nodes, 2);
+	self.bind(host, "assetClips", &js_asset_clips, 2);
+	self.bind(host, "bindAnimation", &js_bind_animation, 5);
+	self.bind(host, "playAnimation", &js_play_animation, 5);
+	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
 
 	// The graph
@@ -62,6 +68,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "remove", &js_remove, 2);
 	self.bind(host, "setParent", &js_set_parent, 4);
 	self.bind(host, "setTransform", &js_set_transform, 11);
+	self.bind(host, "setQuaternion", &js_set_quaternion, 6);
 	self.bind(host, "setVisible", &js_set_visible, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
@@ -359,9 +366,141 @@ fn void js_set_transform(
 
 	Node* node = self.pass.scene.node(id);
 	node.position = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
-	node.rotation = { arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) };
+	// Euler in, quaternion stored — the one-way conversion `node.c3`'s header
+	// describes. JavaScript keeps the triple it sent, so nothing converts back.
+	node.rotation = quat_from_euler({ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) });
 	node.scale    = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
 	node.dirty = true;
+}
+
+<*
+ `setQuaternion(index, generation, x, y, z, w)` — a rotation that did not come
+ from Euler angles.
+
+ Sent after `setTransform` and overwriting the rotation it just wrote, by an
+ object that was handed an exact quaternion — today that means one out of
+ `asset.instantiate()`. Two crossings rather than one, and only for those
+ objects: the Euler triple is what a script reads back off `.rotation`, and the
+ quaternion is what actually rotates the node. `bind_asset.c3`'s `js_asset_nodes`
+ has the number that makes the second one worth paying for.
+
+ Writing any Euler component drops the quaternion, so a script that touches
+ `.rotation` gets exactly what it typed and nothing left over from the file.
+*>
+fn void js_set_quaternion(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	self.pass.scene.set_quaternion(id, {
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4),
+		arg_float(&js, argc, args, 5),
+	});
+}
+
+<*
+ `bindAnimation(index, generation, asset, assetGeneration, pairs)` — tell the
+ host which of a subtree's nodes came from which glTF node.
+
+ The map an `AnimationPlayer` needs, and the reason it has to come from
+ JavaScript at all: `asset.instantiate()` builds `Object3D`s and lets the
+ ordinary `add` path materialize them, so the host performed the tree walk one
+ node at a time through `js_add` and never saw the correspondence.
+ `Scene.instantiate` on the host has the same map for free; both hand it to
+ `Scene.bind_player`.
+
+ `pairs` is flat — glTF node index, node index, node generation, repeating —
+ rather than an array of objects, because it is written once per instantiated
+ prop and read once, and three numbers per node in one typed pass beats an
+ object allocation per node.
+
+ Called lazily, on the first `play`. A prop that never animates never sends it.
+*>
+fn void js_bind_animation(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId root = arg_handle(self, &js, argc, args, 0, out);
+	if (!root.is_set()) return;
+
+	AssetId asset = arg_asset(self, &js, argc, args, 2, out);
+	if (!asset.is_set()) return;
+
+	if (argc < 5) return;
+	qjs::Value pairs = args[4];
+	uint length = (uint)js.length(pairs);
+
+	List{uint} sources;
+	List{NodeId} nodes;
+	sources.init(mem, (sz)(length / 3) + 1);
+	nodes.init(mem, (sz)(length / 3) + 1);
+	defer sources.free();
+	defer nodes.free();
+
+	for (uint i = 0; i + 2 < length; i += 3)
+	{
+		sources.push((uint)js.number(js.index(pairs, i)));
+		nodes.push({
+			.index = (uint)js.number(js.index(pairs, i + 1)),
+			.generation = (uint)js.number(js.index(pairs, i + 2)),
+		});
+	}
+
+	self.pass.scene.bind_player(asset, root, sources.array_view(), nodes.array_view());
+}
+
+<*
+ `playAnimation(index, generation, name, loop, speed)` — start a clip on an
+ instantiated subtree.
+
+ Answers with a boolean rather than throwing on an unknown clip: `mesh.animations`
+ is the list, so naming something that is not on it is a mistake a script can see
+ and correct, and an exception raised inside an animation callback is a stopped
+ game rather than a wrong pose.
+*>
+fn void js_play_animation(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId root = arg_handle(self, &js, argc, args, 0, out);
+	if (!root.is_set()) return;
+
+	@pool()
+	{
+		String name = arg_text(&js, argc, args, 2, tmem);
+		bool loop = argc > 3 ? arg_truth(&js, argc, args, 3) : true;
+		float speed = argc > 4 ? arg_float(&js, argc, args, 4) : 1.0f;
+		*out = qjs::bool_value(self.pass.scene.play(root, name, loop, speed));
+	};
+}
+
+<*
+ `stopAnimation(index, generation)` — hold the pose. See `Scene.stop`.
+*>
+fn void js_stop_animation(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId root = arg_handle(self, &js, argc, args, 0, out);
+	if (!root.is_set()) return;
+
+	*out = qjs::bool_value(self.pass.scene.stop(root));
 }
 
 fn void js_set_visible(
@@ -653,6 +792,7 @@ fn void js_unload_unused(
 
 	qjs::Value object = js.object();
 	js.set_property(object, "assets", qjs::int_value((int)report.assets));
+	js.set_property(object, "meshes", qjs::int_value((int)report.meshes));
 	js.set_property(object, "textures", qjs::int_value((int)report.textures));
 	js.set_property(object, "bytes", qjs::number_value((double)report.bytes));
 	*out = object;

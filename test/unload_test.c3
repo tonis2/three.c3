@@ -45,6 +45,18 @@ const String FIXTURE = "test/fixtures/textured.glb";
 *>
 const String FIXTURE_COPY = "build/unload_fixture_copy.glb";
 
+<*
+ The kit-shaped fixture and its copy: four meshes, one material, one image.
+
+ `textured.glb` above shares an image between two *files*. This shares one
+ between four meshes inside a file, which is the case `ImageMemo` handles and
+ therefore the case where the reference can go missing — the memo answers
+ without going anywhere near the upload path, and the upload path is where the
+ count used to be taken.
+*>
+const String SHARED = "test/fixtures/shared_material.glb";
+const String SHARED_COPY = "build/unload_shared_copy.glb";
+
 const uint W = 200;
 const uint H = 150;
 
@@ -63,16 +75,16 @@ macro @with_pass(; @body(three::Renderer* renderer))
 }
 
 <*
- The fixture's bytes under a second name, deleted when the body is done.
+ A fixture's bytes under a second name, deleted when the body is done.
 *>
-macro @with_copy(; @body)
+macro @copy_of(String source, String dest; @body)
 {
 	@pool()
 	{
-		char[] bytes = file::load_temp(FIXTURE)!!;
-		file::save(FIXTURE_COPY, bytes)!!;
+		char[] bytes = file::load_temp(source)!!;
+		file::save(dest, bytes)!!;
 	};
-	defer (void)file::delete(FIXTURE_COPY);
+	defer (void)file::delete(dest);
 	@body();
 }
 
@@ -171,13 +183,15 @@ fn void every_node_is_one_reference() @test
 		test::@check(meshes >= 2, "the fixture has %d meshes; this check wants at least 2", meshes);
 
 		three::NodeId group = scene.add_group(scene.root, "level");
-		renderer.pass.place(level, group);
+		three::NodeId placed = renderer.pass.place(level, group);
 		test::@check(assets.slot(level).refs == meshes,
 			"placing %d meshes took %d references", meshes, assets.slot(level).refs);
 
 		// One node of the subtree, so the release has to come from the recursion
-		// rather than from the node `remove` was handed.
-		three::NodeId first = scene.node(group).children[0];
+		// rather than from the node `remove` was handed. Taken off `place`'s own
+		// return value since G3, because the asset's hierarchy decides the shape
+		// of what it built and a test should not be asserting on that here.
+		three::NodeId first = scene.node(placed).children[0];
 		scene.remove(first);
 		test::@check(assets.slot(level).refs == meshes - 1,
 			"removing one node left %d references, expected %d", assets.slot(level).refs, meshes - 1);
@@ -232,7 +246,7 @@ fn void an_asset_a_node_still_names_survives_the_sweep() @test
 *>
 fn void a_handle_from_before_an_unload_does_not_answer() @test
 {
-	@with_copy()
+	@copy_of(FIXTURE, FIXTURE_COPY)
 	{
 		@with_pass(; three::Renderer* renderer)
 		{
@@ -294,7 +308,7 @@ fn void loading_a_path_again_after_unloading_it_gives_a_new_asset() @test
 *>
 fn void an_image_two_files_share_outlives_the_first_of_them() @test
 {
-	@with_copy()
+	@copy_of(FIXTURE, FIXTURE_COPY)
 	{
 		@with_pass(; three::Renderer* renderer)
 		{
@@ -304,6 +318,13 @@ fn void an_image_two_files_share_outlives_the_first_of_them() @test
 			three::AssetId one = assets.load(&renderer.gpu, FIXTURE)!!;
 			three::AssetId two = assets.load(&renderer.gpu, FIXTURE_COPY)!!;
 
+			// Both have to be *placed*, not merely loaded: since G3/S3 loading
+			// describes a file and retaining a mesh is what uploads it, so two
+			// loaded-and-unused files share nothing because neither has an image
+			// yet.
+			three::NodeId first = scene.instantiate(one, scene.root, "first");
+			scene.instantiate(two, scene.root, "second");
+
 			test::@check(assets.resident() == 2, "%d assets resident, expected 2", assets.resident());
 			test::@check(assets.texture_count() == 1,
 				"two files with identical images uploaded %d textures", assets.texture_count());
@@ -311,7 +332,7 @@ fn void an_image_two_files_share_outlives_the_first_of_them() @test
 			test::@check(shared_bytes > 0, "the shared image measured zero bytes");
 
 			// Keep the second file, drop the first.
-			scene.add_mesh(two, 0, scene.root, "kept");
+			scene.remove(first);
 			three::UnloadReport first_sweep = assets.unload_unused(&renderer.gpu);
 
 			test::@check(first_sweep.assets == 1, "the sweep freed %d assets, expected 1", first_sweep.assets);
@@ -339,6 +360,70 @@ fn void an_image_two_files_share_outlives_the_first_of_them() @test
 }
 
 <*
+ An image four meshes share does not die with the first file that drops it.
+
+ The same shape as the test above, one level in. There the image is shared
+ between two *files* and the content hash is what notices; here it is shared
+ between four meshes of one file and `ImageMemo` is what notices, which means
+ the reference is taken on a code path that never touches the upload.
+
+ Two copies of the kit, eight meshes, one image, eight references. Drop one copy
+ and four go — and the image has to be exactly as alive as it was, because four
+ meshes still sample it.
+
+ The failure this exists for has no picture and no fault: forget the retain on a
+ memo hit and the count reads 2 instead of 8, the first sweep takes it to zero,
+ and `release_texture` politely ignores the four releases that follow. What is
+ left is a `GpuMesh` holding an index into a destroyed image — which is why
+ `render_offscreen` is in here, with the validation layer watching.
+*>
+fn void an_image_four_meshes_share_survives_losing_half_of_them() @test
+{
+	@copy_of(SHARED, SHARED_COPY)
+	{
+		@with_pass(; three::Renderer* renderer)
+		{
+			three::Assets* assets = &renderer.pass.assets;
+			three::Scene* scene = &renderer.pass.scene;
+
+			three::AssetId one = assets.load(&renderer.gpu, SHARED)!!;
+			three::AssetId two = assets.load(&renderer.gpu, SHARED_COPY)!!;
+
+			// Placed, not merely loaded — see the test above.
+			three::NodeId dropped = scene.instantiate(one, scene.root, "dropped");
+			scene.instantiate(two, scene.root, "kept");
+
+			test::@check(assets.texture_count() == 1,
+				"eight meshes over one image uploaded %d textures", assets.texture_count());
+			test::@check(assets.textures[0].refs == 8,
+				"eight meshes name the image and it holds %d references", assets.textures[0].refs);
+			usz shared_bytes = assets.texture_bytes();
+
+			// Keep the second copy's four meshes, drop the first copy's four.
+			scene.remove(dropped);
+			three::UnloadReport sweep = assets.unload_unused(&renderer.gpu);
+
+			test::@check(sweep.assets == 1, "the sweep freed %d assets, expected 1", sweep.assets);
+			test::@check(sweep.textures == 0,
+				"the sweep freed %d textures while four meshes still sample the image", sweep.textures);
+			test::@check(assets.textures[0].refs == 4,
+				"four meshes are left and the image holds %d references", assets.textures[0].refs);
+			test::@check(assets.texture_bytes() == shared_bytes,
+				"the image's bytes changed from %d to %d", shared_bytes, assets.texture_bytes());
+			test::@check(assets.slot(one) == null, "the dropped copy still resolved");
+
+			renderer.render_offscreen()!!;
+
+			scene.remove(scene.root);
+			three::UnloadReport last = assets.unload_unused(&renderer.gpu);
+			test::@check(last.textures == 1,
+				"the last four references went and %d textures were freed", last.textures);
+			test::@check(assets.texture_bytes() == 0, "%d texture bytes still resident", assets.texture_bytes());
+		};
+	};
+}
+
+<*
  A freed texture slot is reused rather than appended to.
 
  The same argument the asset free list makes, one level down: a game that cycles
@@ -351,9 +436,13 @@ fn void a_freed_texture_slot_is_reused() @test
 	{
 		three::Assets* assets = &renderer.pass.assets;
 
-		assets.load(&renderer.gpu, FIXTURE)!!;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId first = assets.load(&renderer.gpu, FIXTURE)!!;
+		scene.instantiate(first, scene.root, "level");
 		test::@check(assets.textures.len() == 1, "the fixture uploaded %d texture slots", assets.textures.len());
 
+		scene.remove(scene.root);
 		assets.unload_unused(&renderer.gpu);
 		test::@check(assets.texture_count() == 0, "%d textures survived a full sweep", assets.texture_count());
 		// The bookkeeping saying "gone" and the image actually being destroyed
@@ -365,7 +454,8 @@ fn void a_freed_texture_slot_is_reused() @test
 		test::@check(assets.textures[0].texture.sampler == null, "and its sampler");
 		test::@check(assets.textures[0].texture.view == null, "and its view");
 
-		assets.load(&renderer.gpu, FIXTURE)!!;
+		three::AssetId again = assets.load(&renderer.gpu, FIXTURE)!!;
+		scene.instantiate(again, scene.root, "level again");
 		test::@check(assets.textures.len() == 1,
 			"reloading grew the texture table to %d slots instead of reusing the free one",
 			assets.textures.len());

@@ -458,7 +458,7 @@ closing it, which is G3/S3.*
 
 ---
 
-# G3 — glTF node animation, and the loader rework it forces
+# G3 — glTF node animation, and the loader rework it forces — **built**
 
 Sampling a channel is cheap. Getting to where sampling is *possible* is not,
 because `Assets.load` was written for M1's "show me this file" and has not been
@@ -551,7 +551,34 @@ Unnumbered because it has no step of its own: it has to be done before S6 can
 write a sampled rotation into a node, and there is no earlier point at which it
 is cheaper. Whoever starts S6 does this first.
 
-## S1 — the decode memo, first because it is a bug
+*Built — and **S2 needed it, not S6.** The moment a glTF node's TRS has to be
+written into a `three::Node`, the rotation arriving is a quaternion, so the step
+that was scheduled two steps later turned out to block the one immediately after
+it. "Before S6" was the wrong deadline and nothing would have caught that except
+starting S2 and finding the wall.*
+
+*`Node.rotation` is a `Quaternionf`; `prelude.js` keeps the Euler triple. That
+split is what makes it free of a second source of truth: JavaScript stores the
+form it reads back — so `rotation.z = 2 * Math.PI` still reads as `2 * Math.PI`
+and not as `0`, which is Three.js's behaviour — and the host stores the form it
+composes and interpolates in. The conversion is one-way at the boundary.*
+
+*`quat_from_euler` does **not** use `std::math::quaternion::from_euler`, which
+documents itself as ZYX. `euler_order_survived_the_quaternion` compares against
+the literal `rotate_x().rotate_y().rotate_z()` chain that `local_matrix` used to
+build, because "rotations compose" is a property every wrong order also has.*
+
+*One conversion runs the other way and it is worth knowing why. `euler_from_quat`
+exists for `asset.instantiate()`, which has to give an `Object3D` a `rotation`.
+Measured cost, at the quarter turn about +Y that `hierarchy.glb` uses: **3.5e-4
+radians**, because `asin` is evaluated where its slope is infinite. That is
+0.7mm at the end of a two-metre arm — a hairline gap between two kit pieces
+authored flush. So the boundary sends both: the Euler triple for reading, the
+quaternion for the transform, and writing an Euler component drops the
+quaternion. The general form of that argument was already in the plan; this is
+the first time it has a number attached.*
+
+## S1 — the decode memo, first because it is a bug — **built**
 
 A `(file, image index) -> texture index` memo consulted *before*
 `decode_image`, so an image is decoded once per file rather than once per
@@ -567,7 +594,38 @@ passes today with the double decode intact, which is exactly why the bug
 survived — a test that measures the wrong side of a cache is a test the cache
 can fail behind.
 
-## S2 — the node tree on the `Asset`, and `asset.instantiate()`
+*Built as `ImageMemo` plus `Assets.decodes`, with `load_material_texture` split
+in two: the outer half is the two lookups and nothing else, the inner half
+(`decode_material_texture`) is the work. Four things worth knowing:*
+
+- ***A `-1` is memoised too.** An image the decoder refuses is answered from the
+  memo like any other, so a file whose ninety materials name one KTX2 image
+  attempts the decode once. That was not in the step and costs a line.*
+- ***`Assets.decodes` exists because the memo is otherwise unobservable.**
+  Textures, draw calls, bytes and pixels are all identical with the memo and
+  without it — delete it and every pre-existing test still passes. A cache with
+  no counter is a cache nothing can hold to its claim, so the counter ships.*
+- ***The retain on a memo hit is the sharp edge.** The memo returns without
+  touching the upload path, and the upload path is where the texture reference
+  was taken. Two tests cover it: `every_mesh_sharing_an_image_holds_a_reference`
+  on the number, and `an_image_four_meshes_share_survives_losing_half_of_them`
+  on what the number does — two copies of the kit, drop one, and the image has
+  to still be there for the other four meshes.*
+- ***`identical_textures_upload_once` now asserts `decodes == 2`.** Not a typo:
+  two distinct images is exactly what the memo cannot see, and pinning the number
+  at the honest value is what stops the next reader assuming otherwise.*
+
+*New fixture `test/fixtures/shared_material.glb` (`make_shared_material.py`):
+four meshes, one material, one image — the kit shape. Four pieces rather than
+two so a missing memo (4) and an off-by-one cannot report the same number.*
+
+*It also put a second glTF in `test/fixtures/`, which broke three `inventory`
+checks that read `found[0]` and asserted `found.len() == 1`. Fixed by looking
+entries up by name — a one-file directory could not tell a listing apart from a
+function that describes whatever it finds first, so those checks are stronger
+now than the fixture change made them weaker.*
+
+## S2 — the node tree on the `Asset`, and `asset.instantiate()` — **built**
 
 The hidden cost above. Parents, local TRS, mesh bindings, names — recorded at
 load from `stream.gltf.nodes`, and instantiated into a `Scene` subtree on
@@ -578,7 +636,43 @@ something to address; `mesh.play()` in S7 is meaningless without it.
 does — a prop instantiated twice is two subtrees over one upload, which is the
 thesis restated at a level the API could not previously express.
 
-## S3 — the upload becomes per mesh
+*Built as `AssetNode` on the asset, `Assets.flatten` deciding what a glTF node
+becomes, and two consumers of that one answer: `Scene.instantiate` on the host
+and `asset.instantiate()` in JavaScript.*
+
+- ***It was not a feature, it was a bug.** "A loaded prop arrives as loose
+  meshes" undersold it: `MeshPass.place` put every mesh at the **origin**, so a
+  file that positions its pieces by node — a kit laid out in Blender, anything
+  with a rig — rendered as a pile. Both existing fixtures bake their coordinates
+  into their vertices, which is why nothing in 300 tests could see it. New
+  fixture `hierarchy.glb` is the other kind: one quad, four times, positioned
+  entirely by nodes.*
+- ***The policy lives in one place on purpose.** `Assets.flatten` produces a flat
+  list in creation order with parents named by position, and both instantiate
+  paths walk it. The alternative was JavaScript re-implementing "a node with two
+  primitives becomes a group" — fifteen lines that would drift, and produce
+  different trees for the CLI and for a script with nobody looking.*
+- ***JavaScript gets a description, not host nodes.** `asset.instantiate()`
+  answers with ordinary detached `Object3D`s that materialize through the normal
+  `add` path, so a script can take the tree apart, add one piece and drop the
+  rest, before anything reaches a scene. Building host nodes and adopting them
+  would have meant a new lifecycle state in the binding for no gain.*
+- ***`place` now returns a group**, which is Three.js's `gltf.scene` shape and
+  changed two tests that assumed the old flat placement. Both now read the
+  hierarchy off `place`'s own return value rather than asserting on its shape.*
+- ***`hierarchy.glb`'s `tip` lands at (2, 0, -2)** and no single mistake produces
+  that by accident: dropped hierarchy puts it at the origin, dropped scale at
+  (2, 0, -1), the composition reversed at (4, 0, 0), a flipped quaternion sign at
+  (2, 0, 2). Its `loose` node states a `matrix` rather than a TRS triple, which a
+  loader reading only TRS leaves at the origin while every other assertion still
+  passes.*
+
+*What S3 will move: the node tree is on `Asset` because an `Asset` is still a
+file. When S3 makes an `Asset` one mesh, the tree belongs on the file record that
+holds the open stream. Planned relocation, not rework — `flatten` is already the
+only thing that reads it.*
+
+## S3 — the upload becomes per mesh — **built**
 
 `three.load(path)` stops uploading anything. It parses the JSON, records the
 node tree and the mesh names, and answers with a handle to a *described* file —
@@ -589,12 +683,27 @@ which is `inventory.c3`'s `describe_gltf` doing the work it already does.
 **From JavaScript nothing changes.** The same two lines an agent writes today
 keep working; `three.load` simply stops being the expensive one.
 
-An `Asset` then becomes **one uploaded mesh, keyed `path#meshname`** — the same
-key shape `primitive.c3` (`<box 2.000000x1.000000x2.000000 1x1x1>`) and
-`convex.c3` (`<convex n=500 h=...>`) already file under, and exactly what G2's
-generational slot table with per-asset refcounts was built to hold. Unloading
-gets *sharper* as a side effect: one unused mesh out of a kit can go while its
-neighbours stay, which today is impossible because the file is the unit.
+~~An `Asset` then becomes **one uploaded mesh, keyed `path#meshname`**~~ — the
+same key shape `primitive.c3` (`<box 2.000000x1.000000x2.000000 1x1x1>`) and
+`convex.c3` (`<convex n=500 h=...>`) already file under. Unloading gets *sharper*
+either way: one unused mesh out of a kit can go while its neighbours stay, which
+today is impossible because the file is the unit.
+
+**Changed at implementation time: the file stays the asset, and the *mesh* gets
+the refcount.** The strike-through above is the shape this step was planned in,
+and the paragraph below it — "`MeshPass.place` and `Asset.bounds` assume file
+granularity, so the file has to stay a thing even once the asset is not" — is
+what gave it away. That plan needs **two** types: a per-mesh asset and a file
+record to hold the open stream, the node tree and the mesh names. Putting the
+refcount on `GpuMesh` instead needs one, because the file record already exists
+and is called `Asset`.
+
+Everything the step promises survives the change: metadata-only load, upload on
+first use, per-mesh unload, the stream held open. What it avoids is redefining
+what an `AssetId` names — which is G2's generational handle, the JavaScript
+surface, `Node.asset`, every raycast hit and every `stats()` number. A rename
+with that reach wants to buy something, and on inspection this one bought a
+second type.
 
 What it costs:
 
@@ -610,21 +719,98 @@ What it costs:
   `three.load(...)`, and a level that wants no hitch prepares its meshes before
   it needs them.
 
-## S4 — the animation data (`src/scene/animation.c3`)
+*Built. Five things came out differently from the plan and all five are cheaper:*
+
+- ***The trigger is `retain`, not `asset.mesh(name)`.** `Scene.create_slot` is
+  the one place a node can begin naming a mesh, so retaining is where "first use"
+  is defined — one choke point rather than one per JavaScript verb, and exactly
+  symmetric with `release`: uploaded when something begins drawing it, freed when
+  nothing does. It also lands strictly later than naming would: `kit.mesh("x")`
+  stays a pure-JavaScript index lookup with no crossing at all.*
+- ***`Assets` holds a `Gpu*` now**, and only the lazy path reads it, because
+  `create_slot` has no device and a `Scene` should not grow one. Every other
+  method still takes the device as a parameter. Null in a scene-math runtime,
+  where `ensure_uploaded` does nothing and nothing needs it to.*
+- ***Bounds were free.** A POSITION accessor carries `count` and is *required* to
+  carry `min`/`max`, so `describe_primitive` gets the name, the vertex count and
+  the AABB out of the JSON — which is the reading `inventory.c3` already relied
+  on. That is what made the step land without a fight: `Asset.bounds`,
+  `--grid`'s spacing and `camera.frameAll()` all keep working on a file that has
+  never uploaded a byte, and the "the file has to stay a thing" problem the plan
+  worried about never arrived.*
+- ***`free_buffers` split into `release_device` and `free_buffers`.** A swept mesh
+  has to stay a valid *described* mesh — name, bounds, count, glTF indices —
+  because the next node that names it uploads it again with no re-read. The old
+  single function freed the name too, which would have made the second placement
+  read a file for a string it already had.*
+- ***`UnloadReport` gained `meshes`.** Pieces given back without their file going
+  with them. `assets` staying at zero while `meshes` moves is the whole
+  distinction between "swapped which pieces of the kit are placed" and "dropped
+  the kit and read it again", and no byte-counting check can tell those apart.*
+
+*Both mutations fail: making `load` upload eagerly again fails five checks, and
+removing the per-mesh sweep fails two. The one that matters is
+`loading_a_file_uploads_nothing` — an assertion about an **absence**, which is
+the only kind that notices a lazy loader quietly going back to being eager,
+because every other test in the suite passes just as happily either way.*
+
+## S4 — the animation data (`src/scene/animation.c3`) — **built**
 
 Channels and samplers read at load and stored per asset. `gltf.c3l` supplies
 `Animation.duration`, `loop_time`, `clamp_time` and `find_animation` already —
 and `load_animation_buffers(i)`, so a clip's samplers can be paged in without
 the rest of the file once S3 has made that mean something.
 
-## S5 — the player is per instance
+*Built, and **not at load** — S3's rule applies one level along. `gltf::open`
+already parses every channel, sampler and target from the JSON, and a clip's
+extent comes from its time accessor's required `min`/`max`, so names and
+durations are free. `Assets.ensure_clip` reads the curves, on the first `play` of
+that clip: a character with eleven clips reads the one that plays.
+`a_files_clips_are_named_without_being_read` asserts `channels.len() == 0` after
+a load — the same kind of absence-assertion as `loading_a_file_uploads_nothing`,
+for the same reason.*
+
+*Three things the sampler had to get right, one fixture clip each:*
+
+- ***LINEAR on a rotation is slerp.*** *The spec says so, and a component-wise
+  mix is a shorter turn through a non-unit quaternion. Testing it at the
+  **midpoint** would have proved nothing — the two agree there for any arc — so
+  `spin` is checked a quarter of the way in, where slerp gives 22.5° and a mix
+  gives 22.06°.*
+- ***STEP holds.*** *A LINEAR-only implementation renders `blink` as a perfectly
+  smooth ramp of exactly the wrong thing, which has no visual signature beyond
+  "it eases when it should pop".*
+- ***CUBICSPLINE's tangents scale by the key interval.*** *Implemented rather
+  than approximated, which is what reading the curves into three.c3's own arrays
+  bought — and treating the interval as one second is the part every naive
+  implementation gets wrong.*
+
+*`gltf.c3l`'s own whole-node sampler is deliberately not used: it walks every
+channel of an animation per node and answers with a matrix, and what a
+`three::Node` wants is a TRS triple written into three fields.*
+
+## S5 — the player is per instance — **built**
 
 Two copies of the same tree must be able to wave at different phases, so the
 player lives beside the node, not on the asset. **This is the first per-instance
 state that is not a transform**, and worth noting as such — it is a new kind of
 thing in the scene model.
 
-## S6 — stepping, and the sleep condition
+*Built as `Scene.players`, a list beside the nodes rather than a field on one:
+paying a player's worth of bytes on every node of every scene to animate a dozen
+of them is the wrong trade, and `an_asset_with_no_clips_costs_no_player` is the
+check that a scene of ten thousand crates carries no animation state at all.*
+
+*The part that was not obvious: **a clip targets a glTF node index, and only the
+thing that built the tree knows what that became.** On the host,
+`Scene.instantiate` has the map for free. From JavaScript there is no such
+moment — `asset.instantiate()` builds `Object3D`s and lets the ordinary `add`
+path materialize them one node at a time, so the host performed the walk and
+never saw the correspondence. So the map goes the other way: `play()` sends it
+over on its first call, and both paths meet at `Scene.bind_player`. A prop that
+never animates never sends it.*
+
+## S6 — stepping, and the sleep condition — **built**
 
 The step happens in the host frame, before the animation callback, so a callback
 can read the result and so animation runs with no `setAnimationLoop` registered
@@ -639,7 +825,23 @@ Every term there is something that would be lost by sleeping through it
 window sleeps in the middle of a walk cycle. One term, easy to miss, impossible
 to debug from a screenshot.
 
-## S7 — the JS surface
+*Built — and it went into `JsRuntime.is_animating` rather than into `main.c3`,
+because that function is already both `tick`'s early return and the sleep
+condition, written once and read twice. Adding the term there fixed both halves
+at once: without it a clip with no `setAnimationLoop` registered would not have
+been **stepped** either.*
+
+*The step needs a delta and the host's clock gives an absolute reading, so the
+runtime keeps the last one — two guards on the difference, both for deltas that
+are not frames. The first tick contributes **nothing**, because `elapsed_ms` runs
+from process start and a clip played during boot would begin half a second in.
+And a delta is clamped to **100 ms**, because a longer one means the process
+stalled rather than that a second of animation happened. That clamp is real
+enough that the first three JavaScript checks failed on it — they jumped a second
+in one call and were measuring the clamp; they now tick at 60 Hz, which is what a
+second actually looks like.*
+
+## S7 — the JS surface — **built**
 
 	mesh.animations            // ['Idle', 'Walk', 'Run']
 	mesh.play('Walk', { loop: true, speed: 1 })
@@ -650,6 +852,21 @@ on crossfading, and crossfading is worth doing when something wants it — after
 G4, where blending between clips is what makes a character look right. A
 deliberate simplification, said out loud, rather than a partial mixer that
 answers to the same name.
+
+*Built exactly as written, on `Object3D` — so it is on `Group`, `Mesh` and
+`Scene` alike, and the object it actually means anything on is the root
+`asset.instantiate()` returned, because a clip drives a whole subtree.*
+
+*Two failures are told apart rather than both being a `false`. `play()` on an
+object that did not come from `instantiate()` throws a sentence naming which door
+to use; `play()` with a name the file does not have throws one listing the names
+it does. The host answers with a boolean — a false is a question, and an
+exception raised inside an animation callback is a stopped game — and JavaScript
+is where it becomes a message, because `mesh.animations` is right there.*
+
+*`asset.animations` is free and worth knowing about: names and durations come out
+of the JSON at load, so "does this character have a walk cycle" is a question to
+ask **before** deciding whether to place it.*
 
 ## What this milestone deliberately does not answer
 
@@ -1040,10 +1257,10 @@ they check:
    same `state_hash` after N steps, and a `snapshot`/`restore` round trip
    reproduces it. The library supplies the mechanism; the binding is what could
    break it, by stepping at a rate that depends on the frame.
-
-A fourth is worth adding once G3/S3 lands, because it is the claim that step
-exists for: **loading a file uploads nothing.** `three.load` on a kit, then
-`stats()`, and every number is what it was before the load — followed by one
-`asset.mesh(name)` and exactly one mesh appearing. Asserting the absence is the
-only way to keep a lazy loader lazy; nothing else notices when it quietly starts
-uploading everything again.
+4. **G3/S3's absence.** **Loading a file uploads nothing.** `three.load` on a
+   kit, then `stats()`, and every number is what it was before the load —
+   followed by one mesh placed and exactly one mesh appearing. Asserting the
+   absence is the only way to keep a lazy loader lazy; nothing else notices when
+   it quietly starts uploading everything again. *Built:
+   `loading_a_file_uploads_nothing` and
+   `loading_a_kit_uploads_nothing_until_a_piece_is_placed`.*

@@ -2528,3 +2528,502 @@ fn void a_hundred_levels_through_the_api_leave_nothing_behind() @test
 		test::@check(result.value.contains(`"instances":0`), "and an empty scene: %s", result.value);
 	};
 }
+
+// ============================================================================
+// asset.instantiate() — `game.md` G3/S2
+// ============================================================================
+
+<*
+ A prop's own hierarchy comes back as Object3Ds, positioned where the file says.
+
+ The host's `Scene.instantiate` is checked in `asset_test`; this is the other
+ consumer of the same walk, and what it has to prove is that going out through a
+ description and back in through the ordinary `add` path lands in the same
+ place. `tip` is under `arm` is under `pivot` in `hierarchy.glb` and ends up at
+ (2, 0, -2) — see `make_hierarchy.py` for why that number is the one no single
+ mistake produces by accident.
+
+ `pivot`'s quarter turn about +Y is exactly the pose where an Euler triple stops
+ being able to say what a quaternion means — `asin` at the top of its range —
+ so this is also the check on the second crossing. Sending only the Euler angles
+ puts `tip` at 2.0007 rather than 2, which the rounding below is deliberately
+ tight enough to fail.
+*>
+fn void an_instantiated_prop_keeps_its_hierarchy() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const tree = prop.instantiate();
+
+			const scene = new three.Scene();
+			scene.add(tree);
+
+			const find = (o, name) => {
+				if (o.name === name) return o;
+				for (const c of o.children) {
+					const hit = find(c, name);
+					if (hit) return hit;
+				}
+				return null;
+			};
+
+			const tip = find(tree, "tip");
+			const arm = find(tree, "arm");
+			const loose = find(tree, "loose");
+			// Four decimals: tight enough that the Euler-only crossing, which
+			// missed by 7e-4 here, does not round to the right answer.
+			const at = o => o.getWorldPosition().toArray().map(n => Math.round(n * 1e4) / 1e4);
+			return {
+				tip: tip ? at(tip) : null,
+				loose: loose ? at(loose) : null,
+				armChildren: arm ? arm.children.length : -1,
+				armIsGroup: arm ? !(arm instanceof three.Mesh) : null,
+				stats: scene.stats(),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"tip":[2,0,-2]`),
+			"`tip` should be at (2, 0, -2) after the chain: %s", result.value);
+		test::@check(result.value.contains(`"loose":[0,3,0]`),
+			"`loose` states its transform as a matrix and should be at (0, 3, 0): %s", result.value);
+		test::@check(result.value.contains(`"armChildren":3`),
+			"`arm` draws a two-primitive mesh and parents `tip`, so it should have three children: %s",
+			result.value);
+		test::@check(result.value.contains(`"armIsGroup":true`),
+			"`arm` should be a group rather than a mesh: %s", result.value);
+	};
+}
+
+<*
+ Two instantiations are two trees over one upload.
+
+ `plan.md` §2 at the level G3 added: the JavaScript objects double, the node
+ count doubles, and the number of unique meshes does not move. A loader that
+ uploaded per instantiation would pass every positional check above and fail
+ this one.
+*>
+fn void instantiating_a_prop_twice_shares_the_upload() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const scene = new three.Scene();
+
+			const one = prop.instantiate("left");
+			const two = prop.instantiate("right");
+			one.position.x = -5;
+			two.position.x = 5;
+			scene.add(one, two);
+
+			return scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		// Four primitives in the file, and two copies of each drawn.
+		test::@check(result.stats.unique_meshes == 4,
+			"two copies of a four-mesh prop report %d unique meshes", result.stats.unique_meshes);
+		test::@check(result.stats.instances == 8,
+			"two copies of four meshes should be eight instances, got %d", result.stats.instances);
+		test::@check(result.stats.assets == 1,
+			"two instantiations of one file report %d assets", result.stats.assets);
+	};
+}
+
+<*
+ An instantiated tree is ordinary objects, not a sealed handle.
+
+ The whole reason the host answers `instantiate()` with a *description* rather
+ than building host nodes itself: what comes back has not been added to anything,
+ so a script can take it apart before it ever reaches a scene. Here one piece is
+ pulled out and added on its own, and the rest is never added at all — which
+ should draw exactly one mesh and hold exactly one reference.
+*>
+fn void an_instantiated_tree_can_be_taken_apart_before_it_is_added() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const tree = prop.instantiate();
+
+			const find = (o, name) => {
+				if (o.name === name) return o;
+				for (const c of o.children) {
+					const hit = find(c, name);
+					if (hit) return hit;
+				}
+				return null;
+			};
+
+			const loose = find(tree, "loose");
+			const scene = new three.Scene();
+			scene.add(loose);
+
+			return { added: loose.name, stats: scene.stats() };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.stats.instances == 1,
+			"one piece of the tree was added and %d instances drew", result.stats.instances);
+		test::@check(result.stats.unique_meshes == 1,
+			"one piece should be one mesh, got %d", result.stats.unique_meshes);
+	};
+}
+
+// ============================================================================
+// Lazy loading, from JavaScript — `game.md` G3/S3
+// ============================================================================
+
+<*
+ `three.load` costs nothing on the device, and adding a mesh is what pays.
+
+ The claim an agent has to be able to act on: loading a 200-piece kit to place
+ twelve costs twelve. Here it is four and one, watched through `three.stats()`
+ rather than through host internals, because the number a script can read is the
+ one it can plan against.
+
+ `textures` is the observable, and it is a good one — the fixture's four meshes
+ share one image, so a loader that uploaded everything eagerly would report 1
+ after the load rather than 0.
+*>
+fn void loading_a_kit_uploads_nothing_until_a_piece_is_placed() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/shared_material.glb");
+			const scene = new three.Scene();
+
+			const described = kit.meshes.length;
+			const afterLoad = three.stats();
+
+			scene.add(new three.Mesh(kit.mesh("piece_2")));
+			const afterOne = three.stats();
+
+			return {
+				described,
+				loadedTextures: afterLoad.textures,
+				loadedMeshes: afterLoad.uniqueMeshes,
+				placedTextures: afterOne.textures,
+				placedMeshes: afterOne.uniqueMeshes,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"described":4`),
+			"the file's four meshes should be known without being uploaded: %s", result.value);
+		test::@check(result.value.contains(`"loadedTextures":0`),
+			"three.load uploaded a texture: %s", result.value);
+		test::@check(result.value.contains(`"placedTextures":1`),
+			"placing one mesh should have uploaded its image: %s", result.value);
+		test::@check(result.value.contains(`"placedMeshes":1`),
+			"placing one mesh of four should draw one: %s", result.value);
+	};
+}
+
+<*
+ A level can swap which pieces of a kit it uses without reloading the kit.
+
+ What the refcount moving from the file to the mesh is for. The kit stays loaded
+ across the swap — `assets` does not move — and the piece that was dropped comes
+ back as `meshes` in the report, which is the number that distinguishes this from
+ a sweep that took the whole file and reloaded it.
+*>
+fn void swapping_pieces_of_a_kit_keeps_the_kit() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/shared_material.glb");
+			const scene = new three.Scene();
+
+			const keep = new three.Mesh(kit.mesh("piece_0"));
+			const swap = new three.Mesh(kit.mesh("piece_1"));
+			scene.add(keep, swap);
+			const before = three.stats();
+
+			scene.remove(swap);
+			const report = three.unloadUnused();
+
+			scene.add(new three.Mesh(kit.mesh("piece_3")));
+			const after = three.stats();
+
+			return { before: before.uniqueMeshes, report, after: after.uniqueMeshes };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"before":2`),
+			"two pieces placed should be two meshes: %s", result.value);
+		test::@check(result.value.contains(`"meshes":1`),
+			"dropping one piece should give back one mesh: %s", result.value);
+		test::@check(result.value.contains(`"assets":0`),
+			"the kit itself should have stayed loaded: %s", result.value);
+		test::@check(result.value.contains(`"after":2`),
+			"a third piece placed after the sweep should draw: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Animation, from JavaScript — `game.md` G3/S7
+// ============================================================================
+
+<*
+ Drive the runtime from one moment to another in 60 Hz frames.
+
+ **Not one big tick.** `JsRuntime.step_animations` clamps a single delta to
+ 100 ms, because a longer one means the process stalled rather than that a second
+ of animation happened — so a test that jumped a second in one call would be
+ asserting on the clamp. Sixty frames is what a second actually looks like, and
+ the telescoping of consecutive absolute readings makes the total exact.
+*>
+fn void advance(three::JsRuntime* run, double from_ms, double to_ms)
+{
+	const double STEP = 1000.0 / 60.0;
+	for (double t = from_ms; t < to_ms; t += STEP) run.tick(t);
+	run.tick(to_ms);
+}
+
+<*
+ `mesh.play('Walk')` — the three-line surface, working end to end.
+
+ This is the whole of S7 in one script, and it goes through a path the host tests
+ cannot reach: `asset.instantiate()` in JavaScript builds `Object3D`s and lets
+ the ordinary `add` materialize them, so the host never performed the tree walk
+ and only JavaScript knows which object came from which glTF node. `play` sends
+ that map over on its first call. Get it wrong and the clip plays into nothing —
+ the call succeeds, the time advances, and every node stays where it was.
+
+ Which is why the check is on `tip`'s position after a tick rather than on
+ `play()` returning.
+*>
+fn void a_clip_plays_through_the_javascript_api() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const rig = prop.instantiate();
+			const scene = new three.Scene();
+			scene.add(rig);
+
+			const find = (o, name) => {
+				if (o.name === name) return o;
+				for (const c of o.children) {
+					const hit = find(c, name);
+					if (hit) return hit;
+				}
+				return null;
+			};
+			const tip = find(rig, "tip");
+
+			globalThis.rig = rig;
+			globalThis.tip = tip;
+			rig.play("slide", { loop: false });
+
+			return { clips: rig.animations, assetClips: prop.animations, at: tip.getWorldPosition().toArray() };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"clips":["slide","spin","blink"]`),
+			"the prop should list its three clips: %s", result.value);
+		test::@check(result.value.contains(`"assetClips":["slide","spin","blink"]`),
+			"and so should the asset: %s", result.value);
+
+		// One second of host frames, which is what actually advances a clip.
+		advance(run, 0, 1000);
+
+		three::RunResult moved = run.run(`
+			const at = globalThis.tip.getWorldPosition().toArray().map(n => Math.round(n * 1e2) / 1e2);
+			return { at };
+		`);
+		defer moved.free();
+		test::@check(moved.ok, "the second script ran: %s", moved.error);
+		test::@check(moved.value.contains(`"at":[2,0,-4]`),
+			"a second into `slide`, `tip` should be at (2, 0, -4): %s", moved.value);
+	};
+}
+
+<*
+ A playing clip keeps the window awake.
+
+ `game.md` G3/S6's easy-to-miss term. `is_animating` is the host's "may this
+ window sleep" condition and `tick`'s own early return, and a clip playing with
+ no `setAnimationLoop` registered is exactly the case that was not in it — the
+ clip advances, the player steps, and the frames stop arriving. Nothing about
+ that reads as a bug in the animation code.
+
+ The reverse is asserted too: once the clip finishes, the window is allowed to
+ sleep again. A term that is always true is the same bug with the opposite cost.
+*>
+fn void a_playing_clip_keeps_the_window_awake() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		test::@check(!run.is_animating(), "a fresh runtime already wanted frames");
+
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			new three.Scene().add(rig);
+			globalThis.rig = rig;
+			rig.play("slide", { loop: false });
+			return three.stats().nodes;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(run.is_animating(),
+			"a clip is playing with no setAnimationLoop registered and the window may sleep");
+
+		// Past the end of a two-second clip.
+		advance(run, 0, 3000);
+
+		test::@check(!run.is_animating(),
+			"the clip finished and the window still may not sleep");
+	};
+}
+
+<*
+ A clip that is not there is a sentence, not a silent no.
+
+ The host answers `play` with a boolean because a false is a question rather than
+ an error. JavaScript is where it becomes a message, because `mesh.animations`
+ is right there and a script that named the wrong clip should be told what the
+ right ones are rather than watching nothing happen.
+*>
+fn void playing_a_clip_that_is_not_there_says_which_ones_are() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			new three.Scene().add(rig);
+			try { rig.play("moonwalk"); return "played"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains("moonwalk") && result.value.contains("slide"),
+			"the message should name the clip asked for and the ones there are: %s", result.value);
+	};
+}
+
+<*
+ An ordinary Group has no animations and says so.
+
+ A clip targets glTF nodes, so playing one needs a subtree that came from a file.
+ Returning false here would leave a script unable to tell "wrong clip name" from
+ "wrong kind of object".
+*>
+fn void an_ordinary_group_cannot_play_anything() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const g = new three.Group();
+			new three.Scene().add(g);
+			const empty = g.animations.length;
+			try { g.play("slide"); return { empty, message: "played" }; }
+			catch (e) { return { empty, message: e.message }; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"empty":0`), "a plain Group listed animations: %s", result.value);
+		test::@check(result.value.contains("instantiate"),
+			"the message should say which door to use: %s", result.value);
+	};
+}
+
+<*
+ Two props of one file play at different phases, from JavaScript.
+
+ The per-instance player (S5) reached through the binding. Both play `slide`;
+ only one gets the second tick, so their positions have to differ — and the
+ asset still reports one upload behind both of them.
+*>
+fn void two_props_of_one_file_animate_independently() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const scene = new three.Scene();
+			const a = prop.instantiate("a");
+			const b = prop.instantiate("b");
+			scene.add(a, b);
+			globalThis.a = a;
+			globalThis.b = b;
+			a.play("slide", { loop: false });
+			return three.stats().assets;
+		`);
+		defer setup.free();
+		test::@check(setup.ok, "the setup ran: %s", setup.error);
+
+		advance(run, 0, 1000);
+
+		three::RunResult started = run.run(`globalThis.b.play("slide", { loop: false }); return 0;`);
+		defer started.free();
+		test::@check(started.ok, "the second play ran: %s", started.error);
+
+		advance(run, 1000, 1500);
+
+		three::RunResult where = run.run(`
+			const at = o => o.getObjectByName("tip").getWorldPosition().toArray()
+				.map(n => Math.round(n * 1e2) / 1e2);
+			return { a: at(globalThis.a), b: at(globalThis.b), assets: three.stats().assets };
+		`);
+		defer where.free();
+		test::@check(where.ok, "the script ran: %s", where.error);
+		// `a` has had 1.5s of the clip, `b` has had 0.5s.
+		test::@check(where.value.contains(`"a":[2,0,-5]`),
+			"the first prop should be 1.5s in, at (2, 0, -5): %s", where.value);
+		test::@check(where.value.contains(`"b":[2,0,-3]`),
+			"the second should be 0.5s in, at (2, 0, -3): %s", where.value);
+		test::@check(where.value.contains(`"assets":1`),
+			"two animated props should share one asset: %s", where.value);
+	};
+}
+
+<*
+ Removing an animated prop stops it, and the scene stays steppable.
+
+ The player holds `NodeId`s into the scene, so one outliving its subtree would be
+ writing sampled transforms into slots something else now occupies — a node
+ moving on its own with no code anywhere that moves it.
+*>
+fn void removing_an_animated_prop_stops_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const prop = three.load("test/fixtures/hierarchy.glb");
+			const scene = new three.Scene();
+			const rig = prop.instantiate();
+			scene.add(rig);
+			rig.play("slide");
+			globalThis.scene = scene;
+			globalThis.rig = rig;
+			return 0;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(run.is_animating(), "the clip is not playing");
+
+		advance(run, 0, 500);
+
+		three::RunResult removed = run.run(`globalThis.scene.remove(globalThis.rig); return three.stats().nodes;`);
+		defer removed.free();
+		test::@check(removed.ok, "the removal ran: %s", removed.error);
+
+		test::@check(!run.is_animating(), "the removed prop is still animating");
+		advance(run, 500, 1500);
+	};
+}

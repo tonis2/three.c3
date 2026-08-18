@@ -769,6 +769,12 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
 	mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
 
+	// A generated shape has no file to go back to, so it is uploaded at the
+	// moment it is built and says so — `ensure_uploaded` would have nothing to
+	// read from if it were ever reached for one.
+	mesh.uploaded = true;
+	mesh.gltf_mesh = -1;
+	mesh.gltf_primitive = -1;
 	asset.meshes.push(mesh);
 	return self.claim_slot(asset);
 }

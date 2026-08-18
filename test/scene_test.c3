@@ -27,6 +27,7 @@ import std::io::file;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
+import std::math::quaternion;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -93,6 +94,106 @@ fn uint count_drawn(image::Image* shot, float[4] clear)
 // ============================================================================
 // Scene math — no GPU, no assets
 // ============================================================================
+
+<*
+ A rotation handed to JavaScript as Euler angles comes back as the same rotation.
+
+ `euler_from_quat` is the only backwards conversion in the codebase and it exists
+ for `asset.instantiate()`, which has to give an `Object3D` a `rotation` triple.
+ What has to survive the trip is the *rotation*, not the three numbers — the
+ decomposition is not unique — so this asserts on matrices.
+
+ The last two poses are the ones that matter. A pitch of exactly ±90° is the
+ singularity where X and Z become the same axis and the split between them is
+ arbitrary; a naive implementation returns NaN there, from an `asin` of a value
+ that floating point pushed just past 1. NaN in a rotation is invisible until it
+ reaches a world matrix and takes every descendant with it.
+*>
+fn void a_quaternion_survives_being_read_as_euler_angles() @test
+{
+	Vec3[] poses = {
+		{ 0, 0, 0 },
+		{ 0.3f, 0.7f, 1.1f },
+		{ -1.2f, 0.4f, -0.9f },
+		{ 2.5f, -1.9f, 0.2f },
+		{ 0.4f, (float)math::PI * 0.5f, 0.9f },   // gimbal lock, +90 pitch
+		{ 0.4f, (float)math::PI * -0.5f, 0.9f },  // and -90
+	};
+
+	foreach (euler : poses)
+	{
+		Quaternionf original = three::quat_from_euler(euler);
+		Vec3 read_back = three::euler_from_quat(original);
+		Quaternionf rebuilt = three::quat_from_euler(read_back);
+
+		test::@check(
+			math::is_finite(read_back.x) && math::is_finite(read_back.y) && math::is_finite(read_back.z),
+			"(%.2f, %.2f, %.2f) read back as (%f, %f, %f)",
+			euler.x, euler.y, euler.z, read_back.x, read_back.y, read_back.z
+		);
+
+		Matrix4f before = original.to_matrix();
+		Matrix4f after = rebuilt.to_matrix();
+		for (usz i = 0; i < 16; i++)
+		{
+			test::@check(
+				math::abs(before.m[i] - after.m[i]) < 0.0005f,
+				"element %d of (%.2f, %.2f, %.2f) changed from %f to %f through the Euler round trip",
+				i, euler.x, euler.y, euler.z, before.m[i], after.m[i]
+			);
+		}
+	}
+}
+
+<*
+ The Euler order survived becoming a quaternion.
+
+ `Node.rotation` was an XYZ Euler triple until G3 and `local_matrix` composed it
+ by hand as `translate · rotate_x · rotate_y · rotate_z · scale`. It is a
+ quaternion now, because a glTF node's TRS and a sampled animation channel are
+ both quaternions and storing them as Euler angles is lossy at exactly the poses
+ that matter. `quat_from_euler` is the conversion that stands where the chain
+ used to.
+
+ This is that chain, written out literally, compared against what
+ `quat_from_euler` produces. Not a property of quaternions — a property of
+ *this* conversion agreeing with *that* order, which is a thing an agent
+ pasting Three.js code depends on and which nothing else in the suite would
+ notice going wrong. `from_euler` in the standard library documents itself as
+ ZYX and would pass a "rotations compose" test while failing this one.
+
+ The angles are deliberately all-different and none of them a right angle: a
+ wrong order is invisible when two of three are zero, and 90° hides sign errors
+ by putting sines and cosines on 0 and 1.
+*>
+fn void euler_order_survived_the_quaternion() @test
+{
+	Vec3[] poses = {
+		{ 0.3f, 0.7f, 1.1f },
+		{ -1.2f, 0.4f, -0.9f },
+		{ 2.5f, -1.9f, 0.2f },
+		{ (float)math::PI * 0.5f, 0.6f, -0.35f }, // gimbal-locked in Euler terms
+	};
+
+	foreach (euler : poses)
+	{
+		Matrix4f chain = matrix::IDENTITY4{float}
+			.rotate_x(euler.x)
+			.rotate_y(euler.y)
+			.rotate_z(euler.z);
+
+		Matrix4f viaq = three::quat_from_euler(euler).to_matrix();
+
+		for (usz i = 0; i < 16; i++)
+		{
+			test::@check(
+				math::abs(chain.m[i] - viaq.m[i]) < 0.0001f,
+				"element %d of (%.2f, %.2f, %.2f) is %f through the old chain and %f through the quaternion",
+				i, euler.x, euler.y, euler.z, chain.m[i], viaq.m[i]
+			);
+		}
+	}
+}
 
 <*
  A child's world transform is its parent's, applied to its own.
@@ -701,7 +802,10 @@ fn void a_ray_through_the_screen_centre_hits_what_is_centred() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
-		three::NodeId centred = scene.node(scene.root).children[0];
+		// `place` instantiates into a group since G3, so the drawing node is a
+		// level further down than it was.
+		three::NodeId placed = scene.node(scene.root).children[0];
+		three::NodeId centred = scene.node(placed).children[0];
 
 		// A second copy well off to the left, so a raycast that ignores the
 		// screen position entirely still has something wrong to return.

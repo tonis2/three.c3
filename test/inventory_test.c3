@@ -1,9 +1,15 @@
 <*
  `game.md` G1/S5: what a glTF says about itself before anything uploads it.
 
- Pointed at `test/fixtures/`, which is a real directory with a real `.glb` in it
- and — usefully — a `.py` beside it, so the filter is tested by the fixture
+ Pointed at `test/fixtures/`, which is a real directory with real `.glb`s in it
+ and — usefully — `.py` files beside them, so the filter is tested by the fixture
  layout rather than by a mock of one.
+
+ There are three glTFs there, which matters more than it looks. A directory
+ holding exactly one file cannot tell a working listing apart from a function
+ that describes whatever it finds first, and it lets every check index `found[0]`
+ and call that a test. So nothing here indexes: each check names the file it is
+ about and looks it up, which is also what a game does with `three.inventory()`.
 
  Every check here runs with no GPU and no device: reading a glTF's JSON is
  arithmetic over a parse, and that is the whole point of the feature.
@@ -15,23 +21,51 @@ import three;
 
 const String FIXTURE_DIR = "test/fixtures";
 
+<*
+ The entry for one fixture, or a failed check saying which one is missing.
+
+ A null return rather than an assert so a caller can bail cleanly: a missing
+ fixture is one failure, not one per line that would have read it.
+*>
+fn three::InventoryEntry* named(three::Inventory* found, String path)
+{
+	foreach (&entry : *found)
+	{
+		if (entry.path == path) return entry;
+	}
+	test::@check(false, "%s is not in the inventory of %s", path, FIXTURE_DIR);
+	return null;
+}
+
 fn void a_directory_is_described_without_being_loaded() @test
 {
 	three::Inventory? found = three::take_inventory(FIXTURE_DIR);
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 1, "one glTF in test/fixtures (%d)", found.len());
-	if (found.len() != 1) return;
+	test::@check(found.len() == 3, "every glTF in test/fixtures (%d)", found.len());
 
-	three::InventoryEntry* entry = &found[0];
-	test::@check(entry.path == "textured.glb",
-		"named relative to the root, which is what three.load wants (%s)", entry.path);
+	three::InventoryEntry* entry = named(&found, "textured.glb");
+	if (entry == null) return;
+
 	test::@check(entry.meshes.len() == 2, "with both its meshes (%d)", entry.meshes.len());
 	test::@check(entry.triangles == 4, "and four triangles across them (%d)", entry.triangles);
 	test::@check(entry.nodes == 2, "and two nodes (%d)", entry.nodes);
 	test::@check(entry.animations.len() == 0 && entry.skins == 0,
 		"and nothing animated, which this fixture is not");
+
+	// The path is what `three.load` is handed straight back, so it is relative
+	// to the root that was scanned and not to the process's directory.
+	three::InventoryEntry* shared = named(&found, "shared_material.glb");
+	if (shared == null) return;
+	test::@check(shared.meshes.len() == 4, "and the kit fixture's four pieces (%d)", shared.meshes.len());
+
+	// Counted from the JSON, so a fixture whose geometry is positioned entirely
+	// by its nodes is described without any of it being read.
+	three::InventoryEntry* tree = named(&found, "hierarchy.glb");
+	if (tree == null) return;
+	test::@check(tree.nodes == 4, "and the hierarchy fixture's four nodes (%d)", tree.nodes);
+	test::@check(tree.triangles == 8, "and its eight triangles across four primitives (%d)", tree.triangles);
 }
 
 <*
@@ -46,17 +80,19 @@ fn void every_mesh_carries_its_own_count() @test
 	three::Inventory? found = three::take_inventory(FIXTURE_DIR);
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
-	if (found.len() != 1) { test::@check(false, "one glTF in test/fixtures"); return; }
+
+	three::InventoryEntry* entry = named(&found, "textured.glb");
+	if (entry == null) return;
 
 	uint summed = 0;
-	foreach (&mesh : found[0].meshes)
+	foreach (&mesh : entry.meshes)
 	{
 		test::@check(mesh.name.len > 0, "each mesh is named (%s)", mesh.name);
 		test::@check(mesh.triangles == 2, "and carries its own two triangles (%d)", mesh.triangles);
 		summed += mesh.triangles;
 	}
-	test::@check(summed == found[0].triangles,
-		"and the parts add up to the whole (%d vs %d)", summed, found[0].triangles);
+	test::@check(summed == entry.triangles,
+		"and the parts add up to the whole (%d vs %d)", summed, entry.triangles);
 }
 
 <*
@@ -68,9 +104,10 @@ fn void the_bounds_are_read_from_the_json() @test
 	three::Inventory? found = three::take_inventory(FIXTURE_DIR);
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
-	if (found.len() != 1) { test::@check(false, "one glTF in test/fixtures"); return; }
 
-	three::InventoryEntry* entry = &found[0];
+	three::InventoryEntry* entry = named(&found, "textured.glb");
+	if (entry == null) return;
+
 	test::@check(entry.has_bounds, "the fixture's positions carry min/max");
 	if (!entry.has_bounds) return;
 
@@ -97,7 +134,7 @@ fn void only_gltf_files_are_listed() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	// `make_textured.py` sits beside the fixture and must not appear.
+	// The `make_*.py` generators sit beside the fixtures and must not appear.
 	foreach (&entry : found)
 	{
 		test::@check(entry.path.ends_with(".glb") || entry.path.ends_with(".gltf"),
