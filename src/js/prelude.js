@@ -1445,6 +1445,8 @@
 			'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
+			'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
+			'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
 			'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
 			'A mesh with no material draws with the base colour and texture its glTF material carried.',
 			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
@@ -1503,7 +1505,10 @@
 			Group: {
 				construct: 'new three.Group(), or asset.instantiate()',
 				note:
-					'Transforms its children and draws nothing itself. asset.instantiate() answers with one '
+					'Transforms its children and draws nothing itself, which makes it the way to keep several '
+					+ 'objects one object: parent the pieces, place them relative to the Group once, and afterwards '
+					+ 'there is one transform to move rather than a convention to remember. '
+					+ 'asset.instantiate() answers with one '
 					+ 'of these carrying the file\'s own node hierarchy, and that one is what animations, '
 					+ 'play(name, {loop, speed}) and stop() work on — a glTF clip drives a whole subtree, so '
 					+ 'its root is where it is played. On a hand-built Group animations is empty and play() '
