@@ -183,6 +183,14 @@ struct JsRuntime
 	long frame_dropped;
 	DString frame_error;
 
+	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at
+	// worst and is replaced whole by every tick; `input_text` backs its `text`,
+	// which would otherwise point into a window buffer that clears itself.
+	InputState input;
+	DString input_text;
+	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
+	usz key_handler_count;
+
 	bool ready;
 }
 
@@ -205,6 +213,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.error.init(mem, 256);
 	self.frame_log.init(mem, 512);
 	self.frame_error.init(mem, 128);
+	self.input_text.init(mem, 64);
 	self.frame_fn = qjs::undefined_value();
 	self.budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.epoch = 1;
@@ -231,15 +240,17 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 fn void JsRuntime.close(&self)
 {
 	if (!self.ready) return;
-	// Before the context goes, not after: `clear_frame` releases a reference
-	// into an engine that would no longer be there to release it into.
+	// Before the context goes, not after: both of these release references into
+	// an engine that would no longer be there to release them into.
 	self.clear_frame();
+	self.clear_key_handlers();
 	self.js.close();
 	self.log.free();
 	self.value.free();
 	self.error.free();
 	self.frame_log.free();
 	self.frame_error.free();
+	self.input_text.free();
 	*self = {};
 }
 

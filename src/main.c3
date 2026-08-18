@@ -441,6 +441,8 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	}
 
 	Controls controls = default_controls();
+	InputTracker keyboard;
+	InputState input;
 
 	// What the animation callback is told the time is. Stamped once, here, so it
 	// is monotonic across every registration a script makes — which is what
@@ -460,6 +462,10 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			// iteration resolve in the order they happened rather than the
 			// script's camera being overwritten by a stale anchor.
 			drive_camera(renderer: renderer, window: window, controls: &controls, events: events);
+			// Sampled here rather than at the tick, because this is where the
+			// events are: `getEvent` clears the typed text on its next call, and
+			// the edges are a difference against what the *previous* call saw.
+			input = keyboard.step(read_events(events), window.get_text());
 		}
 
 		usz handled = listener.pump(&server);
@@ -471,7 +477,7 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			// After `pump` and before the draw: a script that registers a
 			// callback gets its first frame on this iteration, and the frame
 			// presented is the one the callback just built.
-			runtime.tick((double)elapsed_ns / 1_000_000.0);
+			runtime.tick((double)elapsed_ns / 1_000_000.0, input);
 
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between
@@ -490,6 +496,10 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			if (elapsed_ns - last_tick_ns >= HEADLESS_FRAME_MS * 1_000_000)
 			{
 				last_tick_ns = elapsed_ns;
+				// No window, so no keyboard: the default empty state, and
+				// `three.input.isDown` answers false rather than throwing. A
+				// script written for a window still runs here; it just gets no
+				// input, which is the truth.
 				runtime.tick((double)elapsed_ns / 1_000_000.0);
 			}
 			if (handled == 0)

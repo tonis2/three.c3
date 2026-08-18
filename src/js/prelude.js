@@ -923,6 +923,35 @@
 	};
 
 	// -----------------------------------------------------------------------
+	// The keyboard
+	//
+	// Not a Three.js API — Three.js has no input layer at all, and this is in
+	// the `differences` list because of it. The key *names* are the browser's
+	// (`KeyboardEvent.key`, lowercased), because those are the strings an agent
+	// has memorized even though the object around them is new.
+	//
+	// `isDown` is meaningful whenever it is asked. `pressed`, `released` and
+	// `text` describe the frame being drawn right now, so they only mean
+	// something inside the animation callback — between frames they report
+	// whatever the last frame happened to see, which is almost always nothing.
+
+	const input = {
+		isDown(key) { return H.inputDown(String(key)); },
+		pressed(key) { return H.inputPressed(String(key)); },
+		released(key) { return H.inputReleased(String(key)); },
+
+		// What was typed this frame, with modifier chords and the function-key
+		// range already filtered out. This, and not the key map, is what a text
+		// field wants: it has the keyboard layout applied and the shift key
+		// already accounted for.
+		get text() { return H.inputText(); },
+
+		// Every name there is, in one place, and the same list the host
+		// searches. Aliases are included: ctrl, cmd and esc.
+		keys() { return H.keyNames(); },
+	};
+
+	// -----------------------------------------------------------------------
 	// The module
 
 	const three = {
@@ -1006,8 +1035,37 @@
 			return { width, height };
 		},
 
+		input,
+
+		// Bind an action to a key. The handler is called once when the key goes
+		// down (or up), from inside the frame, and is given the name it was
+		// bound under — so one function can serve 'w', 'a', 's' and 'd'.
+		//
+		// One handler per key per edge: binding again replaces. null unbinds.
+		// A held key does not repeat; polling three.input.isDown in the
+		// animation callback is what continuous movement wants.
+		onKeyDown(key, fn) { bindKey(key, true, fn); },
+		onKeyUp(key, fn) { bindKey(key, false, fn); },
+
 		getApiDocs() { return DOCS; },
 	};
+
+	// Shared by both, including the async refusal: a key handler runs inside a
+	// frame for the same reason the animation callback does, and an async one
+	// would return before it had done anything.
+	function bindKey(key, down, fn) {
+		if (fn === null || fn === undefined) { H.onKey(String(key), down, null); return; }
+		if (typeof fn !== 'function') {
+			throw new TypeError('three.onKeyDown(key, fn) wants a function, or null to unbind');
+		}
+		if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+			throw new TypeError(
+				'a key handler must be synchronous — an async one returns before it has done '
+				+ 'anything, and the frame does not wait. Do the awaiting in a run_script.'
+			);
+		}
+		H.onKey(String(key), down, fn);
+	}
 
 	// -----------------------------------------------------------------------
 	// The docs
@@ -1041,6 +1099,8 @@
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
 			'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
 			'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. setAnimationLoop(null) stops the clock so a known state can be captured.',
+			'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
+			'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -1162,6 +1222,23 @@
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
+			'three.input.isDown(key)':
+				'Whether a key is held right now. Poll this in the animation callback for continuous '
+				+ 'movement — a held key fires no repeat events.',
+			'three.input.pressed(key) / released(key)':
+				'Whether the key went down (or up) during the frame being drawn. Meaningful inside the '
+				+ 'animation callback; between frames it reports the last frame, which is almost always nothing.',
+			'three.input.text':
+				'What was typed this frame, as UTF-8, with modifier chords, control characters and the '
+				+ 'function-key range filtered out. The layout and the shift key are already applied, so '
+				+ 'this is what a text field wants rather than the key map.',
+			'three.input.keys()':
+				'Every key name there is. The same list the host searches, so it cannot be out of date.',
+			'three.onKeyDown(key, fn) / three.onKeyUp(key, fn)':
+				'Call fn(keyName) once when the key goes down (or up), from inside the frame. One handler '
+				+ 'per key per edge — binding again replaces, null unbinds, and up to 32 exist at a time. '
+				+ 'Synchronous only, and stopped for good if it throws, exactly as the animation callback is. '
+				+ 'Escape is the host\'s: it closes the window whatever a script binds.',
 			'three.setAnimationLoop(fn)':
 				'Run fn(elapsedMs) once per frame, or null to stop. Synchronous only. The next '
 				+ 'run_script reports how many frames it ran, whether it is still running, and why it '
@@ -1200,6 +1277,12 @@
 			'three.camera.lookAt(x, y, z)': 'Point the turntable at a world position.',
 			'three.camera.frameAll()': 'Aim at everything in the scene and back off far enough to see it.',
 		},
+		// The whole key table, from the host, so the names an agent reads and the
+		// names the host searches are one list. Aliases included: ctrl, cmd, esc.
+		// No numpad and no mouse buttons — mesh.pick and the mouse are the
+		// camera's, and a latched mouse button is a trap the window has already
+		// been caught by once.
+		keys: H.keyNames(),
 		stats: {
 			drawCalls: 'vkCmdDrawIndexed calls for one frame of this scene.',
 			uniqueMeshes: 'Distinct (asset, mesh) pairs drawn.',

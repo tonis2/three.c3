@@ -76,6 +76,9 @@ fn void JsRuntime.install_bindings(&self)
 	// The animation loop (js/frame_loop.c3)
 	self.bind_frame_verbs(host);
 
+	// The keyboard (js/bind_input.c3)
+	self.bind_input_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "render", &js_render, 0);
