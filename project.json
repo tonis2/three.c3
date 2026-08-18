@@ -22,7 +22,23 @@
 	// another Slang on the default search path — /usr/local/lib, from an
 	// installer — links against that one instead and dies at startup in dyld
 	// naming a version nobody asked for. Measured; see slang.c3l's README.
-	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang"],
+	//
+	// **ktx arrived ahead of the milestone that uses it** — `game.md` G6 — and is
+	// listed here rather than left unlisted so that `test/ktx_test.c3` can hold
+	// it to compiling and linking. A dependency nothing imports rots silently.
+	//
+	// **It needs no staging step, unlike slang.** `libzstd.a` is checked in per
+	// target under `lib/ktx.c3l/lib/<target>/` and reached through the library's
+	// own `linklib-dir`, so a plain checkout links. Worth saying because slang
+	// trained this project to expect the opposite.
+	//
+	// **`--recursive` is not needed for it either**, unlike quickjs. ktx.c3l has
+	// submodules of its own — getopt and image — but its manifest builds only
+	// `src/ktx/**`, deliberately leaving the CLI out, and those two are the CLI's.
+	//
+	// **`ktx::vk` is not `vk`.** ktx's format-table module and vulkan.c3l's
+	// binding want the same name; reach the former fully qualified.
+	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang", "ktx"],
 	"features": [],
 	// c3c defaults to 11.0 and the Slang SDK is built for 15.0, so every link
 	// drew "building for macOS-11.0, but linking with dylib ... built for newer

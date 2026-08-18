@@ -113,6 +113,9 @@ struct RunResult
 	// `js/frame_loop.c3` fills these in and says why each one is here.
 	bool frame_running;
 	long frame_ticks;
+	// Frames that ran past JS_GAME_FRAME_SOFT_MS, in a game boot. Always zero
+	// under `--mcp` alone, where an overrun is a stop rather than a statistic.
+	long frame_overruns;
 	// Why the callback was stopped, empty when it was not. Reported exactly
 	// once: whichever run reads it clears it.
 	String frame_error;
@@ -182,6 +185,11 @@ struct JsRuntime
 	DString frame_log;
 	long frame_dropped;
 	DString frame_error;
+	// The game frame policy, set by `--assets` through `set_assets_root`.
+	// `game.md` G1/S4: a game is warned and counted where an agent is stopped.
+	bool game_frames;
+	long frame_overruns;
+	bool frame_overrun_warned;
 
 	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at
 	// worst and is replaced whole by every tick; `input_text` backs its `text`,
@@ -196,6 +204,16 @@ struct JsRuntime
 	// before the context closes.
 	qjs::Value click_fn;
 	bool click_active;
+
+	// `import`, owned by `js/modules.c3`. Empty root means no `--assets` boot
+	// and no module resolution at all, which is what a plain `--mcp` run wants.
+	// **`module_hooks` is addressed by the engine and must not move** while the
+	// context is open — the same requirement `main.c3` meets for the `Renderer`
+	// the server holds. `module_source` is the one buffer every load is answered
+	// out of; see `read_module` for why one is enough.
+	String assets_root;
+	qjs::ModuleHooks module_hooks;
+	char[] module_source;
 
 	bool ready;
 }
@@ -259,6 +277,8 @@ fn void JsRuntime.close(&self)
 	self.frame_log.free();
 	self.frame_error.free();
 	self.input_text.free();
+	if (self.assets_root.len > 0) self.assets_root.free(mem);
+	if (self.module_source.len > 0) free(self.module_source);
 	*self = {};
 }
 
@@ -271,6 +291,54 @@ fn void JsRuntime.close(&self)
  @return `Owned by the caller; free it with RunResult.free.`
 *>
 fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool drain_frame = true)
+{
+	return self.run_source(source, name, drain_frame, as_module: false);
+}
+
+<*
+ Run `source` as an ES module — `game.md` G1/S3, and the shape `main.js` takes.
+
+ **Not the async wrapper `run` uses**, and the difference is not cosmetic: a
+ module's `import` declarations must be at its top level, so wrapping one in a
+ function body is a syntax error before it is anything else. What the two share
+ is everything after evaluation, because module evaluation hands back a promise
+ exactly as the wrapper does — top-level `await` is a module's by right rather
+ than by a trick.
+
+ `three` reaches it as a global, which is why there is no import of it and no
+ module named for it. See `js/modules.c3`.
+
+ @param specifier : `Root-relative, and also what a stack trace calls it and what its own imports resolve against.`
+ @require self.assets_root.len > 0 : "a module needs an assets root to resolve against"
+*>
+fn RunResult JsRuntime.run_module(&self, String specifier)
+{
+	String? source = self.read_module(specifier);
+	if (catch err = source)
+	{
+		self.log.clear();
+		self.value.clear();
+		self.error.clear();
+		self.error.appendf("could not read %s: %s", specifier, err)!!;
+		self.rejected = true;
+		self.settled = false;
+		return {
+			.ok = false,
+			.log = self.log.copy_str(mem),
+			.value = self.value.copy_str(mem),
+			.error = self.error.copy_str(mem),
+			.frame_error = self.frame_error.copy_str(mem),
+		};
+	}
+	// Copied off the shared buffer before evaluating: the module's own imports
+	// are loaded during the parse and each one overwrites it.
+	@pool()
+	{
+		return self.run_source(source.copy(tmem), specifier, drain_frame: true, as_module: true);
+	};
+}
+
+fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_frame, bool as_module)
 {
 	self.log.clear();
 	self.value.clear();
@@ -290,10 +358,11 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
 	@pool()
 	{
 		// No newline after the brace: the script's line 1 stays line 1 in every
-		// stack trace. See the header.
-		String wrapped = string::tformat("(async()=>{%s\n})()", source);
+		// stack trace. See the header. A module needs neither — its top level is
+		// already async and its line 1 is already its own.
+		String wrapped = as_module ? source : string::tformat("(async()=>{%s\n})()", source);
 
-		qjs::Value? started = self.js.eval(wrapped, name);
+		qjs::Value? started = self.js.eval(wrapped, name, as_module ? qjs::EVAL_MODULE : qjs::EVAL_GLOBAL);
 		if (catch err = started)
 		{
 			// A parse error, or a throw before the first await — the async
@@ -327,10 +396,12 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
 	// it.
 	String frame_error = self.frame_error.copy_str(mem);
 	long frame_ticks = self.frame_ticks;
+	long frame_overruns = self.frame_overruns;
 	if (drain_frame)
 	{
 		self.frame_error.clear();
 		self.frame_ticks = 0;
+		self.frame_overruns = 0;
 	}
 
 	return {
@@ -341,6 +412,7 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
 		.stats = stats,
 		.frame_running = self.frame_active,
 		.frame_ticks = frame_ticks,
+		.frame_overruns = frame_overruns,
 		.frame_error = frame_error,
 	};
 }

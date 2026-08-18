@@ -164,6 +164,14 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 		report.append_string(result.frame_running ? "true" : "false");
 		report.append_string(`,"ticks":`);
 		report.appendf("%d", result.frame_ticks)!!;
+		// Only in a game boot, where it is ever non-zero — and then always, even
+		// at zero, because "no frames ran long" is the answer somebody checking
+		// for hitching came to read.
+		if (result.frame_overruns > 0)
+		{
+			report.append_string(`,"overruns":`);
+			report.appendf("%d", result.frame_overruns)!!;
+		}
 		if (result.frame_error.len > 0)
 		{
 			report.append_string(`,"error":`);

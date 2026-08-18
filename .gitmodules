@@ -22,3 +22,6 @@
 [submodule "lib/slang.c3l"]
 	path = lib/slang.c3l
 	url = https://github.com/tonis2/slang.c3.git
+[submodule "lib/ktx.c3l"]
+	path = lib/ktx.c3l
+	url = https://github.com/tonis2/ktx.c3.git
