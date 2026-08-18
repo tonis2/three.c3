@@ -153,6 +153,25 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 
 	report.append_string(`,"stats":`);
 	append_stats(&report, result.stats);
+
+	// Only when there is something to say. A `"frame"` block on every result
+	// would be noise on the overwhelming majority of scripts, which never
+	// register a callback — and noise on every result is how a field stops being
+	// read at all.
+	if (result.frame_running || result.frame_ticks > 0 || result.frame_error.len > 0)
+	{
+		report.append_string(`,"frame":{"running":`);
+		report.append_string(result.frame_running ? "true" : "false");
+		report.append_string(`,"ticks":`);
+		report.appendf("%d", result.frame_ticks)!!;
+		if (result.frame_error.len > 0)
+		{
+			report.append_string(`,"error":`);
+			append_json_string(&report, result.frame_error);
+		}
+		report.append_char('}');
+	}
+
 	report.append_char('}');
 
 	return content_with_frame(host, report.str_view());
@@ -216,7 +235,10 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 
 	// Asked of the runtime rather than kept here, so the docs and the API they
 	// describe are one file — `prelude.js` — and cannot drift apart.
-	RunResult result = host.runtime.run("return three.getApiDocs();", "<get_api_docs>");
+	// `drain_frame: false` — this run is the server's own, not the agent's, and
+	// consuming what the animation loop logged here would lose it: nothing below
+	// reads anything but `value`.
+	RunResult result = host.runtime.run("return three.getApiDocs();", "<get_api_docs>", drain_frame: false);
 	defer result.free();
 
 	if (!result.ok)

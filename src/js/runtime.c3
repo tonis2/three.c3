@@ -106,6 +106,16 @@ struct RunResult
 	// The message and, when the throw carried one, the stack. Empty when `ok`.
 	String error;
 	SceneStats stats;
+
+	// What the animation loop did between the last run and this one, which is
+	// the only window an agent has onto it: nothing else reports a callback that
+	// has been quietly running — or quietly stopped — since the last tool call.
+	// `js/frame_loop.c3` fills these in and says why each one is here.
+	bool frame_running;
+	long frame_ticks;
+	// Why the callback was stopped, empty when it was not. Reported exactly
+	// once: whichever run reads it clears it.
+	String frame_error;
 }
 
 <*
@@ -127,6 +137,7 @@ fn void RunResult.free(&self)
 	if (self.log.ptr != null) self.log.free(mem);
 	if (self.value.ptr != null) self.value.free(mem);
 	if (self.error.ptr != null) self.error.free(mem);
+	if (self.frame_error.ptr != null) self.frame_error.free(mem);
 	*self = {};
 }
 
@@ -160,6 +171,18 @@ struct JsRuntime
 	// throws instead of silently operating on the newer scene's nodes.
 	double epoch;
 
+	// The animation loop, all of it owned by `js/frame_loop.c3`. `frame_fn` is a
+	// retained reference and is only meaningful while `frame_active`; releasing
+	// it is the one piece of cleanup that has to happen before the context
+	// closes rather than after, which is why `close` below leads with it.
+	qjs::Value frame_fn;
+	bool frame_active;
+	bool in_frame;
+	long frame_ticks;
+	DString frame_log;
+	long frame_dropped;
+	DString frame_error;
+
 	bool ready;
 }
 
@@ -180,6 +203,9 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.log.init(mem, 1024);
 	self.value.init(mem, 256);
 	self.error.init(mem, 256);
+	self.frame_log.init(mem, 512);
+	self.frame_error.init(mem, 128);
+	self.frame_fn = qjs::undefined_value();
 	self.budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.epoch = 1;
 	self.ready = true;
@@ -205,10 +231,15 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 fn void JsRuntime.close(&self)
 {
 	if (!self.ready) return;
+	// Before the context goes, not after: `clear_frame` releases a reference
+	// into an engine that would no longer be there to release it into.
+	self.clear_frame();
 	self.js.close();
 	self.log.free();
 	self.value.free();
 	self.error.free();
+	self.frame_log.free();
+	self.frame_error.free();
 	*self = {};
 }
 
@@ -217,13 +248,17 @@ fn void JsRuntime.close(&self)
 
  @param source : `The script. Evaluated as an async function body — see the header.`
  @param name : `What a stack trace calls it. Never opened.`
+ @param drain_frame : `False for a run the caller made up rather than one the agent asked for — it then neither reports nor consumes what the animation loop has been doing. See js/frame_loop.c3.`
  @return `Owned by the caller; free it with RunResult.free.`
 *>
-fn RunResult JsRuntime.run(&self, String source, String name = "<script>")
+fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool drain_frame = true)
 {
 	self.log.clear();
 	self.value.clear();
 	self.error.clear();
+	// Into the log before the script has written a line of its own, so the two
+	// arrive in the order they happened. `drain_frame_log` labels both halves.
+	if (drain_frame) self.drain_frame_log();
 	// The fourth thing cleared, for the same reason as the other three: what the
 	// device complained about during *this* run is what this run answers with.
 	// See `collect_validation`.
@@ -247,7 +282,7 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>")
 			// function body's execution.
 			String message = self.js.exception(mem);
 			defer message.free(mem);
-			self.error.append_string(self.timed_out ? timeout_message() : message);
+			self.error.append_string(self.timed_out ? self.timeout_message() : message);
 			self.rejected = true;
 			self.settled = true;
 		}
@@ -262,12 +297,32 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>")
 
 	SceneStats stats = self.pass != null ? self.pass.stats() : (SceneStats){};
 
+	// Always copied, cleared only when this run is the agent's. Copying is free
+	// of consequence and the clear is not: a stopped callback has to be
+	// explained to exactly one caller, or an old failure looks like a new one on
+	// every tool call afterwards.
+	//
+	// The copy is unconditional for a second reason. `RunResult.free` frees
+	// whatever pointer it finds, and a `""` literal has a perfectly good pointer
+	// into static memory — the one shape of empty string that must never reach
+	// it.
+	String frame_error = self.frame_error.copy_str(mem);
+	long frame_ticks = self.frame_ticks;
+	if (drain_frame)
+	{
+		self.frame_error.clear();
+		self.frame_ticks = 0;
+	}
+
 	return {
 		.ok = !self.rejected && self.settled,
 		.log = self.log.copy_str(mem),
 		.value = self.value.copy_str(mem),
 		.error = self.error.copy_str(mem),
 		.stats = stats,
+		.frame_running = self.frame_active,
+		.frame_ticks = frame_ticks,
+		.frame_error = frame_error,
 	};
 }
 
@@ -324,7 +379,7 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 	if (self.timed_out)
 	{
 		self.error.clear();
-		self.error.append_string(timeout_message());
+		self.error.append_string(self.timeout_message());
 		self.rejected = true;
 		self.settled = true;
 		return;
@@ -343,9 +398,16 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 	}
 }
 
-fn String timeout_message() @local
+<*
+ Read off `budget_ns` rather than off `JS_BUDGET_MS`, because there are now two
+ budgets: a script's, and the much shorter one a frame callback runs under
+ (`js/frame_loop.c3`). A message naming a constant the run did not use is worse
+ than no number at all — it sends the reader looking for a five-second pause
+ that never happened.
+*>
+fn String JsRuntime.timeout_message(&self)
 {
-	return string::tformat("the script ran for longer than %d ms and was stopped", JS_BUDGET_MS);
+	return string::tformat("the script ran for longer than %d ms and was stopped", self.budget_ns / 1_000_000);
 }
 
 <*
@@ -501,6 +563,13 @@ fn String describe_throw(qjs::Context* js, qjs::Value thrown, Allocator allocato
  Nothing reaches stdout: the log is one of the four things a run answers with,
  and a script driven over JSON-RPC has no terminal to print to. A host that
  wants it on screen prints `RunResult.log`.
+
+ **There are two logs, and `in_frame` picks between them.** A line written from
+ inside an animation callback belongs to no run — the run that would have owned
+ it finished long ago — so it goes to the bounded `frame_log` that the next run
+ drains. Sending it to `self.log` instead would either flood the next result
+ with sixty frames a second of output or, worse, be cleared unread at the top of
+ that run. See `js/frame_loop.c3`.
 *>
 fn void JsRuntime.install_console(&self)
 {
@@ -528,14 +597,16 @@ fn void js_console(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
+	DString* sink = self.in_frame ? &self.frame_log : &self.log;
+
 	for (int i = 0; i < argc; i++)
 	{
-		if (i > 0) self.log.append_char(' ');
+		if (i > 0) sink.append_char(' ');
 		String text = display(&js, args[i], mem);
 		defer text.free(mem);
-		self.log.append_string(text);
+		sink.append_string(text);
 	}
-	self.log.append_char('\n');
+	sink.append_char('\n');
 }
 
 <*

@@ -79,8 +79,10 @@ a scene no longer needs a `.glb` to exist — and **so is the per-copy channel**
 `mesh.color` and `mesh.variant` vary inside a single instanced draw, so a
 thousand cubes in a thousand colours is still one call. **The window is a
 control as well as a viewer** — drag to orbit, right-drag to pan, scroll to
-zoom, writing the same camera a script writes. `c3c test --trust=full` runs a
-hundred and seventy-two checks, all headless, leak-clean.
+zoom, writing the same camera a script writes. **And a script can drive the
+frame**: `three.setAnimationLoop(fn)` runs a callback between the input and the
+draw, so a scene moves with no agent in the loop. `c3c test --trust=full` runs a
+hundred and ninety-two checks, all headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -343,6 +345,8 @@ src/
   js/bind_scene.c3  built  the flat host verbs prelude.js is written against
   js/bind_asset.c3  built  load(), asset paths, mesh names
   js/bind_shader.c3 built  the material/shader surface (tier 2, §4)
+  js/frame_loop.c3  built  setAnimationLoop: the second way into the engine, the one
+                           that is not a run (M5d)
   mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
@@ -358,6 +362,9 @@ test/
                            two of them are one asset — no device anywhere in it
   controls_test.c3  built  which way a drag turns the scene, and the state machine
                            behind it — no device and no window anywhere in it
+  frame_test.c3     built  what a tick does and the four ways a callback stops —
+                           the tick takes the time as an argument, so this is a
+                           statement about the callback and not about the machine
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -967,8 +974,32 @@ Two things it is worth having found out here rather than later:
   release that should clear it is swallowed by AppKit's own event loop whenever
   the window is dragged by its title bar — so the scene turns by itself from
   then on. `Controls` will not believe a held button until it has seen one
-  button-free frame. See `event_loop.md`, which is also where the per-frame
-  script hook and the keyboard are written down.
+  button-free frame. See `event_loop.md`, which is also where the keyboard and
+  the click-to-pick are written down.
+
+**M5d — a script drives the frame.** `three.setAnimationLoop(fn)`, Three.js's own
+name for it, in `js/frame_loop.c3`. The loop was never the missing part —
+`main.c3` has rendered every iteration since M3. What was missing was a second
+entry point into the engine: `JsRuntime.run` clears the log, the value, the error
+and the validation capture on every call, which is right for a tool call and
+wrong sixty times a second. A tick calls a retained `qjs::Value` directly and
+shares only the interrupt handler, because there is one of those per context.
+
+**Everything hard about it was a question about failure**, not about frames:
+
+- **A callback that misbehaves is stopped, once, and the reason is kept for the
+  next tool call.** Retrying every frame is the failure mode worth designing
+  against — an unusable window, and nothing anywhere that says why.
+- **Two logs.** Per-frame `console.log` goes to a bounded ring the next run
+  drains under its own marker, because `run` clears the log at the top of every
+  call: the flood would either drown the next result or be erased unread.
+- **The frame budget is borrowed from the script's, and given back.** One
+  interrupt handler reads one field, so a tick that walked away from it would
+  hand every later script a tenth of a second and a timeout message naming a
+  number nobody typed.
+
+`event_loop.md` is the record, including the injection whose escape said the
+timeout message must read the budget in force rather than the constant beside it.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash
