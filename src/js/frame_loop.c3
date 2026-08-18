@@ -82,19 +82,19 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
  `main.c3` passes the elapsed time it already has, and a test passes whatever it
  wants to have happened.
 
- **The keyboard arrives here too**, and is taken whether or not anything is
+ **The input arrives here too**, and is taken whether or not anything is
  registered to read it: `three.input.isDown(...)` from an ordinary `run_script`
  answers about the last frame the window drew, which is the only answer that
  could be right.
 
  @param elapsed_ms : `What the callback is told, as Three.js's setAnimationLoop tells it: milliseconds, monotonic, from whenever the host started counting.`
- @param input : `This frame's keyboard. Default-empty, for a host that has no window and for the checks that only care about the callback.`
+ @param input : `This frame's keyboard and mouse. Default-empty, for a host that has no window and for the checks that only care about the callback.`
  @return `true when something ran, false when nothing is registered — so a caller can tell an idle loop from a running one without asking twice.`
 *>
 fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 {
 	self.take_input(input);
-	if (!self.frame_active && self.key_handler_count == 0) return false;
+	if (!self.frame_active && self.key_handler_count == 0 && !self.click_active) return false;
 
 	self.frame_ticks++;
 
@@ -108,7 +108,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	self.timed_out = false;
 	self.in_frame = true;
 
-	// Keys first, then the animation. A handler that moves something and a
+	// Input first, then the animation. A handler that moves something and a
 	// callback that draws the consequence in the same frame is the order a
 	// person expects; the other way round shows every keypress one frame late.
 	self.dispatch_keys();
@@ -116,6 +116,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// interrupted on its first instruction: a callback stopped for someone
 	// else's overrun would be stopped for good, for a failure that is not its
 	// own.
+	if (!self.timed_out) self.dispatch_click();
 	if (!self.timed_out && self.frame_active) self.call_frame(elapsed_ms);
 	if (!self.timed_out) self.drain_frame_jobs();
 

@@ -34,10 +34,19 @@
 
  **No mouse buttons are named here**, although the same latch carries them.
  `controls.c3` documents why: AppKit swallows the mouse-up that ends a title-bar
- drag, so the button stays latched for the rest of the session. `Controls` has a
- release gate for that; a script polling `isDown('mouseleft')` would have no such
- thing and would be told the button is held forever. Clicking belongs with the
- picking work, where it can be given the same gate.
+ drag, so the button stays latched for the rest of the session. A script polling
+ `isDown('mouseleft')` would have no gate against that and would be told the
+ button is held forever. The mouse is at the bottom of this file instead, where
+ it is a *click* rather than a button — an edge, which a stuck latch cannot
+ produce.
+
+ ## The pointer, at the bottom
+
+ The same two questions with different answers. Level state is where the cursor
+ is, and it is a conversion rather than a difference: the window reports points
+ counted from the bottom-left and the picker takes image pixels counted from the
+ top-left, and `WindowView.cursor` is the one place both of those are undone.
+ The edge is the click, which is a press and a release that stayed together.
 *>
 module three;
 
@@ -114,29 +123,39 @@ struct InputState
 	KeyBits pressed;
 	KeyBits released;
 	String text;
+	MouseState mouse;
 }
 
 <*
- What the previous frame had down, which is the entire state an edge needs.
+ What the previous frame had down, which is the entire state an edge needs —
+ and the pointer's version of the same thing.
 *>
 struct InputTracker
 {
 	KeyBits previous;
+	MouseTracker mouse;
 }
 
 <*
  Fold one frame's latch into level state and the two edges.
 
+ The mouse rides along rather than having a tracker of its own to be stepped
+ beside this one. There is one input per frame and forgetting half of it would
+ be a silent half — a window whose keyboard works and whose clicks do nothing.
+
  @param down : `What is held right now. The host reads this from its window; a test says so directly.`
  @param text : `What was typed this frame, borrowed for the frame.`
+ @param cursor : `Where the pointer is, already in image pixels. Default-empty for a host with no window.`
+ @param now_ms : `The host's clock, for telling a click from a hold.`
 *>
-fn InputState InputTracker.step(&self, KeyBits down, String text = "")
+fn InputState InputTracker.step(&self, KeyBits down, String text = "", Cursor cursor = {}, double now_ms = 0)
 {
 	InputState state = {
 		.down = down,
 		.pressed = down.without(self.previous),
 		.released = self.previous.without(down),
 		.text = text,
+		.mouse = self.mouse.step(cursor, now_ms),
 	};
 	self.previous = down;
 	return state;
@@ -325,4 +344,189 @@ fn bool InputState.went_up(&self, KeyName row)
 {
 	return self.released.has(row.key)
 		|| (row.also != c3w::EventKey.EMPTY_KEY && self.released.has(row.also));
+}
+
+// ============================================================================
+// The pointer
+// ============================================================================
+
+<*
+ How far a press may travel, and how long it may last, and still be a click.
+
+ **In the rendered image's pixels**, which is the unit the question is actually
+ asked in: the slop exists to decide whether the person aimed somewhere else,
+ and "somewhere else" is a place in the picture rather than a distance the hand
+ moved. Four is about the tremor of a careful trackpad click, and half a second
+ is longer than any click and shorter than any deliberate hold.
+*>
+const float CLICK_SLOP = 4.0;
+const double CLICK_HOLD_MS = 500.0;
+
+<*
+ Where the cursor is, in the rendered image's pixels.
+
+ `x` counts from the left and `y` from the **top** — which is neither of the two
+ things the platform hands over. `c3w`'s contract is the window's own units with
+ a bottom-left origin, and `scene.pick` takes image pixels from the top-left,
+ the corner the PNG starts at. Both conversions happen in `WindowView.cursor`
+ and nowhere else, so everything downstream is in one coordinate system and it
+ is the picture's.
+*>
+struct Cursor
+{
+	bool inside;
+	bool down;
+	float x;
+	float y;
+}
+
+<*
+ The window and the image, as far as a cursor is concerned.
+
+ **The picture is stretched, not scaled.** `Viewer.record_blit` copies the whole
+ offscreen target onto the whole swapchain image — no letterbox, no crop, and no
+ relationship between the two extents beyond the fraction. So the mapping is a
+ fraction of the window and not a multiplication by the backing scale, which is
+ the tempting version and is wrong twice over: the target is fixed at the size
+ `--width`/`--height` asked for while the swapchain follows a live resize drag,
+ and on a retina display the two agree at startup by coincidence and diverge the
+ moment the window is touched. `plan.md` §1 — the window is a consumer, never
+ the target — is what makes that true, and this is where it is paid for.
+*>
+struct WindowView
+{
+	// The drawable's extent, in device pixels: the swapchain's, which tracks a
+	// live resize where `Window.width` is only ever what `new` was asked for.
+	uint width;
+	uint height;
+	// Device pixels per window point. One everywhere but a retina display.
+	float scale;
+	// The offscreen target's extent — what `scene.pick` counts in and what a
+	// screenshot comes back as.
+	uint image_width;
+	uint image_height;
+}
+
+<*
+ Turn one reading of the cursor into image pixels.
+
+ @param at : `The window's own answer: window-relative, bottom-left origin, in the platform's units.`
+ @param down : `The left button's latch, as the window reports it.`
+*>
+fn Cursor WindowView.cursor(&self, float[<2>] at, bool down)
+{
+	// Minimised, or before the first frame. The fallback is a cursor that is
+	// nowhere and the alternative is a division by zero in the one function the
+	// whole gesture path runs through.
+	if (self.width == 0 || self.height == 0 || self.scale <= 0.0f) return {};
+
+	// The scale is what makes the pointer's unit and the extent's unit the same
+	// one; after this line neither of them exists any more, only the fraction.
+	float across = (at[0] * self.scale) / (float)self.width;
+	float up = (at[1] * self.scale) / (float)self.height;
+
+	bool inside = across >= 0.0f && across < 1.0f && up >= 0.0f && up < 1.0f;
+
+	return {
+		.inside = inside,
+		.down = down,
+		.x = across * (float)self.image_width,
+		// The one flip, and the only place it happens. `screen_ray` counts rows
+		// from the top because that is how an image is stored and how every
+		// window but Cocoa's reports a cursor; `c3w` normalises all of them to
+		// Cocoa's. Getting it backwards is invisible at the centre of the
+		// window and wrong everywhere else, which is the same trap `screen_ray`
+		// documents about its own flip.
+		.y = (1.0f - up) * (float)self.image_height,
+	};
+}
+
+<*
+ One frame of mouse, as a script sees it.
+*>
+struct MouseState
+{
+	bool inside;
+	bool down;
+	// True for exactly the one frame a press and its release resolved to a
+	// click. `x` and `y` are then where the release landed.
+	bool clicked;
+	float x;
+	float y;
+}
+
+<*
+ The press this tracker is waiting to see the end of.
+*>
+struct MouseTracker
+{
+	bool was_down;
+	bool holding;
+	float press_x;
+	float press_y;
+	double press_ms;
+}
+
+<*
+ Fold one reading of the cursor into level state and, at the end of a press,
+ a click.
+
+ ## The edge is the gate
+
+ `controls.c3` documents a latch that sticks: AppKit swallows the mouse-up that
+ ends a title-bar drag, so the button reads as held for the rest of the session,
+ and `Controls` waits for one button-free frame before believing it. Nothing of
+ that sort is here, and adding it would be exactly the second mechanism
+ `controls.c3` argues against. A click needs a press *edge* — a frame where the
+ button was not down and now is — and a stuck latch produces no edges at all, so
+ it produces no clicks rather than one a frame.
+
+ It heals the same way and for the same reason. The first real click after a
+ stuck latch is swallowed, because that click's release is what finally clears
+ the latch and there was no press edge to match it; the click after that works.
+
+ ## A drag is not a click
+
+ The left button orbits the camera, so every click is also a drag of a few
+ pixels and every drag ends in a release. The slop and the hold are what tell
+ them apart, and they are deliberately generous in the direction of *not* being
+ a click: a picked object that was not asked for is worse than a click that has
+ to be repeated, because it changes the scene and the person has to find out
+ what it changed.
+
+ @param now_ms : `The host's clock — the same one the animation callback is told.`
+*>
+fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
+{
+	bool clicked = false;
+
+	if (cursor.down && !self.was_down)
+	{
+		// A press that begins outside the window starts nothing: the window
+		// still reports a position when the cursor has left it, so `inside` is
+		// the only thing that says the press was aimed at the picture.
+		self.holding = cursor.inside;
+		self.press_x = cursor.x;
+		self.press_y = cursor.y;
+		self.press_ms = now_ms;
+	}
+	else if (!cursor.down && self.was_down)
+	{
+		clicked = self.holding
+			&& cursor.inside
+			&& math::abs(cursor.x - self.press_x) <= CLICK_SLOP
+			&& math::abs(cursor.y - self.press_y) <= CLICK_SLOP
+			&& now_ms - self.press_ms <= CLICK_HOLD_MS;
+		self.holding = false;
+	}
+
+	self.was_down = cursor.down;
+
+	return {
+		.inside = cursor.inside,
+		.down = cursor.down,
+		.clicked = clicked,
+		.x = cursor.x,
+		.y = cursor.y,
+	};
 }

@@ -5,6 +5,7 @@
  three.input.isDown('w')          // level — polled inside the frame callback
  three.input.pressed('space')     // edge — went down during this frame
  three.onKeyDown('e', () => {})   // edge — the host calls you
+ three.onClick(hit => {})         // the mouse, which only has the second kind
  ```
 
  ## Why both
@@ -29,6 +30,16 @@
  names here are chosen to be the browser's where the browser has one —
  `KeyboardEvent.key`, lowercased, in `scene/input.c3`'s table — and the shape is
  an invention, listed as one in `prelude.js`'s `differences`.
+
+ ## The mouse is only ever told
+
+ `three.input.pointer` is where the cursor is, and that is level state a script
+ may want in the animation callback. There is no `mouseDown` beside it, and the
+ omission is the same argument `scene/input.c3` makes about the key table: the
+ latch that carries the button sticks, and a script polling it would be told the
+ button is held forever. A click is an edge, and an edge a stuck latch cannot
+ fabricate — so the click is the whole of the mouse's edge API, and it comes
+ with what is under it already raycast.
 
  ## One handler per key per edge
 
@@ -68,6 +79,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "inputText", &js_input_text, 0);
 	self.bind(host, "keyNames", &js_key_names, 0);
 	self.bind(host, "onKey", &js_on_key, 3);
+	self.bind(host, "pointer", &js_pointer, 0);
+	self.bind(host, "onClick", &js_on_click, 1);
 }
 
 <*
@@ -199,6 +212,75 @@ fn void JsRuntime.drop_key_handler(&self, usz at)
 fn void JsRuntime.clear_key_handlers(&self)
 {
 	while (self.key_handler_count > 0) self.drop_key_handler(0);
+}
+
+// ============================================================================
+// The click
+// ============================================================================
+
+<*
+ Call the click handler, if this frame ended a click and there is one.
+
+ The raycast happens here rather than in the script, which is the whole of what
+ "click to pick" buys over `three.input.pointer` plus `scene.pick`. It costs a
+ BVH walk per gesture, which is once per click and not once per frame.
+*>
+fn void JsRuntime.dispatch_click(&self)
+{
+	if (!self.click_active || !self.input.mouse.clicked) return;
+
+	bool kept = true;
+
+	@pool()
+	{
+		float x = self.input.mouse.x;
+		float y = self.input.mouse.y;
+
+		// `pick_at` answers null with no device, which is what a miss answers
+		// too — so a handler written against a window still runs headless, and
+		// what it is told is the truth rather than an error nobody caused.
+		qjs::Value[3] args = {
+			self.pick_at(&self.js, x, y),
+			qjs::number_value((double)x),
+			qjs::number_value((double)y),
+		};
+		defer self.js.release(args[0]);
+
+		qjs::Value? answer = self.js.call(self.click_fn, qjs::undefined_value(), args[..]);
+		if (catch err = answer)
+		{
+			self.report_frame_failure(self.timed_out
+				? self.frame_timeout_message()
+				: string::tformat(
+					"the click handler threw and was stopped: %s", self.js.exception(tmem)));
+			kept = false;
+		}
+		else
+		{
+			bool promised = self.is_thenable(answer);
+			self.js.release(answer);
+			if (promised)
+			{
+				self.report_frame_failure(
+					"the click handler returned a promise. It has to finish inside the frame, "
+					"so it must be synchronous — do the awaiting in a run_script instead");
+				kept = false;
+			}
+		}
+	};
+
+	if (!kept) self.clear_click_handler();
+}
+
+<*
+ Forget the click handler. Same rule as `clear_key_handlers`, same reason.
+*>
+fn void JsRuntime.clear_click_handler(&self)
+{
+	if (!self.click_active) return;
+	self.click_active = false;
+	self.js.release(self.click_fn);
+	self.click_fn = qjs::undefined_value();
 }
 
 // ============================================================================
@@ -351,4 +433,63 @@ fn void js_on_key(
 		.body = js.retain(args[2]),
 	};
 	self.key_handler_count++;
+}
+
+<*
+ `__three.pointer()` — where the cursor is and what it is doing.
+
+ One object rather than five verbs, because the five are read together and
+ correlated: `clicked` without the pixel it happened at is not usable, and a
+ pixel from a different sample than the flag is a bug that only shows up when
+ the mouse is moving.
+*>
+fn void js_pointer(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	MouseState mouse = self.input.mouse;
+
+	qjs::Value object = js.object();
+	js.set_property(object, "x", qjs::number_value((double)mouse.x));
+	js.set_property(object, "y", qjs::number_value((double)mouse.y));
+	js.set_property(object, "inside", qjs::bool_value(mouse.inside));
+	js.set_property(object, "down", qjs::bool_value(mouse.down));
+	js.set_property(object, "clicked", qjs::bool_value(mouse.clicked));
+	*out = object;
+}
+
+<*
+ `__three.onClick(fn)` — register, replace, or with null remove.
+
+ One handler, not a table. A click has no name to key a table by — every click
+ is the same event at a different pixel — so the choice a key binding has, of
+ which of thirty-two rows to replace, does not exist here. It is
+ `setAnimationLoop`'s shape rather than `onKey`'s.
+*>
+fn void js_on_click(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	bool clearing = argc < 1 || args[0].is_undefined() || args[0].is_null();
+
+	if (!clearing && !js.is_function(args[0]))
+	{
+		*out = js.raise("three.onClick(fn) wants a function, or null to unbind");
+		return;
+	}
+
+	// Released before the new one is retained, so replacing cannot leak and
+	// cannot leave the old handler firing under a script that believes it has
+	// been replaced.
+	self.clear_click_handler();
+	if (clearing) return;
+
+	self.click_fn = js.retain(args[0]);
+	self.click_active = true;
 }

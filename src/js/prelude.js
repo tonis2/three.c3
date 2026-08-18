@@ -562,9 +562,16 @@
 	// stamped on each Scene and checked on use, and the older one throws a
 	// sentence saying what happened instead of quietly operating on the newer
 	// scene's nodes.
+	// The one live Scene, or null before the first `new three.Scene()`. There is
+	// only ever one — a second replaces the first and the epoch check above says
+	// so — which is what makes "the current scene" a thing a click can be
+	// resolved against without the host being told which scene to use.
+	let liveScene = null;
+
 	class Scene extends Object3D {
 		constructor() {
 			super();
+			liveScene = this;
 			this._e = H.reset();
 			const [i, g] = H.root();
 			this._i = i;
@@ -949,7 +956,35 @@
 		// Every name there is, in one place, and the same list the host
 		// searches. Aliases are included: ctrl, cmd and esc.
 		keys() { return H.keyNames(); },
+
+		// Where the cursor is: { x, y, inside, down, clicked }, in the rendered
+		// image's pixels — the same coordinates scene.pick(x, y) takes and the
+		// same corner the PNG starts at, whatever size the window has been
+		// dragged to. Everything is zero and `inside` is false when there is no
+		// window.
+		get pointer() { return H.pointer(); },
+
+		// True for the one frame a click finished on. A press that travelled or
+		// was held is a drag, and a drag belongs to the camera.
+		get clicked() { return H.pointer().clicked; },
 	};
+
+	// The host raycasts in image pixels and answers with a node index; turning
+	// that back into the object a script is holding is the Scene's job, and the
+	// Scene that does it is the live one. With none — a model opened from the
+	// command line, or nothing built yet — the hit still carries its name, which
+	// is the only identity such a node has, and `object` is null.
+	function asIntersection(raw) {
+		if (raw === null) return null;
+		if (liveScene !== null && liveScene._e === H.epoch()) return liveScene._intersection(raw);
+		return {
+			object: null,
+			name: raw.name,
+			distance: raw.distance,
+			point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
+			normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+		};
+	}
 
 	// -----------------------------------------------------------------------
 	// The module
@@ -1047,6 +1082,29 @@
 		onKeyDown(key, fn) { bindKey(key, true, fn); },
 		onKeyUp(key, fn) { bindKey(key, false, fn); },
 
+		// Click to pick. The handler is called once, from inside the frame,
+		// with what is under the cursor — the same intersection scene.pick(x, y)
+		// answers with, or null for a miss — and the pixel it happened at.
+		//
+		// A click is a press and a release that stayed in the same place: a drag
+		// orbits the camera and is not one, which is why there is no
+		// onMouseDown beside this.
+		//
+		// One handler, and binding again replaces it. null unbinds.
+		onClick(fn) {
+			if (fn === null || fn === undefined) { H.onClick(null); return; }
+			if (typeof fn !== 'function') {
+				throw new TypeError('three.onClick(fn) wants a function, or null to unbind');
+			}
+			if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+				throw new TypeError(
+					'a click handler must be synchronous — an async one returns before it has done '
+					+ 'anything, and the frame does not wait. Do the awaiting in a run_script.'
+				);
+			}
+			H.onClick((raw, x, y) => fn(asIntersection(raw), x, y));
+		},
+
 		getApiDocs() { return DOCS; },
 	};
 
@@ -1101,6 +1159,8 @@
 			'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. setAnimationLoop(null) stops the clock so a known state can be captured.',
 			'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
 			'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
+			'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is where the cursor is. There is no mouseDown and no drag events — the left button orbits the camera, and a press that travels or is held is a drag rather than a click.',
+			'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -1239,6 +1299,17 @@
 				+ 'per key per edge — binding again replaces, null unbinds, and up to 32 exist at a time. '
 				+ 'Synchronous only, and stopped for good if it throws, exactly as the animation callback is. '
 				+ 'Escape is the host\'s: it closes the window whatever a script binds.',
+			'three.input.pointer':
+				'{ x, y, inside, down, clicked } — where the cursor is, in the rendered image\'s pixels '
+				+ 'counted from its top-left corner, which is what scene.pick(x, y) takes. `inside` is '
+				+ 'false when the cursor has left the window, and everything is zero when there is no '
+				+ 'window at all. Read it in the animation callback.',
+			'three.onClick(fn)':
+				'Call fn(hit, x, y) once when the window is clicked, from inside the frame. `hit` is what '
+				+ 'is under the cursor — the same intersection scene.pick(x, y) answers with, or null for '
+				+ 'a miss — so click-to-select is one call. A click is a press and a release in the same '
+				+ 'place: dragging orbits the camera and does not fire this. One handler; binding again '
+				+ 'replaces, null unbinds. Synchronous only, and stopped for good if it throws.',
 			'three.setAnimationLoop(fn)':
 				'Run fn(elapsedMs) once per frame, or null to stop. Synchronous only. The next '
 				+ 'run_script reports how many frames it ran, whether it is still running, and why it '

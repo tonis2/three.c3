@@ -493,14 +493,31 @@ fn void js_pick(
 		return;
 	}
 
+	*out = self.pick_at(&js, arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1));
+}
+
+<*
+ One pixel of the rendered image, raycast.
+
+ Factored out because the click handler asks the same question, and a second
+ copy of these four lines is a second chance to disagree with the picture about
+ which way rows are counted. `js_pick` keeps its own device check because a
+ script that asked has to be told; a click with no device is not a mistake
+ anyone made, so it answers `null` — the same thing a click on empty space
+ answers, which is the truth in both cases.
+*>
+fn qjs::Value JsRuntime.pick_at(&self, qjs::Context* js, float x, float y)
+{
+	if (self.renderer == null) return qjs::null_value();
+
 	collision::Ray ray = screen_ray(
 		&self.pass.camera,
-		arg_float(&js, argc, args, 0),
-		arg_float(&js, argc, args, 1),
+		x,
+		y,
 		self.renderer.target.extent.width,
 		self.renderer.target.extent.height,
 	);
-	*out = hit_value(self, &js, self.pass.scene.raycast(&self.pass.assets, ray));
+	return hit_value(self, js, self.pass.scene.raycast(&self.pass.assets, ray));
 }
 
 <*
