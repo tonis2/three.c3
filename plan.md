@@ -83,7 +83,7 @@ zoom, writing the same camera a script writes. **And a script can drive the
 frame**: `three.setAnimationLoop(fn)` runs a callback between the input and the
 draw, so a scene moves with no agent in the loop, and **the keyboard reaches it**
 — `three.input.isDown('w')` for held keys, `three.onKeyDown('e', fn)` for
-actions. `c3c test --trust=full` runs two hundred and sixty-four checks, all
+actions. `c3c test --trust=full` runs two hundred and sixty-eight checks, all
 headless, leak-clean.
 
 	three <file.glb>                    open a window on it
@@ -343,7 +343,8 @@ src/
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
   scene/material.c3 built  a pipeline plus the push-block bytes that go with it
-  scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space
+  scene/pick.c3     built  scene raycast over collision::TriBVH, in instance-local space,
+                           and the yes/no the hover asks it (M5h)
   scene/primitive.c3
                     built  the parametric shapes, keyed by their parameters so the
                            same numbers are the same asset (§4, and see below)
@@ -1099,6 +1100,32 @@ were written down as decisions rather than tasks until the decision was made.
 `event_loop.md` has the record, including five injections that escaped — of
 which only two were the tests' fault, and two found a guard written in two
 places where one would do.
+
+**M5h — the cursor says what would happen if you pressed.** A pointing hand over
+anything clickable, which is the only cursor state here that carries information
+the person cannot get another way: `onClick` picks, and nothing else on screen
+said whether there was anything to pick.
+
+- **Asked once per place the pointer stops, not once per frame.** The broad
+  phase is one world-AABB test per instance, so on the thousand-cube scene this
+  project exists to make a point about, a per-frame hover would be a thousand
+  tests to choose between two pictures of a hand. A still cursor costs nothing;
+  a moving one costs one raycast per frame it moves.
+- **The Windows DPI declaration moved into `c3w`**, and the argument that moved
+  it is `c3w`'s own contract: every other backend reports units that are the
+  same size on screen whatever the density, and Windows only behaves that way
+  for a process that has declared itself aware. So the question is not who owns
+  a process-wide setting but whether the library keeps its promise on that
+  platform. An application with a manifest still wins.
+- **Two Win32 bugs fell out of it**: `getMousePos` was answering in physical
+  pixels from the top-left where the contract is logical units from the bottom
+  — both conversions wrong at once — and `set_size` mixed the two. And
+  `should_close` answered `false`, latching `ESCAPE` instead, which worked only
+  because this application happens to exit on Escape and cost it the Escape key.
+
+`event_loop.md` has the record, including a picking check that was symmetric
+about its own probe and so could not see a transposition — the fourth check in
+that document to pass for the wrong reason.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

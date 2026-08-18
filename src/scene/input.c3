@@ -594,23 +594,84 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 }
 
 <*
- What the cursor should look like, given where it is and what the hand is doing.
+ What the cursor should look like, given where it is and what it is over.
 
- An open hand over the scene and a closed one while dragging: the two states
- `Controls` already has, said in the one language a window has for saying them.
- Outside the content the answer is the arrow — the window's own edges and title
- bar are AppKit's to dress, and asserting a hand over them would fight it.
+ Three states in order of how much they override each other. A closed hand
+ whenever something is being dragged, because that is true wherever the cursor
+ has got to. Then the arrow off the image — the window's own edges and title bar
+ are the platform's to dress, and asserting a hand over them would fight it.
+ Then a pointing hand over something clickable and an open one over empty scene,
+ which is the ordinary case and the only one anybody will look at for long.
 
- A function rather than three lines at the call site because the call site is
+ **The pointing hand is the one that carries information.** The other two say
+ what the hand is doing, which the person already knows because it is their
+ hand; this one says what would happen if they pressed, which they cannot know
+ any other way — `onClick` picks, and nothing else on screen says whether there
+ is anything to pick.
+
+ A function rather than four lines at the call site because the call site is
  `main.c3`, which is the one file with no checks in it, and "the cursor is a
  closed hand while panning as well as while orbiting" is exactly the sort of
  claim that is true when written and false a milestone later.
 
  @param inside : `Whether the cursor is over the rendered image.`
  @param dragging : `Controls.dragging — a believed drag, not merely a held button.`
+ @param over : `Whether the picker found something under it. See Hover, which decides when that is worth asking.`
 *>
-fn c3w::CursorShape cursor_shape(bool inside, bool dragging)
+fn c3w::CursorShape cursor_shape(bool inside, bool dragging, bool over = false)
 {
 	if (dragging) return CLOSED_HAND;
-	return inside ? c3w::CursorShape.OPEN_HAND : c3w::CursorShape.ARROW;
+	if (!inside) return ARROW;
+	return over ? c3w::CursorShape.POINTING_HAND : c3w::CursorShape.OPEN_HAND;
+}
+
+<*
+ The last answer the picker gave about the pointer, and where it was standing
+ when it gave it.
+
+ **A raycast per frame is the wrong price for a cursor shape.** The broad phase
+ is one world-AABB test per instance, and a scene built to make the point that
+ a thousand instances are one draw call is a scene where that is a thousand
+ tests — to decide between two pictures of a hand. So it is asked once per
+ *place* the pointer stops, not once per frame: a still cursor over a still
+ scene costs nothing, and a moving one costs one raycast per frame it moves,
+ which is bounded by the frame rate and by how fast a hand can move.
+
+ What it deliberately does not do is notice the scene changing under a still
+ cursor. A script that deletes what the pointer is resting on leaves a pointing
+ hand over nothing until the hand moves a pixel, and that is the cheap half of
+ the trade: the alternative is the raycast per frame this exists to avoid, for a
+ wrong cursor that corrects itself the moment anybody does anything.
+*>
+struct Hover
+{
+	bool over;
+	bool known;
+	float x;
+	float y;
+}
+
+// Whether the picker has to be asked again: the pointer has moved, or has never
+// been asked about at all.
+fn bool Hover.stale(&self, Cursor cursor)
+{
+	return !self.known || cursor.x != self.x || cursor.y != self.y;
+}
+
+fn void Hover.keep(&self, Cursor cursor, bool over)
+{
+	self.known = true;
+	self.over = over;
+	self.x = cursor.x;
+	self.y = cursor.y;
+}
+
+// Called when the answer stops being wanted — the pointer left the image, or a
+// drag started. Forgetting rather than keeping is what makes coming back ask
+// again, which matters because the scene may have moved in between; a drag
+// moves the camera by definition.
+fn void Hover.forget(&self)
+{
+	self.known = false;
+	self.over = false;
 }

@@ -1,25 +1,27 @@
 # event_loop.md — the window as an input device, and the frame as a hook
 
-One document at five stages of the same subject: making the scene move without
+One document at six stages of the same subject: making the scene move without
 an agent in the loop.
 
-**The first five parts are the record for M5c through M5g**, all built: the
-mouse moves the camera, a script can register a callback that runs every frame,
-a script can read the keyboard and bind actions to it, a click on the window
-hands back what is under it, and the window has the manners a window is supposed
-to have — it coasts, it dresses the cursor, and it sleeps at 0% CPU when nobody
-is asking it for anything. They are written the way `m5a_stage.md` and
-`m5b_stage.md` are — what was built, where it departed from `plan.md`, and what
-was actually run to believe any of it, including the tables of re-introduced
-bugs.
+**The first six parts are the record for M5c through M5h**, all built: the mouse
+moves the camera, a script can register a callback that runs every frame, a
+script can read the keyboard and bind actions to it, a click on the window hands
+back what is under it, and the window has the manners a window is supposed to
+have — it coasts, it says what would happen if you pressed, and it sleeps at 0%
+CPU when nobody is asking it for anything. They are written the way
+`m5a_stage.md` and `m5b_stage.md` are — what was built, where it departed from
+`plan.md`, and what was actually run to believe any of it, including the tables
+of re-introduced bugs.
 
-**Three of M5g's changes are in `c3w`**, which is a submodule: an event queue
-beside the latch, the stuck-latch fix at its source, and the Windows backend's
-missing reads. They were written down as somebody's decision rather than as
-tasks, and the decision was made.
+**Several of M5g's and M5h's changes are in `c3w`**, which is a submodule: an
+event queue beside the latch, the stuck-latch fix at its source, and the Windows
+backend's missing reads, wrong units and unanswered close. Every one of them was
+written down first as somebody's decision rather than as a task; the decision
+was made, and in one case — the DPI declaration — the line about who owns it
+turned out to have been drawn in the wrong place, which Part six argues.
 
-**The last part is what is not built**, which after M5g is small and mostly not
-code.
+**The last part is what is not built**, which is now four things and none of
+them is a feature.
 
 ---
 
@@ -1141,33 +1143,165 @@ injections above.
 
 ---
 
-# Part six — what is left
+# Part six — M5h, built
 
-Everything the list here held is built — see Part five. What is left is smaller
-and mostly not code.
+The tail of the list, and the two items on it that were written down as
+belonging to somebody else — the Windows manifest and `should_close` — turn out
+to belong here after all, for a reason worth writing down.
 
-## The smaller ones
+## The cursor says what would happen if you pressed
 
-- **Hover feedback.** The cursor already says whether the hand is on the scene
-  and whether it is holding it. What it does not say is whether there is
-  anything *under* it worth clicking, and `POINTING_HAND` over a pickable node
-  would. That is a `scene.pick` every frame the mouse moves, so it is a decision
-  about cost rather than a one-liner — and `three.input.pointer` already lets a
-  script do it for itself, which is the argument for leaving it there.
-- **A DPI-aware manifest for Windows.** `get_scale` now reads the real DPI and
-  will keep answering 1.0 until the *application* declares per-monitor
-  awareness, because that declaration changes what every coordinate in the
-  process means, including the size the window was asked for. It belongs to
-  whoever ships a Windows build of this, not to `c3w`.
-- **`should_close` on Windows.** Still `false`, with `WM_QUIT` latching `ESCAPE`
-  instead. It is the one remaining piece of the Windows backend that is a stub
-  rather than an answer, and it was left out of the parity work deliberately:
-  the other four were reads, and this one changes when the loop exits.
-- **A running window on Linux and Windows.** Both backends compile — Win32
-  links against the MSVC SDK, both Linux backends type-check for `linux-x64` —
-  and neither has been *run* since any of this was written. Compiling catches
-  the failure a blind port actually has, and it does not catch a wrong sign or a
-  message that never arrives.
+`onClick` picks, and nothing on screen said whether there was anything to pick.
+The open hand and the closed one say what the *hand* is doing, which the person
+already knows because it is their hand; the pointing hand says what the window
+would do, which they cannot know any other way.
+
+	dragging          closed hand   — wherever the cursor has got to
+	outside the image arrow         — the frame and title bar are the platform's
+	over something    pointing hand — the only one that carries information
+	over nothing      open hand
+
+## …asked as rarely as the answer allows
+
+**A raycast per frame is the wrong price for a cursor shape.** The broad phase
+is one world-AABB test per instance, so on the thousand-cube scene this project
+exists to make a point about, a hover would be a thousand tests per frame to
+choose between two pictures of a hand.
+
+`Hover` is the rule: the picker is asked once per *place* the pointer stops, not
+once per frame. A still cursor over a still scene costs nothing at all; a moving
+one costs one raycast per frame it moves, bounded by the frame rate and by how
+fast a hand can move. Nothing is asked while a drag runs — the cursor is a
+closed hand then whatever the answer would be — and nothing is asked with the
+pointer off the image, where there is nothing to be over.
+
+**What it deliberately does not do is notice the scene changing under a still
+cursor.** A script that deletes what the pointer is resting on leaves a pointing
+hand over nothing until the hand moves one pixel. That is the cheap half of the
+trade: the alternative is the per-frame raycast the whole thing exists to avoid,
+bought for a wrong cursor that corrects itself the moment anybody does anything.
+
+The rule and the raycast are split the way everything else here is split —
+`Hover.stale` is checkable without a GPU and `MeshPass.hits` needs one. `hits`
+answers `bool` rather than a `Hit` because the hover does not want the hit, and
+a caller asking sixty times a second should not also be building an answer
+nobody reads.
+
+## Windows: the manifest that was not a manifest
+
+Part five left `get_scale` reading the real DPI and answering 1.0 anyway,
+because Windows answers 96 to a process that has not declared itself DPI-aware,
+and the note said that declaration "belongs to whoever ships a Windows build of
+this, not to `c3w`".
+
+**That was the wrong place to draw the line, and the argument that moved it is
+`c3w`'s own contract.** Every other backend reports a cursor, a size and a scale
+in units that are the same size on screen whatever the display density, and
+answers `get_scale` with the ratio between those and pixels. Windows only
+behaves that way for a process that has made the declaration. So the choice is
+not "who owns a process-wide setting" but "does this library keep its promise on
+this platform" — and a window library is precisely the piece that knows what a
+logical unit is meant to be.
+
+So `new` calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` before any
+window exists, and multiplies the requested size by the display's DPI, which
+keeps a window the same physical size it was before the line was added. An
+application that disagrees still wins: a manifest is applied first, and the call
+then fails and changes nothing.
+
+Two things fell out of it that were bugs rather than gaps:
+
+- **`getMousePos` was answering the wrong question twice.** Win32 reports the
+  client area in physical pixels with a top-left origin; the c3w contract is
+  logical units with a bottom-left one — Cocoa's, which the Linux backends
+  already convert to and which `WindowView.cursor` undoes. Both conversions are
+  now made, and the height for the flip is read off `GetClientRect` rather than
+  `Window.width`/`height`, which are only ever what `new` was asked for. A
+  resized window would otherwise report a cursor offset by however much it grew,
+  and only vertically.
+- **`set_size` was mixing the two.** It takes logical units, and the rects it
+  measures the chrome from are physical.
+
+## Windows: `should_close`
+
+It answered `false`, and WM_QUIT latched `ESCAPE` instead. That worked only
+because the one application reading this happens to exit on Escape — and it cost
+that application the Escape key, which reads as held for the rest of the run.
+Now it is a flag on the window, set by the WM_QUIT that `windowProc`'s
+`PostQuitMessage` produces. One flag per window rather than one per process,
+which is what the darwin backend has and what it would want.
+
+## Verification
+
+	c3c build --trust=full              Program linked to executable './build/three'.
+	c3c test --trust=full               PASSED: 268 passed, 0 failed, 0 skipped.
+	c3c test --trust=full --test-noleak PASSED: 268 passed, 0 failed, 0 skipped.
+	c3c build test-win                  Program linked to './build/test-win.exe'
+	c3c compile-only --target linux-x64 Object files written to './obj/linux-x64'
+	c3c build test-wasm                 Program linked to './test/web/test-wasm.wasm'
+
+| re-introduced bug | check | result |
+| --- | --- | --- |
+| the pointing hand is never shown | `the_cursor_points_at_what_can_be_clicked` | caught |
+| what is under the pointer beats the drag | `the_cursor_points_at_what_can_be_clicked` | caught |
+| the pointing hand is shown off the image too | `the_cursor_points_at_what_can_be_clicked` | caught |
+| the picker is asked on every frame | `a_still_pointer_does_not_ask_the_picker_again` | caught |
+| a pointer that moved is not noticed | `a_still_pointer_does_not_ask_the_picker_again` | caught |
+| the answer is not kept, so the next frame asks again | `a_still_pointer_does_not_ask_the_picker_again` | caught |
+| the anchor is not moved with the answer | `a_still_pointer_does_not_ask_the_picker_again` | caught |
+| coming back after a drag trusts the old answer | `leaving_and_returning_asks_the_picker_again` | caught |
+| the hover asks about a different pixel than the click | `the_hover_agrees_with_the_click` | caught |
+| the hover says yes to everything | `the_hover_agrees_with_the_click` | caught |
+
+10 of 10 caught; `scene/input.c3` and `scene/pick.c3` restore byte-identical.
+
+### The symmetric fixture, for the fourth time
+
+**"The hover asks about a different pixel than the click" was NOT CAUGHT on the
+first pass.** The check put a cube at the origin, probed the middle of the image
+and the corner, and asserted a hit and a miss — and a cube at the origin probed
+through the middle is symmetric in both axes, so swapping `x` and `y` in
+`MeshPass.hits` changes nothing at all. `(0, 0)` is its own swap.
+
+The fixture is now a bar four units wide and half a unit tall, probed
+seven-tenths of the way along a landscape image. Swap the arguments and the row
+asked about is off the bottom of a picture that is not that tall. Where the bar
+actually lands was measured rather than guessed — a scan across the row printed
+`.........#######################........`, which is also why the probe is at
+0.7 and not the 0.8 it started as, where the bar has already ended.
+
+This is the fourth time in this document that a check has passed for the wrong
+reason, and the third of those was a symmetric fixture. The pattern is specific
+enough to state as a rule: **a picking check whose fixture is symmetric about
+the probe cannot see a transposition**, and picking code is made almost entirely
+of transpositions.
+
+## What was not verified here
+
+The Windows work compiles and links against the MSVC SDK and the Linux backends
+type-check for `linux-x64`; neither has been run. That catches the failure a
+blind port actually has and it does not catch a wrong sign, a message that never
+arrives, or a DPI declaration that fights something else in the process. The
+owner of this repository has said they will run both.
+
+---
+
+# Part seven — what is left
+
+## Not code
+
+- **A running window on Linux and Windows.** Both compile; neither has been run
+  since any of M5g or M5h was written.
+- **`WM_DPICHANGED`.** The awareness context asked for is the per-monitor one,
+  but nothing handles the message, so a window dragged between displays of
+  different densities keeps the size it was given. The parts that read the scale
+  every frame — the cursor, a pan — follow the new display correctly; the
+  window's own size does not.
+- **`Window.width`/`height` go stale on Linux.** `getMousePos` there flips the y
+  against them, and they are only ever what `new` was asked for, so a resized
+  window reports a cursor offset vertically by however much it grew. The win32
+  backend now reads `GetClientRect` for exactly this; x11 and wayland could ask
+  their own equivalents. Not fixed because it cannot be seen from here.
 
 ## Open questions
 
