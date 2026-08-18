@@ -354,6 +354,7 @@ fn void? run(Options opts)
 
 	Controls controls = default_controls();
 	c3w::CursorShape shown;
+	Hover hover;
 	Clock since_start = clock::now();
 	long last_ns;
 	// Nothing but the mouse can change this window, so it sleeps between
@@ -375,7 +376,9 @@ fn void? run(Options opts)
 			renderer: &renderer, window: &window, controls: &controls,
 			events: events, at: at, dt_ms: dt_ms
 		);
-		show_cursor(&window, &shown, cursor_shape(cursor.inside, controls.dragging));
+		show_cursor(&window, &shown, cursor_shape(
+			cursor.inside, controls.dragging, ask_hover(&renderer, &hover, cursor, controls.dragging)
+		));
 
 		bool presented = renderer.frame()!;
 		quiet = presented && !moved;
@@ -394,6 +397,34 @@ fn void show_cursor(c3w::Window* window, c3w::CursorShape* shown, c3w::CursorSha
 	if (want == *shown) return;
 	*shown = want;
 	window.set_cursor(want);
+}
+
+<*
+ Whether there is anything under the pointer, asked as rarely as the answer
+ allows.
+
+ `Hover` owns the rule and this owns the raycast, which is the same split
+ everything else here uses: the decision is checkable without a GPU and the call
+ needs one. Nothing is asked while a drag is running — the cursor is a closed
+ hand then whatever the answer would be — and nothing is asked with the pointer
+ off the image, where there is nothing to be over.
+*>
+fn bool ask_hover(Renderer* renderer, Hover* hover, Cursor cursor, bool dragging)
+{
+	if (!cursor.inside || dragging)
+	{
+		hover.forget();
+		return false;
+	}
+
+	if (hover.stale(cursor))
+	{
+		hover.keep(cursor, renderer.pass.hits(
+			cursor.x, cursor.y, renderer.target.extent.width, renderer.target.extent.height
+		));
+	}
+
+	return hover.over;
 }
 
 <*
@@ -519,6 +550,7 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	InputTracker keyboard;
 	InputState input;
 	c3w::CursorShape shown;
+	Hover hover;
 
 	// What the animation callback is told the time is. Stamped once, here, so it
 	// is monotonic across every registration a script makes — which is what
@@ -562,7 +594,9 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 				renderer: renderer, window: window, controls: &controls,
 				events: events, at: at, dt_ms: dt_ms
 			);
-			show_cursor(window, &shown, cursor_shape(cursor.inside, controls.dragging));
+			show_cursor(window, &shown, cursor_shape(
+				cursor.inside, controls.dragging, ask_hover(renderer, &hover, cursor, controls.dragging)
+			));
 
 			// Sampled here rather than at the tick, because this is where the
 			// events are: `getEvent` clears the typed text on its next call, and

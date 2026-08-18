@@ -738,3 +738,74 @@ fn void the_cursor_says_what_the_hand_is_doing() @test
 		"a drag that leaves the window is still a drag"
 	);
 }
+
+<*
+ And it says whether there is anything to click.
+
+ The one state that carries information the person cannot get any other way:
+ `onClick` picks, and nothing else on screen says whether there is anything
+ under the pointer to be picked. It is also the one that has to lose — a drag is
+ a drag whatever it started over.
+*>
+fn void the_cursor_points_at_what_can_be_clicked() @test
+{
+	test::@check(
+		three::cursor_shape(inside: true, dragging: false, over: true) == POINTING_HAND,
+		"over something"
+	);
+	test::@check(
+		three::cursor_shape(inside: true, dragging: false, over: false) == OPEN_HAND,
+		"over nothing"
+	);
+	test::@check(
+		three::cursor_shape(inside: true, dragging: true, over: true) == CLOSED_HAND,
+		"and a drag beats it, wherever it began"
+	);
+	test::@check(
+		three::cursor_shape(inside: false, dragging: false, over: true) == ARROW,
+		"as does being off the image, which nothing can be over"
+	);
+}
+
+<*
+ The picker is asked once per place the pointer stops, not once per frame.
+
+ The broad phase is one world-AABB test per instance, so on the thousand-cube
+ scene this project exists to make a point about, a raycast per frame is a
+ thousand tests to choose between two pictures of a hand. A still cursor must
+ cost nothing.
+*>
+fn void a_still_pointer_does_not_ask_the_picker_again() @test
+{
+	three::Hover hover;
+	three::Cursor at = { .inside = true, .x = 100, .y = 100 };
+
+	test::@check(hover.stale(at), "the first time, because nothing is known yet");
+	hover.keep(at, true);
+
+	test::@check(!hover.stale(at), "and not again while the pointer has not moved");
+	test::@check(hover.over, "with the answer kept");
+
+	three::Cursor moved = { .inside = true, .x = 101, .y = 100 };
+	test::@check(hover.stale(moved), "one pixel is a move");
+}
+
+<*
+ Coming back asks again, because the camera moved while the hand was away.
+
+ A drag is the ordinary reason the answer stops being wanted, and a drag turns
+ the camera by definition — so what was under the pointer before it started is
+ no evidence at all about what is under it now, even if the pointer came back to
+ the same pixel.
+*>
+fn void leaving_and_returning_asks_the_picker_again() @test
+{
+	three::Hover hover;
+	three::Cursor at = { .inside = true, .x = 100, .y = 100 };
+
+	hover.keep(at, true);
+	hover.forget();
+
+	test::@check(hover.stale(at), "the same pixel is a new question after a drag");
+	test::@check(!hover.over, "and nothing is claimed in the meantime");
+}

@@ -1408,6 +1408,56 @@ fn void a_click_picks_the_object_under_it() @test
 }
 
 <*
+ What the hover asks agrees with what the click answers.
+
+ `MeshPass.hits` is one line and the line is a composition — a screen ray joined
+ to a raycast — which is exactly where a swapped argument or a missing flip
+ lives.
+
+ **The fixture is a wide bar and the probe is off-centre on purpose.** A cube at
+ the origin probed through the middle of the image is symmetric in both axes, so
+ it answers the same for `(x, y)` and for `(y, x)` and would pass with the two
+ arguments swapped — the trap this document has now fallen into three times. A
+ bar four units wide and half a unit tall, probed near the right-hand edge of a
+ landscape image, answers differently: swap the arguments and the row asked
+ about is off the bottom of a picture that is not that tall.
+*>
+fn void the_hover_agrees_with_the_click() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(4, 0.5, 1)));
+			three.camera.orbit(0, 0);
+			three.camera.frameAll();
+		`);
+
+		float w = (float)renderer.target.extent.width;
+		float h = (float)renderer.target.extent.height;
+		uint pixels_w = renderer.target.extent.width;
+		uint pixels_h = renderer.target.extent.height;
+
+		test::@check(
+			renderer.pass.hits(w / 2.0f, h / 2.0f, pixels_w, pixels_h),
+			"the middle of the image has the bar under it"
+		);
+		test::@check(
+			renderer.pass.hits(w * 0.7f, h / 2.0f, pixels_w, pixels_h),
+			"and so does a point along it, which the middle alone cannot tell you"
+		);
+		test::@check(
+			!renderer.pass.hits(w / 2.0f, h * 0.05f, pixels_w, pixels_h),
+			"while the same distance above it has nothing"
+		);
+		test::@check(
+			!renderer.pass.hits(0, 0, pixels_w, pixels_h),
+			"and neither has the corner, which is where the click found nothing"
+		);
+	};
+}
+
+<*
  And a click on empty space finds nothing rather than the nearest thing.
 
  The corner of the image with a single box at the centre: `null` is the whole

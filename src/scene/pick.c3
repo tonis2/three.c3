@@ -200,3 +200,20 @@ fn Vec3 transform_direction(Matrix4f m, Vec3 direction) @local
 		v[2] * direction.x + v[6] * direction.y + v[10] * direction.z,
 	};
 }
+
+<*
+ Whether anything is under this pixel.
+
+ The question a hover asks, which does not want the hit — only whether there was
+ one. Separate from `pick` so the caller that asks it sixty times a second is not
+ also building an answer nobody reads, and so that the one place it is asked from
+ (`main.c3`, for the cursor shape) is one line rather than five.
+
+ `x` and `y` are the rendered image's pixels, counted from its top-left corner:
+ the same coordinates `scene.pick` takes and the same ones `WindowView.cursor`
+ answers in.
+*>
+fn bool MeshPass.hits(&self, float x, float y, uint width, uint height)
+{
+	return self.scene.raycast(&self.assets, screen_ray(&self.camera, x, y, width, height)).hit;
+}
