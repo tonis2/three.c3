@@ -682,14 +682,123 @@ fn void a_cone_and_the_cylinder_that_spells_it_are_one_draw() @test
 }
 
 <*
+ A hull is an asset like any other: deduped, instanced, and refused when the
+ cloud describes nothing.
+
+ The dedup is the claim worth asserting with a device behind it, because it is
+ the one that makes the Three.js habit cheap for the shape that costs the most to
+ build. A geometry per mesh is what an agent writes; here fifty of them from one
+ array are one quickhull, one upload and one draw call, and the second
+ construction never reaches the hull at all — `Assets.convex` asks `Assets.built`
+ before it computes anything.
+
+ The three refusals are in the same test rather than three of their own because
+ what is being checked is that each comes back as a *sentence a script can act
+ on*, and they are only comparable side by side. The degenerate case is the one
+ that has to travel furthest: quickhull answers with an empty mesh, `Assets.convex`
+ turns that into a fault, and `js_convex` turns the fault into the three ways a
+ cloud can be flat — which is the fact the agent needs and the fault name does
+ not carry.
+*>
+fn void a_hull_is_deduped_instanced_and_refused_like_any_shape() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			// One cloud, fifty separately constructed geometries.
+			const cloud = [];
+			for (let i = 0; i < 40; i++) {
+				cloud.push([Math.cos(i * 1.1), Math.sin(i * 1.7), Math.cos(i * 2.3)]);
+			}
+			let first = null;
+			for (let i = 0; i < 50; i++) {
+				const geometry = new three.ConvexGeometry(cloud);
+				if (first === null) first = geometry.asset;
+				const rock = new three.Mesh(geometry);
+				rock.position.set((i % 10) * 3, 0, Math.floor(i / 10) * 3);
+				rock.color = [i / 50, 0.5, 1 - i / 50, 1];
+				scene.add(rock);
+			}
+
+			// The same eight corners, spelled three ways.
+			const flat = [-1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1, -1,-1,1, 1,-1,1, 1,1,1, -1,1,1];
+			const vectors = [];
+			for (let i = 0; i < flat.length; i += 3) {
+				vectors.push(new three.Vector3(null, flat[i], flat[i + 1], flat[i + 2]));
+			}
+			const a = new three.ConvexGeometry(flat);
+			const b = new three.ConvexGeometry(vectors);
+			const c = new three.ConvexGeometry(new Float32Array(flat));
+			// Placed, so that stats() counts it: unique_meshes is what the scene
+			// holds, not what has been uploaded.
+			const cube = new three.Mesh(a);
+			cube.position.set(-6, 0, 0);
+			scene.add(cube);
+
+			const refuse = (fn) => { try { fn(); return "no throw"; } catch (e) { return e.message; } };
+
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+			return {
+				stats: scene.stats(),
+				oneAsset: new three.ConvexGeometry(cloud).asset === first,
+				spellings: a.asset === b.asset && b.asset === c.asset,
+				cubeIsACube: a.parameters.points === 8,
+				tooFew: refuse(() => new three.ConvexGeometry([[0,0,0],[1,0,0],[0,1,0]])),
+				flatCloud: refuse(() => new three.ConvexGeometry([[0,0,0],[1,0,0],[0,1,0],[1,1,0],[2,5,0]])),
+				capped: refuse(() => new three.ConvexGeometry(new Float32Array(70000 * 3))),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.instances == 51, "fifty rocks and a cube were placed, got %d", result.stats.instances);
+		test::@check(
+			result.stats.unique_meshes == 2,
+			"one hull for the cloud and one for the cube, got %d", result.stats.unique_meshes
+		);
+		test::@check(
+			result.stats.draw_calls == 2,
+			"the fifty rocks are one draw and the cube is the other, got %d", result.stats.draw_calls
+		);
+		// Twelve triangles for the cube, so the count also says the hull of eight
+		// corners is those eight corners and not a shape with a face shaved off.
+		// The cloud's own face count is left open on purpose: it comes out of
+		// Math.cos and Math.sin, and pinning it here would make the suite fail on
+		// a platform whose libm rounds a coordinate differently rather than on a
+		// change to anything in this repository. That the remainder is fifty
+		// identical hulls is the claim, and it is the one that would break.
+		test::@check(
+			result.stats.triangles > 12 && (result.stats.triangles - 12) % 50 == 0,
+			"a twelve-triangle cube and fifty copies of one hull, got %d triangles", result.stats.triangles
+		);
+		test::@check(result.value.contains(`"oneAsset":true`), "the same cloud is the same asset: %s", result.value);
+		test::@check(
+			result.value.contains(`"spellings":true`),
+			"Vector3s, [x,y,z] and a Float32Array reach one asset: %s", result.value
+		);
+		test::@check(result.value.contains(`"cubeIsACube":true`), "the cube kept its point count: %s", result.value);
+
+		// Each refusal names what to do about it, which is the whole reason the
+		// host does not hand the fault name over.
+		test::@check(result.value.contains("at least 4 points"), "too few points says how many: %s", result.value);
+		test::@check(result.value.contains("enclose no volume"), "a flat cloud says it is flat: %s", result.value);
+		test::@check(result.value.contains("65536"), "the cap names itself: %s", result.value);
+	};
+}
+
+<*
  Every shape reaches the screen.
 
  The complement to `primitive_test.c3`'s winding checks, and deliberately a
  weaker claim made a different way: that one says the triangles face outward by
  arithmetic on the triangles, and this one says the whole path — build, upload,
  index buffer, buffer device address, draw — puts pixels in the frame for each
- of the six. Neither substitutes for the other. An inside-out sphere would pass
+ of the seven. Neither substitutes for the other. An inside-out sphere would pass
  this and fail that; a shape that was never uploaded fails this and passes that.
+ `convex_test.c3` makes the same pair of claims about the hull.
 
  The threshold is deliberately low. `frameAll` fits a bounding sphere with room
  around it, so a torus seen edge-on covers a small fraction of the image and the
@@ -698,13 +807,16 @@ fn void a_cone_and_the_cylinder_that_spells_it_are_one_draw() @test
 *>
 fn void every_shape_reaches_the_screen() @test
 {
-	String[6] shapes = {
+	String[7] shapes = {
 		"new three.BoxGeometry(1, 1, 1)",
 		"new three.SphereGeometry(1, 32, 16)",
 		"new three.PlaneGeometry(2, 2)",
 		"new three.CylinderGeometry(1, 1, 2)",
 		"new three.ConeGeometry(1, 2)",
 		"new three.TorusGeometry(1, 0.4)",
+		// The hull of a cube's corners, which is that cube — so this asserts the
+		// same coverage the BoxGeometry line does, reached by the other path.
+		"new three.ConvexGeometry([-1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1, -1,-1,1, 1,-1,1, 1,1,1, -1,1,1])",
 	};
 
 	@with_gpu_js(; three::JsRuntime* run)

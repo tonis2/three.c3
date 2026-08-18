@@ -1,9 +1,10 @@
 <*
  `three.load()`, `three.BoxGeometry()` and what an asset can be asked about.
 
- Four verbs, and the smallest set that lets `prelude.js` build an `Asset` whose
+ Five verbs, and the smallest set that lets `prelude.js` build an `Asset` whose
  `mesh(name)` lookup happens in JavaScript: the load itself, the path back, the
- mesh names in order, and one shape builder for all five parametric kinds.
+ mesh names in order, one shape builder for all five parametric kinds, and the
+ hull of a point cloud.
  Resolving a name to an index on this side would be a crossing per lookup and a
  second implementation of a search the host already has; handing the names over
  once means `asset.meshes` is also something a script can print when it has
@@ -20,6 +21,7 @@ module three;
 
 import std::io;
 import std::math;
+import std::math::vector;
 import qjs;
 
 <*
@@ -124,6 +126,101 @@ fn void js_primitive(
 		if (catch err = asset)
 		{
 			*out = js.raise(string::tformat("could not build a %s: %s", name, err));
+			return;
+		}
+
+		*out = qjs::int_value((int)asset);
+	};
+}
+
+<*
+ `convex(points)` — the convex hull of a point cloud, as an asset.
+
+ `points` is a flat JavaScript array of numbers, `x, y, z` per point, because
+ that is the one shape the crossing can read in a single pass: an array of
+ `Vector3`s would be three property lookups and a released value per point,
+ and `prelude.js` has to walk the caller's input anyway to validate it. It
+ flattens while it validates and hands the result over already checked.
+
+ Refused rather than clamped at both ends, unlike `primitive`'s segment counts:
+ there is no nearest sensible cloud to substitute for a bad one, and a hull
+ quietly built from the first 65536 of a script's points would be a shape nobody
+ asked for. See `scene/convex.c3` for why a cloud crossing this boundary leaves
+ the thesis where it was.
+*>
+fn void js_convex(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a shape needs a GPU device and this context has none");
+		return;
+	}
+
+	long length = argc > 0 ? js.length(args[0]) : -1;
+	if (length < 0 || length % 3 != 0)
+	{
+		*out = js.raise(
+			"three.ConvexGeometry wants a flat array of x, y, z numbers — its length must be a multiple of three"
+		);
+		return;
+	}
+
+	usz count = (usz)(length / 3);
+	if (count < MIN_CONVEX_POINTS)
+	{
+		*out = js.raise(string::tformat(
+			"a convex hull needs at least %d points, got %d", MIN_CONVEX_POINTS, count
+		));
+		return;
+	}
+	if (count > MAX_CONVEX_POINTS)
+	{
+		*out = js.raise(string::tformat(
+			"a convex hull is capped at %d points, got %d", MAX_CONVEX_POINTS, count
+		));
+		return;
+	}
+
+	@pool()
+	{
+		Vec3[] points = alloc::new_array(tmem, Vec3, (sz)count);
+		for (usz i = 0; i < count; i++)
+		{
+			for (usz axis = 0; axis < 3; axis++)
+			{
+				qjs::Value component = js.index(args[0], (uint)(i * 3 + axis));
+				double value = js.number(component);
+				js.release(component);
+				// The prelude has already refused a non-finite component with a
+				// sentence naming the point it was in. This is the backstop for a
+				// forged call, and zero is the only substitution that cannot turn
+				// the hull inside out or send quickhull off to infinity.
+				points[i][axis] = math::is_finite(value) ? (float)value : 0.0f;
+			}
+		}
+
+		uint? asset = self.pass.assets.convex(&self.renderer.gpu, points);
+		if (catch err = asset)
+		{
+			// Said rather than named, unlike `js_load`'s faults: there is exactly
+			// one thing that can go wrong here that is about the caller's input,
+			// and "CONVEX_HULL_IS_DEGENERATE" does not tell an agent staring at a
+			// generated cloud which of the three ways it collapsed.
+			if (err == CONVEX_HULL_IS_DEGENERATE)
+			{
+				*out = js.raise(string::tformat(
+					"those %d points enclose no volume — they are all equal, all on one line or all on one "
+					"plane, and a convex hull needs four that are none of those",
+					count
+				));
+				return;
+			}
+			*out = js.raise(string::tformat("could not build a convex hull from %d points: %s", count, err));
 			return;
 		}
 

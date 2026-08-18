@@ -60,7 +60,7 @@ import std::math::vector;
 import std::collections::list;
 import collision;
 
-faultdef PRIMITIVE_HAS_NO_TRIANGLES, NO_SUCH_PRIMITIVE;
+faultdef PRIMITIVE_HAS_NO_TRIANGLES, NO_SUCH_PRIMITIVE, NOTHING_BUILT_UNDER_THAT_KEY;
 
 <*
  What a shape is called, on both sides of the binding.
@@ -667,10 +667,7 @@ fn uint? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 	@pool()
 	{
 		String key = shape.key(tmem);
-		foreach (i, &existing : self.assets)
-		{
-			if (existing.path == key) return (uint)i;
-		}
+		if (try hit = self.built(key)) return hit;
 
 		GeometryBuilder geometry;
 		geometry.init();
@@ -679,45 +676,96 @@ fn uint? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 
 		if (geometry.indices.len() < 3 || geometry.positions.len() == 0) return PRIMITIVE_HAS_NO_TRIANGLES~;
 
-		// The generated streams sample the white stand-in, exactly as an
-		// untextured glTF primitive does: uvs exist, so the shader's uv branch is
-		// taken and the binding has to be occupied.
-		self.ensure_white(gpu)!;
-
-		GpuMesh mesh = {
-			.name = shape.kind.label().copy(mem),
-			.vertex_count = (uint)geometry.positions.len(),
-			.index_count = (uint)geometry.indices.len(),
-			.has_normals = true,
-			.has_uvs = true,
-			.base_color = PRIMITIVE_COLOR,
-			.texture = -1,
-			.bounds = bounds_of(geometry.positions.array_view()),
-		};
-
-		Asset asset = { .path = key.copy(mem) };
-		asset.meshes.init(mem, 1);
-		asset.bounds = mesh.bounds;
-
-		// Nothing below is on `self.assets` yet, so a failure part-way is this
-		// scope's to undo — the same argument `Assets.load` makes.
-		defer catch
-		{
-			mesh.free_buffers();
-			asset.meshes.free();
-			asset.path.free(mem);
-		}
-
-		mesh.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * geometry.positions.len())!;
-		mesh.normals = gpu.upload_stream(geometry.normals.entries, Vec3::size * geometry.normals.len())!;
-		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
-		mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
-		mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
-
-		asset.meshes.push(mesh);
-		self.assets.push(asset);
-		return (uint)self.assets.len() - 1;
+		return self.upload_built(gpu, key, shape.kind.label(), &geometry);
 	};
+}
+
+<*
+ The asset already built under this key, if there is one.
+
+ Split out because it is the *first* half of the dedup rule and every generator
+ needs it before it does the work: `Assets.primitive` asks before it tessellates
+ and `Assets.convex` asks before it runs a hull, which is what keeps a repeated
+ construction cheap rather than merely deduplicated after the fact.
+
+ @return? NOTHING_BUILT_UNDER_THAT_KEY : `No generator has filed an asset under this key yet.`
+*>
+fn uint? Assets.built(&self, String key)
+{
+	foreach (i, &existing : self.assets)
+	{
+		if (existing.path == key) return (uint)i;
+	}
+	return NOTHING_BUILT_UNDER_THAT_KEY~;
+}
+
+<*
+ Upload a filled `GeometryBuilder` as a one-mesh asset filed under `key`.
+
+ The tail every generator shares — the upload, the bounds, the BVH and the
+ all-or-nothing cleanup — so that a shape three.c3 tessellated, a hull it
+ computed and a glTF primitive it read all reach the device through one piece of
+ code and are indistinguishable afterwards.
+
+ **The optional streams are optional by length rather than by flag.** A builder
+ that filled `normals` and `uvs` for every position gets both uploaded; one that
+ left `uvs` empty — a convex hull, which has no natural parameterisation — gets
+ `has_uvs = false` and the shader's no-uv branch. That is the same test
+ `upload_primitive` applies to a glTF accessor, so there is one rule for what
+ "this stream exists" means rather than two that can disagree.
+
+ `key` and `label` are copied; the caller may hand over temporary strings.
+
+ @param key : `What Asset.path becomes: the shape's identity, and what Assets.built matches on.`
+ @param label : `What GpuMesh.name becomes, for asset.meshes and stats dumps.`
+ @return `The new asset's index, for Scene.add_mesh.`
+*>
+fn uint? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry)
+{
+	// The generated streams sample the white stand-in, exactly as an untextured
+	// glTF primitive does: the binding is pushed for every draw whether or not
+	// the mesh carries uvs, so it has to be occupied either way.
+	self.ensure_white(gpu)!;
+
+	GpuMesh mesh = {
+		.name = label.copy(mem),
+		.vertex_count = (uint)geometry.positions.len(),
+		.index_count = (uint)geometry.indices.len(),
+		.has_normals = geometry.normals.len() == geometry.positions.len(),
+		.has_uvs = geometry.uvs.len() == geometry.positions.len(),
+		.base_color = PRIMITIVE_COLOR,
+		.texture = -1,
+		.bounds = bounds_of(geometry.positions.array_view()),
+	};
+
+	Asset asset = { .path = key.copy(mem) };
+	asset.meshes.init(mem, 1);
+	asset.bounds = mesh.bounds;
+
+	// Nothing below is on `self.assets` yet, so a failure part-way is this
+	// scope's to undo — the same argument `Assets.load` makes.
+	defer catch
+	{
+		mesh.free_buffers();
+		asset.meshes.free();
+		asset.path.free(mem);
+	}
+
+	mesh.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * geometry.positions.len())!;
+	if (mesh.has_normals)
+	{
+		mesh.normals = gpu.upload_stream(geometry.normals.entries, Vec3::size * geometry.normals.len())!;
+	}
+	if (mesh.has_uvs)
+	{
+		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
+	}
+	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
+	mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
+
+	asset.meshes.push(mesh);
+	self.assets.push(asset);
+	return (uint)self.assets.len() - 1;
 }
 
 <*
@@ -728,7 +776,7 @@ fn uint? Assets.primitive(&self, Gpu* gpu, Primitive shape)
  `radius + tube` wide and `tube` deep, and a cone's box is not centred on its
  own origin in the way a first guess suggests.
 *>
-fn collision::Aabb3 bounds_of(Vec3[] positions) @local
+fn collision::Aabb3 bounds_of(Vec3[] positions)
 {
 	if (positions.len == 0) return {};
 
