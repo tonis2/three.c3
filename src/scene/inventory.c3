@@ -1,0 +1,281 @@
+<*
+ What is in a game's directory, without uploading any of it.
+
+ `game.md` G1/S5. A `--assets` boot scans for `.glb` and `.gltf` and describes
+ each one — mesh names, animation names, skin count, triangle count, bounds —
+ for the price of the JSON chunk. No buffer is read, no image is decoded, and
+ nothing reaches the device.
+
+ ## Why this is not just a convenience
+
+ Before this, the only way to find out what a file contained was to load it, and
+ loading it is the expensive, irreversible thing: an upload with no unload
+ behind it (G2 is where that changes). So an agent asked to build a scene out of
+ an unfamiliar kit had two bad options — upload all forty files to read their
+ mesh names, or guess. **An inventory makes "what have I got" a cheap question**,
+ which is the one an agent asks first and asks most.
+
+ It is also what a game's `main.js` wants at boot: a manifest it did not have to
+ write by hand and cannot forget to update.
+
+ ## What it costs, and why the numbers are exact rather than estimated
+
+ `gltf::open` parses the JSON and stops. Everything below is read out of that:
+ an accessor's `count` is in the JSON, so a triangle count is a sum and not a
+ guess, and a position accessor's `min`/`max` are required by the spec to be
+ present — which is what makes bounds free here and would make them expensive
+ anywhere else.
+
+ A `.glb`'s binary chunk is never seeked to. On a 200 MB kit that is the whole
+ difference between a boot and a wait.
+*>
+module three;
+
+import std::io;
+import std::io::file;
+import std::io::path;
+import std::collections::list;
+import std::math;
+import std::math::vector;
+import gltf;
+import collision;
+
+faultdef ASSETS_ROOT_IS_NOT_A_DIRECTORY;
+
+<*
+ One mesh, as the file describes it.
+*>
+struct InventoryMesh
+{
+	String name; // owned
+	uint triangles;
+}
+
+<*
+ One `.glb` or `.gltf`, described.
+
+ `path` is root-relative and is exactly what `three.load` wants, so an agent
+ that read an inventory can load from it without joining anything.
+*>
+struct InventoryEntry
+{
+	String path; // owned, root-relative
+	List{InventoryMesh} meshes;
+	List{String} animations; // owned strings
+	uint skins;
+	uint nodes;
+	uint triangles;
+	collision::Aabb3 bounds;
+	bool has_bounds;
+}
+
+fn void InventoryEntry.free(&self)
+{
+	if (self.path.len > 0) self.path.free(mem);
+	foreach (&entry : self.meshes) { if (entry.name.len > 0) entry.name.free(mem); }
+	self.meshes.free();
+	foreach (name : self.animations) { if (name.len > 0) name.free(mem); }
+	self.animations.free();
+	*self = {};
+}
+
+alias Inventory = List{InventoryEntry};
+
+fn void Inventory.free_entries(&self)
+{
+	foreach (&entry : *self) entry.free();
+	self.free();
+}
+
+<*
+ Describe every glTF under `root`, recursively.
+
+ **Sorted by path**, so two runs on the same directory answer identically. A
+ filesystem's own order is not a promise, and an inventory that reshuffled
+ between boots would make every diff of a generated manifest unreadable.
+
+ A file that will not parse is **skipped rather than fatal**: one corrupt asset
+ in a kit of forty should cost that one asset, exactly as M1 decided a texture
+ the decoder cannot read costs that texture and not the model.
+
+ @param root : `The assets directory.`
+ @return `Owned by the caller; free it with Inventory.free_entries.`
+ @return? ASSETS_ROOT_IS_NOT_A_DIRECTORY : `Nothing there, or not a directory.`
+*>
+fn Inventory? take_inventory(String root)
+{
+	if (!path::is_dir((Path)root)) return ASSETS_ROOT_IS_NOT_A_DIRECTORY~;
+
+	Inventory found;
+	found.init(mem, 8);
+
+	@pool()
+	{
+		PathList? listed = path::ls(tmem, (Path)root, no_dirs: true, recursive: true);
+		if (catch listed) return found;
+
+		// `ls` answers in the filesystem's order, which is nobody's contract.
+		String[] names = alloc::new_array(tmem, String, (sz)listed.len());
+		usz count = 0;
+		foreach (entry : listed)
+		{
+			String name = (String)entry;
+			if (!is_gltf_path(name)) continue;
+			names[count++] = name;
+		}
+		sort_paths(names[:count]);
+
+		foreach (name : names[:count])
+		{
+			if (try entry = describe_gltf(root, name)) found.push(entry);
+		}
+	};
+	return found;
+}
+
+<*
+ Whether a name ends in a glTF extension, case-insensitively.
+
+ Case-folded because a kit exported on Windows routinely arrives with `.GLB`,
+ and a file skipped for its capitalisation is a file an agent is told does not
+ exist.
+*>
+fn bool is_gltf_path(String name) @local
+{
+	return ends_with_fold(name, ".glb") || ends_with_fold(name, ".gltf");
+}
+
+fn bool ends_with_fold(String text, String suffix) @local
+{
+	if (text.len < suffix.len) return false;
+	usz start = text.len - suffix.len;
+	for (usz i = 0; i < suffix.len; i++)
+	{
+		char a = text[start + i];
+		char b = suffix[i];
+		if (a >= 'A' && a <= 'Z') a += 32;
+		if (a != b) return false;
+	}
+	return true;
+}
+
+<*
+ Byte order, shortest-first on a tie. C3 will not order `String` with `<`, and
+ the reason is a good one — ordering text is a locale question — but a path is
+ not text in that sense and byte order is exactly what a stable listing wants.
+*>
+fn bool before(String a, String b) @local
+{
+	usz shared = a.len < b.len ? a.len : b.len;
+	for (usz i = 0; i < shared; i++)
+	{
+		if (a[i] != b[i]) return a[i] < b[i];
+	}
+	return a.len < b.len;
+}
+
+<*
+ Insertion sort, because an inventory is tens of files and not thousands, and a
+ sort with no allocation is one less thing that can fail inside a boot.
+*>
+fn void sort_paths(String[] names) @local
+{
+	for (usz i = 1; i < names.len; i++)
+	{
+		String held = names[i];
+		usz j = i;
+		while (j > 0 && before(held, names[j - 1]))
+		{
+			names[j] = names[j - 1];
+			j--;
+		}
+		names[j] = held;
+	}
+}
+
+<*
+ Read one file's JSON and answer with what it says about itself.
+
+ The stream is closed on every path, including the failing ones — which is the
+ reason for the early `defer` rather than a close at the end.
+*>
+fn InventoryEntry? describe_gltf(String root, String relative) @local
+{
+	@pool()
+	{
+		String full = string::tformat("%s/%s", root, relative);
+		gltf::GltfStream stream = gltf::open(full, tmem)!;
+		defer stream.close();
+
+		InventoryEntry entry = { .path = relative.copy(mem) };
+		entry.meshes.init(mem, stream.gltf.meshes.len());
+		entry.animations.init(mem, stream.gltf.animations.len());
+		entry.nodes = (uint)stream.gltf.nodes.len();
+		entry.skins = (uint)stream.gltf.skins.len();
+
+		foreach (&mesh : stream.gltf.meshes)
+		{
+			uint triangles = 0;
+			foreach (primitive : mesh.primitives)
+			{
+				triangles += primitive_triangles(&stream.gltf, primitive);
+				widen(&entry, &stream.gltf, primitive);
+			}
+			entry.triangles += triangles;
+			entry.meshes.push({ .name = mesh.name.copy(mem), .triangles = triangles });
+		}
+
+		foreach (&animation : stream.gltf.animations)
+		{
+			entry.animations.push(animation.name.copy(mem));
+		}
+
+		return entry;
+	};
+}
+
+<*
+ A primitive's triangle count, from accessor counts alone.
+
+ Indexed geometry counts its indices and unindexed counts its positions, which
+ is the same rule `read_indices` follows when it actually uploads one — stated
+ twice because the two read different things to reach the same number.
+*>
+fn uint primitive_triangles(gltf::Gltf* doc, gltf::Primitive primitive) @local
+{
+	if (try indices = primitive.attributes.get("indices"))
+	{
+		return doc.accessors[indices].count / 3;
+	}
+	if (try positions = primitive.attributes.get("POSITION"))
+	{
+		return doc.accessors[positions].count / 3;
+	}
+	return 0;
+}
+
+<*
+ Grow the entry's bounds by a primitive's position accessor.
+
+ **The spec requires `min` and `max` on a POSITION accessor**, which is the only
+ reason bounds are free here: they are in the JSON beside the count, and reading
+ them costs nothing the triangle count did not already cost.
+*>
+fn void widen(InventoryEntry* entry, gltf::Gltf* doc, gltf::Primitive primitive) @local
+{
+	sz? positions = primitive.attributes.get("POSITION");
+	if (catch positions) return;
+
+	gltf::Accessor accessor = doc.accessors[positions];
+	Vec3 low = { accessor.min[0], accessor.min[1], accessor.min[2] };
+	Vec3 high = { accessor.max[0], accessor.max[1], accessor.max[2] };
+
+	if (!entry.has_bounds)
+	{
+		entry.bounds = { .min = low, .max = high };
+		entry.has_bounds = true;
+		return;
+	}
+	entry.bounds.min = math::min(entry.bounds.min, low);
+	entry.bounds.max = math::max(entry.bounds.max, high);
+}

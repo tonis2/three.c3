@@ -52,6 +52,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "assetPath", &js_asset_path, 1);
 	self.bind(host, "meshNames", &js_mesh_names, 1);
+	self.bind(host, "inventory", &js_inventory, 0);
 
 	// The graph
 	self.bind(host, "root", &js_root, 0);

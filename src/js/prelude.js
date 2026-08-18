@@ -1163,6 +1163,18 @@
 			H.setFrame(fn);
 		},
 
+		// Every .glb and .gltf in the assets directory, described without being
+		// loaded — mesh names and triangle counts, animation names, skin count
+		// and bounds, read out of the JSON chunk with no buffer touched.
+		//
+		// Empty outside a `--assets` boot, where there is no directory to
+		// describe. That is an answer rather than an error on purpose: a script
+		// written for a game still runs under a plain `--mcp`, and finds
+		// nothing, which is the truth.
+		inventory() {
+			return H.inventory();
+		},
+
 		// What `scene.pick(x, y)` counts in, and what the PNG comes back as.
 		// It is the offscreen target's, never a window's (`plan.md` §1).
 		renderSize() {
@@ -1396,6 +1408,12 @@
 			'three.load(path)': 'Load a .glb or .gltf. Loading the same path twice returns the same asset.',
 			'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
+			'three.inventory()':
+				'Every .glb and .gltf under the assets directory, described without loading any of it: '
+				+ '[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name], '
+				+ 'bounds: { min, max } }]. Read out of the JSON chunk, so it is cheap on a kit of any size — '
+				+ 'ask this before three.load to find out what is worth loading. `path` is what three.load wants. '
+				+ 'Empty when three was not started with --assets, since there is then no directory to describe.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
 			'three.input.isDown(key)':

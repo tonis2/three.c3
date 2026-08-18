@@ -273,3 +273,80 @@ fn void js_mesh_names(
 	}
 	*out = names;
 }
+
+<*
+ `three.inventory()` — every glTF in the assets directory, described without
+ being loaded.
+
+ `game.md` G1/S5, and `scene/inventory.c3` carries the argument for why it is
+ worth a verb of its own. In short: before this, finding out what a file held
+ meant uploading it, so "what have I got" — the question an agent asks first —
+ was the most expensive one it could ask.
+
+ Answers with an empty array rather than throwing when there is no assets root,
+ because "nothing here" is the true answer for a plain `--mcp` run and an
+ exception would make a script written for a game boot fail loudly under one.
+*>
+fn void js_inventory(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	qjs::Value listed = js.array();
+	if (self.assets_root.len == 0)
+	{
+		*out = listed;
+		return;
+	}
+
+	Inventory? found = take_inventory(self.assets_root);
+	if (catch err = found)
+	{
+		js.release(listed);
+		*out = js.raise(string::tformat("could not read %s: %s", self.assets_root, err));
+		return;
+	}
+	defer found.free_entries();
+
+	foreach (i, &entry : found)
+	{
+		qjs::Value described = js.object();
+		js.set_property(described, "path", js.string(entry.path));
+		js.set_property(described, "triangles", qjs::int_value((int)entry.triangles));
+		js.set_property(described, "nodes", qjs::int_value((int)entry.nodes));
+		js.set_property(described, "skins", qjs::int_value((int)entry.skins));
+
+		qjs::Value meshes = js.array();
+		foreach (m, &mesh : entry.meshes)
+		{
+			qjs::Value described_mesh = js.object();
+			js.set_property(described_mesh, "name", js.string(mesh.name));
+			js.set_property(described_mesh, "triangles", qjs::int_value((int)mesh.triangles));
+			js.set_index(meshes, (uint)m, described_mesh);
+		}
+		js.set_property(described, "meshes", meshes);
+
+		qjs::Value animations = js.array();
+		foreach (a, name : entry.animations)
+		{
+			js.set_index(animations, (uint)a, js.string(name));
+		}
+		js.set_property(described, "animations", animations);
+
+		// Omitted rather than zeroed when the file had no position accessor to
+		// read them from: a box at the origin and "we could not tell" are
+		// different answers, and only one of them is safe to place a camera by.
+		if (entry.has_bounds)
+		{
+			qjs::Value bounds = js.object();
+			js.set_property(bounds, "min", vec3_value(&js, entry.bounds.min));
+			js.set_property(bounds, "max", vec3_value(&js, entry.bounds.max));
+			js.set_property(described, "bounds", bounds);
+		}
+
+		js.set_index(listed, (uint)i, described);
+	}
+	*out = listed;
+}

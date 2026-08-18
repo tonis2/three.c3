@@ -11,6 +11,7 @@
 	--headless            no window, no surface, no swapchain
 	--validate            Vulkan validation layers + debug messenger
 	--no-validate         turn them off — --mcp turns them on by default
+	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
 	--grid <n>            n instances of the model, to see M2's claim hold
 
  The window is a viewer and now also a control: drag to orbit, right-drag to
@@ -51,6 +52,8 @@ const String VERSION = "0.1.0";
 struct Options
 {
 	String model;
+	// The game directory: `.js` to run, `.glb` to describe. `game.md` G1.
+	String assets;
 	String screenshot;
 	uint width;
 	uint height;
@@ -99,6 +102,9 @@ fn Options? parse_args(String[] args)
 				opts.system_driver = true;
 			case "--stress-resize":
 				opts.stress_resize = true;
+			case "--assets":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.assets = args[++i];
 			case "--shader":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.shader = args[++i];
@@ -319,11 +325,13 @@ fn void? run(Options opts)
 		stats.triangles
 	);
 
-	// Before every one-shot path below: a server does not render one frame and
-	// exit, and it works with or without a window.
-	if (opts.mcp_port > 0)
+	// Before every one-shot path below: neither a server nor a game renders one
+	// frame and exits, and both work with or without a window. They compose —
+	// `--assets ./game --mcp` plays and answers tool calls at the same time,
+	// which is the loop `game.md` exists for.
+	if (opts.mcp_port > 0 || opts.assets.len > 0)
 	{
-		serve(&renderer, windowed ? &window : null, opts.mcp_port)!;
+		live(&renderer, windowed ? &window : null, opts.mcp_port, opts.assets, opts.screenshot)!;
 		return;
 	}
 
@@ -502,8 +510,16 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
 }
 
 <*
- Serve the three tools until the window closes, or until interrupted when there
- is no window.
+ The live loop: a JS context, a frame, and — optionally — the tool server and a
+ game booted from a directory.
+
+ **One loop for both, and that is the point rather than an economy.** `--mcp`
+ wants a context that answers tool calls; `--assets` wants a context that runs
+ `main.js` and keeps ticking. They are the same loop with the same frame, so
+ `--assets ./game --mcp` needs no arbitration at all: the agent's `run_script`
+ and the game's `setAnimationLoop` are already the two things `JsRuntime`
+ interleaves every frame, and an agent attaches to a game that is *playing*
+ rather than to a copy of one.
 
  **The handlers run on this loop's thread.** `Listener` gives its own thread to
  moving bytes — accept, read one message, queue it — and `pump` is where
@@ -512,12 +528,51 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  three are single-threaded and none of them is prepared to be otherwise.
 
  @param window : `Null when headless: the loop then only serves, and there is nothing to present.`
+ @param port : `Zero to run without a listener, which is a game with no agent attached.`
+ @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
+ @require port > 0 || assets.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
-fn void? serve(Renderer* renderer, c3w::Window* window, int port)
+fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets = "", String screenshot = "")
 {
+	bool serving = port > 0;
+
 	JsRuntime runtime;
 	runtime.open(&renderer.pass, renderer)!;
 	defer runtime.close();
+
+	// Before the listener and before the first frame: a game that failed to boot
+	// should say so before anything invites a tool call, and a scene an agent
+	// attaches to should be the one `main.js` built.
+	if (assets.len > 0)
+	{
+		runtime.set_assets_root(assets);
+		RunResult booted = runtime.run_module(ENTRY_MODULE);
+		defer booted.free();
+
+		if (booted.log.len > 0) io::printn(booted.log);
+		if (!booted.ok)
+		{
+			// Printed and carried on with, rather than returned as a fault.
+			// A boot that failed is exactly when someone wants to look at it —
+			// with `--mcp` that means attaching and asking, and with a window it
+			// means seeing an empty scene beside the reason for it. Exiting
+			// would take away the only two ways to find out what happened.
+			io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
+		}
+	}
+
+	// One frame of the booted game and out, which is how a game is checked
+	// without a person watching it — and the only path in this function that is
+	// not a loop. The tick is what makes the frame the *game's*: a boot that
+	// only registered a callback has drawn nothing yet, and capturing before it
+	// ran would picture an empty scene and call it the game.
+	if (screenshot.len > 0)
+	{
+		runtime.tick(0.0);
+		renderer.screenshot(screenshot)!;
+		io::printfn("wrote %s", screenshot);
+		return;
+	}
 
 	// Addressed by pointer from every tool, so it must not move while the
 	// server lives — which is why it is a local of the function that owns the
@@ -532,11 +587,15 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	// `Window.wake` posts an application-defined event from the listener's own
 	// thread, which is the one thing a foreign thread is allowed to do to a
 	// Cocoa run loop.
-	listener.start(port, wake: &wake_window, wake_ctx: window)!;
-	defer listener.stop();
+	if (serving) listener.start(port, wake: &wake_window, wake_ctx: window)!;
+	defer if (serving) listener.stop();
 
-	io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
-	io::printn("     run_script, screenshot, get_api_docs");
+	if (serving)
+	{
+		io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
+		io::printn("     run_script, screenshot, get_api_docs");
+	}
+	if (assets.len > 0) io::printfn("game: %s/%s", assets, ENTRY_MODULE);
 	if (window == null)
 	{
 		io::printn("     headless — ctrl-c to stop");
@@ -617,7 +676,8 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			);
 		}
 
-		usz handled = listener.pump(&server);
+		// Nothing to pump when there is no listener; a game alone still ticks.
+		usz handled = serving ? listener.pump(&server) : 0;
 
 		long elapsed_ns = (long)since_start.to_now();
 
@@ -675,6 +735,16 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 		}
 	}
 }
+
+<*
+ The file a `--assets` boot runs.
+
+ Fixed rather than configurable, and named for the same reason `index.html` is:
+ a directory that boots has to boot the same way on every machine, and a flag
+ that changed the entry point would be one more thing to get wrong in a bug
+ report that starts "it works here".
+*>
+const String ENTRY_MODULE = "main.js";
 
 // What a frame is worth when there is no window to present one: 60Hz, the rate
 // the vsynced loop above runs at on the displays this is developed on.

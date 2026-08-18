@@ -57,6 +57,26 @@ import qjs;
 // `while (true) {}` to a tenth of a second instead of five.
 const long JS_FRAME_BUDGET_MS = 100;
 
+<*
+ What a *game's* frame callback may take before anyone is told about it.
+
+ `game.md` G1/S4. Eight milliseconds is half a 60Hz frame, which is the point at
+ which a callback has stopped leaving room for the draw it exists to set up.
+
+ **Exceeding it is a report, not a death**, and that is the whole difference
+ between the two boot modes. Stopping the callback for good is right for an
+ agent — a runaway loop must not wedge the tool surface, and the agent is
+ sitting there to be told. It is wrong for a game, where the thing that trips a
+ hundred-millisecond budget once is a garbage collection, and killing the game
+ loop over one is a crash with a polite message.
+
+ The hard wall does not go away in game mode; it becomes `JS_BUDGET_MS`. A
+ callback that genuinely never returns still has to be stopped, because an
+ attached agent is the only thing that could diagnose it and it cannot be asked
+ while the frame is still running.
+*>
+const long JS_GAME_FRAME_SOFT_MS = 8;
+
 // A callback that makes a promise gets this many microtask steps to settle it.
 // Small on purpose: the script budget's 100 000 is sized for a whole scene
 // build, and per frame it is a licence to hang.
@@ -116,7 +136,9 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// rather than reaching for `JS_BUDGET_MS` is what keeps a caller's shorter
 	// budget theirs.
 	long budget = self.budget_ns;
-	self.budget_ns = JS_FRAME_BUDGET_MS * 1_000_000;
+	// A game gets the long wall and a soft warning; an agent's script gets the
+	// short wall and no second chance. See `JS_GAME_FRAME_SOFT_MS`.
+	self.budget_ns = (self.game_frames ? JS_BUDGET_MS : JS_FRAME_BUDGET_MS) * 1_000_000;
 	self.started = clock::now();
 	self.timed_out = false;
 	self.in_frame = true;
@@ -135,6 +157,31 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 
 	self.in_frame = false;
 	self.budget_ns = budget;
+
+	// Measured after the callback rather than interrupted during it: a frame
+	// that ran long has already cost what it cost, and the only useful thing
+	// left to do with that fact is count it where somebody can read it.
+	if (self.game_frames && !self.timed_out)
+	{
+		long spent_ns = (long)self.started.to_now();
+		if (spent_ns > JS_GAME_FRAME_SOFT_MS * 1_000_000)
+		{
+			self.frame_overruns++;
+			// Once, and then never again: a callback that overruns every frame
+			// would otherwise write sixty lines a second into a log an agent
+			// reads in one piece. The count is what carries the rest.
+			if (!self.frame_overrun_warned)
+			{
+				self.frame_overrun_warned = true;
+				self.report_frame_failure(string::tformat(
+					"the animation callback took %d ms, over the %d ms a frame has — "
+					"the count in `frame.overruns` is every time since",
+					spent_ns / 1_000_000, JS_GAME_FRAME_SOFT_MS
+				));
+			}
+		}
+	}
+
 	self.trim_frame_log();
 	return true;
 }
