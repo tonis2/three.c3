@@ -26,6 +26,7 @@ macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))
 	three::MeshPass pass;
 	pass.scene.init();
 	pass.assets.init();
+	pass.scene.attach_assets(&pass.assets);
 	pass.camera = three::default_camera();
 	defer pass.scene.free();
 	defer pass.assets.free(null);

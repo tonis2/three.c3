@@ -44,7 +44,7 @@ struct Hit
 {
 	bool hit;
 	NodeId node;
-	uint asset;
+	AssetId asset;
 	uint mesh;
 	float distance;
 	Vec3 point;
@@ -69,7 +69,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 	foreach (slot, &node : self.nodes)
 	{
 		if (!node.alive || !node.world_visible) continue;
-		if (node.asset == NO_ASSET || node.mesh == NO_MESH) continue;
+		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null || mesh.bvh == null) continue;

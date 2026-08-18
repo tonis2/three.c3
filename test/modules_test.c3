@@ -119,3 +119,71 @@ fn void a_path_deeper_than_the_walker_is_refused() @test
 	test::@check(@resolved("main.js", deep.str_view()) == "<three::MODULE_PATH_TOO_DEEP>",
 		"seventy-one components is too many (%s)", @resolved("main.js", deep.str_view()));
 }
+
+// ============================================================================
+// Where three.load reads from
+// ============================================================================
+
+<*
+ A `.glb` path follows the same rule an `import` does, and for the same reason.
+
+ `three.inventory()` answers with paths relative to the assets directory and
+ `three.load` used to resolve against the working directory, so the two did not
+ compose and the first two lines of any real game found that out —
+ `could not load level_a.glb: gltf::FILE_NOT_FOUND`. One rule for both is what
+ makes a game directory movable.
+
+ Driven through a `JsRuntime` rather than a free function because the assets
+ root is the runtime's, and "no root at all" — the plain `--mcp` case, where a
+ path means what the shell means by it — is half of what is under test.
+*>
+macro String @asset_path(#root, #path)
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	if (#root.len > 0) runtime.set_assets_root(#root);
+
+	String? answer = runtime.resolve_asset(#path, tmem);
+	if (catch err = answer) return string::tformat("<%s>", err);
+	return answer;
+}
+
+fn void an_asset_path_is_relative_to_the_assets_directory() @test
+{
+	test::@check(@asset_path("game", "level_a.glb") == "game/level_a.glb",
+		"a bare name (%s)", @asset_path("game", "level_a.glb"));
+	test::@check(@asset_path("game", "kits/rocks.glb") == "game/kits/rocks.glb",
+		"a subdirectory (%s)", @asset_path("game", "kits/rocks.glb"));
+	test::@check(@asset_path("game", "./kits/../level_a.glb") == "game/level_a.glb",
+		"and the noise comes out (%s)", @asset_path("game", "./kits/../level_a.glb"));
+	test::@check(@asset_path("game", "/level_a.glb") == "game/level_a.glb",
+		"a leading slash is the assets root, not the filesystem's (%s)",
+		@asset_path("game", "/level_a.glb"));
+}
+
+fn void an_asset_path_cannot_climb_out_of_the_game() @test
+{
+	test::@check(@asset_path("game", "../secrets.glb") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+		"one level up is refused (%s)", @asset_path("game", "../secrets.glb"));
+	test::@check(@asset_path("game", "../../../../etc/passwd") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+		"and so is a long climb, rather than being clamped to etc/passwd (%s)",
+		@asset_path("game", "../../../../etc/passwd"));
+}
+
+<*
+ Without an assets root a path is used exactly as written.
+
+ The `--mcp` and CLI case. There is no directory for it to be relative to, an
+ agent naming a file names it from wherever the process was started, and
+ confining it to nothing would refuse every path there is — including the
+ `test/fixtures/textured.glb` half this suite is built on.
+*>
+fn void without_an_assets_root_a_path_is_left_alone() @test
+{
+	test::@check(@asset_path("", "test/fixtures/textured.glb") == "test/fixtures/textured.glb",
+		"a relative path (%s)", @asset_path("", "test/fixtures/textured.glb"));
+	test::@check(@asset_path("", "../up/one.glb") == "../up/one.glb",
+		"and one that climbs, which is the caller's business here (%s)",
+		@asset_path("", "../up/one.glb"));
+}

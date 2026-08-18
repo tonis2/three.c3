@@ -320,11 +320,12 @@ fn void append_json_string(DString* out, String text)
 fn void append_stats(DString* out, SceneStats stats)
 {
 	out.appendf(
-		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d}`,
+		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d}`,
 		stats.draw_calls,
 		stats.unique_meshes,
 		stats.instances,
 		stats.nodes,
+		stats.assets,
 		stats.triangles,
 		stats.vertices,
 		stats.textures,

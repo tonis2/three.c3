@@ -223,11 +223,11 @@ fn void build_convex(GeometryBuilder* out, Vec3[] points)
  array over twice costs one lookup the second time, not a second quickhull.
 
  @param points : `The cloud, in the mesh's own local space. Not modified, and not retained.`
- @return `The asset's index, for Scene.add_mesh.`
+ @return `The asset's handle, for Scene.add_mesh.`
  @return? TOO_MANY_CONVEX_POINTS : `More than MAX_CONVEX_POINTS. The prelude refuses these first; this is what a forged __three.convex call gets.`
  @return? CONVEX_HULL_IS_DEGENERATE : `The cloud encloses no volume — fewer than four points, or points that are all equal, collinear or coplanar.`
 *>
-fn uint? Assets.convex(&self, Gpu* gpu, Vec3[] points)
+fn AssetId? Assets.convex(&self, Gpu* gpu, Vec3[] points)
 {
 	if (!self.started) self.init();
 	if (points.len > MAX_CONVEX_POINTS) return TOO_MANY_CONVEX_POINTS~;

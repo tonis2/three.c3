@@ -94,6 +94,11 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 
 	self.assets.init();
 	self.scene.init();
+	// The scene counts references against this table from here on — see
+	// `Scene.attach_assets`. Wired at construction rather than at first load,
+	// because a node created before the wiring would never be counted and the
+	// asset it named could then be swept out from under it.
+	self.scene.attach_assets(&self.assets);
 	self.camera = default_camera();
 	self.light = { 0.35, 0.80, 0.45, 0.25 };
 
@@ -132,7 +137,7 @@ fn Material* MeshPass.material(&self, uint index)
 *>
 fn void? MeshPass.load(&self, Gpu* gpu, String path)
 {
-	uint asset = self.assets.load(gpu, path)!;
+	AssetId asset = self.assets.load(gpu, path)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
 }
@@ -147,7 +152,7 @@ fn void? MeshPass.load(&self, Gpu* gpu, String path)
 *>
 fn void? MeshPass.load_triangle(&self, Gpu* gpu)
 {
-	uint asset = self.assets.load_triangle(gpu)!;
+	AssetId asset = self.assets.load_triangle(gpu)!;
 	self.place(asset, NO_NODE);
 	self.frame_camera();
 }
@@ -157,9 +162,10 @@ fn void? MeshPass.load_triangle(&self, Gpu* gpu)
 
  @return `The parent the meshes were placed under.`
 *>
-fn NodeId MeshPass.place(&self, uint asset, NodeId parent)
+fn NodeId MeshPass.place(&self, AssetId asset, NodeId parent)
 {
-	Asset* loaded = &self.assets.assets[asset];
+	Asset* loaded = self.assets.slot(asset);
+	if (loaded == null) return parent;
 	uint count = (uint)loaded.meshes.len();
 
 	for (uint i = 0; i < count; i++)
@@ -167,9 +173,10 @@ fn NodeId MeshPass.place(&self, uint asset, NodeId parent)
 		// The name is re-read each pass rather than held: `add_mesh` grows the
 		// node pool, and the asset pool is a different list, but a pointer taken
 		// across a call that takes `&self` is the habit worth not having.
-		String name = self.assets.assets[asset].meshes[i].name;
+		String name = self.assets.mesh(asset, i).name;
+		// No retain here since G2: `Scene.create_slot` does it, so that there is
+		// one place a reference is taken rather than one per caller.
 		self.scene.add_mesh(asset, i, parent, name);
-		self.assets.retain(asset);
 	}
 	return parent;
 }
@@ -190,14 +197,14 @@ fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
 {
 	if (count == 0) return;
 
-	uint asset = path.len > 0
+	AssetId asset = path.len > 0
 		? self.assets.load(gpu, path)!
 		: self.assets.load_triangle(gpu)!;
 
 	// Clear whatever `load` put there; the grid is the whole scene.
 	self.scene.remove(self.scene.root);
 
-	Vec3 size = self.assets.assets[asset].bounds.size();
+	Vec3 size = self.assets.slot(asset).bounds.size();
 	float span = math::max(math::max(size.x, size.z), 0.001f) * 1.25f;
 
 	uint side = 1;

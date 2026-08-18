@@ -36,6 +36,7 @@ macro @with_js(; @body(three::JsRuntime* run))
 	three::MeshPass pass;
 	pass.scene.init();
 	pass.assets.init();
+	pass.scene.attach_assets(&pass.assets);
 	pass.camera = three::default_camera();
 	defer pass.scene.free();
 	// Null device, which `Assets.free` only ever reaches through a texture or a
@@ -2331,5 +2332,199 @@ fn void consecutive_push_descriptor_draws_each_keep_their_own_state() @test
 		test::@check(green > 200, "the second survived the first push, got %d green", green);
 		test::@check(blue > 200, "and the third, got %d blue", blue);
 		test::@check(yellow > 200, "and the fourth, got %d yellow", yellow);
+	};
+}
+
+// ============================================================================
+// Unloading (game.md G2)
+// ============================================================================
+
+<*
+ `scene.unload()` empties the scene and gives the assets back.
+
+ The verb a level transition is written in. Asserted through `stats()` on both
+ sides, because "the assets went" is the claim and `stats().assets` is the only
+ thing a script — or an agent watching one — can read it off.
+
+ The Scene survives, which is what separates this from `new three.Scene()`: the
+ same object is still usable afterwards, and the check adds to it again to prove
+ it rather than only asserting that nothing threw.
+*>
+fn void unloading_a_scene_gives_the_assets_back() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const kit = three.load('test/fixtures/textured.glb');
+			for (const name of kit.meshes) scene.add(new three.Mesh(kit.mesh(name)));
+			const loaded = scene.stats();
+
+			const freed = scene.unload();
+			const swept = scene.stats();
+
+			// The Scene is still the Scene: adding to it works, and the box is a
+			// fresh asset the sweep knew nothing about.
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			return {
+				loadedAssets: loaded.assets,
+				loadedTextures: loaded.textures,
+				freedAssets: freed.assets,
+				freedTextures: freed.textures,
+				freedBytes: freed.bytes,
+				sweptAssets: swept.assets,
+				sweptTextures: swept.textures,
+				sweptBytes: swept.textureBytes,
+				sweptNodes: swept.instances,
+				after: scene.stats().instances,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"loadedAssets":1`), "one asset was resident: %s", result.value);
+		test::@check(result.value.contains(`"loadedTextures":1`), "and one texture: %s", result.value);
+		test::@check(result.value.contains(`"freedAssets":1`), "the unload freed it: %s", result.value);
+		test::@check(result.value.contains(`"freedTextures":1`), "and its texture: %s", result.value);
+		test::@check(!result.value.contains(`"freedBytes":0`), "and reported the bytes: %s", result.value);
+		test::@check(result.value.contains(`"sweptAssets":0`), "nothing was left resident: %s", result.value);
+		test::@check(result.value.contains(`"sweptTextures":0`), "no textures either: %s", result.value);
+		test::@check(result.value.contains(`"sweptBytes":0`), "and no texture bytes: %s", result.value);
+		test::@check(result.value.contains(`"sweptNodes":0`), "the scene was emptied: %s", result.value);
+		test::@check(result.value.contains(`"after":1`), "and it still takes an add: %s", result.value);
+	};
+}
+
+<*
+ An asset handle from before an unload throws, and says what to do.
+
+ The failure this whole generation business exists to prevent: the slot is
+ reused, so without it `kit.mesh('quad')` after an unload would place geometry
+ out of whatever file happened to land there next, silently. The sentence has to
+ name the recovery — loading the file again — because "that asset is gone" on its
+ own leaves an agent guessing at whether the path or the script is at fault.
+*>
+fn void an_asset_handle_from_before_an_unload_throws() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const kit = three.load('test/fixtures/textured.glb');
+			scene.unload();
+
+			let said = '';
+			try {
+				scene.add(new three.Mesh(kit.meshAt(0)));
+			} catch (e) {
+				said = e.message;
+			}
+
+			// Loading it again is the recovery the message names, and it works.
+			const fresh = three.load('test/fixtures/textured.glb');
+			scene.add(new three.Mesh(fresh.meshAt(0)));
+
+			return { said, instances: scene.stats().instances, assets: scene.stats().assets };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("no longer loaded"), "the stale handle was refused: %s", result.value);
+		test::@check(result.value.contains("unloadUnused"), "and the message names what freed it: %s", result.value);
+		test::@check(result.value.contains(`"instances":1`), "the reloaded asset places: %s", result.value);
+		test::@check(result.value.contains(`"assets":1`), "and it is the only one resident: %s", result.value);
+	};
+}
+
+<*
+ `three.unloadUnused()` frees what nothing draws and leaves what something does.
+
+ The half `scene.unload()` cannot express: a level stays up while an asset
+ loaded and then thought better of goes away. Also the case worth warning about
+ in the docs — an asset that has not been added yet has no references either, so
+ the order is load, add, unload rather than load, unload, add.
+*>
+fn void unload_unused_leaves_what_is_still_drawn() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const kept = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(kept);
+
+			// Built and never added: nothing names it.
+			new three.SphereGeometry(1, 8, 6);
+			const before = scene.stats().assets;
+
+			const freed = three.unloadUnused();
+			const after = scene.stats();
+
+			return { before, freedAssets: freed.assets, after: after.assets, instances: after.instances };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"before":2`), "both shapes were resident: %s", result.value);
+		test::@check(result.value.contains(`"freedAssets":1`), "the sphere went: %s", result.value);
+		test::@check(result.value.contains(`"after":1`), "and the box stayed: %s", result.value);
+		test::@check(result.value.contains(`"instances":1`), "still drawing: %s", result.value);
+	};
+}
+
+<*
+ A hundred levels through the JavaScript API leave what they found.
+
+ The same claim `three_tests::unload` makes against the host, made again through
+ the surface a game actually writes. It is not a duplicate: everything between
+ `scene.unload()` and `Assets.free_slot` — the prelude's demotion of the JS
+ objects, `H.remove`, `Scene.kill`'s recursion — is only covered here, and a
+ reference leaked in any of it would show up as the resident count climbing.
+*>
+fn void a_hundred_levels_through_the_api_leave_nothing_behind() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const seen = new Set();
+
+			for (let level = 0; level < 100; level++) {
+				const kit = three.load('test/fixtures/textured.glb');
+				const group = new three.Group();
+				for (const name of kit.meshes) group.add(new three.Mesh(kit.mesh(name)));
+				scene.add(group);
+				// A generated shape too, so both kinds of asset cycle.
+				scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+				seen.add(scene.stats().assets);
+				scene.unload();
+				seen.add('after:' + scene.stats().assets);
+			}
+
+			const end = scene.stats();
+			return {
+				duringSizes: [...seen].filter(v => typeof v === 'number'),
+				afterSizes: [...seen].filter(v => typeof v === 'string'),
+				assets: end.assets,
+				textures: end.textures,
+				bytes: end.textureBytes,
+				instances: end.instances,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// Two assets while a level is up, zero after it goes — every cycle, or
+		// the sets would have more than one member each.
+		test::@check(result.value.contains(`"duringSizes":[2]`),
+			"every level was two resident assets: %s", result.value);
+		test::@check(result.value.contains(`"afterSizes":["after:0"]`),
+			"and every unload took both back: %s", result.value);
+		test::@check(result.value.contains(`"assets":0`), "nothing resident at the end: %s", result.value);
+		test::@check(result.value.contains(`"textures":0`), "no textures either: %s", result.value);
+		test::@check(result.value.contains(`"bytes":0`), "and no texture bytes: %s", result.value);
+		test::@check(result.value.contains(`"instances":0`), "and an empty scene: %s", result.value);
 	};
 }

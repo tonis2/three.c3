@@ -88,7 +88,7 @@ struct Instance
 *>
 struct Bucket
 {
-	uint asset;
+	AssetId asset;
 	uint mesh;
 	uint material;
 	uint first;
@@ -116,6 +116,11 @@ struct SceneStats
 	uint nodes;
 	uint triangles;
 	uint vertices;
+	// How many assets are resident, which is the number a level transition has
+	// to bring back down — see `Assets.resident`. Not the size of the asset
+	// table: the free list is the difference, and a working unload that grew the
+	// table would otherwise read as a leak.
+	uint assets;
 	uint textures;
 	usz texture_bytes;
 	// From the last `update`, not from this call — see the header.
@@ -143,6 +148,10 @@ struct Scene
 	List{Node} nodes;
 	List{uint} free_slots;
 	NodeId root;
+
+	// The asset table this scene's nodes count against, or null. See
+	// `attach_assets`.
+	Assets* assets;
 
 	// Rebuilt by `update`; read by `MeshPass.record`.
 	List{Draw} draws;
@@ -176,6 +185,28 @@ fn Scene* Scene.init(&self)
 	self.started = true;
 	self.root = self.create_slot(NO_NODE, NO_ASSET, NO_MESH, "root");
 	return self;
+}
+
+<*
+ Point this scene at the asset table its nodes reference.
+
+ **This is where `Asset.refs` comes from.** Every place a node can start naming
+ an asset is `create_slot` and every place it can stop is `kill`, so counting
+ there means there is one implementation of the count rather than one per caller
+ — which matters now that being wrong by one means either a leak or a freed
+ buffer, where before G2 it only meant a misleading number.
+
+ Detached by default and a no-op then. A scene with no asset table is the
+ scene-math test configuration: there is no device, nothing is uploaded, and
+ there is nothing to count.
+
+ The pointer is into the `MeshPass` that owns both, so a pass must not be copied
+ after `init` — which nothing does, and which was already true of `Assets`'
+ own interior pointers.
+*>
+fn void Scene.attach_assets(&self, Assets* assets)
+{
+	self.assets = assets;
 }
 
 fn void Scene.free(&self)
@@ -224,15 +255,15 @@ fn NodeId Scene.add_group(&self, NodeId parent = NO_NODE, String name = "")
  Add a mesh: an asset reference plus a transform, which is the whole of what an
  instance is (`plan.md` §"What it is").
 
- @param asset : `Index into Assets.assets.`
+ @param asset : `A handle from Assets.load, primitive or convex.`
  @param mesh : `Index into that asset's meshes.`
 *>
-fn NodeId Scene.add_mesh(&self, uint asset, uint mesh, NodeId parent = NO_NODE, String name = "")
+fn NodeId Scene.add_mesh(&self, AssetId asset, uint mesh, NodeId parent = NO_NODE, String name = "")
 {
 	return self.attach(parent, asset, mesh, name);
 }
 
-fn NodeId Scene.attach(&self, NodeId parent, uint asset, uint mesh, String name)
+fn NodeId Scene.attach(&self, NodeId parent, AssetId asset, uint mesh, String name)
 {
 	if (!self.started) self.init();
 
@@ -250,7 +281,7 @@ fn NodeId Scene.attach(&self, NodeId parent, uint asset, uint mesh, String name)
 	return id;
 }
 
-fn NodeId Scene.create_slot(&self, NodeId parent, uint asset, uint mesh, String name)
+fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, String name)
 {
 	uint index;
 	if (self.free_slots.len() > 0)
@@ -298,6 +329,11 @@ fn NodeId Scene.create_slot(&self, NodeId parent, uint asset, uint mesh, String 
 	node.dirty = true;
 	node.generation = generation;
 	node.alive = true;
+
+	// One of the two halves of `Asset.refs` — see `attach_assets`. Counted after
+	// the slot is fully written, so a table that somehow reads back into the
+	// scene sees a consistent node.
+	if (self.assets != null && asset.is_set()) self.assets.retain(asset);
 
 	return { .index = index, .generation = generation };
 }
@@ -350,6 +386,12 @@ fn void Scene.kill(&self, NodeId id)
 	// pool through `self`.
 	node = self.node(id);
 	if (node == null) return;
+
+	// The other half of `Asset.refs`. Every path out of the scene ends here —
+	// `remove`, `Scene.remove(root)` for `new three.Scene()`, and the recursion
+	// above for a whole subtree — so there is nowhere else a reference can be
+	// dropped from.
+	if (self.assets != null && node.asset.is_set()) self.assets.release(node.asset);
 
 	if (node.name.len > 0) node.name.free(mem);
 	node.name = "";
@@ -734,7 +776,7 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 	foreach (slot, &node : self.nodes)
 	{
 		if (!node.alive || !node.world_visible) continue;
-		if (node.asset == NO_ASSET || node.mesh == NO_MESH) continue;
+		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
@@ -747,7 +789,7 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 
 		self.draws.push({
 			.material = node.material,
-			.key = bucket_key(node.asset, node.mesh),
+			.key = bucket_key(node.asset.index, node.mesh),
 			.slot = (uint)slot,
 		});
 	}
@@ -769,20 +811,23 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 	uint open_material = self.draws[0].material;
 	foreach (draw : self.draws)
 	{
+		Node* node = &self.nodes[draw.slot];
 		if (draw.key != open || draw.material != open_material)
 		{
 			open = draw.key;
 			open_material = draw.material;
+			// Read off the node rather than unpacked from the key, which only
+			// carries the slot index. Every node in a bucket names the same
+			// live asset, so any of them supplies the generation.
 			self.buckets.push({
-				.asset = (uint)(draw.key >> 32),
-				.mesh = (uint)(draw.key & 0xffffffff),
+				.asset = node.asset,
+				.mesh = node.mesh,
 				.material = draw.material,
 				.first = (uint)self.instances.len(),
 				.count = 0,
 			});
 		}
 
-		Node* node = &self.nodes[draw.slot];
 		self.instances.push({
 			.model = node.world,
 			.normal = node.normal,
@@ -817,7 +862,7 @@ fn uint count_unique_meshes(Bucket[] buckets)
 		bool seen = false;
 		for (sz j = 0; j < i; j++)
 		{
-			if (buckets[j].asset == bucket.asset && buckets[j].mesh == bucket.mesh)
+			if (buckets[j].asset.index == bucket.asset.index && buckets[j].mesh == bucket.mesh)
 			{
 				seen = true;
 				break;
@@ -845,7 +890,8 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.draw_calls = (uint)self.buckets.len(),
 		.unique_meshes = count_unique_meshes(self.buckets.array_view()),
 		.instances = (uint)self.instances.len(),
-		.textures = (uint)assets.textures.len(),
+		.assets = assets.resident(),
+		.textures = assets.texture_count(),
 		.texture_bytes = assets.texture_bytes(),
 		.culled_last_frame = self.culled,
 	};
@@ -882,7 +928,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 
 	foreach (&node : self.nodes)
 	{
-		if (!node.alive || node.asset == NO_ASSET || node.mesh == NO_MESH) continue;
+		if (!node.alive || !node.asset.is_set() || node.mesh == NO_MESH) continue;
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 

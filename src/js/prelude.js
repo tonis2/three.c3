@@ -170,7 +170,10 @@
 		// everything set before the add, then do the same for the subtree.
 		_materialize(parent) {
 			const ref = this._ref();
-			const [i, g] = H.add(ref ? ref.asset : -1, ref ? ref.mesh : -1, parent._i, parent._g, this._name);
+			const [i, g] = H.add(
+				ref ? ref.asset : -1, ref ? ref.assetGeneration : 0, ref ? ref.mesh : -1,
+				parent._i, parent._g, this._name,
+			);
 			this._i = i;
 			this._g = g;
 			this._flush();
@@ -490,10 +493,13 @@
 	class Mesh extends Object3D {
 		constructor(geometry, material = null) {
 			super();
-			if (!geometry || typeof geometry.asset !== 'number' || typeof geometry.mesh !== 'number') {
+			if (!geometry || typeof geometry.asset !== 'number' || typeof geometry.mesh !== 'number'
+				|| typeof geometry.assetGeneration !== 'number') {
 				throw new TypeError(
 					'new three.Mesh(geometry) wants a shape like new three.BoxGeometry(1, 1, 1), '
-					+ 'or a mesh reference from asset.mesh(name)'
+					+ 'or a mesh reference from asset.mesh(name). An asset reference carries '
+					+ 'assetGeneration as well as asset, because assets can be unloaded and their '
+					+ 'slots reused — a hand-built { asset, mesh } cannot say which load it meant.'
 				);
 			}
 			this._mesh = geometry;
@@ -600,6 +606,28 @@
 			return H.stats();
 		}
 
+		// Empty the scene and give back everything nothing else holds — the
+		// level boundary.
+		//
+		// Not `new three.Scene()`, which also empties the scene but replaces it,
+		// so every handle you were holding — including this Scene — starts
+		// throwing. This keeps the scene; it is the same object afterwards, with
+		// no children.
+		//
+		// The freeing is deliberately explicit and deliberately not a collector's
+		// job: resident memory that depended on when the interpreter felt like
+		// running a GC is the worst possible property for the one number a game
+		// watches. Answers with what went, and three.stats() is the independent
+		// confirmation.
+		//
+		// An asset you loaded but never added has no references either, so it
+		// goes too. Load the next level after this call, not before it.
+		unload() {
+			this._check();
+			for (const child of [...this.children]) this.remove(child);
+			return H.unloadUnused();
+		}
+
 		// -------------------------------------------------------------------
 		// Picking
 		//
@@ -659,13 +687,19 @@
 	// -----------------------------------------------------------------------
 	// Assets
 
+	// A loaded file. The handle is two numbers, not one: which slot the host
+	// filed it in, and which occupant of that slot it is. Slots are reused after
+	// an unload, so an index on its own could name a different file than the one
+	// that was loaded — the generation is what makes a stale reference throw a
+	// sentence instead of quietly placing somebody else's mesh.
 	class Asset {
-		constructor(index) {
+		constructor([index, generation]) {
 			this._a = index;
-			this.path = H.assetPath(index);
+			this._g = generation;
+			this.path = H.assetPath(index, generation);
 			// In load order, which is the order `mesh(name)` resolves in and the
 			// order the host's own `find_mesh` walks.
-			this.meshes = H.meshNames(index);
+			this.meshes = H.meshNames(index, generation);
 		}
 
 		mesh(name) {
@@ -674,14 +708,14 @@
 				const have = this.meshes.length ? this.meshes.join(', ') : '(none)';
 				throw new Error(`no mesh named "${name}" in ${this.path} — it has: ${have}`);
 			}
-			return { asset: this._a, mesh: at, name };
+			return { asset: this._a, assetGeneration: this._g, mesh: at, name };
 		}
 
 		meshAt(i) {
 			if (!(i >= 0 && i < this.meshes.length)) {
 				throw new RangeError(`mesh index ${i} is outside 0..${this.meshes.length - 1}`);
 			}
-			return { asset: this._a, mesh: i, name: this.meshes[i] };
+			return { asset: this._a, assetGeneration: this._g, mesh: i, name: this.meshes[i] };
 		}
 
 		toJSON() { return { path: this.path, meshes: this.meshes }; }
@@ -719,11 +753,15 @@
 	// Shared by every shape: what it is called, what it was asked for, and the
 	// asset the host built or reused.
 	class Geometry {
-		constructor(type, name, parameters, asset) {
+		constructor(type, name, parameters, [asset, assetGeneration]) {
 			this.type = type;
 			this.name = name;
 			this.parameters = parameters;
 			this.asset = asset;
+			// The other half of the handle — see the Asset class. Carried here so
+			// that a generated shape and a reference from asset.mesh(name) are
+			// still the same shape of thing, which is what lets Mesh take either.
+			this.assetGeneration = assetGeneration;
 			// A generated shape is one mesh, always. Named `mesh` because that is
 			// what an asset reference calls it, which is what lets Mesh take both.
 			this.mesh = 0;
@@ -1137,6 +1175,18 @@
 
 		stats() { return H.stats(); },
 
+		// Free every asset no live mesh names, and every texture that goes with
+		// it. scene.unload() is this plus emptying the scene, and is what a level
+		// transition wants; this on its own is for the asset loaded and then
+		// changed its mind about.
+		//
+		// Answers with { assets, textures, bytes } — how many asset slots went,
+		// how many unique images went, and how many bytes of image that was.
+		// Costs a full device idle when there is anything to free and nothing at
+		// all when there is not, so once per level is right and once per frame is
+		// merely wasteful.
+		unloadUnused() { return H.unloadUnused(); },
+
 		// Three.js's own name for this, on the renderer, and the only name for
 		// it that is: `requestAnimationFrame` is the browser's, and Three.js has
 		// no frame loop in core either.
@@ -1262,6 +1312,8 @@
 			'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row.',
 			'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
+			'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
+			'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
 			'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
@@ -1282,7 +1334,7 @@
 				note: 'Empties the one host scene and becomes its root. It is an Object3D, so moving it moves everything.',
 				methods: [
 					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
-					'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()', 'toJSON()',
+					'unload()', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()', 'toJSON()',
 				],
 				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
 			},
@@ -1405,9 +1457,18 @@
 			},
 		},
 		functions: {
-			'three.load(path)': 'Load a .glb or .gltf. Loading the same path twice returns the same asset.',
+			'three.load(path)':
+				'Load a .glb or .gltf. Under --assets the path is relative to the assets directory and cannot '
+				+ 'climb out of it, so three.inventory() paths go straight in; otherwise it is relative to '
+				+ 'where three was started. Loading the same path twice returns the same asset — unless it was '
+				+ 'unloaded in between, which gives a fresh one and makes the old handle throw.',
 			'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
+			'three.unloadUnused()':
+				'Free every asset no live mesh names, and every texture that goes with it. Answers with '
+				+ '{ assets, textures, bytes }. scene.unload() is this plus emptying the scene and is what a '
+				+ 'level transition wants. An asset loaded but never added has no references either, so it '
+				+ 'goes too — load the next level after unloading, not before.',
 			'three.inventory()':
 				'Every .glb and .gltf under the assets directory, described without loading any of it: '
 				+ '[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name], '
@@ -1493,6 +1554,7 @@
 			uniqueMeshes: 'Distinct (asset, mesh) pairs drawn.',
 			instances: 'Total placed meshes. The M2 claim is that 1000 of these can be 1 drawCall.',
 			nodes: 'Live nodes, groups and the root included.',
+			assets: 'Loaded files and generated shapes resident on the device. This is the number a level transition has to bring back down; watch it across scene.unload().',
 			triangles: 'Summed over instances, so 1000 copies of a 500-triangle mesh is 500000.',
 			vertices: 'Likewise.',
 			textures: 'Unique images on the device, deduplicated by content across every loaded file.',

@@ -33,6 +33,18 @@ const String FIXTURE = "test/fixtures/textured.glb";
 const uint W = 200;
 const uint H = 150;
 
+<*
+ The asset `load_triangle` files first: slot zero, first occupant.
+
+ Spelled out rather than passed as a bare `0` because an asset handle is two
+ numbers since G2 — an index and a generation, mirroring `NodeId`, so that a
+ handle to an unloaded asset is detectable rather than silently valid. In the
+ checks below that build a `Scene` with no asset table behind it at all, this
+ names nothing and the node simply never reaches the draw list, which is what
+ those checks want.
+*>
+const three::AssetId TRIANGLE = { 0, 0 };
+
 macro @with_pass(; @body(three::Renderer* renderer))
 {
 	vk::Instance instance = three::create_instance(false, headless: true)!!;
@@ -281,7 +293,7 @@ fn void a_thousand_instances_are_one_draw_call() @test
 		three::Scene* scene = &renderer.pass.scene;
 		for (uint i = 0; i < 1000; i++)
 		{
-			three::NodeId node = scene.add_mesh(0, 0);
+			three::NodeId node = scene.add_mesh(TRIANGLE, 0);
 			scene.set_position(node, { (float)i * 2.0f, 0, 0 });
 		}
 
@@ -310,7 +322,7 @@ fn void interleaved_meshes_still_bucket() @test
 		three::Scene* scene = &renderer.pass.scene;
 		for (uint i = 0; i < 20; i++)
 		{
-			three::NodeId node = scene.add_mesh(0, i % 2);
+			three::NodeId node = scene.add_mesh(TRIANGLE, i % 2);
 			scene.set_position(node, { (float)i, 0, 0 });
 		}
 
@@ -350,9 +362,9 @@ fn void one_mesh_under_two_materials_is_two_draws_and_one_mesh() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
-		three::NodeId first = scene.add_mesh(0, 0);
-		three::NodeId second = scene.add_mesh(0, 0);
-		three::NodeId third = scene.add_mesh(0, 0);
+		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
+		three::NodeId second = scene.add_mesh(TRIANGLE, 0);
+		three::NodeId third = scene.add_mesh(TRIANGLE, 0);
 
 		three::SceneStats shared = renderer.pass.stats();
 		test::@check(shared.draw_calls == 1, "four copies on one material took %d draws", shared.draw_calls);
@@ -400,12 +412,12 @@ fn void a_reused_slot_does_not_inherit_a_material() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 		three::Scene* scene = &renderer.pass.scene;
 
-		three::NodeId first = scene.add_mesh(0, 0);
+		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
 		scene.set_material(first, 3);
 		uint slot = first.index;
 		scene.remove(first);
 
-		three::NodeId second = scene.add_mesh(0, 0);
+		three::NodeId second = scene.add_mesh(TRIANGLE, 0);
 		test::@check(second.index == slot, "the slot was not reused, so this test proved nothing");
 
 		three::Node* node = scene.node(second);
@@ -446,7 +458,7 @@ fn void a_colour_per_copy_costs_no_draw_call() @test
 		three::NodeId[100] made;
 		for (uint i = 0; i < 100; i++)
 		{
-			made[i] = scene.add_mesh(0, 0);
+			made[i] = scene.add_mesh(TRIANGLE, 0);
 			scene.set_position(made[i], { (float)i * 2.0f, 0, 0 });
 			scene.set_color(made[i], { (float)i / 100.0f, 0.25f, 1.0f - (float)i / 100.0f, 1.0f });
 			scene.set_variant(made[i], i % 4);
@@ -486,7 +498,7 @@ fn void a_node_starts_white_and_on_row_zero() @test
 	scene.init();
 	defer scene.free();
 
-	three::Node* node = scene.node(scene.add_mesh(0, 0));
+	three::Node* node = scene.node(scene.add_mesh(TRIANGLE, 0));
 	test::@check(node != null, "the node resolves");
 	test::@check(
 		node.color[0] == 1 && node.color[1] == 1 && node.color[2] == 1 && node.color[3] == 1,
@@ -511,7 +523,7 @@ fn void culling_drops_what_is_off_screen() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
-		three::NodeId far_away = scene.add_mesh(0, 0);
+		three::NodeId far_away = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(far_away, { 1000, 0, 0 });
 
 		three::Camera camera = three::default_camera();
@@ -602,7 +614,7 @@ fn void a_ray_hits_the_nearer_instance() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
-		three::NodeId behind = scene.add_mesh(0, 0);
+		three::NodeId behind = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(behind, { 0, 0, -5 });
 
 		collision::Ray ray = { .origin = { 0, 0, 10 }, .direction = { 0, 0, -1 } };
@@ -639,7 +651,7 @@ fn void picking_respects_an_instance_scale() @test
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
-		three::NodeId only = scene.buckets.len() >= 0 ? scene.add_mesh(0, 0) : three::NO_NODE;
+		three::NodeId only = scene.buckets.len() >= 0 ? scene.add_mesh(TRIANGLE, 0) : three::NO_NODE;
 		scene.set_visible(scene.root, true);
 
 		// Hide the one `load_triangle` placed; this test wants one instance.
@@ -693,7 +705,7 @@ fn void a_ray_through_the_screen_centre_hits_what_is_centred() @test
 
 		// A second copy well off to the left, so a raycast that ignores the
 		// screen position entirely still has something wrong to return.
-		three::NodeId beside = scene.add_mesh(0, 0);
+		three::NodeId beside = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(beside, { -20, 0, 0 });
 
 		three::Camera camera = three::default_camera();
@@ -814,7 +826,7 @@ fn void the_instance_buffer_grows_and_stays_stable() @test
 		three::Scene* scene = &renderer.pass.scene;
 		for (uint i = 0; i < 200; i++)
 		{
-			three::NodeId node = scene.add_mesh(0, 0);
+			three::NodeId node = scene.add_mesh(TRIANGLE, 0);
 			scene.set_position(node, { ((float)(i % 20) - 10.0f) * 1.5f, ((float)(i / 20) - 5.0f) * 1.5f, 0 });
 		}
 		renderer.pass.frame_camera();
@@ -880,7 +892,7 @@ fn void the_shader_rotates_normals_per_instance() @test
 
 		three::Scene* scene = &renderer.pass.scene;
 		three::NodeId towards = scene.node(scene.root).children[0];
-		three::NodeId away = scene.add_mesh(0, 0);
+		three::NodeId away = scene.add_mesh(TRIANGLE, 0);
 
 		float tilt = (float)math::PI / 3.0f; // 60 degrees
 		scene.set_position(towards, { -1, 0, 0 });
@@ -941,7 +953,7 @@ fn void instances_land_where_their_transforms_say() @test
 
 		three::Scene* scene = &renderer.pass.scene;
 		three::NodeId left = scene.node(scene.root).children[0];
-		three::NodeId right = scene.add_mesh(0, 0);
+		three::NodeId right = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(left, { -2, 0, 0 });
 		scene.set_position(right, { 2, 0, 0 });
 
@@ -1006,7 +1018,7 @@ fn void two_draws_with_different_textures_do_not_bleed() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
-		uint triangle = renderer.pass.assets.load_triangle(&renderer.gpu)!!;
+		three::AssetId triangle = renderer.pass.assets.load_triangle(&renderer.gpu)!!;
 
 		three::Scene* scene = &renderer.pass.scene;
 		three::NodeId tri = scene.add_mesh(triangle, 0);
@@ -1017,7 +1029,7 @@ fn void two_draws_with_different_textures_do_not_bleed() @test
 		uint found = 0;
 		foreach (slot, &node : scene.nodes)
 		{
-			if (!node.alive || node.asset != 0 || node.mesh == three::NO_MESH) continue;
+			if (!node.alive || node.asset.index != 0 || node.mesh == three::NO_MESH) continue;
 			if (found < 2) quads[found++] = { .index = (uint)slot, .generation = node.generation };
 		}
 		test::@check(found == 2, "the fixture placed %d quads, expected 2", found);

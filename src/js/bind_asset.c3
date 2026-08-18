@@ -54,7 +54,26 @@ fn void js_load(
 			return;
 		}
 
-		uint? asset = self.pass.assets.load(&self.renderer.gpu, path);
+		// Relative to the assets directory in a `--assets` boot, and to the
+		// working directory otherwise — see `JsRuntime.resolve_asset`. Resolved
+		// before the load so that a path reaching out of the game is refused by
+		// name rather than opening whatever it found.
+		String? opening = self.resolve_asset(path, tmem);
+		if (catch err = opening)
+		{
+			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			{
+				*out = js.raise(string::tformat(
+					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
+					"what is inside its own", path
+				));
+				return;
+			}
+			*out = js.raise(string::tformat("cannot load '%s': %s", path, err));
+			return;
+		}
+
+		AssetId? asset = self.pass.assets.load(&self.renderer.gpu, opening);
 		if (catch err = asset)
 		{
 			// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
@@ -64,7 +83,7 @@ fn void js_load(
 			return;
 		}
 
-		*out = qjs::int_value((int)asset);
+		*out = asset_value(&js, asset);
 	};
 }
 
@@ -122,14 +141,14 @@ fn void js_primitive(
 			.capped = arg_truth(&js, argc, args, 7),
 		};
 
-		uint? asset = self.pass.assets.primitive(&self.renderer.gpu, shape);
+		AssetId? asset = self.pass.assets.primitive(&self.renderer.gpu, shape);
 		if (catch err = asset)
 		{
 			*out = js.raise(string::tformat("could not build a %s: %s", name, err));
 			return;
 		}
 
-		*out = qjs::int_value((int)asset);
+		*out = asset_value(&js, asset);
 	};
 }
 
@@ -204,7 +223,7 @@ fn void js_convex(
 			}
 		}
 
-		uint? asset = self.pass.assets.convex(&self.renderer.gpu, points);
+		AssetId? asset = self.pass.assets.convex(&self.renderer.gpu, points);
 		if (catch err = asset)
 		{
 			// Said rather than named, unlike `js_load`'s faults: there is exactly
@@ -224,7 +243,7 @@ fn void js_convex(
 			return;
 		}
 
-		*out = qjs::int_value((int)asset);
+		*out = asset_value(&js, asset);
 	};
 }
 
@@ -235,13 +254,9 @@ fn void js_asset_path(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int index = arg_int(&js, argc, args, 0);
-	if (index < 0 || index >= self.pass.assets.assets.len())
-	{
-		*out = js.raise(string::tformat("there is no asset %d", index));
-		return;
-	}
-	*out = js.string(self.pass.assets.assets[index].path);
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+	*out = js.string(self.pass.assets.slot(id).path);
 }
 
 <*
@@ -259,15 +274,11 @@ fn void js_mesh_names(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int index = arg_int(&js, argc, args, 0);
-	if (index < 0 || index >= self.pass.assets.assets.len())
-	{
-		*out = js.raise(string::tformat("there is no asset %d", index));
-		return;
-	}
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
 
 	qjs::Value names = js.array();
-	foreach (i, &mesh : self.pass.assets.assets[index].meshes)
+	foreach (i, &mesh : self.pass.assets.slot(id).meshes)
 	{
 		js.set_index(names, (uint)i, js.string(mesh.name));
 	}

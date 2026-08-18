@@ -62,6 +62,37 @@ import collision;
 faultdef ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE;
 
 <*
+ A handle to a loaded asset: which slot, and which occupant of it.
+
+ The same two fields as `NodeId` (`scene/node.c3`), for the same reason and by
+ deliberate mirroring. Until G2 an asset index was a promise the table never
+ broke — nothing was ever freed, so slot 7 meant one file forever and a bare
+ `uint` was the whole truth. Unloading breaks that promise: slot 7 is handed to
+ the next load, and a script still holding the old index would place somebody
+ else's mesh with nothing anywhere reporting an error.
+
+ The generation is what turns that silence into a sentence. `free_slot` climbs
+ it, so `Assets.slot` can tell "the asset that is there now" from "the asset that
+ was there when you asked", and the verb that asked says the asset was unloaded.
+
+ Nothing in the renderer compares generations in a hot loop: `bucket_key` packs
+ the index alone, because two *live* nodes naming the same slot necessarily agree
+ about its generation — an asset with a live node has a non-zero refcount and is
+ never swept.
+*>
+struct AssetId
+{
+	uint index;
+	uint generation;
+}
+
+const AssetId NO_ASSET = { uint::max, 0 };
+
+fn bool AssetId.is_set(self) => self.index != uint::max;
+fn bool AssetId.equals(self, AssetId other) @operator(==) => self.index == other.index
+	&& self.generation == other.generation;
+
+<*
  One glTF primitive, uploaded.
 
  A glTF *mesh* is a list of primitives, each with its own material, and the
@@ -104,29 +135,89 @@ struct Asset
 	String path; // owned
 	List{GpuMesh} meshes;
 	collision::Aabb3 bounds;
-	// The number of live `Mesh` nodes pointing here (`plan.md` §2). Maintained
-	// so that an unused asset is *knowable*; dropping to zero does not unload
-	// yet, because unloading under two frames in flight needs the deferred
-	// delete queue and nothing asks for it before M6.
+
+	// The number of live `Mesh` nodes pointing here (`plan.md` §2), maintained
+	// by `Scene.create_slot` and `Scene.kill` — the two places a node can start
+	// or stop naming an asset — so that there is one implementation of it
+	// rather than one per caller.
+	//
+	// **Zero means unloadable, and it means it completely.** In Three.js you
+	// need an explicit `.dispose()` because anything can hold a hidden reference
+	// to a buffer; here nothing can, because there is no accessor from an asset
+	// to its data. That is the same refusal that made every expressible scene
+	// one draw call per mesh, paying for a second thing.
 	uint refs;
+
+	// Slot bookkeeping, mirroring `Node`. `generation` climbs when the slot is
+	// freed, which is what makes every outstanding `AssetId` to it stale.
+	uint generation;
+	bool alive;
 }
 
 fn collision::Aabb3 Asset.aabb(&self) => self.bounds;
+
+<*
+ A deduplicated texture, and how many `GpuMesh`es name it.
+
+ The count is what lets an image outlive the file that first uploaded it and die
+ with the last file that uses it — which is the case that actually happens,
+ because the dedup is across *files*: two kit pieces share an image, one of them
+ unloads, and the image has to stay for the other.
+
+ Wrapped rather than counted in a second list beside `textures`. The header
+ above says there is nothing parallel to the texture list any more, and a
+ refcount array running alongside it would put that back — the exact shape the
+ descriptor-set list had, and the exact way it went wrong.
+*>
+struct SharedTexture
+{
+	Texture texture;
+	uint refs;
+	bool alive;
+}
+
+<*
+ What one call to `unload_unused` gave back.
+
+ Reported rather than merely done, because an agent that cannot watch the number
+ go down has no way to believe any of this works — `game.md` G2/S6. The bytes are
+ texture bytes, which is the half that actually moves the device's memory number;
+ `texture_bytes` computes it the same way `stats()` does, so the two agree.
+*>
+struct UnloadReport
+{
+	uint assets;
+	uint textures;
+	usz bytes;
+}
 
 <*
  Every loaded asset, and everything shared between them.
 
  A `GpuMesh*` or `Asset*` handed out from here is valid only until the next
  `load` — the pools are `List`s and growing one moves its contents.
+
+ ## Slots are reused, which is why handles carry a generation
+
+ Both pools keep a free list and hand dead slots back out, so a game that cycles
+ through a hundred levels holds as many slots as its largest level rather than as
+ many as it ever loaded. For assets that reuse is visible to JavaScript, so an
+ `AssetId` carries a generation and a stale one is refused. For textures it is
+ not: the only thing that can name a texture is a `GpuMesh`, a `GpuMesh` holds a
+ reference for as long as it exists, and a slot is therefore only ever freed when
+ nothing at all points at it. A generation there would be a field nothing could
+ ever observe.
 *>
 struct Assets
 {
 	List{Asset} assets;
+	List{uint} free_slots;
 
 	// Shared across every asset. Since M5 there is nothing parallel to this:
 	// the image and its sampler are pushed straight into the command buffer at
 	// draw time, so a texture is a texture and not also a descriptor set.
-	List{Texture} textures;
+	List{SharedTexture} textures;
+	List{uint} free_textures;
 
 	Texture white;
 	bool has_white;
@@ -151,22 +242,40 @@ struct Assets
 fn Assets* Assets.init(&self)
 {
 	self.assets.init(mem, 4);
+	self.free_slots.init(mem, 4);
 	self.textures.init(mem, 8);
+	self.free_textures.init(mem, 4);
 	self.started = true;
 	return self;
 }
 
 <*
+ The asset a handle names, or null if it names none.
+
+ Three ways to get null and they are deliberately one answer: out of range, a
+ slot nothing occupies, and a slot occupied by a *later* asset than the one the
+ handle was taken from. All three mean "this handle is not a loaded asset", and
+ every caller does the same thing about it.
+*>
+fn Asset* Assets.slot(&self, AssetId id)
+{
+	if (id.index >= self.assets.len()) return null;
+	Asset* asset = &self.assets[id.index];
+	if (!asset.alive || asset.generation != id.generation) return null;
+	return asset;
+}
+
+<*
  A mesh by asset and index, or null.
 
- Bounds-checked rather than asserted because the indices reaching here come out
- of `Scene`, and a node holding a stale asset index should draw nothing rather
+ Bounds-checked rather than asserted because the handles reaching here come out
+ of `Scene`, and a node holding a stale asset handle should draw nothing rather
  than read a freed list.
 *>
-fn GpuMesh* Assets.mesh(&self, uint asset, uint mesh)
+fn GpuMesh* Assets.mesh(&self, AssetId asset, uint mesh)
 {
-	if (asset >= self.assets.len()) return null;
-	Asset* owner = &self.assets[asset];
+	Asset* owner = self.slot(asset);
+	if (owner == null) return null;
 	if (mesh >= owner.meshes.len()) return null;
 	return &owner.meshes[mesh];
 }
@@ -179,24 +288,59 @@ fn GpuMesh* Assets.mesh(&self, uint asset, uint mesh)
 
  @return `An index into the asset's meshes, or -1.`
 *>
-fn int Assets.find_mesh(&self, uint asset, String name)
+fn int Assets.find_mesh(&self, AssetId asset, String name)
 {
-	if (asset >= self.assets.len()) return -1;
-	foreach (i, &mesh : self.assets[asset].meshes)
+	Asset* owner = self.slot(asset);
+	if (owner == null) return -1;
+	foreach (i, &mesh : owner.meshes)
 	{
 		if (mesh.name == name) return (int)i;
 	}
 	return -1;
 }
 
-fn void Assets.retain(&self, uint asset)
+fn void Assets.retain(&self, AssetId asset)
 {
-	if (asset < self.assets.len()) self.assets[asset].refs++;
+	Asset* owner = self.slot(asset);
+	if (owner != null) owner.refs++;
 }
 
-fn void Assets.release(&self, uint asset)
+fn void Assets.release(&self, AssetId asset)
 {
-	if (asset < self.assets.len() && self.assets[asset].refs > 0) self.assets[asset].refs--;
+	Asset* owner = self.slot(asset);
+	if (owner != null && owner.refs > 0) owner.refs--;
+}
+
+<*
+ How many assets are resident — what `stats()` reports and what a load-unload
+ cycle has to return to.
+
+ Counted rather than stored, because `assets.len()` is the number of *slots* the
+ table has ever needed and this is the number a game watches. They differ by
+ exactly the free list, and conflating them would make a working unload look
+ like a leak.
+*>
+fn uint Assets.resident(&self)
+{
+	uint live = 0;
+	foreach (&asset : self.assets)
+	{
+		if (asset.alive) live++;
+	}
+	return live;
+}
+
+<*
+ How many unique textures are resident. `resident`'s argument, one level down.
+*>
+fn uint Assets.texture_count(&self)
+{
+	uint live = 0;
+	foreach (&shared : self.textures)
+	{
+		if (shared.alive) live++;
+	}
+	return live;
 }
 
 <*
@@ -209,7 +353,10 @@ fn void Assets.release(&self, uint asset)
 fn usz Assets.texture_bytes(&self)
 {
 	usz total = 0;
-	foreach (&texture : self.textures) total += (usz)texture.width * texture.height * 4;
+	foreach (&shared : self.textures)
+	{
+		if (shared.alive) total += (usz)shared.texture.width * shared.texture.height * 4;
+	}
 	return total;
 }
 
@@ -225,7 +372,181 @@ fn usz Assets.texture_bytes(&self)
 fn Texture* Assets.texture_for(&self, GpuMesh* mesh)
 {
 	if (mesh.texture < 0 || mesh.texture >= self.textures.len()) return &self.white;
-	return &self.textures[mesh.texture];
+	SharedTexture* shared = &self.textures[mesh.texture];
+	// A dead slot is unreachable from a live mesh — a texture is only freed when
+	// no mesh names it — so this is the backstop for a bug in that argument
+	// rather than a case. White is what it degrades to, which is a visible
+	// wrong colour rather than a sampled freed image.
+	if (!shared.alive) return &self.white;
+	return &shared.texture;
+}
+
+// ============================================================================
+// Slots
+// ============================================================================
+
+<*
+ File a finished asset in the table and answer with a handle to it.
+
+ Reuses a freed slot when there is one, exactly as `Scene.create_slot` does. The
+ generation it hands back is the one the slot already carried — `free_slot`
+ climbed it on the way out — so a handle to the new occupant can never compare
+ equal to a handle to the old one.
+
+ @param asset : `Fully built. Ownership of its path and its meshes passes to the table.`
+*>
+fn AssetId Assets.claim_slot(&self, Asset asset)
+{
+	uint index;
+	if (self.free_slots.len() > 0)
+	{
+		index = self.free_slots.pop()!!;
+		// The generation is the slot's, not the incoming asset's: it is the one
+		// piece of a dead slot that has to survive being overwritten.
+		uint generation = self.assets[index].generation;
+		self.assets[index] = asset;
+		self.assets[index].generation = generation;
+	}
+	else
+	{
+		index = (uint)self.assets.len();
+		self.assets.push(asset);
+	}
+
+	Asset* filed = &self.assets[index];
+	filed.alive = true;
+	filed.refs = 0;
+	return { .index = index, .generation = filed.generation };
+}
+
+<*
+ Give a slot's memory back, host and device, and mark every handle to it stale.
+
+ Called only from `unload_unused`, and only for a slot at zero references — the
+ caller owns that decision, because "is anything still using this" is a question
+ about the scene and not about the asset table.
+
+ **The device must already be idle.** A buffer freed while a frame in flight is
+ still reading it is a use-after-free the validation layer reports two frames
+ later, somewhere else. `unload_unused` waits once for the whole sweep rather
+ than making this function wait per asset.
+*>
+fn void Assets.free_slot(&self, Gpu* gpu, uint index)
+{
+	if (index >= self.assets.len()) return;
+	Asset* asset = &self.assets[index];
+	if (!asset.alive) return;
+
+	foreach (&mesh : asset.meshes)
+	{
+		// Before the buffers, because after `free_buffers` the mesh no longer
+		// says which texture it was holding.
+		self.release_texture(gpu, mesh.texture);
+		mesh.free_buffers();
+	}
+	asset.meshes.free();
+	// Zeroed rather than left dangling: `claim_slot` overwrites the whole struct
+	// and `Assets.free` walks every slot, so a freed `List` must not look
+	// initialised to either of them.
+	asset.meshes = {};
+	if (asset.path.len > 0) asset.path.free(mem);
+	asset.path = "";
+	asset.bounds = {};
+	asset.refs = 0;
+	asset.alive = false;
+	// The climb is what makes every outstanding `AssetId` to this slot stale.
+	asset.generation++;
+	self.free_slots.push(index);
+}
+
+<*
+ One more `GpuMesh` names this texture.
+
+ Called at upload, once per mesh that resolves to the image — including the
+ second and third primitive of a file that all share one material, because each
+ of them will release it separately.
+*>
+fn void Assets.retain_texture(&self, int index)
+{
+	if (index < 0 || index >= self.textures.len()) return;
+	self.textures[index].refs++;
+}
+
+<*
+ One fewer, and the image goes when the last one does.
+
+ The device must already be idle — see `free_slot`.
+*>
+fn void Assets.release_texture(&self, Gpu* gpu, int index)
+{
+	if (index < 0 || index >= self.textures.len()) return;
+	SharedTexture* shared = &self.textures[index];
+	if (!shared.alive || shared.refs == 0) return;
+
+	shared.refs--;
+	if (shared.refs > 0) return;
+
+	// `Texture.free` zeroes the struct on its way out, which is what leaves a
+	// dead slot inspectable: an image handle still sitting here would mean the
+	// destroy did not happen, and a test can say so. Deliberately not zeroed
+	// here as well — doing that would hide the one bug worth catching.
+	if (gpu != null) shared.texture.free(gpu);
+	shared.alive = false;
+	self.free_textures.push((uint)index);
+}
+
+<*
+ Free every asset nothing points at, and every texture that goes with them.
+
+ `game.md` G2/S3: **not a finalizer.** A collector-driven free would make the
+ resident number depend on when the interpreter felt like collecting, which is
+ nondeterminism in the one number a game watches. A level boundary is an explicit
+ moment; this is what happens at it.
+
+ One pass, not a fixed point. An asset's references come from scene nodes and
+ nothing else — no asset holds another — so there is nothing for a second pass to
+ discover.
+
+ @param gpu : `Null only in a scene-math runtime, which has nothing on a device to free.`
+ @return `What went, for stats() and for whoever asked.`
+*>
+fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
+{
+	UnloadReport report;
+
+	bool sweepable = false;
+	foreach (&asset : self.assets)
+	{
+		if (asset.alive && asset.refs == 0)
+		{
+			sweepable = true;
+			break;
+		}
+	}
+	if (!sweepable) return report;
+
+	// `game.md` G2/S4, the simple half. `MAX_FRAMES_IN_FLIGHT` is 2 and a buffer
+	// freed now may still be referenced by a command buffer the GPU has not
+	// finished, so something has to keep the two apart. A tagged deletion queue
+	// is the version that lets a game unload mid-frame without a hitch; a level
+	// boundary is already a stall, so a full idle costs a frame or two exactly
+	// where nobody is looking, and it is a fraction of the code. The queue is
+	// what the first mid-gameplay unload should build.
+	if (gpu != null) gpu.wait_idle();
+
+	usz bytes_before = self.texture_bytes();
+	uint textures_before = self.texture_count();
+
+	foreach (i, &asset : self.assets)
+	{
+		if (!asset.alive || asset.refs > 0) continue;
+		self.free_slot(gpu, (uint)i);
+		report.assets++;
+	}
+
+	report.textures = textures_before - self.texture_count();
+	report.bytes = bytes_before - self.texture_bytes();
+	return report;
 }
 
 // ============================================================================
@@ -241,16 +562,21 @@ fn Texture* Assets.texture_for(&self, GpuMesh* mesh)
  below, which catches two *different* files sharing an image.
 
  @param path : `A .glb or a .gltf; gltf.c3l reads both.`
- @return `The asset's index, for Scene.add_mesh.`
+ @return `The asset's handle, for Scene.add_mesh.`
  @return? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
 *>
-fn uint? Assets.load(&self, Gpu* gpu, String path)
+fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 {
 	if (!self.started) self.init();
 
 	foreach (i, &existing : self.assets)
 	{
-		if (existing.path == path) return (uint)i;
+		// Dead slots keep their path until they are overwritten, so the liveness
+		// test is what stops an unloaded file being handed back as loaded.
+		if (existing.alive && existing.path == path)
+		{
+			return { .index = (uint)i, .generation = existing.generation };
+		}
 	}
 
 	gltf::GltfStream stream = gltf::open(path)!;
@@ -268,7 +594,11 @@ fn uint? Assets.load(&self, Gpu* gpu, String path)
 	// `self.assets` yet — so its own buffers are its own to undo.
 	defer catch
 	{
-		foreach (&mesh : asset.meshes) mesh.free_buffers();
+		foreach (&mesh : asset.meshes)
+		{
+			self.release_texture(gpu, mesh.texture);
+			mesh.free_buffers();
+		}
 		asset.meshes.free();
 		asset.path.free(mem);
 	}
@@ -297,9 +627,7 @@ fn uint? Assets.load(&self, Gpu* gpu, String path)
 
 	if (asset.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
-
-	self.assets.push(asset);
-	return (uint)self.assets.len() - 1;
+	return self.claim_slot(asset);
 }
 
 <*
@@ -507,15 +835,30 @@ fn int? Assets.load_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream, 
 	defer free(rgba);
 
 	ulong hash = content_hash(rgba);
-	foreach (i, existing : self.textures)
+	foreach (i, &existing : self.textures)
 	{
-		if (existing.hash == hash && existing.width == decoded.width && existing.height == decoded.height)
+		if (!existing.alive) continue;
+		if (existing.texture.hash == hash
+			&& existing.texture.width == decoded.width
+			&& existing.texture.height == decoded.height)
 		{
+			existing.refs++;
 			return (int)i;
 		}
 	}
 
-	self.textures.push(gpu.create_texture(rgba, decoded.width, decoded.height)!);
+	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height)!;
+
+	// A freed slot before a fresh one, for `Assets`'s reason: the table should
+	// be as large as the largest level, not as large as every level added up.
+	if (self.free_textures.len() > 0)
+	{
+		uint index = self.free_textures.pop()!!;
+		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true };
+		return (int)index;
+	}
+
+	self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
 	return (int)self.textures.len() - 1;
 }
 
@@ -611,9 +954,9 @@ fn vk::DescriptorImageInfo Texture.descriptor(&self)
  Wound counter-clockwise as seen from +Z, which is glTF's front-face
  convention, so it is culled by the same rule real geometry is.
 
- @return `The asset's index, for Scene.add_mesh.`
+ @return `The asset's handle, for Scene.add_mesh.`
 *>
-fn uint? Assets.load_triangle(&self, Gpu* gpu)
+fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
 {
 	if (!self.started) self.init();
 
@@ -650,8 +993,7 @@ fn uint? Assets.load_triangle(&self, Gpu* gpu)
 	asset.bounds = mesh.bounds;
 	asset.meshes.push(mesh);
 
-	self.assets.push(asset);
-	return (uint)self.assets.len() - 1;
+	return self.claim_slot(asset);
 }
 
 // ============================================================================
@@ -691,14 +1033,22 @@ fn void Assets.free(&self, Gpu* gpu)
 {
 	foreach (&asset : self.assets)
 	{
+		// A slot already swept by `unload_unused` gave everything back and left
+		// its lists zeroed; walking it again would free them twice.
+		if (!asset.alive) continue;
 		foreach (&mesh : asset.meshes) mesh.free_buffers();
 		asset.meshes.free();
 		if (asset.path.len > 0) asset.path.free(mem);
 	}
 	self.assets.free();
+	self.free_slots.free();
 
-	foreach (&texture : self.textures) texture.free(gpu);
+	foreach (&shared : self.textures)
+	{
+		if (shared.alive) shared.texture.free(gpu);
+	}
 	self.textures.free();
+	self.free_textures.free();
 
 	if (self.has_white)
 	{

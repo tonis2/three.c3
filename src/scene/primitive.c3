@@ -657,10 +657,10 @@ fn void build_torus(GeometryBuilder* out, Primitive shape) @local
  loaded file fills it in with its filename, so the two kinds of asset share one
  table and one dedup rule.
 
- @return `The asset's index, for Scene.add_mesh.`
+ @return `The asset's handle, for Scene.add_mesh.`
  @return? PRIMITIVE_HAS_NO_TRIANGLES : `The numbers describe nothing — a zero radius, a zero-height cone with no caps. The prelude refuses these first; this is what a forged __three.primitive call gets.`
 *>
-fn uint? Assets.primitive(&self, Gpu* gpu, Primitive shape)
+fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 {
 	if (!self.started) self.init();
 
@@ -690,11 +690,17 @@ fn uint? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 
  @return? NOTHING_BUILT_UNDER_THAT_KEY : `No generator has filed an asset under this key yet.`
 *>
-fn uint? Assets.built(&self, String key)
+fn AssetId? Assets.built(&self, String key)
 {
 	foreach (i, &existing : self.assets)
 	{
-		if (existing.path == key) return (uint)i;
+		// Liveness first, for `Assets.load`'s reason: a swept slot keeps its key
+		// until something overwrites it, and matching on one would hand back an
+		// asset that is no longer there.
+		if (existing.alive && existing.path == key)
+		{
+			return { .index = (uint)i, .generation = existing.generation };
+		}
 	}
 	return NOTHING_BUILT_UNDER_THAT_KEY~;
 }
@@ -718,9 +724,9 @@ fn uint? Assets.built(&self, String key)
 
  @param key : `What Asset.path becomes: the shape's identity, and what Assets.built matches on.`
  @param label : `What GpuMesh.name becomes, for asset.meshes and stats dumps.`
- @return `The new asset's index, for Scene.add_mesh.`
+ @return `The new asset's handle, for Scene.add_mesh.`
 *>
-fn uint? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry)
+fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry)
 {
 	// The generated streams sample the white stand-in, exactly as an untextured
 	// glTF primitive does: the binding is pushed for every draw whether or not
@@ -764,8 +770,7 @@ fn uint? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geometry
 	mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
 
 	asset.meshes.push(mesh);
-	self.assets.push(asset);
-	return (uint)self.assets.len() - 1;
+	return self.claim_slot(asset);
 }
 
 <*
