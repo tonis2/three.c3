@@ -17,6 +17,7 @@ module three_tests::input;
 import three;
 import c3w;
 import qjs;
+import vk;
 import std::core::test;
 import std::io;
 
@@ -34,6 +35,32 @@ macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))
 	defer runtime.close();
 
 	@body(&runtime, &pass);
+}
+
+<*
+ A runtime with a headless device, for the one check that needs a raycast to
+ answer with something.
+
+ `js_test.c3` has the same macro for the same reason: headless here means no
+ window, not no GPU, and the whole point of the check below is that a pixel in
+ the window becomes a pixel in the *image* and then an object.
+*>
+macro @with_gpu_js(; @body(three::JsRuntime* run, three::Renderer* renderer))
+{
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, &renderer)!!;
+	defer runtime.close();
+
+	@body(&runtime, &renderer);
 }
 
 macro @ok(three::JsRuntime* run, String source)
@@ -690,5 +717,562 @@ fn void too_many_handlers_is_a_message() @test
 		test::@check(!result.ok, "it did not silently drop the extras");
 		test::@check(result.error.contains("all taken"), "and says so: '%s'", result.error);
 		test::@check(result.error.contains("null"), "and how to make room: '%s'", result.error);
+	};
+}
+
+// ============================================================================
+// The pointer — where the cursor is
+// ============================================================================
+
+// A cursor reading, in the units the window reports: window-relative, in
+// points, counted from the bottom-left. `WindowView.cursor` is the thing under
+// test, so nothing here does any of the conversion itself.
+macro three::Cursor @cursor(three::WindowView view, float x, float y, bool down = false)
+{
+	return view.cursor({ x, y }, down);
+}
+
+<*
+ A window whose picture is the same size as the image it shows.
+
+ The uninteresting case, and the one every other check below is a departure
+ from: one point is one pixel, and the only thing that happens is the flip.
+*>
+fn void the_centre_of_the_window_is_the_centre_of_the_image() @test
+{
+	three::WindowView view = { .width = 800, .height = 600, .scale = 1, .image_width = 800, .image_height = 600 };
+	three::Cursor at = @cursor(view, 400, 300);
+
+	test::@check(at.inside, "the middle of the window is in it");
+	test::@check(at.x == 400, "and in the middle of the image across, got %f", at.x);
+	test::@check(at.y == 300, "and down, got %f", at.y);
+}
+
+<*
+ The flip, which is the whole reason a cursor cannot be handed to `pick` as it
+ arrives.
+
+ `c3w`'s contract is Cocoa's — y grows upward from the bottom-left, and the
+ Linux backends convert to it — while `screen_ray` counts rows from the top,
+ the way the image is stored. A cursor a fifth of the way up the window is four
+ fifths of the way down the picture, and the unflipped answer would be 120.
+*>
+fn void the_cursor_is_flipped_because_the_window_counts_up() @test
+{
+	three::WindowView view = { .width = 800, .height = 600, .scale = 1, .image_width = 800, .image_height = 600 };
+	three::Cursor at = @cursor(view, 100, 120);
+
+	test::@check(at.x == 100, "across is untouched, got %f", at.x);
+	test::@check(at.y == 480, "and 120 up from the bottom is row 480, got %f", at.y);
+}
+
+<*
+ A retina window maps by fraction, not by the backing scale.
+
+ The tempting version multiplies the pointer by `get_scale()` — which is what
+ `drive_camera` does, correctly, for a *delta* — and it is wrong here by exactly
+ the scale: the centre of this window would come back as 800, off the right edge
+ of an 800-pixel image. The picture is the target stretched onto the swapchain,
+ so the only thing that survives the trip is the fraction.
+*>
+fn void a_retina_window_maps_by_fraction_and_not_by_the_backing_scale() @test
+{
+	// An 800x600-point window on a 2x display, showing an 800x600 image.
+	three::WindowView view = { .width = 1600, .height = 1200, .scale = 2, .image_width = 800, .image_height = 600 };
+	three::Cursor at = @cursor(view, 400, 300);
+
+	test::@check(at.inside, "the middle of the window is in it");
+	test::@check(at.x == 400, "and the middle of the image, not twice it, got %f", at.x);
+	test::@check(at.y == 300, "in both directions, got %f", at.y);
+}
+
+<*
+ A window dragged to a different size than the image still lands on it.
+
+ `--width`/`--height` fix the offscreen target and a resize drag moves only the
+ swapchain, so the two disagree for the whole rest of the session. This is the
+ case that makes the mapping a fraction rather than an identity.
+*>
+fn void a_resized_window_still_maps_onto_the_image() @test
+{
+	three::WindowView view = { .width = 1600, .height = 1200, .scale = 1, .image_width = 800, .image_height = 600 };
+	three::Cursor at = @cursor(view, 400, 300);
+
+	test::@check(at.x == 200, "a quarter across the window is a quarter across the image, got %f", at.x);
+	test::@check(at.y == 450, "and a quarter up is three quarters down, got %f", at.y);
+}
+
+<*
+ The window answers where the cursor is even when it is somewhere else.
+
+ `getMousePos` is window-relative and unclamped, so a cursor on the desktop
+ reports a negative column or one past the edge. Nothing downstream would notice
+ — `pick` would happily raycast through a pixel that does not exist — so it is
+ caught at the conversion, which is the only place that knows how big the window
+ is.
+*>
+fn void a_cursor_off_the_window_is_not_inside() @test
+{
+	three::WindowView view = { .width = 800, .height = 600, .scale = 1, .image_width = 800, .image_height = 600 };
+
+	test::@check(!@cursor(view, -1, 300).inside, "to the left");
+	test::@check(!@cursor(view, 800, 300).inside, "past the right edge, which is exclusive");
+	test::@check(!@cursor(view, 400, -1).inside, "below");
+	test::@check(!@cursor(view, 400, 600).inside, "and above");
+	test::@check(@cursor(view, 0, 0).inside, "while the bottom-left corner itself is in");
+}
+
+<*
+ A minimised window divides by nothing.
+
+ The extent goes to zero while a window is minimised and the scale is zero
+ before the first frame. Both reach this function on an ordinary frame, and the
+ answer wanted is "the cursor is nowhere" rather than an infinity that
+ propagates into a raycast.
+*>
+fn void a_window_with_no_size_answers_nothing() @test
+{
+	three::WindowView none = { .width = 0, .height = 0, .scale = 1, .image_width = 800, .image_height = 600 };
+	three::Cursor at = @cursor(none, 400, 300, true);
+	test::@check(!at.inside && at.x == 0 && at.y == 0, "a zero extent is nowhere, got %f, %f", at.x, at.y);
+
+	three::WindowView unscaled = { .width = 800, .height = 600, .scale = 0, .image_width = 800, .image_height = 600 };
+	test::@check(!@cursor(unscaled, 400, 300).inside, "and so is a zero scale");
+}
+
+// ============================================================================
+// The pointer — what a click is
+// ============================================================================
+
+// One reading of the cursor, already in image pixels, so these checks say what
+// the mouse did rather than where a hypothetical window was.
+macro three::MouseState @moved(three::MouseTracker* tracker, float x, float y, bool down, double at_ms, bool inside = true)
+{
+	three::Cursor cursor = { .inside = inside, .down = down, .x = x, .y = y };
+	return tracker.step(cursor, at_ms);
+}
+
+fn void a_press_and_a_release_in_one_place_is_a_click() @test
+{
+	three::MouseTracker mouse;
+
+	test::@check(!@moved(&mouse, 100, 100, true, 0).clicked, "the press alone is not one");
+	three::MouseState up = @moved(&mouse, 100, 100, false, 50);
+	test::@check(up.clicked, "the release completes it");
+	test::@check(up.x == 100 && up.y == 100, "where it happened, got %f, %f", up.x, up.y);
+}
+
+<*
+ A click lasts one frame, like every other edge here.
+
+ A `clicked` that stayed true would be read once per frame by an animation
+ callback and would pick something new sixty times a second — the same failure
+ `a_held_key_is_pressed_once` guards the keyboard against.
+*>
+fn void a_click_is_reported_for_exactly_one_frame() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, true, 0);
+	test::@check(@moved(&mouse, 100, 100, false, 50).clicked, "the frame it finished on");
+	test::@check(!@moved(&mouse, 100, 100, false, 100).clicked, "and not the next");
+	test::@check(!@moved(&mouse, 100, 100, false, 150).clicked, "or the one after that");
+}
+
+<*
+ A drag is not a click, which is the whole reason the slop exists: the left
+ button orbits the camera, so every drag ends in a release over the scene.
+*>
+fn void a_press_that_travels_is_a_drag() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, true, 0);
+	@moved(&mouse, 300, 100, true, 50);
+	test::@check(!@moved(&mouse, 300, 100, false, 60).clicked, "an orbit does not select anything");
+}
+
+<*
+ A press held in one place is not a click either.
+
+ Half a second is longer than any click and shorter than any deliberate hold,
+ and the direction of the mistake is chosen: a click that has to be repeated is
+ better than an object picked without being asked for, because the second one
+ changes the scene and the person has to work out what it changed.
+*>
+fn void a_press_that_is_held_is_not_a_click() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, true, 0);
+	test::@check(!@moved(&mouse, 100, 100, false, 800).clicked, "a hold is not a click");
+	test::@check(@moved(&mouse, 100, 100, true, 900).clicked == false, "and the next press is only a press");
+	test::@check(@moved(&mouse, 100, 100, false, 950).clicked, "which does click when it is let go in time");
+}
+
+<*
+ A press that started somewhere else is not a click that ends here.
+
+ The window reports a cursor position whether or not the cursor is over it, so
+ a press on the desktop and a release over the scene arrives as a perfectly
+ ordinary pair of edges. `inside` at the press is what tells them apart.
+*>
+fn void a_press_that_starts_outside_is_not_a_click() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, true, 0, inside: false);
+	test::@check(!@moved(&mouse, 100, 100, false, 50).clicked, "a press from off the window is not aimed at it");
+}
+
+fn void a_release_outside_the_window_is_not_a_click() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, true, 0);
+	test::@check(!@moved(&mouse, 100, 100, false, 50, inside: false).clicked, "and neither is a release off it");
+}
+
+<*
+ The stuck latch, and why there is no release gate here.
+
+ AppKit swallows the mouse-up that ends a title-bar drag, so the button reads as
+ held for the rest of the session — the bug `controls.c3` documents and waits a
+ button-free frame for. Nothing waits here, because a click needs a press *edge*
+ and a latch that never falls produces none: the failure is no clicks rather
+ than a click a frame, and it heals on its own.
+*>
+fn void a_stuck_button_never_clicks_and_heals_at_the_next_one() @test
+{
+	three::MouseTracker mouse;
+
+	// A drag by the title bar: pressed, moved away, and the release never comes.
+	@moved(&mouse, 100, 100, true, 0);
+	test::@check(!@moved(&mouse, 700, 500, true, 100).clicked, "the drag itself clicks nothing");
+	test::@check(!@moved(&mouse, 700, 500, true, 200).clicked, "and the stuck frames after it click nothing");
+	test::@check(!@moved(&mouse, 400, 300, true, 1000).clicked, "however far the cursor is moved");
+
+	// The user's next real click. Its press is invisible — the latch was already
+	// set — and its release is what finally clears it.
+	test::@check(!@moved(&mouse, 400, 300, false, 1010).clicked, "the first real click after is swallowed");
+
+	// And the one after that is an ordinary click.
+	@moved(&mouse, 400, 300, true, 2000);
+	test::@check(@moved(&mouse, 400, 300, false, 2010).clicked, "the one after it works");
+}
+
+// ============================================================================
+// The pointer, from a script
+// ============================================================================
+
+// One frame of mouse and nothing else held.
+fn three::InputState pointer_frame(
+	three::InputTracker* tracker, float x, float y, bool down, double at_ms, bool inside = true
+)
+{
+	three::Cursor cursor = { .inside = inside, .down = down, .x = x, .y = y };
+	return tracker.step({}, "", cursor, at_ms);
+}
+
+fn void a_script_can_ask_where_the_pointer_is() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 120, 90, true, 0));
+
+		String where = @answer(run, `
+			const p = three.input.pointer;
+			return [p.x, p.y, p.inside, p.down, p.clicked];
+		`);
+		defer where.free(mem);
+		test::@check(where == "[120,90,true,true,false]", "all five, got '%s'", where);
+	};
+}
+
+<*
+ The pointer is taken whether or not anything is registered to read it.
+
+ `tick` returns early when there is no callback and no handler, and the input
+ has to have been taken before that return — otherwise `three.input.pointer`
+ from an ordinary `run_script` would answer about whatever frame last happened
+ to have a handler on it.
+*>
+fn void the_pointer_arrives_with_nothing_registered() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::InputTracker tracker;
+		bool ran = run.tick(0, pointer_frame(&tracker, 33, 44, false, 0));
+
+		test::@check(!ran, "nothing was registered, so nothing ran");
+
+		String x = @answer(run, "return three.input.pointer.x;");
+		defer x.free(mem);
+		test::@check(x == "33", "and the pointer arrived anyway, got '%s'", x);
+	};
+}
+
+fn void a_click_handler_fires_once_and_says_where() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.clicks = [];
+			three.onClick((hit, x, y) => { globalThis.clicks.push(x + ',' + y); });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 200, 150, true, 0));
+		run.tick(16, pointer_frame(&tracker, 200, 150, true, 16));
+		run.tick(32, pointer_frame(&tracker, 200, 150, false, 32));
+		run.tick(48, pointer_frame(&tracker, 200, 150, false, 48));
+
+		String clicks = @answer(run, "return globalThis.clicks;");
+		defer clicks.free(mem);
+		test::@check(clicks == `["200,150"]`, "once, at the pixel it happened on, got '%s'", clicks);
+	};
+}
+
+<*
+ The handler is told what is under the cursor, and with no device that is
+ nothing.
+
+ A miss and a context with no GPU answer the same `null`, which is the truth in
+ both cases: there is nothing under the cursor. The alternative — throwing the
+ way `scene.pick` does — would make a click handler written for a window fail
+ every frame under `--headless` for a mistake nobody made.
+*>
+fn void a_click_with_no_device_is_told_null() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.seen = 'not called';
+			three.onClick((hit) => { globalThis.seen = hit === null ? 'null' : typeof hit; });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 10, 10, true, 0));
+		run.tick(16, pointer_frame(&tracker, 10, 10, false, 16));
+
+		String seen = @answer(run, "return globalThis.seen;");
+		defer seen.free(mem);
+		test::@check(seen == `"null"`, "a hit that is nothing is null, got '%s'", seen);
+	};
+}
+
+fn void binding_a_click_again_replaces_and_null_unbinds() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.seen = [];
+			three.onClick(() => { globalThis.seen.push('first'); });
+			three.onClick(() => { globalThis.seen.push('second'); });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 10, 10, true, 0));
+		run.tick(16, pointer_frame(&tracker, 10, 10, false, 16));
+
+		@ok(run, "three.onClick(null);");
+		run.tick(32, pointer_frame(&tracker, 10, 10, true, 32));
+		run.tick(48, pointer_frame(&tracker, 10, 10, false, 48));
+
+		String seen = @answer(run, "return globalThis.seen;");
+		defer seen.free(mem);
+		test::@check(seen == `["second"]`, "one handler, replaced then removed, got '%s'", seen);
+	};
+}
+
+fn void a_click_handler_alone_is_enough_to_tick() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, "three.onClick(() => {});");
+
+		three::InputTracker tracker;
+		test::@check(
+			run.tick(0, pointer_frame(&tracker, 10, 10, false, 0)),
+			"a click handler with no animation callback still makes a frame"
+		);
+	};
+}
+
+<*
+ The click runs before the animation callback, for the reason the keys do: a
+ handler that moves something and a callback that draws the consequence in the
+ same frame is the order a person expects.
+*>
+fn void the_click_runs_before_the_animation_callback() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.order = [];
+			three.onClick(() => { globalThis.order.push('click'); });
+			three.setAnimationLoop(() => { globalThis.order.push('frame'); });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 10, 10, true, 0));
+		run.tick(16, pointer_frame(&tracker, 10, 10, false, 16));
+
+		String order = @answer(run, "return globalThis.order;");
+		defer order.free(mem);
+		test::@check(order == `["frame","click","frame"]`, "the click is inside its own frame, got '%s'", order);
+	};
+}
+
+fn void a_throwing_click_handler_is_stopped() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.n = 0;
+			three.onClick(() => { globalThis.n++; throw new Error('the wheels came off'); });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 10, 10, true, 0));
+		run.tick(16, pointer_frame(&tracker, 10, 10, false, 16));
+		run.tick(32, pointer_frame(&tracker, 10, 10, true, 32));
+		run.tick(48, pointer_frame(&tracker, 10, 10, false, 48));
+
+		three::RunResult result = run.run("return globalThis.n;");
+		defer result.free();
+
+		test::@check(result.value == "1", "it ran once and was stopped, got '%s'", result.value);
+		test::@check(result.ok, "the run that reports it is not itself a failure");
+		test::@check(
+			result.frame_error.contains("click handler") && result.frame_error.contains("the wheels came off"),
+			"and the reason says what threw: '%s'",
+			result.frame_error
+		);
+	};
+}
+
+fn void a_click_handler_that_returns_a_promise_is_stopped() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, "three.onClick(() => Promise.resolve(1));");
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 10, 10, true, 0));
+		run.tick(16, pointer_frame(&tracker, 10, 10, false, 16));
+
+		three::RunResult result = run.run("return 1;");
+		defer result.free();
+		test::@check(result.frame_error.contains("promise"), "and says what it did: '%s'", result.frame_error);
+	};
+}
+
+fn void an_async_click_handler_is_refused_at_registration() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult result = run.run("three.onClick(async () => {});");
+		defer result.free();
+
+		test::@check(!result.ok, "an async click handler is refused where it was written");
+		test::@check(result.error.contains("synchronous"), "and says why: '%s'", result.error);
+	};
+}
+
+fn void the_docs_describe_the_click() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		String found = @answer(run, `
+			const d = three.getApiDocs();
+			return [
+				'three.onClick(fn)' in d.functions,
+				'three.input.pointer' in d.functions,
+				d.differences.some(s => s.includes('onClick')),
+			];
+		`);
+		defer found.free(mem);
+		test::@check(found == "[true,true,true]", "the click is documented where the rest is, got '%s'", found);
+	};
+}
+
+<*
+ The whole of T3, end to end: a click becomes the object a script is holding.
+
+ Everything above this is a piece — the fraction, the flip, the edge, the
+ dispatch — and each is checked where it can be checked exactly. This is the
+ one that says the pieces are joined the right way round, and it is the only
+ check here that needs a device, because a raycast with nothing uploaded can
+ only ever answer `null`.
+
+ The box is at the origin and the camera is aimed at it, so the centre of the
+ image is the one pixel whose answer is not in doubt. `hit.object === box` is
+ the assertion that matters: the host answers with a node index, and turning
+ that back into the object the script built is `asIntersection` going through
+ the live scene — the branch a deviceless click can never reach.
+*>
+fn void a_click_picks_the_object_under_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `
+			const scene = new three.Scene();
+			globalThis.box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			globalThis.box.name = 'the box';
+			scene.add(globalThis.box);
+			three.camera.frameAll();
+
+			globalThis.seen = 'not called';
+			three.onClick((hit) => {
+				globalThis.seen = hit === null
+					? 'nothing'
+					: (hit.object === globalThis.box ? 'the object itself' : 'a stranger: ' + hit.name);
+			});
+		`);
+
+		// The centre of the image, which is where `frameAll` has just put the
+		// box. The pixel is the *image's*, which is what a click arrives as.
+		float x = (float)renderer.target.extent.width / 2.0f;
+		float y = (float)renderer.target.extent.height / 2.0f;
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, x, y, true, 0));
+		run.tick(16, pointer_frame(&tracker, x, y, false, 16));
+
+		String seen = @answer(run, "return globalThis.seen;");
+		defer seen.free(mem);
+		test::@check(seen == `"the object itself"`, "the click found the box, got '%s'", seen);
+	};
+}
+
+<*
+ And a click on empty space finds nothing rather than the nearest thing.
+
+ The corner of the image with a single box at the centre: `null` is the whole
+ answer, and a picker that answered with the box anyway would pass every check
+ above this one.
+*>
+fn void a_click_on_nothing_is_a_miss() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.frameAll();
+
+			globalThis.seen = 'not called';
+			three.onClick((hit) => { globalThis.seen = hit === null ? 'nothing' : hit.name; });
+		`);
+
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 0, 0, true, 0));
+		run.tick(16, pointer_frame(&tracker, 0, 0, false, 16));
+
+		String seen = @answer(run, "return globalThis.seen;");
+		defer seen.free(mem);
+		test::@check(seen == `"nothing"`, "the corner found nothing, got '%s'", seen);
 	};
 }

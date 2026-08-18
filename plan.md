@@ -83,7 +83,7 @@ zoom, writing the same camera a script writes. **And a script can drive the
 frame**: `three.setAnimationLoop(fn)` runs a callback between the input and the
 draw, so a scene moves with no agent in the loop, and **the keyboard reaches it**
 — `three.input.isDown('w')` for held keys, `three.onKeyDown('e', fn)` for
-actions. `c3c test --trust=full` runs two hundred and twenty-one checks, all
+actions. `c3c test --trust=full` runs two hundred and forty-seven checks, all
 headless, leak-clean.
 
 	three <file.glb>                    open a window on it
@@ -334,7 +334,8 @@ src/
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
   scene/controls.c3 built  the mouse as camera movement: orbit, pan, zoom (M5c)
   scene/input.c3    built  the keyboard: the latch as level state and edges, and the
-                           table of names a script uses for it (M5e)
+                           table of names a script uses for it (M5e); and the pointer,
+                           as a window point turned into an image pixel (M5f)
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
@@ -352,7 +353,8 @@ src/
   js/frame_loop.c3  built  setAnimationLoop: the second way into the engine, the one
                            that is not a run (M5d)
   js/bind_input.c3  built  three.input and the key handlers, dispatched on the frame
-                           and failing the way everything on the frame fails (M5e)
+                           and failing the way everything on the frame fails (M5e);
+                           three.onClick, which picks before it calls (M5f)
   mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
@@ -373,7 +375,8 @@ test/
                            statement about the callback and not about the machine
   input_test.c3     built  the key table and the one-frame difference, then what a
                            script can see of them — separated because a wrong edge
-                           and a wrong binding fail identically from JavaScript
+                           and a wrong binding fail identically from JavaScript;
+                           then the pointer's two conversions and what a click is
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -1032,6 +1035,34 @@ meaningful once per frame and JavaScript cannot know when a frame happened.
 
 `event_loop.md` has the record, including a check that passed for the wrong
 reason and the sub-frame keypress that only a live window could have shown.
+
+**M5f — click to pick.** `three.onClick(fn)` calls back with what is under the
+cursor already raycast, and `three.input.pointer` is where the cursor is. The
+raycast itself is `scene/pick.c3` from M2 and needed nothing; what this
+milestone is, is the two conversions between a window and an image, and one
+edge.
+
+- **A click maps to the image by fraction, never by the backing scale.** The
+  window shows the offscreen target *stretched* onto the swapchain image (§1 —
+  the window is a consumer, never the target), so the two extents are unrelated:
+  the target is fixed at `--width`/`--height` while the swapchain follows a live
+  resize, and on a retina display they agree at startup by coincidence. The
+  tempting `pointer * get_scale()` — which is right for `Controls`, because a
+  delta is not a position — is wrong here by exactly the scale.
+- **And it flips.** `c3w` reports the cursor from the bottom-left and
+  `screen_ray` counts rows from the top. Both conversions happen in
+  `WindowView.cursor` and nowhere else.
+- **The edge is the gate.** `Controls` waits for a button-free frame before
+  believing a held button, because AppKit's swallowed mouse-up leaves the latch
+  stuck. A click needs a press *edge*, which a stuck latch cannot produce, so it
+  needs no gate and heals the same way — the second mechanism `controls.c3`
+  argues against is simply not there.
+- **A drag is not a click**, which is what makes clicking usable at all when the
+  same button orbits: a press that travels more than four pixels or lasts longer
+  than half a second is the camera's.
+
+`event_loop.md` has the record, including the live run where the window was
+dragged across the screen mid-measurement and the mapping followed it.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

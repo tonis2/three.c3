@@ -402,6 +402,30 @@ fn void drive_camera(Renderer* renderer, c3w::Window* window, Controls* controls
 }
 
 <*
+ The window and the image, as a cursor sees them.
+
+ Three extents and a scale, and the interesting one is the third: the picture in
+ the window is the *offscreen target* stretched onto the swapchain image, so a
+ click maps to it by fraction and never by the backing scale. `WindowView`
+ carries the argument; this is only where the numbers are read off the two
+ things that have them.
+
+ Read from the renderer rather than the window for the same reason
+ `drive_camera` does: `Window.width` is what `new` was asked for and the extents
+ are what a live resize drag has left behind.
+*>
+fn WindowView window_view(Renderer* renderer, c3w::Window* window)
+{
+	return {
+		.width = renderer.viewer.extent.width,
+		.height = renderer.viewer.extent.height,
+		.scale = window.get_scale(),
+		.image_width = renderer.target.extent.width,
+		.image_height = renderer.target.extent.height,
+	};
+}
+
+<*
  Serve the three tools until the window closes, or until interrupted when there
  is no window.
 
@@ -465,7 +489,20 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			// Sampled here rather than at the tick, because this is where the
 			// events are: `getEvent` clears the typed text on its next call, and
 			// the edges are a difference against what the *previous* call saw.
-			input = keyboard.step(read_events(events), window.get_text());
+			//
+			// The clock is read here too, and separately from the tick's below.
+			// A click is timed from when the button was *sampled*, and what
+			// happens between here and the tick is a whole `pump` — which on the
+			// iteration that runs a slow tool call is seconds, and would turn
+			// every click that straddled it into a hold.
+			input = keyboard.step(
+				read_events(events),
+				window.get_text(),
+				window_view(renderer, window).cursor(
+					window.getMousePos(), events.is_pressed(LEFT_MOUSE)
+				),
+				(double)since_start.to_now() / 1_000_000.0,
+			);
 		}
 
 		usz handled = listener.pump(&server);

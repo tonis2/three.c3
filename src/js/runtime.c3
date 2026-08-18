@@ -191,6 +191,12 @@ struct JsRuntime
 	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
 	usz key_handler_count;
 
+	// The click handler, also `js/bind_input.c3`'s. Retained like `frame_fn`,
+	// only meaningful while `click_active`, and released with the other two
+	// before the context closes.
+	qjs::Value click_fn;
+	bool click_active;
+
 	bool ready;
 }
 
@@ -215,6 +221,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
 	self.frame_fn = qjs::undefined_value();
+	self.click_fn = qjs::undefined_value();
 	self.budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.epoch = 1;
 	self.ready = true;
@@ -240,10 +247,11 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 fn void JsRuntime.close(&self)
 {
 	if (!self.ready) return;
-	// Before the context goes, not after: both of these release references into
-	// an engine that would no longer be there to release them into.
+	// Before the context goes, not after: every one of these releases a
+	// reference into an engine that would no longer be there to release it into.
 	self.clear_frame();
 	self.clear_key_handlers();
+	self.clear_click_handler();
 	self.js.close();
 	self.log.free();
 	self.value.free();

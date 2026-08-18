@@ -1,19 +1,21 @@
 # event_loop.md — the window as an input device, and the frame as a hook
 
-One document at three stages of the same subject: making the scene move without
+One document at four stages of the same subject: making the scene move without
 an agent in the loop.
 
-**The first three parts are the record for M5c, M5d and M5e**, all built: the
-mouse moves the camera, a script can register a callback that runs every frame,
-and a script can read the keyboard and bind actions to it. They are written the
-way `m5a_stage.md` and `m5b_stage.md` are — what was built, where it departed
-from `plan.md`, and what was actually run to believe any of it, including the
-tables of re-introduced bugs.
+**The first four parts are the record for M5c, M5d, M5e and M5f**, all built:
+the mouse moves the camera, a script can register a callback that runs every
+frame, a script can read the keyboard and bind actions to it, and a click on the
+window hands back what is under it. They are written the way `m5a_stage.md` and
+`m5b_stage.md` are — what was built, where it departed from `plan.md`, and what
+was actually run to believe any of it, including the tables of re-introduced
+bugs.
 
-**The last part is the work that is not built**: clicking the window to select,
-and the smaller things the first three made worth doing. It is written to be picked up cold, so every task names the
-file and the line it starts at and says what the hard part is, which in almost
-every case is not the part that sounds hard.
+**The last part is the work that is not built**: the smaller things the first
+four made worth doing, and the three that are changes to `c3w` and therefore
+somebody's decision rather than a task. It is written to be picked up cold, so
+every task names the file and says what the hard part is, which in almost every
+case is not the part that sounds hard.
 
 ---
 
@@ -603,30 +605,288 @@ beside the `+[NSEvent pressedMouseButtons]` note below.
 
 ---
 
-# Part four — what is left
+# Part four — M5f, built
 
-## T3 — click to pick
+## The question this answers
 
-`Scene.raycast` and `screen_ray` already exist (`src/scene/pick.c3:63` and
-`:151`) and `scene.pick(x, y)` is already in the JS API. Clicking the window to
-select is close to free once the mouse position is in hand, which it now is.
+The picker has existed since M2 and nobody could reach it with a mouse.
+`scene.pick(x, y)` takes a pixel of the rendered image, and the only way to
+produce one was for an agent to guess a number or to read it off a PNG it had
+been handed — which is a fine way to write a test and no way at all to select
+something in a window somebody is looking at.
 
-Two things to get right, neither of them the raycast:
+```js
+three.onClick((hit, x, y) => {
+	if (hit) hit.object.color = 0xff8800;   // what was under the cursor
+});
+three.input.pointer                          // { x, y, inside, down, clicked }
+```
 
-- **`screen_ray` counts rows from the top** and says so in a comment; the
-  pointer counts from the bottom on macOS. The flip is one line and it is
-  invisible to any test that picks at the centre.
-- **The scale.** `screen_ray` takes pixels, the pointer is in points. Same
-  `get_scale()` as `drive_camera`.
+## What it turned out to need
 
-A click must also be distinguishable from the end of an orbit drag — the usual
-rule is a press and release within a few points and a short time.
+**Not the raycast.** `Scene.raycast` and `screen_ray` were already there, tested
+against the rendered image down to the half-pixel, and `js_pick` already joined
+them. The four lines that do the work were moved into `JsRuntime.pick_at` so the
+click and `scene.pick` ask the identical question, and that was the whole of the
+picking change.
 
-## T4 — the smaller ones
+What was actually missing is smaller than it sounds and got the two things it
+does have wrong on the first try in the same way twice — **both conversions
+between a window and an image are invisible to a check that picks at the
+centre**:
+
+1. **A window point is not an image pixel**, and the relationship is a fraction
+   rather than a scale. This is the one `plan.md`'s own note about T3 got wrong.
+2. **A window counts up and an image counts down**, which `screen_ray` documents
+   about its own flip and which has to be undone here for the same reason.
+
+And one thing that is not a conversion at all: a click has to be told apart from
+the end of an orbit drag, because the same button does both.
+
+## The steps
+
+### S1 — the fraction, not the scale (`src/scene/input.c3`)
+
+`WindowView.cursor` is the only place a window's units exist. It takes what
+`c3w` reports and answers in image pixels:
+
+```c3
+float across = (at[0] * self.scale) / (float)self.width;
+float up     = (at[1] * self.scale) / (float)self.height;
+...
+	.x = across * (float)self.image_width,
+	.y = (1.0f - up) * (float)self.image_height,
+```
+
+**The tempting version is `pointer * get_scale()`, and it is what the plan said
+to do.** It is also what `drive_camera` does — correctly, because `Controls`
+only ever takes *differences* of the pointer and the unit cancels. It does not
+cancel for a position, and there is no unit conversion that would work anyway,
+because the two extents are not related by one:
+
+- `Viewer.record_blit` copies the **whole** offscreen target onto the **whole**
+  swapchain image. No letterbox, no crop. The picture in the window is the image
+  stretched to fit it, whatever either size is.
+- The target is fixed at `--width`/`--height` for the life of the process; the
+  swapchain follows a live resize drag. So they diverge the first time anyone
+  touches the window edge and stay diverged.
+- On a retina display they start out differing by exactly the backing scale,
+  which is why the wrong version looks right on the machine it was written on
+  until the window is resized.
+
+`plan.md` §1 — the window is a consumer and never the render target — is the
+decision being paid for here, and paying for it is one line.
+
+### S2 — the flip, in one place
+
+`c3w`'s contract is Cocoa's: y grows upward from the bottom-left, and the Linux
+backends convert to it rather than the other way round. `screen_ray` counts rows
+from the top, because that is how an image is stored. `1.0f - up` is the whole
+fix, and putting it in the conversion rather than at the call site is what keeps
+everything downstream — the tracker, the handler, `scene.pick`, the PNG — in one
+coordinate system.
+
+### S3 — the edge is the gate (`MouseTracker.step`)
+
+`controls.c3` documents a latch that sticks: AppKit runs its own event loop while
+a window is dragged by its title bar and swallows the mouse-up, so the button
+reads as held for the rest of the session. `Controls` waits for one button-free
+frame before believing it.
+
+**Nothing of the sort is here, and that is the design rather than an omission.**
+A click requires a press *edge* — a frame where the button was not down and now
+is — and a stuck latch produces no edges at all. So the failure mode is no
+clicks rather than a click a frame, and it heals identically: the first real
+click after a stuck latch is swallowed, because that click's release is what
+finally clears the latch and there was no press to match it, and the one after
+it works.
+
+This is `controls.c3`'s own argument applied to itself. A release gate here
+would be a second mechanism that hides the failure of the first, which is the
+line that file says no test can ever motivate.
+
+### S4 — a drag is not a click
+
+Four pixels of travel and half a second, both measured in the *image* — the slop
+exists to decide whether the person aimed somewhere else, and somewhere else is
+a place in the picture. Both thresholds are deliberately generous in the
+direction of not-a-click: a click that has to be repeated is better than an
+object picked without being asked for, because the second one changes the scene
+and the person then has to work out what it changed.
+
+### S5 — the handler rides the frame (`src/js/bind_input.c3`)
+
+Dispatched from `tick`, after the keys and before the animation callback, under
+the frame's budget, into the frame's log, stopped the same way when it throws or
+returns a promise. There is no new failure policy and there is not meant to be —
+M5d decided all of it once.
+
+One handler rather than a table: a click has no name to key a table by, so the
+choice `onKey` has of which of thirty-two rows to replace does not exist. It is
+`setAnimationLoop`'s shape.
+
+**The raycast happens in the host**, which is the whole of what `onClick` buys
+over `input.pointer` plus `scene.pick`. It costs a BVH walk per gesture — once
+per click, not once per frame — and `prelude.js` turns the node index back into
+the `Mesh` the script is holding by going through the live `Scene`. There is
+exactly one of those at a time (`new three.Scene()` replaces it and the epoch
+check says so), which is what makes "the current scene" a thing the host never
+has to be told.
+
+## Where this departed from `plan.md`
+
+**`plan.md`'s note on T3 said to use `get_scale()`, and that is wrong.** It is
+written down in Part five's history rather than quietly fixed, because the note
+was right about there being a units problem and wrong about which one, and that
+is the more useful thing to have recorded. The scale is *involved* — it is how
+the pointer's unit and the extent's unit are made the same one — but it appears
+inside the fraction and not as a multiplier.
+
+Everything else went where §1 and §4 said it would: the pure part in
+`scene/`, the surface in `js/`, the window in `main.c3` and nowhere else.
+
+## Verification
+
+	c3c build --trust=full              Program linked to executable './build/three'.
+	c3c test --trust=full               PASSED: 247 passed, 0 failed, 0 skipped.
+	c3c test --trust=full --test-noleak PASSED: 247 passed, 0 failed, 0 skipped.
+
+Twenty-six new checks. Twenty-four of them need no device: the two conversions
+and the click are arithmetic over structs, which is the same seam
+`controls_test.c3` and the keyboard use and it is here for the same reason.
+
+**Two need a device**, and they are the two that matter most:
+`a_click_picks_the_object_under_it` puts a box at the origin, aims the camera at
+it, clicks the centre of the image and asserts `hit.object === box` — the one
+check that says the pieces are joined the right way round, and the only way to
+reach `asIntersection`'s live-scene branch, which a deviceless click can never
+get to because its hit is always `null`. `a_click_on_nothing_is_a_miss` clicks
+the corner, where the answer is `null` and a picker that answered with the
+nearest thing anyway would pass every other check in the file.
+
+### Every bug the tests claim to catch, re-introduced
+
+`scratchpad/inject_click.py`. Each row asserts its pattern matches exactly once,
+applies it, runs the one named check, restores, and compares a sha256 of every
+touched file at the end.
+
+| re-introduced bug | check | result |
+| --- | --- | --- |
+| the cursor is not flipped | `the_cursor_is_flipped_because_the_window_counts_up` | caught |
+| the cursor is scaled by the backing scale instead of mapped by fraction | `a_retina_window_maps_by_fraction_and_not_by_the_backing_scale` | caught |
+| the right and top edges count as inside | `a_cursor_off_the_window_is_not_inside` | caught |
+| a window with no size is not guarded | `a_window_with_no_size_answers_nothing` | caught |
+| the press anchor is never recorded | `a_press_and_a_release_in_one_place_is_a_click` | caught |
+| the press anchor follows the button rather than its edge | `a_stuck_button_never_clicks_and_heals_at_the_next_one` | caught |
+| a click is not required to have stayed still | `a_press_that_travels_is_a_drag` | caught |
+| a click may be held for as long as it likes | `a_press_that_is_held_is_not_a_click` | caught |
+| a press from off the window still starts a click | `a_press_that_starts_outside_is_not_a_click` | caught |
+| a release off the window still ends one | `a_release_outside_the_window_is_not_a_click` | caught |
+| the click is not an edge | `a_click_is_reported_for_exactly_one_frame` | caught |
+| the pointer is taken after the early return, not before | `the_pointer_arrives_with_nothing_registered` | caught |
+| a click handler alone does not make a frame | `a_click_handler_alone_is_enough_to_tick` | caught |
+| the click is dispatched after the animation callback | `the_click_runs_before_the_animation_callback` | caught |
+| the handler fires every frame rather than on the click | `a_click_handler_fires_once_and_says_where` | caught |
+| the handler is told the pixel the other way round | `a_click_handler_fires_once_and_says_where` | caught |
+| a throwing handler stays bound | `a_throwing_click_handler_is_stopped` | caught |
+| a handler that returns a promise stays bound | `a_click_handler_that_returns_a_promise_is_stopped` | caught |
+| null does not unbind | `binding_a_click_again_replaces_and_null_unbinds` | caught |
+| the pointer answers about the wrong axis | `a_script_can_ask_where_the_pointer_is` | caught |
+| an async click handler is accepted | `an_async_click_handler_is_refused_at_registration` | caught |
+| a hit is never resolved to the object the script built | `a_click_picks_the_object_under_it` | caught |
+| the click picks the middle of the image whatever pixel it was on | `a_click_on_nothing_is_a_miss` | caught |
+| the docs do not mention the click | `the_docs_describe_the_click` | caught |
+
+24 of 24 caught; `scene/input.c3`, `js/bind_input.c3`, `js/frame_loop.c3` and
+`js/prelude.js` all restore byte-identical.
+
+**Two of these are the reason this milestone exists at all.** "Scaled by the
+backing scale" is the implementation `plan.md` asked for, and it passes the
+1:1 window check and the flip check and fails only the retina and resize ones.
+"Not flipped" passes anything symmetric. Neither is a crash, a warning, or a
+wrong-looking picture — they are a picker that agrees with itself and disagrees
+with the window, which is `plan.md` §7's whole argument for having a pick suite.
+
+### What running it live added
+
+A window on port 8811, a box at the origin, and a small `mouse` binary built for
+the purpose: `CGEventCreate` to read the cursor, `CGWarpMouseCursorPosition` to
+place it, and `CGEventPost` for the button. Warping needs no permission; posting
+does, and the run was silent until macOS's accessibility prompt was answered —
+worth knowing, because a synthetic click that is refused looks exactly like a
+click that was not seen.
+
+**The mapping, against a real retina window.** With the cursor warped to a known
+screen point and the window's own rect read from `System Events`:
+
+	screen (200, 742)  ->  image (200.00, 150.00)  inside=true
+	screen ( 10, 602)  ->  image ( 10.00,  10.00)  inside=true
+	screen (1302.84, 158.02) -> image (1302.84, -433.98) inside=false
+
+Exact to two decimals, including the point off the window, where the arithmetic
+is the same and unclamped. This is a 400x300-point window showing a 400x300
+image on a 2x display, so the swapchain is 800x600 and **the wrong version would
+have reported 400 for the centre instead of 200**.
+
+**Five gestures, in one run:**
+
+	click on the box       -> "200,150 -> the box itself"
+	click on empty space   -> "15.000000953674316,15.000003814697266 -> nothing"
+	drag through the box   -> no click, and the camera turned -57.8 degrees
+	hold 900 ms on the box -> no click
+	click on the box       -> "200,150 -> the box itself"
+
+The drag is the one worth having: it crossed the box, it ended on the box, and
+it selected nothing while orbiting the camera by fifty-seven degrees. That is
+the whole reason the slop and the hold exist, and it cannot be observed from a
+test that says what the mouse did — only from one where a real gesture had to be
+told apart from another real gesture by the same button.
+
+`15.000000953674316` is not noise worth cleaning up: it is the evidence that the
+number went through a divide and a multiply rather than being passed along, which
+is exactly what was in question.
+
+**And the thing that was luck rather than design:** halfway through the run the
+window moved — from (0, 560) to (171, 287) to (525, 329), because the machine
+was in use while the measurement ran. Every reading after the move was still
+exact against the new rect, which is the strongest available statement that the
+conversion is window-relative and reads the extents fresh rather than caching
+what it was told at startup. It would have been a reasonable thing to test on
+purpose and it did not occur to me to.
+
+## What is deliberately absent
+
+- **No `mouseDown` / `mouseUp` for scripts.** The same argument the key table
+  makes: the latch sticks, and a script polling it would be told the button is
+  held forever with no gate of its own. The click is an edge, and an edge is the
+  one thing a stuck latch cannot fabricate.
+- **No drag events.** The left button orbits the camera. A script that wanted
+  its own drag behaviour would first need a way to turn the camera controls off,
+  which is Part five's open question and not this milestone's.
+- **No right-click and no double-click.** Both are real gestures and neither has
+  anything to do yet; the right button already pans.
+- **No hover.** `three.input.pointer` polled in the animation callback is a
+  hover, and a `scene.pick` per frame on top of it is the script's decision to
+  make rather than the host's to make for it.
+
+---
+
+
+# Part five — what is left
+
+## The smaller ones
 
 - **Cursor feedback.** `Window.set_cursor(CLOSED_HAND)` while orbiting,
   `OPEN_HAND` over the window otherwise. macOS only; the other backends are
-  no-op stubs, which is fine.
+  no-op stubs, which is fine. Now that a click picks, the more useful version is
+  `POINTING_HAND` when the cursor is over something pickable — which is a
+  `scene.pick` per frame and therefore a decision about cost rather than a
+  one-liner. `three.input.pointer` already lets a script do it for itself.
+- **The pointer is read twice a frame.** `drive_camera` calls `getMousePos` for
+  its delta and `serve` calls it again for the cursor, because the two want
+  different units and neither wants the other's. Harmless — it is an accessor —
+  but it means the camera and the click can disagree by whatever the mouse moved
+  in between, which is a pixel at most and has never been visible.
 - **Damping.** A per-frame decay on the orbit velocity. `drive_camera` is
   already called once a frame beside the tick, so what it wants now is the time
   delta rather than the call — `serve()` computes one for `tick` and does not
@@ -643,23 +903,33 @@ rule is a press and release within a few points and a short time.
   right place, but the real answer is `+[NSEvent pressedMouseButtons]`, which
   reports the physically-held buttons independently of the event stream — one
   objc call, and it would let a stuck latch clear on the very next frame instead
-  of at the next click. Also a `c3w` change, and also therefore a decision
-  rather than a task.
+  of at the next click. Two things now depend on that healing rather than one:
+  the camera stops turning on its own a frame sooner, and the first real click
+  after a stuck latch stops being swallowed. Still a `c3w` change, and so still
+  a decision rather than a task.
 - **Idle CPU.** The windowed loop renders continuously at whatever rate the
   swapchain allows, and `getEvent(wait: true)` plus `Window.wake` exist for an
   on-demand loop that sleeps in the kernel at 0%. Now decidable, and the
-  condition is already a field: a runtime with `frame_active` set is never idle
-  and must not sleep; one without it can. The awkward half is that the MCP
+  condition is already written down — it is `tick`'s own early return, which is
+  false exactly when nothing is registered: `frame_active`, a key handler, or a
+  click handler. A runtime with any of them is never idle and must not sleep. The awkward half is that the MCP
   listener has to be able to wake the loop, which is `Window.wake` from the
   listener's thread — the one place in the program where those two threads would
   touch.
 
 ## Open questions
 
-- **Should a script be able to turn the mouse controls off?** A scene that binds
-  its own drag behaviour would want to. `three.controls.enabled = false` is
-  cheap, but it is one more piece of state a script can leave in a bad way, and
-  the window becoming uncontrollable is a bad way.
+- **Should a script be able to turn the mouse controls off?** Sharper now than
+  it was: `onClick` gave a script half the mouse, and the half it did not give —
+  the drag — is the half the camera owns. A scene that wanted its own drag
+  behaviour has no way to ask for it. `three.controls.enabled = false` is cheap,
+  but it is one more piece of state a script can leave in a bad way, and a
+  window nobody can move the camera in is a bad way.
+- **Should a click be able to say it was handled?** A handler that returns
+  `false` could suppress the orbit for that gesture. It is the browser's
+  `preventDefault` and it would be the natural answer to the question above —
+  and it is also a rule that has to be explained, for a conflict that a
+  four-pixel click barely has.
 - **Does the camera belong to the scene?** The camera survives
   `new three.Scene()` today, so a script that rebuilds the scene keeps whatever
   the user dragged it to. That is almost certainly right for a person watching
