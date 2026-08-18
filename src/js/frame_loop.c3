@@ -74,6 +74,19 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 }
 
 <*
+ Whether a tick would do anything: is anything registered at all.
+
+ Exposed because it is also the host's "may this window go to sleep" condition,
+ and the two must be the same sentence. A loop that idled while a callback was
+ registered would stop it dead; a `tick` that ran with nothing registered would
+ keep the loop awake forever. Written once, read twice — see `main.c3`.
+*>
+fn bool JsRuntime.is_animating(&self)
+{
+	return self.frame_active || self.key_handler_count > 0 || self.click_active;
+}
+
+<*
  Run the callback once, if there is one.
 
  **The host says what time it is.** The runtime keeps no clock of its own, which
@@ -94,7 +107,7 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 {
 	self.take_input(input);
-	if (!self.frame_active && self.key_handler_count == 0 && !self.click_active) return false;
+	if (!self.is_animating()) return false;
 
 	self.frame_ticks++;
 

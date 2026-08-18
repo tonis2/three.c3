@@ -83,7 +83,7 @@ zoom, writing the same camera a script writes. **And a script can drive the
 frame**: `three.setAnimationLoop(fn)` runs a callback between the input and the
 draw, so a scene moves with no agent in the loop, and **the keyboard reaches it**
 — `three.input.isDown('w')` for held keys, `three.onKeyDown('e', fn)` for
-actions. `c3c test --trust=full` runs two hundred and forty-seven checks, all
+actions. `c3c test --trust=full` runs two hundred and sixty-four checks, all
 headless, leak-clean.
 
 	three <file.glb>                    open a window on it
@@ -332,10 +332,13 @@ src/
   shader/material_source.c3
                     built  wraps an agent's fragment body into a whole Slang module
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
-  scene/controls.c3 built  the mouse as camera movement: orbit, pan, zoom (M5c)
+  scene/controls.c3 built  the mouse as camera movement: orbit, pan, zoom (M5c),
+                           and the coast that carries an orbit past the release (M5g)
   scene/input.c3    built  the keyboard: the latch as level state and edges, and the
                            table of names a script uses for it (M5e); and the pointer,
-                           as a window point turned into an image pixel (M5f)
+                           as a window point turned into an image pixel (M5f);
+                           and the queue behind the latch, for the press that began
+                           and ended inside one frame (M5g)
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
@@ -369,14 +372,17 @@ test/
   primitive_test.c3 built  what the shapes are shaped like, which way they face, when
                            two of them are one asset — no device anywhere in it
   controls_test.c3  built  which way a drag turns the scene, and the state machine
-                           behind it — no device and no window anywhere in it
+                           behind it — no device and no window anywhere in it; and
+                           the coast, where the frame delta and the "may the window
+                           sleep" answer are both decided (M5g)
   frame_test.c3     built  what a tick does and the four ways a callback stops —
                            the tick takes the time as an argument, so this is a
                            statement about the callback and not about the machine
   input_test.c3     built  the key table and the one-frame difference, then what a
                            script can see of them — separated because a wrong edge
                            and a wrong binding fail identically from JavaScript;
-                           then the pointer's two conversions and what a click is
+                           then the pointer's two conversions and what a click is;
+                           then the queue behind the latch (M5g)
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -1063,6 +1069,36 @@ edge.
 
 `event_loop.md` has the record, including the live run where the window was
 dragged across the screen mid-measurement and the mapping followed it.
+
+**M5g — the window's manners.** The list of smaller things the four before it
+made worth doing. Three of them are changes to `c3w`, which is a submodule, and
+were written down as decisions rather than tasks until the decision was made.
+
+- **The window sleeps.** `getEvent(wait: true)` parks the loop in the kernel at
+  **0% CPU**, and `mcp.c3l`'s `WakeFn` — already designed for exactly this — is
+  what lets the listener's thread wake it. The condition for sleeping is
+  `tick`'s own early return, exposed rather than written twice: a loop that
+  slept while a callback was registered would stop it dead.
+- **An orbit coasts.** The last frame's angular velocity, decayed with a 60 ms
+  time constant. The *last* frame's rather than the drag's average, because a
+  hand that slows before it lets go is saying where it wants to stop. Both ends
+  of the step are clamped — the same loop answers tool calls, so a slow script
+  arrives as one enormous frame — and there is a floor, without which `apply`
+  would answer "moved" forever and the window would never idle again.
+- **The cursor dresses itself**: open hand over the scene, closed while
+  dragging, and set only when it changes.
+- **A press that begins and ends inside one frame is now seen.** `c3w` keeps an
+  `EventLog` beside its `EventMap`, filled by all five backends, and the two
+  sources of an edge are or-ed rather than swapped — so a backend with no log
+  keeps exactly what it had, and neither source can invent an edge.
+- **The stuck mouse latch is fixed at its source**, with
+  `+[NSEvent pressedMouseButtons]`, which only ever clears and never sets: a
+  button held over another application is not this window's to react to.
+- **Windows has scroll, typed text and DPI**, and they cross-compile and link.
+
+`event_loop.md` has the record, including five injections that escaped — of
+which only two were the tests' fault, and two found a guard written in two
+places where one would do.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

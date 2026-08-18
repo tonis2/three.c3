@@ -18,6 +18,7 @@
 module three_tests::controls;
 
 import three;
+import c3w;
 import std::core::test;
 import std::math;
 import std::math::vector;
@@ -492,5 +493,248 @@ fn void yaw_does_not_wander_off() @test
 		close(wrapped_eye.x, direct_eye.x, 0.001) && close(wrapped_eye.z, direct_eye.z, 0.001),
 		"wrapping moved the eye: (%f, %f) against (%f, %f)",
 		wrapped_eye.x, wrapped_eye.z, direct_eye.x, direct_eye.z
+	);
+}
+
+// ============================================================================
+// The coast
+// ============================================================================
+
+// A drag frame that says how long it took, which the helpers above deliberately
+// do not: every check that predates the coast passes dt = 0 and therefore never
+// reaches any of it.
+fn bool orbit_over(three::Controls* controls, three::Camera* camera, float x, float y, float dt_ms)
+{
+	return controls.apply(camera, { .orbit = true, .x = x, .y = y }, VIEW_H, dt_ms);
+}
+
+fn bool idle_for(three::Controls* controls, three::Camera* camera, float dt_ms)
+{
+	return controls.apply(camera, { .x = 400, .y = 300 }, VIEW_H, dt_ms);
+}
+
+// Press, drag, and let go — the shortest gesture that leaves the scene turning.
+fn void flick(three::Controls* controls, three::Camera* camera, float by = 60.0f, float dt_ms = 16.0f)
+{
+	idle_for(controls, camera, dt_ms);
+	orbit_over(controls, camera, 400, 300, dt_ms);
+	orbit_over(controls, camera, 400 + by * 0.5f, 300, dt_ms);
+	orbit_over(controls, camera, 400 + by, 300, dt_ms);
+}
+
+<*
+ The scene keeps turning after the hand lets go, in the direction it was going.
+
+ A turntable that stopped dead on release would be the one gesture here with no
+ weight at all. The direction matters as much as the fact: a coast that ran
+ backwards would still "damp", and it would be unmistakably wrong to use and
+ perfectly plausible in a diff.
+*>
+fn void a_flick_keeps_turning_after_the_hand_lets_go() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+	float at_release = camera.yaw;
+
+	test::@check(idle_for(&controls, &camera, 16), "the frame after the release still moves the camera");
+	float after = camera.yaw;
+
+	// The drag was to the right, which turns the eye left: yaw falls.
+	test::@check(after < at_release, "and the coast carries on turning left, %f -> %f", at_release, after);
+}
+
+<*
+ It slows down, and it stops.
+
+ Both halves are load-bearing and only the first is obvious. An exponential
+ never reaches zero, so without the floor the camera would keep creeping by
+ amounts nobody can see — and `apply` would keep answering "moved", which is the
+ sentence `main.c3` reads as "do not go to sleep". The window would then never
+ idle again, for a gesture that ended a minute ago.
+*>
+fn void the_coast_slows_down_and_stops() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+
+	int frames = 0;
+	while (idle_for(&controls, &camera, 16))
+	{
+		frames++;
+		if (frames > 200) break;
+	}
+	test::@check(frames <= 200, "the coast is not endless");
+
+	test::@check(frames > 1, "it took more than one frame to stop, got %d", frames);
+	test::@check(frames < 60, "and stopped inside a second at 60Hz, got %d frames", frames);
+	test::@check(
+		!idle_for(&controls, &camera, 16),
+		"and once stopped it stays stopped, which is what lets the window sleep"
+	);
+}
+
+<*
+ Each frame of the coast moves the camera less than the one before it.
+*>
+fn void the_coast_decays() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+
+	float previous_step = float::max;
+	for (int i = 0; i < 5; i++)
+	{
+		float before = camera.yaw;
+		test::@check(idle_for(&controls, &camera, 16), "still coasting at frame %d", i);
+		float step = math::abs(camera.yaw - before);
+		test::@check(step < previous_step, "frame %d moved less than the one before: %f < %f", i, step, previous_step);
+		previous_step = step;
+	}
+}
+
+<*
+ A hand that stops before it lets go means the scene stops too.
+
+ The velocity is the last frame's rather than the drag's average for exactly
+ this: someone who lines a view up, pauses on it, and releases is saying where
+ they want it, and an average would throw it past that every time.
+*>
+fn void a_hand_that_stops_before_it_lets_go_does_not_throw_the_scene() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+	// Still held, and now still.
+	orbit_over(&controls, &camera, 460, 300, 16);
+	float settled = camera.yaw;
+
+	test::@check(!idle_for(&controls, &camera, 16), "the release after a pause coasts nowhere");
+	test::@check(camera.yaw == settled, "and the camera is where it was left, %f", camera.yaw);
+}
+
+<*
+ Grabbing a coasting scene catches it, which is how a person stops one.
+*>
+fn void grabbing_a_coasting_scene_stops_it() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+	idle_for(&controls, &camera, 16);
+
+	// The press frame: a button goes down and the anchor is set, so its own
+	// delta is zero by construction.
+	orbit_over(&controls, &camera, 200, 200, 16);
+	float caught = camera.yaw;
+	orbit_over(&controls, &camera, 200, 200, 16);
+
+	test::@check(camera.yaw == caught, "holding still holds it still, %f", camera.yaw);
+	test::@check(!idle_for(&controls, &camera, 16), "and letting go of a still hand starts nothing");
+}
+
+<*
+ A pan catches it too. It does not feed the coast — panning is not turning — but
+ a hand on the window is a hand on the window.
+*>
+fn void a_pan_catches_the_coast_as_well() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+	controls.apply(&camera, { .pan = true, .x = 400, .y = 300 }, VIEW_H, 16);
+	float caught = camera.yaw;
+
+	controls.apply(&camera, { .pan = true, .x = 420, .y = 300 }, VIEW_H, 16);
+	test::@check(camera.yaw == caught, "the pan moved the target and not the angle, %f", camera.yaw);
+	test::@check(!idle_for(&controls, &camera, 16), "and the coast is gone");
+}
+
+<*
+ Damping off means the scene stops dead, which is what the field is for.
+*>
+fn void damping_off_stops_the_scene_dead() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+	controls.damping_ms = 0;
+
+	flick(&controls, &camera);
+	float at_release = camera.yaw;
+
+	test::@check(!idle_for(&controls, &camera, 16), "nothing to spend");
+	test::@check(camera.yaw == at_release, "and the camera has not moved, %f", camera.yaw);
+}
+
+<*
+ A caller with no clock gets no coast — which is what protects every check
+ written before there was one.
+*>
+fn void a_caller_with_no_clock_never_coasts() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	hover(&controls, &camera, 400, 300);
+	orbit(&controls, &camera, 400, 300);
+	orbit(&controls, &camera, 460, 300);
+	float at_release = camera.yaw;
+
+	test::@check(!hover(&controls, &camera, 460, 300), "no dt, no velocity, no coast");
+	test::@check(camera.yaw == at_release, "the camera stopped where the drag did, %f", camera.yaw);
+}
+
+<*
+ A frame that took a second does not fling the camera across the sky.
+
+ The loop that drives this is the same one that answers tool calls, so a script
+ that runs for two seconds arrives here as a single enormous frame. Both ends of
+ the step are clamped for it: without the ceiling one slow frame would multiply
+ the last flick by sixty, and without the floor a frame timed at zero would
+ divide by it.
+*>
+fn void a_very_long_frame_does_not_fling_the_camera() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::default_controls();
+
+	flick(&controls, &camera);
+	float at_release = camera.yaw;
+
+	idle_for(&controls, &camera, 5_000);
+	float travelled = math::abs(camera.yaw - at_release);
+
+	test::@check(travelled > 0.0f, "it still coasted, %f", travelled);
+	test::@check(travelled < 90.0f, "but not across the sky, %f degrees in one frame", travelled);
+}
+
+// ============================================================================
+// The cursor
+// ============================================================================
+
+<*
+ An open hand over the scene, a closed one while dragging, and the arrow
+ everywhere else.
+
+ Three lines, checked because their call site is `main.c3` and the claim they
+ make — that a pan closes the hand as well as an orbit — is the kind that is
+ true when written and quietly false a milestone later.
+*>
+fn void the_cursor_says_what_the_hand_is_doing() @test
+{
+	test::@check(three::cursor_shape(inside: true, dragging: false) == OPEN_HAND, "over the scene");
+	test::@check(three::cursor_shape(inside: true, dragging: true) == CLOSED_HAND, "and holding it");
+	test::@check(three::cursor_shape(inside: false, dragging: false) == ARROW, "off the scene");
+	test::@check(
+		three::cursor_shape(inside: false, dragging: true) == CLOSED_HAND,
+		"a drag that leaves the window is still a drag"
 	);
 }
