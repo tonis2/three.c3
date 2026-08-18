@@ -94,6 +94,15 @@ fn KeyBits KeyBits.without(&self, KeyBits other)
 	return out;
 }
 
+// The bits set in either. What joins the two sources an edge can come from —
+// see `InputTracker.step`.
+fn KeyBits KeyBits.with(&self, KeyBits other)
+{
+	KeyBits out;
+	for (usz i = 0; i < KEY_SLOTS; i++) { out.word[i] = self.word[i] | other.word[i]; }
+	return out;
+}
+
 <*
  Set a key by the name a script would use. Unknown names are ignored, which is
  right for a host filling one in and wrong for a script asking about one — see
@@ -106,6 +115,23 @@ fn bool KeyBits.add(&self, String name)
 	self.set(row.key);
 	if (row.also != c3w::EventKey.EMPTY_KEY) self.set(row.also);
 	return true;
+}
+
+<*
+ What the window said about the keyboard this frame: the latch, and the
+ transitions behind it.
+
+ Two sources for the same fact, and they disagree in exactly one case, which is
+ the case the second one exists for. See `InputTracker.step`.
+*>
+struct FrameKeys
+{
+	// What is held right now, from the latch.
+	KeyBits down;
+	// Every key that was seen going down during the frame, from the queue —
+	// including ones that were let go again before anybody looked.
+	KeyBits fired_down;
+	KeyBits fired_up;
 }
 
 <*
@@ -137,44 +163,80 @@ struct InputTracker
 }
 
 <*
- Fold one frame's latch into level state and the two edges.
+ Fold one frame's keyboard into level state and the two edges.
+
+ ## An edge has two sources, and the union is the answer
+
+ The difference against the previous frame — `down & ~previous` — is the edge as
+ far as the latch can describe it, and it misses the press that began and ended
+ inside one frame: the flag is set and cleared before anything samples it. The
+ window's own event queue has that press, and `keys.fired_down` is it.
+
+ They are **or**-ed rather than one replacing the other, and that is deliberate.
+ A backend with no queue reports nothing there and keeps exactly today's
+ behaviour rather than losing every edge it had; a backend with one adds the
+ presses the difference could not see. Neither can produce a false edge — the
+ difference needs a real transition and the queue needs a real event — so the
+ union is not a compromise between two answers, it is two ways of noticing the
+ same thing and taking whichever noticed.
+
+ A key that goes down and up inside one frame is then reported as both pressed
+ and released in that frame, which is what happened.
 
  The mouse rides along rather than having a tracker of its own to be stepped
  beside this one. There is one input per frame and forgetting half of it would
  be a silent half — a window whose keyboard works and whose clicks do nothing.
 
- @param down : `What is held right now. The host reads this from its window; a test says so directly.`
+ @param keys : `What the window said. The host reads this from its window; a test says so directly.`
  @param text : `What was typed this frame, borrowed for the frame.`
  @param cursor : `Where the pointer is, already in image pixels. Default-empty for a host with no window.`
  @param now_ms : `The host's clock, for telling a click from a hold.`
 *>
-fn InputState InputTracker.step(&self, KeyBits down, String text = "", Cursor cursor = {}, double now_ms = 0)
+fn InputState InputTracker.step(&self, FrameKeys keys, String text = "", Cursor cursor = {}, double now_ms = 0)
 {
 	InputState state = {
-		.down = down,
-		.pressed = down.without(self.previous),
-		.released = self.previous.without(down),
+		.down = keys.down,
+		.pressed = keys.down.without(self.previous).with(keys.fired_down),
+		.released = self.previous.without(keys.down).with(keys.fired_up),
 		.text = text,
 		.mouse = self.mouse.step(cursor, now_ms),
 	};
-	self.previous = down;
+	self.previous = keys.down;
 	return state;
 }
 
 <*
- The window's latched map as bits.
+ The window's latched map and its event queue, as bits.
 
  Iterating the map rather than asking it about all 124 keys: it only holds keys
- that have ever been seen, which on a real keyboard is a handful.
+ that have ever been seen, which on a real keyboard is a handful. The queue is
+ shorter still — it is one frame of transitions, and an idle frame has none.
+
+ @param log : `What c3w drained this frame. Empty is a perfectly good answer and means "the latch is all there is".`
 *>
-fn KeyBits read_events(c3w::EventMap events)
+fn FrameKeys read_events(c3w::EventMap events, c3w::Event[] log = {})
 {
-	KeyBits down;
+	FrameKeys keys;
+
 	events.@each(; c3w::EventKey key, bool held)
 	{
-		if (held) down.set(key);
+		if (held) keys.down.set(key);
 	};
-	return down;
+
+	foreach (c3w::Event event : log)
+	{
+		switch (event.type)
+		{
+			case KEY_PRESSED: keys.fired_down.set(event.value);
+			case KEY_RELEASED: keys.fired_up.set(event.value);
+			// The queue carries the mouse buttons too. They are not keys and
+			// `MouseTracker` has the latch it needs, so they are skipped here
+			// rather than turned into keyboard edges nobody asked for.
+			default: break;
+		}
+	}
+
+	return keys;
 }
 
 // ============================================================================
@@ -529,4 +591,26 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 		.x = cursor.x,
 		.y = cursor.y,
 	};
+}
+
+<*
+ What the cursor should look like, given where it is and what the hand is doing.
+
+ An open hand over the scene and a closed one while dragging: the two states
+ `Controls` already has, said in the one language a window has for saying them.
+ Outside the content the answer is the arrow — the window's own edges and title
+ bar are AppKit's to dress, and asserting a hand over them would fight it.
+
+ A function rather than three lines at the call site because the call site is
+ `main.c3`, which is the one file with no checks in it, and "the cursor is a
+ closed hand while panning as well as while orbiting" is exactly the sort of
+ claim that is true when written and false a milestone later.
+
+ @param inside : `Whether the cursor is over the rendered image.`
+ @param dragging : `Controls.dragging — a believed drag, not merely a held button.`
+*>
+fn c3w::CursorShape cursor_shape(bool inside, bool dragging)
+{
+	if (dragging) return CLOSED_HAND;
+	return inside ? c3w::CursorShape.OPEN_HAND : c3w::CursorShape.ARROW;
 }

@@ -1,21 +1,25 @@
 # event_loop.md — the window as an input device, and the frame as a hook
 
-One document at four stages of the same subject: making the scene move without
+One document at five stages of the same subject: making the scene move without
 an agent in the loop.
 
-**The first four parts are the record for M5c, M5d, M5e and M5f**, all built:
-the mouse moves the camera, a script can register a callback that runs every
-frame, a script can read the keyboard and bind actions to it, and a click on the
-window hands back what is under it. They are written the way `m5a_stage.md` and
+**The first five parts are the record for M5c through M5g**, all built: the
+mouse moves the camera, a script can register a callback that runs every frame,
+a script can read the keyboard and bind actions to it, a click on the window
+hands back what is under it, and the window has the manners a window is supposed
+to have — it coasts, it dresses the cursor, and it sleeps at 0% CPU when nobody
+is asking it for anything. They are written the way `m5a_stage.md` and
 `m5b_stage.md` are — what was built, where it departed from `plan.md`, and what
 was actually run to believe any of it, including the tables of re-introduced
 bugs.
 
-**The last part is the work that is not built**: the smaller things the first
-four made worth doing, and the three that are changes to `c3w` and therefore
-somebody's decision rather than a task. It is written to be picked up cold, so
-every task names the file and says what the hard part is, which in almost every
-case is not the part that sounds hard.
+**Three of M5g's changes are in `c3w`**, which is a submodule: an event queue
+beside the latch, the stuck-latch fix at its source, and the Windows backend's
+missing reads. They were written down as somebody's decision rather than as
+tasks, and the decision was made.
+
+**The last part is what is not built**, which after M5g is small and mostly not
+code.
 
 ---
 
@@ -872,50 +876,298 @@ purpose and it did not occur to me to.
 ---
 
 
-# Part five — what is left
+# Part five — M5g, built
+
+The list of smaller things the first four made worth doing, done — including the
+three that were written down as somebody's decision rather than as a task,
+because they are changes to `c3w` and `c3w` is a submodule. The decision was
+made; they are in the submodule's working tree, uncommitted, and the three that
+touch platforms this cannot run on are compiled for those platforms rather than
+merely written.
+
+## The window sleeps
+
+The windowed loop rendered continuously at whatever rate the swapchain allowed,
+which for a viewer sitting open beside an agent is a core spinning to redraw a
+picture nobody changed. `getEvent(wait: true)` parks the thread in
+`nextEventMatchingMask` at 0% CPU, and the whole difficulty is deciding when it
+is allowed to.
+
+**The condition is already written down**, and the discipline is not writing it
+twice: `JsRuntime.is_animating()` is `tick`'s own early return, exposed and read
+by `main.c3`. A loop that slept while a callback was registered would stop it
+dead; a `tick` that ran with nothing registered would keep the loop awake for
+ever. One sentence, read from both ends.
+
+	quiet = presented && !runtime.is_animating() && !camera_moved && handled == 0;
+
+Every term is something that would be lost by sleeping through it. `presented`
+is false when the frame rebuilt the swapchain instead of drawing, so the loop
+owes one more iteration before resting. `camera_moved` covers the coast below —
+a drag that ends is followed by a third of a second of frames nobody asked for.
+`handled` is a tool call that may have changed the scene and answered before the
+frame that shows it.
+
+**The wake was already designed for.** `mcp.c3l`'s `Listener.start` takes a
+`WakeFn` and calls it from its own thread once a request is queued —
+"on a windowing toolkit that means the post-an-event-to-the-loop primitive" —
+and `c3w`'s `Window.wake` is exactly that primitive. Without it a sleeping
+window would go on sleeping through every request and the whole tool surface
+would answer only when somebody moved the mouse. It is the one place in this
+program where the listener's thread and the loop's thread touch, and it touches
+through a posted event rather than through any state.
+
+Measured: **0.0% idle**, a tool call answered in 113 ms round trip including
+python's own startup, 17.6% and ~125 frames a second with a callback registered,
+and back to 0.0% the moment `setAnimationLoop(null)` arrives.
+
+## The scene coasts
+
+An orbit that stopped the instant the button came up was the one gesture here
+with no weight, and a turntable is the thing people most expect to keep turning.
+`Controls` keeps the last frame's angular velocity and decays it — a time
+constant of 60 ms, which is a third of a second of visible travel and about
+thirty degrees on a hard flick.
+
+**The velocity is the last frame's, not the drag's average**, and that is the
+whole design rather than an implementation detail. A hand that slows down before
+it lets go is saying where it wants the scene to stop; an average throws it past
+that every time. A hand that stops dead and then releases sets the velocity to
+zero, which is the same statement made more firmly, and it falls out of
+recording the velocity on every frame of the drag including the ones with no
+movement.
+
+Three things it has to get right that are not the arithmetic:
+
+- **Degrees per millisecond, not per frame.** Anything that decays by a fixed
+  fraction per frame throws the same flick twice as far on a 120 Hz display.
+- **Both ends of the step are clamped.** This loop also answers tool calls, so a
+  script that runs for two seconds arrives as one enormous frame; without a
+  ceiling it would multiply the last flick by sixty.
+- **There is a floor.** An exponential never reaches zero, so without one the
+  camera creeps by amounts nobody can see *and* `apply` goes on answering
+  "moved" — which is the sentence the paragraph above reads as "do not sleep".
+  The window would never idle again, for a gesture that ended a minute ago.
+
+`damping_ms = 0` turns it off, and the check is read in exactly one place:
+recording how fast the hand was going is a fact, and whether to spend it is a
+policy. Checking it in both would mean removing either check changed nothing,
+which is how a guard stops being load-bearing without anybody noticing.
+
+## The cursor says what the hand is doing
+
+An open hand over the scene, a closed one while dragging, the arrow everywhere
+else — and set only when the shape has actually changed, because doing it every
+frame is an objc call sixty times a second to say the same thing and, worse, it
+overrules whatever AppKit put there the instant the pointer touches a resize
+edge.
+
+Three lines, and they are in `scene/input.c3` with a check on them rather than
+inline in `main.c3`, which is the one file with no checks in it. The claim they
+make — that a *pan* closes the hand as well as an orbit — is exactly the sort
+that is true when written and quietly false a milestone later.
+
+## The pointer is read once
+
+`drive_camera` read `getMousePos` for its delta and `serve` read it again for
+the click. Both readings are of the same instant and the two are now one, handed
+to both: the camera wants a delta in points and the click wants a position in
+image pixels, and one reading answering two questions is one fewer way for them
+to disagree about where the mouse was.
+
+## Sub-frame key presses — the `c3w` change that started as a measurement
+
+Part three measured it: `osascript`'s `keystroke` presses and releases in the
+same instant, and it produced the typed text and **no edge at all**. The latch is
+set and cleared between two samples, so the press is invisible. A person cannot
+type that fast — eighty milliseconds is five frames — but synthetic input can, a
+key repeat that lands badly can, and any frame that runs long can.
+
+`c3w` now keeps `EventLog` beside `EventMap`: the transitions it drained, in
+order, cleared per call like the typed text. A fixed 512-entry array rather than
+a list, so there is nothing to allocate, initialise or free and a window that is
+not being pumped cannot grow it. Filled by all five backends — darwin, x11,
+wayland, win32, wasm — and exposed as `Window.events()`.
+
+**The two sources are or-ed, not swapped.** `down & ~previous` is the edge as far
+as a latch can describe it; `fired_down` is the press the latch could not see.
+Joining them means a backend that fills no log keeps exactly the behaviour it
+had rather than losing every edge it used to report, and neither source can
+manufacture a false edge — the difference needs a real transition and the queue
+needs a real event. It is not a compromise between two answers; it is two ways
+of noticing the same thing, taking whichever noticed.
+
+A key that goes down and up inside one frame is now reported as **both** pressed
+and released in that frame, which is what happened.
+
+One thing the log made better on its own: `apply_modifier_flags` rewrites every
+modifier on every `flagsChanged`, because the event carries the whole set rather
+than an edge. Logging those blindly would report a shift press every time
+control was touched — so the map's own previous answer is the edge, and it was
+already sitting right there.
+
+## The stuck latch, fixed at the source
+
+`controls.c3` has documented since M5c that AppKit swallows the mouse-up ending
+a title-bar drag, leaving the button latched for the rest of the session. Every
+application built on that map has to work around it, and the workaround has to
+live in each of them. `+[NSEvent pressedMouseButtons]` reports what is
+physically held, right now, independently of what has been delivered to anybody.
+
+**It only ever clears, and never sets.** A button held down over another
+application is not this window's to react to: believing it would turn the very
+next mouse movement across this window into a drag nobody started, which is the
+same bug pointing the other way. The event stream stays the only thing that can
+latch a button; this is only allowed to unlatch one.
+
+`Controls`' release gate stays. It is the portable half — Linux and Windows have
+the same class of problem and no equivalent call — and on macOS the source now
+clears within a frame instead of at the user's next click.
+
+## Windows parity
+
+`get_scroll`, `get_scroll_x`, `get_text` and `get_scale` were stubs returning
+zero, so zoom, typed text and retina scaling were all dead on Windows while
+Linux was complete.
+
+- **Scroll** accumulates `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL`, divided by
+  `WHEEL_DELTA` so the answer is in notches — the same unit the X11 backend
+  reports, positive away from the user and positive to the right.
+- **Text** reads `WM_CHAR`, which `TranslateMessage` posts back into the same
+  queue, so it arrives on a later turn of the loop that is already running. It
+  carries the layout, the dead keys and the shift state already applied, which
+  is the whole reason to read it rather than translating the key map by hand.
+  Surrogate pairs are why it is a function and not a line: a character past the
+  basic plane arrives as two messages, and appending each on its own writes two
+  replacement characters where one emoji was meant.
+- **Scale** is `GetDpiForWindow / 96`, and it answers 1.0 unless the process has
+  declared itself DPI-aware — which is the application's manifest and not
+  something a window library may decide on its behalf, because turning it on
+  changes what every coordinate in the process means, including the size the
+  window was asked for. So the answer is the same 1.0 the stub gave, now for a
+  reason rather than for want of an implementation.
+- **`get_scroll_precise`** stays false, and that is now the truth rather than a
+  stub: the flag means "continuous units, from a trackpad", and the classic
+  `WM_MOUSEWHEEL` path reports notches whatever the hardware is.
+
+## Verification
+
+	c3c build --trust=full              Program linked to executable './build/three'.
+	c3c test --trust=full               PASSED: 264 passed, 0 failed, 0 skipped.
+	c3c test --trust=full --test-noleak PASSED: 264 passed, 0 failed, 0 skipped.
+
+Seventeen new checks. **And the platforms this cannot run are compiled rather
+than hoped for**, which turned out to be available and worth the two minutes:
+
+	c3c build test-win                  Program linked to executable './build/test-win.exe'
+	c3c compile-only --target linux-x64 linux/*.c3 main.c3
+	                                    Object files written to './obj/linux-x64'
+	c3c build test-wasm                 Program linked to './test/web/test-wasm.wasm'
+
+The Win32 backend cross-compiles *and links* against the MSVC SDK, and both
+Linux backends type-check for `linux-x64`. That is not a running test and it is
+not nothing: it catches the whole class of "written blind and does not build",
+which is the failure a blind port actually has.
+
+### Every bug the tests claim to catch, re-introduced
+
+`scratchpad/inject_part5.py`, same harness: each row asserts its pattern matches
+once, applies it, runs one check, restores, and compares a sha256 at the end.
+
+| re-introduced bug | check | result |
+| --- | --- | --- |
+| the velocity is never remembered | `a_flick_keeps_turning_after_the_hand_lets_go` | caught |
+| the coast runs backwards | `a_flick_keeps_turning_after_the_hand_lets_go` | caught |
+| the coast never decays | `the_coast_decays` | caught |
+| the coast has no floor and so never stops | `the_coast_slows_down_and_stops` | caught |
+| the velocity is the whole drag rather than its last frame | `a_hand_that_stops_before_it_lets_go_does_not_throw_the_scene` | caught |
+| the press frame does not reset the velocity | `grabbing_a_coasting_scene_stops_it` | caught |
+| a pan does not catch the coast | `a_pan_catches_the_coast_as_well` | caught |
+| damping cannot be turned off | `damping_off_stops_the_scene_dead` | caught |
+| the coast keeps claiming it moved when it did not | `a_caller_with_no_clock_never_coasts` | caught |
+| a long frame is not clamped | `a_very_long_frame_does_not_fling_the_camera` | caught |
+| a pan does not close the hand | `the_cursor_says_what_the_hand_is_doing` | caught |
+| the hand is shown off the window too | `the_cursor_says_what_the_hand_is_doing` | caught |
+| the queue is ignored and only the latch is read | `a_key_tapped_inside_one_frame_is_still_seen` | caught |
+| the queue replaces the latch instead of joining it | `the_latch_alone_still_reports_edges` | caught |
+| the queue's presses are latched and so repeat for ever | `the_queue_does_not_re_press_a_held_key` | caught |
+| a release event is read as a press | `the_window_queue_becomes_the_frames_edges` | caught |
+| a tapped key is reported as held | `the_window_queue_becomes_the_frames_edges` | caught |
+| a mouse button in the queue becomes a keyboard edge | `the_window_queue_becomes_the_frames_edges` | caught |
+| a two-key name does not answer for a tapped key | `a_tapped_chord_key_answers_for_its_name` | caught |
+| a click handler is not enough to keep the loop awake | `a_click_handler_alone_is_enough_to_tick` | caught |
+| a key handler is not enough to keep the loop awake | `a_handler_runs_with_no_animation_callback` | caught |
+
+21 of 21 caught; `scene/controls.c3`, `scene/input.c3` and `js/frame_loop.c3`
+restore byte-identical.
+
+### The injections that found redundancy rather than a bug
+
+**Five escaped on the first pass, and only two of them were the tests' fault.**
+
+Two — "damping cannot be turned off" and "a caller with no clock coasts anyway"
+— were not caught because the guard existed in *two* places, `remember_spin` and
+`coast`, and removing either changed nothing. That is not a test gap, it is the
+thing `controls.c3` already argues against in as many words: a second mechanism
+that hides the failure of the first. The fix was to the code, not the check —
+`damping_ms` is now read in one place, and the two `dt_ms` guards were kept
+because they are required for different reasons (one cannot divide by zero time,
+the other must not answer "moved" for a frame that moved nothing).
+
+Two more — "a release event is read as a press" and "a tapped key is reported as
+held" — escaped because every check fed `InputTracker.step` a `FrameKeys`
+directly, which is the right way to say what the keyboard *did* and says nothing
+at all about the one function that reads `c3w`. `the_window_queue_becomes_the_frames_edges`
+is that function: an event list in, two bitsets out.
+
+The fifth was a bad injection — it happened to be neutralised by the pan branch
+— and was replaced with one that isolates what the check is actually about.
+
+### What was measured live, and what was not
+
+The idle loop was measured directly, and needs no mouse: **0.0% CPU** across
+repeated samples with the window open, a `run_script` answered while it slept,
+another after a further idle stretch, and 0.0% again after. The
+`+[NSEvent pressedMouseButtons]` call was smoke-tested against a real window —
+the selector resolves, the ABI is right, and it answers false with nothing held.
+
+**The coast's positive case was not confirmed live.** What was seen, in a
+per-frame trace before live mouse testing was stopped, is the drag itself
+applying -9.60 degrees a frame and then nothing after the release — which is the
+*negative* case behaving correctly, because the synthetic drag's last twenty
+milliseconds were stationary and a hand that stops before it lets go is meant to
+stop the scene. The positive case rests on the nine headless checks and the ten
+injections above.
+
+---
+
+# Part six — what is left
+
+Everything the list here held is built — see Part five. What is left is smaller
+and mostly not code.
 
 ## The smaller ones
 
-- **Cursor feedback.** `Window.set_cursor(CLOSED_HAND)` while orbiting,
-  `OPEN_HAND` over the window otherwise. macOS only; the other backends are
-  no-op stubs, which is fine. Now that a click picks, the more useful version is
-  `POINTING_HAND` when the cursor is over something pickable — which is a
-  `scene.pick` per frame and therefore a decision about cost rather than a
-  one-liner. `three.input.pointer` already lets a script do it for itself.
-- **The pointer is read twice a frame.** `drive_camera` calls `getMousePos` for
-  its delta and `serve` calls it again for the cursor, because the two want
-  different units and neither wants the other's. Harmless — it is an accessor —
-  but it means the camera and the click can disagree by whatever the mouse moved
-  in between, which is a pixel at most and has never been visible.
-- **Damping.** A per-frame decay on the orbit velocity. `drive_camera` is
-  already called once a frame beside the tick, so what it wants now is the time
-  delta rather than the call — `serve()` computes one for `tick` and does not
-  hand it to `Controls`.
-- **Windows parity.** `lib/window.c3l/win32/main.c3:651-661` stubs `get_scroll`,
-  `get_scroll_x`, `get_text` and `get_scale` to zero, so zoom, typed text and
-  retina scaling are all dead there. Linux is complete. This is a change to
-  `c3w`, which is a submodule, so it is somebody's decision rather than a task.
-- **Sub-frame key presses.** Measured above: a press and release inside one
-  frame is invisible, because `c3w` hands back a latch rather than a queue.
-  `Window.getEvent` returns only the map, so seeing it would mean the submodule
-  exposing the events it already drains. A `c3w` change, and so a decision.
-- **The stuck-latch fix at the source.** The release gate is a workaround in the
-  right place, but the real answer is `+[NSEvent pressedMouseButtons]`, which
-  reports the physically-held buttons independently of the event stream — one
-  objc call, and it would let a stuck latch clear on the very next frame instead
-  of at the next click. Two things now depend on that healing rather than one:
-  the camera stops turning on its own a frame sooner, and the first real click
-  after a stuck latch stops being swallowed. Still a `c3w` change, and so still
-  a decision rather than a task.
-- **Idle CPU.** The windowed loop renders continuously at whatever rate the
-  swapchain allows, and `getEvent(wait: true)` plus `Window.wake` exist for an
-  on-demand loop that sleeps in the kernel at 0%. Now decidable, and the
-  condition is already written down — it is `tick`'s own early return, which is
-  false exactly when nothing is registered: `frame_active`, a key handler, or a
-  click handler. A runtime with any of them is never idle and must not sleep. The awkward half is that the MCP
-  listener has to be able to wake the loop, which is `Window.wake` from the
-  listener's thread — the one place in the program where those two threads would
-  touch.
+- **Hover feedback.** The cursor already says whether the hand is on the scene
+  and whether it is holding it. What it does not say is whether there is
+  anything *under* it worth clicking, and `POINTING_HAND` over a pickable node
+  would. That is a `scene.pick` every frame the mouse moves, so it is a decision
+  about cost rather than a one-liner — and `three.input.pointer` already lets a
+  script do it for itself, which is the argument for leaving it there.
+- **A DPI-aware manifest for Windows.** `get_scale` now reads the real DPI and
+  will keep answering 1.0 until the *application* declares per-monitor
+  awareness, because that declaration changes what every coordinate in the
+  process means, including the size the window was asked for. It belongs to
+  whoever ships a Windows build of this, not to `c3w`.
+- **`should_close` on Windows.** Still `false`, with `WM_QUIT` latching `ESCAPE`
+  instead. It is the one remaining piece of the Windows backend that is a stub
+  rather than an answer, and it was left out of the parity work deliberately:
+  the other four were reads, and this one changes when the loop exits.
+- **A running window on Linux and Windows.** Both backends compile — Win32
+  links against the MSVC SDK, both Linux backends type-check for `linux-x64` —
+  and neither has been *run* since any of this was written. Compiling catches
+  the failure a blind port actually has, and it does not catch a wrong sign or a
+  message that never arrives.
 
 ## Open questions
 

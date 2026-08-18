@@ -353,13 +353,47 @@ fn void? run(Options opts)
 	}
 
 	Controls controls = default_controls();
+	c3w::CursorShape shown;
+	Clock since_start = clock::now();
+	long last_ns;
+	// Nothing but the mouse can change this window, so it sleeps between
+	// gestures — see `serve`, which has more to wait for and says why there.
+	bool quiet = false;
+
 	while (!window.should_close())
 	{
-		c3w::EventMap events = window.getEvent();
+		c3w::EventMap events = window.getEvent(wait: quiet);
 		if (events.is_pressed(ESCAPE)) break;
-		drive_camera(renderer: &renderer, window: &window, controls: &controls, events: events);
-		renderer.frame()!;
+
+		long now_ns = (long)since_start.to_now();
+		float dt_ms = (float)(now_ns - last_ns) / 1_000_000.0f;
+		last_ns = now_ns;
+
+		float[<2>] at = window.getMousePos();
+		Cursor cursor = window_view(&renderer, &window).cursor(at, events.is_pressed(LEFT_MOUSE));
+		bool moved = drive_camera(
+			renderer: &renderer, window: &window, controls: &controls,
+			events: events, at: at, dt_ms: dt_ms
+		);
+		show_cursor(&window, &shown, cursor_shape(cursor.inside, controls.dragging));
+
+		bool presented = renderer.frame()!;
+		quiet = presented && !moved;
 	}
+}
+
+<*
+ Ask the window for a cursor, once the shape has actually changed.
+
+ Setting it every frame would be an objc call sixty times a second to say the
+ same thing, and — worse — it would overrule whatever AppKit put there for the
+ resize edges the instant the pointer touched one.
+*>
+fn void show_cursor(c3w::Window* window, c3w::CursorShape* shown, c3w::CursorShape want)
+{
+	if (want == *shown) return;
+	*shown = want;
+	window.set_cursor(want);
 }
 
 <*
@@ -377,10 +411,21 @@ fn void? run(Options opts)
  The extent is read rather than the window's own size because the frame loop
  keeps it current through a live resize drag and `Window.width` is only what
  `new` was asked for.
+
+ The cursor arrives as an argument rather than being read here, because the
+ caller needs it too — in image pixels, for the click — and one reading answered
+ two questions is one fewer way for the camera and the picker to disagree about
+ where the mouse was.
+
+ @param at : `The window's own answer, in its own units. Read once by the caller and shared.`
+ @param dt_ms : `Milliseconds since the last call, for the coast.`
+ @return `true when the camera moved — a drag, a scroll, or a coast still running.`
 *>
-fn void drive_camera(Renderer* renderer, c3w::Window* window, Controls* controls, c3w::EventMap events)
+fn bool drive_camera(
+	Renderer* renderer, c3w::Window* window, Controls* controls, c3w::EventMap events,
+	float[<2>] at, float dt_ms
+)
 {
-	float[<2>] at = window.getMousePos();
 	PointerState pointer = {
 		.orbit = events.is_pressed(LEFT_MOUSE),
 		// Middle alongside right because a trackpad has no third button and a
@@ -398,7 +443,7 @@ fn void drive_camera(Renderer* renderer, c3w::Window* window, Controls* controls
 	// and the alternative is an infinity in the camera target.
 	float height = scale > 0.0f ? (float)renderer.viewer.extent.height / scale : 0.0f;
 
-	controls.apply(&renderer.pass.camera, pointer, height);
+	return controls.apply(&renderer.pass.camera, pointer, height, dt_ms);
 }
 
 <*
@@ -450,7 +495,13 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	mcp::Server server = new_mcp_server(&host);
 
 	mcp::Listener listener;
-	listener.start(port)!;
+	// **The wake is what lets the window sleep.** Without it an idle loop parked
+	// in `getEvent(wait: true)` would go on sleeping through every request, and
+	// the whole tool surface would answer only when somebody moved the mouse.
+	// `Window.wake` posts an application-defined event from the listener's own
+	// thread, which is the one thing a foreign thread is allowed to do to a
+	// Cocoa run loop.
+	listener.start(port, wake: &wake_window, wake_ctx: window)!;
 	defer listener.stop();
 
 	io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
@@ -467,6 +518,7 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	Controls controls = default_controls();
 	InputTracker keyboard;
 	InputState input;
+	c3w::CursorShape shown;
 
 	// What the animation callback is told the time is. Stamped once, here, so it
 	// is monotonic across every registration a script makes — which is what
@@ -474,34 +526,60 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 	// rotation from it assumes.
 	Clock since_start = clock::now();
 	long last_tick_ns = 0;
+	long last_frame_ns = 0;
+
+	// Whether the last iteration left nothing to do. Read at the top of the next
+	// one, which is the only place the question can be asked: the answer has to
+	// be known *before* the events are fetched, and everything that decides it
+	// happens after.
+	bool quiet = false;
+	bool camera_moved = false;
 
 	while (true)
 	{
 		if (window != null)
 		{
 			if (window.should_close()) break;
-			c3w::EventMap events = window.getEvent();
+			c3w::EventMap events = window.getEvent(wait: quiet);
 			if (events.is_pressed(ESCAPE)) break;
+
+			long now_ns = (long)since_start.to_now();
+			float dt_ms = (float)(now_ns - last_frame_ns) / 1_000_000.0f;
+			last_frame_ns = now_ns;
+
+			// Read once and handed to both: the camera wants a delta in points
+			// and the click wants a position in image pixels, and two readings
+			// of the same instant are two chances for them to disagree.
+			float[<2>] at = window.getMousePos();
+			Cursor cursor = window_view(renderer, window).cursor(
+				at, events.is_pressed(LEFT_MOUSE)
+			);
+
 			// Before `pump`, so a drag and a script that arrives in the same
 			// iteration resolve in the order they happened rather than the
 			// script's camera being overwritten by a stale anchor.
-			drive_camera(renderer: renderer, window: window, controls: &controls, events: events);
+			camera_moved = drive_camera(
+				renderer: renderer, window: window, controls: &controls,
+				events: events, at: at, dt_ms: dt_ms
+			);
+			show_cursor(window, &shown, cursor_shape(cursor.inside, controls.dragging));
+
 			// Sampled here rather than at the tick, because this is where the
 			// events are: `getEvent` clears the typed text on its next call, and
 			// the edges are a difference against what the *previous* call saw.
 			//
-			// The clock is read here too, and separately from the tick's below.
-			// A click is timed from when the button was *sampled*, and what
+			// The clock is this iteration's own, and not the tick's below. A
+			// click is timed from when the button was *sampled*, and what
 			// happens between here and the tick is a whole `pump` — which on the
 			// iteration that runs a slow tool call is seconds, and would turn
 			// every click that straddled it into a hold.
 			input = keyboard.step(
-				read_events(events),
+				// The queue as well as the latch: a key pressed and released
+				// between two frames is in one and not the other.
+				read_events(events, window.events()),
 				window.get_text(),
-				window_view(renderer, window).cursor(
-					window.getMousePos(), events.is_pressed(LEFT_MOUSE)
-				),
-				(double)since_start.to_now() / 1_000_000.0,
+				cursor,
+				(double)now_ns / 1_000_000.0,
 			);
 		}
 
@@ -519,7 +597,22 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between
 			// requests, which reads as a hung application.
-			renderer.frame()!;
+			bool presented = renderer.frame()!;
+
+			// **When the next fetch is allowed to sleep in the kernel.** Every
+			// term is something that would be lost by sleeping through it:
+			//
+			// - `presented` — a frame that rebuilt the swapchain instead of
+			//   drawing has not shown the current state yet, so the loop owes
+			//   one more iteration before it may rest.
+			// - `is_animating` — a registered callback or handler means the
+			//   runtime has work every frame by definition, and this is `tick`'s
+			//   own early-return condition rather than a second copy of it.
+			// - `camera_moved` — a coast is still running, and a drag that ends
+			//   is followed by a third of a second of frames nobody asked for.
+			// - `handled` — a tool call may have changed the scene, and the
+			//   answer went out before the frame that shows it.
+			quiet = presented && !runtime.is_animating() && !camera_moved && handled == 0;
 		}
 		else
 		{
@@ -643,4 +736,22 @@ fn void? pump(Renderer* renderer, c3w::Window* window, uint frames)
 		window.getEvent();
 		renderer.frame()!;
 	}
+}
+
+<*
+ Poke the window's event loop awake. Called on the listener's thread.
+
+ The one thing a foreign thread may do to a Cocoa run loop: `Window.wake` posts
+ an application-defined event, which `getEvent` falls through its switch and
+ hands to `NSApp`, which ignores it. So a wake costs exactly one extra iteration
+ and changes nothing else.
+
+ Null for a headless server, where the parameter is the window itself and there
+ is nothing to wake — the loop there paces itself with a sleep instead.
+*>
+fn void wake_window(void* ctx)
+{
+	c3w::Window* window = (c3w::Window*)ctx;
+	if (window == null) return;
+	window.wake();
 }

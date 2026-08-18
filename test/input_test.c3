@@ -78,15 +78,29 @@ macro String @answer(three::JsRuntime* run, String source)
 	return result.value.copy(mem);
 }
 
-// One frame of keyboard: these names held, this text typed.
+// One frame of keyboard: these names held, this text typed. The latch only —
+// what the window's event queue adds is `sub_frame` below.
 fn three::InputState frame(three::InputTracker* tracker, String[] held, String text = "")
 {
+	return tracker.step({ .down = named(held) }, text);
+}
+
+fn three::KeyBits named(String[] names)
+{
 	three::KeyBits bits;
-	foreach (String name : held)
+	foreach (String name : names)
 	{
 		test::@check(bits.add(name), "the fixture names a real key: '%s'", name);
 	}
-	return tracker.step(bits, text);
+	return bits;
+}
+
+// A frame in which these keys were pressed and let go again before anything
+// looked: nothing is held at the end of it, and the queue is the only witness.
+fn three::InputState sub_frame(three::InputTracker* tracker, String[] tapped)
+{
+	three::KeyBits fired = named(tapped);
+	return tracker.step({ .fired_down = fired, .fired_up = fired });
 }
 
 // ============================================================================
@@ -972,6 +986,152 @@ fn three::InputState pointer_frame(
 {
 	three::Cursor cursor = { .inside = inside, .down = down, .x = x, .y = y };
 	return tracker.step({}, "", cursor, at_ms);
+}
+
+// ============================================================================
+// The queue behind the latch
+// ============================================================================
+
+<*
+ A press and a release inside one frame is seen, which the latch alone cannot do.
+
+ Measured before it was fixed: `osascript`'s `keystroke` presses and releases in
+ the same instant, and it produced the typed text and **no edge at all** — the
+ flag was set and cleared between two samples. A person cannot type that fast,
+ but synthetic input can, a key repeat that lands badly can, and any frame that
+ runs long can.
+
+ Both edges are reported in the one frame, because both happened in it.
+*>
+fn void a_key_tapped_inside_one_frame_is_still_seen() @test
+{
+	three::InputTracker tracker;
+	three::KeyName space = three::find_key("space")!!;
+
+	three::InputState state = sub_frame(&tracker, { "space" });
+
+	test::@check(state.went_down(space), "the press is not lost");
+	test::@check(state.went_up(space), "and neither is the release");
+	test::@check(!state.is_down(space), "while nothing is held, which is also true");
+}
+
+<*
+ And it is over: the frame after a tap reports nothing.
+*>
+fn void a_tap_does_not_repeat_on_the_next_frame() @test
+{
+	three::InputTracker tracker;
+	three::KeyName space = three::find_key("space")!!;
+
+	sub_frame(&tracker, { "space" });
+	three::InputState after = frame(&tracker, {});
+
+	test::@check(!after.went_down(space), "the press was this frame's, not every frame's");
+	test::@check(!after.went_up(space), "and so was the release");
+}
+
+<*
+ A window that reports no queue at all keeps exactly the edges it had.
+
+ The two sources are or-ed rather than one replacing the other for this: three
+ of `c3w`'s five backends fill the log today, and a host on one that does not
+ must not silently lose every edge it used to have.
+*>
+fn void the_latch_alone_still_reports_edges() @test
+{
+	three::InputTracker tracker;
+	three::KeyName w = three::find_key("w")!!;
+
+	test::@check(frame(&tracker, { "w" }).went_down(w), "down, from the difference alone");
+	test::@check(!frame(&tracker, { "w" }).went_down(w), "and once, from the difference alone");
+	test::@check(frame(&tracker, {}).went_up(w), "up, from the difference alone");
+}
+
+<*
+ A held key does not report a press every frame just because the queue said so
+ once.
+*>
+fn void the_queue_does_not_re_press_a_held_key() @test
+{
+	three::InputTracker tracker;
+	three::KeyName w = three::find_key("w")!!;
+
+	three::KeyBits held = named({ "w" });
+
+	// The frame it went down: both sources agree.
+	three::InputState first = tracker.step({ .down = held, .fired_down = held });
+	test::@check(first.went_down(w), "pressed on the frame it arrived");
+
+	// Still held, and no new event.
+	three::InputState second = tracker.step({ .down = held });
+	test::@check(!second.went_down(w), "and not again while it is simply held");
+	test::@check(second.is_down(w), "though it is still down, which is the other question");
+}
+
+<*
+ The window's own queue becomes the frame's edges.
+
+ Everything above this hands `InputTracker.step` a `FrameKeys` directly, which
+ is the right way to say what the keyboard *did* and says nothing about the one
+ function that reads `c3w`. This is the translation: an event list in, two
+ bitsets out, and the direction of each event is the whole of it.
+
+ The map is left empty on purpose — a key tapped inside one frame is not held at
+ the end of it, and the latch is genuinely blank. That is the case the queue
+ exists for.
+*>
+fn void the_window_queue_becomes_the_frames_edges() @test
+{
+	c3w::EventMap latch;
+	c3w::Event[3] log = {
+		{ .type = c3w::EventType.KEY_PRESSED, .value = c3w::EventKey.W },
+		{ .type = c3w::EventType.KEY_RELEASED, .value = c3w::EventKey.W },
+		// A button in the same queue, which is not a key and must not become one.
+		{ .type = c3w::EventType.MOUSE_PRESSED, .value = c3w::EventKey.LEFT_MOUSE },
+	};
+
+	three::FrameKeys keys = three::read_events(latch, log[..]);
+
+	test::@check(keys.fired_down.has(c3w::EventKey.W), "a press event is a press");
+	test::@check(keys.fired_up.has(c3w::EventKey.W), "a release event is a release");
+	test::@check(!keys.down.has(c3w::EventKey.W), "an event does not latch the key it named");
+	test::@check(
+		!keys.fired_down.has(c3w::EventKey.LEFT_MOUSE),
+		"and a mouse button in the queue does not become a keyboard edge"
+	);
+}
+
+<*
+ A latched key is level state and not an edge, however the queue is read.
+*>
+fn void the_latch_and_the_queue_answer_different_questions() @test
+{
+	c3w::EventMap latch;
+	latch.set(c3w::EventKey.A, true);
+	latch.set(c3w::EventKey.B, false);
+	defer latch.free();
+
+	three::FrameKeys keys = three::read_events(latch);
+
+	test::@check(keys.down.has(c3w::EventKey.A), "what the map says is held, is held");
+	test::@check(!keys.down.has(c3w::EventKey.B), "and what it says is not, is not");
+	test::@check(!keys.fired_down.has(c3w::EventKey.A), "with no queue there are no events");
+}
+
+<*
+ A tap of a two-key name answers for the name.
+
+ `'shift'` means either shift, and the queue carries whichever one the hardware
+ sent. The row-based lookup has to work the same on this path as on the latch's.
+*>
+fn void a_tapped_chord_key_answers_for_its_name() @test
+{
+	three::InputTracker tracker;
+	three::KeyName shift = three::find_key("shift")!!;
+
+	three::InputState state = sub_frame(&tracker, { "shiftright" });
+	test::@check(state.went_down(shift), "the right shift is a shift");
+	test::@check(state.went_up(shift), "coming and going");
 }
 
 fn void a_script_can_ask_where_the_pointer_is() @test
