@@ -33,9 +33,9 @@ import std::math;
 import std::math::vector;
 import std::math::matrix;
 
-// A node that draws nothing — a group, or the scene root.
-const uint NO_ASSET = uint::max;
-const uint NO_MESH  = uint::max;
+// A node that draws nothing — a group, or the scene root. `NO_ASSET` is an
+// `AssetId` and lives in `scene/asset.c3` beside the handle it is the absence of.
+const uint NO_MESH = uint::max;
 
 <*
  A handle to a node in a particular `Scene`.
@@ -79,7 +79,14 @@ struct Node
 
 	// What this node draws. `mesh` indexes that asset's `meshes`; a group
 	// carries NO_ASSET and is traversed but never drawn.
-	uint asset;
+	//
+	// A handle rather than an index since G2, because assets can be unloaded and
+	// their slots reused. A node never outlives the asset it names — it holds a
+	// reference for exactly as long as it is alive, and the sweep only takes
+	// assets at zero — so the generation here is never the one that goes stale.
+	// It is carried so that the handle a node hands *back* (to a raycast hit, to
+	// the draw list) is a whole handle rather than half of one.
+	AssetId asset;
 	uint mesh;
 
 	// How this node draws. Indexes `MeshPass.materials`; `DEFAULT_MATERIAL` is

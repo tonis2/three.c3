@@ -619,6 +619,25 @@ fn void Gpu.report(&self)
 }
 
 <*
+ Block until the device has finished everything already submitted.
+
+ What keeps `Assets.unload_unused` from freeing a buffer a frame in flight is
+ still reading (`game.md` G2/S4). A full idle is heavy — it is the opposite of
+ what `MAX_FRAMES_IN_FLIGHT` exists for — and it is deliberately the version
+ built first, because the only thing that unloads today is a level transition,
+ which is already a stall. A tagged deletion queue is what the first
+ mid-gameplay unload needs and this is the one line it replaces.
+
+ Answers nothing on failure: `VK_ERROR_DEVICE_LOST` here means the frame loop is
+ about to fail on its own with a better sentence, and refusing to free would
+ turn a lost device into a leak as well.
+*>
+fn void Gpu.wait_idle(&self)
+{
+	if (self.handle != null) self.handle.waitIdle();
+}
+
+<*
  Tear down everything this owns, in reverse. The surface and the instance are
  not ours: whoever made them frees them.
 *>

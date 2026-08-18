@@ -50,15 +50,15 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "load", &js_load, 1);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
-	self.bind(host, "assetPath", &js_asset_path, 1);
-	self.bind(host, "meshNames", &js_mesh_names, 1);
+	self.bind(host, "assetPath", &js_asset_path, 2);
+	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
 
 	// The graph
 	self.bind(host, "root", &js_root, 0);
 	self.bind(host, "reset", &js_reset, 0);
 	self.bind(host, "epoch", &js_epoch, 0);
-	self.bind(host, "add", &js_add, 5);
+	self.bind(host, "add", &js_add, 6);
 	self.bind(host, "remove", &js_remove, 2);
 	self.bind(host, "setParent", &js_set_parent, 4);
 	self.bind(host, "setTransform", &js_set_transform, 11);
@@ -83,6 +83,7 @@ fn void JsRuntime.install_bindings(&self)
 
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
+	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
@@ -138,6 +139,47 @@ fn qjs::Value handle_value(qjs::Context* js, NodeId id)
 	js.set_index(pair, 0, qjs::int_value((int)id.index));
 	js.set_index(pair, 1, qjs::int_value((int)id.generation));
 	return pair;
+}
+
+<*
+ An `AssetId` as `[index, generation]`, the same shape a `NodeId` crosses in.
+
+ Two numbers rather than an object because the prelude immediately destructures
+ it, and because an object would allocate a shape per load.
+*>
+fn qjs::Value asset_value(qjs::Context* js, AssetId id)
+{
+	qjs::Value pair = js.array();
+	js.set_index(pair, 0, qjs::int_value((int)id.index));
+	js.set_index(pair, 1, qjs::int_value((int)id.generation));
+	return pair;
+}
+
+<*
+ Read `(index, generation)` from `args[at]` and `args[at + 1]` and resolve it.
+
+ The asset half of `arg_handle`, and the sentence is the one an unloaded asset
+ earns: since G2 a slot is reused, so "no such asset" and "that asset was
+ unloaded and something else is there now" are different things to have done,
+ and only the second one is worth a word about `unloadUnused`.
+
+ @return `The handle, or NO_ASSET with a JS exception left pending, in which case the caller must write out and return immediately.`
+*>
+fn AssetId arg_asset(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
+{
+	AssetId id = {
+		.index = (uint)arg_int(js, argc, args, at),
+		.generation = (uint)arg_int(js, argc, args, at + 1),
+	};
+	if (self.pass == null || self.pass.assets.slot(id) == null)
+	{
+		*out = js.raise(
+			"that asset is no longer loaded — three.unloadUnused() or scene.unload() freed it, "
+			"and loading the file again gives a fresh handle"
+		);
+		return NO_ASSET;
+	}
+	return id;
 }
 
 fn qjs::Value vec3_value(qjs::Context* js, Vec3 v)
@@ -199,7 +241,10 @@ fn void js_reset(
 	qjs::Context js = qjs::wrap(ctx);
 
 	if (!self.pass.scene.started) self.pass.scene.init();
-	self.release_subtree(self.pass.scene.root);
+	// `Scene.remove` releases every asset reference under the root on its own
+	// since G2 — see `Scene.attach_assets`. This used to walk the subtree here
+	// as well, which was a second implementation of the count and is exactly
+	// what stopped being safe once the count decides what gets freed.
 	self.pass.scene.remove(self.pass.scene.root);
 
 	self.epoch += 1;
@@ -215,27 +260,11 @@ fn void js_epoch(
 }
 
 <*
- Give back one asset reference per drawable node in a subtree.
+ `add(asset, assetGeneration, mesh, parentIndex, parentGeneration, name)`.
 
- `Assets.refs` is bookkeeping — dropping to zero does not unload anything before
- M6 — but it is bookkeeping that is either right or worthless, and a `remove`
- that skipped it would make an unused asset permanently look used.
-*>
-fn void JsRuntime.release_subtree(&self, NodeId id)
-{
-	@pool()
-	{
-		self.pass.scene.@traverse(id; NodeId child, Node* node)
-		{
-			if (node.asset != NO_ASSET) self.pass.assets.release(node.asset);
-		};
-	};
-}
-
-<*
- `add(asset, mesh, parentIndex, parentGeneration, name)`.
-
- A negative `asset` is a group: traversed and transformed, never drawn.
+ A negative `asset` is a group: traversed and transformed, never drawn — and it
+ is read before the handle is resolved, so a group never has to carry a
+ generation for an asset it does not name.
 *>
 fn void js_add(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -244,31 +273,34 @@ fn void js_add(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int asset = arg_int(&js, argc, args, 0);
-	int mesh = arg_int(&js, argc, args, 1);
+	int index = arg_int(&js, argc, args, 0);
+	int mesh = arg_int(&js, argc, args, 2);
 
-	NodeId parent = arg_handle(self, &js, argc, args, 2, out);
+	NodeId parent = arg_handle(self, &js, argc, args, 3, out);
 	if (!parent.is_set()) return;
 
 	@pool()
 	{
-		String name = arg_text(&js, argc, args, 4, tmem);
+		String name = arg_text(&js, argc, args, 5, tmem);
 
-		if (asset < 0)
+		if (index < 0)
 		{
 			*out = handle_value(&js, self.pass.scene.add_group(parent, name));
 			return;
 		}
 
-		if (self.pass.assets.mesh((uint)asset, (uint)mesh) == null)
+		AssetId asset = arg_asset(self, &js, argc, args, 0, out);
+		if (!asset.is_set()) return;
+
+		if (self.pass.assets.mesh(asset, (uint)mesh) == null)
 		{
-			*out = js.raise(string::tformat("there is no mesh %d in asset %d", mesh, asset));
+			*out = js.raise(string::tformat("there is no mesh %d in asset %d", mesh, index));
 			return;
 		}
 
-		NodeId id = self.pass.scene.add_mesh((uint)asset, (uint)mesh, parent, name);
-		self.pass.assets.retain((uint)asset);
-		*out = handle_value(&js, id);
+		// No retain here since G2: `Scene.create_slot` takes the reference, so
+		// the count has one implementation rather than one per caller.
+		*out = handle_value(&js, self.pass.scene.add_mesh(asset, (uint)mesh, parent, name));
 	};
 }
 
@@ -289,7 +321,6 @@ fn void js_remove(
 		return;
 	}
 
-	self.release_subtree(id);
 	self.pass.scene.remove(id);
 }
 
@@ -582,11 +613,48 @@ fn void js_stats(
 	js.set_property(object, "uniqueMeshes", qjs::int_value((int)stats.unique_meshes));
 	js.set_property(object, "instances", qjs::int_value((int)stats.instances));
 	js.set_property(object, "nodes", qjs::int_value((int)stats.nodes));
+	js.set_property(object, "assets", qjs::int_value((int)stats.assets));
 	js.set_property(object, "triangles", qjs::int_value((int)stats.triangles));
 	js.set_property(object, "vertices", qjs::int_value((int)stats.vertices));
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
 	js.set_property(object, "culledLastFrame", qjs::int_value((int)stats.culled_last_frame));
+	*out = object;
+}
+
+<*
+ `unloadUnused()` — free every asset no live node names, and say what went.
+
+ `game.md` G2/S3, and the reason it is a verb rather than a finalizer is written
+ there: a collector-driven free makes resident memory depend on when QuickJS felt
+ like collecting, which is the worst possible property for the one number a game
+ watches. A level boundary is an explicit moment and this is what happens at it.
+
+ Answers with `{ assets, textures, bytes }` rather than nothing, because an agent
+ that cannot see the number move has no way to tell a working unload from a
+ no-op — and `stats()` afterwards is the independent confirmation.
+
+ Costs a full device idle when there is anything to free and nothing at all when
+ there is not, so calling it every level is right and calling it every frame is
+ merely wasteful.
+*>
+fn void js_unload_unused(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	// A null device is a scene-math runtime: nothing was ever uploaded, so there
+	// is nothing to give back and an exception would make a script written for a
+	// game fail under a test harness.
+	Gpu* gpu = self.renderer != null ? &self.renderer.gpu : null;
+	UnloadReport report = self.pass.assets.unload_unused(gpu);
+
+	qjs::Value object = js.object();
+	js.set_property(object, "assets", qjs::int_value((int)report.assets));
+	js.set_property(object, "textures", qjs::int_value((int)report.textures));
+	js.set_property(object, "bytes", qjs::number_value((double)report.bytes));
 	*out = object;
 }
 

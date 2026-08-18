@@ -514,6 +514,17 @@ pieces exported from the same source share their material and their images, and
 neither the renderer nor the exporter sees them twice. Assets are refcounted by
 the number of live `Mesh` nodes pointing at them.
 
+**The refusal that made scenes fast is the same refusal that makes unloading
+safe.** Three.js needs an explicit `.dispose()` because anything can hold a
+hidden reference to a buffer, so no count is ever complete and the library
+cannot tell you when a texture is unused. Here nothing can hold one — there is
+no accessor from an asset to its data — so *"referenced by at least one live
+node"* is a complete answer rather than an optimistic one, and freeing at zero
+is sound rather than hopeful. `scene.unload()` and `three.unloadUnused()` are
+what a game says at a level boundary; an asset handle carries a generation so
+that a reference to something freed is refused rather than pointed at whatever
+took its slot. See `game.md` G2.
+
 Rendering is: traverse, cull, bucket by `(mesh, material)`, write one transform per
 instance into a per-frame instance buffer, and issue one instanced draw per bucket.
 The bucketing is what makes the "linked, not duplicated" claim true at runtime; the

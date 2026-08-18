@@ -50,11 +50,15 @@ The gap is not in the renderer. It is in lifecycle.
   implementation, and that single fact reorders the cost of this whole document.
   It wants two changes of its own — an up-axis it does not have, and a
   `remove_body` nothing has needed until now — and both are small.
-- **`gltf.c3l` already parses animation and skinning.** Channels, samplers,
-  `Animation.duration`, `loop_time`, `clamp_time`, `find_skin_animations`, a
-  16 KB `skinning.c3`, IK, and even `KHR_physics_rigid_bodies`. `scene/asset.c3`
-  uses **none** of it — zero mentions of "animation". G3 and G4 are runtime
-  work only.
+- **`gltf.c3l` already parses animation and skinning, and already streams.**
+  Channels, samplers, `Animation.duration`, `loop_time`, `clamp_time`,
+  `find_skin_animations`, a 16 KB `skinning.c3`, IK, even
+  `KHR_physics_rigid_bodies` — and, separately, per-mesh, per-material,
+  per-skin, per-animation and per-node loading with refcounted slots and mmapped
+  GLB buffers. `scene/asset.c3` uses **none** of the first list and exactly two
+  verbs of the second, both of them `_all_`. So G4 is runtime work only; **G3 is
+  runtime work plus the one loader rework three separate things are waiting
+  on**, and that is where the milestone's real weight is.
 - **`Asset.refs` already exists and already says what G2 is for**, in a comment
   written before anyone asked: *"dropping to zero does not unload yet, because
   unloading under two frames in flight needs the deferred delete queue and
@@ -108,8 +112,8 @@ The smallest milestone that makes the idea real. No new subsystems.
 imports resolve, confined to the assets directory; `--assets` composes with
 `--mcp` in one loop and one process; a game's frames are warned about and
 counted where an agent's are killed; and `three.inventory()` describes every
-glTF in the directory without uploading one. Sixteen new tests, and the suite
-is 290 and leak-clean under `--test-noleak`.
+glTF in the directory without uploading one. Eleven new tests, and the suite is
+288 and leak-clean under `--test-noleak`.
 
 Four things are worth keeping in view:
 
@@ -235,15 +239,93 @@ answers by uploading everything to find out.
 
 ---
 
-# G2 — unloading: what turns a scene into levels
+# G2 — unloading: what turns a scene into levels — **built**
 
 The only architecturally load-bearing item in this document.
 
-`Assets.retain`/`release` (`scene/asset.c3:192`) move a counter and nothing
-else. `Assets.free` frees everything, at shutdown. `new three.Scene()` empties
-the host scene and leaves every upload resident. **Level 1 → level 2 → level 3
-grows VRAM monotonically until the process exits.** Invisible to an agent poking
-at one scene; fatal to a game.
+Before it, `Assets.retain`/`release` moved a counter and nothing else,
+`Assets.free` freed everything at shutdown, and `new three.Scene()` emptied the
+host scene and left every upload resident. **Level 1 → level 2 → level 3 grew
+VRAM monotonically until the process exited.** Invisible to an agent poking at
+one scene; fatal to a game.
+
+	scene.unload()          // drop this scene's nodes, free what nothing else holds
+	three.unloadUnused()    // free every asset at zero refs
+
+**All six steps are in.** An asset handle carries a generation and a freed slot
+is reused; the refcount is `Scene.create_slot`'s and `Scene.kill`'s; the free is
+a verb rather than a finalizer; the device is idled once per sweep; textures
+unload with a count of their own; and `stats()` reports resident assets so the
+number can be watched. Sixteen new tests — nine against the host, four through
+the JavaScript API, three on where `three.load` reads from. The suite is 304 and
+leak-clean under `--test-noleak`.
+
+Five things worth keeping in view:
+
+- **A hundred cycles is the test; one is not.** An off-by-one in the refcount, a
+  last texture reference dropped twice, and a free list that is written but never
+  read all survive a single load-unload-assert. The check that matters asserts
+  the three resident numbers after *every* cycle and then asserts that the table
+  itself stopped growing — `assets.len() == 1` after a hundred levels is what
+  says dead slots come back rather than merely being marked.
+- **Counting and destroying are two claims, and only one of them gives memory
+  back.** Every count in the suite passed with `Texture.free` stubbed out. What
+  catches it is that `Texture.free` zeroes its struct, so `release_texture`
+  deliberately does *not* zero the slot itself — a leftover image handle in a
+  dead slot is then a thing a test can point at. Three mutations were run against
+  the finished suite (no release on `kill`, no slot reuse, no texture destroy)
+  and each fails at least one check.
+- **The generation earns itself in one line.** Load, unload, build the same
+  shape again: `fresh.asset === stale.asset` is **true** — the slot is reused,
+  which is the point of the free list — and `fresh.assetGeneration !==
+  stale.assetGeneration`. Without the second field the stale handle would place
+  geometry out of whatever landed in that slot, silently and correctly-looking.
+- **The refusal that made scenes fast is what makes unloading safe**, and that
+  is now written into `plan.md` §2 where the thesis lives. Three.js needs
+  `.dispose()` because anything can hold a hidden reference to a buffer; here
+  nothing can, so *"referenced by at least one live node"* is a complete answer
+  and freeing at zero is sound rather than hopeful.
+- **G1 had a defect that only a game could find.** `three.inventory()` answers
+  with paths relative to the assets directory and `three.load` resolved against
+  the working directory, so the first two lines of any real game did not compose
+  — `could not load level_a.glb: gltf::FILE_NOT_FOUND`. `three.load` now goes
+  through the same lexical confinement an `import` does, so inventory's paths go
+  straight in and a game directory can be moved without editing a line inside it.
+
+## What was measured
+
+A level-cycling game booted from `--assets`: 50 load-unload cycles at boot, then
+the 51st level rendered — two textured quads and a generated box, image intact
+after fifty trips through a recycled texture slot. Resident went `assets=3,
+textures=1, bytes=256` with a level up and `assets=0, textures=0, bytes=0` after
+every unload.
+
+The same game left running under `--assets --mcp`, swapping levels once a
+second with the Khronos validation layer loaded: **86 levels swapped, resident
+flat at `assets: 2, textures: 1, bytes: 256` the whole way, and not one
+validation message.** That last part is S4's claim — a buffer freed while a
+frame in flight still referenced it is exactly what the layer reports.
+
+An agent attached mid-flight called `scene.unload()` on the running game and
+watched `assets` go `2 → 0` and `textureBytes` go `256 → 0` in the same answer,
+with `frame.running: true` throughout; the next tick rebuilt the level. And
+`three.load("../../etc/passwd")` came back with *cannot load
+'../../etc/passwd': it climbs out of the assets directory, and a game may only
+read what is inside its own*.
+
+## What is left for later
+
+- **The deletion queue.** S4 built the simple half — one `vkDeviceWaitIdle` per
+  sweep — and it is right for a level boundary, which is already a stall. A game
+  that streams chunks mid-play wants buffers tagged with the frame counter and
+  destroyed two frames on. That is the first thing to build when something
+  actually unloads during gameplay, and nothing else has to move for it.
+- **A stale handle is refused at `add()`, not at `new three.Mesh()`.** The Mesh
+  constructor validates the shape of what it was handed and not the liveness of
+  the asset, because checking would be a host crossing per mesh constructed and
+  the handle is not used until the add. Documented rather than hidden.
+- **Hot reload**, unchanged from below: now that a scene can be dropped and its
+  assets released, re-evaluating `main.js` on a file change is a small addition.
 
 ## S1 — the asset handle gets a generation
 
@@ -255,6 +337,14 @@ already written and already proved at M2.
 The widening is mostly internal: the prelude already wraps the bare int in an
 `Asset` class (`prelude.js:662`), so JavaScript sees an object either way. Every
 host verb that takes an asset index takes a generation with it.
+
+*Built as `AssetId` in `scene/asset.c3`, with `Assets.slot` as the one place
+staleness is decided — out of range, dead, and superseded are three ways to get
+one null, because every caller does the same thing about all three. A mesh
+reference across the boundary grew `assetGeneration` beside `asset`, so
+`geometry.asset === other.asset` still means what the dedup tests said it meant.
+`bucket_key` still packs the index alone: two live nodes naming one slot must
+agree about its generation, because an asset with a live node is never swept.*
 
 ## S2 — the refcount comes from the scene, not from JavaScript
 
@@ -268,16 +358,27 @@ by at least one live node"* is a complete answer rather than an optimistic one.
 **The refusal that made scenes fast is the same refusal that makes unloading
 safe.** That is worth writing into `plan.md` when this lands.
 
-## S3 — the free is explicit, and deliberately not driven by GC
+*Written there, in §2 beside the sentence about refcounting. In code it is
+`Scene.attach_assets`, a back-pointer set by `MeshPass.init` and null in the
+scene-math tests, which have no device and nothing to count. `js_reset` and
+`js_remove` lost their own `release_subtree` walk — a second implementation of
+the count, and the thing that stopped being merely misleading and started being
+a use-after-free once the count decides what gets freed.*
 
-	scene.unload()          // drop this scene's nodes, free what nothing else holds
-	three.unloadUnused()    // free every asset at zero refs
+## S3 — the free is explicit, and deliberately not driven by GC
 
 **Not a QuickJS finalizer.** A GC-driven free makes resident VRAM depend on when
 the interpreter felt like collecting — nondeterminism this project has refused
 everywhere else, and the worst possible property for the one number a game
 watches. A level boundary is an explicit moment in a game; the free happens
 there. An agent can call it too, which is how the effect gets *seen*.
+
+*Both verbs answer with `{ assets, textures, bytes }` rather than nothing, for
+the same reason: an agent that cannot watch the number move has no way to tell
+a working unload from a no-op, and `stats()` afterwards is the independent
+confirmation. `scene.unload()` keeps the Scene — that is what separates it from
+`new three.Scene()`, which empties the graph but also makes every handle you
+were holding throw.*
 
 ## S4 — deferred destruction
 
@@ -291,6 +392,12 @@ is a fraction of the code. The queue is what mid-gameplay unloading needs, and
 mid-gameplay unloading is not a G2 requirement. Build the simple one, leave the
 queue to whatever first wants it.
 
+*Built as `Gpu.wait_idle`, called once per sweep and only when there is
+something to free — so a game that calls `unloadUnused()` every frame out of
+superstition pays nothing for it. Eighty-six level swaps under the validation
+layer produced no messages, which is the check: a buffer freed while a frame in
+flight still referenced it is precisely what the layer reports.*
+
 ## S5 — textures unload too
 
 `Assets.textures` is deduplicated across files and reached by index from
@@ -298,11 +405,25 @@ queue to whatever first wants it.
 half that actually moves the VRAM number — `texture_bytes()` already computes
 it.
 
+*Built as `SharedTexture` — the texture wrapped with its count, rather than a
+count list running beside `Assets.textures`. `scene/asset.c3`'s header says
+there is nothing parallel to the texture list since the descriptor sets went;
+a refcount array alongside it would have put back the exact shape that went
+wrong. A texture slot needs no generation, unlike an asset slot: the only thing
+that can name one is a `GpuMesh`, which holds its reference for as long as it
+exists, so a slot is freed only when nothing at all points at it and a
+generation would be a field nothing could observe.*
+
 ## S6 — `stats()` says so
 
 Resident asset count and texture bytes, added to what `stats()` reports. **An
 agent that can watch VRAM go back down is the only way anyone believes this
 works.**
+
+*`stats().assets` counts *resident* assets and not `assets.len()`, which is the
+number of slots the table has ever needed. They differ by exactly the free list,
+and reporting the wrong one would have shown a working unload as a leak. Added
+to the MCP stats block as well, so the two spellings stay one list.*
 
 ## What proves it
 
@@ -311,26 +432,41 @@ resident asset count, texture count and texture bytes return to exactly the
 number they started at. That single cycle catches every leak this milestone can
 have, and the bookkeeping half of it needs no GPU.
 
+Built as `test/unload_test.c3` (nine checks against the host) and four more in
+`test/js_test.c3` that make the same claims through the surface a game is
+actually written in — the prelude's demotion of JS objects, `H.remove` and
+`Scene.kill`'s recursion are only covered from that side.
+
 ## What G2 unlocks
 
 Hot reload. Once a scene can be dropped and its assets released, re-evaluating
 `main.js` on a file change is a small addition — and combined with `--mcp` it
 means an agent edits a `.js`, the game reloads, and the screenshot shows the
-result. Worth doing immediately after, but not inside, this milestone.
+result. Worth doing immediately after, but not inside, this milestone. *Still
+true and still not done.*
 
 ## The `gltf.c3l` question
 
 `GltfStream.close` already frees what it owns and the leak is not there. What
 the library may want is the *opposite*: a way to keep a parsed document's JSON
-around without its buffers, so G1's inventory does not reopen files. Small, and
-only if the inventory turns out to be hot.
+around without its buffers, so G1's inventory does not reopen files.
+
+*Answered, and the library already has it: `gltf::open` parses the JSON chunk
+alone and leaves every buffer `UNLOADED`, and the slots are refcounted. Nothing
+needs adding — what needs doing is three.c3 holding the stream open instead of
+closing it, which is G3/S3.*
 
 ---
 
-# G3 — glTF node animation
+# G3 — glTF node animation, and the loader rework it forces
 
-Cheap in principle, and carrying one hidden cost that has to be found now rather
-than in week three.
+Sampling a channel is cheap. Getting to where sampling is *possible* is not,
+because `Assets.load` was written for M1's "show me this file" and has not been
+reopened since. **Most of this milestone is reopening it** — for the node
+hierarchy animation needs, for the per-mesh loading a kit needs, and for a decode
+bug that is already costing something today. Three demands, one function, one
+pass over it. A fourth cost is somewhere else entirely, in `Node`, and is listed
+last below because it is the only one that is not the loader.
 
 ## The hidden cost, stated first
 
@@ -350,29 +486,145 @@ currently arrives as loose meshes — but it is a bigger job than "sample a
 channel and call `set_position`", and it belongs to G3 rather than to whoever
 discovers it.
 
-## The second cost: rotation is a quaternion
+## The second cost: the loader loads everything, every time
+
+Not discovered by animation — discovered by asking whether a mesh could be
+loaded on its own — but it lands in the same function and wants the same pass.
+
+`Assets.load` calls `stream.load_all_buffers()` and `stream.load_all_images()`
+(`scene/asset.c3:584`) and then uploads **every primitive in the file**. Those
+two are the bluntest verbs `gltf.c3l` has, and the library has never been asked
+for anything else. Sitting unused beside them:
+
+	load_mesh_buffers(i)      load_material_images(i)     load_skin_buffers(i)
+	load_animation_buffers(i) load_scene(i)               load_node_recursive(i)
+	load_mesh_by_name(name)   unload_buffer(i)            unload_image(i)
+
+with refcounted slots on both. `gltf::open` already parses the JSON chunk alone
+and leaves every buffer `UNLOADED` — which is what G1's `three.inventory()` is
+built on, so half of this is written.
+
+**Per-*buffer* granularity is mostly a red herring, and it is worth knowing
+why.** A `.glb` has one buffer — the fixture reports `buffers: 1` — and on POSIX
+`load_buffer` **mmaps** it rather than reading it, so `load_mesh_buffers(3)` and
+`load_all_buffers()` do the identical thing for a GLB and the OS pages in only
+what is touched. That verb earns its keep on a multi-`.bin` `.gltf` and almost
+nowhere else.
+
+**The cost worth removing is three.c3's own.** Per primitive: the
+`@each_position`/`@each_normal` walk into `List`s, an upload per stream, and
+`build_bvh` — which allocates a second copy of the positions plus a triangle
+array and keeps both resident for the life of the asset. Per image: decode,
+`to_rgba`, a 64-bit hash over the decoded bytes, and the upload. A 200-mesh kit
+where a level places twelve pays all of that 200 times.
+
+### And there is a present-tense bug in the way, measured
+
+Texture dedup happens *after* the decode, and `load_material_texture` is called
+once per primitive. Two primitives sharing one material:
+
+	[decode] image 0 (86 encoded bytes)
+	[decode] image 0 (86 encoded bytes)
+	... 2 draw calls, 2 instances, 1 textures
+
+One texture uploaded — the content-hash dedup works — and the PNG decoded and
+hashed **twice**. On a kit atlased into one 4K image with 200 primitives that is
+200 decodes of the same file at load time. It is a bug today; it is the thing
+that would make lazy loading look expensive if it were left in place; and it is
+the smallest of the three fixes. Hence S1.
+
+## The one cost that is not the loader: rotation is a quaternion
 
 `Node.rotation` is a `Vec3` euler. glTF rotation channels are **quaternions**.
 Converting quat→euler per frame is lossy, gimbal-locked, and produces the class
 of bug that looks like "the arm flips once per cycle". `Node` needs to carry a
 quaternion, or an animated node needs a separate rotation path.
 
-**This is arguably a prerequisite, not a step**, and the cheapest place to do it
-is inside G2's slot rework, where `create_slot` is already being touched.
+**This was written as arguably-a-prerequisite, with G2's slot rework named as
+the cheapest place to do it. G2 has landed and it was not done there.** So it is
+G3's own step now and costs a little more than it would have — `create_slot` is
+no longer already open. Recorded rather than quietly renumbered, because "we
+will do it while we are in there" is a promise that only counts if somebody
+checks afterwards whether it was kept.
 
-## S1 — the animation data (`src/scene/animation.c3`)
+Unnumbered because it has no step of its own: it has to be done before S6 can
+write a sampled rotation into a node, and there is no earlier point at which it
+is cheaper. Whoever starts S6 does this first.
+
+## S1 — the decode memo, first because it is a bug
+
+A `(file, image index) -> texture index` memo consulted *before*
+`decode_image`, so an image is decoded once per file rather than once per
+primitive that names it. The content hash stays — it is what catches two
+*different* files sharing an image, which is the case the memo cannot see.
+
+Independent of everything else here and worth landing on its own.
+
+**What proves it:** a fixture whose primitives share one material, and a count
+of decodes rather than of textures. The existing check
+(`identical_textures_upload_once`) asserts the *upload* is deduplicated and
+passes today with the double decode intact, which is exactly why the bug
+survived — a test that measures the wrong side of a cache is a test the cache
+can fail behind.
+
+## S2 — the node tree on the `Asset`, and `asset.instantiate()`
+
+The hidden cost above. Parents, local TRS, mesh bindings, names — recorded at
+load from `stream.gltf.nodes`, and instantiated into a `Scene` subtree on
+demand. Animation channels address glTF node indices, so this is what gives them
+something to address; `mesh.play()` in S7 is meaningless without it.
+
+**One retain per instantiated node**, which G2's `Scene.create_slot` already
+does — a prop instantiated twice is two subtrees over one upload, which is the
+thesis restated at a level the API could not previously express.
+
+## S3 — the upload becomes per mesh
+
+`three.load(path)` stops uploading anything. It parses the JSON, records the
+node tree and the mesh names, and answers with a handle to a *described* file —
+which is `inventory.c3`'s `describe_gltf` doing the work it already does.
+`asset.mesh("wall_corner_02")` is what uploads that one primitive, and
+`asset.instantiate()` uploads the meshes the tree actually reaches.
+
+**From JavaScript nothing changes.** The same two lines an agent writes today
+keep working; `three.load` simply stops being the expensive one.
+
+An `Asset` then becomes **one uploaded mesh, keyed `path#meshname`** — the same
+key shape `primitive.c3` (`<box 2.000000x1.000000x2.000000 1x1x1>`) and
+`convex.c3` (`<convex n=500 h=...>`) already file under, and exactly what G2's
+generational slot table with per-asset refcounts was built to hold. Unloading
+gets *sharper* as a side effect: one unused mesh out of a kit can go while its
+neighbours stay, which today is impossible because the file is the unit.
+
+What it costs:
+
+- **The `GltfStream` has to stay open** instead of `defer stream.close()` — an
+  open mmap and a parsed document per described file, closed when the last mesh
+  from it unloads. That is a new refcounted lifetime, and it is the real work in
+  this step. G2's asset refcount is the pattern, one level up.
+- **`MeshPass.place` and `Asset.bounds` assume file granularity.** The CLI's
+  "show me this file" and `--grid` both go through them, so the file has to stay
+  a thing even once the asset is not.
+- **Cost moves from boot to first use**, which is right for a game and worth
+  saying out loud for an agent: the hitch is at `asset.mesh(...)`, not at
+  `three.load(...)`, and a level that wants no hitch prepares its meshes before
+  it needs them.
+
+## S4 — the animation data (`src/scene/animation.c3`)
 
 Channels and samplers read at load and stored per asset. `gltf.c3l` supplies
-`Animation.duration`, `loop_time`, `clamp_time` and `find_animation` already.
+`Animation.duration`, `loop_time`, `clamp_time` and `find_animation` already —
+and `load_animation_buffers(i)`, so a clip's samplers can be paged in without
+the rest of the file once S3 has made that mean something.
 
-## S2 — the player is per instance
+## S5 — the player is per instance
 
 Two copies of the same tree must be able to wave at different phases, so the
 player lives beside the node, not on the asset. **This is the first per-instance
 state that is not a transform**, and worth noting as such — it is a new kind of
 thing in the scene model.
 
-## S3 — stepping, and the sleep condition
+## S6 — stepping, and the sleep condition
 
 The step happens in the host frame, before the animation callback, so a callback
 can read the result and so animation runs with no `setAnimationLoop` registered
@@ -387,7 +639,7 @@ Every term there is something that would be lost by sleeping through it
 window sleeps in the middle of a walk cycle. One term, easy to miss, impossible
 to debug from a screenshot.
 
-## S4 — the JS surface
+## S7 — the JS surface
 
 	mesh.animations            // ['Idle', 'Walk', 'Run']
 	mesh.play('Walk', { loop: true, speed: 1 })
@@ -398,6 +650,19 @@ on crossfading, and crossfading is worth doing when something wants it — after
 G4, where blending between clips is what makes a character look right. A
 deliberate simplification, said out loud, rather than a partial mixer that
 answers to the same name.
+
+## What this milestone deliberately does not answer
+
+**"Load one material at a time" has no unit to load into.** three.c3 has no
+glTF material object at all: `upload_primitive` folds `baseColorFactor` and
+`baseColorTexture` into the `GpuMesh` and drops metallic-roughness, normal,
+occlusion and emissive on the floor. `three.Material` is the *shader* material
+and is unrelated. So per-material loading is a modelling decision — what a glTF
+material becomes on this side — before it is a loading one, and making that
+decision belongs wherever PBR does, which is not on this list yet.
+
+`load_material_images(i)` is the verb waiting for it, and S1's memo is keyed the
+way that verb would want.
 
 ---
 
@@ -607,6 +872,13 @@ queue; the parse is the expensive half and can be off-thread.
 Today `three.load` blocks, which means a mid-game level load is a hitch of
 however long the `.glb` takes.
 
+**G3/S3 has already done the synchronous half of this**, and it changes what is
+left. Once `three.load` is metadata-only and the upload happens per mesh, the
+thing worth making async is `asset.mesh(...)` / `asset.instantiate()` — a
+bounded, per-mesh unit of work — rather than a whole file. There is little point
+streaming 200 meshes in the background that were never going to be placed, and
+that is what this step would have been without it.
+
 ## S2 — `three.texture(path)`
 
 PNG and JPEG through `image.c3l`, uploaded down the same path a glTF texture
@@ -736,8 +1008,11 @@ about.
   directional shadow map is the cheapest thing that would change how every
   screenshot in this project looks. Worth a decision, probably between G4 and
   G5.
-- **`Node.rotation` as a quaternion.** Written under G3, but the cheapest place
-  to do it is inside G2. Decide when G2 starts, not when G3 does.
+- ~~**`Node.rotation` as a quaternion.** Written under G3, but the cheapest
+  place to do it is inside G2.~~ **Decided by default: G2 landed without it, so
+  it is G3's own step.** Left struck rather than deleted, because the way it was
+  decided — nobody chose, the moment passed — is the failure mode worth being
+  able to see happen.
 - **Hot reload semantics.** What happens to a running `setAnimationLoop`, to
   live physics bodies, to the camera. G2 unlocks it; somebody has to say what it
   means.
@@ -765,3 +1040,10 @@ they check:
    same `state_hash` after N steps, and a `snapshot`/`restore` round trip
    reproduces it. The library supplies the mechanism; the binding is what could
    break it, by stepping at a rate that depends on the frame.
+
+A fourth is worth adding once G3/S3 lands, because it is the claim that step
+exists for: **loading a file uploads nothing.** `three.load` on a kit, then
+`stats()`, and every number is what it was before the load — followed by one
+`asset.mesh(name)` and exactly one mesh appearing. Asserting the absence is the
+only way to keep a lazy loader lazy; nothing else notices when it quietly starts
+uploading everything again.

@@ -174,6 +174,34 @@ fn String module_path(String root, String specifier, Allocator allocator)
 }
 
 <*
+ Where `three.load("kit.glb")` reads from.
+
+ In a `--assets` boot a path is relative to the assets directory and confined to
+ it, by exactly the rule an `import` follows — `resolve_module` with no importer
+ — so the paths `three.inventory()` hands back are paths `three.load` accepts,
+ and a game directory can be moved or renamed without editing a line inside it.
+ Before this they were two different conventions and the first line of every game
+ was the one that found that out.
+
+ Without an assets root the path is used as written. That is the `--mcp` and CLI
+ case: there is no directory for it to be relative to, an agent naming a file
+ names it from wherever the process was started, and confining it to nothing
+ would refuse every path there is.
+
+ @param path : `As the script wrote it. A leading '/' means the assets directory, not the filesystem's.`
+ @return `The path to open, allocated in the caller's allocator.`
+ @return? MODULE_SPECIFIER_IS_EMPTY : `An empty path.`
+ @return? MODULE_ESCAPES_ASSETS_ROOT : `More '..' than there was path to climb.`
+ @return? MODULE_PATH_TOO_DEEP : `More than MAX_MODULE_PARTS components.`
+*>
+fn String? JsRuntime.resolve_asset(&self, String path, Allocator allocator)
+{
+	if (self.assets_root.len == 0) return path.copy(allocator);
+	String specifier = resolve_module("", path, allocator)!;
+	return module_path(self.assets_root, specifier, allocator);
+}
+
+<*
  Read a module's bytes into the runtime's reusable buffer.
 
  One buffer, overwritten by every load, which `quickjs.c3l`'s loader documents
