@@ -973,6 +973,32 @@
 
 		stats() { return H.stats(); },
 
+		// Three.js's own name for this, on the renderer, and the only name for
+		// it that is: `requestAnimationFrame` is the browser's, and Three.js has
+		// no frame loop in core either.
+		//
+		// The callback runs on the host's loop, between the input and the draw,
+		// and is given the milliseconds since the host started counting — the
+		// same argument `WebGLRenderer.setAnimationLoop` passes. It must be
+		// synchronous: it has one frame to finish in, and there is no later.
+		setAnimationLoop(fn) {
+			if (fn === null || fn === undefined) { H.setFrame(null); return; }
+			if (typeof fn !== 'function') {
+				throw new TypeError('three.setAnimationLoop(fn) wants a function, or null to stop');
+			}
+			// Caught here rather than at the first tick, because an async
+			// callback fails in a way that reads as the loop not running at all:
+			// it returns a promise immediately, does its work later, and the
+			// frame it was meant to be part of is long gone.
+			if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+				throw new TypeError(
+					'the animation callback must be synchronous — an async one returns before it '
+					+ 'has done anything, and the frame does not wait. Do the awaiting in a run_script.'
+				);
+			}
+			H.setFrame(fn);
+		},
+
 		// What `scene.pick(x, y)` counts in, and what the PNG comes back as.
 		// It is the offscreen target's, never a window's (`plan.md` §1).
 		renderSize() {
@@ -1013,6 +1039,8 @@
 			'A mesh with no material draws with the base colour and texture its glTF material carried.',
 			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
+			'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
+			'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. setAnimationLoop(null) stops the clock so a known state can be captured.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -1134,6 +1162,12 @@
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
+			'three.setAnimationLoop(fn)':
+				'Run fn(elapsedMs) once per frame, or null to stop. Synchronous only. The next '
+				+ 'run_script reports how many frames it ran, whether it is still running, and why it '
+				+ 'stopped if it did. Only one callback exists: registering a second replaces the first. '
+				+ 'It survives new three.Scene(), so a callback holding meshes from the old scene will '
+				+ 'throw on the next frame and be stopped — re-register it after rebuilding.',
 			'toJSON() / toString()':
 				'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
 				+ 'return an object from a script. Objects report their name, transform and children; a '

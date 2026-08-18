@@ -73,6 +73,9 @@ fn void JsRuntime.install_bindings(&self)
 	// Materials (js/bind_shader.c3)
 	self.bind_shader_verbs(host);
 
+	// The animation loop (js/frame_loop.c3)
+	self.bind_frame_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "render", &js_render, 0);

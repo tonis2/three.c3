@@ -1,17 +1,19 @@
-# event_loop.md — the window as an input device
+# event_loop.md — the window as an input device, and the frame as a hook
 
-Two documents in one, because they are the same subject at two stages.
+One document at three stages of the same subject: making the scene move without
+an agent in the loop.
 
-**The first half is the record for M5c**, which is built: the mouse moves the
-camera. It is written the way `m5a_stage.md` and `m5b_stage.md` are — what was
-built, where it departed from `plan.md`, and what was actually run to believe
-any of it, including the table of re-introduced bugs.
+**The first two parts are the record for M5c and M5d**, both built: the mouse
+moves the camera, and a script can register a callback that runs every frame.
+They are written the way `m5a_stage.md` and `m5b_stage.md` are — what was built,
+where it departed from `plan.md`, and what was actually run to believe any of
+it, including the tables of re-introduced bugs.
 
-**The second half is the work that is not built**: a per-frame hook a script can
-register, a keyboard an agent can bind actions to, and the smaller things either
-of those makes worth doing. It is written to be picked up cold, so every task
-names the file and the line it starts at and says what the hard part is, which
-in almost every case is not the part that sounds hard.
+**The last part is the work that is not built**: a keyboard an agent can bind
+actions to, clicking the window to select, and the smaller things the first two
+made worth doing. It is written to be picked up cold, so every task names the
+file and the line it starts at and says what the hard part is, which in almost
+every case is not the part that sounds hard.
 
 ---
 
@@ -218,69 +220,218 @@ the only one that could have produced this.
 
 ---
 
-# Part two — what is left
+# Part two — M5d, built
 
-Ordered by what unlocks what. T1 is the one everything else is easier after.
+## The question this answers
 
-## T1 — a per-frame hook a script can register
-
-The API is Three.js's own name for it, on the renderer:
+A scene that only changes when an agent says so is a slideshow. Every mutation
+had to arrive as a whole tool call, which means the smallest possible animation
+was a round trip per frame — and the person watching the window saw a still
+image between them.
 
 ```js
-three.setAnimationLoop((elapsedMs) => {
-  cube.rotation.y += 0.01;
-});
-three.setAnimationLoop(null);   // stop
+three.setAnimationLoop((ms) => { cube.rotation.y = ms / 1000; });
+three.setAnimationLoop(null);   // and the clock genuinely stops
 ```
 
-**The difficulty is not the loop.** The loop exists. Every difficulty is in the
-runtime, and none of them is visible from the JavaScript side:
+## What it turned out to need
 
-1. **It must not go through `JsRuntime.run`** (`src/js/runtime.c3:222`). That
-   call clears `log`, `value` and `error` and starts a fresh GPU validation
-   capture (`runtime.c3:230`) — per frame it would erase the result an agent is
-   about to read — and it wraps the source in `(async()=>{})()`, allocating a
-   promise sixty times a second. This needs a second entry point that calls a
-   retained `qjs::Value` directly.
+**The loop was never the missing part.** `main.c3` has rendered every iteration
+since M3. What was missing was a second way *into* the engine, because the only
+one that existed is built for the tool call and every one of its habits is wrong
+per frame: `JsRuntime.run` clears `log`, `value` and `error`, starts a fresh GPU
+validation capture, and wraps the source in `(async()=>{})()` to allocate a
+promise sixty times a second for a function that already exists.
 
-2. **The budget is wrong by three orders of magnitude.** `JS_BUDGET_MS` is 5000
-   (`runtime.c3:74`). As a per-frame budget that is a five-second hitch, and
-   since the MCP handlers run on the loop's own thread (`main.c3:457`, inside the same loop) a wedged
-   callback wedges the server with it. The interrupt machinery is already there
-   — `started`, `budget_ns` (`runtime.c3:153`), `on_interrupt` — so a tick just
-   stamps a few milliseconds instead.
+So `JsRuntime.tick` calls a retained `qjs::Value` directly. It shares exactly one
+thing with `run` — the interrupt handler — and only because there is one of those
+per context. Everything difficult below follows from that sharing, or from the
+fact that a frame has nobody listening to it.
 
-   **The policy question is the real one:** what happens on overrun? Retrying
-   silently every frame gives an unusable window and nothing to diagnose it
-   with. The proposal is to disable the callback, keep the error, and report it
-   on the next `run_script`.
+### S1 — the tick, and the four ways a callback stops
 
-3. **Per-frame `console.log` currently has nowhere to go.** `run` clears the log
-   buffer at the top of every call, so a callback that logs either floods or
-   vanishes. Without a bounded ring that the next tool result drains, animation
-   is undebuggable — which for an agent-driven project is the difference between
-   a feature and a trap. **This is the task most likely to be skipped and most
-   likely to be regretted.**
+`src/js/frame_loop.c3`. A tick is a call, a thenable check, and a bounded
+microtask drain. The interesting half is the failure policy, which is the same
+for all four: **stop the callback, keep the reason, report it once.**
 
-4. **Microtasks.** The callback should be called synchronously and any promise
-   it creates drained under a small job cap, not `JS_MAX_JOBS`'s 100 000
-   (`runtime.c3:79`). An `async` frame callback is probably worth refusing
-   outright, with a message saying so.
+The alternative — call it again next frame — is what makes a feature a trap. It
+throws sixty times a second into a log nobody drains, in a window that has
+visibly stopped moving, and leaves the agent with a scene that does not animate
+and no statement anywhere about why. The four are a throw, a budget overrun, a
+returned promise, and `setAnimationLoop(null)`.
 
-5. **Testability.** The loop only runs when there is a window
-   (`main.c3:459-465`, the `window != null` arm) and the suite is headless. The tick has to be drivable
-   directly from a test — N ticks, then assert on the scene — or none of this
-   gets a regression test, which is not how the rest of this codebase is built.
+**Async is refused twice, at two different layers.** `prelude.js` rejects an
+`AsyncFunction` at the line that registered it, because the way an async callback
+fails reads as nothing happening at all: it returns immediately, does its work on
+some later microtask, and the frame it was meant to be part of has been presented
+by then. `tick` catches the other spelling — a plain function that happens to
+return a promise — at the first frame. One catches the shape, one catches the
+behaviour.
 
-6. **Determinism gets a caveat.** `three.render()` and the `screenshot` tool
-   stop being repeatable once a loop is mutating the scene. That is inherent,
-   but it belongs in `prelude.js`'s `differences` list, and
-   `setAnimationLoop(null)` has to genuinely stop the clock so a screenshot can
-   be taken of a known state.
+**The budget is borrowed, not replaced.** `on_interrupt` reads one field, so a
+tick saves `budget_ns`, installs a tenth of a second, and puts it back. 100 ms is
+chosen to sit in a gap: it cannot be reached by anything that is merely slow — a
+callback taking that long has already made the window a slideshow, and killing it
+for that would be the host overruling the author — and it bounds a
+`while (true) {}` to a tenth of a second rather than the script's five.
 
-**Not a `requestAnimationFrame`.** Three.js has no frame loop in core either —
-`rAF` is the browser's. Matching `WebGLRenderer.setAnimationLoop` keeps the one
-name that is actually Three.js's.
+### S2 — two logs
+
+`run` clears the log at the top of every call, so a per-frame `console.log` would
+either be erased unread or drown the next result. `js_console` now writes to
+whichever log is open: `frame_log` while `in_frame`, and the run's otherwise.
+
+**The frame log is a ring, and the oldest lines go**, because a loop that logs
+every frame fills any buffer immediately and the state worth seeing is the state
+it is in now. What was dropped is counted and said out loud, since a log that
+silently begins in the middle will be read as the beginning. It is drained into
+the next run under `[animation loop]` / `[script]` markers, which exist because
+unlabelled, a callback's lines arrive above the script's own and read as the
+script's own — an agent debugging what it just wrote would be reading output from
+a function it registered ten calls ago.
+
+A script that never animates sees no markers at all, and there is a check that
+says so: this is the kind of addition that quietly changes every result in the
+project.
+
+### S3 — the frame block
+
+`run_script` grew a `"frame"` block — `running`, `ticks` since the last call, and
+`error` when there is one. It is the only window an agent has onto the loop:
+nothing else reports a callback that has been quietly running, or quietly
+stopped, since the last tool call. **Ticks count since the last call** rather than
+in total, because "sixty frames since you last looked" is the question being
+asked and a running total is the same number every time once it is large.
+
+It is emitted only when there is something to say. A block on every result would
+be noise on the overwhelming majority of scripts, and noise on every result is
+how a field stops being read.
+
+**`get_api_docs` passes `drain_frame: false`.** It is a `run` the server made up
+rather than one the agent asked for, and it reads nothing but `value` — draining
+there would silently eat the frame log and the one report of a stopped callback.
+
+### S4 — headless ticks, paced
+
+The open question from part one has an answer: **yes, and at 60 Hz.** A callback
+that behaved differently under `--headless` would be a difference an agent cannot
+see, since it has no window to look at and no way to ask whether there is one.
+Pacing is what makes it the same difference rather than merely present — the
+headless loop is bounded by a 4 ms sleep and would otherwise run a callback four
+times for every frame a vsynced window gives it.
+
+## Verification
+
+	c3c build --trust=full              Program linked to executable './build/three'.
+	c3c test --trust=full               PASSED: 192 passed, 0 failed, 0 skipped.
+	c3c test --trust=full --test-noleak PASSED: 192 passed, 0 failed, 0 skipped.
+
+Twenty new checks in `test/frame_test.c3`, 172 to 192, and both runs are the
+suite entire rather than the new file. **The tick takes the time as an argument
+rather than reading a clock**, which is what makes every one of them a statement
+about the callback instead of about how fast the machine was — and it is the
+whole reason a feature that only exists while a window is open has tests at all.
+
+### Every bug the tests claim to catch, re-introduced
+
+One at a time, each against the single check that names it, restoring from a
+copy and comparing sha256 afterwards. All three files restored byte-identical.
+
+| bug injected | test | result |
+|---|---|---|
+| a tick claims to have run with nothing registered | `a_runtime_with_no_callback_does_not_tick` | caught |
+| the callback is not told the time | `the_callback_is_told_what_time_it_is` | caught |
+| the frame budget is never installed | `an_endless_callback_is_stopped_by_the_frame_budget` | caught |
+| the script budget is not given back | `the_frame_budget_is_not_the_script_budget` | caught |
+| a throwing callback is retried next frame | `a_throwing_callback_is_stopped_and_says_why` | caught |
+| a promise-returning callback is allowed | `a_callback_that_returns_a_promise_is_stopped` | caught |
+| the microtasks the frame queued are left for later | `a_microtask_the_callback_made_settles_in_the_same_frame` | caught |
+| the frame log grows without bound | `a_flood_of_logging_is_bounded_and_says_what_it_dropped` | caught |
+| what was dropped is not counted | `a_flood_of_logging_is_bounded_and_says_what_it_dropped` | caught |
+| the script half of the log is not marked | `what_a_frame_logged_arrives_with_the_next_run` | caught |
+| null does not stop the loop | `null_stops_the_loop` | caught |
+| a non-function is retained anyway | `a_non_function_is_refused_by_the_host_too` | caught |
+| a frame's log goes into the run's | `what_a_frame_logged_arrives_with_the_next_run` | caught |
+| the frame log is never drained | `what_a_frame_logged_arrives_with_the_next_run` | caught |
+| a stopped callback is explained on every run from now on | `the_reason_reaches_exactly_one_run` | caught |
+| the frame count never resets | `the_frame_count_comes_back_and_resets` | caught |
+| the timeout message names the constant rather than the budget | `the_frame_budget_is_not_the_script_budget` | caught |
+| an async callback is accepted | `an_async_callback_is_refused_at_registration` | caught |
+| the context is closed before the callback is released | (the whole file) | caught — see below |
+
+### The injection that escaped, and what it changed
+
+**"The frame budget is never installed" was NOT CAUGHT on the first pass.** The
+check asserted that the reason named 100 ms, and it did — because
+`frame_timeout_message` read the constant `JS_FRAME_BUDGET_MS`. With the install
+removed, the tick sat there for the script's whole five seconds and then
+produced a sentence saying it had stopped after a tenth of one.
+
+Two changes came out of it, and the second is the one worth keeping:
+
+- The message now reads `budget_ns`, the budget actually in force. A number and
+  the thing it names have to come from the same place, or the message is free to
+  be wrong in exactly the case anybody reads it.
+- **The check now reads a clock instead of the sentence.** `plan.md` §7's rule is
+  to assert on the thing rather than on the flag, and the thing here is that the
+  tick ended in a tenth of a second rather than five. Ten times the budget and
+  five times under the failure, so it asserts which budget applied without
+  asserting a rate.
+
+This is a different fault from M5c's, and worth telling apart. M5c had two
+mechanisms doing one job, each hiding the other's removal. Here there was one
+mechanism and one *witness*, and the witness was independent of what it claimed
+to be witnessing.
+
+### The bug QuickJS caught, which no check would have
+
+`JsRuntime.close` releases the retained callback **before** `js.close()`. Swapping
+those two lines does not fail a check — it aborts the process:
+
+	Assertion failed: (list_empty(&rt->gc_obj_list)), function JS_FreeRuntime, quickjs.c:2704
+
+The engine's own leak assertion, which is a better test than any I would have
+written, and the reason the ordering has a comment on it rather than being
+obvious from the line.
+
+### What running it live added
+
+The M5c lesson was that everything on the far side of the pure/platform seam has
+to be checked by running it, and `main.c3`'s wiring is on that side. A window on
+port 8809, driven over HTTP:
+
+- **A callback moved the camera and the window showed it**, at 1301 ticks in one
+  two-second gap and 243 in the next — the frame block reporting and resetting
+  each time.
+- **`setAnimationLoop(null)` genuinely stops the clock.** Two reads a second
+  apart both answered `-22.5613`, which is item 6's determinism requirement:
+  a screenshot of a known state has to be possible.
+- **A throwing callback came back with its stack**, once, in a run that was
+  itself `ok: true` — the animation's failure is not the script's.
+- **`() => { while (true) {} }` was stopped in one frame and the server kept
+  answering**, which is the concern that made the budget worth having: the MCP
+  handlers run on the loop's own thread.
+- **A flood was bounded to 8 KB with "205 earlier lines dropped"**, newest kept.
+- **Headless ticked 152 times in three seconds** — about 50 Hz, against the
+  ~250 Hz the unpaced loop would have given.
+
+## What is deliberately absent
+
+- **No `three.animationLoop` getter.** Three.js has none either, and the `frame`
+  block already answers the question from the side that can be trusted.
+- **No second callback.** Registering replaces; a list of callbacks is a
+  lifetime problem and a JavaScript array solves it inside one callback.
+- **No fixed timestep, no interpolation.** The callback gets the elapsed
+  milliseconds and decides for itself.
+- **The camera is not touched by the tick.** A drag and a callback that both
+  write it compose the way a drag and `three.camera.orbit(...)` already do: last
+  writer wins, frame by frame.
+
+---
+
+# Part three — what is left
+
+Ordered by what unlocks what.
 
 ## T2 — the keyboard, and actions bound to it
 
@@ -294,7 +445,9 @@ polled inside the frame callback; an action wants the edge, once. `c3w`'s map is
 latched level state, so edges are a one-frame diff against the previous map —
 cheap, and it has to live beside the map rather than in JS.
 
-Depends on T1 for anything continuous, which is most of it.
+**T1 is built, which is what this was waiting for.** Level state polled inside
+the frame callback is the shape movement wants, and that callback now exists:
+`three.input.isDown('w')` inside `setAnimationLoop` is the whole pattern.
 
 **This is not a Three.js API and must be documented as an invention.** Three.js
 has no input layer at all: `OrbitControls` is `examples/jsm` and takes a DOM
@@ -332,8 +485,10 @@ rule is a press and release within a few points and a short time.
 - **Cursor feedback.** `Window.set_cursor(CLOSED_HAND)` while orbiting,
   `OPEN_HAND` over the window otherwise. macOS only; the other backends are
   no-op stubs, which is fine.
-- **Damping.** A per-frame decay on the orbit velocity. Wants T1's tick, or at
-  least a per-frame call, and wants a real time delta rather than a frame count.
+- **Damping.** A per-frame decay on the orbit velocity. `drive_camera` is
+  already called once a frame beside the tick, so what it wants now is the time
+  delta rather than the call — `serve()` computes one for `tick` and does not
+  hand it to `Controls`.
 - **Windows parity.** `lib/window.c3l/win32/main.c3:651-661` stubs `get_scroll`,
   `get_scroll_x`, `get_text` and `get_scale` to zero, so zoom, typed text and
   retina scaling are all dead there. Linux is complete. This is a change to
@@ -346,17 +501,15 @@ rule is a press and release within a few points and a short time.
   rather than a task.
 - **Idle CPU.** The windowed loop renders continuously at whatever rate the
   swapchain allows, and `getEvent(wait: true)` plus `Window.wake` exist for an
-  on-demand loop that sleeps in the kernel at 0%. Attractive, and it conflicts
-  directly with T1: a scene with a frame callback is never idle. Worth deciding
-  once T1 exists rather than before.
+  on-demand loop that sleeps in the kernel at 0%. Now decidable, and the
+  condition is already a field: a runtime with `frame_active` set is never idle
+  and must not sleep; one without it can. The awkward half is that the MCP
+  listener has to be able to wake the loop, which is `Window.wake` from the
+  listener's thread — the one place in the program where those two threads would
+  touch.
 
 ## Open questions
 
-- **Does the frame callback fire headless?** `serve()` with no window has no
-  frames at all (`main.c3:459-465`, the `window != null` arm). Firing it on a timer there would make
-  `--headless --mcp` behave like the windowed one; not firing it makes the
-  window a behavioural difference an agent cannot see. T1's item 5 needs an
-  answer to this anyway, since the tests are headless.
 - **Should a script be able to turn the mouse controls off?** A scene that binds
   its own drag behaviour would want to. `three.controls.enabled = false` is
   cheap, but it is one more piece of state a script can leave in a bad way, and
@@ -365,4 +518,8 @@ rule is a press and release within a few points and a short time.
   `new three.Scene()` today, so a script that rebuilds the scene keeps whatever
   the user dragged it to. That is almost certainly right for a person watching
   the window and it is worth writing down before something changes it by
-  accident.
+  accident. **The animation callback survives it too**, and that one is decided
+  and tested: the loop belongs to the host as Three.js's belongs to the
+  renderer, so a rebuild does not silently lose the animation — what it loses is
+  every handle the callback captured, and the stale-handle throw stops it with a
+  sentence rather than leaving it running against nothing.

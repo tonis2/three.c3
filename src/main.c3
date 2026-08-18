@@ -40,6 +40,7 @@ module three;
 
 import std::io;
 import std::thread;
+import std::time;
 import c3w;
 import vk;
 import image;
@@ -441,6 +442,13 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 
 	Controls controls = default_controls();
 
+	// What the animation callback is told the time is. Stamped once, here, so it
+	// is monotonic across every registration a script makes — which is what
+	// Three.js's `setAnimationLoop` argument is, and what a callback computing a
+	// rotation from it assumes.
+	Clock since_start = clock::now();
+	long last_tick_ns = 0;
+
 	while (true)
 	{
 		if (window != null)
@@ -456,21 +464,47 @@ fn void? serve(Renderer* renderer, c3w::Window* window, int port)
 
 		usz handled = listener.pump(&server);
 
+		long elapsed_ns = (long)since_start.to_now();
+
 		if (window != null)
 		{
+			// After `pump` and before the draw: a script that registers a
+			// callback gets its first frame on this iteration, and the frame
+			// presented is the one the callback just built.
+			runtime.tick((double)elapsed_ns / 1_000_000.0);
+
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between
 			// requests, which reads as a hung application.
 			renderer.frame()!;
 		}
-		else if (handled == 0)
+		else
 		{
-			// A tight loop here would peg a core for as long as the server is
-			// idle, which is most of its life.
-			thread::sleep_ms(4)!!;
+			// **Headless ticks too, and paced.** A callback that behaved
+			// differently with `--headless` would be a difference an agent
+			// cannot see: it has no window to look at and no way to ask whether
+			// there is one. Pacing is what makes it the same difference rather
+			// than merely present — this loop is bounded by a 4 ms sleep and
+			// would otherwise run a callback four times for every frame a
+			// vsynced window gives it.
+			if (elapsed_ns - last_tick_ns >= HEADLESS_FRAME_MS * 1_000_000)
+			{
+				last_tick_ns = elapsed_ns;
+				runtime.tick((double)elapsed_ns / 1_000_000.0);
+			}
+			if (handled == 0)
+			{
+				// A tight loop here would peg a core for as long as the server
+				// is idle, which is most of its life.
+				thread::sleep_ms(4)!!;
+			}
 		}
 	}
 }
+
+// What a frame is worth when there is no window to present one: 60Hz, the rate
+// the vsynced loop above runs at on the displays this is developed on.
+const long HEADLESS_FRAME_MS = 16;
 
 <*
  Answer JSON-RPC on stdin and stdout by forwarding it to a `three --mcp` that is
