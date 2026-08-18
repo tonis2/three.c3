@@ -134,18 +134,23 @@ fn bool JsRuntime.is_animating(&self)
    cannot mask a *sleeping* window, because a playing clip is precisely what
    stops the window sleeping.
 *>
-fn void JsRuntime.step_animations(&self, double elapsed_ms)
+fn double JsRuntime.step_animations(&self, double elapsed_ms)
 {
-	if (self.pass == null) return;
+	if (self.pass == null) return 0;
 
 	double delta_ms = self.clock_started ? elapsed_ms - self.last_elapsed_ms : 0;
 	self.last_elapsed_ms = elapsed_ms;
 	self.clock_started = true;
 
-	if (delta_ms <= 0) return;
+	if (delta_ms <= 0) return 0;
 	if (delta_ms > ANIMATION_MAX_STEP_MS) delta_ms = ANIMATION_MAX_STEP_MS;
 
 	self.pass.scene.step_animations((float)(delta_ms / 1000.0));
+	// Handed back rather than recomputed by the next caller: this function
+	// consumes `last_elapsed_ms`, so anything else asking the clock the same
+	// question after it would be told nothing happened. `tick` gives it to
+	// physics, which needs exactly this delta and the same clamp.
+	return delta_ms;
 }
 
 // The longest single step any clip will take. See `step_animations`.
@@ -178,9 +183,28 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// where a character got to this frame rather than where it was last frame —
 	// and so a clip plays with no `setAnimationLoop` registered at all, which is
 	// the case the early return below would otherwise refuse.
-	self.step_animations(elapsed_ms);
+	double delta_ms = self.step_animations(elapsed_ms);
 
-	if (!self.is_animating()) return false;
+	// **Physics next, and above the early return, for the same two reasons the
+	// animation step is above it** (`game.md` G3/S6, G5/S1): a callback should
+	// read where a body got to *this* frame rather than where it was last one,
+	// and a scene with bodies but no `setAnimationLoop` still has to fall.
+	//
+	// The fixed-rate accumulator is inside `Physics.step` and is C3's, not
+	// JavaScript's — an accumulator in the callback would run inside the script
+	// budget, so a spiral of death would trip the budget and stop the callback
+	// for good rather than merely stutter.
+	self.physics.step(&self.pass.scene, delta_ms);
+	self.report_diverged_bodies();
+
+	if (!self.is_animating())
+	{
+		// Nothing will run this frame, so nothing will be told. Dropped rather
+		// than kept, or a world stepping under a scene with no callback grows
+		// a list nobody ever reads.
+		self.drop_physics_events();
+		return false;
+	}
 
 	self.frame_ticks++;
 
@@ -205,6 +229,10 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// else's overrun would be stopped for good, for a failure that is not its
 	// own.
 	if (!self.timed_out) self.dispatch_click();
+	// After input and before the callback: the events describe the step that
+	// already happened, so a handler that reacts to a hit and a callback that
+	// draws the consequence run in that order within one frame.
+	if (!self.timed_out) self.dispatch_physics_events();
 	if (!self.timed_out && self.frame_active) self.call_frame(elapsed_ms);
 	if (!self.timed_out) self.drain_frame_jobs();
 

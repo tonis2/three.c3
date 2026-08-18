@@ -211,6 +211,17 @@ struct JsRuntime
 	qjs::Value click_fn;
 	bool click_active;
 
+	// The physics world, owned by `scene/physics.c3` and stepped by `tick`.
+	// On the runtime rather than on the scene because it is the frame that
+	// advances it, and `new three.Scene()` empties it for the same reason it
+	// empties everything else: the bodies named nodes that are gone.
+	Physics physics;
+	// The event handlers physics dispatches into — `js/bind_physics.c3`.
+	qjs::Value trigger_fn;
+	bool trigger_active;
+	qjs::Value contact_fn;
+	bool contact_active;
+
 	// `import`, owned by `js/modules.c3`. Empty root means no `--assets` boot
 	// and no module resolution at all, which is what a plain `--mcp` run wants.
 	// **`module_hooks` is addressed by the engine and must not move** while the
@@ -276,7 +287,9 @@ fn void JsRuntime.close(&self)
 	self.clear_frame();
 	self.clear_key_handlers();
 	self.clear_click_handler();
+	self.clear_physics_handlers();
 	self.js.close();
+	self.physics.close();
 	self.log.free();
 	self.value.free();
 	self.error.free();
