@@ -134,12 +134,29 @@
 	class Object3D {
 		constructor() {
 			this.position = new Vector3(this, 0, 0, 0);
-			this.rotation = new Vector3(this, 0, 0, 0);
+			// The rotation vector's owner is a shim rather than `this`, so that
+			// writing an Euler angle both flushes and drops `_q`. See `_q`.
+			this.rotation = new Vector3({ _flush: () => { this._q = null; this._flush(); } }, 0, 0, 0);
 			this.scale = new Vector3(this, 1, 1, 1);
 			this.children = [];
 			this.parent = null;
 			this._name = '';
 			this._visible = true;
+			// An exact rotation, when this object has one — `[x, y, z, w]`. Only
+			// `asset.instantiate()` sets it, because only a glTF node arrives as
+			// a quaternion. `rotation` still holds the Euler equivalent and is
+			// what a script reads; this is what is actually sent, because the
+			// Euler form loses about 3e-4 radians at gimbal lock and a 90°
+			// rotation is the most common thing anyone authors. Writing any
+			// Euler component clears it — see the constructor.
+			this._q = null;
+			// Set only on a tree from `asset.instantiate()`: the clip names, the
+			// asset they belong to, the glTF node this object came from, and
+			// whether the host has been told the map yet. See `play`.
+			this._clips = null;
+			this._asset = null;
+			this._gltfNode = -1;
+			this._bound = false;
 			// The host node, or -1 for "not in a scene". See the header.
 			this._i = -1;
 			this._g = -1;
@@ -160,10 +177,69 @@
 		// What this object draws, or null for a group. Overridden by Mesh.
 		_ref() { return null; }
 
+		// -------------------------------------------------------------------
+		// Animation
+		//
+		// Only an object from `asset.instantiate()` has any: a clip targets
+		// glTF nodes, so playing one needs a subtree that came from a file. On
+		// anything else `animations` is empty and `play` throws with a sentence
+		// saying which door to use, rather than returning false and leaving a
+		// script to wonder whether the clip name was wrong.
+		//
+		// **Deliberately not an AnimationMixer.** Three.js's mixer/clip/action
+		// trio earns its complexity on crossfading; there is no crossfading here
+		// yet, and a partial mixer answering to the same name would be worse
+		// than a smaller thing with a different one. See G3/S7.
+
+		get animations() { return this._clips ? this._clips.slice() : []; }
+
+		play(name, { loop = true, speed = 1 } = {}) {
+			if (!this._clips) {
+				throw new Error(
+					'play() works on an object from asset.instantiate(), which is what carries a file\'s '
+					+ 'animation clips. This object has none.'
+				);
+			}
+			if (this._i < 0) {
+				throw new Error(`play("${name}") needs ${this._name || 'the object'} to be in a scene — add it first`);
+			}
+			if (!this._clips.includes(name)) {
+				const have = this._clips.length ? this._clips.join(', ') : '(none)';
+				throw new Error(`no animation named "${name}" — this one has: ${have}`);
+			}
+			// The host learns the node map on the first play and not before: a
+			// prop that never animates never sends it.
+			this._bindAnimation();
+			H.playAnimation(this._i, this._g, String(name), !!loop, +speed);
+			return this;
+		}
+
+		stop() {
+			if (this._i >= 0 && this._clips) H.stopAnimation(this._i, this._g);
+			return this;
+		}
+
+		// Flat triples — glTF node index, host node index, host node generation
+		// — for every descendant that came from a glTF node. The per-primitive
+		// children `instantiate()` synthesizes carry no glTF index and are
+		// skipped, because no channel can name them.
+		_bindAnimation() {
+			if (this._bound) return;
+			const pairs = [];
+			const walk = (o) => {
+				if (o._gltfNode >= 0 && o._i >= 0) pairs.push(o._gltfNode, o._i, o._g);
+				for (const c of o.children) walk(c);
+			};
+			walk(this);
+			H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs);
+			this._bound = true;
+		}
+
 		_flush() {
 			if (this._i < 0) return;
 			const { position: p, rotation: r, scale: s } = this;
 			H.setTransform(this._i, this._g, p._x, p._y, p._z, r._x, r._y, r._z, s._x, s._y, s._z);
+			if (this._q) H.setQuaternion(this._i, this._g, this._q[0], this._q[1], this._q[2], this._q[3]);
 		}
 
 		// Create the host node for this object under `parent`, then replay
@@ -700,6 +776,10 @@
 			// In load order, which is the order `mesh(name)` resolves in and the
 			// order the host's own `find_mesh` walks.
 			this.meshes = H.meshNames(index, generation);
+			// Names and durations are read out of the JSON chunk at load, so
+			// this costs nothing and "does this character have a walk cycle" is
+			// a question worth asking before deciding to place it.
+			this.animations = H.assetClips(index, generation);
 		}
 
 		mesh(name) {
@@ -718,7 +798,56 @@
 			return { asset: this._a, assetGeneration: this._g, mesh: i, name: this.meshes[i] };
 		}
 
-		toJSON() { return { path: this.path, meshes: this.meshes }; }
+		// The file's node hierarchy as an Object3D tree — Three.js's
+		// `gltf.scene`. A group, with the file's own nodes under it carrying the
+		// transforms the file gave them.
+		//
+		// Nothing here is special: what comes back is ordinary Object3Ds and
+		// Meshes that have not been added to anything yet, so a script can move
+		// them, hide them, recolour them or pull one out and add it on its own,
+		// and `scene.add()` materializes them by the same path as everything
+		// else. That is the reason the host answers with a description instead
+		// of building host nodes itself.
+		//
+		// Call it twice for two copies. They share the upload — the host counts
+		// one reference per drawing node, so two trees over one asset is two
+		// sets of transforms and nothing else.
+		instantiate(name) {
+			const rows = H.assetNodes(this._a, this._g);
+			const root = new Object3D();
+			root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
+			// The root is what carries the animations: a clip drives the whole
+			// subtree, so root.play('Walk') is the only sensible place to say it.
+			root._clips = this.animations;
+			root._asset = [this._a, this._g];
+
+			const built = [];
+			for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode] of rows) {
+				const node = mesh < 0
+					? new Object3D()
+					: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
+				if (label) node.name = label;
+				node.position.set(px, py, pz);
+				// The Euler triple is what `node.rotation` reads back as; the
+				// quaternion beside it is what the host is actually given,
+				// because the two are not the same rotation at gimbal lock.
+				// Setting `rotation` clears `_q`, so this order matters.
+				node.rotation.set(ex, ey, ez);
+				node._q = [qx, qy, qz, qw];
+				node.scale.set(sx, sy, sz);
+				// Which glTF node this was, so `play` can tell the host what an
+				// animation channel's target index became. -1 for the entries
+				// the host synthesized, which no channel can name.
+				node._gltfNode = gltfNode;
+				// Parents always precede their children in the host's walk, so
+				// `built[parent]` is there by the time it is asked for.
+				(parent < 0 ? root : built[parent]).add(node);
+				built.push(node);
+			}
+			return root;
+		}
+
+		toJSON() { return { path: this.path, meshes: this.meshes, animations: this.animations }; }
 	}
 
 	// -----------------------------------------------------------------------
@@ -1334,9 +1463,10 @@
 				note: 'Empties the one host scene and becomes its root. It is an Object3D, so moving it moves everything.',
 				methods: [
 					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
-					'unload()', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()', 'toJSON()',
+					'unload()', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
+					'play(name, opts)', 'stop()', 'toJSON()',
 				],
-				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
+				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations'],
 			},
 			Mesh: {
 				construct: 'new three.Mesh(geometry, material)',
@@ -1348,8 +1478,12 @@
 					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'material', 'children', 'parent',
 					'color (per copy, free: [r,g,b], [r,g,b,a] or 0xff8800)',
 					'variant (per copy, free: which row of the material\'s table)',
+					'animations (empty unless this came from asset.instantiate())',
 				],
-				methods: ['add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()', 'toJSON()'],
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'play(name, opts)', 'stop()', 'toJSON()',
+				],
 			},
 			ShaderMaterial: {
 				construct: "new three.ShaderMaterial({ fragment, uniforms })",
@@ -1367,13 +1501,22 @@
 				methods: ['toJSON()'],
 			},
 			Group: {
-				construct: 'new three.Group()',
-				note: 'Transforms its children and draws nothing itself.',
+				construct: 'new three.Group(), or asset.instantiate()',
+				note:
+					'Transforms its children and draws nothing itself. asset.instantiate() answers with one '
+					+ 'of these carrying the file\'s own node hierarchy, and that one is what animations, '
+					+ 'play(name, {loop, speed}) and stop() work on — a glTF clip drives a whole subtree, so '
+					+ 'its root is where it is played. On a hand-built Group animations is empty and play() '
+					+ 'throws saying which door to use. There is no AnimationMixer: one clip at a time, no '
+					+ 'crossfade.',
 				methods: [
 					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
-					'toJSON()',
+					'play(name, opts)', 'stop()', 'toJSON()',
 				],
-				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent'],
+				properties: [
+					'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
+					'animations (clip names, from asset.instantiate())',
+				],
 			},
 			Vector3: {
 				construct: 'new three.Vector3(null, x, y, z)',
@@ -1385,8 +1528,15 @@
 			},
 			Asset: {
 				construct: 'three.load(path)',
-				properties: ['path', 'meshes (names, in load order)'],
-				methods: ['mesh(name)', 'meshAt(index)', 'toJSON()'],
+				properties: ['path', 'meshes (names, in load order)', 'animations (clip names)'],
+				methods: ['mesh(name)', 'meshAt(index)', 'instantiate(name?)', 'toJSON()'],
+				note:
+					'instantiate() is Three.js\'s gltf.scene: the file\'s own node hierarchy as Object3Ds, '
+					+ 'with the transforms the file gave them. Use it for anything whose pieces are '
+					+ 'positioned by nodes rather than baked into the vertices — a rig, a prop with parts, '
+					+ 'a level laid out in Blender. asset.mesh(name) is the other door and is what you want '
+					+ 'when you are placing pieces yourself. Instantiating twice gives two independent trees '
+					+ 'over one upload.',
 			},
 			Geometry: {
 				construct: 'not constructible — use one of the seven shapes below',
@@ -1458,17 +1608,23 @@
 		},
 		functions: {
 			'three.load(path)':
-				'Load a .glb or .gltf. Under --assets the path is relative to the assets directory and cannot '
-				+ 'climb out of it, so three.inventory() paths go straight in; otherwise it is relative to '
-				+ 'where three was started. Loading the same path twice returns the same asset — unless it was '
-				+ 'unloaded in between, which gives a fresh one and makes the old handle throw.',
+				'Read a .glb or .gltf. Nothing is uploaded: this parses the JSON and answers with an Asset '
+				+ 'that knows its meshes, their bounds and the file\'s node tree. A mesh reaches the GPU when '
+				+ 'a Mesh drawing it is added to a scene, so loading a 200-piece kit to place twelve costs '
+				+ 'twelve. Under --assets the path is relative to the assets directory and cannot climb out '
+				+ 'of it, so three.inventory() paths go straight in; otherwise it is relative to where three '
+				+ 'was started. Loading the same path twice returns the same asset — unless it was unloaded '
+				+ 'in between, which gives a fresh one and makes the old handle throw. '
+				+ 'asset.instantiate() for the file\'s own hierarchy, asset.mesh(name) for one piece of it.',
 			'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
 			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
 			'three.unloadUnused()':
-				'Free every asset no live mesh names, and every texture that goes with it. Answers with '
-				+ '{ assets, textures, bytes }. scene.unload() is this plus emptying the scene and is what a '
-				+ 'level transition wants. An asset loaded but never added has no references either, so it '
-				+ 'goes too — load the next level after unloading, not before.',
+				'Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and '
+				+ 'every texture that goes with them. Answers with { assets, meshes, textures, bytes } — '
+				+ 'meshes counts the pieces given back without their file, which is what lets a level swap '
+				+ 'which parts of a kit it places without reloading the kit. scene.unload() is this plus '
+				+ 'emptying the scene and is what a level transition wants. An asset loaded but never added '
+				+ 'has no references either, so it goes too — load the next level after unloading, not before.',
 			'three.inventory()':
 				'Every .glb and .gltf under the assets directory, described without loading any of it: '
 				+ '[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name], '

@@ -29,8 +29,27 @@ import collision;
 import std::core::test;
 import std::io;
 import std::io::file;
+import std::math;
+import std::math::vector;
 
 const String FIXTURE = "test/fixtures/textured.glb";
+
+<*
+ The other half of the texture story: one image, four meshes, one material.
+
+ `textured.glb` is two different images that hold the same picture — the case
+ only a content hash can see. This is one image named four times — the case the
+ hash sees far too late, because it cannot answer until the PNG has been
+ decoded. Written by `test/fixtures/make_shared_material.py`.
+*>
+const String SHARED = "test/fixtures/shared_material.glb";
+
+<*
+ The fixture whose geometry is all at the origin and whose *nodes* put it
+ anywhere. Written by `test/fixtures/make_hierarchy.py`, which explains what
+ each node is for.
+*>
+const String HIERARCHY = "test/fixtures/hierarchy.glb";
 
 const uint W = 200;
 const uint H = 150;
@@ -132,12 +151,19 @@ fn void several_meshes_stay_several_meshes() @test
 }
 
 <*
- Two identical images upload once.
+ Two identical images upload once — and are still decoded twice.
 
  The fixture declares two glTF images, two textures and two materials; the PNG
  payloads are byte-identical. A loader keyed on the file's own indices uploads
  two. Content-hash dedup uploads one — the same rule the M6 exporter needs when
  it writes one glTF image per unique texture rather than one per reference.
+
+ The decode count is asserted alongside, and asserted at **two**, because that
+ is the honest description of what the hash can and cannot do. It is keyed on
+ the decoded pixels, so it cannot say anything until both files' bytes have been
+ through the decoder; two distinct images is precisely the case `ImageMemo` is
+ blind to. Pinning the number here rather than leaving it unsaid is what stops
+ the next reader from assuming the memo covers this too.
 *>
 fn void identical_textures_upload_once() @test
 {
@@ -147,6 +173,75 @@ fn void identical_textures_upload_once() @test
 
 		three::SceneStats stats = renderer.pass.stats();
 		test::@check(stats.textures == 1, "two byte-identical images uploaded as %d textures", stats.textures);
+		test::@check(
+			renderer.pass.assets.decodes == 2,
+			"two distinct images decoded %d times; the hash works on pixels and has to see both",
+			renderer.pass.assets.decodes
+		);
+	};
+}
+
+<*
+ One image, four meshes, one decode.
+
+ This is the check `identical_textures_upload_once` looks like it makes and does
+ not. That one counts *textures*, which is the far side of the cache: the upload
+ was already deduplicated and the count read 1 while the same PNG went through
+ `decode_image`, `to_rgba` and a 64-bit hash once per primitive naming it. A
+ test on the far side of a cache is a test the cache can fail behind, and this
+ one did, for the whole of M1 through G2.
+
+ So this counts decodes. Four meshes share material 0, which names image 0; the
+ decoder should see the file's bytes exactly once. Four is what a memo-less
+ loader reports, which is why the fixture has four pieces and not two — an
+ off-by-one and a missing cache should not produce the same number.
+*>
+fn void an_image_every_mesh_shares_is_decoded_once() @test
+{
+	test::@check(file::is_file(SHARED), "%s is missing — regenerate it with test/fixtures/make_shared_material.py", SHARED);
+
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, SHARED)!!;
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.unique_meshes == 4, "the fixture's four pieces came back as %d", stats.unique_meshes);
+		test::@check(stats.textures == 1, "one image uploaded as %d textures", stats.textures);
+		test::@check(
+			renderer.pass.assets.decodes == 1,
+			"one image shared by four meshes was decoded %d times",
+			renderer.pass.assets.decodes
+		);
+	};
+}
+
+<*
+ A memo hit still counts as a reference.
+
+ The memo returns a texture index without going near the upload path, and the
+ upload path is where the reference used to be taken. Skip the retain and the
+ count is 1 where it should be 4 — which is invisible until the first of those
+ four meshes goes away and takes a live image out from under the other three.
+
+ Asserted on the refcount rather than on a render because the failure has no
+ picture: `release_texture` will not free a slot whose count is already zero, so
+ a driver-level use-after-free is not even reliably what happens. The number is
+ the fault, and `an_image_four_meshes_share_survives_losing_half_of_them` in
+ `unload_test` is where it turns into behaviour.
+*>
+fn void every_mesh_sharing_an_image_holds_a_reference() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, SHARED)!!;
+
+		three::Assets* assets = &renderer.pass.assets;
+		test::@check(assets.textures.len() == 1, "expected one texture slot, got %d", assets.textures.len());
+		test::@check(
+			assets.textures[0].refs == 4,
+			"four meshes name the image and it holds %d references",
+			assets.textures[0].refs
+		);
 	};
 }
 
@@ -228,5 +323,320 @@ fn void asset_bounds_cover_the_geometry() @test
 		collision::Aabb3 bounds = renderer.pass.bounds();
 		test::@check(bounds.min[0] < -1.2 && bounds.max[0] > 1.2, "x bounds came back [%f, %f], expected about [-1.25, 1.25]", bounds.min[0], bounds.max[0]);
 		test::@check(bounds.min[1] < -0.4 && bounds.max[1] > 0.4, "y bounds came back [%f, %f], expected about [-0.5, 0.5]", bounds.min[1], bounds.max[1]);
+	};
+}
+
+// ============================================================================
+// The node hierarchy — `game.md` G3/S2
+// ============================================================================
+
+<*
+ A node by name, anywhere in the scene.
+
+ `Scene` has no find-by-name — `getObjectByName` is a JavaScript-side walk in
+ Three.js and there is nothing in the host that wants one — so this is the
+ test's own, over the node pool rather than the tree, which is the same set.
+*>
+fn three::NodeId named(three::Scene* scene, String name)
+{
+	foreach (i, &node : scene.nodes)
+	{
+		if (node.alive && node.name == name)
+		{
+			return { .index = (uint)i, .generation = node.generation };
+		}
+	}
+	test::@check(false, "no node called '%s' in the scene", name);
+	return three::NO_NODE;
+}
+
+fn bool near(Vec3 got, Vec3 want)
+{
+	return math::abs(got.x - want.x) < 0.001f
+		&& math::abs(got.y - want.y) < 0.001f
+		&& math::abs(got.z - want.z) < 0.001f;
+}
+
+<*
+ The loader keeps the file's node tree.
+
+ Until G3 it did not, and there was no way to tell: both other fixtures bake
+ their positions into their vertices, so a loader that discards every node
+ renders them perfectly. This fixture is the other kind — one quad at the
+ origin, four times, positioned entirely by nodes — and under the old loader it
+ draws as a single pile.
+
+ Two roots, because `record_nodes` derives them from "nothing lists it as a
+ child" rather than from the `scenes` array, and a file with two of them is what
+ separates that from "node 0".
+*>
+fn void the_node_tree_survives_the_loader() @test
+{
+	test::@check(file::is_file(HIERARCHY), "%s is missing — regenerate it with test/fixtures/make_hierarchy.py", HIERARCHY);
+
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, HIERARCHY)!!;
+		three::Asset* asset = renderer.pass.assets.slot(id);
+
+		test::@check(asset.nodes.len() == 4, "the file's four nodes came back as %d", asset.nodes.len());
+		test::@check(asset.roots.len() == 2, "two nodes are nobody's child; %d were found", asset.roots.len());
+		test::@check(asset.meshes.len() == 4,
+			"three glTF meshes, one of them two primitives, uploaded as %d", asset.meshes.len());
+
+		// `arm` names a glTF mesh with two primitives, so its range is two wide.
+		// This is the mapping that cannot be arithmetic: a primitive with no
+		// vertices is skipped at upload, so node-to-mesh has to be recorded.
+		foreach (&node : asset.nodes)
+		{
+			if (node.name == "arm")
+			{
+				test::@check(node.mesh_count == 2, "`arm` draws %d meshes, expected 2", node.mesh_count);
+			}
+			if (node.name == "pivot")
+			{
+				test::@check(node.mesh_count == 0, "`pivot` has no mesh and drew %d", node.mesh_count);
+			}
+		}
+	};
+}
+
+<*
+ Instantiating rebuilds the transforms, and the chain composes.
+
+ `tip` is under `arm` is under `pivot`, and its world position is the only
+ number here that no single mistake produces by accident:
+
+	pivot   translate (2, 0, 0), then a quarter turn about +Y
+	arm     scale 2
+	tip     translate (1, 0, 0)
+
+ A quarter turn about +Y sends +X to (0, 0, -1) — which is not this test's
+ claim to make, it is `a_child_follows_its_parent`'s, asserted there against
+ `set_rotation` directly. So the local +1 on X becomes +2 after `arm`'s scale
+ and (0, 0, -2) after `pivot`'s rotation, landing at (2, 0, -2).
+
+ Drop the hierarchy and it is at the origin. Drop the scale and it is at
+ (2, 0, -1). Compose the rotation the other way and it is at (4, 0, 0). Read the
+ quaternion with a flipped sign and it is at (2, 0, 2). Every one of those is a
+ different wrong answer, which is the property worth having in a fixture.
+
+ `loose` is the second root and states its transform as a `matrix`; it is here
+ because a loader that reads only TRS leaves it at the origin and every other
+ assertion in this file still passes.
+*>
+fn void an_instantiated_tree_puts_its_meshes_where_the_file_says() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, HIERARCHY)!!;
+		scene.instantiate(id, scene.root, "prop");
+		scene.update_world_matrices();
+
+		Vec3 tip = scene.node(named(scene, "tip")).world_position();
+		test::@check(near(tip, { 2, 0, -2 }),
+			"`tip` landed at (%.3f, %.3f, %.3f), expected (2, 0, -2)", tip.x, tip.y, tip.z);
+
+		Vec3 loose = scene.node(named(scene, "loose")).world_position();
+		test::@check(near(loose, { 0, 3, 0 }),
+			"`loose` states its transform as a matrix and landed at (%.3f, %.3f, %.3f), expected (0, 3, 0)",
+			loose.x, loose.y, loose.z);
+
+		Vec3 arm = scene.node(named(scene, "arm")).world_position();
+		test::@check(near(arm, { 2, 0, 0 }),
+			"`arm` landed at (%.3f, %.3f, %.3f), expected (2, 0, 0)", arm.x, arm.y, arm.z);
+
+		// `arm` names a two-primitive mesh, so it is a group: two mesh children
+		// plus `tip`. Three.js's GLTFLoader produces the same shape.
+		three::Node* arm_node = scene.node(named(scene, "arm"));
+		test::@check(arm_node.asset.is_set() == false, "`arm` draws a mesh itself instead of being a group");
+		test::@check(arm_node.children.len() == 3,
+			"`arm` has %d children; expected its two primitives and `tip`", arm_node.children.len());
+	};
+}
+
+<*
+ One instantiation is one reference per drawing node, and two instantiations are
+ two subtrees over one upload.
+
+ **The thesis, at a level the API could not previously state.** Before G3 a
+ prop's hierarchy was not a thing that existed, so "instantiate it twice" was not
+ an operation. It is now, and what it costs is what `plan.md` §2 promises: the
+ nodes double and nothing on the device does.
+
+ G2's `create_slot` is what makes it true and nothing in `instantiate` counts
+ anything — which is the point of asserting it here rather than trusting it.
+*>
+fn void instantiating_twice_is_two_subtrees_over_one_upload() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId id = assets.load(&renderer.gpu, HIERARCHY)!!;
+		uint meshes = (uint)assets.slot(id).meshes.len();
+
+		// `Assets.load` uploads and nothing else — it is `MeshPass.load` that
+		// also places. So a freshly loaded asset is at zero and unloadable, which
+		// is what makes `three.load` cheap to call speculatively.
+		test::@check(assets.slot(id).refs == 0, "loading alone took %d references", assets.slot(id).refs);
+
+		three::NodeId one = scene.instantiate(id, scene.root, "first");
+		test::@check(assets.slot(id).refs == meshes,
+			"one instantiation of %d meshes took %d references", meshes, assets.slot(id).refs);
+
+		three::NodeId two = scene.instantiate(id, scene.root, "second");
+		test::@check(assets.slot(id).refs == meshes * 2,
+			"two instantiations took %d references, expected %d", assets.slot(id).refs, meshes * 2);
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.unique_meshes == meshes,
+			"two copies of one asset report %d unique meshes, expected %d", stats.unique_meshes, meshes);
+
+		scene.remove(one);
+		test::@check(assets.slot(id).refs == meshes,
+			"dropping one subtree left %d references, expected %d", assets.slot(id).refs, meshes);
+
+		scene.remove(two);
+		test::@check(assets.slot(id).refs == 0,
+			"dropping both subtrees left %d references", assets.slot(id).refs);
+	};
+}
+
+// ============================================================================
+// Lazy loading — `game.md` G3/S3
+// ============================================================================
+
+<*
+ **Loading a file uploads nothing.**
+
+ The check that keeps a lazy loader lazy, and the reason it is phrased as an
+ absence: every other test in this suite asserts that something is *there*, and
+ all of them keep passing on the day the loader quietly goes back to uploading
+ everything. Nothing else notices. This is the only assertion that can.
+
+ What is there after a load is what the JSON says: a mesh slot per primitive,
+ each with its name, its vertex count and its bounds — because a POSITION
+ accessor carries `count` and is *required* to carry `min`/`max`. `Asset.bounds`
+ is therefore correct on a file that has never uploaded a byte, which is what
+ `--grid`'s spacing and `camera.frameAll()` read.
+*>
+fn void loading_a_file_uploads_nothing() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		three::AssetId id = assets.load(&renderer.gpu, SHARED)!!;
+		three::Asset* asset = assets.slot(id);
+
+		test::@check(asset.meshes.len() == 4, "the file's four meshes were described as %d", asset.meshes.len());
+		test::@check(assets.decodes == 0, "loading decoded %d images", assets.decodes);
+		test::@check(assets.texture_count() == 0, "loading uploaded %d textures", assets.texture_count());
+
+		foreach (&mesh : asset.meshes)
+		{
+			test::@check(!mesh.uploaded, "`%s` was uploaded by a plain load", mesh.name);
+			test::@check(mesh.positions.buffer == null, "`%s` has a vertex buffer on the device", mesh.name);
+			test::@check(mesh.bvh == null, "`%s` built its picking tree before anything drew it", mesh.name);
+
+			// The three things that come out of the JSON, and the reason the
+			// rest can wait.
+			test::@check(mesh.name.len > 0, "a described mesh has no name");
+			test::@check(mesh.vertex_count == 4, "`%s` describes %d vertices, expected a quad's 4", mesh.name, mesh.vertex_count);
+		}
+
+		test::@check(asset.bounds.max[0] > asset.bounds.min[0],
+			"bounds came back empty from the JSON: [%f, %f]", asset.bounds.min[0], asset.bounds.max[0]);
+	};
+}
+
+<*
+ Placing one piece of a kit uploads one piece of it.
+
+ `game.md` G3/S3's actual claim: a 200-mesh kit where a level places twelve pays
+ for twelve. Here it is four and one. The count of *described* meshes does not
+ move — the file is still fully known — which is the distinction the API now
+ makes and could not before.
+*>
+fn void placing_one_mesh_of_a_kit_uploads_one() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId id = assets.load(&renderer.gpu, SHARED)!!;
+		int wanted = assets.find_mesh(id, "piece_2");
+		test::@check(wanted >= 0, "the fixture has no mesh called piece_2");
+
+		scene.add_mesh(id, (uint)wanted, scene.root, "just the one");
+
+		uint uploaded = 0;
+		foreach (&mesh : assets.slot(id).meshes)
+		{
+			if (mesh.uploaded) uploaded++;
+		}
+		test::@check(uploaded == 1, "placing one mesh of a four-mesh file uploaded %d", uploaded);
+		test::@check(assets.slot(id).meshes.len() == 4,
+			"and the other three stopped being described (%d left)", assets.slot(id).meshes.len());
+		test::@check(assets.decodes == 1, "one placed mesh decoded %d images", assets.decodes);
+
+		// And it draws — an uploaded-on-demand mesh is a mesh like any other.
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.unique_meshes == 1, "%d meshes reached the draw list", stats.unique_meshes);
+		renderer.render_offscreen()!!;
+	};
+}
+
+<*
+ One piece of a kit can be given back while the rest of the file stays.
+
+ The sharper unloading G3/S3 buys, and the thing the refcount moving from the
+ file to the mesh is *for*: a level that swaps which pieces it places gives back
+ the ones it stopped using without giving back the kit — and without re-reading
+ the file to get them again, because the description never left.
+
+ `report.meshes` is the count that says so. `report.assets` staying at zero is
+ half the assertion: a sweep that took the whole file would look identical in
+ every byte-counting check and be a completely different thing.
+*>
+fn void a_piece_of_a_kit_unloads_while_the_kit_stays() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId id = assets.load(&renderer.gpu, SHARED)!!;
+		three::NodeId keep = scene.add_mesh(id, 0, scene.root, "kept");
+		three::NodeId drop = scene.add_mesh(id, 1, scene.root, "dropped");
+
+		test::@check(assets.slot(id).meshes[0].uploaded && assets.slot(id).meshes[1].uploaded,
+			"both placed meshes should be on the device");
+
+		scene.remove(drop);
+		three::UnloadReport report = assets.unload_unused(&renderer.gpu);
+
+		test::@check(report.meshes == 1, "the sweep gave back %d meshes, expected 1", report.meshes);
+		test::@check(report.assets == 0, "the sweep took %d whole assets with it", report.assets);
+		test::@check(assets.slot(id) != null, "the file was freed out from under the mesh still drawing");
+		test::@check(assets.slot(id).meshes[0].uploaded, "the mesh still being drawn was freed");
+		test::@check(!assets.slot(id).meshes[1].uploaded, "the unused mesh is still on the device");
+
+		// Still described, which is what makes getting it back cheap.
+		test::@check(assets.slot(id).meshes[1].name.len > 0, "the freed mesh lost its name");
+		test::@check(assets.slot(id).meshes[1].vertex_count == 4, "the freed mesh lost its vertex count");
+
+		// And placing it again uploads it again, with no re-read of the file.
+		scene.add_mesh(id, 1, scene.root, "back again");
+		test::@check(assets.slot(id).meshes[1].uploaded, "re-placing a freed mesh did not upload it");
+		test::@check(assets.slot(id).meshes.len() == 4, "the mesh table changed shape");
+
+		renderer.render_offscreen()!!;
+		(void)keep;
 	};
 }

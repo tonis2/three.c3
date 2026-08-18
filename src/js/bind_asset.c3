@@ -23,6 +23,7 @@ import std::io;
 import std::math;
 import std::math::vector;
 import qjs;
+import std::collections::list;
 
 <*
  `load(path)` — the asset's index, for `add`.
@@ -281,6 +282,110 @@ fn void js_mesh_names(
 	foreach (i, &mesh : self.pass.assets.slot(id).meshes)
 	{
 		js.set_index(names, (uint)i, js.string(mesh.name));
+	}
+	*out = names;
+}
+
+<*
+ `assetNodes(index, generation)` — the asset's node tree, flattened into the
+ objects `asset.instantiate()` builds.
+
+ One entry per node that should exist, each naming its parent by position in the
+ same array. Parents always come before their children, so `instantiate()` can
+ walk it once and never look forward.
+
+ **The tree is not built here and its shape is not decided here.**
+ `Assets.flatten` decides — the same walk `Scene.instantiate` uses on the host —
+ so a file placed by the CLI and a file placed by a script produce the same
+ hierarchy. What crosses the boundary is a description, and JavaScript builds
+ ordinary `Object3D`s from it that materialize through the normal `add` path.
+ That is deliberate: an object handed back from here is one a script can move,
+ hide, recolour and re-parent before it ever reaches a scene, because it is not
+ special in any way.
+
+ ## The rotation crosses twice, and both are needed
+
+ Once as Euler angles, because that is what an `Object3D.rotation` is and a
+ script that reads it back should see numbers rather than a quaternion nobody
+ asked for. Once as the quaternion itself, because the Euler form is not exact:
+ at gimbal lock — a rotation of exactly 90° about Y, which is the single most
+ common thing anyone types into Blender — `asin` is evaluated where its slope is
+ infinite and the recovered angle is off by about 3e-4 radians. That is 0.7mm at
+ the end of a two-metre arm, which is a hairline gap between two kit pieces that
+ were authored flush.
+
+ So `prelude.js` shows the Euler triple and sends the quaternion, and writing an
+ Euler angle drops the quaternion. `scene/node.c3` has the general form of this
+ argument; this is the one place it has a number attached.
+
+ @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode].`
+*>
+fn void js_asset_nodes(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	List{PlacedNode} placed;
+	placed.init(mem, 16);
+	defer placed.free();
+	self.pass.assets.flatten(id, &placed);
+
+	qjs::Value nodes = js.array();
+	foreach (i, &entry : placed)
+	{
+		Vec3 euler = euler_from_quat(entry.rotation);
+
+		qjs::Value row = js.array();
+		js.set_index(row, 0, js.string(entry.name));
+		js.set_index(row, 1, qjs::int_value(entry.parent));
+		js.set_index(row, 2, qjs::int_value(entry.mesh));
+		js.set_index(row, 3, qjs::number_value(entry.position.x));
+		js.set_index(row, 4, qjs::number_value(entry.position.y));
+		js.set_index(row, 5, qjs::number_value(entry.position.z));
+		js.set_index(row, 6, qjs::number_value(euler.x));
+		js.set_index(row, 7, qjs::number_value(euler.y));
+		js.set_index(row, 8, qjs::number_value(euler.z));
+		js.set_index(row, 9, qjs::number_value(entry.scale.x));
+		js.set_index(row, 10, qjs::number_value(entry.scale.y));
+		js.set_index(row, 11, qjs::number_value(entry.scale.z));
+		js.set_index(row, 12, qjs::number_value(entry.rotation.i));
+		js.set_index(row, 13, qjs::number_value(entry.rotation.j));
+		js.set_index(row, 14, qjs::number_value(entry.rotation.k));
+		js.set_index(row, 15, qjs::number_value(entry.rotation.l));
+		js.set_index(row, 16, qjs::int_value(entry.gltf_node));
+
+		js.set_index(nodes, (uint)i, row);
+	}
+	*out = nodes;
+}
+
+<*
+ `assetClips(index, generation)` — the names of a file's animations.
+
+ Free: names and durations are read at load out of the JSON chunk, so this
+ answers on a file that has uploaded nothing. `mesh.animations` is what a script
+ sees, and the reason it is a plain array of strings rather than clip objects is
+ that a name is the only handle `play` takes.
+*>
+fn void js_asset_clips(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	qjs::Value names = js.array();
+	foreach (i, &clip : self.pass.assets.slot(id).clips)
+	{
+		js.set_index(names, (uint)i, js.string(clip.name));
 	}
 	*out = names;
 }

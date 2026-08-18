@@ -37,6 +37,7 @@ import std::sort;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
+import std::math::quaternion;
 import collision;
 
 <*
@@ -153,6 +154,14 @@ struct Scene
 	// `attach_assets`.
 	Assets* assets;
 
+	// One per instantiated subtree of an asset that has animation clips —
+	// `scene/animation.c3`. **The first per-instance state that is not a
+	// transform**, which is why it is a list beside the nodes rather than a
+	// field on one: a `Node` is an asset reference plus a matrix, and paying a
+	// player's worth of bytes on every node of every scene to animate a dozen
+	// of them is the wrong trade.
+	List{AnimationPlayer} players;
+
 	// Rebuilt by `update`; read by `MeshPass.record`.
 	List{Draw} draws;
 	List{Instance} instances;
@@ -177,6 +186,7 @@ fn Scene* Scene.init(&self)
 	// way out — see `Asset.init_lists`, which carries the same note.
 	self.nodes.init(mem, 64);
 	self.free_slots.init(mem, 16);
+	self.players.init(mem, 4);
 	self.draws.init(mem, 64);
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
@@ -209,6 +219,43 @@ fn void Scene.attach_assets(&self, Assets* assets)
 	self.assets = assets;
 }
 
+<*
+ Forget the player rooted at `id`, if there is one.
+
+ Called from `kill` for every node of a removed subtree, so it has to be cheap
+ for the overwhelmingly common case of "this node roots nothing". The shift
+ `remove_at` does is over a list with one entry per animated prop in the scene,
+ which is not the list worth writing a swap-with-last for.
+*>
+fn void Scene.drop_player(&self, NodeId root)
+{
+	foreach (i, &candidate : self.players)
+	{
+		if (candidate.root != root) continue;
+		candidate.free();
+		self.players.remove_at(i);
+		return;
+	}
+}
+
+<*
+ The animation player for an instantiated subtree, or null.
+
+ Looked up by the subtree's root, which is the handle `instantiate` returned and
+ the thing a script has in hand when it calls `play`. A linear scan because the
+ list holds one entry per *animated prop in the scene* — a dozen, not a
+ thousand — and a map keyed by `NodeId` would cost more to maintain than the
+ scan costs to run.
+*>
+fn AnimationPlayer* Scene.player(&self, NodeId root)
+{
+	foreach (&candidate : self.players)
+	{
+		if (candidate.root == root) return candidate;
+	}
+	return null;
+}
+
 fn void Scene.free(&self)
 {
 	foreach (&node : self.nodes)
@@ -218,6 +265,8 @@ fn void Scene.free(&self)
 	}
 	self.nodes.free();
 	self.free_slots.free();
+	foreach (&player : self.players) player.free();
+	self.players.free();
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
@@ -263,6 +312,257 @@ fn NodeId Scene.add_mesh(&self, AssetId asset, uint mesh, NodeId parent = NO_NOD
 	return self.attach(parent, asset, mesh, name);
 }
 
+<*
+ Place an asset's node hierarchy under `parent`, transforms and all.
+
+ This is Three.js's `gltf.scene`, and until G3 there was no equivalent: the
+ loader flattened the file and `MeshPass.place` dropped every mesh at the origin.
+ A file that bakes its transforms into the vertices rendered correctly and one
+ that positions its pieces by node did not — a distinction nothing in the API
+ could express, so nothing in the suite could catch.
+
+ **What a glTF node becomes is `Assets.flatten`'s decision, not this
+ function's.** JavaScript's `asset.instantiate()` reads the same walk and builds
+ `Object3D`s from it, and the two producing different trees for one file would be
+ a bug nobody would think to look for. This is one pass over that answer.
+
+ ## The references take care of themselves
+
+ Every drawing node goes through `create_slot`, which retains the asset (G2). So
+ a prop instantiated twice is two subtrees over one upload, and dropping one
+ subtree releases exactly its own references — **the thesis at a level the API
+ could not previously state**. Nothing here counts anything.
+
+ @return `The group everything was placed under, or NO_NODE if the handle names no asset.`
+*>
+fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, String name = "")
+{
+	if (self.assets == null) return NO_NODE;
+	Asset* loaded = self.assets.slot(asset);
+	if (loaded == null) return NO_NODE;
+
+	NodeId group = self.add_group(parent, name.len > 0 ? name : basename(loaded.path));
+
+	List{PlacedNode} placed;
+	placed.init(mem, 16);
+	defer placed.free();
+	self.assets.flatten(asset, &placed);
+
+	// Parents precede their children in the walk, so `created` always has the
+	// entry a child needs by the time the child is reached. One pass, no fixups.
+	List{NodeId} created;
+	created.init(mem, placed.len() + 1);
+	defer created.free();
+
+	foreach (&entry : placed)
+	{
+		NodeId into = entry.parent < 0 ? group : created[entry.parent];
+		NodeId id = entry.mesh < 0
+			? self.add_group(into, entry.name)
+			: self.add_mesh(asset, (uint)entry.mesh, into, entry.name);
+
+		Node* node = self.node(id);
+		node.position = entry.position;
+		node.rotation = entry.rotation;
+		node.scale = entry.scale;
+		node.dirty = true;
+
+		created.push(id);
+	}
+
+	self.start_player(asset, group, placed.array_view(), created.array_view());
+	return group;
+}
+
+<*
+ Give a freshly instantiated subtree its animation player, if the asset has
+ anything to play.
+
+ The map from glTF node index to `NodeId` can only be built here: `flatten`
+ carries the glTF index on each entry and this walk is the only thing that knows
+ what each entry became. Nothing else in the codebase has both halves, which is
+ why this is not a method on `Assets`.
+
+ **A player is created even though nothing is playing.** The alternative is
+ building the map on the first `play`, which would mean walking the tree a second
+ time — and `play` is called from an animation callback, where a hidden tree walk
+ is the kind of cost that shows up as a stutter the first time a character moves.
+
+ Nothing happens for an asset with no clips, so a scene of ten thousand crates
+ holds no players at all.
+*>
+fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] placed, NodeId[] created)
+{
+	List{uint} sources;
+	List{NodeId} nodes;
+	sources.init(mem, placed.len);
+	nodes.init(mem, placed.len);
+	defer sources.free();
+	defer nodes.free();
+
+	foreach (i, &entry : placed)
+	{
+		if (entry.gltf_node < 0) continue;
+		sources.push((uint)entry.gltf_node);
+		nodes.push(created[i]);
+	}
+
+	self.bind_player(asset, root, sources.array_view(), nodes.array_view());
+}
+
+<*
+ Give a subtree an animation player from a map somebody else built.
+
+ Two callers and they arrive from opposite directions. `start_player` above has
+ just walked `Assets.flatten` and knows which entry became which node.
+ `asset.instantiate()` in JavaScript built the same tree as `Object3D`s and let
+ the ordinary `add` path materialize them — so the host never saw the walk, and
+ JavaScript is the only thing that knows the correspondence. Both end up here,
+ which is why this takes the map as two plain arrays rather than anything
+ either side would have to be taught about.
+
+ Replaces an existing player on the same root rather than adding a second: two
+ players over one subtree would both write to the same nodes every frame, and
+ which one won would depend on list order.
+
+ Nothing happens for an asset with no clips, so a scene of ten thousand crates
+ holds no players at all.
+
+ @param gltf_nodes : `The glTF node index each node came from, one per entry and the same length as the node array.`
+*>
+fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes)
+{
+	if (self.assets == null) return;
+	Asset* loaded = self.assets.slot(asset);
+	if (loaded == null || loaded.clips.len() == 0) return;
+
+	self.drop_player(root);
+
+	AnimationPlayer player = { .root = root, .asset = asset, .clip = -1, .speed = 1 };
+	player.targets.init(mem, loaded.nodes.len());
+	for (sz i = 0; i < loaded.nodes.len(); i++) player.targets.push(NO_NODE);
+
+	foreach (i, source : gltf_nodes)
+	{
+		if (i >= nodes.len) break;
+		if (source >= player.targets.len()) continue;
+		player.targets[source] = nodes[i];
+	}
+
+	self.players.push(player);
+}
+
+<*
+ Start a clip on an instantiated subtree.
+
+ The clip's curves are read here rather than at load — `Assets.ensure_clip`, and
+ `game.md` G3/S3's rule one level up: a file describes itself cheaply and pays
+ when it is used. A character with eleven clips reads the one that plays.
+
+ The instance is **posed immediately**, before any frame is stepped, so a prop
+ placed and played in the same breath looks like its first frame rather than like
+ its rest pose for one frame.
+
+ @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
+ @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
+*>
+fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f)
+{
+	if (self.assets == null) return false;
+	AnimationPlayer* player = self.player(root);
+	if (player == null) return false;
+
+	Asset* loaded = self.assets.slot(player.asset);
+	if (loaded == null) return false;
+
+	int found = -1;
+	foreach (i, &candidate : loaded.clips)
+	{
+		if (candidate.name == clip) { found = (int)i; break; }
+	}
+	if (found < 0) return false;
+
+	self.assets.ensure_clip(player.asset, (uint)found);
+
+	player.clip = found;
+	player.speed = speed;
+	player.loop = loop;
+	player.playing = true;
+	player.time = self.assets.slot(player.asset).clips[found].start;
+
+	player.apply(self, &self.assets.slot(player.asset).clips[found]);
+	return true;
+}
+
+<*
+ Stop a clip where it is.
+
+ Deliberately not a rewind: a character that stops mid-stride and snaps to its
+ rest pose is the thing `stop()` is usually reached for to *prevent*. Playing
+ something else is how you leave the pose.
+*>
+fn bool Scene.stop(&self, NodeId root)
+{
+	AnimationPlayer* player = self.player(root);
+	if (player == null) return false;
+	player.playing = false;
+	return true;
+}
+
+<*
+ Advance every playing clip by `dt` seconds.
+
+ `game.md` G3/S6: this runs in the host frame **before** the animation callback,
+ so a callback can read where a character got to, and so animation runs with no
+ `setAnimationLoop` registered at all.
+
+ @return `Whether anything is still playing, which the sleep condition in main.c3 has to know or the window sleeps in the middle of a walk cycle.`
+*>
+fn bool Scene.step_animations(&self, float dt)
+{
+	if (self.assets == null) return false;
+
+	bool playing = false;
+	foreach (&player : self.players)
+	{
+		player.advance(self, self.assets, dt);
+		if (player.playing) playing = true;
+	}
+	return playing;
+}
+
+<*
+ Whether any clip is playing, without stepping anything.
+
+ The same question `step_animations` answers, asked by a frame that has not
+ stepped yet — the sleep condition is evaluated after the step, but a caller
+ deciding whether to *start* a frame needs it before.
+*>
+fn bool Scene.is_animating(&self)
+{
+	foreach (&player : self.players)
+	{
+		if (player.playing) return true;
+	}
+	return false;
+}
+
+<*
+ The file name out of a path, for naming the group an instantiation lands in.
+
+ A group called `props/crate.glb` is not wrong, only unreadable in a hierarchy
+ dump; `crate.glb` is what a `console.log` of a scene wants to show.
+*>
+fn String basename(String path) @local
+{
+	usz start = 0;
+	foreach (i, c : path)
+	{
+		if (c == '/' || c == '\\') start = (usz)i + 1;
+	}
+	return path[start..];
+}
+
 fn NodeId Scene.attach(&self, NodeId parent, AssetId asset, uint mesh, String name)
 {
 	if (!self.started) self.init();
@@ -306,7 +606,7 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 
 	node.name = name.len > 0 ? name.copy(mem) : "";
 	node.position = { 0, 0, 0 };
-	node.rotation = { 0, 0, 0 };
+	node.rotation = NO_ROTATION;
 	node.scale = { 1, 1, 1 };
 	node.parent = parent;
 	node.world = matrix::IDENTITY4{float};
@@ -333,7 +633,7 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// One of the two halves of `Asset.refs` — see `attach_assets`. Counted after
 	// the slot is fully written, so a table that somehow reads back into the
 	// scene sees a consistent node.
-	if (self.assets != null && asset.is_set()) self.assets.retain(asset);
+	if (self.assets != null && asset.is_set()) self.assets.retain(asset, mesh);
 
 	return { .index = index, .generation = generation };
 }
@@ -391,7 +691,13 @@ fn void Scene.kill(&self, NodeId id)
 	// `remove`, `Scene.remove(root)` for `new three.Scene()`, and the recursion
 	// above for a whole subtree — so there is nowhere else a reference can be
 	// dropped from.
-	if (self.assets != null && node.asset.is_set()) self.assets.release(node.asset);
+	if (self.assets != null && node.asset.is_set()) self.assets.release(node.asset, node.mesh);
+
+	// An instantiated subtree's player goes with the subtree's root. Guarded on
+	// the list being non-empty rather than searched unconditionally, because
+	// `kill` runs once per node of every removal and almost no scene has
+	// players at all.
+	if (self.players.len() > 0) self.drop_player(id);
 
 	if (node.name.len > 0) node.name.free(mem);
 	node.name = "";
@@ -461,11 +767,32 @@ fn void Scene.set_position(&self, NodeId id, Vec3 position)
 	node.dirty = true;
 }
 
+<*
+ Euler angles in, quaternion stored. `node.c3`'s header has the why; the order
+ is XYZ, Three.js's default.
+*>
 fn void Scene.set_rotation(&self, NodeId id, Vec3 rotation)
 {
 	Node* node = self.node(id);
 	if (node == null) return;
-	node.rotation = rotation;
+	node.rotation = quat_from_euler(rotation);
+	node.dirty = true;
+}
+
+<*
+ A rotation that did not come from Euler angles: a glTF node's TRS, or a sampled
+ animation channel.
+
+ Normalized on the way in rather than trusted. A file may store a quaternion
+ that has drifted, and `to_matrix` normalizes anyway — doing it here means the
+ node's own value is the one everything else reads back, instead of a
+ nearly-unit quaternion that produces a correct matrix and a wrong slerp.
+*>
+fn void Scene.set_quaternion(&self, NodeId id, Quaternionf rotation)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.rotation = rotation.normalize();
 	node.dirty = true;
 }
 
@@ -780,6 +1107,11 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
+		// Described but not on the device: since G3/S3 that means an upload that
+		// failed, because a node cannot exist without having retained the mesh
+		// and retaining is what uploads. It draws nothing, which is the same
+		// answer a material whose texture would not decode gets.
+		if (!mesh.uploaded) continue;
 
 		if (frustum != null && !frustum.contains(transform_aabb(node.world, mesh.bounds)))
 		{

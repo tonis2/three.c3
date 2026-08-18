@@ -156,6 +156,12 @@ struct JsRuntime
 {
 	qjs::Context js;
 	MeshPass* pass;
+
+	// The last monotonic reading `tick` was given, and whether there has been
+	// one. Turning the host's clock into a per-frame delta is the whole of the
+	// runtime's timekeeping — see `JsRuntime.step_animations`.
+	double last_elapsed_ms;
+	bool clock_started;
 	Renderer* renderer;
 
 	DString log;

@@ -19,12 +19,28 @@
  in it". Paying for it here means the M3 binding is a lookup rather than a
  lifetime redesign.
 
- ## Euler angles, in Three.js's order
+ ## A quaternion here, Euler angles in JavaScript
 
- `rotation` is XYZ Euler in radians because `m.rotation.y = Math.PI / 2` is what
- an agent that has memorized Three.js will write. Three.js keeps a quaternion
- beside it and syncs the two; that is worth copying when there is something to
- interpolate, and is nothing but a second source of truth until then.
+ `m.rotation.y = Math.PI / 2` is what an agent who has memorized Three.js will
+ write, so Euler angles have to be the API. They are not the *storage*: `Node`
+ holds a quaternion, and `prelude.js` holds the Euler triple it was written from.
+
+ That split is the whole trick, and it is why there is no second source of truth
+ despite there being two representations. The Euler angles live on the
+ JavaScript object, which is where they are read back from — so `rotation.z =
+ 2 * Math.PI` reads back as `2 * Math.PI` and not as `0`, exactly as in
+ Three.js, because nothing ever converts backwards. The quaternion lives here,
+ which is where rotations are composed, interpolated and — from G3 — sampled out
+ of a glTF animation. Each side stores the form its own work needs and the
+ conversion is one-way at the boundary (`js_set_transform`).
+
+ It was Euler on both sides until G3, with `local_matrix` rebuilding
+ `Rx·Ry·Rz` per node per frame. That is fine until something wants to *set* a
+ rotation that did not come from Euler angles — a glTF node's TRS, or a sampled
+ animation channel, both of which are quaternions. Converting those to Euler to
+ store them and back to a matrix to use them is lossy at every gimbal-locked
+ pose, and produces the class of bug that reads as "the arm flips once per
+ cycle".
 *>
 module three;
 
@@ -32,6 +48,7 @@ import std::collections::list;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
+import std::math::quaternion;
 
 // A node that draws nothing — a group, or the scene root. `NO_ASSET` is an
 // `AssetId` and lives in `scene/asset.c3` beside the handle it is the absence of.
@@ -62,8 +79,12 @@ struct Node
 
 	// The local transform. Applied scale-first, then rotation, then translation
 	// — `local_matrix` is where that order is written down.
+	//
+	// `rotation` is a quaternion and is always normalized; `quat_from_euler` is
+	// the door Euler angles come in through. See the header for why it is not
+	// stored as a triple.
 	Vec3 position;
-	Vec3 rotation; // XYZ Euler, radians
+	Quaternionf rotation;
 	Vec3 scale;
 
 	NodeId parent;
@@ -129,20 +150,94 @@ struct Node
 <*
  The local transform, scale-first.
 
- `Matrix4x4.translate`/`rotate_*`/`scale` all post-multiply, so this chain reads
- left to right as T·R·S and applies right to left to a vertex: scaled, then
- rotated, then moved. Any other order makes a rotated non-uniform scale shear,
- which looks like a broken mesh rather than a wrong multiply.
+ `Matrix4x4.translate`/`mul`/`scale` all post-multiply, so this chain reads left
+ to right as T·R·S and applies right to left to a vertex: scaled, then rotated,
+ then moved. Any other order makes a rotated non-uniform scale shear, which looks
+ like a broken mesh rather than a wrong multiply.
 *>
 fn Matrix4f Node.local_matrix(&self)
 {
 	return matrix::IDENTITY4{float}
 		.translate(self.position)
-		.rotate_x(self.rotation.x)
-		.rotate_y(self.rotation.y)
-		.rotate_z(self.rotation.z)
+		.mul(self.rotation.to_matrix())
 		.scale(self.scale);
 }
+
+<*
+ Three.js's default Euler order, XYZ, as a quaternion.
+
+ The order is a promise this API makes, not a detail: `plan.md` §4 says a name
+ means what it means in Three.js or it is not called that, and `rotation.x`
+ followed by `rotation.y` composing in the other order is a rotation that looks
+ right at 90° and wrong everywhere else. `std::math::quaternion::from_euler`
+ exists and is deliberately not used — it documents itself as ZYX, which is the
+ opposite composition and would silently disagree with every Three.js snippet an
+ agent pastes in.
+
+ XYZ names the *intrinsic* order, so the composed rotation is `Rx · Ry · Rz` and
+ the Z rotation is the one a vertex meets first. That is what `local_matrix`
+ built by hand before G3, and `euler_order_survived_the_quaternion` in
+ `scene_test` is the check that it still does — a numeric comparison against the
+ exact `rotate_x().rotate_y().rotate_z()` chain this replaced.
+*>
+fn Quaternionf quat_from_euler(Vec3 euler)
+{
+	// Half angles: a quaternion rotates by twice its own angle.
+	float cos_x = math::cos(euler.x * 0.5f);
+	float sin_x = math::sin(euler.x * 0.5f);
+	float cos_y = math::cos(euler.y * 0.5f);
+	float sin_y = math::sin(euler.y * 0.5f);
+	float cos_z = math::cos(euler.z * 0.5f);
+	float sin_z = math::sin(euler.z * 0.5f);
+
+	return {
+		sin_x * cos_y * cos_z + cos_x * sin_y * sin_z,
+		cos_x * sin_y * cos_z - sin_x * cos_y * sin_z,
+		cos_x * cos_y * sin_z + sin_x * sin_y * cos_z,
+		cos_x * cos_y * cos_z - sin_x * sin_y * sin_z,
+	};
+}
+
+<*
+ The other direction: a quaternion as XYZ Euler angles, for handing a rotation
+ to JavaScript.
+
+ **Deliberately the only place that converts backwards**, and it exists for one
+ reason: `asset.instantiate()` builds `Object3D`s, an `Object3D`'s `rotation` is
+ an Euler triple, and a glTF node's rotation is a quaternion. Nothing on the
+ host round-trips through this — see the header for why that matters.
+
+ The decomposition is not unique and does not need to be. `quat_from_euler` of
+ what this returns reproduces the *rotation*, which is what anything downstream
+ can observe; the individual angles are one of several triples that name it, and
+ at the singularity — the pitch at ±90° where X and Z become the same axis — the
+ split between them is arbitrary. Three.js resolves it the same way, by giving
+ the whole turn to X.
+
+ Via the matrix rather than directly from the components, because that is the
+ form in which the singularity is a single readable comparison instead of three.
+*>
+fn Vec3 euler_from_quat(Quaternionf rotation)
+{
+	Matrix4f m = rotation.to_matrix();
+
+	// Column-major, so `m13` — row 1, column 3 — is element 8. The quaternion's
+	// own `to_matrix` and Three.js's agree element for element, which is what
+	// makes the case analysis below transplantable.
+	float m13 = m.m[8];
+	float y = math::asin(m13 < -1.0f ? -1.0f : (m13 > 1.0f ? 1.0f : m13));
+
+	if (math::abs(m13) < 0.9999999f)
+	{
+		return { math::atan2(-m.m[9], m.m[10]), y, math::atan2(-m.m[4], m.m[0]) };
+	}
+	return { math::atan2(m.m[6], m.m[5]), y, 0 };
+}
+
+// A rotation of nothing. Named because `{ 0, 0, 0, 1 }` at a call site is the
+// kind of literal that gets typed as `{ 0, 0, 0, 0 }` once and then normalizes
+// to garbage.
+const Quaternionf NO_ROTATION = { 0, 0, 0, 1 };
 
 <*
  Where this node ended up, in world space. Valid after

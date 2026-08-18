@@ -92,7 +92,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	self.materials.init(mem, 4);
 	self.materials.push({ .pipeline = self.pipeline, .fragment = "" });
 
-	self.assets.init();
+	self.assets.init(gpu);
 	self.scene.init();
 	// The scene counts references against this table from here on — see
 	// `Scene.attach_assets`. Wired at construction rather than at first load,
@@ -158,27 +158,19 @@ fn void? MeshPass.load_triangle(&self, Gpu* gpu)
 }
 
 <*
- One node per mesh in an asset, under `parent`.
+ An asset's node hierarchy, under `parent`.
 
- @return `The parent the meshes were placed under.`
+ Was "one node per mesh, all at the origin" until G3, which is the same thing
+ for a file that bakes its transforms into its vertices and visibly wrong for one
+ that does not. `Scene.instantiate` is where that is fixed and where the reasons
+ are written down; this stays as the verb the CLI and `load` reach for.
+
+ @return `The group the asset was instantiated into, or the parent it was given if the handle names nothing.`
 *>
 fn NodeId MeshPass.place(&self, AssetId asset, NodeId parent)
 {
-	Asset* loaded = self.assets.slot(asset);
-	if (loaded == null) return parent;
-	uint count = (uint)loaded.meshes.len();
-
-	for (uint i = 0; i < count; i++)
-	{
-		// The name is re-read each pass rather than held: `add_mesh` grows the
-		// node pool, and the asset pool is a different list, but a pointer taken
-		// across a call that takes `&self` is the habit worth not having.
-		String name = self.assets.mesh(asset, i).name;
-		// No retain here since G2: `Scene.create_slot` does it, so that there is
-		// one place a reference is taken rather than one per caller.
-		self.scene.add_mesh(asset, i, parent, name);
-	}
-	return parent;
+	NodeId group = self.scene.instantiate(asset, parent);
+	return group.is_set() ? group : parent;
 }
 
 <*
