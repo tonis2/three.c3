@@ -19,13 +19,27 @@ scenes out of real assets because that is what *this* API contains.
 **There is a `BoxGeometry` now, and the paragraph above still holds.** The two
 were never one claim. What crosses from JavaScript is a shape's name and its
 numbers; what comes back is an ordinary asset index, and no script can read a
-vertex, write one or hand an array of them over. The rule that a shape is
-*parametric* is what keeps it that way: there is no `BufferGeometry` and no
-attribute access, and there will not be. What it bought is that a scene no longer
-needs a file to exist — an agent asked for a room can lay one out in a single
-script and swap the kit in later. `scene/primitive.c3` carries the full argument,
-including why the Three.js habit of a fresh geometry per mesh costs one upload
-and one draw call here.
+vertex or write one. There is no `BufferGeometry` and no attribute access, and
+there will not be. What it bought is that a scene no longer needs a file to
+exist — an agent asked for a room can lay one out in a single script and swap the
+kit in later. `scene/primitive.c3` carries the full argument, including why the
+Three.js habit of a fresh geometry per mesh costs one upload and one draw call
+here.
+
+**There is a `ConvexGeometry` too, and it is the widest input this API takes.**
+It is handed a cloud of points and answers with their convex hull. That is a
+larger argument than a box's three numbers, and it is the same *kind* of
+argument, which is what matters: the points are a description the shape is
+computed from and not the shape's triangles. Most of them are discarded — a
+thousand points inside a cube produce eight vertices — nothing can be read back
+out, the asset is immutable from the instant it exists, and the scene is still
+one upload per distinct cloud and one instanced draw. It is not a buffer path in
+disguise: there is still no way to hand over triangles, no attribute to bind, and
+no index buffer to fill. What it bought is the shape an agent could not otherwise
+express at all — a rock, a crystal, a gem, a chunk of debris, the bound of a scan
+— which previously needed a `.glb` somebody had already made.
+`scene/convex.c3` carries the argument, including why the result is flat shaded
+with no uvs and why its dedup key is a hash rather than its parameters.
 
 The second thesis: **the agent must be able to see what it made.** A render call, a
 screenshot, and a `scene.stats()` that reports draw calls, unique meshes, instance

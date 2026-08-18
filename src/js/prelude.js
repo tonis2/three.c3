@@ -873,6 +873,101 @@
 		}
 	}
 
+	// A cloud of points, on the way to a hull. Accepts what a script is likely
+	// to have: an array of Vector3s (Three.js's own signature), an array of
+	// {x, y, z} or [x, y, z], or a flat array or Float32Array of numbers. All
+	// four flatten to the same thing, which is what the host reads.
+	//
+	// The walk validates while it flattens rather than in a pass of its own,
+	// so a bad component is reported with the index of the point it was in —
+	// which is the one fact that makes a generated cloud debuggable.
+	function readPointCloud(value, where) {
+		if (value === null || value === undefined) {
+			throw new TypeError(`${where} wants an array of points`);
+		}
+
+		const flat = [];
+		const isFlat = ArrayBuffer.isView(value)
+			|| (Array.isArray(value) && (value.length === 0 || typeof value[0] === 'number'));
+
+		if (isFlat) {
+			if (value.length % 3 !== 0) {
+				throw new RangeError(
+					`${where}: a flat array of coordinates must have a length that is a multiple of 3, got ${value.length}`
+				);
+			}
+			for (let i = 0; i < value.length; i++) {
+				const n = +value[i];
+				if (!Number.isFinite(n)) {
+					throw new TypeError(`${where}: coordinate ${i} is ${value[i]}, which is not a finite number`);
+				}
+				flat.push(n);
+			}
+		} else if (Array.isArray(value)) {
+			for (let i = 0; i < value.length; i++) {
+				const p = value[i];
+				let x, y, z;
+				if (Array.isArray(p) && p.length >= 3) {
+					[x, y, z] = p;
+				} else if (p !== null && typeof p === 'object' && 'x' in p) {
+					({ x, y, z } = p);
+				} else {
+					throw new TypeError(
+						`${where}: point ${i} is neither a Vector3, an {x, y, z} nor an [x, y, z]`
+					);
+				}
+				if (!(Number.isFinite(+x) && Number.isFinite(+y) && Number.isFinite(+z))) {
+					throw new TypeError(`${where}: point ${i} has a non-finite component`);
+				}
+				flat.push(+x, +y, +z);
+			}
+		} else {
+			throw new TypeError(
+				`${where} wants an array of Vector3s, of [x, y, z], or a flat array of coordinates`
+			);
+		}
+
+		const count = flat.length / 3;
+		if (count < 4) {
+			throw new RangeError(
+				`${where}: a convex hull needs at least 4 points to enclose a volume, got ${count}`
+			);
+		}
+		if (count > 65536) {
+			throw new RangeError(
+				`${where}: capped at 65536 points, got ${count} — decimate the cloud first, `
+				+ 'the hull of a subset of a convex body is the same hull'
+			);
+		}
+		return flat;
+	}
+
+	// The convex hull of a point cloud — Three.js's ConvexGeometry, and the only
+	// shape here whose argument is an array rather than a number.
+	//
+	// It is still a description and not a buffer: the points are what the hull
+	// is computed *from*, most of them are discarded, and nothing can read a
+	// vertex back out. `scene/convex.c3` carries the full argument for why this
+	// leaves "JS may not touch vertices" standing, and why the result is flat
+	// shaded with no uvs — a hull's faces meet at creases, and smoothing them
+	// removes the only thing that makes it read as a cut stone.
+	//
+	// Handing the same points over twice is one asset and one draw call, as with
+	// every other geometry. The key is bit-exact rather than rounded, though, so
+	// two clouds built by two runs of Math.random() are two assets: build the
+	// array once and reuse it if you want the copies instanced.
+	class ConvexGeometry extends Geometry {
+		constructor(points) {
+			const where = 'new three.ConvexGeometry(points)';
+			const flat = readPointCloud(points, where);
+			super(
+				'ConvexGeometry', 'convex',
+				{ points: flat.length / 3 },
+				H.convex(flat),
+			);
+		}
+	}
+
 	// -----------------------------------------------------------------------
 	// The camera
 	//
@@ -1001,6 +1096,10 @@
 		// The shapes. `Geometry` is exported for `instanceof`, not to be
 		// constructed: there is no BufferGeometry and no attribute access, which
 		// is the thesis rather than an omission — see scene/primitive.c3.
+		// ConvexGeometry takes a cloud of points and is the widest input here;
+		// it is still a description of a shape rather than the shape's triangles,
+		// and scene/convex.c3 argues why that is the same rule and not an
+		// exception to it.
 		Geometry,
 		BoxGeometry,
 		SphereGeometry,
@@ -1008,6 +1107,7 @@
 		CylinderGeometry,
 		ConeGeometry,
 		TorusGeometry,
+		ConvexGeometry,
 
 		// Synchronous, despite reading like Three.js's async loader: the file is
 		// read and uploaded on this thread and there is nothing to yield to.
@@ -1142,7 +1242,8 @@
 			'invoke and no way to write an unbatched scene.',
 		differences: [
 			'three.load(path) is synchronous; await works but is not needed.',
-			'Geometry is parametric only: BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry and TorusGeometry are built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
+			'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
+			'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, is capped at 65536, and is flat shaded with no uvs because a hull has hard creases and no natural unwrap. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
 			'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
 			'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
 			'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
@@ -1224,13 +1325,14 @@
 				methods: ['mesh(name)', 'meshAt(index)', 'toJSON()'],
 			},
 			Geometry: {
-				construct: 'not constructible — use one of the six shapes below',
+				construct: 'not constructible — use one of the seven shapes below',
 				note:
 					'What every shape is: a handle three.c3 built, carrying the numbers you asked for. Hand it '
 					+ 'to new three.Mesh(). Constructing the same shape twice answers with the same asset, so a '
 					+ 'geometry per mesh costs nothing and a thousand identical ones are one draw call; two '
 					+ 'different sizes are two. There is no BufferGeometry and no attribute access — a script '
-					+ 'names shapes, never vertices. Sizes are world units and must be positive, segment counts '
+					+ 'describes shapes, never vertices, and ConvexGeometry\'s point cloud is a description too. '
+					+ 'Sizes are world units and must be positive, segment counts '
 					+ 'are capped at 512, Y is up, and every shape is centred on its own origin.',
 				properties: ['type', 'name', 'parameters (what you asked for, defaults filled in)', 'asset', 'mesh'],
 				methods: ['toJSON()', 'toString()'],
@@ -1273,6 +1375,20 @@
 				note:
 					'A ring in the XY plane. radius is measured to the centre of the tube, so the shape is '
 					+ '2 * (radius + tube) across and 2 * tube thick.',
+				methods: ['toJSON()', 'toString()'],
+			},
+			ConvexGeometry: {
+				construct: 'new three.ConvexGeometry(points)',
+				note:
+					'The convex hull of a cloud of points, and the way to make a shape that is not one of the '
+					+ 'six parametric ones — a rock, a crystal, a gem, a chunk of debris, the bound of a scan. '
+					+ 'points is an array of Vector3s, of [x, y, z] or of {x, y, z}, or a flat array or '
+					+ 'Float32Array of coordinates; at least 4 points, at most 65536. The hull is flat shaded '
+					+ 'and carries no uvs: its faces meet at hard creases, and there is no unwrap of an '
+					+ 'arbitrary hull that does not seam. The points describe the shape, they are not its '
+					+ 'vertices — most are discarded and none can be read back. parameters.points is the count '
+					+ 'you handed over. Two identical arrays are one asset; two runs of Math.random() are two, '
+					+ 'because the key is bit-exact.',
 				methods: ['toJSON()', 'toString()'],
 			},
 		},
