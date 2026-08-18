@@ -921,13 +921,62 @@ character left two seconds ago is worse than one that answers about a box.
 
 ---
 
-# G5 — the physics world
+# G5 — the physics world — **built**
 
 **The engine is already written.** `lib/collision.c3l/src/solver/` is XPBD with
 GJK/EPA, spatial hashing, islands, sleeping, joints, soft bodies, trigger and
 contact events, and a worker pool, entered through
 `PhysicsWorld.run_step(time, step_count, sub_steps)`. This milestone is a
 binding and a set of decisions, not a solver.
+
+## What was built
+
+`src/scene/physics.c3` is the world and the node it moves; `src/js/bind_physics.c3`
+is the JS surface; `test/physics_test.c3` holds the claims. The library changes
+S2, S2a and S5 asked for are in `lib/collision.c3l`, and its own suite went from
+60 tests to 65 without any of the original 60 changing behaviour.
+
+## What the plan did not know
+
+**Two allocator landmines, the same one twice.** A zero-valued C3 map or list
+binds itself to the *temp* allocator on first use (`list.c3:372`,
+`orderedmap.c3:227`). Every collection in `PhysicsWorld` does this, and so did
+`Physics.bodies` on the host side — so the world's storage landed in whichever
+frame's pool happened to be open and was freed under it. It does not fail where
+it is caused: `len()` goes on answering because the count is in the struct and
+only the buffer is gone, so the world steps happily while every body reads as
+garbage. The first form crashed inside a hash table; the second looked like
+physics that ran without moving anything. `PhysicsWorld.init(Allocator)` and
+`SpatialHash3D.init` are new, and the per-cell lists are bound explicitly —
+`SpatialHash3D.cell` carries the reasoning.
+
+**A deep overlap could abort the process.** XPBD answers a body spawned inside
+static geometry with a correction as deep as the overlap, and a few substeps of
+that leaves a transform with no finite value in it. The AABB built from it then
+trips `SpatialHash3D.update`'s size `@require` — from inside the broadphase, a
+long way from the overlap, and unrecoverable. **An agent writing scenes produces
+this constantly**, and "the application exits" is the one failure this API
+cannot afford, so `xpbd_predict` now throws a non-finite prediction away and
+resets the body instead of handing it on. The host keeps a second, looser guard
+for a body that is still a number and is ten kilometres from the game.
+
+**The prelude had no way to read a transform back.** `Object3D` holds its
+transform as JavaScript numbers and pushes on write, which is exactly right
+while a script is the only writer and leaves `mesh.position` reporting where a
+script last put a falling body. `position` and `rotation` are accessors now, and
+refresh from the host for a solver-owned object only.
+
+## What G5 does not do
+
+- **No soft bodies.** The library has them and the ground plane they rest on is
+  now a plane rather than a height, but nothing binds them to JavaScript.
+- **No joints from a script.** `add_constraint` exists and `remove_body` cleans
+  up after it; there is no `three.physics.joint(...)`.
+- **No `snapshot`/`restore` surface**, so S9's "what if" as a tool call is still
+  free-but-unbuilt.
+- **A body-backed object must be a child of the scene**, because the solver
+  works in world space and a parent transform would fight it. `add` refuses and
+  says so rather than writing a world transform into a nested local slot.
 
 ## S1 — one world, stepped in the host, at a fixed rate
 

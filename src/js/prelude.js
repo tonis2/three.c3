@@ -56,6 +56,16 @@
 		get z() { return this._z; }
 		set z(v) { this._z = +v; this._o?._flush(); }
 
+		// Take a value the host already has, without pushing it back.
+		// `set` would flush, and flushing a solver-owned transform is the one
+		// write the host refuses — so a read-back would throw on every frame.
+		_adopt(x, y, z) {
+			this._x = x;
+			this._y = y;
+			this._z = z;
+			return this;
+		}
+
 		set(x, y, z) {
 			this._x = +x;
 			this._y = +y;
@@ -133,10 +143,14 @@
 
 	class Object3D {
 		constructor() {
-			this.position = new Vector3(this, 0, 0, 0);
+			this._position = new Vector3(this, 0, 0, 0);
 			// The rotation vector's owner is a shim rather than `this`, so that
 			// writing an Euler angle both flushes and drops `_q`. See `_q`.
-			this.rotation = new Vector3({ _flush: () => { this._q = null; this._flush(); } }, 0, 0, 0);
+			this._rotation = new Vector3({ _flush: () => { this._q = null; this._flush(); } }, 0, 0, 0);
+			// Whether the physics solver drives this object's transform, which
+			// makes the host the authority on it rather than these numbers.
+			// Set by three.physics.add for a dynamic body and by nothing else.
+			this._solverOwned = false;
 			this.scale = new Vector3(this, 1, 1, 1);
 			this.children = [];
 			this.parent = null;
@@ -160,6 +174,29 @@
 			// The host node, or -1 for "not in a scene". See the header.
 			this._i = -1;
 			this._g = -1;
+		}
+
+		// **Accessors rather than fields, for the solver's sake.** Everything a
+		// script writes is pushed to the host and these numbers stay the truth
+		// — except for a body the solver drives, where the host has moved the
+		// node and nothing has told JavaScript. Reading refreshes exactly those
+		// objects and costs one crossing; every other object answers from here
+		// as it always did.
+		get position() { this._syncSolver(); return this._position; }
+		set position(v) { const [x, y, z] = asTriple(v, 'position'); this._position.set(x, y, z); }
+
+		get rotation() { this._syncSolver(); return this._rotation; }
+		set rotation(v) { const [x, y, z] = asTriple(v, 'rotation'); this._rotation.set(x, y, z); }
+
+		_syncSolver() {
+			if (!this._solverOwned || this._i < 0) return;
+			const t = H.physicsTransform(this._i, this._g);
+			if (t === null) return;
+			this._position._adopt(t[0], t[1], t[2]);
+			this._rotation._adopt(t[3], t[4], t[5]);
+			// The host's rotation is authoritative now, so the exact quaternion
+			// a glTF node arrived with is no longer what this object is at.
+			this._q = null;
 		}
 
 		get name() { return this._name; }
@@ -1396,8 +1433,148 @@
 			H.onClick((raw, x, y) => fn(asIntersection(raw), x, y));
 		},
 
+		// The physics world — one of them, stepped by the host at a fixed 60 Hz
+		// whatever rate the frame runs at. See DOCS.classes.Physics.
+		physics: {
+			// Give an object a body. The description is `object.body` if it has
+			// one, and `options` wins over it, so a scene can be described once
+			// and tweaked at the call.
+			add(object, options) {
+				const target = liveObject(object, 'three.physics.add');
+				const desc = Object.assign({}, object.body || {}, options || {});
+
+				const shape = desc.shape === undefined ? 'box' : String(desc.shape);
+				const mass = desc.mass === undefined ? 1 : Number(desc.mass);
+				const friction = desc.friction === undefined ? 0.5 : Number(desc.friction);
+				const restitution = desc.restitution === undefined ? 0.2 : Number(desc.restitution);
+
+				for (const [name, value] of [['mass', mass], ['friction', friction], ['restitution', restitution]]) {
+					if (!Number.isFinite(value)) {
+						throw new TypeError(`body.${name} must be a finite number, not ${value}`);
+					}
+				}
+				if (mass < 0) throw new RangeError(`body.mass cannot be negative — ${mass} is not a weight`);
+
+				// One word out of four, decided here rather than by the host so
+				// that `mass: 0` means the same thing it means in every other
+				// engine: something that does not move.
+				const kind = desc.trigger ? 'trigger'
+					: desc.kinematic ? 'kinematic'
+					: (desc.static || mass === 0) ? 'static'
+					: 'dynamic';
+
+				H.physicsAdd(target[0], target[1], kind, shape, mass, friction, restitution);
+				object.body = { shape, mass, friction, restitution, kind };
+				object._solverOwned = kind === 'dynamic';
+				return object;
+			},
+
+			// Take the body away. False when it had none, so removing twice is
+			// not an error.
+			remove(object) {
+				const target = liveObject(object, 'three.physics.remove');
+				if (object.body) object.body = null;
+				object._solverOwned = false;
+				return H.physicsRemove(target[0], target[1]);
+			},
+
+			// [x, y, z], y-up. An array rather than a live Vector3 because it
+			// is a world setting and not a transform: writing to a component of
+			// something read back would look like it did something.
+			get gravity() { return H.physicsGravityGet(); },
+			set gravity(value) {
+				const [x, y, z] = asTriple(value, 'three.physics.gravity');
+				H.physicsGravitySet(x, y, z);
+			},
+
+			// How many bodies the world holds.
+			get count() { return H.physicsCount(); },
+		},
+
+		// A trigger overlap started or ended:
+		// { type: 'enter' | 'exit', trigger, other }.
+		// One handler; binding again replaces, null unbinds, and it is stopped
+		// for good if it throws — the same rules onClick follows.
+		onTrigger(fn) {
+			bindPhysicsHandler(fn, 'three.onTrigger', H.onTrigger, event => ({
+				type: event.type,
+				trigger: objectForHandle(event.trigger),
+				other: objectForHandle(event.other),
+			}));
+		},
+
+		// Two bodies touched or came apart:
+		// { type: 'start' | 'end', a, b, normal, point }.
+		// `normal` and `point` mean something on a start and are zero on an end
+		// — there is no contact left to describe by then.
+		onContact(fn) {
+			bindPhysicsHandler(fn, 'three.onContact', H.onContact, event => ({
+				type: event.type,
+				a: objectForHandle(event.a),
+				b: objectForHandle(event.b),
+				normal: new Vector3(null, event.normal[0], event.normal[1], event.normal[2]),
+				point: new Vector3(null, event.point[0], event.point[1], event.point[2]),
+			}));
+		},
+
 		getApiDocs() { return DOCS; },
 	};
+
+	// The handle a host verb wants, having checked the object is one this scene
+	// can still reach. A body needs a world position, so an object that has not
+	// been added has nowhere to put one.
+	function liveObject(object, where) {
+		if (object === null || object === undefined || typeof object._i !== 'number') {
+			throw new TypeError(`${where}(object) wants a scene object`);
+		}
+		if (object._i < 0) {
+			throw new Error(
+				`${where}: add the object to the scene first — a body is placed at a world position, `
+				+ 'and an object that is not in the scene does not have one yet'
+			);
+		}
+		return [object._i, object._g];
+	}
+
+	// A [x, y, z] handle from the host, back to the object a script is holding.
+	// The same walk `_intersection` does and for the same reason: a lookup table
+	// would have to be kept in step with every add, remove and re-parent.
+	function objectForHandle(handle) {
+		if (!handle) return null;
+		if (liveScene === null || liveScene._e !== H.epoch()) return null;
+		const [i, g] = handle;
+		let found = null;
+		liveScene.traverse(o => { if (found === null && o._i === i && o._g === g) found = o; });
+		return found;
+	}
+
+	function asTriple(value, where) {
+		const triple = Array.isArray(value) ? value
+			: (value && typeof value === 'object') ? [value.x, value.y, value.z]
+			: null;
+		if (triple === null || triple.some(n => !Number.isFinite(Number(n)))) {
+			throw new TypeError(`${where} wants [x, y, z] or a Vector3`);
+		}
+		return triple.map(Number);
+	}
+
+	// Shared by onTrigger and onContact, including the async refusal a key
+	// handler and a click handler already make: a handler that returns before
+	// it has done anything is not a handler, and the frame does not wait.
+	function bindPhysicsHandler(fn, where, bind, shape) {
+		if (fn === null || fn === undefined) { bind(null); return; }
+		if (typeof fn !== 'function') {
+			throw new TypeError(`${where}(fn) wants a function, or null to unbind`);
+		}
+		if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+			throw new TypeError(
+				`a ${where.replace('three.on', '').toLowerCase()} handler must be synchronous — an async one `
+				+ 'returns before it has done anything, and the frame does not wait. '
+				+ 'Do the awaiting in a run_script.'
+			);
+		}
+		bind(event => fn(shape(event)));
+	}
 
 	// Shared by both, including the async refusal: a key handler runs inside a
 	// frame for the same reason the animation callback does, and an async one
@@ -1457,6 +1634,10 @@
 			'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
 			'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is where the cursor is. There is no mouseDown and no drag events — the left button orbits the camera, and a press that travels or is held is a drag rather than a click.',
 			'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
+			'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
+			'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
+			'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral.',
+			'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -1666,7 +1847,21 @@
 				+ 'a miss — so click-to-select is one call. A click is a press and a release in the same '
 				+ 'place: dragging orbits the camera and does not fire this. One handler; binding again '
 				+ 'replaces, null unbinds. Synchronous only, and stopped for good if it throws.',
-			'three.setAnimationLoop(fn)':
+			'three.physics.add(object, options)':
+			'Give an object a body and answer with the object. The description is object.body if it has one and `options` wins over it, so a scene can be described once and tweaked at the call: { shape: \'box\' | \'sphere\' | \'capsule\' | \'hull\', mass: 1, friction: 0.5, restitution: 0.2, kinematic: false, trigger: false }. mass 0 means static. The object has to be in the scene already — a body is placed at a world position — and has to be a child of the scene rather than of another object, because the solver works in world space and a parent transform would fight it. A group draws nothing and so has no size to take a collider from; give the body to a mesh.',
+		'three.physics.remove(object)':
+			'Take the body away, and answer whether there was one. A body removed while it is inside a trigger still emits its exit event, so a script that destroys something in a trigger volume still hears it leave.',
+		'three.physics.gravity':
+			'[x, y, z], y-up, read and written as an array. Set once at boot; it is a world setting and not a transform, which is why it is not a live Vector3.',
+		'three.physics.count':
+			'How many bodies the world holds.',
+		'object.body':
+			'What kind of body three.physics.add would give this object, and what it gave it: { shape, mass, friction, restitution, kind }. Set it yourself to describe one, or read it back after add to see the defaults filled in. null once the body is removed.',
+		'three.onTrigger(fn)':
+			'Call fn({ type: \'enter\' | \'exit\', trigger, other }) when a trigger body starts or stops overlapping something, from inside the frame. `trigger` and `other` are the objects, or null for one whose node has already gone. One handler; binding again replaces, null unbinds. Synchronous only, and stopped for good if it throws — the same rules onClick follows.',
+		'three.onContact(fn)':
+			'Call fn({ type: \'start\' | \'end\', a, b, normal, point }) when two bodies touch or come apart. Unlike a trigger, a contact also produced a physical response. `normal` and `point` describe the touch and mean something only on a start — by the end there is no contact left to describe. Same registration and same rules as onTrigger.',
+		'three.setAnimationLoop(fn)':
 				'Run fn(elapsedMs) once per frame, or null to stop. Synchronous only. The next '
 				+ 'run_script reports how many frames it ran, whether it is still running, and why it '
 				+ 'stopped if it did. Only one callback exists: registering a second replaces the first. '

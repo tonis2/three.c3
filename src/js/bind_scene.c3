@@ -88,6 +88,9 @@ fn void JsRuntime.install_bindings(&self)
 	// The keyboard (js/bind_input.c3)
 	self.bind_input_verbs(host);
 
+	// Physics (js/bind_physics.c3)
+	self.bind_physics_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
@@ -253,6 +256,10 @@ fn void js_reset(
 	// as well, which was a second implementation of the count and is exactly
 	// what stopped being safe once the count decides what gets freed.
 	self.pass.scene.remove(self.pass.scene.root);
+	// The bodies named nodes that have just gone. Emptied rather than left to
+	// throw one frame later, which is the same rule handles into the previous
+	// scene follow.
+	self.physics.close();
 
 	self.epoch += 1;
 	*out = qjs::number_value(self.epoch);
@@ -364,6 +371,17 @@ fn void js_set_transform(
 	NodeId id = arg_handle(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
+	// `game.md` G5/S6. The camera resolves a script and a drag by
+	// last-writer-wins because both describe the same intent; a solver and a
+	// script writing the same transform every frame describe two, and the
+	// result is jitter rather than a compromise. So this is a refusal and not
+	// a merge.
+	if (self.physics.owns_transform(id))
+	{
+		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
+		return;
+	}
+
 	Node* node = self.pass.scene.node(id);
 	node.position = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
 	// Euler in, quaternion stored — the one-way conversion `node.c3`'s header
@@ -396,6 +414,15 @@ fn void js_set_quaternion(
 
 	NodeId id = arg_handle(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
+
+	// The same refusal `js_set_transform` makes, and it has to be here too: a
+	// script that only ever wrote `.quaternion` would otherwise fight the
+	// solver through the one door that was left open.
+	if (self.physics.owns_transform(id))
+	{
+		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
+		return;
+	}
 
 	self.pass.scene.set_quaternion(id, {
 		arg_float(&js, argc, args, 2),
