@@ -81,8 +81,10 @@ thousand cubes in a thousand colours is still one call. **The window is a
 control as well as a viewer** — drag to orbit, right-drag to pan, scroll to
 zoom, writing the same camera a script writes. **And a script can drive the
 frame**: `three.setAnimationLoop(fn)` runs a callback between the input and the
-draw, so a scene moves with no agent in the loop. `c3c test --trust=full` runs a
-hundred and ninety-two checks, all headless, leak-clean.
+draw, so a scene moves with no agent in the loop, and **the keyboard reaches it**
+— `three.input.isDown('w')` for held keys, `three.onKeyDown('e', fn)` for
+actions. `c3c test --trust=full` runs two hundred and twenty-one checks, all
+headless, leak-clean.
 
 	three <file.glb>                    open a window on it
 	three --mcp                         serve the agent tools on 127.0.0.1:8808
@@ -331,6 +333,8 @@ src/
                     built  wraps an agent's fragment body into a whole Slang module
   scene/camera.c3   built  a turntable camera and how it frames what it is shown
   scene/controls.c3 built  the mouse as camera movement: orbit, pan, zoom (M5c)
+  scene/input.c3    built  the keyboard: the latch as level state and edges, and the
+                           table of names a script uses for it (M5e)
   scene/asset.c3    built  the asset table: meshes per file, textures shared across them
   scene/node.c3     built  Object3D: parent, children, local TRS, world matrix, dirty flag
   scene/scene.c3    built  the graph root, traversal, culling, the instance table, stats()
@@ -347,6 +351,8 @@ src/
   js/bind_shader.c3 built  the material/shader surface (tier 2, §4)
   js/frame_loop.c3  built  setAnimationLoop: the second way into the engine, the one
                            that is not a run (M5d)
+  js/bind_input.c3  built  three.input and the key handlers, dispatched on the frame
+                           and failing the way everything on the frame fails (M5e)
   mcp/server.c3     built  three tools and no more: run_script, screenshot, get_api_docs
 shaders/
   mesh.slang        built  one shader: BDA streams, base colour texture, one directional light
@@ -365,6 +371,9 @@ test/
   frame_test.c3     built  what a tick does and the four ways a callback stops —
                            the tick takes the time as an argument, so this is a
                            statement about the callback and not about the machine
+  input_test.c3     built  the key table and the one-frame difference, then what a
+                           script can see of them — separated because a wrong edge
+                           and a wrong binding fail identically from JavaScript
   mcp_test.c3       built  the three tools over raw JSON-RPC, in-process
   shader_test.c3    built  compile, diagnostics, reflection, the pipeline cache
   material_test.c3  built  source assembly, the #line remap, the uniform budget
@@ -1000,6 +1009,29 @@ shares only the interrupt handler, because there is one of those per context.
 
 `event_loop.md` is the record, including the injection whose escape said the
 timeout message must read the budget in force rather than the constant beside it.
+
+**M5e — the keyboard.** `three.input.isDown('w')` for held keys,
+`three.input.pressed(...)` for this frame's edges, and
+`three.onKeyDown(key, fn)` to bind an action, in `scene/input.c3` and
+`js/bind_input.c3`. `c3w` hands back a latch, so level state is a read of it and
+an edge is a one-frame difference — taken beside the latch, because it is only
+meaningful once per frame and JavaScript cannot know when a frame happened.
+
+- **Holding and pressing are different questions**, and neither substitutes for
+  the other. A jump bound to the level state fires sixty times a second.
+- **The names are the browser's**, `KeyboardEvent.key` lowercased, and
+  `get_api_docs` lists the same table the host searches rather than a copy. An
+  unknown name throws: a key that is silently never down is a control that
+  silently does nothing.
+- **Handlers ride the frame** — dispatched from `tick`, before the animation
+  callback, under its budget, into its log, stopped the same way. There is no
+  second mechanism, which is the point.
+- **No mouse buttons in the table**, deliberately: the latch keeps a stuck
+  button after a title-bar drag, `Controls` has a release gate for that and a
+  script would have nothing. Clicking waits for the picking work.
+
+`event_loop.md` has the record, including a check that passed for the wrong
+reason and the sub-frame keypress that only a live window could have shown.
 
 **M6 — the export.** A glTF writer that emits one `mesh` per unique asset and one
 `node` per instance, with materials and textures deduplicated by content hash

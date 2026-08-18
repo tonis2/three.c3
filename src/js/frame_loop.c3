@@ -82,12 +82,19 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
  `main.c3` passes the elapsed time it already has, and a test passes whatever it
  wants to have happened.
 
+ **The keyboard arrives here too**, and is taken whether or not anything is
+ registered to read it: `three.input.isDown(...)` from an ordinary `run_script`
+ answers about the last frame the window drew, which is the only answer that
+ could be right.
+
  @param elapsed_ms : `What the callback is told, as Three.js's setAnimationLoop tells it: milliseconds, monotonic, from whenever the host started counting.`
- @return `true when a callback ran, false when there is none — so a caller can tell an idle loop from a running one without asking twice.`
+ @param input : `This frame's keyboard. Default-empty, for a host that has no window and for the checks that only care about the callback.`
+ @return `true when something ran, false when nothing is registered — so a caller can tell an idle loop from a running one without asking twice.`
 *>
-fn bool JsRuntime.tick(&self, double elapsed_ms)
+fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 {
-	if (!self.frame_active) return false;
+	self.take_input(input);
+	if (!self.frame_active && self.key_handler_count == 0) return false;
 
 	self.frame_ticks++;
 
@@ -101,6 +108,28 @@ fn bool JsRuntime.tick(&self, double elapsed_ms)
 	self.timed_out = false;
 	self.in_frame = true;
 
+	// Keys first, then the animation. A handler that moves something and a
+	// callback that draws the consequence in the same frame is the order a
+	// person expects; the other way round shows every keypress one frame late.
+	self.dispatch_keys();
+	// Each step is skipped once the budget is gone, rather than called and
+	// interrupted on its first instruction: a callback stopped for someone
+	// else's overrun would be stopped for good, for a failure that is not its
+	// own.
+	if (!self.timed_out && self.frame_active) self.call_frame(elapsed_ms);
+	if (!self.timed_out) self.drain_frame_jobs();
+
+	self.in_frame = false;
+	self.budget_ns = budget;
+	self.trim_frame_log();
+	return true;
+}
+
+<*
+ The animation callback, called once.
+*>
+fn void JsRuntime.call_frame(&self, double elapsed_ms)
+{
 	@pool()
 	{
 		qjs::Value[1] args = { qjs::number_value(elapsed_ms) };
@@ -127,17 +156,8 @@ fn bool JsRuntime.tick(&self, double elapsed_ms)
 					"so it must be synchronous — do the awaiting in a run_script instead"
 				);
 			}
-			else
-			{
-				self.drain_frame_jobs();
-			}
 		}
 	};
-
-	self.in_frame = false;
-	self.budget_ns = budget;
-	self.trim_frame_log();
-	return true;
 }
 
 <*
@@ -165,7 +185,21 @@ fn void JsRuntime.clear_frame(&self)
 fn void JsRuntime.stop_frame(&self, String why)
 {
 	self.clear_frame();
-	self.frame_error.clear();
+	self.report_frame_failure(why);
+}
+
+<*
+ Keep one reason for the next run to report.
+
+ **Appended rather than replacing**, because a frame now has more than one thing
+ that can fail in it — the animation callback and any number of key handlers —
+ and the first failure is usually the one that explains the rest. Each of them
+ stops the first time it misbehaves, so this is bounded by the number of things
+ registered rather than by how long the window has been open.
+*>
+fn void JsRuntime.report_frame_failure(&self, String why)
+{
+	if (self.frame_error.len() > 0) self.frame_error.append_char('\n');
 	self.frame_error.append_string(why);
 }
 

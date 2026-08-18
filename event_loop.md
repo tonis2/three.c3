@@ -3,15 +3,15 @@
 One document at three stages of the same subject: making the scene move without
 an agent in the loop.
 
-**The first two parts are the record for M5c and M5d**, both built: the mouse
-moves the camera, and a script can register a callback that runs every frame.
-They are written the way `m5a_stage.md` and `m5b_stage.md` are — what was built,
-where it departed from `plan.md`, and what was actually run to believe any of
-it, including the tables of re-introduced bugs.
+**The first three parts are the record for M5c, M5d and M5e**, all built: the
+mouse moves the camera, a script can register a callback that runs every frame,
+and a script can read the keyboard and bind actions to it. They are written the
+way `m5a_stage.md` and `m5b_stage.md` are — what was built, where it departed
+from `plan.md`, and what was actually run to believe any of it, including the
+tables of re-introduced bugs.
 
-**The last part is the work that is not built**: a keyboard an agent can bind
-actions to, clicking the window to select, and the smaller things the first two
-made worth doing. It is written to be picked up cold, so every task names the
+**The last part is the work that is not built**: clicking the window to select,
+and the smaller things the first three made worth doing. It is written to be picked up cold, so every task names the
 file and the line it starts at and says what the hard part is, which in almost
 every case is not the part that sounds hard.
 
@@ -429,39 +429,181 @@ port 8809, driven over HTTP:
 
 ---
 
-# Part three — what is left
+# Part three — M5e, built
 
-Ordered by what unlocks what.
+## The question this answers
 
-## T2 — the keyboard, and actions bound to it
+A window that a person can look at and drag, in a scene that moves on its own,
+and no way for the person to *do* anything in it. The original ask was "the
+player could use keyboard and JS scripts could bind some actions to them", and
+that is two different requests wearing one word.
 
 ```js
-three.onKeyDown('space', () => { ... });      // edge
-three.input.isDown('w');                       // level
+three.input.isDown('w')                          // held — poll it in the frame
+three.onKeyDown('e', () => door.open())          // pressed — once, told to you
 ```
 
-**Two channels, because the two uses are different.** Movement wants level state
-polled inside the frame callback; an action wants the edge, once. `c3w`'s map is
-latched level state, so edges are a one-frame diff against the previous map —
-cheap, and it has to live beside the map rather than in JS.
+## What it turned out to need
 
-**T1 is built, which is what this was waiting for.** Level state polled inside
-the frame callback is the shape movement wants, and that callback now exists:
-`three.input.isDown('w')` inside `setAnimationLoop` is the whole pattern.
+**Two channels, because holding and pressing are different questions.** A jump
+bound to the level state fires sixty times a second and reads as the game being
+broken rather than as the binding being wrong; a walk bound to the edge takes
+one step per press. Neither substitutes for the other, and a script that has
+only the first ends up writing a dispatcher — so it exists once here instead of
+once per script.
 
-**This is not a Three.js API and must be documented as an invention.** Three.js
-has no input layer at all: `OrbitControls` is `examples/jsm` and takes a DOM
-element, and key handling is the browser's `addEventListener`. It goes in
-`prelude.js`'s `differences` list beside the hex-colour note.
+`c3w` reports a **latch**: a map of what is down right now, which persists
+across frames. Level state is a read of it. **An edge is a one-frame difference
+against the previous read**, which has to be taken beside the latch, because it
+is only meaningful once per frame and JavaScript has no way to know when a frame
+happened.
 
-Two sub-questions to settle:
+### S1 — the bits and the table (`src/scene/input.c3`)
 
-- **Key naming.** `c3w`'s `EventKey` is an enum of X11 keycodes. The JS side
-  should take strings — `'w'`, `'space'`, `'shift'`, `'arrowup'` — which means a
-  name table somewhere, and it should be the same table `get_api_docs` lists.
-- **Typed text is separate from keys.** `Window.get_text()` already accumulates
-  UTF-8 per frame with the modifier chords and function-key range filtered out.
-  A script that wants a text field wants that, not a key map.
+`KeyBits` is 256 bits indexed by `c3w::EventKey`'s ordinal, so an edge is
+`down & ~previous` — thirty-two bytes and two words of work, against the pair of
+hash maps the obvious version would have compared per key per frame.
+
+**The names are the API.** `c3w::EventKey` is X11 keycodes, which is the right
+identity for a host and the wrong one for a script, so `KEY_NAMES` maps the
+browser's `KeyboardEvent.key`, lowercased, onto it: letters and digits are
+themselves, punctuation is the character it prints, the rest are the browser's
+words. `get_api_docs` lists that same table by calling into it, because two
+lists would drift the first time one gained a key — and a documented key that
+cannot be bound is worse than an undocumented one that can.
+
+**An unknown name throws.** A typo that silently reports a key which is never
+down is the worst failure available here: nothing is broken, nothing is logged,
+and the symptom is a control that does nothing — indistinguishable from every
+other reason a control might do nothing.
+
+`read_events` is the only function in the file that knows what a window is, and
+it is six lines. That is the same seam `controls.c3` uses, for the same reason.
+
+### S2 — handlers on the frame (`src/js/bind_input.c3`)
+
+`three.onKeyDown(key, fn)` is dispatched from `JsRuntime.tick`, before the
+animation callback, under the same budget, into the same frame log, with the
+same policy when one misbehaves. **There is no second mechanism**, which is the
+whole design: everything M5d had to decide about failure was decided once.
+
+Three things that are not obvious:
+
+- **Keys go first.** A handler that moves something and a callback that draws
+  the consequence in the same frame is what a person expects; the other order
+  shows every keypress one frame late, which is not a bug anyone reports — it is
+  a control scheme that feels slightly wrong.
+- **One overrun does not take the frame with it.** The budget belongs to the
+  frame, so once it is spent every later call would be interrupted on its first
+  instruction and stopped *for good*, for a failure that is not its own. The
+  rest of the frame is skipped instead, and the next one is clean because the
+  handler that spent it is gone.
+- **A frame's failures accumulate.** `frame_error` appends rather than replaces
+  now that a frame has more than one thing that can fail in it, and the first
+  failure is usually the one that explains the rest.
+
+**One handler per key per edge**, replaced by binding again, removed by `null`,
+thirty-two at a time. A list would be a lifetime problem — nothing hands back a
+token to unregister with — and a script that wants two things on one key has a
+JavaScript array.
+
+### S3 — what is not named
+
+- **No mouse buttons**, although the same latch carries them and it would be two
+  rows. AppKit swallows the mouse-up that ends a title-bar drag — part one is
+  about that — so a script polling `isDown('mouseleft')` would be told the button
+  is held for the rest of the session. `Controls` has a release gate; a script
+  would have nothing. Clicking belongs with T3, where it can be given one.
+- **No numpad.** Sixteen rows, and every row is a line in a list an agent reads.
+- **Escape stays the host's.** It closes the window whatever a script binds,
+  which is worth saying out loud in the docs rather than discovering.
+
+## Verification
+
+	c3c build --trust=full              Program linked to executable './build/three'.
+	c3c test --trust=full               PASSED: 221 passed, 0 failed, 0 skipped.
+	c3c test --trust=full --test-noleak PASSED: 221 passed, 0 failed, 0 skipped.
+
+Twenty-nine new checks in `test/input_test.c3`, 192 to 221, in two halves: the
+table and the difference, which need no JavaScript at all, and what a script can
+see of them. **They are worth separating** — a wrong edge and a wrong binding
+fail identically from JavaScript, and only one of them is a bug in the diff.
+
+### Every bug the tests claim to catch, re-introduced
+
+One at a time, each against the single check that names it, restoring from a
+copy and comparing sha256 afterwards. All four files restored byte-identical.
+
+| bug injected | test | result |
+|---|---|---|
+| the press edge is the level state | `a_held_key_is_pressed_once` | caught |
+| the release edge is the press edge | `letting_go_is_an_edge_too` | caught |
+| the previous frame is never remembered | `a_held_key_is_pressed_once` | caught |
+| a two-key name only answers for one of them | `shift_means_either_shift` | caught |
+| names are compared case-sensitively | `names_are_case_insensitive` | caught |
+| a name that starts with a real one matches it | `an_unknown_name_is_a_fault` | caught |
+| a duplicate row shadows a different key | `no_two_names_are_the_same` | caught |
+| a duplicate row shadows a different key | `every_name_in_the_table_resolves` | caught |
+| the typed text is borrowed rather than copied | `the_typed_text_is_copied_and_not_borrowed` | caught |
+| a stopped handler stays in the table | `a_throwing_handler_is_stopped_and_names_its_key` | caught |
+| binding a key again adds a second handler | `binding_again_replaces_and_null_unbinds` | caught |
+| the handler is not told which key it was | `a_handler_is_told_which_key_it_was` | caught |
+| both edges fire on the press | `onkeyup_fires_on_the_other_edge` | caught |
+| a full table drops the extras silently | `too_many_handlers_is_a_message` | caught |
+| the frame's input is never taken | `a_script_can_ask_what_is_held` | caught |
+| keys are not dispatched at all | `a_key_handler_fires_on_the_edge` | caught |
+| keys are dispatched after the animation callback | `handlers_run_before_the_animation_callback` | caught |
+| a handler alone is not enough to tick | `a_handler_runs_with_no_animation_callback` | caught |
+| the animation callback is killed by someone else's overrun | `a_wedged_handler_does_not_stop_the_animation_callback` | caught |
+| only the last failure of a frame is kept | `every_failure_in_a_frame_is_reported` | caught |
+| an async key handler is accepted | `an_async_handler_is_refused_at_registration` | caught |
+| the docs list their own idea of the keys | `the_docs_list_the_whole_table` | caught |
+
+### The check that passed for the wrong reason
+
+**"Both edges fire on the press" was NOT CAUGHT on the first pass.** The check
+bound `onKeyDown` and `onKeyUp` to the same key, pressed it, released it, and
+asserted the log read `["down", "up"]`. An implementation that fires *both*
+handlers on the press produces exactly that: the order is right, and the order
+was all that was being asserted.
+
+It now reads the log after each frame — `["down"]`, then `["down", "up"]` —
+which asserts *when* each fired rather than what order they ended up in. The
+general shape is worth naming, because it is the third time in this document:
+**a check that reads the end state can be satisfied by the wrong path to it.**
+
+### What running it live added, including one thing no test would have
+
+`osascript` can hold a real key down, which makes the whole path testable
+without a person: a window on port 8809, driven over HTTP while System Events
+typed at it.
+
+- **`key down "w"` for half a second gave `down:w`, then 98 frames of
+  `isDown('w')`, then `up:w`** — both edges, the level state between them, and
+  the handler told which key it was.
+- **Shift arrived at all**, which is not a given: macOS never sends modifiers as
+  key up/down, only as `FLAGS_CHANGED`, and `c3w` translates that separately.
+  `["shift", "shift+a", ...]` is a real chord read one frame at a time.
+- **`JUMP` appears before `space` in the same result**, which is the dispatch
+  order — handlers before the animation callback — observed in the real loop
+  rather than in a test's tick.
+
+**And the thing no test would have found:** the first attempt used
+`keystroke "w"`, which presses and releases in the same instant. The typed text
+arrived — `text:w` — and **no edge fired at all**. A press that begins and ends
+inside one frame is invisible, because the latch is set and cleared before it is
+ever sampled.
+
+A person cannot type that fast; ~80 ms on a key is five frames at 60 Hz. But it
+is real for synthetic input, for a key repeat that lands badly, and for any
+frame that runs long. Fixing it means reading `c3w`'s event *queue* rather than
+its map, and `Window.getEvent` returns only the map — so it is a change to the
+submodule, and therefore somebody's decision rather than a task. It belongs
+beside the `+[NSEvent pressedMouseButtons]` note below.
+
+---
+
+# Part four — what is left
 
 ## T3 — click to pick
 
@@ -493,6 +635,10 @@ rule is a press and release within a few points and a short time.
   `get_scroll_x`, `get_text` and `get_scale` to zero, so zoom, typed text and
   retina scaling are all dead there. Linux is complete. This is a change to
   `c3w`, which is a submodule, so it is somebody's decision rather than a task.
+- **Sub-frame key presses.** Measured above: a press and release inside one
+  frame is invisible, because `c3w` hands back a latch rather than a queue.
+  `Window.getEvent` returns only the map, so seeing it would mean the submodule
+  exposing the events it already drains. A `c3w` change, and so a decision.
 - **The stuck-latch fix at the source.** The release gate is a workaround in the
   right place, but the real answer is `+[NSEvent pressedMouseButtons]`, which
   reports the physically-held buttons independently of the event stream — one
