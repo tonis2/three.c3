@@ -1,39 +1,4 @@
-<*
- The physics world — `game.md` G5.
 
- **The solver was already written.** `lib/collision.c3l/src/solver/` is XPBD with
- GJK/EPA, spatial hashing, islands, sleeping, joints, triggers and contacts. This
- file is a binding and a set of decisions, and the decisions are the part worth
- reading.
-
- **Fixed step, in C3.** The world runs at a fixed 60 Hz behind an accumulator
- kept here rather than in JavaScript (G5/S1). That is the answer to
- `event_loop.md`'s "no fixed timestep, no interpolation": physics is fixed-rate,
- the frame callback stays variable-rate, and the two never argue. An accumulator
- written in JS would run inside the script budget, so a spiral of death would
- trip the budget and stop the callback for good rather than merely stutter.
-
- **Y-up, with no swizzle anywhere.** `collision.c3l` defaults to z-down gravity
- and still does for everyone else; three.c3 sets `{0, -9.8, 0}` once, here, and
- nothing converts between the two conventions at any boundary. That is only
- possible because the solver stopped reading a fixed component of gravity —
- `resolver.c3`'s `impulse_dir` and `GroundPlane`, changed for this milestone.
- A conversion at the seam would have meant two conventions meeting inside the
- two functions nobody reads twice.
-
- **The solver owns a dynamic body's transform** (G5/S6). The camera resolves a
- script and a drag by last-writer-wins, and that is right there because both are
- describing the same intent. It is wrong here: a solver and a script both writing
- a transform every frame produce jitter, not a compromise. So a JS write to a
- dynamic body's position or rotation is refused with a sentence, and a body that
- wants to be driven is kinematic — which is what "I want to move this myself"
- actually means.
-
- **World space, so a body-backed node hangs off the root.** The solver works in
- world space and writes back into a node's *local* transform, which are the same
- thing only when the parent is the scene root. Rather than silently writing a
- world transform into a nested node's local slot, `add` refuses and says so.
-*>
 module three;
 
 import std::collections::list;
@@ -521,6 +486,21 @@ fn void Physics.set_gravity(&self, Vec3 gravity)
 {
 	self.open();
 	self.world.gravity = gravity;
+
+	// **The wake is the half that is easy to leave out.** A settled scene has
+	// put its bodies to sleep, and a sleeping body is skipped by the integrator
+	// — so gravity changes and nothing falls, which reads as the setting having
+	// been ignored. The library has no gravity setter to hide this in, so it is
+	// done here: everything that is not static gets woken, since the new pull
+	// is a different pull on all of it.
+	collision::RigidBodyIterator iter = self.world.bodies.value_iter();
+	while (iter.next())
+	{
+		collision::Rigidbody*? body = iter.get();
+		if (catch body) continue;
+		if (body.is_static) continue;
+		body.stop_sleeping();
+	}
 }
 
 <*

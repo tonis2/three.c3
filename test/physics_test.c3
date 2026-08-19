@@ -349,3 +349,72 @@ fn void a_body_inside_a_wall_does_not_take_the_process_with_it() @test
 		test::@check(live.value == "true", "the world is still usable: %s", live.value);
 	};
 }
+
+<*
+ Removing one body out of a world where others are still touching — G5/S5.
+
+ Separate from `a_body_destroyed_in_a_trigger_still_leaves_it` because that one
+ removes the only overlapping pair there is. The replacement sets the library
+ builds are then never written to, which is the one case that cannot expose
+ where they live. This scene keeps a stack in contact after the removal, so the
+ next step reads a set that had to be rebuilt, and reads it from wherever the
+ rebuild put it.
+*>
+fn void removing_one_body_leaves_the_rest_standing() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+
+			const ground = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			ground.name = 'ground';
+			ground.position.set(0, -0.5, 0);
+			scene.add(ground);
+			three.physics.add(ground, { mass: 0 });
+
+			// Four resting on the floor and on each other, so the contact set
+			// has pairs that must survive one of them going away.
+			const geo = new three.BoxGeometry(1, 1, 1);
+			globalThis.boxes = [];
+			for (let i = 0; i < 4; i++) {
+				const box = new three.Mesh(geo);
+				box.name = 'box' + i;
+				box.position.set(0, 0.5 + i * 1.02, 0);
+				scene.add(box);
+				three.physics.add(box, { mass: 1, friction: 0.6 });
+				globalThis.boxes.push(box);
+			}
+
+			three.setAnimationLoop(() => {});
+			return 'ok';
+		`);
+		defer built.free();
+		test::@check(built.ok, "the stack built: %s", built.error);
+
+		// Long enough for the stack to settle into contact with itself.
+		double clock = 0;
+		for (int i = 0; i < 90; i++) { clock += 1000.0 / 60.0; run.tick(clock); }
+
+		three::RunResult removed = run.run(
+			"const n = three.physics.count;"
+			"three.physics.remove(globalThis.boxes[1]);"
+			"return n - three.physics.count;"
+		);
+		defer removed.free();
+		test::@check(removed.ok, "the middle box was removed: %s", removed.error);
+		test::@check(removed.value == "1", "and exactly one body went: %s", removed.value);
+
+		// The steps that read the rebuilt sets.
+		for (int i = 0; i < 60; i++) { clock += 1000.0 / 60.0; run.tick(clock); }
+
+		three::RunResult standing = run.run(
+			"return [three.physics.count,"
+			" globalThis.boxes.filter(b => b.body).length];"
+		);
+		defer standing.free();
+		test::@check(standing.ok, "the world survived the removal: %s", standing.error);
+		test::@check(standing.value == "[4,3]",
+			"four bodies and three live boxes are left: %s", standing.value);
+	};
+}
