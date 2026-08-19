@@ -248,6 +248,202 @@ fn void js_convex(
 	};
 }
 
+<*
+ `lines(kind, divisions)` — a debug line shape, or the one already built for
+ exactly this shape.
+
+ `primitive`'s twin down to the clamping, and deliberately so: a helper is an
+ ordinary asset over an ordinary mesh, and the only thing that makes it a helper
+ is the material `prelude.js` puts on it. `scene/lines.c3` carries the argument
+ for why debug draw is geometry here rather than an immediate-mode side channel.
+
+ `divisions` is the grid's and is ignored by the other two — `LineShape.key`
+ leaves it out of their keys, so a box asked for with a stray division count is
+ still the one box asset.
+*>
+fn void js_lines(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a helper needs a GPU device and this context has none");
+		return;
+	}
+
+	@pool()
+	{
+		String name = arg_text(&js, argc, args, 0, tmem);
+		LineKind? kind = line_kind(name);
+		if (catch kind)
+		{
+			*out = js.raise(string::tformat(
+				"there is no line shape called '%s' — three.c3 builds: box, segment, grid", name
+			));
+			return;
+		}
+
+		// Clamped rather than trusted, for `primitive`'s reason: the prelude has
+		// already refused anything out of range with a better sentence, and this
+		// is the backstop for a script that reached past it into `__three`.
+		int asked = arg_int(&js, argc, args, 1);
+		LineShape shape = {
+			.kind = kind,
+			.divisions = (uint)math::clamp(asked, 1, (int)MAX_GRID_DIVISIONS),
+		};
+
+		AssetId? asset = self.pass.assets.lines(&self.renderer.gpu, shape);
+		if (catch err = asset)
+		{
+			*out = js.raise(string::tformat("could not build a %s helper: %s", name, err));
+			return;
+		}
+
+		*out = asset_value(&js, asset);
+	};
+}
+
+<*
+ `wireframe(index, generation, mesh)` — one mesh's triangles as the edges
+ between them.
+
+ **The mesh has to be resident, and that is a sentence rather than an empty
+ asset.** The edges are read off `hull_positions`/`hull_triangles`, which are
+ filled at upload — and a mesh reaches the device only when something drawing it
+ is added to a scene. An empty wireframe would draw nothing and read as a helper
+ that does not work, so the two faults each get the thing to do about them.
+*>
+fn void js_wireframe(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a helper needs a GPU device and this context has none");
+		return;
+	}
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	uint mesh = (uint)math::max(arg_int(&js, argc, args, 2), 0);
+	AssetId? asset = self.pass.assets.wireframe(&self.renderer.gpu, id, mesh);
+	if (catch err = asset)
+	{
+		if (err == LINE_MESH_NOT_RESIDENT)
+		{
+			*out = js.raise(
+				"a wireframe is built from the mesh's own triangles, and those reach this side when the "
+				"mesh is uploaded — which happens when something drawing it is added to a scene. "
+				"scene.add(mesh) first, then make the helper"
+			);
+			return;
+		}
+		if (err == NO_SUCH_LINE_MESH)
+		{
+			*out = js.raise(string::tformat(
+				"that asset has no mesh %d — asset.meshes lists the ones it has", mesh
+			));
+			return;
+		}
+		*out = js.raise(string::tformat("could not build a wireframe of mesh %d: %s", mesh, err));
+		return;
+	}
+
+	*out = asset_value(&js, asset);
+}
+
+<*
+ `exportScene(path)` — write the scene to a `.glb`, and say what went into it.
+
+ `js_load`'s other half, and it goes through the same door: the path is resolved
+ by `resolve_asset`, so under `--assets` a script may write inside the game
+ directory and nowhere else. A game that could write anywhere on the disk would
+ be a worse thing than one that cannot export at all.
+
+ No device is needed and none is used. `scene/export.c3` reads a mesh out of the
+ file it came from or tessellates it again from its description, so an export is
+ the one heavy verb here that works on a runtime with no GPU — and would, except
+ that a scene with nothing uploaded into it has nothing to export either.
+
+ The report is an object rather than a count because every number in it answers a
+ different question about whether the file is the scene: `meshes` against
+ `stats().uniqueMeshes`, `instances` against `stats().instances`, and `skipped`
+ and `shaded` for the two things that deliberately did not survive the crossing.
+*>
+fn void js_export(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.pass == null)
+	{
+		*out = js.raise("there is no scene to export in this context");
+		return;
+	}
+
+	@pool()
+	{
+		String path = arg_text(&js, argc, args, 0, tmem);
+		if (path.len == 0)
+		{
+			*out = js.raise("scene.export(path) wants a path to write a .glb to");
+			return;
+		}
+
+		String? writing = self.resolve_asset(path, tmem);
+		if (catch err = writing)
+		{
+			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			{
+				*out = js.raise(string::tformat(
+					"cannot export to '%s': it climbs out of the assets directory, and a game may only "
+					"write inside its own", path
+				));
+				return;
+			}
+			*out = js.raise(string::tformat("cannot export to '%s': %s", path, err));
+			return;
+		}
+
+		ExportReport? report = self.pass.export_scene(writing);
+		if (catch err = report)
+		{
+			if (err == EXPORT_HAS_NOTHING_TO_WRITE)
+			{
+				*out = js.raise(
+					"there is nothing in this scene to draw, so there is nothing to export — it is empty, "
+					"or everything in it is a helper or a hidden subtree, neither of which goes into a file"
+				);
+				return;
+			}
+			*out = js.raise(string::tformat("could not export to %s: %s", path, err));
+			return;
+		}
+
+		qjs::Value described = js.object();
+		js.set_property(described, "path", js.string(writing));
+		js.set_property(described, "meshes", qjs::int_value((int)report.meshes));
+		js.set_property(described, "entries", qjs::int_value((int)report.entries));
+		js.set_property(described, "materials", qjs::int_value((int)report.materials));
+		js.set_property(described, "images", qjs::int_value((int)report.images));
+		js.set_property(described, "nodes", qjs::int_value((int)report.nodes));
+		js.set_property(described, "instances", qjs::int_value((int)report.instances));
+		js.set_property(described, "skipped", qjs::int_value((int)report.skipped));
+		js.set_property(described, "shaded", qjs::int_value((int)report.shaded));
+		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
+		*out = described;
+	};
+}
+
 fn void js_asset_path(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 )

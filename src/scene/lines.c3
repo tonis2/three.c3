@@ -49,7 +49,7 @@ import std::collections::list;
 import std::sort;
 import collision;
 
-faultdef NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT;
+faultdef NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT, NO_SUCH_LINE_SHAPE;
 
 <*
  The shapes that come as lines.
@@ -90,6 +90,26 @@ fn String LineShape.key(&self, Allocator allocator)
 		case LineKind.SEGMENT: return "<lines segment>".copy(allocator);
 		case LineKind.GRID: return string::format(allocator, "<lines grid %d>", self.divisions);
 		default: return "<lines>".copy(allocator);
+	}
+}
+
+<*
+ The name a script spells, as a kind.
+
+ `primitive_kind`'s twin, and the same three-line switch, because the crossing is
+ the same one: `prelude.js` names a shape and the host is the place that knows
+ whether the name is one it builds.
+
+ @return? NO_SUCH_LINE_SHAPE : `Not one of box, segment or grid.`
+*>
+fn LineKind? line_kind(String name)
+{
+	switch (name)
+	{
+		case "box": return LineKind.BOX;
+		case "segment": return LineKind.SEGMENT;
+		case "grid": return LineKind.GRID;
+		default: return NO_SUCH_LINE_SHAPE~;
 	}
 }
 

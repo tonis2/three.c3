@@ -676,7 +676,14 @@ fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 
 		if (geometry.indices.len() < 3 || geometry.positions.len() == 0) return PRIMITIVE_HAS_NO_TRIANGLES~;
 
-		return self.upload_built(gpu, key, shape.kind.label(), &geometry);
+		AssetId built = self.upload_built(gpu, key, shape.kind.label(), &geometry)!;
+		// Kept so the exporter can tessellate this again rather than read it back
+		// off the device — `scene/export.c3`. Set after the upload rather than
+		// through `upload_built`, which builds hulls and glTF primitives too and
+		// has no business knowing what a parametric shape is.
+		self.slot(built).primitive = shape;
+		self.slot(built).has_primitive = true;
+		return built;
 	};
 }
 

@@ -51,6 +51,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "load", &js_load, 1);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
+	self.bind(host, "lines", &js_lines, 2);
+	self.bind(host, "wireframe", &js_wireframe, 3);
 	self.bind(host, "assetPath", &js_asset_path, 2);
 	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
@@ -60,6 +62,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "playAnimation", &js_play_animation, 5);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
+	self.bind(host, "exportScene", &js_export, 1);
 
 	// The graph
 	self.bind(host, "root", &js_root, 0);
