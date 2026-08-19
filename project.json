@@ -4,6 +4,11 @@
 	"authors": [],
 	"version": "0.1.0",
 	"dependency-search-paths": ["lib"],
+	// **`./setup.sh` does all of the below**, and is safe to re-run. What follows
+	// is why each of its steps exists — three dependencies carry binaries that
+	// are deliberately not in git, and none of the three fails cleanly when its
+	// step is skipped, which is the part worth reading before debugging one.
+	//
 	// quickjs and mcp arrived with M3, which is what `js/` and `mcp/` are.
 	//
 	// **quickjs has a submodule of its own** — `vendor/quickjs-ng`, which its
@@ -17,6 +22,16 @@
 	// git. Run `./lib/slang.c3l/native/stage-slang.sh` once per checkout — it
 	// uses an installed SDK if there is one and downloads the pinned release,
 	// checksum-verified, if there is not.
+	//
+	// **The macOS Vulkan driver is fetched too, since M6.** vulkan.c3l bundles
+	// KosmicKrisp for macOS, but it is 15 MB and is rebuilt on every Mesa bump,
+	// so it lives on that repository's `driver` orphan branch — amended and
+	// force-pushed, one revision however many bumps — rather than on main where
+	// git would keep every version of it for ever. It is therefore absent from a
+	// plain submodule checkout, and absent is not an error: `vk::findBundledDriver`
+	// falls back to the loader's own ICD discovery, so three runs on some other
+	// installed driver, or finds no device, and neither says anything about a
+	// missing file. `./setup.sh driver` is the whole fix.
 	//
 	// **It does not always fail at the linker when you forget.** A machine with
 	// another Slang on the default search path — /usr/local/lib, from an

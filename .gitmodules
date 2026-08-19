@@ -1,9 +1,9 @@
 [submodule "lib/vulkan.c3l"]
 	path = lib/vulkan.c3l
-	url = https://github.com:tonis2/Vulkan.c3.git
+	url = https://github.com/tonis2/Vulkan.c3.git
 [submodule "lib/quickjs.c3l"]
 	path = lib/quickjs.c3l
-	url = https://github.com:tonis2/quickjs.c3.git
+	url = https://github.com/tonis2/quickjs.c3.git
 [submodule "lib/gltf.c3l"]
 	path = lib/gltf.c3l
 	url = https://github.com/tonis2/gltf.c3.git
