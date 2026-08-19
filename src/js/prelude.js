@@ -333,6 +333,13 @@
 		// What this object draws, or null for a group. Overridden by Mesh.
 		_ref() { return null; }
 
+		// Which of the host's materials this object draws with, or -1 for "say
+		// nothing and leave it at the default". A Mesh answers with the
+		// ShaderMaterial it was given; a helper answers with the line material,
+		// which is the one thing here a script cannot name. A Group has no
+		// `_material` at all, so it answers -1 and costs no crossing.
+		_hostMaterial() { return this._material ? this._material._m : -1; }
+
 		// -------------------------------------------------------------------
 		// Animation
 		//
@@ -410,7 +417,8 @@
 			this._g = g;
 			this._flush();
 			if (!this._visible) H.setVisible(i, g, false);
-			if (this._material) H.setMaterial(i, g, this._material._m);
+			const material = this._hostMaterial();
+			if (material >= 0) H.setMaterial(i, g, material);
 			// Only when they are not the identity: `_materialize` runs once per
 			// object added, and a scene of ten thousand default-coloured meshes
 			// should not pay twenty thousand crossings to say "white, row zero".
@@ -1022,6 +1030,46 @@
 			return H.unloadUnused();
 		}
 
+		// Write the scene to a `.glb`.
+		//
+		// The other direction of `three.load`, and the point at which "linked,
+		// not duplicated" stops being an internal detail: a thousand walls
+		// placed from one kit are a thousand nodes over one mesh in the file,
+		// exactly as they are one draw call in the frame. Vertices are written
+		// once per (asset, mesh) and referenced; images are written once per
+		// unique image, deduplicated across every file they came from by the
+		// same content hash the renderer already deduplicates them with.
+		//
+		// Under `--assets` the path is inside the game directory and cannot
+		// climb out of it — the same rule `three.load` follows.
+		//
+		// Three things are deliberately not in the file:
+		//
+		// - **Helpers and hidden subtrees.** The export is what the frame
+		//   shows; a `.glb` with the debug boxes baked in is a file nobody
+		//   wants. `skipped` counts them.
+		// - **ShaderMaterials.** A material here is a Slang pipeline and glTF
+		//   describes surfaces, not programs. Those meshes are in the file with
+		//   the base colour and texture their geometry carries, and `shaded`
+		//   counts how many lost a custom shader.
+		// - **Per-copy colour, as a per-copy thing.** glTF has no per-instance
+		//   channel at all, so a copy with its own `color` gets its own
+		//   material and its own `mesh` entry. It still shares the vertices —
+		//   only the entry is duplicated, not the geometry — but that is why
+		//   `entries` can exceed `meshes`, and why a scene of many colours
+		//   reloads as many draw calls where it drew as one. A scene that
+		//   leaves `color` alone round-trips its draw count exactly.
+		//
+		// Answers with { path, meshes, entries, materials, images, nodes,
+		// instances, skipped, shaded, bytes }.
+		export(path) {
+			this._check();
+			if (typeof path !== 'string' || path.length === 0) {
+				throw new TypeError('scene.export(path) wants a path to write a .glb to');
+			}
+			return H.exportScene(path);
+		}
+
 		// -------------------------------------------------------------------
 		// Picking
 		//
@@ -1484,6 +1532,292 @@
 	}
 
 	// -----------------------------------------------------------------------
+	// Helpers
+	//
+	// The shapes a scene is debugged with rather than built out of: where a box
+	// ends, where a pivot is, where the ground is, and which triangles a mesh
+	// actually has. `scene/lines.c3` carries the design; the part that matters
+	// from here is that **a helper is an ordinary Mesh over an ordinary asset**
+	// and behaves like one in every direction that has been thought about.
+	//
+	// - A thousand box helpers are one draw call. They share the unit-cube
+	//   asset and differ by transform, which is the same claim the kit pieces
+	//   make.
+	// - `helper.color` is per copy and free, which is why an AxesHelper is three
+	//   meshes over *one* segment asset rather than three assets.
+	// - `scene.remove(helper)` works, and `three.unloadUnused()` gives the
+	//   memory back, because there is nothing special about these assets.
+	// - A helper is not pickable. `upload_built` skips the picking tree for a
+	//   line mesh, so a click goes through the box onto the thing it is drawn
+	//   around.
+	//
+	// **They draw over everything, on purpose.** The line pipeline tests no
+	// depth: a box helper exists to answer "where did this go", and the times
+	// that is asked are the times the thing is inside a wall — where a
+	// depth-tested helper would be hidden by exactly the geometry being asked
+	// about. Three.js's helpers are depth-tested and these are not.
+	//
+	// **Being ordinary cuts both ways: a helper is inside the boxes.** It draws,
+	// so it is in `boundingBox()`, in `boundsInParent()` of whatever it hangs
+	// from, and in `three.camera.frameAll()`. Parent an AxesHelper to a piece
+	// and the piece measures bigger than it is — so align first and add helpers
+	// after, or hang them from a Group of their own.
+
+	// Index 1 of the host's material table, built in `MeshPass.init` over
+	// `LINE_STATE`. A number rather than something asked for, because there is
+	// no verb that answers it — and pinned by `a_helper_draws_with_the_line_material`
+	// in test/lines_test.c3, which reads the material back off the host node
+	// rather than trusting this line.
+	const LINE_MATERIAL = 1;
+
+	// A line shape as a Geometry, so `helper.geometry` is the same kind of thing
+	// a Mesh's is — with `bounds`, `toJSON` and a `type` that says what it is.
+	function lineGeometry(type, kind, parameters, divisions = 1) {
+		return new Geometry(type, kind, parameters, H.lines(kind, divisions));
+	}
+
+	// The base of every helper: a Mesh that draws with the line material, and
+	// only with the line material.
+	class LineMesh extends Mesh {
+		constructor(geometry, color) {
+			super(geometry);
+			if (color !== undefined && color !== null) this.color = color;
+		}
+
+		_hostMaterial() { return LINE_MATERIAL; }
+
+		// Null rather than a stand-in object: there is no ShaderMaterial here to
+		// hand back, and inventing one whose uniforms went nowhere would be worse
+		// than saying so.
+		get material() { return null; }
+
+		set material(v) {
+			throw new TypeError(
+				'a helper draws with the line material and cannot be given another: a ShaderMaterial is '
+				+ 'a pipeline that draws triangles, and a helper\'s indices are pairs — assigning one '
+				+ 'would read the pairs as triangles rather than fail. helper.color is per copy and '
+				+ 'free, and is the knob a helper has.');
+		}
+	}
+
+	// Three.js's Box3Helper: a wire box drawn exactly where a Box3 says.
+	//
+	// The primitive the other box helper is built out of, and the one to reach
+	// for when the box came from somewhere that is not an object — a plot to
+	// fill, a gap to check, a union of two things.
+	//
+	// The box is read in whatever frame the helper's parent is, because that is
+	// the frame its `position` is in. A box from `boundsInParent()` therefore
+	// belongs under the same parent, and a box from `boundingBox()` belongs
+	// under the scene.
+	class Box3Helper extends LineMesh {
+		constructor(box, color = 0xffff00) {
+			if (!(box instanceof Box3)) {
+				throw new TypeError(
+					'new three.Box3Helper(box) wants a three.Box3 — object.boundsInParent() and '
+					+ 'object.boundingBox() answer with one, and new three.Box3(...) builds one.');
+			}
+			super(lineGeometry('BoxLines', 'box', {}), color);
+			this.box = box;
+		}
+
+		// Settable, as in Three.js: the helper follows whatever box it is given.
+		get box() { return this._box; }
+		set box(v) {
+			if (!(v instanceof Box3)) throw new TypeError('helper.box wants a three.Box3');
+			this._box = v;
+			const c = v.center, size = v.size;
+			this.position.set(c.x, c.y, c.z);
+			// The unit cube is corners at +/- 0.5, so the size *is* the scale. A
+			// flat box scales an axis to zero and draws as a rectangle, which is
+			// the right picture for a plane.
+			this.scale.set(size.x, size.y, size.z);
+		}
+	}
+
+	// Three.js's BoxHelper: the box of an object and everything under it.
+	//
+	// **It hangs from the object's own parent, and is refused anywhere else.**
+	// The box comes from `boundsInParent()`, which is measured in that frame, so
+	// a helper parented elsewhere would be drawn wherever the two frames happen
+	// to differ — a box in the wrong place, which is worse than no box. This is
+	// `alignTo`'s rule and it is refused for `alignTo`'s reason.
+	//
+	// The usual spelling is therefore the Three.js one, because a piece is
+	// usually a child of the scene:
+	//
+	//   scene.add(piece);
+	//   scene.add(new three.BoxHelper(piece));
+	//
+	// and a nested piece takes `piece.parent.add(...)`.
+	class BoxHelper extends Box3Helper {
+		constructor(object, color = 0xffff00) {
+			if (!(object instanceof Object3D)) {
+				throw new TypeError('new three.BoxHelper(object) wants the object to measure');
+			}
+			const box = object.boundsInParent();
+			if (box === null) {
+				throw new Error(
+					'new three.BoxHelper(object): that object draws nothing, so it has no box — it is a '
+					+ 'Group with no meshes under it, or its geometry is not resident.');
+			}
+			super(box, color);
+			this._of = object;
+		}
+
+		// What it is drawn around. Read-only: a helper that could be pointed at a
+		// different object would need its parent re-checked, and making a new one
+		// is a line.
+		get object() { return this._of; }
+
+		// Measure again. Nothing here watches the object, so a helper made before
+		// a move draws where the object was — call this after moving, scaling or
+		// rotating it, exactly as Three.js's `BoxHelper.update()` is called.
+		update() {
+			const box = this._of.boundsInParent();
+			if (box === null) {
+				throw new Error('boxHelper.update(): the object it measures no longer draws anything');
+			}
+			this.box = box;
+			return this;
+		}
+
+		_materialize(parent) {
+			if (this._of.parent === null) {
+				throw new Error(
+					`a BoxHelper is drawn in the frame of ${this._of.name || 'the object'}'s parent, and that `
+					+ 'object is not in a scene yet — add it first, then add the helper beside it.');
+			}
+			if (this.parent !== this._of.parent) {
+				throw new Error(
+					`a BoxHelper must hang from the same parent as the object it measures: the box is `
+					+ `measured in that frame, and drawn in this one. Add it to `
+					+ `${this._of.name ? `${this._of.name}.parent` : 'the object\'s parent'} instead — or `
+					+ 'measure with boundingBox() and use a Box3Helper under the scene.');
+			}
+			super._materialize(parent);
+		}
+	}
+
+	// Three.js's AxesHelper: red +X, green +Y, blue +Z, one unit long by default.
+	//
+	// The answer to "where is this thing's pivot and which way is it facing",
+	// which is the question a kit piece with an origin in an unexpected corner
+	// makes somebody ask. Parent it to the object to see that object's pivot.
+	//
+	// Three meshes over one segment asset, so a hundred of these are still one
+	// draw call: the colour rides in the instance record and the direction is a
+	// rotation, neither of which is a new asset.
+	class AxesHelper extends Group {
+		constructor(size = 1) {
+			super();
+			const n = positiveSize(size, 'new three.AxesHelper(size)', 'size');
+			// The segment asset points along +X, so +Y is a quarter turn about Z
+			// and +Z is a quarter turn the other way about Y.
+			for (const [color, rx, ry, rz] of [
+				[0xff0000, 0, 0, 0],
+				[0x00ff00, 0, 0, Math.PI / 2],
+				[0x0000ff, 0, -Math.PI / 2, 0],
+			]) {
+				const arm = new LineMesh(lineGeometry('SegmentLines', 'segment', {}), color);
+				arm.rotation.set(rx, ry, rz);
+				this.add(arm);
+			}
+			this.size = n;
+		}
+
+		// How long each arm is, in the parent's units. Live: writing it rescales
+		// the three arms rather than rebuilding anything.
+		get size() { return this._size; }
+		set size(v) {
+			const n = positiveSize(v, 'axes.size', 'size');
+			this._size = n;
+			for (const arm of this.children) arm.scale.set(n, n, n);
+		}
+	}
+
+	// Three.js's GridHelper: a ruled square in the XZ plane, centred on the
+	// origin — where the ground is, and how big a metre looks.
+	//
+	// One colour rather than Three.js's two. Three.js draws the centre lines
+	// darker, which would be a second mesh here for a distinction nothing has
+	// needed; `scene.background` and `helper.color` are the two knobs.
+	//
+	// Keyed on the divisions alone, so `new three.GridHelper(100, 10)` and
+	// `new three.GridHelper(40, 10)` are one asset at two scales and one draw
+	// call. The size is the scale, which is why there is no `size` to read back:
+	// `grid.scale.x` is it, and it is live.
+	class GridHelper extends LineMesh {
+		constructor(size = 10, divisions = 10, color = 0x888888) {
+			const where = 'new three.GridHelper(size, divisions, color)';
+			const s = positiveSize(size, where, 'size');
+			const d = Math.floor(+divisions);
+			if (!Number.isFinite(d) || d < 1) {
+				throw new RangeError(`${where}: divisions must be at least 1, got ${divisions}`);
+			}
+			if (d > 256) {
+				throw new RangeError(
+					`${where}: divisions is capped at 256 — ${d} lines is a wall of pixels rather than a `
+					+ 'reference, and the grid is meant to be read through.');
+			}
+			super(lineGeometry('GridLines', 'grid', { divisions: d }, d), color);
+			this._divisions = d;
+			this.scale.set(s, 1, s);
+		}
+
+		// How many cells across, which is what picks the asset. Read-only: a
+		// different count is a different mesh, and `new three.GridHelper(...)`
+		// against the same count is free.
+		get divisions() { return this._divisions; }
+	}
+
+	// A mesh's own triangles, as the edges between them. Three.js reaches this
+	// through `WireframeGeometry` and a `LineSegments`; the name here is one
+	// Three.js does not have, because what it takes is different — a mesh that
+	// is already in the scene, not a geometry.
+	//
+	// The tool for the failure that started this: two faces 0.01 apart
+	// z-fighting into a starburst, invisible in a solid render and obvious the
+	// moment the edges are drawn.
+	//
+	// **The mesh has to be in the scene already.** The edges are read off the
+	// CPU copy of the triangles, which is filled at upload — and a mesh reaches
+	// the device when something drawing it is added to a scene. So:
+	//
+	//   scene.add(piece);
+	//   piece.add(new three.WireframeHelper(piece));   // exactly over it
+	//
+	// A child of the mesh, because the edges are in the mesh's own space and a
+	// child at the identity transform overlays it to the pixel. Anywhere else
+	// and the transform is the caller's to match.
+	class WireframeHelper extends LineMesh {
+		constructor(target, color = 0xffffff) {
+			const ref = target instanceof Object3D ? target._ref() : target;
+			if (!ref || typeof ref.asset !== 'number' || typeof ref.mesh !== 'number'
+				|| typeof ref.assetGeneration !== 'number') {
+				throw new TypeError(
+					'new three.WireframeHelper(target) wants a Mesh that is in the scene, or the '
+					+ 'asset.mesh(name) / geometry it draws. A Group has no triangles of its own — '
+					+ 'traverse it and make one per Mesh.');
+			}
+			// Keyed by the source mesh rather than by a shape, which is why this
+			// is the other host verb and not another `lineGeometry` kind.
+			super(
+				new Geometry(
+					'WireframeLines', 'wireframe', { of: ref.name || '' },
+					H.wireframe(ref.asset, ref.assetGeneration, ref.mesh),
+				),
+				color,
+			);
+			this._of = ref.name || '';
+		}
+
+		// Which mesh's edges these are, for a stats dump and for a script that
+		// collected several.
+		get of() { return this._of; }
+	}
+
+	// -----------------------------------------------------------------------
 	// The camera
 	//
 	// A turntable, not a free Object3D, and named so. Three.js's
@@ -1675,6 +2009,16 @@
 		ConeGeometry,
 		TorusGeometry,
 		ConvexGeometry,
+
+		// The helpers. Ordinary meshes over line assets — they cost a draw call
+		// each and nothing else, they are not pickable, and they draw over the
+		// scene rather than inside it because a helper that could be hidden by
+		// the wall a piece had sunk into would be no help at all.
+		Box3Helper,
+		BoxHelper,
+		AxesHelper,
+		GridHelper,
+		WireframeHelper,
 
 		// Synchronous, despite reading like Three.js's async loader: the file is
 		// read and uploaded on this thread and there is nothing to yield to.
@@ -1975,6 +2319,9 @@
 			'three.load(path) is synchronous; await works but is not needed.',
 			'Everything placeable can be MEASURED, and you should measure rather than guess. asset.mesh(name).bounds and geometry.bounds are a Box3 in the piece\'s own space, read out of the glTF JSON so it costs no upload; object.boundingBox() is the world-space box of a subtree, from the host; object.boundsInParent() is the same box in the parent\'s frame and works before add(). A kit piece\'s origin is wherever its exporter left it, so a size table written by hand into a script is the thing that goes stale and sinks pieces into walls.',
 			'object.align(axis, edge, at) moves an object until one face of its box sits at a coordinate — align(\'y\', \'min\', 0) stands a piece on the ground, align(\'z\', \'min\', wallZ) puts its back flush with a wall. object.alignTo(other, {axis, mine, theirs, offset}) says the same thing against a sibling. Both work in the PARENT\'s frame, because that is the frame a script writes positions in; alignTo refuses objects with different parents rather than being wrong by whatever the parents differ by. Set rotation and scale first — they are inputs to where the box is.',
+			'There is DEBUG DRAW, and reaching for it is the cheap move: three.BoxHelper(object) boxes what an object actually occupies, three.Box3Helper(box) boxes a Box3 you worked out yourself, three.AxesHelper(size) shows where a pivot is and which way it faces, three.GridHelper(size, divisions) says where the ground is, and three.WireframeHelper(mesh) draws a mesh\'s own edges — which is how two faces 0.01 apart are found, because a z-fighting starburst is invisible in a solid render. They are ordinary meshes: a thousand of them are one draw call, helper.color is per copy and free, scene.remove(helper) works, and they are NOT pickable, so a click goes through the box onto the thing inside it.',
+			'Helpers draw OVER everything — the line pipeline tests no depth, unlike Three.js\'s helpers. That is deliberate: the times you ask where something is are the times it is inside a wall, and a depth-tested helper would be hidden by exactly the geometry being asked about. The cost of being ordinary meshes is the other direction: a helper draws, so it is inside boundingBox(), inside the boundsInParent() of whatever it hangs from, and inside three.camera.frameAll(). Align first and add helpers after, or hang them from a Group of their own.',
+			'A helper cannot be given a ShaderMaterial. A material is a pipeline and every pipeline you can build draws triangles, while a helper\'s indices are pairs — assigning one would read the pairs as triangles rather than fail, so it throws instead. helper.color is the knob a helper has.',
 			'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
 			'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, is capped at 65536, and is flat shaded with no uvs because a hull has hard creases and no natural unwrap. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
 			'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
@@ -2006,6 +2353,7 @@
 			'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
 			'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral.',
 			'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
+			'The scene comes back OUT with scene.export(path) — a .glb with one mesh per unique geometry and one node per instance, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs. And one thing changes shape: mesh.color is per copy and free here, glTF has no per-instance colour at all, so each distinct colour becomes its own material and its own mesh entry (sharing the vertices). A scene of many colours therefore reloads as many draw calls where it drew as one.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -2014,7 +2362,7 @@
 				note: 'Empties the one host scene and becomes its root. It is an Object3D, so moving it moves everything.',
 				methods: [
 					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
-					'unload()', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
+					'unload()', 'export(path)', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
 					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
 					'play(name, opts)', 'stop()', 'toJSON()',
 				],
@@ -2198,6 +2546,126 @@
 				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
+			Box3Helper: {
+				construct: 'new three.Box3Helper(box, color = 0xffff00)',
+				note:
+					'A wire box drawn exactly where a three.Box3 says. The helper to reach for when the box '
+					+ 'came from somewhere that is not one object — a plot to fill, a gap to check, the union '
+					+ 'of two things. `box` is settable and the helper follows it. It is read in the frame of '
+					+ 'whatever the helper is added to, so a box from boundsInParent() belongs under the same '
+					+ 'parent and a box from boundingBox() belongs under the scene. Draws over everything: the '
+					+ 'line pipeline tests no depth, because the times you ask where something is are the '
+					+ 'times it is inside a wall.',
+				properties: [
+					'box (settable — the helper moves and rescales to it)',
+					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
+					'color (per copy, free: [r,g,b] or 0xff8800)',
+					'material (always null, and assigning throws — a helper draws with the line material)',
+					'variant (meaningless here: the line material has no table)',
+					'animations (always empty)',
+				],
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
+					'play(name, opts)', 'stop()', 'toJSON()',
+				],
+			},
+			BoxHelper: {
+				construct: 'new three.BoxHelper(object, color = 0xffff00)',
+				note:
+					'The box of an object and everything under it — "how big is that actually, and where '
+					+ 'does it end". It must hang from the SAME PARENT as the object it measures, and is '
+					+ 'refused anywhere else: the box is measured in that frame, so a helper parented '
+					+ 'elsewhere would be drawn wherever the two frames differ, which is a box in the wrong '
+					+ 'place rather than no box. The usual spelling is therefore the Three.js one — '
+					+ 'scene.add(piece); scene.add(new three.BoxHelper(piece)) — and a nested piece takes '
+					+ 'piece.parent.add(...). Nothing watches the object, so call update() after moving it.',
+				properties: [
+					'object (what it measures, read-only)',
+					'box (the box it is currently drawn on)',
+					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
+					'color (per copy, free)',
+					'material (always null, and assigning throws)',
+					'variant (meaningless here)',
+					'animations (always empty)',
+				],
+				methods: [
+					'update()', 'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)',
+					'getWorldPosition()', 'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)',
+					'alignTo(other, opts)', 'play(name, opts)', 'stop()', 'toJSON()',
+				],
+			},
+			AxesHelper: {
+				construct: 'new three.AxesHelper(size = 1)',
+				note:
+					'Red +X, green +Y, blue +Z from the origin — where a pivot is and which way it faces, '
+					+ 'which is the question a kit piece whose origin is in an unexpected corner makes '
+					+ 'somebody ask. Parent it to an object to see THAT object\'s pivot. It is a Group of '
+					+ 'three meshes over one segment asset, so a hundred of them are still one draw call. '
+					+ 'Remember that a helper parented to a piece is inside that piece\'s box: align first, '
+					+ 'add the axes after.',
+				properties: [
+					'size (settable — rescales the three arms, builds nothing)',
+					'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
+					'animations (always empty)',
+				],
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
+					'play(name, opts)', 'stop()', 'toJSON()',
+				],
+			},
+			GridHelper: {
+				construct: 'new three.GridHelper(size = 10, divisions = 10, color = 0x888888)',
+				note:
+					'A ruled square in the XZ plane, centred on the origin: where the ground is and how big '
+					+ 'a metre looks. ONE colour, not Three.js\'s two — the darker centre line would be a '
+					+ 'second mesh here for a distinction nothing has needed. Keyed on the divisions alone, '
+					+ 'so GridHelper(100, 10) and GridHelper(40, 10) are one asset at two scales and one '
+					+ 'draw call. There is no `size` to read back because the size IS the scale: grid.scale.x, '
+					+ 'and it is live. Divisions are capped at 256.',
+				properties: [
+					'divisions (read-only — a different count is a different mesh)',
+					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
+					'color (per copy, free)',
+					'material (always null, and assigning throws)',
+					'variant (meaningless here)',
+					'animations (always empty)',
+				],
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
+					'play(name, opts)', 'stop()', 'toJSON()',
+				],
+			},
+			WireframeHelper: {
+				construct: 'new three.WireframeHelper(meshOrGeometry, color = 0xffffff)',
+				note:
+					'A mesh\'s own triangles as the edges between them — the tool for two faces 0.01 apart '
+					+ 'z-fighting into a starburst, which is invisible in a solid render and obvious the '
+					+ 'moment the edges are drawn. Takes a Mesh that is already in the scene, or the '
+					+ 'geometry / asset.mesh(name) it draws. THE MESH HAS TO BE ON THE DEVICE: a generated '
+					+ 'shape is uploaded when it is constructed and works straight away, but a mesh out of a '
+					+ 'file reaches the device when something drawing it is added to a scene, and until then '
+					+ 'there are no triangles to read — you get a sentence saying so, not an empty helper. '
+					+ 'Add it as a CHILD of the mesh — piece.add(new three.WireframeHelper(piece)) — because '
+					+ 'the edges are in the mesh\'s own space and a child at the identity transform overlays '
+					+ 'it to the pixel. Each shared edge is drawn once. A Group has no triangles of its own: '
+					+ 'traverse it and make one per Mesh.',
+				properties: [
+					'of (the name of the mesh these edges belong to)',
+					'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
+					'color (per copy, free)',
+					'material (always null, and assigning throws)',
+					'variant (meaningless here)',
+					'animations (always empty)',
+				],
+				methods: [
+					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
+					'play(name, opts)', 'stop()', 'toJSON()',
+				],
+			},
 		},
 		functions: {
 			'three.load(path)':
@@ -2224,6 +2692,19 @@
 				+ 'bounds: { min, max } }]. Read out of the JSON chunk, so it is cheap on a kit of any size — '
 				+ 'ask this before three.load to find out what is worth loading. `path` is what three.load wants. '
 				+ 'Empty when three was not started with --assets, since there is then no directory to describe.',
+			'scene.export(path)':
+				'Write the scene to a .glb, and answer with { path, meshes, entries, materials, images, '
+				+ 'nodes, instances, skipped, shaded, bytes }. One mesh per unique (asset, mesh) and one '
+				+ 'node per instance, so a thousand walls from one kit are a thousand nodes over one mesh '
+				+ 'in the file exactly as they are one draw call in the frame. Images are written once and '
+				+ 'shared across every file they came from. Under --assets the path is inside the game '
+				+ 'directory and cannot climb out of it, as three.load\'s is. Helpers and hidden subtrees '
+				+ 'are not in the file (skipped counts them) and a ShaderMaterial is not either, because it '
+				+ 'is a Slang pipeline and glTF describes surfaces rather than programs — those meshes are '
+				+ 'exported with the base colour and texture their geometry carries, and shaded counts them. '
+				+ 'entries exceeds meshes when copies of one shape carry different mesh.color values: glTF '
+				+ 'has no per-instance colour channel, so each colour needs its own material and its own '
+				+ 'mesh entry. They still share the vertices.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
 			'three.input.isDown(key)':

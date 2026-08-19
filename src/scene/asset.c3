@@ -210,6 +210,15 @@ struct Asset
 	List{AssetNode} nodes;
 	List{uint} roots;
 
+	// How a generated shape was described, for the exporter and for nothing else.
+	// `Primitive.build` regenerates its positions, normals and uvs from these
+	// eight numbers, which is why they are kept and the CPU streams are not —
+	// thirty-two bytes per asset against twenty per vertex. `has_primitive` is
+	// false for a file, a convex hull and a line shape; `scene/export.c3` says
+	// what each of those does instead.
+	Primitive primitive;
+	bool has_primitive;
+
 	// The file, still open. `Assets.load` parses the JSON and stops, so the
 	// document and its mmapped buffer have to stay until the last mesh in them
 	// is uploaded or the asset is freed — which is what `game.md` G3/S3 calls
@@ -925,8 +934,13 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 		}
 	}
 
-	Asset asset = { .path = path.copy(mem), .has_stream = true };
-	asset.stream = gltf::open(path)!;
+	// Opened before anything is allocated, because a `defer catch` covers the
+	// statements below it and not the one that registers it. A path copied
+	// ahead of this line leaks on every path that does not open — which is the
+	// common case for the bad-path branch, not a rare one.
+	gltf::GltfStream stream = gltf::open(path)!;
+
+	Asset asset = { .path = path.copy(mem), .stream = stream, .has_stream = true };
 	// Everything below this point can fail, and the asset is not on
 	// `self.assets` yet — so the file it opened is its own to close.
 	defer catch
