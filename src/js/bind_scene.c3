@@ -53,6 +53,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "assetPath", &js_asset_path, 2);
 	self.bind(host, "meshNames", &js_mesh_names, 2);
+	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
 	self.bind(host, "assetNodes", &js_asset_nodes, 2);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
 	self.bind(host, "bindAnimation", &js_bind_animation, 5);
@@ -74,6 +75,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
 	self.bind(host, "worldPosition", &js_world_position, 2);
+	self.bind(host, "objectBounds", &js_object_bounds, 2);
 
 	// Picking
 	self.bind(host, "pick", &js_pick, 2);
@@ -96,6 +98,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
+	self.bind(host, "backgroundGet", &js_background_get, 0);
+	self.bind(host, "backgroundSet", &js_background_set, 3);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "frameAll", &js_frame_all, 0);
@@ -202,6 +206,25 @@ fn qjs::Value vec3_value(qjs::Context* js, Vec3 v)
 }
 
 <*
+ A box as six numbers, `[minX, minY, minZ, maxX, maxY, maxZ]`.
+
+ Flat rather than `{min, max}` because `prelude.js` derives `size` and `center`
+ from it anyway, and one array of six is one allocation where a nested pair is
+ three. The shape a script sees is built there.
+*>
+fn qjs::Value aabb_value(qjs::Context* js, collision::Aabb3 box)
+{
+	qjs::Value six = js.array();
+	js.set_index(six, 0, qjs::number_value(box.min.x));
+	js.set_index(six, 1, qjs::number_value(box.min.y));
+	js.set_index(six, 2, qjs::number_value(box.min.z));
+	js.set_index(six, 3, qjs::number_value(box.max.x));
+	js.set_index(six, 4, qjs::number_value(box.max.y));
+	js.set_index(six, 5, qjs::number_value(box.max.z));
+	return six;
+}
+
+<*
  Read `(index, generation)` from `args[at]` and `args[at + 1]` and resolve it.
 
  @return `The id, or NO_NODE with a JS exception left pending, in which case the caller must write out and return immediately.`
@@ -260,6 +283,12 @@ fn void js_reset(
 	// throw one frame later, which is the same rule handles into the previous
 	// scene follow.
 	self.physics.close();
+	// The background goes back to the default, unlike materials and assets, which
+	// survive a reset on purpose. It is a property of the Scene in Three.js and
+	// this keeps that true: `new three.Scene()` starts on the default sky rather
+	// than on whatever the last scene painted, so a script that sets a background
+	// and a script that does not render the same first frame.
+	if (self.renderer != null) self.renderer.clear = DEFAULT_CLEAR;
 
 	self.epoch += 1;
 	*out = qjs::number_value(self.epoch);
@@ -633,6 +662,33 @@ fn void js_world_position(
 	*out = vec3_value(&js, self.pass.scene.node(id).world_position());
 }
 
+<*
+ `objectBounds(handle, generation)` — the world-space box of a subtree, or
+ `null` when nothing under it draws.
+
+ The world-space half of what `meshBounds` answers in mesh-local space, and the
+ reason both exist: a script placing a piece against a wall needs to know where
+ the piece's *faces* end up, which is its own bounds run through every transform
+ between it and the root. Doing that arithmetic in JavaScript would mean
+ re-deriving world matrices the host already keeps.
+
+ Null rather than a zero box for an empty subtree — see `Scene.subtree_bounds`.
+*>
+fn void js_object_bounds(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	bool found = false;
+	collision::Aabb3 box = self.pass.scene.subtree_bounds(&self.pass.assets, id, &found);
+	*out = found ? aabb_value(&js, box) : qjs::null_value();
+}
+
 // ============================================================================
 // Picking
 // ============================================================================
@@ -871,6 +927,65 @@ fn void js_render_size(
 	*out = pair;
 }
 
+<*
+ `backgroundGet()` — the colour every frame starts on, as `[r, g, b]`.
+*>
+fn void js_background_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is nothing to clear without a GPU device, so there is no background colour");
+		return;
+	}
+
+	qjs::Value list = js.array();
+	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(self.renderer.clear[i]));
+	*out = list;
+}
+
+<*
+ `backgroundSet(r, g, b)` — what every frame starts on.
+
+ ## The alpha stays at one, and is not an argument
+
+ A clear alpha of zero would only mean something if what the image is composited
+ onto were a question, and it is not: the offscreen target is blitted to an
+ opaque swapchain image and encoded to a PNG that nothing is behind. Taking an
+ alpha here would let a script write a number that changes no pixel, which is
+ worse than not offering it — `plan.md` §4's half-match rule applied to a
+ parameter rather than to a name.
+
+ ## Components, not a hex value
+
+ The same contract `mesh.color` has, and the same reason: the components are
+ what the pixel gets and there is no colour management anywhere in this project.
+ `prelude.js` does the hex arithmetic so both doors divide by 255 identically.
+*>
+fn void js_background_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is nothing to clear without a GPU device, so there is no background colour");
+		return;
+	}
+
+	for (int i = 0; i < 3; i++)
+	{
+		self.renderer.clear[i] = math::clamp(arg_float(&js, argc, args, i), 0.0f, 1.0f);
+	}
+	self.renderer.clear[3] = 1.0f;
+}
+
 fn void js_camera_get(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 ) @local
@@ -887,16 +1002,23 @@ fn void js_camera_get(
 	js.set_index(list, 4, qjs::number_value(camera.pitch));
 	js.set_index(list, 5, qjs::number_value(camera.distance));
 	js.set_index(list, 6, qjs::number_value(camera.fov));
+	// Reported since M6, and read-only on the JS side. They are still derived
+	// rather than set — `Camera.derive_planes` argues that at length — but derived
+	// is not the same as secret, and while they were neither reported nor settable
+	// there was no way at all to find out that the sky had fallen outside the far
+	// plane except by rendering and guessing.
+	js.set_index(list, 7, qjs::number_value(camera.near_plane));
+	js.set_index(list, 8, qjs::number_value(camera.far_plane));
 	*out = list;
 }
 
 <*
  `cameraSet(tx, ty, tz, yaw, pitch, distance, fov)`.
 
- The near and far planes are re-derived from the distance rather than taken from
- the caller — see `Camera.derive_planes` for why — and the angles are clamped
- the same way a mouse drag clamps them, so a script and a hand on the window
- cannot put the camera in two different sets of states.
+ The near and far planes are re-derived from the distance and the scene's own
+ bounds rather than taken from the caller — see `Camera.derive_planes` for why —
+ and the angles are clamped the same way a mouse drag clamps them, so a script
+ and a hand on the window cannot put the camera in two different sets of states.
 *>
 fn void js_camera_set(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -913,7 +1035,12 @@ fn void js_camera_set(
 	camera.fov = math::clamp(arg_float(&js, argc, args, 6), 1.0f, 179.0f);
 
 	camera.clamp_angles();
-	camera.derive_planes();
+	// Through the pass rather than `camera.derive_planes()` directly, so the far
+	// plane is fitted to the scene the script has built instead of to a multiple
+	// of the distance it just asked for. `MeshPass.derive_camera_planes` has the
+	// argument; the short version is that a script that dollies in used to lose
+	// its sky.
+	self.pass.derive_camera_planes();
 }
 
 fn void js_frame_all(

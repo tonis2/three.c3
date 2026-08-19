@@ -1,0 +1,1 @@
+Close three instance after working on it, so on next session it doesent clash with the scene rendering.

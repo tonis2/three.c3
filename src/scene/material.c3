@@ -61,6 +61,62 @@ faultdef
 const uint DEFAULT_MATERIAL = 0;
 
 <*
+ Which faces a material keeps, in Three.js's own numbering.
+
+ `FrontSide` is 0 there, `BackSide` 1 and `DoubleSide` 2, and matching the
+ numbers rather than only the names means a script that hardcoded `side: 2` from
+ memory of Three.js gets what it meant.
+*>
+const int SIDE_FRONT = 0;
+const int SIDE_BACK = 1;
+const int SIDE_DOUBLE = 2;
+
+<*
+ The cull mode a side means.
+
+ **Culling is not an optional device feature**, unlike the wireframe fill mode
+ `plan.md` §1 refuses to depend on: `cullMode` is core Vulkan with no capability
+ bit behind it, so this needs no query and has no fallback path.
+
+ The inversion is the thing to read twice. `BackSide` means *keep the back
+ faces*, so it culls the front ones. Getting it the other way round renders a
+ skydome that is invisible from inside — which is the exact bug this exists to
+ fix, so it would look like nothing had changed.
+
+ Anything unrecognised is `FrontSide`, the default every material had before
+ this argument existed. The JS side refuses an unknown value by name before it
+ reaches here; this is the floor under that, not the check.
+*>
+fn vk::CullModeFlags cull_for_side(int side)
+{
+	switch (side)
+	{
+		case SIDE_BACK: return CULL_MODE_FRONT_BIT;
+		case SIDE_DOUBLE: return CULL_MODE_NONE;
+		default: return CULL_MODE_BACK_BIT;
+	}
+}
+
+<*
+ The material every debug line draws with.
+
+ Index 1 of `MeshPass.materials`, built in `MeshPass.init` from the same
+ `mesh.slang` the default material uses, over `LINE_STATE`.
+
+ It is a *material* rather than a flag on the mesh because a bucket is
+ `(asset, mesh, material)` and the material is what chooses the pipeline. Making
+ topology a property of the geometry instead would mean every material needed a
+ line variant of its pipeline, for a case in which nobody wants a custom shader:
+ a debug line is a colour and a position, and `mesh.color` already carries the
+ colour per copy for free.
+
+ A script cannot name it. `three.AxesHelper` and its siblings set it themselves,
+ and `MeshPass.set_material_side` refuses it — a line pipeline with a cull mode
+ would be a pipeline built from a state nobody meant.
+*>
+const uint LINE_MATERIAL = 1;
+
+<*
  Where a material's uniforms begin in the push block.
 
  The mesh contract owns everything below this: `MESH_PUSH_FIELDS` ends with
@@ -92,6 +148,12 @@ $assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
 struct Material
 {
 	MeshPipeline* pipeline;
+	// Which faces survive, as `material.side` chose them. Set at record time with
+	// `vk::cmdSetCullMode` rather than baked into `pipeline`, so two materials that
+	// differ only in their side share one `VkPipeline` and changing a side builds
+	// nothing at all. `PipelineState` has the argument, including why topology did
+	// not get the same treatment.
+	vk::CullModeFlags cull;
 	// The body the agent wrote, owned. Kept for `toJSON` and for the error
 	// message when a uniform name does not resolve — "that material has no
 	// uniform called X" is only actionable next to the source that declared them.

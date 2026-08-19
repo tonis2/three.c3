@@ -42,6 +42,9 @@ struct MeshPass
 	// it — the cache owns every pipeline it hands out and frees them all.
 	PipelineCache pipelines;
 	MeshPipeline* pipeline;
+	// The same shader over `LINE_STATE`. `LINE_MATERIAL` is the index that reaches
+	// it, and this is the pointer that index resolves to.
+	MeshPipeline* line_pipeline;
 	// Every material any node can name. Index 0 is `DEFAULT_MATERIAL`, built in
 	// `init` from `pipeline`, so a scene that never mentions a material still has
 	// one. Lives here rather than on `JsRuntime` for the same reason `assets`
@@ -82,15 +85,33 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 		if (path.len == 0) path = find_shader("mesh.slang", tmem)!;
 
 		String source = load_source(path, tmem)!;
-		self.pipeline = self.pipelines.acquire(gpu, target, source, path, CULL_MODE_BACK_BIT)!;
+		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE)!;
+
+		// The line pipeline is the same shader over a different fixed-function
+		// state — `LINE_STATE`, which has the argument — so this is a second
+		// `VkPipeline` and *not* a second Slang call: `acquire` keys on the source
+		// as well as the state, and the source is byte-identical.
+		//
+		// It draws nothing until a script asks for a helper. Built here anyway,
+		// rather than on demand, because building it on demand would put a 1 ms
+		// pipeline creation inside whichever frame first added a box helper, and
+		// the whole point of a debug tool is that reaching for it is free.
+		self.line_pipeline = self.pipelines.acquire(gpu, target, source, path, LINE_STATE)!;
 	};
 
 	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
 	// a material, so `Node.material` never has to mean "none". Its uniform block
 	// is empty: `mesh.slang` declares no fields past `flags`, so nothing above
 	// `MATERIAL_PUSH_START` is ever read out of it.
+	//
+	// `LINE_MATERIAL` is index 1 and is built beside it for the same reason: a
+	// node's material is a `uint`, so the pass has to be able to hand out an index
+	// that means "draw this as lines" before any script has asked for one.
 	self.materials.init(mem, 4);
-	self.materials.push({ .pipeline = self.pipeline, .fragment = "" });
+	self.materials.push({ .pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "" });
+	// No culling for lines: a segment has no facing, and `CULL_MODE_NONE` is what
+	// keeps a wireframe from losing half its edges to a rule about triangles.
+	self.materials.push({ .pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "" });
 
 	self.assets.init(gpu);
 	self.scene.init();
@@ -234,6 +255,31 @@ fn void MeshPass.frame_camera(&self)
 fn collision::Aabb3 MeshPass.bounds(&self) => self.scene.bounds(&self.assets);
 
 <*
+ Re-derive the camera's near and far planes against what the scene actually holds.
+
+ `Camera.derive_planes` on its own only knows the orbit distance, and the far
+ plane it picks from that is a guess that fails silently — see its header. This
+ is the caller that has a scene to measure, so it measures: the eye's distance to
+ the far side of the bounding sphere is exactly how far the camera can need to
+ see, and the multiple-of-distance floor stays underneath it.
+
+ The bounding *sphere* rather than the box's furthest corner, for
+ `frame_bounds`'s reason: it is orientation independent, so the answer does not
+ change as the turntable turns and the far plane does not breathe during a drag.
+
+ Costs one walk of the node array, on camera moves only — not per frame. An
+ empty scene answers with a unit box, whose reach is under the floor, so nothing
+ special-cases it.
+*>
+fn void MeshPass.derive_camera_planes(&self)
+{
+	collision::Aabb3 bounds = self.scene.bounds(&self.assets);
+	Vec3 centre = (bounds.min + bounds.max) * 0.5f;
+	float radius = (bounds.max - bounds.min).length() * 0.5f;
+	self.camera.derive_planes((self.camera.eye() - centre).length() + radius);
+}
+
+<*
  Record the draws.
 
  @param slot : `Which frame in flight this is. Selects the instance array to write, and must be one whose fence has already been waited on.`
@@ -275,6 +321,14 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
 			bound = pipeline.handle;
 		}
+
+		// Dynamic, so `material.side` costs a command rather than a pipeline —
+		// `PipelineState` has the argument and the measurement. Set per bucket
+		// rather than tracked like `bound`, because the draw list is material-major
+		// already: consecutive buckets usually share a material and the driver
+		// folds a repeated set, whereas a `last_cull` variable here would be a
+		// second thing to keep in step with the pipeline bind for no measured gain.
+		vk::cmdSetCullMode(cmd, material.cull);
 
 		// Pushed, not bound. There is no descriptor set anywhere in this project:
 		// the image and sampler are specified inline against this pipeline's own
@@ -404,6 +458,7 @@ fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
  with `ok == true` and an agent that never sees its warnings writes the same
  mistake twice.
 
+ @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
 *>
@@ -413,6 +468,7 @@ fn uint? MeshPass.create_material(
 	Target* target,
 	String fragment,
 	MaterialUniform[] uniforms,
+	int side = SIDE_FRONT,
 	String* diagnostic = null
 )
 {
@@ -421,13 +477,48 @@ fn uint? MeshPass.create_material(
 	{
 		String source = material_source(fragment, uniforms, tmem)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
-			gpu, target, source, "three.material", CULL_MODE_BACK_BIT, diagnostic
+			gpu, target, source, "three.material", SOLID_STATE, diagnostic
 		)!;
 
 		index = (uint)self.materials.len();
-		self.materials.push({ .pipeline = pipeline, .fragment = fragment.copy(mem) });
+		self.materials.push({
+			.pipeline = pipeline,
+			.cull = cull_for_side(side),
+			.fragment = fragment.copy(mem),
+		});
 	};
 	return index;
+}
+
+<*
+ `material.side = ...` — change which faces this material keeps.
+
+ One field, and no pipeline. It was a re-`acquire` for about an hour: the cull
+ mode used to be baked into `PipelineState`, so a new side meant a new
+ `VkPipeline` built from the material's own source — which also meant this
+ needed a device, a target, the assembled source read back out of the pipeline
+ cache, and a fault path for each of those going wrong.
+
+ Making the cull mode dynamic deleted all of it. `MeshPass.record` sets it per
+ bucket from this field, so two sides of one material are one pipeline and this
+ is an assignment. See `PipelineState`.
+
+ **The built-in materials are refused.** `DEFAULT_MATERIAL` is shared by every
+ node that was never given a material of its own, so turning its faces round
+ would turn every such node's faces round — a scene-wide change made through a
+ handle that reads like it names one thing. `LINE_MATERIAL` is refused for a
+ different reason: a debug line has no facing to cull, and offering the setting
+ would be offering one that does nothing.
+
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+*>
+fn void? MeshPass.set_material_side(&self, uint index, int side)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+
+	material.cull = cull_for_side(side);
 }
 
 fn void MeshPass.free(&self, Gpu* gpu)
@@ -445,5 +536,6 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.materials.free();
 	self.pipelines.free(gpu);
 	self.pipeline = null;
+	self.line_pipeline = null;
 	self.ready = false;
 }

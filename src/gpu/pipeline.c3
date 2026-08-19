@@ -136,6 +136,109 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	{ "flags",     56,  4 },
 };
 
+<*
+ The fixed-function state a pipeline is *built* with — as opposed to the state it
+ is *told* at record time.
+
+ ## The cull mode is not in here, and that is the interesting part
+
+ Four things vary across the pipelines this project needs: topology, cull mode,
+ and the two depth flags. All four are settable dynamically on a Vulkan 1.3
+ device — `vkCmdSetCullMode`, `vkCmdSetPrimitiveTopology`,
+ `vkCmdSetDepthTestEnable` and `vkCmdSetDepthWriteEnable` are core with no
+ feature bit. So in principle none of them needs a pipeline of its own.
+
+ **Topology is the exception, and it was measured rather than assumed.** With
+ `dynamicPrimitiveTopologyUnrestricted` false — which is what this machine's
+ device reports — `vkCmdSetPrimitiveTopology` may only pick a topology in the
+ same *class* as the one the pipeline was built with, and triangles and lines are
+ different classes. The bundled KosmicKrisp honours the switch anyway, pixel for
+ pixel, because Metal takes the primitive type at draw time and has nothing baked
+ in to conflict with. It is still undefined behaviour, and the validation layer
+ names it on every single draw:
+
+	VUID-vkCmdDrawIndexed-dynamicPrimitiveTopologyUnrestricted-07500
+
+ A validation error on every frame is how a real one gets missed, so the line
+ pass gets a pipeline and topology stays here.
+
+ **The cull mode went dynamic**, and that is where the saving was. It is the one
+ of the four a *script* varies — `material.side` — so under a static cull mode
+ every distinct side an agent asked for was another `VkPipeline`, built at the
+ line that asked for it. It is now `vk::cmdSetCullMode` per bucket, which costs
+ one command and no pipeline, and it puts the field where it belongs: topology
+ and depth describe the pass, the cull mode describes the material.
+
+ The depth flags could go the same way and deliberately have not. They would save
+ nothing — the line pass differs in topology regardless, so it is a second
+ pipeline either way — and a pipeline that no longer states its own depth
+ behaviour is harder to read for no gain.
+
+ Everything left in here is core Vulkan with no capability bit behind it. That is
+ also why a wireframe is a **line-list index buffer** rather than
+ `POLYGON_MODE_LINE`: `fillModeNonSolid` is false on the bundled KosmicKrisp, and
+ so is `wideLines`, so lines are one pixel and there is no raster state to ask
+ for (`plan.md` §1).
+*>
+struct PipelineState
+{
+	vk::PrimitiveTopology topology;
+	bool depth_test;
+	bool depth_write;
+}
+
+<*
+ What everything drew with before there was a choice: solid triangles, back faces
+ culled, depth tested and written.
+*>
+const PipelineState SOLID_STATE = {
+	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+	.depth_test = true,
+	.depth_write = true,
+};
+
+<*
+ What debug geometry draws with: line segments, no culling, and **no depth test
+ at all**.
+
+ The depth part is the one worth defending, because Three.js's helpers are
+ depth-tested and these are not.
+
+ A debug line exists to answer "where is this thing", and the times that question
+ is asked are exactly the times the thing is somewhere it should not be — inside
+ a wall, behind the terrain, buried in the masonry. The town-square session lost
+ a render to a window that had sunk into the stone it was mounted on, and a box
+ helper that was also hidden by that stone would have been no help at all.
+
+ It also removes the one hard case for free. A wireframe drawn over its own mesh
+ is exactly coplanar with it, and coplanar depth is a speckle rather than a line —
+ which is the failure the helper is supposed to *diagnose*, appearing in the
+ diagnostic. With no depth test there is nothing to fight.
+
+ The cost is that debug geometry does not sort with the scene, so it has to be
+ drawn after all of it. `Scene.build_draw_list` puts the line material last for
+ that reason, and it is not an ordering that can be got right by luck.
+*>
+const PipelineState LINE_STATE = {
+	.topology = PRIMITIVE_TOPOLOGY_LINE_LIST,
+	.depth_test = false,
+	.depth_write = false,
+};
+
+fn ulong PipelineState.hash(self)
+{
+	return ((ulong)self.topology * 0xbf58476d1ce4e5b9)
+		^ (self.depth_test ? 0x94d049bb133111ebUL : 0)
+		^ (self.depth_write ? 0x2545f4914f6cdd1dUL : 0);
+}
+
+fn bool PipelineState.equals(self, PipelineState other)
+{
+	return self.topology == other.topology
+		&& self.depth_test == other.depth_test
+		&& self.depth_write == other.depth_write;
+}
+
 struct MeshPipeline
 {
 	vk::Pipeline handle;
@@ -240,13 +343,13 @@ fn void? check_entry_points(ShaderModule* mod)
  The alternative — a pointer into the module — would make the pipeline outlive
  what it points at the first time a caller freed the module after building.
 
- @param [&inout] mod : `A module from compile_slang. Its layout is moved into the pipeline.`
+ @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
  @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
  @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
  @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
  @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
 *>
-fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, vk::CullModeFlags cull)
+fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state)
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
 	// The *shader's* block, not `MeshPush::size`. Since M5 a material appends its
@@ -328,7 +431,7 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
 
 	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
-		.setTopology(PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+		.setTopology(state.topology)
 		.setPrimitiveRestartEnable(vk::FALSE);
 
 	// **Counter-clockwise, the same as glTF's own convention, and the negative
@@ -343,11 +446,17 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	// projection works unchanged; undoing a flip is not a flip, so a triangle
 	// that is counter-clockwise in glTF space is counter-clockwise here.
 	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
-		.setCullMode(cull)
+		// **Ignored.** `DYNAMIC_STATE_CULL_MODE` is declared below, so the value
+		// here is never read and `MeshPass.record` supplies the material's own.
+		// Written as the old default rather than left zero, because zero spells
+		// CULL_MODE_NONE and a reader who missed the dynamic state would take it
+		// for a deliberate choice.
+		.setCullMode(CULL_MODE_BACK_BIT)
 		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
-		// POLYGON_MODE_FILL only. fillModeNonSolid is false on the bundled
-		// driver here, so a wireframe would have to be a line-list index
-		// buffer rather than a raster state (plan.md §1).
+		// POLYGON_MODE_FILL only, whatever the topology. fillModeNonSolid is
+		// false on the bundled driver here, which is why `LINE_STATE` reaches
+		// lines through PRIMITIVE_TOPOLOGY_LINE_LIST and an index buffer of
+		// pairs rather than through a raster state (plan.md §1).
 		.setPolygonMode(POLYGON_MODE_FILL);
 
 	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
@@ -359,11 +468,18 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	);
 
 	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
-		.setDepthTestEnable(vk::TRUE)
-		.setDepthWriteEnable(vk::TRUE)
+		.setDepthTestEnable(state.depth_test ? vk::TRUE : vk::FALSE)
+		.setDepthWriteEnable(state.depth_write ? vk::TRUE : vk::FALSE)
 		.setDepthCompareOp(COMPARE_OP_LESS_OR_EQUAL);
 
-	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };
+	// `CULL_MODE` alongside the two the swapchain needs. Core in Vulkan 1.3 with no
+	// feature bit, so there is nothing to query and nothing to fall back to — see
+	// `PipelineState` for why topology is not here beside it.
+	vk::DynamicState[3] dynamic_states = {
+		DYNAMIC_STATE_VIEWPORT,
+		DYNAMIC_STATE_SCISSOR,
+		DYNAMIC_STATE_CULL_MODE,
+	};
 	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
 		.setDynamicStates(dynamic_states[..]);
 
@@ -382,10 +498,15 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		.setLayout(self.layout)
 		.build(gpu.handle)!;
 
-	// The move. Everything above read `mod.layout`; from here the pipeline owns
-	// it and the module's copy is empty.
-	self.shader = mod.layout;
-	mod.layout = {};
+	// A copy, not a move. Until the pipeline cache learned to keep modules this
+	// took the module's own layout and left it empty, which was right while a
+	// module produced exactly one pipeline. It now produces one per render state —
+	// the line pass and the solid pass are one `mesh.slang`, and a material's two
+	// sides are one source — so the module has to survive with its layout intact.
+	//
+	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
+	// the argument against borrowing instead.
+	self.shader = mod.layout.copy();
 
 	return *self;
 }
@@ -404,19 +525,49 @@ fn void MeshPipeline.free(&self, Gpu* gpu)
 // ============================================================================
 
 <*
- One pipeline the cache is keeping, and what it was built from.
+ One compiled shader the cache is keeping, and the source that produced it.
+
+ ## Why this is a level of its own
+
+ A pipeline is `(source, render state)`. A *compile* is source alone — Slang emits
+ byte-identical SPIR-V for a line pipeline and a solid one, because topology, cull
+ mode and the depth flags are `VkGraphicsPipelineCreateInfo` fields the shader
+ never sees.
+
+ Until M6 nothing asked for two states over one source, so the cache keyed both
+ levels together and nobody paid for it. Debug lines and `material.side` both ask,
+ and under the single key each of them called Slang again on source it had already
+ compiled: measured at `compiles=2, hits=0` for a `MeshPass.init` that builds one
+ shader. The header below states the ratio that makes that matter — roughly 17 ms
+ for the compile against 1 ms for the pipeline — so splitting the levels is worth
+ seventeen eighteenths of the cost, and dynamic state would have been worth the
+ other eighteenth.
 *>
-struct CachedPipeline
+struct CachedModule
 {
 	ulong hash;
 	// The source that produced it, kept so a hash *hit* can be confirmed rather
 	// than trusted. `gpu/texture.c3` compares dimensions before believing its
 	// content hash for the same reason, and `plan.md` §6 states the rule
 	// generally: compare identity, not a proxy for it. A 64-bit collision here
-	// would bind a pipeline compiled from different source, which renders
-	// something plausible and wrong.
+	// would build a pipeline out of a different shader, which renders something
+	// plausible and wrong.
 	String source;
-	vk::CullModeFlags cull;
+	ShaderModule mod;
+}
+
+<*
+ One pipeline the cache is keeping: which module, and over which state.
+
+ The module is a pointer rather than a copy because a `CachedModule` holds the
+ SPIR-V. It is borrowed from `PipelineCache.modules`, whose entries are
+ heap-boxed for the same reason the pipelines are — a later `acquire` that grows
+ either list must not move something already in use.
+*>
+struct CachedPipeline
+{
+	CachedModule* compiled;
+	PipelineState state;
 	MeshPipeline pipeline;
 }
 
@@ -429,11 +580,17 @@ struct CachedPipeline
  expensive half** — measured at about 17 ms per compile against roughly 1 ms for
  the pipeline on this machine.
 
- Entries are heap-allocated and handed out by pointer, so a later `acquire` that
- grows the list does not move a pipeline something is already drawing with.
+ That ratio is why there are two levels rather than one key. A shader compiles
+ once; a pipeline is built once per render state over it. See `CachedModule`.
+
+ Entries in both lists are heap-allocated and handed out by pointer, so a later
+ `acquire` that grows either one does not move a pipeline something is already
+ drawing with, or a module a pipeline entry points at.
 *>
 struct PipelineCache
 {
+	// Two levels, keyed differently. See `CachedModule` for why they are not one.
+	List{CachedModule*} modules;
 	List{CachedPipeline*} entries;
 	// How many times Slang was actually invoked, and how many acquires were
 	// answered without it. Not diagnostics: `the_pipeline_cache_skips_the_compile`
@@ -441,11 +598,69 @@ struct PipelineCache
 	// of a cache that recompiled and threw the result away.
 	uint compiles;
 	uint hits;
+	// How many `VkPipeline` objects were built. Separate from `compiles` since the
+	// split, because they are no longer the same number and the whole point of the
+	// split is that the cheap one can happen without the expensive one — a test
+	// that only watched `compiles` would pass on a cache that had stopped caching
+	// pipelines at all.
+	uint builds;
 }
 
 fn void PipelineCache.init(&self)
 {
+	self.modules.init(mem, 2);
 	self.entries.init(mem, 2);
+}
+
+<*
+ The compiled module for this source, compiling it if it is new.
+
+ Split out of `acquire` because it is the level with the cost in it: the SPIR-V
+ depends on the source and on nothing else, so two render states over one shader
+ come through here once.
+
+ @return `Borrowed from the cache, which owns it. Null is never returned — a failure is a fault.`
+*>
+fn CachedModule*? PipelineCache.module_for(&self, String source, String name, String* diagnostic)
+{
+	ulong hash = content_hash((char[])source);
+
+	foreach (existing : self.modules)
+	{
+		if (existing.hash != hash) continue;
+		// Identity, not the hash — see `CachedModule.source`.
+		if (existing.source != source) continue;
+		self.hits++;
+		return existing;
+	}
+
+	ShaderModule mod = compile_slang(source, name, MESH_ENTRIES[..])!;
+	self.compiles++;
+
+	// Handed over before the `ok` check, because a successful compile can still
+	// warn and the caller asked for the text, not for the failures.
+	if (diagnostic != null && mod.diagnostic.len > 0) *diagnostic = mod.diagnostic.copy(mem);
+
+	if (!mod.ok)
+	{
+		// Printed only when nobody took delivery. `plan.md` §6: a compile that
+		// fails quietly is the runtime version of the `$embed` trap, so the text
+		// has to reach *someone* on every path.
+		if (diagnostic == null) io::eprintn(mod.diagnostic);
+		// Freed rather than kept. A cached failure would be handed to the next
+		// caller as though it were a shader, and the next caller is usually the
+		// agent having just fixed the typo.
+		mod.free();
+		return SHADER_COMPILE_FAILED~;
+	}
+	if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
+
+	CachedModule* entry = mem::new(CachedModule);
+	entry.hash = hash;
+	entry.source = source.copy(mem);
+	entry.mod = mod;
+	self.modules.push(entry);
+	return entry;
 }
 
 <*
@@ -465,6 +680,7 @@ fn void PipelineCache.init(&self)
  is what the CLI and the built-in mesh pipeline still want.
 
  @param name : `What diagnostics call the source.`
+ @param state : `Topology, cull mode and depth behaviour. Part of the key, so two states over one source are two pipelines and one compile.`
  @param [out] diagnostic : `Receives Slang's output verbatim, or is left alone if null. Set on warnings as well as errors — check the fault, not this.`
  @return `A pointer owned by the cache. Valid until the cache is freed.`
 *>
@@ -474,47 +690,31 @@ fn MeshPipeline*? PipelineCache.acquire(
 	Target* target,
 	String source,
 	String name,
-	vk::CullModeFlags cull,
+	PipelineState state,
 	String* diagnostic = null
 )
 {
-	ulong hash = content_hash((char[])source) ^ ((ulong)cull * 0x9e3779b97f4a7c15);
+	// The module first, and by source alone. A state this cache has not seen
+	// before must not reach Slang: `CachedModule` has the measurement.
+	CachedModule* compiled = self.module_for(source, name, diagnostic)!;
 
 	foreach (entry : self.entries)
 	{
-		if (entry.hash != hash || entry.cull != cull) continue;
-		if (entry.source != source) continue;
-		self.hits++;
+		// Pointer identity is exact here in a way a hash is not — both entries
+		// came out of `module_for`, which has already confirmed the source.
+		if (entry.compiled != compiled || !entry.state.equals(state)) continue;
 		return &entry.pipeline;
 	}
-
-	ShaderModule mod = compile_slang(source, name, MESH_ENTRIES[..])!;
-	defer mod.free();
-	self.compiles++;
-
-	// Handed over before the `ok` check, because a successful compile can still
-	// warn and the caller asked for the text, not for the failures.
-	if (diagnostic != null && mod.diagnostic.len > 0) *diagnostic = mod.diagnostic.copy(mem);
-
-	if (!mod.ok)
-	{
-		// Printed only when nobody took delivery. `plan.md` §6: a compile that
-		// fails quietly is the runtime version of the `$embed` trap, so the text
-		// has to reach *someone* on every path.
-		if (diagnostic == null) io::eprintn(mod.diagnostic);
-		return SHADER_COMPILE_FAILED~;
-	}
-	if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
 
 	// Built into a local first, so a pipeline that fails to build leaves nothing
 	// half-allocated behind. Nothing here can fail after this line.
 	MeshPipeline built;
-	built.init(gpu, target, &mod, cull)!;
+	built.init(gpu, target, &compiled.mod, state)!;
+	self.builds++;
 
 	CachedPipeline* entry = mem::new(CachedPipeline);
-	entry.hash = hash;
-	entry.cull = cull;
-	entry.source = source.copy(mem);
+	entry.compiled = compiled;
+	entry.state = state;
 	entry.pipeline = built;
 
 	self.entries.push(entry);
@@ -523,12 +723,23 @@ fn MeshPipeline*? PipelineCache.acquire(
 
 fn void PipelineCache.free(&self, Gpu* gpu)
 {
+	// Pipelines before modules, because a pipeline borrows the module it was built
+	// from. Nothing here reads it — the layout was copied, not borrowed — but the
+	// order is the one the ownership says, so a future field that does borrow does
+	// not become a use-after-free discovered at teardown.
 	foreach (entry : self.entries)
 	{
 		entry.pipeline.free(gpu);
-		if (entry.source.ptr != null) entry.source.free(mem);
 		mem::free(entry);
 	}
 	self.entries.free();
+
+	foreach (compiled : self.modules)
+	{
+		compiled.mod.free();
+		if (compiled.source.ptr != null) compiled.source.free(mem);
+		mem::free(compiled);
+	}
+	self.modules.free();
 	*self = {};
 }

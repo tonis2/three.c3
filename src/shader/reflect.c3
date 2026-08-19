@@ -87,6 +87,47 @@ struct ShaderLayout
 	uint set_count;
 }
 
+<*
+ A deep copy, names included.
+
+ Exists because one compiled module now serves several pipelines — the line pass
+ and the solid pass are the same `mesh.slang` over two fixed-function states, and
+ `material.side` is the same material source over two cull modes. `PipelineCache`
+ keeps the module and hands each pipeline one of these.
+
+ **A copy rather than a shared pointer**, which is the choice `MeshPipeline`'s
+ own comment argues: a pipeline holding a pointer into the module would outlive
+ what it points at the moment a caller freed the module, and a layout is a few
+ dozen short strings — the price of getting that wrong is far higher than the
+ price of copying it.
+*>
+fn ShaderLayout ShaderLayout.copy(&self)
+{
+	ShaderLayout out = {
+		.push_size = self.push_size,
+		.stages = self.stages,
+		.set_count = self.set_count,
+	};
+
+	out.bindings.init(mem, self.bindings.len() > 0 ? self.bindings.len() : 1);
+	foreach (binding : self.bindings)
+	{
+		ShaderBinding copied = binding;
+		copied.name = binding.name.copy(mem);
+		out.bindings.push(copied);
+	}
+
+	out.push_fields.init(mem, self.push_fields.len() > 0 ? self.push_fields.len() : 1);
+	foreach (field : self.push_fields)
+	{
+		ShaderField copied = field;
+		copied.name = field.name.copy(mem);
+		out.push_fields.push(copied);
+	}
+
+	return out;
+}
+
 fn void ShaderLayout.free(&self)
 {
 	foreach (binding : self.bindings) if (binding.name.ptr != null) binding.name.free(mem);

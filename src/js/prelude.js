@@ -88,6 +88,125 @@
 		toString() { return `Vector3(${this._x}, ${this._y}, ${this._z})`; }
 	}
 
+	// An axis-aligned box, and the answer to "how big is this actually".
+	//
+	// **Why this exists at all.** A kit piece's origin is wherever whoever
+	// exported it left it — the centre of the bounding box, one corner, the
+	// world origin of the scene it was authored in. Nothing about a transform
+	// says where the piece's *faces* are, so "put this window on that wall" is
+	// unanswerable from `position` alone. Without a box a script has to carry a
+	// hand-copied table of piece sizes, and that table goes stale silently: the
+	// piece still draws, it just sinks into the masonry.
+	//
+	// `size` and `center` are derived rather than stored, because a box that can
+	// disagree with itself is worse than one arithmetic operation.
+	class Box3 {
+		constructor(minX, minY, minZ, maxX, maxY, maxZ) {
+			this.min = new Vector3(null, minX, minY, minZ);
+			this.max = new Vector3(null, maxX, maxY, maxZ);
+		}
+
+		get size() {
+			return new Vector3(null, this.max.x - this.min.x, this.max.y - this.min.y, this.max.z - this.min.z);
+		}
+
+		get center() {
+			return new Vector3(null,
+				(this.min.x + this.max.x) / 2, (this.min.y + this.max.y) / 2, (this.min.z + this.max.z) / 2);
+		}
+
+		// One face's coordinate on one axis. `align` is written in terms of this
+		// and so is every placement a script does by hand.
+		edge(axis, which) {
+			const i = axisIndex(axis, 'box.edge');
+			const lo = this.min.toArray()[i], hi = this.max.toArray()[i];
+			switch (which) {
+				case 'min': return lo;
+				case 'max': return hi;
+				case 'center': return (lo + hi) / 2;
+				default: throw new TypeError(
+					`box.edge(axis, which) wants 'min', 'center' or 'max', not ${JSON.stringify(which)}`);
+			}
+		}
+
+		union(other) {
+			return new Box3(
+				Math.min(this.min.x, other.min.x), Math.min(this.min.y, other.min.y), Math.min(this.min.z, other.min.z),
+				Math.max(this.max.x, other.max.x), Math.max(this.max.y, other.max.y), Math.max(this.max.z, other.max.z));
+		}
+
+		clone() {
+			return new Box3(this.min.x, this.min.y, this.min.z, this.max.x, this.max.y, this.max.z);
+		}
+
+		toJSON() {
+			return { min: this.min.toArray(), max: this.max.toArray(), size: this.size.toArray(), center: this.center.toArray() };
+		}
+		toString() { return `Box3(min ${this.min}, max ${this.max})`; }
+	}
+
+	function axisIndex(axis, where) {
+		const i = { x: 0, y: 1, z: 2, X: 0, Y: 1, Z: 2 }[axis];
+		if (i === undefined) {
+			throw new TypeError(`${where} wants an axis of 'x', 'y' or 'z', not ${JSON.stringify(axis)}`);
+		}
+		return i;
+	}
+
+	function boxFromSix(six) {
+		return six === null ? null : new Box3(six[0], six[1], six[2], six[3], six[4], six[5]);
+	}
+
+	// A mesh reference's own box, in the mesh's local space.
+	//
+	// Not cached. The numbers never change for a live asset, but caching them
+	// would mean a reference outliving an `unloadUnused()` kept answering with
+	// what used to be true — and every other handle in this API revalidates on
+	// use rather than trusting a copy. The host reads it out of the glTF JSON,
+	// so this costs no upload.
+	function refBounds(ref, where) {
+		const six = H.meshBounds(ref.asset, ref.assetGeneration, ref.mesh);
+		if (six === null) throw new Error(`${where}: that mesh reference names nothing`);
+		return boxFromSix(six);
+	}
+
+	// The rotation part of a local TRS as a 3x3, in the order `scene/node.c3`
+	// documents: Rx * Ry * Rz, Three.js's default Euler order.
+	function eulerMatrix3(x, y, z) {
+		const cx = Math.cos(x), sx = Math.sin(x);
+		const cy = Math.cos(y), sy = Math.sin(y);
+		const cz = Math.cos(z), sz = Math.sin(z);
+		return [
+			cy * cz,                  -cy * sz,                 sy,
+			sx * sy * cz + cx * sz,   -sx * sy * sz + cx * cz,  -sx * cy,
+			-cx * sy * cz + sx * sz,  cx * sy * sz + sx * cz,   cx * cy,
+		];
+	}
+
+	// A box through a local TRS, still axis-aligned: the standard
+	// centre-and-half-extent form, where the extent is |M| times the old extent.
+	function transformBox(box, position, rotation, scale) {
+		const m = eulerMatrix3(rotation.x, rotation.y, rotation.z);
+		const c = box.center, h = box.size.multiplyScalar(0.5);
+		const sx = scale.x, sy = scale.y, sz = scale.z;
+		const cx = c.x * sx, cy = c.y * sy, cz = c.z * sz;
+		const hx = Math.abs(h.x * sx), hy = Math.abs(h.y * sy), hz = Math.abs(h.z * sz);
+		const out = [];
+		for (let r = 0; r < 3; r++) {
+			const a = m[r * 3], b = m[r * 3 + 1], d = m[r * 3 + 2];
+			out.push(a * cx + b * cy + d * cz, Math.abs(a) * hx + Math.abs(b) * hy + Math.abs(d) * hz);
+		}
+		return new Box3(
+			position.x + out[0] - out[1], position.y + out[2] - out[3], position.z + out[4] - out[5],
+			position.x + out[0] + out[1], position.y + out[2] + out[3], position.z + out[4] + out[5]);
+	}
+
+	// What `scene.background = null` restores. Kept in step with `DEFAULT_CLEAR`
+	// in gpu/frame.c3 by `the_default_background_is_the_renderer_clear` rather
+	// than by a comment, because two spellings of one constant is exactly the
+	// kind of drift that renders fine and is wrong.
+	const DEFAULT_BACKGROUND = [0.10, 0.11, 0.13];
+
 	// Read a colour out of whatever the script had to hand: `[r, g, b]`,
 	// `[r, g, b, a]`, `{ r, g, b }`, or Three.js's hex — `0xff8800`.
 	//
@@ -381,6 +500,93 @@
 			return new Vector3(null, x, y, z);
 		}
 
+		// -------------------------------------------------------------------
+		// Measuring, and placing against what was measured
+		//
+		// Two boxes, and the split between them is the whole design:
+		//
+		//   boundingBox()      world space, computed by the host, for asking
+		//                      where something *ended up*.
+		//   boundsInParent()   the parent's space, computed here, for deciding
+		//                      where something *should go*.
+		//
+		// Placement is the second one because that is the frame a script writes
+		// in. A window is positioned inside its building's group; the group is
+		// then rotated to face the square. Aligning in world space would mean
+		// undoing that rotation to write a local `position`, and the round trip
+		// through a matrix inverse is both slower and a place to be subtly wrong
+		// at 90°, which is the single most common angle anyone types.
+
+		// The world-space box of this object and everything under it, or null
+		// when nothing in the subtree draws. Throws if this is not in a scene:
+		// world space is a thing a scene has, and answering with the local box
+		// would be a wrong answer rather than a missing one.
+		boundingBox() {
+			if (this._i < 0) throw new Error('this object is not in a scene yet — add() it first');
+			return boxFromSix(H.objectBounds(this._i, this._g));
+		}
+
+		// This object's box in its parent's coordinates — its own mesh, its
+		// descendants, and its own local transform applied. Works before `add()`,
+		// which is the point: a kit piece can be sized and placed while it is
+		// still a detached description.
+		boundsInParent() {
+			const ref = this._ref();
+			let box = ref === null ? null : refBounds(ref, 'boundsInParent()');
+			for (const child of this.children) {
+				const inner = child.boundsInParent();
+				if (inner === null) continue;
+				box = box === null ? inner : box.union(inner);
+			}
+			if (box === null) return null;
+			return transformBox(box, this.position, this.rotation, this.scale);
+		}
+
+		// Move along one axis until a chosen face of this object's box sits at
+		// `at`, in the parent's coordinates. The verb that replaces arithmetic
+		// on a hand-copied size table.
+		//
+		//   piece.align('y', 'min', 0)          // stand it on the ground
+		//   piece.align('z', 'min', wallZ)      // back face flush with the wall
+		//
+		// Only `position` moves; rotation and scale are inputs to where the box
+		// is, so set them first.
+		align(axis, edge, at) {
+			const box = this.boundsInParent();
+			if (box === null) {
+				throw new Error(
+					'align() needs a box, and this object draws nothing — it is a Group with no meshes '
+					+ 'under it, or its geometry is not resident. Align a Mesh, or add one first.');
+			}
+			const key = ['x', 'y', 'z'][axisIndex(axis, 'align()')];
+			const to = +at;
+			if (!Number.isFinite(to)) throw new TypeError(`align(${axis}, ${edge}, at) wants a number for at`);
+			this.position[key] += to - box.edge(axis, edge);
+			return this;
+		}
+
+		// The same move, expressed against a sibling instead of a number.
+		//
+		//   window.alignTo(wall, { axis: 'z', mine: 'min', theirs: 'max', offset: -0.28 })
+		//
+		// Siblings, because each box is measured in its own parent's frame and
+		// two different parents are two different frames. Refused rather than
+		// silently wrong — see the note above `boundingBox`.
+		alignTo(other, { axis = 'y', mine = 'min', theirs = 'max', offset = 0 } = {}) {
+			if (!(other instanceof Object3D)) {
+				throw new TypeError('alignTo(other) wants another object as its first argument');
+			}
+			if (other.parent !== this.parent) {
+				throw new Error(
+					'alignTo() aligns siblings: both objects must share a parent, because a box is '
+					+ 'measured in the frame of the parent it hangs from. For anything else, measure '
+					+ 'with boundsInParent() and place with align(axis, edge, number).');
+			}
+			const box = other.boundsInParent();
+			if (box === null) throw new Error('alignTo(): the object aligned to draws nothing, so it has no box');
+			return this.align(axis, mine, box.edge(axis, theirs) + (+offset));
+		}
+
 		toJSON() {
 			return {
 				type: this.constructor.name,
@@ -399,6 +605,17 @@
 	// Group, Mesh, Scene
 
 	class Group extends Object3D {}
+
+	// Which faces a material keeps. Three.js's names and Three.js's numbers —
+	// see `cull_for_side` in scene/material.c3, which is where the numbers stop
+	// being a convention and become a Vulkan cull mode.
+	//
+	// `BackSide` keeps the back faces, so it culls the front ones. That reads
+	// backwards and is worth saying out loud once: it is the setting that makes
+	// a sphere visible from *inside*, which is what a skydome is.
+	const FrontSide = 0;
+	const BackSide = 1;
+	const DoubleSide = 2;
 
 	// A shader written by whoever is driving, compiled the moment it is
 	// constructed.
@@ -419,13 +636,14 @@
 			if (options === null || typeof options !== 'object') {
 				throw new TypeError('new three.ShaderMaterial({ fragment, uniforms }) wants an options object');
 			}
-			const { fragment, uniforms = {} } = options;
+			const { fragment, uniforms = {}, side = FrontSide } = options;
 			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 				throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
 			}
 			if (uniforms === null || typeof uniforms !== 'object') {
 				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
 			}
+			ShaderMaterial._checkSide(side);
 
 			// The enumeration happens here because it cannot happen in the host:
 			// the QuickJS shim exposes property *get* by name and nothing that
@@ -452,8 +670,10 @@
 				names.join(','),
 				shapes.map(s => s[0]).join(','),
 				shapes.map(s => s[1]).join(','),
+				side,
 			);
 			this.fragment = fragment;
+			this._side = side;
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 
@@ -495,6 +715,37 @@
 				},
 			});
 			for (const name of names) this._set(name, uniforms[name]);
+		}
+
+		// Which faces this material keeps.
+		//
+		// Three.js's property, Three.js's constants, and Three.js's default —
+		// `FrontSide`. It is on the material rather than on the mesh because it
+		// is a property of the *pipeline*: two meshes drawing the same geometry
+		// with the same material are one draw call, and they stop being one the
+		// moment they can disagree about which faces to keep. A mesh that wants
+		// another side wants a material.
+		//
+		// This is the setting a sky needs. A sphere seen from the inside shows
+		// only its back faces, so under the default it is not merely dark, it is
+		// *absent* — and scaling it by -1 does not help, because a negative scale
+		// does not reverse a triangle's winding. Before this existed the way
+		// round it was five inward-facing planes.
+		get side() { return this._side; }
+
+		set side(v) {
+			ShaderMaterial._checkSide(v);
+			if (v === this._side) return;
+			H.setSide(this._m, v);
+			this._side = v;
+		}
+
+		static _checkSide(v) {
+			if (v !== FrontSide && v !== BackSide && v !== DoubleSide) {
+				throw new TypeError(
+					'`side` wants three.FrontSide, three.BackSide or three.DoubleSide, not ' + String(v)
+				);
+			}
 		}
 
 		// A uniform's shape: how many floats wide, and how many rows.
@@ -589,7 +840,7 @@
 		}
 
 		toJSON() {
-			return { fragment: this.fragment, uniforms: { ...this._values } };
+			return { fragment: this.fragment, side: this._side, uniforms: { ...this._values } };
 		}
 	}
 
@@ -719,6 +970,36 @@
 			return H.stats();
 		}
 
+		// The colour every frame starts on.
+		//
+		// Three.js's name and Three.js's place — it is a property of the Scene
+		// there too — but a narrower type: a colour, in any of the spellings
+		// `mesh.color` takes, or `null` for the default. Three.js also accepts a
+		// Texture or a CubeTexture here and this does not, because there is no
+		// environment map anywhere in this project and accepting one to ignore it
+		// would be the half-match `plan.md` §4 rules out.
+		//
+		// A sky that is a *gradient* is still geometry. What this removes is the
+		// case that was costing a mesh for no reason: a daylight scene rendering
+		// against the default near-black, which is not a sky anyone chose.
+		//
+		// It reads back as `[r, g, b]` rather than as whatever was assigned,
+		// because the components are what the pixel gets — a hex value is
+		// converted on the way in and there is no colour management to convert it
+		// back through.
+		get background() {
+			this._check();
+			return H.backgroundGet();
+		}
+
+		set background(v) {
+			this._check();
+			const c = v === null || v === undefined
+				? DEFAULT_BACKGROUND
+				: readColor(v, 'scene.background');
+			H.backgroundSet(c[0], c[1], c[2]);
+		}
+
 		// Empty the scene and give back everything nothing else holds — the
 		// level boundary.
 		//
@@ -805,6 +1086,29 @@
 	// an unload, so an index on its own could name a different file than the one
 	// that was loaded — the generation is what makes a stale reference throw a
 	// sentence instead of quietly placing somebody else's mesh.
+	// What `asset.mesh(name)` answers with: the handle, plus the one question
+	// worth asking about a piece before placing it.
+	//
+	// A plain object would do for the handle — `Mesh` only checks that `asset`,
+	// `mesh` and `assetGeneration` are numbers, and a generated `Geometry`
+	// satisfies the same check. This is a class so that `bounds` can be a getter
+	// rather than a field: measuring is a crossing into the host, and paying for
+	// it on every `asset.mesh(...)` when most callers only want to place the
+	// piece would tax the common path to serve the rarer one.
+	class MeshRef {
+		constructor(asset, assetGeneration, mesh, name) {
+			this.asset = asset;
+			this.assetGeneration = assetGeneration;
+			this.mesh = mesh;
+			this.name = name;
+		}
+
+		get bounds() { return refBounds(this, `asset.mesh(${JSON.stringify(this.name)}).bounds`); }
+
+		toJSON() { return { name: this.name, mesh: this.mesh }; }
+		toString() { return `MeshRef(${this.name})`; }
+	}
+
 	class Asset {
 		constructor([index, generation]) {
 			this._a = index;
@@ -825,14 +1129,14 @@
 				const have = this.meshes.length ? this.meshes.join(', ') : '(none)';
 				throw new Error(`no mesh named "${name}" in ${this.path} — it has: ${have}`);
 			}
-			return { asset: this._a, assetGeneration: this._g, mesh: at, name };
+			return new MeshRef(this._a, this._g, at, name);
 		}
 
 		meshAt(i) {
 			if (!(i >= 0 && i < this.meshes.length)) {
 				throw new RangeError(`mesh index ${i} is outside 0..${this.meshes.length - 1}`);
 			}
-			return { asset: this._a, assetGeneration: this._g, mesh: i, name: this.meshes[i] };
+			return new MeshRef(this._a, this._g, i, this.meshes[i]);
 		}
 
 		// The file's node hierarchy as an Object3D tree — Three.js's
@@ -932,6 +1236,13 @@
 			// what an asset reference calls it, which is what lets Mesh take both.
 			this.mesh = 0;
 		}
+
+		// The same question a MeshRef answers, for the same reason: a script that
+		// scales a box to fit against something needs to know what it is fitting.
+		// A parametric shape's box is not always the numbers it was asked for —
+		// a TorusGeometry is `2 * (radius + tube)` across and a ConvexGeometry's
+		// hull is whatever its point cloud turned out to be.
+		get bounds() { return refBounds(this, `${this.type}.bounds`); }
 
 		toJSON() { return { type: this.type, parameters: this.parameters }; }
 		toString() { return `${this.type}(${Object.values(this.parameters).join(', ')})`; }
@@ -1191,10 +1502,49 @@
 		get pitch() { return H.cameraGet()[4]; },
 		get distance() { return H.cameraGet()[5]; },
 
+		// The three that `orbit()` writes, and the two that nothing writes, all
+		// refuse assignment out loud.
+		//
+		// A getter with no setter is not silence-free: a script is not evaluated
+		// in strict mode, so `camera.far = 500` would *do nothing at all* and
+		// report nothing at all — and the whole reason near and far became
+		// readable in M6 is that a plane nobody could see had already cost a
+		// session. Throwing here is the same call the ShaderMaterial uniform
+		// Proxy makes, for the same reason.
+		set yaw(_) { throw new TypeError('the turntable is moved by three.camera.orbit(yaw, pitch, distance), not by assigning yaw'); },
+		set pitch(_) { throw new TypeError('the turntable is moved by three.camera.orbit(yaw, pitch, distance), not by assigning pitch'); },
+		set distance(_) { throw new TypeError('the turntable is moved by three.camera.orbit(yaw, pitch, distance), not by assigning distance'); },
+		set near(_) { throw new TypeError('near is derived from the orbit distance and the scene bounds — move the camera, or three.camera.frameAll()'); },
+		set far(_) { throw new TypeError('far is derived from the orbit distance and the scene bounds — move the camera, or three.camera.frameAll()'); },
+
+		// Read-only, and both halves of that are deliberate.
+		//
+		// They are **derived** — from the orbit distance and from the scene's own
+		// bounds, every time the camera moves — because a fixed near plane in
+		// front of a kilometre-wide model spends the whole depth buffer on the
+		// first few metres, and a fixed far plane behind a one-metre one throws
+		// the rest of it away. Neither number is a taste setting; both are
+		// functions of what is being looked at, so the camera computes them.
+		//
+		// They are **reported** because being derived does not make them
+		// uninteresting. A sky that renders at one zoom level and not at another
+		// is `camera.far` moving, and until M6 there was no way to see that
+		// happening — only to render, guess, and get it wrong.
+		get near() { return H.cameraGet()[7]; },
+		get far() { return H.cameraGet()[8]; },
+
+		// Live, like `mesh.position` and unlike `getWorldPosition()` — so
+		// `three.camera.target.y = 2` raises the turntable's focus instead of
+		// editing a copy nothing reads again. `lookAt` is what it flushes
+		// through, so there is one path that moves the target and one place the
+		// planes are re-derived.
 		get target() {
 			const [tx, ty, tz] = H.cameraGet();
-			return new Vector3(null, tx, ty, tz);
+			const v = new Vector3(null, tx, ty, tz);
+			v._o = { _flush() { camera.lookAt(v.x, v.y, v.z); } };
+			return v;
 		},
+		set target(v) { this.lookAt(v); },
 
 		// Degrees for the angles, world units for the distance — the same units
 		// the host camera keeps them in. Any argument may be left out.
@@ -1223,8 +1573,8 @@
 		frameAll() { H.frameAll(); return this; },
 
 		toJSON() {
-			const [x, y, z, yaw, pitch, distance, fov] = H.cameraGet();
-			return { target: { x, y, z }, yaw, pitch, distance, fov };
+			const [x, y, z, yaw, pitch, distance, fov, near, far] = H.cameraGet();
+			return { target: { x, y, z }, yaw, pitch, distance, fov, near, far };
 		},
 	};
 
@@ -1296,6 +1646,19 @@
 		Asset,
 		ShaderMaterial,
 		camera,
+
+		// `material.side`. Numbers rather than an enum object because that is
+		// what Three.js exports and what a script written from memory of it will
+		// compare against — `side: 2` means DoubleSide in both.
+		FrontSide,
+		BackSide,
+		DoubleSide,
+
+		// Exported for `instanceof` and for building one by hand, which a script
+		// wants when it is describing a volume the scene does not hold yet — a
+		// plot to fill, a gap to check. Neither is constructed by the host.
+		Box3,
+		MeshRef,
 
 		// The shapes. `Geometry` is exported for `instanceof`, not to be
 		// constructed: there is no BufferGeometry and no attribute access, which
@@ -1610,6 +1973,8 @@
 			'invoke and no way to write an unbatched scene.',
 		differences: [
 			'three.load(path) is synchronous; await works but is not needed.',
+			'Everything placeable can be MEASURED, and you should measure rather than guess. asset.mesh(name).bounds and geometry.bounds are a Box3 in the piece\'s own space, read out of the glTF JSON so it costs no upload; object.boundingBox() is the world-space box of a subtree, from the host; object.boundsInParent() is the same box in the parent\'s frame and works before add(). A kit piece\'s origin is wherever its exporter left it, so a size table written by hand into a script is the thing that goes stale and sinks pieces into walls.',
+			'object.align(axis, edge, at) moves an object until one face of its box sits at a coordinate — align(\'y\', \'min\', 0) stands a piece on the ground, align(\'z\', \'min\', wallZ) puts its back flush with a wall. object.alignTo(other, {axis, mine, theirs, offset}) says the same thing against a sibling. Both work in the PARENT\'s frame, because that is the frame a script writes positions in; alignTo refuses objects with different parents rather than being wrong by whatever the parents differ by. Set rotation and scale first — they are inputs to where the box is.',
 			'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
 			'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, is capped at 65536, and is flat shaded with no uvs because a hull has hard creases and no natural unwrap. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
 			'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
@@ -1621,6 +1986,9 @@
 			'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 			'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
+			'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
+			'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
+			'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
 			'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
 			'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
@@ -1647,9 +2015,13 @@
 				methods: [
 					'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
 					'unload()', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
 					'play(name, opts)', 'stop()', 'toJSON()',
 				],
-				properties: ['position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations'],
+				properties: [
+					'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
+					'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default)',
+				],
 			},
 			Mesh: {
 				construct: 'new three.Mesh(geometry, material)',
@@ -1665,11 +2037,12 @@
 				],
 				methods: [
 					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
 					'play(name, opts)', 'stop()', 'toJSON()',
 				],
 			},
 			ShaderMaterial: {
-				construct: "new three.ShaderMaterial({ fragment, uniforms })",
+				construct: "new three.ShaderMaterial({ fragment, uniforms, side })",
 				note:
 					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
 					+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo) '
@@ -1680,6 +2053,7 @@
 				properties: [
 					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
 					'fragment',
+					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
 				],
 				methods: ['toJSON()'],
 			},
@@ -1697,12 +2071,35 @@
 					+ 'crossfade.',
 				methods: [
 					'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
+					'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
 					'play(name, opts)', 'stop()', 'toJSON()',
 				],
 				properties: [
 					'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
 					'animations (clip names, from asset.instantiate())',
 				],
+			},
+			Box3: {
+				construct: 'new three.Box3(minX, minY, minZ, maxX, maxY, maxZ)',
+				note:
+					'An axis-aligned box, and the answer to "how big is this actually". A kit piece\'s origin '
+					+ 'is wherever whoever exported it left it, so nothing about a transform says where the '
+					+ 'piece\'s faces are — which is what "put this window on that wall" is really asking. '
+					+ 'size and center are derived from min/max rather than stored. '
+					+ 'edge(axis, which) is one face\'s coordinate, and is what align() is written in terms of.',
+				properties: ['min', 'max', 'size', 'center'],
+				methods: ['edge(axis, \'min\' | \'center\' | \'max\')', 'union(other)', 'clone()', 'toJSON()', 'toString()'],
+			},
+			MeshRef: {
+				construct: 'not constructible — asset.mesh(name) and asset.meshAt(i) answer with these',
+				note:
+					'One piece of a loaded file: the handle new three.Mesh() wants, plus bounds. Reading bounds '
+					+ 'costs no upload — the box comes out of the glTF JSON at load, so asking how big two '
+					+ 'hundred kit pieces are before placing twelve of them still uploads twelve. It is not '
+					+ 'cached: a reference that outlives its asset throws rather than answering with the size '
+					+ 'the mesh used to be.',
+				properties: ['asset', 'assetGeneration', 'mesh', 'name', 'bounds (a Box3 in the mesh\'s own space)'],
+				methods: ['toJSON()', 'toString()'],
 			},
 			Vector3: {
 				construct: 'new three.Vector3(null, x, y, z)',
@@ -1734,18 +2131,23 @@
 					+ 'describes shapes, never vertices, and ConvexGeometry\'s point cloud is a description too. '
 					+ 'Sizes are world units and must be positive, segment counts '
 					+ 'are capped at 512, Y is up, and every shape is centred on its own origin.',
-				properties: ['type', 'name', 'parameters (what you asked for, defaults filled in)', 'asset', 'mesh'],
+				properties: [
+					'type', 'name', 'parameters (what you asked for, defaults filled in)', 'asset', 'mesh',
+					'bounds (a Box3 in the shape\'s own space — what it IS, which is not always what it was asked for)',
+				],
 				methods: ['toJSON()', 'toString()'],
 			},
 			BoxGeometry: {
 				construct:
 					'new three.BoxGeometry(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1)',
 				note: 'A box centred on the origin. The segment counts subdivide it and change nothing about its size.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			SphereGeometry: {
 				construct: 'new three.SphereGeometry(radius = 1, widthSegments = 32, heightSegments = 16)',
 				note: 'A UV sphere with its poles on the Y axis.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			PlaneGeometry: {
@@ -1754,12 +2156,14 @@
 					'A one-sided rectangle in the XY plane, facing +Z — Three.js\'s orientation, which is '
 					+ 'vertical. A floor is this with rotation.x = -Math.PI / 2. From behind it is invisible, '
 					+ 'because back faces are culled.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			CylinderGeometry: {
 				construct:
 					'new three.CylinderGeometry(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false)',
 				note: 'A cylinder or a truncated cone about the Y axis. Either radius may be 0, but not both.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			ConeGeometry: {
@@ -1768,6 +2172,7 @@
 				note:
 					'A cone about the Y axis with its point up. The same triangles as '
 					+ 'CylinderGeometry(0, radius, height) — and the same asset, so the two spellings share a draw call.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			TorusGeometry: {
@@ -1775,6 +2180,7 @@
 				note:
 					'A ring in the XY plane. radius is measured to the centre of the tube, so the shape is '
 					+ '2 * (radius + tube) across and 2 * tube thick.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 			ConvexGeometry: {
@@ -1789,6 +2195,7 @@
 					+ 'vertices — most are discarded and none can be read back. parameters.points is the count '
 					+ 'you handed over. Two identical arrays are one asset; two runs of Math.random() are two, '
 					+ 'because the key is bit-exact.',
+				properties: ['bounds'],
 				methods: ['toJSON()', 'toString()'],
 			},
 		},
@@ -1898,6 +2305,17 @@
 			'three.camera.orbit(yaw, pitch, distance)': 'Degrees, degrees, world units. Any argument may be omitted to leave it alone.',
 			'three.camera.lookAt(x, y, z)': 'Point the turntable at a world position.',
 			'three.camera.frameAll()': 'Aim at everything in the scene and back off far enough to see it.',
+			'three.camera.near / three.camera.far':
+				'Where the depth range starts and ends, in world units. Read-only: both are derived, from '
+				+ 'the orbit distance and from the scene\'s own bounds, every time the camera moves. They '
+				+ 'are worth reading when something has stopped being drawn — geometry beyond far is not '
+				+ 'dim, it is absent, and it is culled as well as clipped, so stats().culledLastFrame moves too.',
+			'three.FrontSide / three.BackSide / three.DoubleSide':
+				'The values material.side takes — 0, 1 and 2, the same numbers Three.js gives them. '
+				+ 'BackSide keeps the back faces, which is what makes a sphere visible from inside: it is '
+				+ 'how a skydome is built, and scaling one by -1 instead does nothing, because a negative '
+				+ 'scale does not reverse a triangle\'s winding. DoubleSide keeps both and is what a plane '
+				+ 'seen from either direction wants — a flag, a leaf card, a piece of a wall you can walk past.',
 		},
 		// The whole key table, from the host, so the names an agent reads and the
 		// names the host searches are one list. Aliases included: ctrl, cmd, esc.

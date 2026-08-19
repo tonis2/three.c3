@@ -73,22 +73,47 @@ fn void Camera.clamp_angles(&self)
 }
 
 <*
- Put the near and far planes back where the distance says they belong.
+ Put the near and far planes back where the distance and the scene say they
+ belong.
 
  **The planes are derived, never set.** A fixed near plane against a model a
  kilometre wide spends the whole depth buffer on the first few metres, which is
  z-fighting across the entire scene and reads as a rendering bug rather than as
  a camera setting.
 
+ ## `reach` is what M6 added, and why
+
+ `distance * 8` alone is a guess about how big the scene is, made from the only
+ number this struct has. It is wrong in exactly one direction and the failure is
+ invisible: a sky 190 units across stops being drawn the moment the camera
+ dollies in to 20, because the far plane followed the camera down to 160. What
+ that looks like is a skybox that works at some zoom levels and vanishes at
+ others, which reads as a winding or culling bug — it cost a render to find in
+ the town-square session, and the wrong conclusion ("the far plane is fixed at
+ about 300") survived two more renders after that.
+
+ So the caller may say how far away the furthest thing it intends to draw is,
+ and `MeshPass.derive_camera_planes` is the one that knows. The multiple stays
+ as the floor rather than being replaced, so an empty scene and a scene whose
+ bounds have not been walked yet behave exactly as they did before.
+
+ **The near plane is deliberately not raised to match.** Widening `far` costs
+ depth precision at the far end — the ratio a sky at 200 units and a near plane
+ at 0.002 asks for is worse than the fixed 8000 this used to have — and pushing
+ `near` out to buy it back would clip whatever the camera is actually close to.
+ Geometry that quietly disappears is a worse failure than two distant coplanar
+ faces flickering, and the second one at least looks like what it is.
+
  `frame_bounds` does *not* call this and is not meant to: it knows the model's
- radius, so it can put the far plane just beyond the geometry instead of at a
- multiple of the distance. Everything that only moves the camera — `cameraSet`,
- an orbit drag, a scroll — has no radius to work from and comes here.
+ radius and is fitting the distance at the same time, so it can put the far
+ plane just beyond the geometry instead of at a multiple of anything.
+
+ @param reach : `World-space distance from the eye to the furthest thing worth drawing. Zero to derive from the orbit distance alone.`
 *>
-fn void Camera.derive_planes(&self)
+fn void Camera.derive_planes(&self, float reach = 0.0f)
 {
 	self.near_plane = math::max(self.distance * 0.001f, 0.0001f);
-	self.far_plane = self.distance * 8.0f;
+	self.far_plane = math::max(self.distance * 8.0f, reach);
 }
 
 <*
