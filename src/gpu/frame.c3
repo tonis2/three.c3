@@ -156,8 +156,20 @@ struct Renderer
 	// The frame path above does not know any of that is in there.
 	MeshPass pass;
 	bool windowed;
+	// What every render begins with. Reachable from a script since M6 as
+	// `scene.background` — a daylight scene against this was rendering itself a
+	// night sky, and the only way round it was to build one out of geometry.
 	float[4] clear;
 }
+
+<*
+ The clear colour a renderer starts on, and the one `scene.background = null`
+ goes back to.
+
+ Named rather than written twice, because "the default" is now something a
+ script can ask to be restored to and two spellings of it would drift.
+*>
+const float[4] DEFAULT_CLEAR = { 0.10, 0.11, 0.13, 1.0 };
 
 <*
  @param surface : `Null for headless: no viewer, no swapchain, and render + screenshot still work.`
@@ -173,7 +185,7 @@ fn Renderer? Renderer.init(
 )
 {
 	self.windowed = surface != null;
-	self.clear = { 0.10, 0.11, 0.13, 1.0 };
+	self.clear = DEFAULT_CLEAR;
 
 	self.gpu.init(instance, surface, validate)!;
 	self.target.init(&self.gpu, width, height)!;

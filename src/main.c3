@@ -482,7 +482,14 @@ fn bool drive_camera(
 	// and the alternative is an infinity in the camera target.
 	float height = scale > 0.0f ? (float)renderer.viewer.extent.height / scale : 0.0f;
 
-	return controls.apply(&renderer.pass.camera, pointer, height, dt_ms);
+	if (!controls.apply(&renderer.pass.camera, pointer, height, dt_ms)) return false;
+
+	// `Controls.apply` has already derived the planes from the distance, which is
+	// the right answer for a `Controls` that has never been shown a scene. This is
+	// the caller that has one, so it derives them again against the geometry — a
+	// scroll toward the model must not pull the far plane in front of the sky.
+	renderer.pass.derive_camera_planes();
+	return true;
 }
 
 <*

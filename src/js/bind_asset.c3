@@ -287,6 +287,34 @@ fn void js_mesh_names(
 }
 
 <*
+ `meshBounds(index, generation, mesh)` — one mesh's box in its own local space,
+ as `[minX, minY, minZ, maxX, maxY, maxZ]`, or `null` if the index names nothing.
+
+ **This costs nothing and is available before the mesh is on the device.** A
+ `GpuMesh` exists from the moment the JSON is parsed, and `bounds` is one of the
+ three fields filled in then rather than at upload — it is the POSITION
+ accessor's required `min`/`max`, the same numbers `inventory.c3` reads. So
+ asking how big a kit piece is does not upload the kit.
+
+ **Per mesh index, not per name.** A glTF mesh with several primitives produced
+ several entries sharing a name, and a `Mesh` node draws exactly one of them, so
+ the box a script wants is the one belonging to the thing it placed.
+*>
+fn void js_mesh_bounds(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	GpuMesh* mesh = self.pass.assets.mesh(id, (uint)arg_int(&js, argc, args, 2));
+	*out = mesh == null ? qjs::null_value() : aabb_value(&js, mesh.bounds);
+}
+
+<*
  `assetNodes(index, generation)` — the asset's node tree, flattened into the
  objects `asset.instantiate()` builds.
 

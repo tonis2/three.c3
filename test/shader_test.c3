@@ -416,11 +416,11 @@ fn void the_pipeline_cache_skips_the_compile() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_BACK_BIT)!!;
+		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 		test::@check(cache.compiles == 1, "the first acquire compiled");
 		test::@check(cache.hits == 0, "and was not a hit");
 
-		three::MeshPipeline* second = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_BACK_BIT)!!;
+		three::MeshPipeline* second = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 		test::@check(second == first, "the same pipeline came back");
 		test::@check(cache.compiles == 1, "and Slang was not called again");
 		test::@check(cache.hits == 1, "it was a hit");
@@ -428,14 +428,22 @@ fn void the_pipeline_cache_skips_the_compile() @test
 }
 
 <*
- A different render state is a different pipeline, from the same source.
+ A different render state is a different pipeline, from the same source — and
+ **not** a different compile.
 
- The key is `hash(source, render state)` and this is the half of it that is easy
- to leave out: keying on source alone returns a back-face-culled pipeline to a
- caller that asked for no culling, which renders a plausible picture with the
- inside of everything missing.
+ Both halves are easy to get wrong in opposite directions. Keying the pipeline on
+ source alone hands a caller that asked for lines a pipeline built for triangles,
+ which draws a wireframe index buffer three indices at a time and produces
+ nothing recognisable. Keying the *compile* on the render state as well — which
+ is what this cache did until M6 — calls Slang again for SPIR-V it already has,
+ at about seventeen times the cost of the pipeline it was trying to avoid
+ rebuilding.
+
+ The state used to vary by cull mode. It cannot any more: the cull mode is
+ dynamic, so two sides of one material are one pipeline, and topology is what is
+ left that a pipeline has to be rebuilt for. `PipelineState` has the argument.
 *>
-fn void a_different_cull_mode_is_a_different_pipeline() @test
+fn void a_different_render_state_is_a_different_pipeline() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
@@ -446,12 +454,20 @@ fn void a_different_cull_mode_is_a_different_pipeline() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* culled = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_BACK_BIT)!!;
-		three::MeshPipeline* both = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_NONE)!!;
+		three::MeshPipeline* culled = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* both = cache.acquire(gpu, target, source, "mesh.slang", three::LINE_STATE)!!;
 
 		test::@check(culled != both, "two render states, two pipelines");
 		test::@check(culled.handle != both.handle, "and two Vulkan handles");
-		test::@check(cache.compiles == 2, "which cost two compiles");
+		test::@check(cache.builds == 2, "two VkPipelines were built");
+		// **One compile, not two.** This line read `compiles == 2` until M6, which
+		// recorded the behaviour rather than objecting to it — nothing in the
+		// product asked for a second render state, so nobody paid. Debug lines and
+		// `material.side` both ask, and Slang emits byte-identical SPIR-V for every
+		// one of them: topology, cull mode and the depth flags are pipeline fields
+		// the shader never sees. See `CachedModule`.
+		test::@check(cache.compiles == 1, "and shared one compile between them");
+		test::@check(cache.modules.len() == 1, "because there is one module under both");
 	};
 }
 
@@ -472,14 +488,14 @@ fn void a_broken_shader_leaves_the_cache_empty() @test
 		defer cache.free(gpu);
 
 		three::MeshPipeline*? broken = cache.acquire(
-			gpu, target, "this is not a shader", "broken.slang", CULL_MODE_BACK_BIT
+			gpu, target, "this is not a shader", "broken.slang", three::SOLID_STATE
 		);
 		test::@check(@catch(broken), "it failed");
 		test::@check(cache.entries.len() == 0, "and cached nothing");
 
 		String source = three::load_source(MESH_PATH)!!;
 		defer source.free(mem);
-		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_BACK_BIT)!!;
+		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 		test::@check(good != null, "and the cache still works afterwards");
 		test::@check(cache.entries.len() == 1, "with one entry");
 	};
@@ -503,7 +519,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", CULL_MODE_BACK_BIT)!!;
+		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
 		test::@check(pipeline.shader.bindings.len() == 1, "from one reflected binding");

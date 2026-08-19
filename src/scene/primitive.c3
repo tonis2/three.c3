@@ -724,9 +724,10 @@ fn AssetId? Assets.built(&self, String key)
 
  @param key : `What Asset.path becomes: the shape's identity, and what Assets.built matches on.`
  @param label : `What GpuMesh.name becomes, for asset.meshes and stats dumps.`
+ @param lines : `True when the indices are pairs for PRIMITIVE_TOPOLOGY_LINE_LIST rather than triangles. Skips the picking tree, which would read them three at a time.`
  @return `The new asset's handle, for Scene.add_mesh.`
 *>
-fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry)
+fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry, bool lines = false)
 {
 	// The generated streams sample the white stand-in, exactly as an untextured
 	// glTF primitive does: the binding is pushed for every draw whether or not
@@ -767,7 +768,13 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
 	}
 	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
-	mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
+	// **Not for lines.** The index buffer is pairs and `build_bvh` reads it in
+	// threes, so a line mesh would get a tree over triangles that do not exist and
+	// `scene.pick` would answer with a hit on a debug helper. Skipping it is also
+	// what makes a helper unpickable — `pick.c3` steps over a mesh with no tree —
+	// and that is the behaviour a script wants: a click goes through the box
+	// helper onto the thing it is drawn around.
+	if (!lines) mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
 
 	// A generated shape has no file to go back to, so it is uploaded at the
 	// moment it is built and says so — `ensure_uploaded` would have nothing to

@@ -34,8 +34,9 @@ import qjs;
 *>
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "createMaterial", &js_create_material, 4);
+	self.bind(host, "createMaterial", &js_create_material, 5);
 	self.bind(host, "setUniform", &js_set_uniform, 9);
+	self.bind(host, "setSide", &js_set_side, 2);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 }
 
@@ -156,12 +157,18 @@ fn void js_create_material(
 		// done condition for M5 is that a bad shader throws a JS error carrying
 		// the Slang text — so it is collected whether the compile failed or only
 		// warned, and the warning path logs rather than throws.
+		// Absent means `SIDE_FRONT`, which is what every material meant before a
+		// side could be named — `cull_for_side` maps anything it does not know
+		// there too, and the prelude has already refused an unknown value by name.
+		int side = argc > 4 ? arg_int(&js, argc, args, 4) : SIDE_FRONT;
+
 		String diagnostic;
 		uint? made = self.pass.create_material(
 			&self.renderer.gpu,
 			&self.renderer.target,
 			fragment,
 			uniforms.array_view(),
+			side,
 			&diagnostic
 		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
@@ -289,6 +296,37 @@ fn void js_set_uniform(
 			return;
 		}
 	};
+}
+
+<*
+ `material.side = ...` — change which faces this material keeps.
+
+ A verb rather than a uniform because which faces survive is render state and not
+ a byte in the push block — but it needs no device and can build nothing, because
+ the cull mode is dynamic. `PipelineState` has that argument; the short version
+ is that a material's side is one `vk::cmdSetCullMode` at record time, so
+ flipping it in an animation callback costs nothing at all.
+*>
+fn void js_set_side(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	int side = arg_int(&js, argc, args, 1);
+
+	if (catch self.pass.set_material_side(index, side))
+	{
+		*out = js.raise("that material is not in this context");
+		return;
+	}
 }
 
 <*

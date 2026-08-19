@@ -1083,6 +1083,26 @@ fn void Scene.update(&self, Assets* assets, Matrix4f view_projection)
 	self.build_draw_list(assets, self.cull ? &frustum : null);
 }
 
+// ----------------------------------------------------------------------------
+
+<*
+ Where a material sits in the frame, as opposed to what its index is.
+
+ Identity everywhere except the line material, which sorts last however low its
+ index is. `LINE_MATERIAL` is 1 — it has to be a small number, because it is
+ built before any script can ask for a material and indices are handed out in
+ order — and 1 would otherwise put every debug line *underneath* the scene it is
+ drawn to explain.
+
+ That would not look like an ordering bug. `LINE_STATE` writes no depth and tests
+ none, so a line drawn first is simply painted over by the next opaque triangle
+ and vanishes — which reads as "the helper did not work".
+*>
+fn uint draw_order(uint material) @local
+{
+	return material == LINE_MATERIAL ? 0xffffffffu : material;
+}
+
 <*
  Flatten, cull, sort by bucket key, and write one `Instance` per drawn node.
 
@@ -1129,8 +1149,10 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 	if (self.draws.len() == 0) return;
 
 	quicksort(self.draws.array_view(), fn int(Draw a, Draw b) {
-		if (a.material < b.material) return -1;
-		if (a.material > b.material) return 1;
+		uint left = draw_order(a.material);
+		uint right = draw_order(b.material);
+		if (left < right) return -1;
+		if (left > right) return 1;
 		if (a.key < b.key) return -1;
 		if (a.key > b.key) return 1;
 		return 0;
@@ -1278,4 +1300,66 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 
 	if (!found) return { .min = { -1, -1, -1 }, .max = { 1, 1, 1 } };
 	return total;
+}
+
+<*
+ The world-space bounds of one subtree, its root included.
+
+ `Scene.bounds` is this over everything and is what the camera frames on. The
+ restricted form is what a *script* needs, and for a different reason: a kit
+ piece's origin is wherever its exporter left it, so "put this window on that
+ wall" is a question about where the piece's faces are, not about where its
+ transform is. Without this the answer has to be carried into the script as a
+ hand-copied table of sizes, which is a table that goes stale silently.
+
+ Empty rather than unit-sized when nothing under `root` draws. `Scene.bounds`
+ answers with a unit box in that case because the camera must point *somewhere*;
+ here the caller asked about a specific subtree and "it has no size" is the
+ truthful answer, which is why `found` is out-of-band rather than encoded as a
+ degenerate box a caller would have to recognise.
+
+ @param found : `Out. False when nothing under root draws — a Group of Groups, or a node whose mesh is not resident. The box is not written then.`
+*>
+fn collision::Aabb3 Scene.subtree_bounds(&self, Assets* assets, NodeId root, bool* found)
+{
+	self.update_world_matrices();
+
+	collision::Aabb3 total;
+	*found = false;
+	self.grow_bounds(assets, root, &total, found);
+	return total;
+}
+
+<*
+ One node's contribution to `subtree_bounds`, then its children's.
+
+ Copies the child list before recursing for `Scene.kill`'s reason: the walk
+ reaches the node pool through `self`, and a `Node*` held across it is a pointer
+ into a list that may have moved.
+*>
+fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* total, bool* found)
+{
+	Node* node = self.node(id);
+	if (node == null || !node.alive) return;
+
+	if (assets != null && node.asset.is_set() && node.mesh != NO_MESH)
+	{
+		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
+		if (mesh != null)
+		{
+			collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+			if (!*found)
+			{
+				*total = box;
+				*found = true;
+			}
+			else
+			{
+				total.expand_by_aabb(box);
+			}
+		}
+	}
+
+	NodeId[] children = node.children.to_tarray();
+	foreach (child : children) self.grow_bounds(assets, child, total, found);
 }
