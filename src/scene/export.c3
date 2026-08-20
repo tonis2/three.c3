@@ -49,14 +49,71 @@
  render it with. Nothing is silently dropped that a script cannot see: the report
  names the count.
 
- **Per-copy colour becomes material colour**, which is the one place the export
- cannot keep the draw-call count. `mesh.color` is per instance and free here
- because it rides in the instance record; glTF has no per-instance channel at
- all, so a copy with its own colour needs its own material and therefore its own
- `mesh` entry. The *geometry* is still shared — the accessors are written once
- and referenced by each — so a thousand colours cost a thousand tiny mesh
- entries and one set of vertices, rather than a thousand copies of the vertices.
- A scene that leaves `color` alone round-trips its draw calls exactly.
+ ## Per-copy colour, and the instanced nodes that carry it
+
+ **`mesh.color` is per instance and free in the frame** — it rides in the
+ `Instance` record and is read by `SV_InstanceID`, so a thousand colours are one
+ draw call. Core glTF has no per-instance channel at all: a material belongs to a
+ primitive, a primitive to a mesh, and a node points at a mesh. Written that way
+ a thousand colours are a thousand materials, a thousand `mesh` entries and — on
+ reload — a thousand draw calls, which is the frame's central claim thrown away
+ at the door.
+
+ `EXT_mesh_gpu_instancing` is the channel. One node carries an array of
+ transforms and draws its mesh once per entry, and the extension's `attributes`
+ dictionary takes application-specific names beside `TRANSLATION`/`ROTATION`/
+ `SCALE`, underscore-prefixed by convention. `_COLOR_0` is that: a fourth
+ accessor, read by the same instance index, holding what `mesh.color` was. The
+ index is the extension's own — there is nothing to correlate and nothing to
+ keep in step beyond the counts, which the extension requires to be equal.
+
+ **A reader that does not know `_COLOR_0` skips the key** and gets the transforms
+ and the material's own colour, which is a scene in one colour rather than a
+ scene in the wrong place. That is the whole reason the tint is not folded into
+ the material here: the untinted material *is* the fallback.
+
+ ## What gets collapsed, and what keeps its name
+
+ Sibling nodes drawing the same `(asset, mesh)` are written as one instanced
+ node — but only when there are **two or more of them**. A batch of one is one
+ draw call whichever way it is written, so a lone node keeps its name, its place
+ in the tree and its own tinted material, and pays nothing for it. What collapses
+ is the mass-produced copy, whose name is `crate.012` and whose loss is not one.
+
+ A node with children of its own is never collapsed: instancing replicates a
+ node's mesh, not its subtree, so there would be nowhere for the children to go.
+ Groups are therefore untouched, and the hierarchy an author built survives —
+ what flattens is a run of leaves under one parent, into one node beneath that
+ same parent.
+
+ **Instance transforms are relative to the node that carries them**, so the
+ instanced node sits at identity under the shared parent and each copy's own
+ local TRS goes in unchanged. Nothing is baked into world space and nothing has
+ to be un-baked on the way back in.
+
+ ## `flatten`, and the case the sibling rule cannot reach
+
+ Copies placed with `asset.instantiate()` are not siblings. Each one arrives
+ wrapped in a group of its own — that is what an instantiated subtree *is* — so
+ a hundred crates from one kit are a hundred groups holding one crate each, and
+ no two crates share a parent. The rule above never compares them.
+
+ Untinted that costs nothing: geometry is deduplicated on `(asset, mesh)` across
+ the whole scene regardless of parentage, so the hundred crates already share one
+ `mesh` entry and reload as one bucket. What it costs is the *tint*, which is the
+ one thing that has to travel per copy: six colours become six materials, six
+ `mesh` entries and six buckets, exactly as before any of this.
+
+ `flatten` is the way out, and it is a parameter rather than the default because
+ it trades something real. It abandons the hierarchy: every drawing node in the
+ scene is taken in **world space**, batched by shape alone, and written as a
+ handful of instanced nodes under one root. The groups go, and so do the names of
+ the copies inside them. What comes back is the same picture in the same number
+ of draw calls, and no longer a scene anybody can navigate in a viewer.
+
+ So: leave it off for a file a person will open, turn it on for a file that is a
+ payload. Nothing about the default changed — an export that does not ask for it
+ walks the tree exactly as it did.
 *>
 module three;
 
@@ -69,6 +126,7 @@ import gltf;
 import collision;
 
 faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
+
 
 <*
  What one export wrote.
@@ -89,10 +147,17 @@ struct ExportReport
 	uint entries;
 	uint materials;
 	uint images;
-	// Every node written, groups included.
+	// Every node written, groups and instanced nodes included. No longer one per
+	// copy: a batch of a thousand is one entry here and a thousand in `instances`.
 	uint nodes;
-	// Of those, the ones that draw.
+	// Every copy that draws, counted whether it got a node of its own or a slot
+	// in an instanced node's arrays. The number to compare against
+	// `stats().instances`.
 	uint instances;
+	// How many of `nodes` are instanced nodes. Zero for a scene with no two
+	// siblings sharing a shape, which is how a script tells "instancing did not
+	// apply here" from "instancing is not working".
+	uint batches;
 	// Nodes left out because they were helpers or were switched off.
 	uint skipped;
 	// Nodes drawn under a ShaderMaterial, which was not written. They are in the
@@ -124,6 +189,18 @@ struct ExportMaterial @local
 	// one-to-one here — see `ExportImage`.
 	int image;
 	uint material;
+}
+
+// A run of sibling nodes drawing one shape, to be written as a single instanced
+// node. Keyed on `(asset, mesh)` alone rather than on the material as `entries`
+// is, because the material follows from the mesh — `base_color` and `texture`
+// are the `GpuMesh`'s, and the one thing that used to differ, the per-copy tint,
+// is exactly what moves into the instance arrays.
+struct ExportBatch @local
+{
+	AssetId asset;
+	uint mesh;
+	List{NodeId} members;
 }
 
 // One `(geometry, material)` pair, and the `mesh` entry that is that pair.
@@ -164,10 +241,11 @@ struct Exporter @local
  Write the scene to a `.glb`.
 
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
+ @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
  @return? EXPORT_PATH_IS_EMPTY : `No path was given.`
  @return? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
 *>
-fn ExportReport? MeshPass.export_scene(&self, String path)
+fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 {
 	if (path.len == 0) return EXPORT_PATH_IS_EMPTY~;
 
@@ -190,8 +268,10 @@ fn ExportReport? MeshPass.export_scene(&self, String path)
 
 	// The root goes in as a node of its own rather than having its children
 	// hoisted, because a Scene is an Object3D here — moving it moves everything,
-	// and hoisting would drop that transform on the floor.
-	int root = state.walk(self.scene.root)!;
+	// and hoisting would drop that transform on the floor. Flattened, that
+	// transform is already inside every world matrix, so the root written there is
+	// at identity instead — see `flatten_scene`.
+	int root = flatten ? state.flatten_scene()! : state.walk(self.scene.root)!;
 	if (root < 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
 	builder.add_root((uint)root);
 
@@ -227,7 +307,9 @@ fn int? Exporter.walk(&self, NodeId id)
 	int entry = -1;
 	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
-		entry = self.mesh_entry(node)!;
+		// Tinted: this node is written as itself, so its colour has nowhere to go
+		// but its material. A copy that ends up in a batch takes the other path.
+		entry = self.mesh_entry(node, node.color)!;
 	}
 
 	// A node's own children may all have dropped out; it is still written when it
@@ -239,11 +321,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	List{uint} children;
 	children.init(mem, node.children.len() > 0 ? node.children.len() : 1);
 	defer children.free();
-	foreach (child : node.children)
-	{
-		int built = self.walk(child)!;
-		if (built >= 0) children.push((uint)built);
-	}
+	self.place_children(node, &children)!;
 
 	if (entry < 0 && children.len() == 0)
 	{
@@ -267,12 +345,326 @@ fn int? Exporter.walk(&self, NodeId id)
 }
 
 <*
+ Write a node's children into `into`, as instanced nodes where they repeat.
+
+ Two passes over the same list. The first sorts the collapsible children into
+ batches by the shape they draw; the second walks the children in order and, at
+ the position of a batch's *first* member, writes that batch instead. A batch is
+ therefore emitted where its copies began rather than appended after everything
+ else, so document order still tracks the order things were added to the scene.
+
+ **A batch of one is not a batch.** It falls through to `walk` and is written as
+ an ordinary node with its own name and its own tinted material, which costs no
+ draw call — see the header.
+
+ A shape whose vertices cannot be written never forms a batch at all, so its
+ nodes go through `walk` and drop out there, exactly as they did before. That is
+ what the `geometry_for` call in the first pass is for, and it is not wasted
+ work: the accessors it writes are the ones the batch is about to reference, and
+ the memo means the second pass costs a list scan.
+*>
+fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
+{
+	// Heap-backed for `walk`'s reason: this is inside the recursion.
+	List{ExportBatch} batches;
+	batches.init(mem, 4);
+	defer
+	{
+		foreach (&batch : batches) batch.members.free();
+		batches.free();
+	}
+
+	foreach (child : node.children)
+	{
+		Node* copy = self.collapsible(child);
+		if (copy == null) continue;
+
+		int index = batch_of(&batches, copy.asset, copy.mesh);
+		if (index < 0)
+		{
+			if (self.geometry_for(copy.asset, copy.mesh)! < 0) continue;
+			ExportBatch fresh = { .asset = copy.asset, .mesh = copy.mesh };
+			fresh.members.init(mem, 8);
+			batches.push(fresh);
+			index = (int)batches.len() - 1;
+		}
+		batches.get_ref((usz)index).members.push(child);
+	}
+
+	foreach (child : node.children)
+	{
+		Node* copy = self.collapsible(child);
+		int index = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh);
+		if (index >= 0)
+		{
+			ExportBatch* batch = batches.get_ref((usz)index);
+			if (batch.members.len() > 1)
+			{
+				if (batch.members[0] != child) continue;
+				int built = self.instanced_node(batch, false)!;
+				if (built >= 0) into.push((uint)built);
+				continue;
+			}
+		}
+
+		int built = self.walk(child)!;
+		if (built >= 0) into.push((uint)built);
+	}
+}
+
+<*
+ Whether this node is a copy that may be folded into an instanced node.
+
+ Returns the node itself rather than a bool, because every caller wants it and
+ looking it up twice is the kind of double lookup that goes out of step.
+
+ The exclusions are `walk`'s two — a helper, and a subtree switched off — plus
+ the two instancing adds: a node with children cannot collapse, because
+ instancing replicates a mesh and not a subtree, and a node with no mesh has
+ nothing to instance. `walk` still applies its own, so a hidden child reaching it
+ by this returning null is counted as skipped exactly once.
+
+ @return `The node, or null if it has to be written as itself.`
+*>
+fn Node* Exporter.collapsible(&self, NodeId id)
+{
+	Node* node = self.pass.scene.node(id);
+	if (node == null) return null;
+	if (node.material == LINE_MATERIAL || !node.visible) return null;
+	if (node.children.len() > 0) return null;
+	if (!node.asset.is_set()) return null;
+	if (self.pass.assets.mesh(node.asset, node.mesh) == null) return null;
+	return node;
+}
+
+// The batch drawing this shape, or -1. A linear scan: the count is the number of
+// *distinct shapes* among one node's children, which is single digits in a scene
+// anybody wrote and stays single digits in one a script generated.
+fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh) @local
+{
+	foreach (i, &known : batches)
+	{
+		if (known.asset == asset && known.mesh == mesh) return (int)i;
+	}
+	return -1;
+}
+
+<*
+ Write one batch as a single node drawing its mesh once per member.
+
+ The node itself is at identity: instance transforms are relative to it, and it
+ sits where the copies' shared parent already is, so each member's own local TRS
+ goes into the arrays untouched.
+
+ **`TRANSLATION` is always written**, even for the pathological batch whose
+ copies are all in the same place. It is what carries the instance count — the
+ extension has no length field of its own — and a reader that finds no attribute
+ it recognises has been handed a node that draws an unknown number of times.
+ `ROTATION`, `SCALE` and `_COLOR_0` are written only when some member differs
+ from the identity, which is what keeps the ordinary case — a grid of copies that
+ only ever moved — at twelve bytes each rather than forty-four.
+
+ @param world : `Whether to take each copy's world transform rather than its local one. What a flattened export needs, because its copies no longer share a parent to be relative to.`
+ @return `The document's node index, or -1 if the mesh entry could not be written.`
+*>
+fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
+{
+	Node* first = self.pass.scene.node(batch.members[0]);
+	// Untinted, deliberately: the material is what a reader without `_COLOR_0`
+	// falls back to, so it has to be the shape's own colour rather than the first
+	// copy's. The tints go in the array below.
+	int entry = self.mesh_entry(first, NO_TINT)!;
+	if (entry < 0) return -1;
+
+	sz count = batch.members.len();
+	List{Vec3} translations;
+	List{Vec4} rotations;
+	List{Vec3} scales;
+	List{Vec4} colors;
+	translations.init(mem, count);
+	rotations.init(mem, count);
+	scales.init(mem, count);
+	colors.init(mem, count);
+	defer
+	{
+		translations.free();
+		rotations.free();
+		scales.free();
+		colors.free();
+	}
+
+	bool turned = false;
+	bool resized = false;
+	bool tinted = false;
+	foreach (member : batch.members)
+	{
+		Node* copy = self.pass.scene.node(member);
+
+		Vec3 position = copy.position;
+		Quaternionf rotation = copy.rotation;
+		Vec3 scale = copy.scale;
+		if (world) decompose(copy.world, &position, &rotation, &scale);
+
+		translations.push(position);
+		rotations.push({ rotation.v[0], rotation.v[1], rotation.v[2], rotation.v[3] });
+		scales.push(scale);
+		colors.push({ copy.color[0], copy.color[1], copy.color[2], copy.color[3] });
+
+		if (rotation.v[0] != 0 || rotation.v[1] != 0 || rotation.v[2] != 0 || rotation.v[3] != 1) turned = true;
+		if (scale.x != 1 || scale.y != 1 || scale.z != 1) resized = true;
+		if (copy.color[0] != 1 || copy.color[1] != 1 || copy.color[2] != 1 || copy.color[3] != 1) tinted = true;
+	}
+
+	gltf::WriteAttribute[4] attributes;
+	usz used = 0;
+	attributes[used++] = { .name = "TRANSLATION", .accessor = self.out.add_vec3(translations.array_view()) };
+	if (turned)  attributes[used++] = { .name = "ROTATION",  .accessor = self.out.add_vec4(rotations.array_view()) };
+	if (resized) attributes[used++] = { .name = "SCALE",     .accessor = self.out.add_vec3(scales.array_view()) };
+	if (tinted)  attributes[used++] = { .name = "_COLOR_0",  .accessor = self.out.add_vec4(colors.array_view()) };
+
+	GpuMesh* mesh = self.pass.assets.mesh(batch.asset, batch.mesh);
+	uint written = self.out.add_node(mesh.name, entry, -1);
+	self.out.add_instancing(written, attributes[:used]);
+
+	self.report.nodes++;
+	self.report.batches++;
+	foreach (member : batch.members)
+	{
+		self.report.instances++;
+		if (self.pass.scene.node(member).material != DEFAULT_MATERIAL) self.report.shaded++;
+	}
+	return (int)written;
+}
+
+<*
+ The whole scene as a handful of instanced nodes in world space.
+
+ `walk`'s alternative, and the header says when to want it. Everything that draws
+ is gathered by shape, wherever it sits in the tree, and written under one root
+ that is deliberately at **identity**: the scene root's own transform is already
+ inside every world matrix, and writing it again would apply it twice.
+
+ **The world matrices are recomputed first.** `Node.world` is only valid after
+ the walk that fills it, and an export is not a frame — a script that builds a
+ scene and exports it without ever rendering has never run that walk, and every
+ world matrix in it is whatever it was initialised to. This is the same call the
+ renderer makes and it has the same effect, so a scene that *was* up to date pays
+ a traversal and changes by nothing.
+
+ A shape with one copy is still written as an ordinary node rather than a batch
+ of one, keeping its name and its tinted material for the reason it always did.
+ Its transform is the world one, because there is no longer a parent to be
+ relative to.
+
+ @return `The document's root node index, or -1 for a scene with nothing to write.`
+*>
+fn int? Exporter.flatten_scene(&self)
+{
+	self.pass.scene.update_world_matrices();
+
+	List{ExportBatch} batches;
+	batches.init(mem, 8);
+	defer
+	{
+		foreach (&batch : batches) batch.members.free();
+		batches.free();
+	}
+	self.gather(self.pass.scene.root, &batches)!;
+
+	List{uint} children;
+	children.init(mem, batches.len() > 0 ? batches.len() : 1);
+	defer children.free();
+
+	foreach (&batch : batches)
+	{
+		int built = batch.members.len() > 1
+			? self.instanced_node(batch, true)!
+			: self.placed_node(batch.members[0])!;
+		if (built >= 0) children.push((uint)built);
+	}
+
+	if (children.len() == 0) return -1;
+
+	Node* root = self.pass.scene.node(self.pass.scene.root);
+	uint written = self.out.add_node(root == null ? "" : root.name);
+	foreach (child : children) self.out.add_child(written, child);
+	self.report.nodes++;
+	return (int)written;
+}
+
+<*
+ Collect everything that draws, by shape, wherever it is in the tree.
+
+ `walk`'s two exclusions apply unchanged and for the same reason, including that
+ a hidden subtree is one `skipped` rather than one per node in it: the recursion
+ stops there, so nothing below it is counted or looked at.
+
+ A node that draws *and* has children contributes itself and is still descended
+ into. Nothing is lost by that here — every child ends up in world space too, so
+ there is no parent relationship left to preserve or to break.
+*>
+fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
+{
+	Node* node = self.pass.scene.node(id);
+	if (node == null) return;
+
+	if (node.material == LINE_MATERIAL || !node.visible)
+	{
+		self.report.skipped++;
+		return;
+	}
+
+	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
+	{
+		int index = batch_of(batches, node.asset, node.mesh);
+		if (index < 0 && self.geometry_for(node.asset, node.mesh)! >= 0)
+		{
+			ExportBatch fresh = { .asset = node.asset, .mesh = node.mesh };
+			fresh.members.init(mem, 16);
+			batches.push(fresh);
+			index = (int)batches.len() - 1;
+		}
+		if (index >= 0) batches.get_ref((usz)index).members.push(id);
+	}
+
+	foreach (child : node.children) self.gather(child, batches)!;
+}
+
+<*
+ One node, written where it ended up rather than where its parent put it.
+
+ The flattened export's answer for a shape with a single copy, which is not worth
+ an instancing block: one node, one name, one material carrying its tint, and the
+ world transform decomposed into the TRS triple a glTF node states.
+
+ @return `The document's node index, or -1 for a mesh whose vertices cannot be written.`
+*>
+fn int? Exporter.placed_node(&self, NodeId id)
+{
+	Node* node = self.pass.scene.node(id);
+	int entry = self.mesh_entry(node, node.color)!;
+	if (entry < 0) return -1;
+
+	Vec3 position;
+	Quaternionf rotation;
+	Vec3 scale;
+	decompose(node.world, &position, &rotation, &scale);
+
+	uint written = self.out.add_node(node.name, entry, -1, position, rotation, scale);
+	self.report.nodes++;
+	self.report.instances++;
+	if (node.material != DEFAULT_MATERIAL) self.report.shaded++;
+	return (int)written;
+}
+
+<*
  The `mesh` entry this node draws: its geometry, and the material its colour and
  texture resolve to.
 
+ @param tint : `What to multiply the mesh's base colour by — the node's own colour when it is written as itself, and white for a batch, whose copies are tinted per instance instead.`
  @return `The document's mesh index, or -1 for a mesh whose vertices cannot be written.`
 *>
-fn int? Exporter.mesh_entry(&self, Node* node)
+fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 {
 	GpuMesh* mesh = self.pass.assets.mesh(node.asset, node.mesh);
 
@@ -283,10 +675,10 @@ fn int? Exporter.mesh_entry(&self, Node* node)
 	// multiplies the base colour texture the same way — so the product is exactly
 	// what the pixel was.
 	float[4] color = {
-		mesh.base_color[0] * node.color[0],
-		mesh.base_color[1] * node.color[1],
-		mesh.base_color[2] * node.color[2],
-		mesh.base_color[3] * node.color[3],
+		mesh.base_color[0] * tint[0],
+		mesh.base_color[1] * tint[1],
+		mesh.base_color[2] * tint[2],
+		mesh.base_color[3] * tint[3],
 	};
 	int texture = self.texture_for(node.asset, node.mesh)!;
 	int material = self.material_for(color, texture);

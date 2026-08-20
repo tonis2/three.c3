@@ -239,6 +239,12 @@ fn Vec3 euler_from_quat(Quaternionf rotation)
 // to garbage.
 const Quaternionf NO_ROTATION = { 0, 0, 0, 1 };
 
+// White, and the same argument: `Node.color` multiplies albedo, so the identity
+// is four ones and a zeroed struct literal is a node that draws black. Every
+// place that fills in a colour it was not given says this rather than counting
+// braces.
+const float[4] NO_TINT = { 1, 1, 1, 1 };
+
 <*
  Where this node ended up, in world space. Valid after
  `Scene.update_world_matrices`.

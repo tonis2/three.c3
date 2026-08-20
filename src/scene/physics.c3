@@ -75,7 +75,7 @@ struct PhysicsBody
 	// value pointing straight at this allocation, so a `List` of shapes that
 	// reallocated on its next push would leave every body already in the world
 	// pointing into freed memory. One allocation per body, released in `drop`.
-	void* collider;
+	void* collider; //CollisionShape
 }
 
 <*

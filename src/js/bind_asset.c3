@@ -376,6 +376,14 @@ fn void js_wireframe(
  different question about whether the file is the scene: `meshes` against
  `stats().uniqueMeshes`, `instances` against `stats().instances`, and `skipped`
  and `shaded` for the two things that deliberately did not survive the crossing.
+
+ `batches` is how many of `nodes` were written as instanced nodes, which is the
+ one number that has no counterpart in `stats()` — it says how much of the scene
+ the file managed to keep as repetition rather than as a thousand named copies.
+
+ The second argument is `flatten`, which gives up the hierarchy to batch copies
+ that are not siblings — the ones `asset.instantiate()` produces, each in a group
+ of its own. `scene/export.c3` argues when that is the trade to make.
 *>
 fn void js_export(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -414,7 +422,11 @@ fn void js_export(
 			return;
 		}
 
-		ExportReport? report = self.pass.export_scene(writing);
+		// The prelude has already reduced the options object to this one flag, so
+		// nothing here reads a property off a JavaScript value — an argument list
+		// this side stays a list of scalars, which is what every other binding here
+		// takes and what keeps the two sides from disagreeing about defaults.
+		ExportReport? report = self.pass.export_scene(writing, arg_truth(&js, argc, args, 1));
 		if (catch err = report)
 		{
 			if (err == EXPORT_HAS_NOTHING_TO_WRITE)
@@ -437,6 +449,7 @@ fn void js_export(
 		js.set_property(described, "images", qjs::int_value((int)report.images));
 		js.set_property(described, "nodes", qjs::int_value((int)report.nodes));
 		js.set_property(described, "instances", qjs::int_value((int)report.instances));
+		js.set_property(described, "batches", qjs::int_value((int)report.batches));
 		js.set_property(described, "skipped", qjs::int_value((int)report.skipped));
 		js.set_property(described, "shaded", qjs::int_value((int)report.shaded));
 		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
@@ -542,7 +555,7 @@ fn void js_mesh_bounds(
  Euler angle drops the quaternion. `scene/node.c3` has the general form of this
  argument; this is the one place it has a number attached.
 
- @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode].`
+ @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a].`
 *>
 fn void js_asset_nodes(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -582,6 +595,13 @@ fn void js_asset_nodes(
 		js.set_index(row, 14, qjs::number_value(entry.rotation.k));
 		js.set_index(row, 15, qjs::number_value(entry.rotation.l));
 		js.set_index(row, 16, qjs::int_value(entry.gltf_node));
+		// The per-copy tint, which is white for everything but a copy an
+		// instanced node placed. Four numbers rather than an object because the
+		// row is already a flat array and `mesh.color` is already a flat array.
+		js.set_index(row, 17, qjs::number_value(entry.color[0]));
+		js.set_index(row, 18, qjs::number_value(entry.color[1]));
+		js.set_index(row, 19, qjs::number_value(entry.color[2]));
+		js.set_index(row, 20, qjs::number_value(entry.color[3]));
 
 		js.set_index(nodes, (uint)i, row);
 	}
