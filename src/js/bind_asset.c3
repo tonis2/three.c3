@@ -23,6 +23,7 @@ import std::io;
 import std::math;
 import std::math::vector;
 import qjs;
+import image;
 import std::collections::list;
 
 <*
@@ -86,6 +87,252 @@ fn void js_load(
 
 		*out = asset_value(&js, asset);
 	};
+}
+
+<*
+ `texture(path)` — decode a PNG or JPEG and upload it, as `[index, width, height]`.
+
+ Three numbers rather than a bare index because the prelude's `Texture` wants the
+ extents and there is no second verb to ask for them: an agent sizing a plane to
+ an image's aspect ratio would otherwise have to guess, and a texture that loaded
+ at half the resolution it expected is exactly the thing worth being able to see.
+
+ **The path goes through `resolve_asset`, the same door `three.load` uses**, so
+ under `--assets` a texture may only come from inside the game — a script cannot
+ reach `../../etc/passwd` and hand its bytes to a decoder.
+
+ The index is not a generational handle, unlike an asset or a node. It does not
+ need to be: the only way a script gets one is the `Texture` the prelude wraps it
+ in, that object marks itself dead on `dispose()`, and a second
+ `three.texture()` of the same file returns a second object holding a reference
+ of its own. So a stale index cannot be presented — there is no live JS value
+ carrying one.
+*>
+fn void js_texture(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("three.texture needs a GPU device and this context has none");
+		return;
+	}
+
+	@pool()
+	{
+		String path = arg_text(&js, argc, args, 0, tmem);
+		if (path.len == 0)
+		{
+			*out = js.raise("three.texture(path) wants a path to a .png or .jpg");
+			return;
+		}
+
+		String? opening = self.resolve_asset(path, tmem);
+		if (catch err = opening)
+		{
+			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			{
+				*out = js.raise(string::tformat(
+					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
+					"what is inside its own", path
+				));
+				return;
+			}
+			*out = js.raise(string::tformat("cannot load '%s': %s", path, err));
+			return;
+		}
+
+		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening);
+		if (catch err = index)
+		{
+			*out = js.raise(texture_failure(err, path));
+			return;
+		}
+
+		Texture* uploaded = self.pass.assets.texture_at(index);
+		qjs::Value triple = js.array();
+		js.set_index(triple, 0, qjs::int_value(index));
+		js.set_index(triple, 1, qjs::int_value((int)uploaded.width));
+		js.set_index(triple, 2, qjs::int_value((int)uploaded.height));
+		*out = triple;
+	};
+}
+
+<*
+ `dataTexture(bytes, width, height)` — pixels a script built, as `[index, w, h]`.
+
+ **The bytes are borrowed and are copied before this returns.** `js.bytes` points
+ into the engine's own storage for the `Uint8Array` the script is holding, which
+ moves if the array is resized and is gone when it is collected — so the only
+ safe thing to do with it is exactly what happens here: read it inside the call.
+ `claim_texture` hashes it, copies it into a staging buffer and uploads, all
+ before control goes back to JavaScript. Nothing keeps the pointer.
+
+ **Deduplicated against every other texture, which is the interesting part.**
+ Pixels generated in a script and the identical image loaded from a `.png` are
+ one upload, because the hash is over RGBA bytes and has no idea where they came
+ from. A script that regenerates the same texture on every frame pays for one.
+
+ The size is stated rather than inferred, and checked against the array's length.
+ The alternative — deriving one from the other — cannot tell a 64x64 from a
+ 128x32, so a script that had its dimensions the wrong way round would get a
+ skewed picture and no complaint.
+*>
+fn void js_data_texture(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("three.DataTexture needs a GPU device and this context has none");
+		return;
+	}
+
+	int width = arg_int(&js, argc, args, 1);
+	int height = arg_int(&js, argc, args, 2);
+	if (width <= 0 || height <= 0)
+	{
+		*out = js.raise(string::tformat(
+			"new three.DataTexture(data, width, height) wants positive dimensions, got %dx%d", width, height
+		));
+		return;
+	}
+	if (width > MAX_TEXTURE_SIDE || height > MAX_TEXTURE_SIDE)
+	{
+		*out = js.raise(string::tformat(
+			"%dx%d is past the %d-pixel limit three.DataTexture accepts on a side", width, height, MAX_TEXTURE_SIDE
+		));
+		return;
+	}
+
+	char[] pixels = argc > 0 ? js.bytes(args[0]) : (char[]){};
+	if (pixels.len == 0)
+	{
+		// An empty slice means "not a Uint8Array" *and* "an empty one", and the
+		// message covers both because the fix is the same either way: the prelude
+		// has already widened a plain Array into a Uint8Array before this, so
+		// anything arriving here without bytes had none to give.
+		*out = js.raise("new three.DataTexture(data, ...) wants a Uint8Array of RGBA bytes, and this one is empty");
+		return;
+	}
+
+	usz wanted = (usz)width * (usz)height * 4;
+	if (pixels.len != wanted)
+	{
+		*out = js.raise(string::tformat(
+			"%dx%d is %d RGBA bytes and %d were given — four per pixel, in r, g, b, a order",
+			width, height, wanted, pixels.len
+		));
+		return;
+	}
+
+	// An `Image` over the borrowed bytes rather than a copy of them. `to_rgba`
+	// inside `claim_texture` makes the one copy this path needs; a second one
+	// here would be 1 MB memcpy'd for nothing on a 512x512.
+	//
+	// **The null allocator is what makes borrowing safe.** `Image.free` frees
+	// nothing without one, so this struct owning bytes it did not allocate can
+	// never free the engine's storage — and it is never freed here anyway,
+	// because it is not ours to free.
+	image::Image borrowed = {
+		.width = (uint)width,
+		.height = (uint)height,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		.pixels = pixels,
+		.allocator = (Allocator)null,
+	};
+
+	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed);
+	if (catch err = index)
+	{
+		*out = js.raise(string::tformat("could not upload the texture: %s", err));
+		return;
+	}
+
+	// **Read back off the upload, not echoed from the arguments.** The two agree
+	// when everything is right, which is exactly why echoing is tempting and
+	// wrong: it makes `tex.width` a restatement of what the caller already said
+	// rather than a report of what happened, so a dimension lost or transposed
+	// anywhere between here and the device is invisible from JavaScript. Written
+	// as an echo first, and a `.width`/`.height` swap injected into the `Image`
+	// above passed the whole suite.
+	Texture* uploaded = self.pass.assets.texture_at(index);
+	qjs::Value triple = js.array();
+	js.set_index(triple, 0, qjs::int_value(index));
+	js.set_index(triple, 1, qjs::int_value((int)uploaded.width));
+	js.set_index(triple, 2, qjs::int_value((int)uploaded.height));
+	*out = triple;
+}
+
+<*
+ The largest side `three.DataTexture` will take.
+
+ Not a device limit — `maxImageDimension2D` is 16384 on everything this targets —
+ but a limit on the mistake. The dimensions and the byte count are checked against
+ each other, so a wrong pair is refused rather than uploaded; this is the guard
+ for a *right* pair that is absurd, where the array was built by a loop with a
+ bad bound and the allocation is what fails, several seconds later, somewhere
+ else. 8192x8192 RGBA is 256 MB, which is already past what anyone means.
+*>
+const int MAX_TEXTURE_SIDE = 8192;
+
+<*
+ Turn a texture fault into a sentence that says what to do about it.
+
+ Each of the three is a different next move — check the path, convert the file,
+ re-export it at 8 bits — and "could not load" would cost the agent all of that.
+*>
+fn String texture_failure(fault err, String path) @local
+{
+	switch (err)
+	{
+		case TEXTURE_UNREADABLE:
+			return string::tformat("there is no readable file at '%s'", path);
+		case TEXTURE_FORMAT_UNKNOWN:
+			return string::tformat(
+				"'%s' is not a PNG or a JPEG — those are the two three.texture reads, and the check is on the "
+				"file's own first bytes rather than its name", path
+			);
+		case TEXTURE_BIT_DEPTH:
+			return string::tformat("'%s' is a 16-bit PNG; save it as 8-bit and it will load", path);
+		default:
+			return string::tformat("could not load '%s': %s", path, err);
+	}
+}
+
+<*
+ `textureDispose(index)` — give back the reference the script's handle holds.
+
+ Not a free. The slot goes only when nothing names it at all, so disposing a
+ handle whose image is still on a material leaves the material drawing correctly
+ — which is the behaviour that makes `dispose()` safe to call the moment a script
+ is done *referring* to a texture, rather than something to be timed against the
+ materials that use it.
+
+ Waits for the device when this release is the last one, for
+ `MeshPass.set_material_map`'s reason: the image is destroyed inside
+ `release_texture` and a frame in flight may still be sampling it.
+*>
+fn void js_texture_dispose(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int index = arg_int(&js, argc, args, 0);
+	if (!self.pass.assets.texture_alive(index)) return;
+
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	if (gpu != null && self.pass.assets.texture_refs(index) == 1) gpu.wait_idle();
+	self.pass.assets.release_texture(gpu, index);
 }
 
 <*

@@ -49,6 +49,9 @@ fn void JsRuntime.install_bindings(&self)
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
+	self.bind(host, "texture", &js_texture, 1);
+	self.bind(host, "dataTexture", &js_data_texture, 3);
+	self.bind(host, "textureDispose", &js_texture_dispose, 1);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "lines", &js_lines, 2);
