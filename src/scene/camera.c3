@@ -50,13 +50,39 @@ fn Camera default_camera()
 // gone" rather than as "the camera is broken".
 const float CAMERA_PITCH_LIMIT = 89.0f;
 
-fn Vec3 Camera.eye(&self)
+<*
+ How much room `frame_bounds` leaves around what it framed. 1.0 is a fit with
+ the outermost corner exactly on the frustum wall.
+
+ **It scales the lateral requirement, not the finished distance**, and the two
+ are only the same thing for a box whose corners all sit near the target's
+ depth. A corner leaning towards the eye is seen at a fraction of the orbit
+ distance, so a percentage added to the distance arrives as a large multiple of
+ *that corner's* depth: framing a 60-unit box end-on, where the near face sits
+ 1.4 units in front of a 31-unit orbit, 5% on the distance more than doubled the
+ near face's depth and halved the picture. Applied to the requirement instead it
+ is 5% of the frame, at every shape and every angle.
+*>
+const float FRAME_MARGIN = 1.05f;
+
+fn Vec3 Camera.eye(&self) => self.target + self.orbit_dir() * self.distance;
+
+<*
+ The unit vector from the target towards the eye, from the orbit angles alone.
+
+ Split out of `eye` because two callers need the direction at a moment when the
+ distance is not to be trusted. `basis` is asked for the screen axes by a pan
+ that may have dollied all the way in, and `frame_bounds` is *choosing* the
+ distance and so cannot derive anything from it. Both used to recover this by
+ normalizing `target - eye()`, which is the same vector whenever the distance is
+ positive and NaN when it is zero.
+*>
+fn Vec3 Camera.orbit_dir(&self)
 {
 	float yaw        = math::deg_to_rad(self.yaw);
 	float pitch      = math::deg_to_rad(self.pitch);
 	float horizontal = math::cos(pitch);
-	return self.target + (Vec3) { horizontal * math::sin(yaw), math::sin(pitch), horizontal * math::cos(yaw) }
-		* self.distance;
+	return { horizontal * math::sin(yaw), math::sin(pitch), horizontal * math::cos(yaw) };
 }
 
 <*
@@ -124,7 +150,7 @@ fn void Camera.derive_planes(&self, float reach = 0.0f)
 *>
 fn void Camera.basis(&self, Vec3* right, Vec3* up)
 {
-	Vec3 forward = (self.target - self.eye()).normalize();
+	Vec3 forward = self.orbit_dir() * -1.0f;
 	Vec3 sideways = forward.cross((Vec3) { 0, 1, 0 });
 
 	// The pitch clamp is what normally keeps this from happening, but the clamp
@@ -180,30 +206,105 @@ fn Matrix4f Camera.view_projection(&self, float aspect)
 <*
  Aim at the middle of a bounding box and back off far enough to see all of it.
 
- The distance is derived from the box's bounding *sphere* rather than from its
- height, because a model that is wide and flat would otherwise be framed by its
- short axis and run off both sides of the screen. The sphere is orientation
- independent, so the fit holds however the camera is turned afterwards.
+ ## What this used to do, and why the picture came out small
 
- The near and far planes are re-derived from the same number: a fixed 0.01 near
- plane against a kilometre-wide model spends the entire depth buffer on the
- first few metres, which is z-fighting across the whole scene.
+ Until M6 the distance came from the box's bounding *sphere* — `extent.length()
+ * 0.5`, the radius of the sphere through the box's corners — fitted to the
+ vertical half-angle and then multiplied by 1.25. Both halves of that overshoot,
+ and they compound:
+
+ - The corner sphere is the tightest bound that holds *whichever way the camera
+   is turned*, and paying for that is only worth it if the camera is going to
+   turn. It is not: this runs on `frameAll`, at a known orientation, and the
+   turntable re-derives its planes on every move anyway. Framing a cube by its
+   corner sphere spends a factor of sqrt(3) on an orientation nobody asked for.
+ - The vertical half-angle is the one the projection is specified by, but it is
+   only the *narrower* of the two on a frame that is wider than it is tall. On
+   16:9 the horizontal is nearly twice as wide and fitting the vertical alone
+   simply left it empty. On a portrait frame the same line was worse than
+   wasteful: the narrower axis was then the horizontal, which was never fitted,
+   so the silhouette ran off the sides — the one case where the old code was not
+   conservative but wrong.
+
+ ## What it does now
+
+ The exact fit, against both half-angles. Every corner of the box is projected
+ onto the screen axes and onto the view axis, and the distance kept is the
+ largest any one corner asks for. `toward` is the part of a corner's offset that
+ leans towards the eye: a near corner is seen at a shallower depth than the
+ target and so needs *more* distance for the same lateral offset, which is why
+ the binding corner is usually a near one rather than the furthest.
+
+ The cost is the property the sphere was bought for — the fit is now good at the
+ orientation it was made at, and orbiting afterwards can carry a long box's ends
+ out of frame. That is the normal behaviour of a framing helper and is the
+ trade this is making knowingly.
+
+ The margin is `FRAME_MARGIN` and is applied to each corner's lateral
+ requirement rather than to the distance that comes out — see its header, which
+ is where that distinction cost a rewrite.
+
+ The near and far planes are still re-derived from the distance: a fixed 0.01
+ near plane against a kilometre-wide model spends the entire depth buffer on the
+ first few metres, which is z-fighting across the whole scene. `far` keeps using
+ the corner radius, because unlike the fit it genuinely must hold at any
+ orientation — `MeshPass.derive_camera_planes` re-derives it during a drag, and
+ a far plane that breathed as the turntable turned would pop distant geometry in
+ and out.
 
  @param min : `Corner of the model's axis-aligned bounds, model space.`
+ @param max : `The opposite corner.`
+ @param aspect : `Viewport width divided by height. Non-positive is read as 1, which fits the vertical alone and is what a caller with nothing to measure should want.`
 *>
-fn void Camera.frame_bounds(&self, Vec3 min, Vec3 max)
+fn void Camera.frame_bounds(&self, Vec3 min, Vec3 max, float aspect = 1.0f)
 {
-	Vec3 extent = max - min;
 	self.target = (min + max) * 0.5f;
 
-	float radius = extent.length() * 0.5f;
-	if (radius <= 0.0f) radius = 1.0f;
+	Vec3 half = (max - min) * 0.5f;
+	float radius = half.length();
+	// A box with no size at all — one point, or a scene holding nothing — has no
+	// fit to compute. A unit box gives the same answer the old code's `radius = 1`
+	// fallback did, and keeps every expression below away from a divide by zero.
+	if (radius <= 0.0f)
+	{
+		half = { 1, 1, 1 };
+		radius = half.length();
+	}
 
-	// The half-angle the *narrower* of the two screen axes subtends is what
-	// actually bounds the fit, and the vertical is the one this projection is
-	// specified by. A little slack keeps the silhouette off the edge.
-	float half_fov = math::deg_to_rad(self.fov) * 0.5f;
-	self.distance = radius / math::sin(half_fov) * 1.25f;
+	float tan_v = math::tan(math::deg_to_rad(self.fov) * 0.5f);
+	// Spelled as a negated `>` rather than `<= 0` so that a NaN lands here too:
+	// a target measured at zero height divides to one, and NaN fails every
+	// comparison, so `<= 0` would have waved it through into `tan_h` and made the
+	// whole fit NaN — a camera at no distance, which renders an empty frame and
+	// says nothing about why.
+	if (!(aspect > 0.0f)) aspect = 1.0f;
+	float tan_h = tan_v * aspect;
+
+	Vec3 to_eye = self.orbit_dir();
+	Vec3 right, up;
+	self.basis(&right, &up);
+
+	float needed = 0.0f;
+	for (int i = 0; i < 8; i++)
+	{
+		Vec3 corner = {
+			(i & 1) != 0 ? half.x : -half.x,
+			(i & 2) != 0 ? half.y : -half.y,
+			(i & 4) != 0 ? half.z : -half.z,
+		};
+		float toward = corner.dot(to_eye);
+		float v = math::abs(corner.dot(up));
+		float h = math::abs(corner.dot(right));
+		needed = math::max(needed, toward + v * FRAME_MARGIN / tan_v);
+		needed = math::max(needed, toward + h * FRAME_MARGIN / tan_h);
+	}
+
+	self.distance = needed;
+	// Only reachable if every corner asked for a non-positive distance, which the
+	// degenerate-box guard above already rules out. Kept because the alternative
+	// to a cheap floor here is an eye sitting on its own target, and `look_at`
+	// answers that with a matrix of NaN and an empty frame.
+	if (self.distance <= 0.0f) self.distance = radius;
 
 	self.near_plane = math::max(self.distance * 0.001f, 0.0001f);
 	self.far_plane = self.distance + radius * 4.0f;

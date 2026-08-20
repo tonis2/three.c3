@@ -54,6 +54,13 @@ struct MeshPass
 	Assets assets;
 	Scene scene;
 	Camera camera;
+	// The render target's width over its height, kept current by `record`.
+	// `frame_camera` needs it and has no target to ask — it is reached from a
+	// script, between frames — and fitting a 16:9 frame as though it were square
+	// is most of why `frameAll` used to leave the subject at a third of the
+	// width. Seeded in `init` so the very first fit, before any frame has been
+	// recorded, is already right.
+	float aspect;
 	// xyz: surface-to-light in world space. w: the ambient floor, which keeps
 	// unlit faces readable rather than black.
 	float[4] light;
@@ -122,6 +129,13 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	self.scene.attach_assets(&self.assets);
 	self.camera = default_camera();
 	self.light = { 0.35, 0.80, 0.45, 0.25 };
+	// The first `frame_camera` can run before any frame has been recorded — the
+	// CLI loads a file and fits the camera to it during startup — so the aspect
+	// starts from the target rather than from zero. A zero-height target would
+	// make this a NaN that `frame_bounds` reads as "no aspect given"; it is
+	// guarded there rather than here, because the same is true of every later
+	// resize and one guard at the point of use is the one that cannot be missed.
+	self.aspect = (float)target.extent.width / (float)target.extent.height;
 
 	// Set here rather than by the loaders, which is where it used to be set and
 	// was a bug: `ready` guards `record` against running without a *pipeline*,
@@ -249,7 +263,7 @@ fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
 fn void MeshPass.frame_camera(&self)
 {
 	collision::Aabb3 bounds = self.scene.bounds(&self.assets);
-	self.camera.frame_bounds(bounds.min, bounds.max);
+	self.camera.frame_bounds(bounds.min, bounds.max, self.aspect);
 }
 
 fn collision::Aabb3 MeshPass.bounds(&self) => self.scene.bounds(&self.assets);
@@ -289,6 +303,9 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	if (!self.ready) return;
 
 	float aspect = (float)target.extent.width / (float)target.extent.height;
+	// Remembered for `frame_camera`, which runs between frames and so has no
+	// target of its own to measure. A resize therefore reaches the next fit.
+	self.aspect = aspect;
 	Matrix4f view_projection = self.camera.view_projection(aspect);
 
 	self.scene.update(&self.assets, view_projection);
