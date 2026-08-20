@@ -82,6 +82,17 @@ struct PushData
     float2* uvs;
     float4 base_color;      // rgb: albedo factor. a: material alpha, unused so far.
     uint flags;
+    // xy: how many times the texture repeats across the surface. zw: where it
+    // starts. `{1, 1, 0, 0}` is the identity and is what a material with no
+    // transform is given — `scene/material.c3` says why a zero repeat means
+    // "unset" rather than meaning a texture collapsed onto one texel.
+    //
+    // **Here rather than in a material's uniforms**, and it costs 16 of the 68
+    // bytes those had. The alternative was per-material uniforms, which only a
+    // ShaderMaterial has — and the surface that needed this most is a ground
+    // plane wearing a MeshLambertMaterial, which compiles nothing and has no
+    // uniform block at all.
+    float4 uv_transform;
 };
 [vk_push_constant] const PushData push;
 
@@ -135,6 +146,60 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     return output;
 }
 
+// **The sRGB decode: what it is applied to, and what it is deliberately not.**
+//
+// Two colours multiply into albedo below and they are in *different spaces*,
+// which looks like an inconsistency and is the only arrangement that is correct.
+//
+// `push.base_color` is the mesh's own factor, and it comes from a glTF
+// `baseColorFactor`, which the specification defines as **linear**. Decoding it
+// would be decoding something twice, and would make a round trip through
+// `scene.export` darken a scene every time it was written and read back.
+//
+// `input.color` is the copy's own tint, and it comes from `mesh.color` in a
+// script — a hex a person read off a colour picker, which is **sRGB**. Using it
+// raw is what made `examples/village` need every generated texel pre-corrected
+// by hand.
+//
+// So the mesh's factor is used as it arrives and the script's is decoded.
+// `scene/primitive.c3` states `PRIMITIVE_COLOR` in sRGB for readability and
+// converts where it is assigned, which is the same rule seen from the other
+// side.
+//
+//
+// `gpu/target.c3` renders to an `R8G8B8A8_SRGB` target, so the hardware encodes
+// on write. That fixes the output half of the round trip and leaves the input
+// half: a colour a script hands over — `mesh.color = 0xff8040`, a `[r,g,b]`
+// triple, a `scene.background` — is a value someone read off a colour picker,
+// which is to say an sRGB one. Multiplying it into linear lighting arithmetic
+// untouched is the same category of error the target used to make, pointing the
+// other way, and it would leave a hex value rendering as a visibly different
+// colour from the hex.
+//
+// Textures need no equivalent because the sampler already does it: they upload
+// as `R8G8B8A8_SRGB` (`gpu/texture.c3`) and arrive linear. So after this one
+// call every term in the multiply below is linear, which is the property the
+// lighting arithmetic has always assumed and never actually had.
+//
+// It is per fragment rather than per instance on the CPU because it is free
+// here and because the two shaders then cannot disagree. `scene/export.c3`
+// makes the same conversion for glTF's `baseColorFactor`, which is defined
+// linear — that is the third copy and the reason this text names it.
+//
+// **The exact piecewise curve, not `pow(c, 2.2)`.** The approximation looks
+// harmless measured against the real curve — about 3 eight-bit levels at worst —
+// and is not, because the device is not negotiable: the `_SRGB` attachment
+// encodes with the exact curve whatever this decoded with. Decode by
+// approximation and encode by hardware and a value comes back **wrong by up to
+// 9 levels, worst around 15/255**, which is a visible step in the part of the
+// range where banding already lives. `three_tests::color` measures it.
+float3 srgb_to_linear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow(max(c + 0.055, 0.0) / 1.055, 2.4);
+    return lerp(hi, lo, step(c, 0.04045));
+}
+
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
@@ -142,10 +207,10 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // 0]` works with no material at all — which is the point of it being here
     // rather than only in `material.slang`. White is the identity and is what
     // every node starts at.
-    float3 albedo = push.base_color.rgb * input.color.rgb;
+    float3 albedo = push.base_color.rgb * srgb_to_linear(input.color.rgb);
     if ((push.flags & FLAG_HAS_UVS) != 0)
     {
-        albedo *= base_color_map.Sample(input.uv).rgb;
+        albedo *= base_color_map.Sample(input.uv * push.uv_transform.xy + push.uv_transform.zw).rgb;
     }
 
     // One hardcoded directional light and an ambient floor. A material model is

@@ -123,6 +123,8 @@ import std::math;
 import std::math::vector;
 import std::collections::list;
 import gltf;
+import image;
+import image::png;
 import collision;
 
 faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
@@ -339,7 +341,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	if (entry >= 0)
 	{
 		self.report.instances++;
-		if (node.material != DEFAULT_MATERIAL) self.report.shaded++;
+		if (self.loses_its_shader(node.material)) self.report.shaded++;
 	}
 	return (int)written;
 }
@@ -531,7 +533,7 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	foreach (member : batch.members)
 	{
 		self.report.instances++;
-		if (self.pass.scene.node(member).material != DEFAULT_MATERIAL) self.report.shaded++;
+		if (self.loses_its_shader(self.pass.scene.node(member).material)) self.report.shaded++;
 	}
 	return (int)written;
 }
@@ -653,7 +655,7 @@ fn int? Exporter.placed_node(&self, NodeId id)
 	uint written = self.out.add_node(node.name, entry, -1, position, rotation, scale);
 	self.report.nodes++;
 	self.report.instances++;
-	if (node.material != DEFAULT_MATERIAL) self.report.shaded++;
+	if (self.loses_its_shader(node.material)) self.report.shaded++;
 	return (int)written;
 }
 
@@ -674,13 +676,23 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	// `mesh.color` multiplies albedo in the shader, and glTF's baseColorFactor
 	// multiplies the base colour texture the same way — so the product is exactly
 	// what the pixel was.
+	//
+	// **The two halves are in different spaces and only one is converted.**
+	// `base_color` is already linear, because that is what glTF's
+	// `baseColorFactor` is and what the shaders now use it as. The tint is
+	// `mesh.color`, which is a script's sRGB value, and it goes through the same
+	// decode the shader applies to it. Multiplying them raw was the old
+	// behaviour, and it is why baking a stand-in colour used to mean choosing
+	// between matching this engine and matching a colour-managed viewer — two
+	// numbers that should be one, and now are.
+	float[4] linear_tint = srgb_to_linear_rgb(tint);
 	float[4] color = {
-		mesh.base_color[0] * tint[0],
-		mesh.base_color[1] * tint[1],
-		mesh.base_color[2] * tint[2],
-		mesh.base_color[3] * tint[3],
+		mesh.base_color[0] * linear_tint[0],
+		mesh.base_color[1] * linear_tint[1],
+		mesh.base_color[2] * linear_tint[2],
+		mesh.base_color[3] * linear_tint[3],
 	};
-	int texture = self.texture_for(node.asset, node.mesh)!;
+	int texture = self.texture_for(node)!;
 	int material = self.material_for(color, texture);
 
 	foreach (&known : self.entries)
@@ -748,12 +760,74 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 }
 
 <*
- The exported texture this mesh samples, or -1.
+ Whether writing this node loses something the file cannot carry.
 
- Keyed on `GpuMesh.texture`, the device slot — which is deduplicated by a hash of
- the decoded image across every loaded file, so two kit packs sharing an atlas
- write it once. The *bytes* come from whichever file is asked first, and they are
- the file's own encoded bytes rather than anything re-encoded here.
+ **A `ShaderMaterial` and nothing else.** This used to be
+ `node.material != DEFAULT_MATERIAL`, which counted a `MeshLambertMaterial` too
+ — and glTF describes one of those perfectly well: a base colour, a texture and a
+ side are exactly what a glTF material is. The result was `scene.export`
+ reporting `shaded: 3025` of 3029 for `examples/village`, a number that says
+ "almost everything lost its shading" about a file where almost nothing had.
+
+ The distinction is the fragment body: a material with one is a Slang pipeline,
+ and glTF describes surfaces rather than programs. A material with none is a
+ texture and a colour, which is a thing the format has.
+*>
+fn bool Exporter.loses_its_shader(&self, uint material)
+{
+	if (material == DEFAULT_MATERIAL) return false;
+	if (material >= self.pass.materials.len()) return false;
+	return self.pass.materials[material].fragment.len > 0;
+}
+
+<*
+ Which device texture slot a node actually draws with.
+
+ **The material's map beats the mesh's own image**, which is the rule
+ `MeshPass.record` follows and the one the exporter used to ignore: it read
+ `GpuMesh.texture` and never looked at the material at all, so a script that put
+ an image on a shape with `new three.MeshLambertMaterial({ map })` exported the
+ shape untextured, or textured with whatever its glTF had brought.
+*>
+fn int Exporter.texture_slot(&self, Node* node)
+{
+	if (node.material != DEFAULT_MATERIAL && node.material < self.pass.materials.len())
+	{
+		int mapped = self.pass.materials[node.material].texture;
+		if (mapped != NO_TEXTURE) return mapped;
+	}
+
+	GpuMesh* mesh = self.pass.assets.mesh(node.asset, node.mesh);
+	return mesh == null ? NO_TEXTURE : mesh.texture;
+}
+
+<*
+ The exported texture this node samples, or -1.
+
+ Keyed on the device slot — which is deduplicated by a hash of the decoded image
+ across every loaded file, so two kit packs sharing an atlas write it once, and
+ so a `.png` on disk and the identical image inside a `.glb` are one entry in the
+ written file as well as one upload on the device.
+
+ ## Two ways to get the bytes, and the second one is why this exists
+
+ **From the source file, when there is one.** A mesh that came from a `.glb`
+ carries its image's encoded bytes in that file's buffer, and copying them across
+ preserves whatever compression the artist chose — re-encoding a JPEG as a PNG
+ would multiply the file size by five for no gain.
+
+ **Off the device, when there is not.** A `DataTexture` has no file behind it, and
+ neither does `three.texture(path)` once it is uploaded — both go straight into
+ the shared table. Before `Texture.read_pixels` existed there was nothing to
+ write, so `scene.export` reported `images: 0` on `examples/village`, a scene
+ whose entire character is eleven generated textures, and reloading it gave a
+ village of flat colours. Now the pixels come back off the device and
+ `png::save_bytes` encodes them, which is a call rather than a project because
+ `image.c3l` was already linked for the screenshot path.
+
+ The readback is the expensive half — a queue idle per distinct texture — and it
+ happens once per *device slot* rather than once per mesh, which is what the
+ cache above it is for.
 
  **The image is written without a name.** A glTF image name is decorative, and
  the source file's is not readable this late: `gltf::Image.name` is a slice into
@@ -763,33 +837,90 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
  could parse, which is a good argument for not carrying decoration across a
  lifetime boundary.
 *>
-fn int? Exporter.texture_for(&self, AssetId id, uint mesh)
+fn int? Exporter.texture_for(&self, Node* node)
 {
-	GpuMesh* gpu_mesh = self.pass.assets.mesh(id, mesh);
-	if (gpu_mesh.texture < 0) return -1;
+	int slot = self.texture_slot(node);
+	if (slot < 0) return -1;
 
 	foreach (&known : self.images)
 	{
-		if (known.device == gpu_mesh.texture) return (int)known.texture;
+		if (known.device == slot) return (int)known.texture;
 	}
 
-	Asset* asset = self.pass.assets.slot(id);
-	if (asset == null || !asset.has_stream || gpu_mesh.gltf_mesh < 0) return -1;
+	char[] encoded = {};
+	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
+	bool own = false;
 
-	int source = source_image_index(asset, gpu_mesh);
-	if (source < 0) return -1;
+	// The source-file path, and only when the slot really is the one this mesh's
+	// own glTF brought. A material's map is a different image entirely, and
+	// reaching for the mesh's source bytes for it would write the wrong picture
+	// — which is worse than writing none.
+	GpuMesh* gpu_mesh = self.pass.assets.mesh(node.asset, node.mesh);
+	Asset* asset = self.pass.assets.slot(node.asset);
+	if (gpu_mesh != null && slot == gpu_mesh.texture && asset != null && asset.has_stream && gpu_mesh.gltf_mesh >= 0)
+	{
+		int source = source_image_index(asset, gpu_mesh);
+		if (source >= 0)
+		{
+			char[]? from_file = asset.stream.get_image_data((uint)source);
+			if (try from_file)
+			{
+				encoded = from_file;
+				mime = asset.stream.gltf.images[source].mimeType;
+			}
+		}
+	}
 
-	char[]? encoded = asset.stream.get_image_data((uint)source);
-	if (catch encoded) return -1;
+	if (encoded.len == 0)
+	{
+		char[]? made = self.encode_from_device(slot);
+		if (catch made) return -1;
+		encoded = made;
+		own = true;
+	}
+	defer if (own) free(encoded);
 
-	gltf::ImageType mime = asset.stream.gltf.images[source].mimeType;
 	uint image = self.out.add_image("", encoded, mime);
 	// No sampler: a texture that names none takes the viewer's default, which is
 	// repeat with mipmapped linear filtering — what `Assets` uploads with.
 	uint texture = self.out.add_texture(image);
-	self.images.push({ .device = gpu_mesh.texture, .texture = texture });
+	self.images.push({ .device = slot, .texture = texture });
 	self.report.images++;
 	return (int)texture;
+}
+
+<*
+ A texture with no file behind it, read off the device and encoded as a PNG.
+
+ PNG rather than JPEG because the pixels are exact and should stay exact: a
+ generated texture is often a pattern with hard edges — a checker, a brick
+ course, a tile grid — and those are what JPEG is worst at. It is also what
+ `image.c3l` can write.
+
+ @return `The encoded bytes, owned by the caller.`
+*>
+fn char[]? Exporter.encode_from_device(&self, int slot)
+{
+	Gpu* gpu = self.pass.assets.gpu;
+	if (gpu == null) return EXPORT_HAS_NOTHING_TO_WRITE~;
+	if (!self.pass.assets.texture_alive(slot)) return EXPORT_HAS_NOTHING_TO_WRITE~;
+
+	Texture* texture = self.pass.assets.texture_at(slot);
+	sz size = (sz)texture.width * (sz)texture.height * 4;
+
+	char[] pixels = mem::new_array(char, size);
+	defer free(pixels);
+	texture.read_pixels(gpu, pixels)!;
+
+	image::Image decoded = {
+		.width = texture.width,
+		.height = texture.height,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		.pixels = pixels,
+		.allocator = mem,
+	};
+	return png::save_bytes(&decoded);
 }
 
 <*

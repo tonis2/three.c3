@@ -660,6 +660,37 @@
 		// something with whatever took its slot.
 		get alive() { return this._t >= 0; }
 
+		// The pixels, copied back off the device, as a Uint8Array of RGBA
+		// bytes — width * height * 4 of them, row by row from the top.
+		//
+		// **The bytes that went in, not the ones the shader sees.** The copy
+		// converts nothing, so a texture made from a DataTexture reads back
+		// byte-for-byte identical to the array it was built from, and a PNG
+		// reads back as the PNG's own pixels. The sampler's sRGB-to-linear
+		// decode happens at sample time and is not in here.
+		//
+		// `into` is optional and exists because this is not free: it copies the
+		// image off the device and waits for the queue, so a caller doing it
+		// repeatedly should hand the same array back rather than allocate one
+		// per call. Without it a fresh Uint8Array is made each time.
+		read(into) {
+			if (this._t < 0) {
+				throw new TypeError('this texture has been disposed — read() it before dispose(), or keep a reference');
+			}
+			const need = this._width * this._height * 4;
+			const out = into === undefined ? new Uint8Array(need) : into;
+			if (!(out instanceof Uint8Array)) {
+				throw new TypeError('texture.read(into) wants a Uint8Array, or nothing at all');
+			}
+			if (out.length < need) {
+				throw new RangeError(
+					`texture.read(into) needs ${need} bytes for this ${this._width}x${this._height} image, `
+					+ `and was given ${out.length}`);
+			}
+			H.textureRead(this._t, out);
+			return out;
+		}
+
 		// Give back the reference this handle holds.
 		//
 		// **Not a free.** The image goes only when nothing names it at all, so
@@ -820,6 +851,49 @@
 			this._map = texture;
 		}
 
+		// How many times the map repeats across a surface, as [u, v].
+		//
+		// **This is why one plane can be a ground.** Nothing scales uvs by
+		// default: a surface maps its texture exactly once, so texel density is
+		// a function of how big the mesh is, and a 128px grass image stretched
+		// over 132 world units is a smear. `examples/village` covered its ground
+		// with 484 separate plane meshes purely to avoid that — one draw call
+		// between them, and 484 nodes to say something one number says.
+		//
+		// **On the material rather than on the texture**, unlike Three.js. Not
+		// for Three.js's reason: textures here are deduplicated by content across
+		// every file, so a brick image loaded twice is deliberately one slot, and
+		// a transform living there would change a wall's tiling because something
+		// unrelated used the same picture.
+		//
+		// Zero throws. It maps every point of the surface to one texel, which is
+		// never what anyone meant and is exactly what an unset field looks like.
+		get repeat() {
+			const [u, v] = H.getMaterialUv(this._m);
+			return [u, v];
+		}
+
+		set repeat(value) {
+			const [u, v] = asPair(value, 'material.repeat');
+			const uv = H.getMaterialUv(this._m);
+			H.setMaterialUv(this._m, u, v, uv[2], uv[3]);
+		}
+
+		// Where the map starts, as [u, v]. One whole repeat is 1, so 0.5 shifts
+		// the image half a tile — which is what an atlas or a scrolling texture
+		// wants, and what stops two neighbouring walls from having visibly the
+		// same crack in the same place.
+		get offset() {
+			const [, , u, v] = H.getMaterialUv(this._m);
+			return [u, v];
+		}
+
+		set offset(value) {
+			const [u, v] = asPair(value, 'material.offset');
+			const uv = H.getMaterialUv(this._m);
+			H.setMaterialUv(this._m, uv[0], uv[1], u, v);
+		}
+
 		static _checkSide(v) {
 			if (v !== FrontSide && v !== BackSide && v !== DoubleSide) {
 				throw new TypeError(
@@ -829,7 +903,13 @@
 		}
 
 		toJSON() {
-			return { type: this.constructor.name, side: this._side, map: this._map?.toJSON() ?? null };
+			return {
+				type: this.constructor.name,
+				side: this._side,
+				map: this._map?.toJSON() ?? null,
+				repeat: this.repeat,
+				offset: this.offset,
+			};
 		}
 	}
 
@@ -2089,6 +2169,49 @@
 	// would half-match it do not exist — `orbit()` and `frameAll()` are names
 	// Three.js does not have, which is `plan.md` §4's rule for a divergence.
 
+	// -------------------------------------------------------------------
+	// The light
+	//
+	// One directional light and an ambient floor, which is the whole model the
+	// shaders implement. Not `scene.add(new three.DirectionalLight(...))`: that
+	// name would promise adding, removing, colouring and duplicating, and this
+	// renderer can do none of them. `plan.md` §4's half-match rule — a name
+	// Three.js does not have is a name nobody expects Three.js's behaviour from.
+	//
+	// `direction` hands back a live Vector3, so `three.light.direction.y = -1`
+	// writes through the same way `mesh.position.y = 1` does. A detached copy
+	// would be the trap the camera avoided by making yaw and pitch throw on
+	// assignment — a property that reads back what you wrote and changes nothing.
+
+	const light = {
+		get direction() {
+			const [x, y, z] = H.lightGet();
+			const v = new Vector3(null, x, y, z);
+			v._o = { _flush() { H.lightSet(v._x, v._y, v._z, H.lightGet()[3]); } };
+			return v;
+		},
+		set direction(v) {
+			const [x, y, z] = readVector(v, 'three.light.direction');
+			H.lightSet(x, y, z, H.lightGet()[3]);
+		},
+
+		// 0 leaves a face turned away from the light black; 1 removes the
+		// shading entirely and everything is its own flat colour.
+		get ambient() { return H.lightGet()[3]; },
+		set ambient(v) {
+			const [x, y, z] = H.lightGet();
+			H.lightSet(x, y, z, +v);
+		},
+
+		// Both at once, because setting them one at a time is two host crossings
+		// and reads worse at a call site that always means one change.
+		set(direction, ambient = H.lightGet()[3]) {
+			const [x, y, z] = readVector(direction, 'three.light.set(direction, ambient)');
+			H.lightSet(x, y, z, +ambient);
+			return light;
+		},
+	};
+
 	const camera = {
 		get fov() { return H.cameraGet()[6]; },
 		set fov(v) {
@@ -2194,6 +2317,31 @@
 		pressed(key) { return H.inputPressed(String(key)); },
 		released(key) { return H.inputReleased(String(key)); },
 
+		// -------------------------------------------------------------------
+		// Pressing keys from a script
+		//
+		// A headless boot has no keyboard, so a scene whose whole subject is
+		// input could not be exercised at all: `examples/village` binds seven
+		// keys to a character, and the only way to test the walking and the
+		// collision was for the scene to hand its internals to a global — a
+		// scene leaking its own state in order to be testable.
+		//
+		// **A held key, not an event.** It stays down until released, exactly as
+		// a finger does, so a walk is `press('w')`, sixty frames, `release('w')`
+		// rather than sixty calls of which one may be forgotten. The edges come
+		// out of the same difference a real key's do, so `pressed`, `released`
+		// and every onKeyDown handler behave identically — there is one
+		// keyboard, not two paths into it.
+		//
+		// It adds to the real keyboard rather than replacing it, so a scripted
+		// demo works with someone still at the keys.
+		press(key) { H.inputHold(String(key), true); },
+		release(key) { H.inputHold(String(key), false); },
+
+		// Let go of everything. What a test calls between cases so one does not
+		// leak a held key into the next.
+		releaseAll() { H.inputReleaseAll(); },
+
 		// What was typed this frame, with modifier chords and the function-key
 		// range already filtered out. This, and not the key map, is what a text
 		// field wants: it has the keyboard layout applied and the shift key
@@ -2245,6 +2393,28 @@
 		Texture,
 		DataTexture,
 		camera,
+		light,
+
+		// How long this script may run before the interrupt stops it, in
+		// milliseconds. 5,000 by default, and raisable to ten minutes.
+		//
+		// **Raise it to simulate, not to build.** Five seconds is generous for a
+		// script that assembles a scene and short for one that steps it: the
+		// check that proved the village's character controller walked 30,000
+		// frames against 120 colliders, and the first attempt at it was killed
+		// by the default — so it had to be cut into pieces that fit the budget
+		// rather than pieces that meant something.
+		//
+		// The ceiling stays because a limit a script can lift entirely is not a
+		// limit, and the whole reason the interrupt exists is that a wedged loop
+		// must be a pause rather than a hang. Asking for more is clamped, not
+		// refused: a caller asking for an hour means "as long as possible", and
+		// throwing would leave them on the default instead.
+		//
+		// Raising it takes effect on the run that raises it — a script does not
+		// know it needs longer until it is already running.
+		get budget() { return H.budgetGet(); },
+		set budget(ms) { H.budgetSet(+ms); },
 
 		// The materials. `Material` is exported for `instanceof`, not to be
 		// constructed: it is the base both concrete kinds share and holds `side`
@@ -2487,6 +2657,77 @@
 
 			// How many bodies the world holds.
 			get count() { return H.physicsCount(); },
+
+			// ---------------------------------------------------------------
+			// Steering a body
+			//
+			// Functions taking the object rather than properties on it, because
+			// a velocity belongs to the body and an object may not have one —
+			// `mesh.velocity` would be a property that exists on everything and
+			// means something on almost nothing.
+			//
+			// **setVelocity assigns and applyImpulse adds**, which is the whole
+			// distinction at a call site. A character sets its velocity every
+			// frame from the keys that are down, because what it wants is a
+			// speed. A jump, an explosion or a bat applies an impulse, because
+			// what it wants is a change to whatever the speed already was.
+			// Using an impulse where a velocity was meant gives something that
+			// accelerates forever.
+
+			// [lx, ly, lz, ax, ay, az] — linear in units per second, angular in
+			// radians per second — or null when the object has no body.
+			//
+			// Null rather than a throw because this gets asked in a loop over
+			// things that may or may not have bodies, and answering with both
+			// velocities at once because a script that wants one usually wants
+			// the other in the same breath.
+			velocity(object) {
+				const target = liveObject(object, 'three.physics.velocity');
+				return H.physicsVelocityGet(target[0], target[1]);
+			},
+
+			// World units per second. Only a dynamic body can be given one: a
+			// static body's inverse mass is zero and a kinematic body is driven
+			// by the transform a script writes, so both throw and say which.
+			setVelocity(object, value) {
+				const target = liveObject(object, 'three.physics.setVelocity');
+				const [x, y, z] = asTriple(value, 'three.physics.setVelocity');
+				H.physicsLinearSet(target[0], target[1], x, y, z);
+				return object;
+			},
+
+			// Radians per second about each world axis; the vector's length is
+			// the rate.
+			setAngularVelocity(object, value) {
+				const target = liveObject(object, 'three.physics.setAngularVelocity');
+				const [x, y, z] = asTriple(value, 'three.physics.setAngularVelocity');
+				H.physicsAngularSet(target[0], target[1], x, y, z);
+				return object;
+			},
+
+			// A push, in mass times velocity, so the same impulse moves a heavy
+			// thing less. `at` is an offset from the body's centre in world
+			// axes, not a world position: give one and the push also tumbles
+			// the body, leave it out and it is a pure shove.
+			applyImpulse(object, impulse, at) {
+				const target = liveObject(object, 'three.physics.applyImpulse');
+				const [x, y, z] = asTriple(impulse, 'three.physics.applyImpulse');
+				const [px, py, pz] = at === undefined
+					? [0, 0, 0]
+					: asTriple(at, 'three.physics.applyImpulse(object, impulse, at)');
+				H.physicsImpulse(target[0], target[1], x, y, z, px, py, pz);
+				return object;
+			},
+
+			// A spin with no shove. Separate from an off-centre applyImpulse
+			// because "make this rotate" should not require solving for an
+			// offset and a force that happen to produce the spin you wanted.
+			applyTorqueImpulse(object, impulse) {
+				const target = liveObject(object, 'three.physics.applyTorqueImpulse');
+				const [x, y, z] = asTriple(impulse, 'three.physics.applyTorqueImpulse');
+				H.physicsTorqueImpulse(target[0], target[1], x, y, z);
+				return object;
+			},
 		},
 
 		// A trigger overlap started or ended:
@@ -2544,6 +2785,21 @@
 		let found = null;
 		liveScene.traverse(o => { if (found === null && o._i === i && o._g === g) found = o; });
 		return found;
+	}
+
+	// A [u, v] pair out of an array or an {x, y}. The two-component sibling of
+	// asTriple, for the texture-space properties: uvs are named u and v and a
+	// caller who wrote {x, y} meant the same thing, so both are taken.
+	function asPair(value, where) {
+		const pair = Array.isArray(value) ? value
+			: (value && typeof value === 'object')
+				? [value.u ?? value.x, value.v ?? value.y]
+				: (typeof value === 'number') ? [value, value]
+				: null;
+		if (pair === null || pair.length < 2 || pair.some(n => !Number.isFinite(Number(n)))) {
+			throw new TypeError(`${where} wants [u, v], an {x, y}, or one number for both`);
+		}
+		return [Number(pair[0]), Number(pair[1])];
 	}
 
 	function asTriple(value, where) {
@@ -2625,7 +2881,9 @@
 			'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 			'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 			'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
+			'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light, no colour per light and no shadow — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
 			'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
+			'Every colour you state is sRGB — the components a colour picker gives. mesh.color = 0xff8040 renders as 0xff8040 under a full light, scene.background = 0x2060a0 screenshots as 0x2060a0, and a texture\'s bytes come back out as the bytes that went in. The shading arithmetic in between is linear and the conversion is the renderer\'s job, so nothing in a script should ever apply a gamma of its own; a scene that pre-corrects its own textures will now be twice corrected.',
 			'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
 			'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
 			'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
@@ -2637,10 +2895,12 @@
 			'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
 			'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. setAnimationLoop(null) stops the clock so a known state can be captured.',
 			'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
+			'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
 			'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
 			'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is where the cursor is. There is no mouseDown and no drag events — the left button orbits the camera, and a press that travels or is held is a drag rather than a click.',
 			'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
 			'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
+			'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
 			'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
 			'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral.',
 			'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
@@ -2660,6 +2920,9 @@
 				properties: [
 					'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
 					'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default)',
+					// three.light rather than a scene property: it is per renderer, like
+					// three.camera, and listing it here would suggest two scenes could
+					// disagree about it.
 				],
 			},
 			Mesh: {
@@ -2690,6 +2953,8 @@
 				properties: [
 					'map (a three.texture, or null; wins over whatever image the mesh itself carries)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide)',
+					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
+					'offset ([u, v]: where the map starts, in whole repeats)',
 				],
 				methods: ['toJSON()'],
 			},
@@ -2706,7 +2971,7 @@
 					+ '256x256 in JavaScript costs about 16ms before any of this, so build at load '
 					+ 'rather than per frame. path is null; the side limit is 8192.',
 				properties: ['width', 'height', 'path (null)', 'alive'],
-				methods: ['dispose()', 'toJSON()', 'toString()'],
+				methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 			},
 			Texture: {
 				construct: 'three.texture(path)',
@@ -2718,9 +2983,10 @@
 					+ 'identical image inside a .glb, are one upload — each call still answers with its '
 					+ 'own handle. Under --assets the path is inside the game directory and cannot climb '
 					+ 'out of it. Put it on something with new three.MeshLambertMaterial({ map }). '
-					+ '16-bit PNGs are refused by name; save as 8-bit.',
+					+ '16-bit PNGs are refused by name; save as 8-bit. read() copies the pixels back '
+					+ 'off the device.',
 				properties: ['width', 'height', 'path', 'alive'],
-				methods: ['dispose()', 'toJSON()', 'toString()'],
+				methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 			},
 			MeshLambertMaterial: {
 				construct: 'new three.MeshLambertMaterial({ map, side })',
@@ -2735,6 +3001,8 @@
 				properties: [
 					'map (a three.texture, or null; settable)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable)',
+					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
+					'offset ([u, v]: where the map starts, in whole repeats)',
 				],
 				methods: ['toJSON()'],
 			},
@@ -2752,6 +3020,8 @@
 					'fragment',
 					'map (a three.texture, or null; sampled as Surface.albedo before your shade() runs)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
+					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
+					'offset ([u, v]: where the map starts, in whole repeats)',
 				],
 				methods: ['toJSON()'],
 			},
@@ -3099,6 +3369,58 @@
 			'[x, y, z], y-up, read and written as an array. Set once at boot; it is a world setting and not a transform, which is why it is not a live Vector3.',
 		'three.physics.count':
 			'How many bodies the world holds.',
+		'three.budget':
+			'How long this script may run before the interrupt stops it, in milliseconds. 5,000 by default. '
+			+ 'Raise it to SIMULATE, not to build: five seconds is generous for assembling a scene and short '
+			+ 'for stepping one — a check that walks a character 30,000 frames against its colliders needs '
+			+ 'minutes, and being forced under five seconds means cutting it into pieces that fit the budget '
+			+ 'rather than pieces that mean something. Raising it applies to the run that raises it, because '
+			+ 'a script does not know it needs longer until it is already running. Ten minutes is the ceiling '
+			+ 'and asking for more clamps rather than throws; zero or negative throws, because there is no way '
+			+ 'to turn the interrupt off. It does not reach the animation callback, which keeps its own 100 ms '
+			+ 'so that one slow frame is a stutter rather than a hang.',
+		'material.repeat / material.offset':
+			'How the map is laid across a surface. repeat is [u, v] — or one number for both — and is how '
+			+ 'many times the image is tiled; offset is [u, v] in whole repeats, for shifting it. Without '
+			+ 'this a surface maps its texture exactly ONCE, so texel density is a function of how big the '
+			+ 'mesh is and a 128px image across 100 units is a smear — the way round it used to be cutting '
+			+ 'the surface into hundreds of small meshes. On the MATERIAL, not on the texture as in '
+			+ 'Three.js: textures here are deduplicated by content across every file, so a transform on '
+			+ 'the texture would change every unrelated surface that used the same picture. Two densities '
+			+ 'of one image is two materials, which is what they already had to be. A repeat of zero '
+			+ 'throws — it maps the whole surface onto one texel.',
+		'texture.read(into)':
+			'The pixels, copied back off the device: a Uint8Array of width * height * 4 RGBA bytes. '
+			+ 'The bytes that went IN, not the ones the shader sees — the copy converts nothing, so a '
+			+ 'DataTexture reads back byte-for-byte identical to the array it was built from and a PNG '
+			+ 'reads back as its own pixels; the sRGB decode happens at sample time and is not in here. '
+			+ '`into` is optional and lets you reuse a buffer: this copies off the device and waits for '
+			+ 'the queue, so it belongs at load or in a test rather than in a frame. It is also what '
+			+ 'makes a texture testable and what lets scene.export write a generated one.',
+		'three.physics.velocity(object)':
+			'[lx, ly, lz, ax, ay, az] — linear in world units per second, angular in radians per second — or '
+			+ 'null when the object has no body. Both at once because a script that wants one usually wants '
+			+ 'the other; null rather than a throw because this gets asked in a loop over things that may or '
+			+ 'may not have bodies.',
+		'three.physics.setVelocity(object, [x, y, z])':
+			'Assign a body\'s speed, in world units per second. This is what a character uses: set it every '
+			+ 'frame from the keys that are down, because what you want is a speed. Only a dynamic body can '
+			+ 'be given one — a static body\'s inverse mass is zero so nothing would happen, and a kinematic '
+			+ 'body is driven by the transform your script writes so it would be discarded a fraction of a '
+			+ 'step later. Both throw and say which. The solver recomputes the velocity from what actually '
+			+ 'happened at the end of every step, so this survives one integration by design.',
+		'three.physics.setAngularVelocity(object, [x, y, z])':
+			'Radians per second about each world axis; the vector\'s length is the rate. Same dynamic-only '
+			+ 'rule as setVelocity.',
+		'three.physics.applyImpulse(object, [x, y, z], at)':
+			'A push, in mass times velocity — so the same impulse moves a heavy thing less, and this is what '
+			+ 'a jump, a bat or an explosion wants rather than setVelocity. It ADDS to whatever the body was '
+			+ 'already doing. `at` is optional and is an offset from the body\'s centre in world axes, not a '
+			+ 'world position: give one and the push tumbles the body as well as shoving it. A sleeping body '
+			+ 'is woken first, so a settled crate and a rolling one answer the same push the same way.',
+		'three.physics.applyTorqueImpulse(object, [x, y, z])':
+			'A spin with no shove, so "make this rotate" does not mean solving for an offset and a force '
+			+ 'that happen to produce the spin you wanted.',
 		'object.body':
 			'What kind of body three.physics.add would give this object, and what it gave it: { shape, mass, friction, restitution, kind }. Set it yourself to describe one, or read it back after add to see the defaults filled in. null once the body is removed.',
 		'three.onTrigger(fn)':
@@ -3172,6 +3494,17 @@
 				+ 'the orbit distance and from the scene\'s own bounds, every time the camera moves. They '
 				+ 'are worth reading when something has stopped being drawn — geometry beyond far is not '
 				+ 'dim, it is absent, and it is culled as well as clipped, so stats().culledLastFrame moves too.',
+			'three.light.direction / three.light.ambient':
+				'The one directional light. direction is a world-space surface-to-light vector — the way a '
+				+ 'face has to point to be fully lit — and is a live Vector3, so three.light.direction.y = -1 '
+				+ 'writes through. It is not normalized, so it reads back as you wrote it, and a zero one '
+				+ 'throws rather than making every shaded pixel a NaN. ambient is the floor a face turned '
+				+ 'right away from the light gets, 0 to 1: at 0 it is black, at 1 there is no shading at all '
+				+ 'and everything is its own flat colour. Defaults to [0.35, 0.8, 0.45] and 0.25.',
+			'three.light.set(direction, ambient)':
+				'Both at once. ambient may be omitted to leave it alone. There is no second light, no colour '
+				+ 'per light and no shadow, which is why this is not scene.add(new DirectionalLight(...)) — '
+				+ 'a name Three.js has would be read as a promise of the three things it cannot do.',
 			'three.FrontSide / three.BackSide / three.DoubleSide':
 				'The values material.side takes — 0, 1 and 2, the same numbers Three.js gives them. '
 				+ 'BackSide keeps the back faces, which is what makes a sphere visible from inside: it is '

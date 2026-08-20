@@ -168,9 +168,13 @@ fn void the_material_push_block_keeps_the_mesh_contract() @test
 	test::@check(tint != null && time != null, "both uniforms are in the block");
 	if (tint == null || time == null) return;
 
-	test::@check(tint.offset == 60 && tint.size == 12, "tint is at 60+12, got %d+%d", tint.offset, tint.size);
-	test::@check(time.offset == 72 && time.size == 4, "time is at 72+4, got %d+%d", time.offset, time.size);
-	test::@check(mod.layout.push_size == 76, "the block is 76 bytes, got %d", mod.layout.push_size);
+	uint start = three::MATERIAL_PUSH_START;
+	test::@check(tint.offset == start && tint.size == 12,
+		"tint is at %d+12, got %d+%d", start, tint.offset, tint.size);
+	test::@check(time.offset == start + 12 && time.size == 4,
+		"time is at %d+4, got %d+%d", start + 12, time.offset, time.size);
+	test::@check(mod.layout.push_size == start + 16,
+		"the block is %d bytes, got %d", start + 16, mod.layout.push_size);
 	test::@check(
 		mod.layout.push_size <= three::PUSH_BUDGET,
 		"and inside the 128 every device offers, got %d",
@@ -196,7 +200,8 @@ fn void a_material_without_uniforms_is_exactly_the_mesh_push_block() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.push_size == 60, "60 bytes, the same as mesh.slang, got %d", mod.layout.push_size);
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START,
+		"%d bytes, the same as mesh.slang, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(
 		mod.layout.push_fields.len() == three::MESH_PUSH_FIELDS.len,
 		"and %d fields, got %d",
@@ -239,7 +244,11 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
 	uint[4] expected_size = { 4, 8, 12, 16 };
-	uint[4] expected_offset = { 60, 64, 72, 84 };
+	// Relative to where the mesh contract stops, not absolute: the four are
+	// packed end to end from there, and `MATERIAL_PUSH_START` moved once already
+	// when `uv_transform` joined the pinned fields.
+	uint start = three::MATERIAL_PUSH_START;
+	uint[4] expected_offset = { start, start + 4, start + 12, start + 24 };
 	String[4] names = { "one", "two", "three", "four" };
 
 	foreach (i, name : names)
@@ -259,7 +268,9 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 		);
 	}
 
-	test::@check(mod.layout.push_size == 100, "the block is 100 bytes, got %d", mod.layout.push_size);
+	// The four sizes end to end, on top of the mesh contract.
+	test::@check(mod.layout.push_size == start + 40,
+		"the block is %d bytes, got %d", start + 40, mod.layout.push_size);
 }
 
 <*
@@ -521,7 +532,8 @@ fn void a_uniform_named_after_a_swizzle_cannot_reach_the_template() @test
 
 	test::@check(mod.ok, "the substitution stopped at the end of the body: %s", mod.diagnostic);
 	three::ShaderField* field = mod.layout.field_of("a");
-	test::@check(field != null && field.offset == 60, "and the uniform is still in the block");
+	test::@check(field != null && field.offset == three::MATERIAL_PUSH_START,
+		"and the uniform is still in the block, at %d", field == null ? -1 : (int)field.offset);
 }
 
 // ============================================================================
@@ -666,29 +678,32 @@ fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
 
  **69 bytes is not reachable and that is not a gap in the test.** A uniform is
  one to four floats, so the total is always a multiple of four; the first size
- that does not fit is 72, and that is the one asserted. The message has to carry
+ that does not fit is 56, and that is the one asserted. The message has to carry
  both numbers, because "too many uniforms" leaves the agent to guess which one to
  drop.
 *>
 fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 {
 	test::@check(
-		three::MATERIAL_UNIFORM_BUDGET == 68,
-		"the budget is 68 bytes, got %d",
+		three::MATERIAL_UNIFORM_BUDGET == three::PUSH_BUDGET - three::MATERIAL_PUSH_START,
+		"the budget is what the mesh contract leaves, got %d",
 		three::MATERIAL_UNIFORM_BUDGET
 	);
 
-	three::MaterialUniform[5] exact = {
-		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 }, { "a4", 1, 1 },
+	// Thirteen floats, which is the whole 52 the mesh contract leaves. It was
+	// seventeen until `uv_transform` became a pinned field and took 16 bytes off
+	// the top — the trade is argued at `MATERIAL_UNIFORM_BUDGET`.
+	three::MaterialUniform[4] exact = {
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 1, 1 },
 	};
 	test::@check(
 		three::material_uniform_bytes(exact[..]) == three::MATERIAL_UNIFORM_BUDGET,
-		"seventeen floats is the whole budget, got %d",
+		"thirteen floats is the whole budget, got %d",
 		three::material_uniform_bytes(exact[..])
 	);
 
 	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * a0.rgb * a1.rgb * a2.rgb * a3.rgb * a4; }`,
+		`float3 shade(Surface s) { return s.albedo * a0.rgb * a1.rgb * a2.rgb * a3; }`,
 		exact[..]
 	)!!;
 	defer source.free(mem);
@@ -703,15 +718,15 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		three::PUSH_BUDGET
 	);
 
-	three::MaterialUniform[6] over = {
-		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 }, { "a4", 1, 1 }, { "a5", 1, 1 },
+	three::MaterialUniform[5] over = {
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 1, 1 }, { "a4", 1, 1 },
 	};
 	String? refused_source = three::material_source(PLAN_EXAMPLE, over[..]);
 	fault refused = @catch(refused_source);
 
 	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "one float more is refused, got %s", refused);
 	test::@check(
-		three::material_diagnostic().contains("72") && three::material_diagnostic().contains("68"),
+		three::material_diagnostic().contains("56") && three::material_diagnostic().contains("52"),
 		"saying how many bytes were asked for and how many exist: %s",
 		three::material_diagnostic()
 	);
@@ -734,7 +749,11 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 *>
 fn void a_uniform_with_rows_becomes_an_array() @test
 {
-	three::MaterialUniform[2] uniforms = { { "palette", 3, 4 }, { "sheen", 1, 4 } };
+	// Three rows rather than four: two columns of four rows is 64 bytes, and the
+	// budget is 52 since `uv_transform` joined the mesh contract. Three keeps
+	// both columns, which is what this check is really about — one column would
+	// not exercise "every array in one material is a column of the same table".
+	three::MaterialUniform[2] uniforms = { { "palette", 3, 3 }, { "sheen", 1, 3 } };
 
 	String source = three::material_source(
 		`float3 shade(Surface s) { return palette[s.variant] * (lambert(s.normal) + sheen[s.variant]); }`,
@@ -742,18 +761,18 @@ fn void a_uniform_with_rows_becomes_an_array() @test
 	)!!;
 	defer source.free(mem);
 
-	test::@check(source.contains("float3 palette[4];"), "the column is declared as an array:\n%s", source);
-	test::@check(source.contains("float sheen[4];"), "and so is the second one");
-	test::@check(source.contains("MATERIAL_ROWS = 4u"), "and the row count is generated");
+	test::@check(source.contains("float3 palette[3];"), "the column is declared as an array:\n%s", source);
+	test::@check(source.contains("float sheen[3];"), "and so is the second one");
+	test::@check(source.contains("MATERIAL_ROWS = 3u"), "and the row count is generated");
 
 	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "a table compiles: %s", mod.diagnostic);
 
-	// 16 floats of table plus the 60 the mesh contract pins.
+	// 12 floats of table on top of what the mesh contract pins.
 	three::ShaderField* field = mod.layout.field_of("palette");
 	test::@check(field != null, "the column reflects");
-	test::@check(field.size == 48, "as all four rows of three floats, got %d bytes", field == null ? 0 : field.size);
+	test::@check(field.size == 36, "as all three rows of three floats, got %d bytes", field == null ? 0 : field.size);
 	test::@check(
 		field.offset >= three::MATERIAL_PUSH_START,
 		"after the mesh contract, at %d", field == null ? 0 : field.offset

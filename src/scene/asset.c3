@@ -1719,6 +1719,9 @@ fn GpuMesh? Assets.upload_primitive(
 		if (material_index < stream.gltf.materials.len())
 		{
 			gltf::Material material = stream.gltf.materials[material_index];
+			// Straight across, no transfer function: glTF defines
+			// `baseColorFactor` linear and the shaders use `base_color` linear.
+			// The one colour in this project that is *not* in a script's units.
 			out.base_color = {
 				material.baseColorFactor[0],
 				material.baseColorFactor[1],
@@ -2142,7 +2145,9 @@ fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
 		.vertex_count = 3,
 		.index_count = 3,
 		.has_normals = true,
-		.base_color = { 0.85, 0.55, 0.25, 1.0 },
+		// sRGB, converted here: `base_color` is a linear factor, because glTF's
+		// `baseColorFactor` is one. Written as the orange it looks like.
+		.base_color = srgb_to_linear_rgb({ 0.85, 0.55, 0.25, 1.0 }),
 		.texture = -1,
 		.bounds = { .min = { -0.5, -0.5, 0 }, .max = { 0.5, 0.5, 0 } },
 	};

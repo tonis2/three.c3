@@ -59,6 +59,10 @@ struct PushData
     float2* uvs;
     float4 base_color;      // rgb: albedo factor. a: the alpha `fragmentMain` returns.
     uint flags;
+    // xy repeat, zw offset. See `mesh.slang`. It is one of the **eight** fields
+    // the mesh contract pins now, so material uniforms still only ever go after
+    // it — and there are 52 bytes left for them rather than 68.
+    float4 uv_transform;
     //@uniforms
 };
 [vk_push_constant] const PushData push;
@@ -122,6 +126,18 @@ struct VertexOutput
 // thing that gives a variant meaning.
 //@rows
 
+// The sRGB decode. `mesh.slang` carries the same function and the whole argument
+// for it; this copy exists for the same reason `lambert` below is a copy, which
+// is that a material is a change of *shading* and not a second renderer. If the
+// two ever disagree, a `ShaderMaterial` whose body is the default
+// `s.albedo * lambert(s.normal)` stops matching no material at all.
+float3 srgb_to_linear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow(max(c + 0.055, 0.0) / 1.055, 2.4);
+    return lerp(hi, lo, step(c, 0.04045));
+}
+
 // `mesh.slang`'s light as a single factor, so a body can ask for the default
 // look without reproducing it. `return s.albedo * lambert(s.normal);` is the
 // same arithmetic `mesh.slang`'s `fragmentMain` performs — which is the property
@@ -182,15 +198,20 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // folds it: a body that writes `return s.albedo * lambert(s.normal)` — the
     // default look — respects `mesh.color` without knowing it exists, and a body
     // that wants the raw value has `s.color`.
-    s.albedo = push.base_color.rgb * input.color.rgb;
+    // **The transform is applied to the sample and to `s.uv` alike.** A body that
+    // samples its own texture with `s.uv` has to land on the same texel the
+    // default shading does, or `material.repeat` would mean one thing without a
+    // custom body and nothing at all with one.
+    float2 uv = input.uv * push.uv_transform.xy + push.uv_transform.zw;
+    s.albedo = push.base_color.rgb * srgb_to_linear(input.color.rgb);
     if ((push.flags & FLAG_HAS_UVS) != 0)
     {
-        s.albedo *= base_color_map.Sample(input.uv).rgb;
+        s.albedo *= base_color_map.Sample(uv).rgb;
     }
     s.normal = normalize(input.normal);
-    s.uv = input.uv;
+    s.uv = uv;
     s.position = input.world;
-    s.color = input.color;
+    s.color = float4(srgb_to_linear(input.color.rgb), input.color.a);
     // Clamped once, here, rather than at each use: an out-of-range index into a
     // push-constant array is undefined behaviour that reads whatever is next in
     // the block — a wrong colour with no error anywhere, which is precisely the

@@ -79,6 +79,16 @@ fn void KeyBits.set(&self, c3w::EventKey key)
 	self.word[at / 64] |= 1UL << (at % 64);
 }
 
+// The other half of `set`, and it exists for `SyntheticKeys`: a script letting
+// go of a key is the only thing in this file that takes a bit *out*. Real input
+// never needs it, because a frame's `down` is rebuilt from the window rather
+// than edited.
+fn void KeyBits.clear(&self, c3w::EventKey key)
+{
+	usz at = key.ordinal;
+	self.word[at / 64] &= ~(1UL << (at % 64));
+}
+
 fn bool KeyBits.has(&self, c3w::EventKey key)
 {
 	usz at = key.ordinal;
@@ -160,6 +170,120 @@ struct InputTracker
 {
 	KeyBits previous;
 	MouseTracker mouse;
+}
+
+<*
+ Keys a *script* is holding down, folded into the frame beside the real ones.
+
+ ## Why this exists
+
+ A headless boot has no keyboard, so a scene whose whole subject is input could
+ not be exercised at all. `examples/village` binds seven keys to a character and
+ the only way to test the walking and the collision was for the scene to hand its
+ internals to `globalThis.village` — a scene deliberately leaking its own state
+ in order to be testable, which is the smell rather than the fix. The sweep that
+ this made possible found a 13% collision failure rate that no amount of playing
+ the scene by hand had surfaced, which is the argument for it in one number.
+
+ ## It is a held set, not an event
+
+ `press(key)` puts a key down and it **stays** down until `release(key)`, exactly
+ as a finger does. That is what makes it usable: a walk is "hold w for sixty
+ frames", and an API where every frame needed its own call would be one where
+ forgetting a frame looks like the character stuttering.
+
+ The edges fall out of the same difference `InputTracker` computes for real keys,
+ so `pressed`, `released` and every `onKeyDown` handler behave identically —
+ there is no second path through the input system to get out of step with. A
+ press and a release inside one frame is still reported as both, through
+ `fired_down` and `fired_up`, for the same reason the window's event queue is
+ unioned in rather than replacing the latch.
+
+ ## It adds to the real keyboard rather than replacing it
+
+ A window that is open still works while a script is holding keys, which is what
+ a replay or a scripted demo wants — and what a test never notices, because there
+ is no window.
+*>
+struct SyntheticKeys
+{
+	KeyBits held;
+	KeyBits previous;
+	// Presses and releases that happened between frames, so one that began and
+	// ended without a frame in between is not lost.
+	KeyBits fired_down;
+	KeyBits fired_up;
+	// Whether anything has ever been pressed. A frame pays nothing until a
+	// script uses this at all.
+	bool active;
+}
+
+<*
+ Hold a key down, or let it go.
+
+ @param down : `True to press, false to release. Pressing a key already held is not an error and fires no second edge — a real key does the same.`
+*>
+fn void SyntheticKeys.hold(&self, KeyName row, bool down)
+{
+	self.active = true;
+	bool was = self.held.has(row.key);
+	if (down == was) return;
+
+	if (down)
+	{
+		self.held.set(row.key);
+		self.fired_down.set(row.key);
+	}
+	else
+	{
+		self.held.clear(row.key);
+		self.fired_up.set(row.key);
+	}
+}
+
+<*
+ Let go of everything.
+
+ What a test calls between cases so one does not leak a held key into the next,
+ and what a script calls when it hands control back to a person.
+*>
+fn void SyntheticKeys.release_all(&self)
+{
+	self.fired_up = self.fired_up.with(self.held);
+	self.held = {};
+	self.active = true;
+}
+
+<*
+ Fold this frame's script-held keys into what the window reported.
+
+ The union is taken on `down` and both edges recomputed from it, rather than
+ or-ing the edges the caller already computed: a key held by a script across a
+ frame boundary must not report a second press, and one the window is also
+ holding must not report two. Recomputing from the merged `down` is the only
+ form of that which cannot double-count.
+
+ @param real : `What the window said this frame, already stepped. Empty for a headless host.`
+*>
+fn InputState SyntheticKeys.merge(&self, InputState real)
+{
+	if (!self.active) return real;
+
+	KeyBits down = real.down.with(self.held);
+	KeyBits previous = real.down.without(real.pressed).with(self.previous);
+
+	InputState merged = {
+		.down = down,
+		.pressed = down.without(previous).with(real.pressed).with(self.fired_down),
+		.released = previous.without(down).with(real.released).with(self.fired_up),
+		.text = real.text,
+		.mouse = real.mouse,
+	};
+
+	self.previous = self.held;
+	self.fired_down = {};
+	self.fired_up = {};
+	return merged;
 }
 
 <*

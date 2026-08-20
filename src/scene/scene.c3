@@ -865,7 +865,7 @@ fn void Scene.set_material(&self, NodeId id, uint material)
  per colour change, which for a script recolouring a thousand nodes is a
  thousand of them.
 
- @param color : `Linear rgb and an alpha. Multiplies albedo; the alpha reaches shade() and is not blended with.`
+ @param color : `sRGB rgb and an alpha - the components a colour picker gives, not linear ones. The shaders decode it before it multiplies albedo, so 0xff8040 renders as 0xff8040 under a full light; see gpu/color.c3. The alpha reaches shade() untransferred - coverage is not a colour - and is still not blended with.`
 *>
 fn void Scene.set_color(&self, NodeId id, float[4] color)
 {
@@ -1088,6 +1088,80 @@ fn collision::Aabb3 transform_aabb(Matrix4f m, collision::Aabb3 box)
 	return { .min = world_centre - world_extent, .max = world_centre + world_extent };
 }
 
+<*
+ The tight world-space box of one mesh under one transform.
+
+ ## Why this is not `transform_aabb`
+
+ `transform_aabb` re-bounds a *box*: it takes the mesh's local AABB, rotates its
+ extent and takes the axis-aligned hull of the result. That is exact only when
+ the shape genuinely fills its box, or when the rotation is a multiple of 90
+ degrees — and it is conservative rather than wrong, which is why it stays in the
+ two places that want conservative.
+
+ It is the wrong answer for *measuring*, and the failure is sharp rather than
+ marginal. `ConeGeometry(1, 1, 4)` is a square pyramid whose base sits corner-on
+ to the axes; turn it 45 degrees, which is exactly what makes it a hip roof, and
+ re-bounding the box reports a half-extent of 1.414 where the truth is 0.707.
+ Doubled. `examples/village` is full of that shape at that angle and its church
+ reported a minimum z of -49 for a spire that stops at -45.8.
+
+ That number is not merely reported: `align`, `alignTo`, `frameAll` and
+ `BoxHelper` all place things with it, so `align('y', 'min', 0)` on a rotated
+ pyramid floats the piece half a unit off the ground — and the helper drawn to
+ check it agrees, because it is reading the same wrong box.
+
+ So this bounds the transformed *vertices*. `hull_positions` is every position
+ the mesh has, kept on the CPU for picking (see `GpuMesh.build_bvh`, which copies
+ the lot rather than reducing to a hull), so the pass is exact and needs nothing
+ uploaded or cached.
+
+ ## The fallback, and why nothing in the public API reaches it
+
+ `hull_positions` is filled by `upload_primitive`, so a mesh that has not been
+ uploaded has nothing to bound but its local AABB — the accessor's `min`/`max`
+ and no more. This returns the conservative box in that case rather than
+ pretending to an exactness it does not have.
+
+ **Every node in a scene is past that point.** `Scene.create_slot` retains the
+ mesh it names, `Assets.retain` calls `ensure_uploaded`, and `boundingBox()`
+ throws unless the object is in a scene. Generated shapes are further still:
+ `Assets.primitive` builds and uploads in one step. So the fallback covers a
+ device-less runtime and an upload that failed and was swallowed — the two states
+ in which a wrong-but-valid box beats no box — and not a state a script can put
+ an object into and then measure.
+
+ That matters because the alternative would have been to force an upload here,
+ and that is the change that would have quietly cost something: `frame_camera`
+ runs at startup, so measuring would have pulled every mesh in a file onto the
+ device at load and `measuring_a_loaded_mesh_does_not_upload_it` would have gone
+ red — which is exactly the assertion that exists to keep the loader lazy.
+*>
+fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
+{
+	if (mesh.hull_positions.len == 0) return transform_aabb(m, mesh.bounds);
+
+	float[<16>] v = m.m;
+	collision::Aabb3 box;
+	foreach (i, p : mesh.hull_positions)
+	{
+		Vec3 world = {
+			v[0] * p.x + v[4] * p.y + v[8] * p.z + v[12],
+			v[1] * p.x + v[5] * p.y + v[9] * p.z + v[13],
+			v[2] * p.x + v[6] * p.y + v[10] * p.z + v[14],
+		};
+		if (i == 0)
+		{
+			box = { .min = world, .max = world };
+		}
+		else
+		{
+			box.expand_by_point(world);
+		}
+	}
+	return box;
+}
+
 // ============================================================================
 // The instance table
 // ============================================================================
@@ -1160,6 +1234,11 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 		// answer a material whose texture would not decode gets.
 		if (!mesh.uploaded) continue;
 
+		// **Conservative on purpose, unlike the measuring paths.** A box that is
+		// too big keeps a draw that could have been skipped; a box that is too
+		// small drops geometry the camera can see. `world_mesh_bounds` would be
+		// tighter and would cost a pass over every vertex of every node every
+		// frame to save a handful of draws, which is the trade backwards.
 		if (frustum != null && !frustum.contains(transform_aabb(node.world, mesh.bounds)))
 		{
 			self.culled++;
@@ -1319,7 +1398,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
-		collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+		collision::Aabb3 box = world_mesh_bounds(node.world, mesh);
 		if (!found)
 		{
 			total = box;
@@ -1380,7 +1459,7 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh != null)
 		{
-			collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+			collision::Aabb3 box = world_mesh_bounds(node.world, mesh);
 			if (!*found)
 			{
 				*total = box;

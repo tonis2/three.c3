@@ -5,8 +5,19 @@
 	three.physics.add(mesh)
 	three.physics.remove(mesh)
 	three.physics.gravity = [0, -9.8, 0]
+	three.physics.velocity(mesh)                     // and setVelocity
+	three.physics.applyImpulse(mesh, [0, 5, 0])
 	three.onTrigger(e => ...)
 	three.onContact(e => ...)
+
+ **Velocity and impulse are what make a character possible**, and until they
+ were bound there was no combination of the verbs above that both walks and
+ collides: a dynamic body could be dropped and watched but never steered, and a
+ kinematic one was steered but never stopped. The solver had
+ `apply_linear_impulse` and `linear_velocity` all along
+ (`collision.c3l` `solver/resolver.c3`); nothing here reached them, so
+ `examples/village` walked its character with 123 hand-registered circles and
+ rectangles resolved in JavaScript every frame.
 
  **Events reuse the keyboard's machinery** (G5/S7), which is the whole of this
  file's second half: same registration shape, same "a handler that throws is
@@ -21,6 +32,7 @@ module three;
 
 import std::io;
 import std::collections::object;
+import std::core::string;
 import collision;
 import qjs;
 import std::math::vector;
@@ -33,6 +45,11 @@ fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
 	self.bind(host, "physicsGravityGet", &js_physics_gravity_get, 0);
 	self.bind(host, "physicsCount", &js_physics_count, 0);
 	self.bind(host, "physicsTransform", &js_physics_transform, 2);
+	self.bind(host, "physicsVelocityGet", &js_physics_velocity_get, 2);
+	self.bind(host, "physicsLinearSet", &js_physics_linear_set, 5);
+	self.bind(host, "physicsAngularSet", &js_physics_angular_set, 5);
+	self.bind(host, "physicsImpulse", &js_physics_impulse, 8);
+	self.bind(host, "physicsTorqueImpulse", &js_physics_torque_impulse, 5);
 	self.bind(host, "onTrigger", &js_on_trigger, 1);
 	self.bind(host, "onContact", &js_on_contact, 1);
 }
@@ -218,6 +235,220 @@ fn void js_physics_transform(
 	js.set_index(six, 4, qjs::number_value((double)euler.y));
 	js.set_index(six, 5, qjs::number_value((double)euler.z));
 	*out = six;
+}
+
+// ---------------------------------------------------------------------------
+// Velocity and impulse
+//
+// Five verbs over three solver calls. What they share is the guard: each one
+// resolves the node, refuses a body the solver does not integrate, and wakes the
+// island before touching anything. Skipping the wake is the failure worth naming
+// twice — a sleeping body absorbs an impulse into a number nothing reads, so the
+// same line of script works on a rolling crate and does nothing at all to a
+// settled one, which reads as the verb being unreliable rather than as sleep.
+
+<*
+ Resolve a node to a body that may be pushed, or raise saying why not.
+
+ Three different refusals rather than one, because they are three different
+ mistakes and the fix for each is a different line of script.
+*>
+fn collision::Rigidbody* pushable(
+	JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, qjs::Value* out, String verb
+) @local
+{
+	NodeId id = arg_handle(self, js, argc, args, 0, out);
+	if (!id.is_set()) return null;
+
+	PhysicsBody* body = self.physics.body_for(id);
+	if (body == null)
+	{
+		*out = js.raise(string::tformat("%s needs a body — three.physics.add(object) first", verb));
+		return null;
+	}
+	if (body.kind == BodyKind.STATIC)
+	{
+		*out = js.raise(string::tformat(
+			"%s cannot move a static body: its inverse mass is zero, so an impulse is arithmetically nothing. Give it a mass, or move its transform directly",
+			verb
+		));
+		return null;
+	}
+	if (body.kind == BodyKind.KINEMATIC)
+	{
+		*out = js.raise(string::tformat(
+			"%s cannot move a kinematic body: the solver drives it from the transform your script writes, so a velocity set here is discarded a fraction of a step later. Move object.position instead",
+			verb
+		));
+		return null;
+	}
+	if (body.kind == BodyKind.TRIGGER)
+	{
+		*out = js.raise(string::tformat("%s cannot move a trigger: a trigger detects overlaps and is never integrated", verb));
+		return null;
+	}
+
+	collision::Rigidbody* rigid = self.physics.rigidbody_for(id);
+	if (rigid == null)
+	{
+		*out = js.raise(string::tformat("%s found the body's record but not the solver's, which should not happen", verb));
+		return null;
+	}
+	self.physics.wake(rigid);
+	return rigid;
+}
+
+<*
+ `physicsVelocityGet(index, generation)` — `[lx, ly, lz, ax, ay, az]`, or null.
+
+ Null rather than a raise for the same reason `physicsTransform` answers null: a
+ getter is asked in a loop over things that may or may not have bodies, and
+ making that a throw would mean writing the check twice in every such loop.
+
+ Both velocities in one array rather than two crossings, because a script that
+ wants one usually wants the other in the same breath — a character reads linear
+ to decide whether it is moving and angular to decide whether it has been spun.
+
+ Answers for every kind of body, unlike the setters. Reading a kinematic body's
+ velocity is how a script finds out how fast the transform it is writing is
+ actually carrying the thing, which is a real question with a real answer.
+*>
+fn void js_physics_velocity_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	collision::Rigidbody* rigid = self.physics.rigidbody_for(id);
+	if (rigid == null)
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	qjs::Value six = js.array();
+	js.set_index(six, 0, qjs::number_value((double)rigid.linear_velocity.x));
+	js.set_index(six, 1, qjs::number_value((double)rigid.linear_velocity.y));
+	js.set_index(six, 2, qjs::number_value((double)rigid.linear_velocity.z));
+	js.set_index(six, 3, qjs::number_value((double)rigid.angular_velocity.x));
+	js.set_index(six, 4, qjs::number_value((double)rigid.angular_velocity.y));
+	js.set_index(six, 5, qjs::number_value((double)rigid.angular_velocity.z));
+	*out = six;
+}
+
+<*
+ `physicsLinearSet(index, generation, x, y, z)` — units per second, world space.
+
+ **Assignment, not addition**, and that is the difference from an impulse that
+ matters at a call site. A character sets its velocity every frame from the keys
+ that are down, because what it wants is a speed; a explosion applies an impulse,
+ because what it wants is a change to whatever the speed already was. Getting
+ this backwards gives a character that accelerates forever.
+
+ The solver reconstructs `linear_velocity` from the position delta at the end of
+ every step (`resolver.c3`'s `body.linear_velocity = (position - prev) * inv_dt`),
+ so what is written here survives exactly one integration and then becomes
+ whatever actually happened — which is the right behaviour and the reason a
+ character sets it again next frame rather than once.
+*>
+fn void js_physics_linear_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.setVelocity");
+	if (rigid == null) return;
+
+	rigid.linear_velocity = {
+		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+	};
+}
+
+<*
+ `physicsAngularSet(index, generation, x, y, z)` — radians per second about each
+ world axis, the vector's length being the rate.
+*>
+fn void js_physics_angular_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.setAngularVelocity");
+	if (rigid == null) return;
+
+	rigid.angular_velocity = {
+		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+	};
+}
+
+<*
+ `physicsImpulse(index, generation, x, y, z, px, py, pz)` — a push, in
+ mass-times-velocity, at an offset from the body's centre.
+
+ **The offset is what makes it spin.** `apply_impulse` splits into a linear term
+ scaled by the inverse mass and an angular one from `point.cross(impulse)`, so an
+ offset of zero is a pure shove and an offset out at the rim is a shove that also
+ tumbles the thing. The prelude passes zero when the script gave no point, so
+ there is one verb here rather than two that differ by a cross product.
+
+ The offset is relative to the body's centre and in world axes — not a world
+ position, which would be the same numbers meaning something completely
+ different for anything not sitting at the origin.
+*>
+fn void js_physics_impulse(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.applyImpulse");
+	if (rigid == null) return;
+
+	Vec3 impulse = {
+		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+	};
+	Vec3 point = {
+		arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7)
+	};
+
+	if (point.length_sq() == 0.0f)
+	{
+		rigid.apply_linear_impulse(impulse);
+		return;
+	}
+	rigid.apply_impulse(impulse, point);
+}
+
+<*
+ `physicsTorqueImpulse(index, generation, x, y, z)` — a spin with no shove.
+
+ Separate from the offset form of `physicsImpulse` because "make this rotate" and
+ "hit this off-centre" are different intentions, and expressing the first as the
+ second means solving for an offset and a force that produce a wanted spin —
+ arithmetic nobody should have to do to turn a wheel.
+*>
+fn void js_physics_torque_impulse(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.applyTorqueImpulse");
+	if (rigid == null) return;
+
+	rigid.apply_angular_impulse({
+		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+	});
 }
 
 fn void js_physics_count(

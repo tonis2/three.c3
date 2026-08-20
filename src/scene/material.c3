@@ -50,7 +50,8 @@ faultdef
 	MATERIAL_TEXTURE_UNKNOWN,
 	MATERIAL_UNIFORM_UNKNOWN,
 	MATERIAL_UNIFORM_WIDTH,
-	MATERIAL_NEEDS_DEVICE;
+	MATERIAL_NEEDS_DEVICE,
+	MATERIAL_REPEAT_IS_ZERO;
 
 <*
  The material every node draws with until it is given another.
@@ -121,14 +122,16 @@ const uint LINE_MATERIAL = 1;
  Where a material's uniforms begin in the push block.
 
  The mesh contract owns everything below this: `MESH_PUSH_FIELDS` ends with
- `flags` at 56+4, and `shaders/material.slang` declares those seven fields first
- and in that order so `check_push_block` passes on a generated module exactly as
- it does on `mesh.slang`. The `$assert` is what makes this a derived number
- rather than a copied one.
+ `uv_transform` at 60+16, and `shaders/material.slang` declares those eight
+ fields first and in that order so `check_push_block` passes on a generated
+ module exactly as it does on `mesh.slang`. The `$assert` is what makes this a
+ derived number rather than a copied one — and it earned that when
+ `uv_transform` was added and this moved from 60 to 76 without anyone having to
+ remember it existed.
 *>
-const uint MATERIAL_PUSH_START = 60;
+const uint MATERIAL_PUSH_START = 76;
 
-$assert MESH_PUSH_FIELDS[6].offset + MESH_PUSH_FIELDS[6].size == MATERIAL_PUSH_START :
+$assert MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].offset + MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].size == MATERIAL_PUSH_START :
 	"the mesh push block moved; material uniforms no longer start where the template puts them";
 $assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
 	"the material uniform budget and the push budget disagree";
@@ -173,7 +176,39 @@ struct Material
 	// that the mistake is possible to make; the alternative, a biased
 	// index-plus-one, makes it impossible and makes every read arithmetic.
 	int texture;
+	// `material.repeat` and `material.offset` — xy is how many times the texture
+	// repeats across the surface, zw is where it starts.
+	//
+	// **All zeros means unset, and is read as the identity.** That is the answer
+	// to the hazard the `.texture` comment above spends a paragraph on: C3
+	// zero-fills what an initializer omits, and here zero would be a repeat of
+	// zero, which collapses a whole surface onto one texel — a black or
+	// single-colour shape, on a material nobody gave a transform to. Rather than
+	// require every construction site to remember, `uv_transform_or_identity`
+	// treats the zero value as "none", and a script that writes a zero repeat is
+	// refused by name at the boundary because a zero repeat means nothing anyone
+	// wants.
+	float[4] uv_transform;
 	char[PUSH_BUDGET] block;
+}
+
+<*
+ The identity uv transform: repeat once, start at the corner.
+*>
+const float[4] UV_IDENTITY = { 1, 1, 0, 0 };
+
+<*
+ What to push for this material's uv transform.
+
+ See `Material.uv_transform` for why an all-zero value is "unset" rather than a
+ repeat of zero. Checked on the scale only: an offset with no scale is still a
+ transform somebody asked for, and a zero *scale* is the only part that is never
+ meaningful.
+*>
+fn float[4] Material.uv_transform_or_identity(&self)
+{
+	if (self.uv_transform[0] == 0 && self.uv_transform[1] == 0) return UV_IDENTITY;
+	return self.uv_transform;
 }
 
 <*

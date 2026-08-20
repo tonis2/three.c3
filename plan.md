@@ -43,9 +43,14 @@ A game boot (`--assets`, `main.js`), unloading, glTF node animation, and an XPBD
 physics world with contacts, friction, joints, triggers and events. PNG and JPEG
 textures from a path, pixels generated in a script, and the glTF image table —
 all three sharing one content hash, so the same picture is one upload however it
-arrived.
+arrived. Colour management end to end: an sRGB target, a decode at the one door
+a script's colours come in through, and a round trip a test can assert on.
+One directional light with a verb (`three.light`). Velocity and impulse on a
+dynamic body, which is what makes a character possible. `texture.read()`, a uv
+transform per material, and a glTF export that writes a texture a script made.
+Keys a script can hold down, and a budget a script can raise.
 
-	c3c test --trust=full       455 passed, 0 failed, leak-clean
+	c3c test --trust=full       494 passed, 0 failed, leak-clean
 
 **`examples/village` is where most of what follows came from.** A walled village
 wearing nothing but generated textures — eleven `DataTexture`s and no image file
@@ -69,35 +74,19 @@ Small, known, and each one is a number or a picture that lies rather than a
 missing feature. Worth clearing before anything on the feature list, because
 every one of them is something a person will trust and be wrong about.
 
-- **Colour is never encoded on the way out.** Textures upload as
-  `FORMAT_R8G8B8A8_SRGB` (`gpu/texture.c3:62`), so the sampler de-gammas on read;
-  the target is `FORMAT_R8G8B8A8_UNORM` (`gpu/target.c3:44`), so nothing
-  re-encodes on write; the swapchain then presents those bytes as sRGB. The round
-  trip loses a gamma and **every textured scene renders about 2.2 too dark**.
-  `examples/village` only looks right because every generated texel is
-  pre-encoded with `pow(v, 1/2.2)` — one line, and deleting it turns the whole
-  place to mud. It also made the glTF export ambiguous: baking a flat stand-in
-  colour meant choosing between matching this engine and matching a
-  colour-managed viewer, and those are two different numbers that should be one.
-  Fix by rendering to an `_SRGB` target so the hardware encodes on write, or by
-  encoding in the fragment shaders; the risk is in the two paths that read the
-  target directly — `scene.pick()` and the screenshot blit. **Do it before tuning
-  any more art**, because every colour constant anyone has chosen so far was
-  chosen against the broken pipeline and fixing it moves all of them at once.
-
-- **`boundingBox()` over-reports under rotation.** A `ConeGeometry(1, 1, 4)` at
-  `rotation.y = pi/4` reports a half-extent of ±1.414 when the truth is 0.707.
-  Nested groups come back exact, so the error is that a *mesh* bounds its
-  geometry's AABB rather than its vertices — and re-bounding a rotated AABB is
-  only exact when the shape *is* its box, or the angle is a multiple of 90°. A
-  four-sided cone is a diamond, so a 45° turn doubles it. Every hip roof in
-  `examples/village` is that shape at that angle, which is why the church
-  reported a minimum z of −49 when its spire stops at −45.8. **This is the §1
-  criterion exactly**: `align()`, `alignTo()`, `frameAll()` and `BoxHelper` all
-  read this box, so `align('y', 'min', 0)` on a rotated pyramid floats the piece,
-  and the helper drawn to check it agrees — it is reading the same wrong number.
-  Fix by bounding the transformed vertices, or by caching an oriented box per
-  asset and transforming that. Worth a regression test per primitive at 45°.
+- **The physics worker pool can deadlock on a body that is asleep and moving.**
+  Found by injection rather than by reading: deleting the wake from
+  `Physics.wake` and running `three_tests::physics` **hangs**, reproducibly, with
+  the main thread in `collision::WorkerPool.join` on a mutex and a worker parked
+  on a condition variable in `worker_main`. Giving a sleeping body a non-zero
+  velocity is a state the island bookkeeping does not survive. The binding never
+  produces it — `three.physics.setVelocity` and `applyImpulse` wake the island
+  first, and `an_impulse_wakes_a_settled_body_and_moves_it` is what keeps that
+  true — so nothing a script can write reaches it today. It is listed because a
+  library that hangs rather than misbehaves on bad input is one bad input away
+  from hanging a game, and because the *next* verb over that world (a joint, a
+  soft body, `snapshot`/`restore`) will not have this one's guard by accident.
+  The fix belongs in `collision.c3l`.
 
 - **`PipelineCache` never evicts.** An agent iterating on a shader in a loop
   accumulates one `VkPipeline` per distinct source for the life of the process.
@@ -238,35 +227,40 @@ textured floor aliases at grazing angles), and any colourspace but sRGB (so a
 normal or roughness map through this verb would come back gamma-decoded — the
 argument is in `Assets.load_texture_file`).
 
-**Three gaps `examples/village` ran into, all of them texture-shaped:**
+**The three texture-shaped gaps `examples/village` ran into are closed**, and
+what they cost is worth keeping because it is the measure of what a gap is worth:
 
-- **No uv repeat and no texture transform**, so a surface maps its texture
-  exactly once and texel density is a function of how big the mesh is. The
-  village ground is **484 separate plane meshes** on a six-unit grid — not for
-  detail, purely to stop one 128px grass texture stretching across 132 units.
-  They are one draw call between them and 484 nodes, and every large flat surface
-  in every scene will do the same thing. A uv scale and offset per material in
-  the uniform block, or `texture.repeat`, replaces the lot with one quad; the
-  sampler already wraps, which is what the exporter's own comment about a texture
-  naming no sampler relies on.
-- **Textures are write-only.** Pixels go to the device and cannot come back.
-  Baking each texture's average colour into the village's `.glb` needed those
-  pixels, and with no readback the choice was a second copy of all eleven
-  generators — which would silently drift from the real ones — or accumulating
-  the mean inside the loop that writes them, which only works because that script
-  owns both sides. A texture loaded from a file has no such option.
-  `texture.read()` also makes textures testable, which today they are not.
-- **The exporter cannot write a texture a script made.** `scene.export` reports
-  `images: 0` and `shaded: 3025` of 3029 on the village, so a scene whose entire
-  character is generated textures exports flat. `Exporter.texture_for` keys on
-  `GpuMesh.texture` and pulls bytes from `asset.stream.get_image_data` — a source
-  glTF's own buffer — so a `DataTexture` has no bytes to write, and a material's
-  `map` is never consulted at all. **Cheaper than it looks:** `png::save_file`
-  and `zlib::compress` are already in the tree and already linked
-  (`gpu/target.c3:303` writes every screenshot through them), so encoding a
-  decoded RGBA texture is a call rather than a project. Fix `shaded` with it — it
-  counts every non-default material as unrepresentable, including a
-  `MeshLambertMaterial`, which glTF describes perfectly well.
+- **`material.repeat` / `material.offset`.** There was no uv scale anywhere, so a
+  surface mapped its texture exactly once and texel density was a function of how
+  big the mesh was — the village's ground was **484 separate plane meshes** on a
+  six-unit grid, purely to stop one 128px grass texture stretching across 132
+  units. One number replaces the lot. It is a *material* property rather than a
+  texture one, which is a divergence from Three.js with a reason Three.js does
+  not have: textures here are deduplicated by content across every file, so a
+  transform on the texture would reach every unrelated surface that used the same
+  picture. It cost 16 bytes of the push block, taking `MATERIAL_UNIFORM_BUDGET`
+  from 68 to 52 — three rows of four floats rather than four. That trade is
+  argued where the constant is.
+- **`texture.read()`.** Pixels can come back off the device now, into a
+  `Uint8Array` the caller supplies. It makes textures testable, which they were
+  not, and it is what lets the exporter write one. Writing it found a real bug
+  immediately: texture images were created without `TRANSFER_SRC` usage, so the
+  readback was not merely absent but *invalid* — caught by the validation layer
+  on the check's first run, with the VUID naming it.
+- **The exporter writes a texture a script made.** `Exporter.texture_for` now
+  consults `material.map` — which it never did, so an image a script put on a
+  shape was invisible to it — and falls back to reading the pixels off the device
+  and encoding them with `png::save_bytes` when there is no source file behind
+  them. `shaded` was counting every non-default material, including a
+  `MeshLambertMaterial`, which glTF describes perfectly well; it now counts only
+  what the format cannot carry, which is a `ShaderMaterial`. The village exported
+  `images: 0, shaded: 3025 of 3029` and now exports its textures.
+
+**What a script still cannot reach is a mesh's *own* image.** A mesh loaded from
+a `.glb` carries its texture on the `GpuMesh` and exposes no `Texture` handle, so
+`texture.read()` has nothing to be called on for it — the byte-for-byte export
+round trip had to be written in C3 for that reason.
+`asset.imageAt(i)` is the shape of the missing verb, and it is small.
 
 **`test/ktx_test.c3` does not exist**, and both this file and `project.json:42`
 claimed it did — "holding it to compiling and linking so it does not rot".
@@ -278,7 +272,7 @@ prevent has already happened. Either write that file or stop claiming it.
 nothing else, so **every shipped `.glb` using `KHR_texture_basisu` currently
 loads with its textures missing** — recorded at M1, worked around by rendering a
 141-mesh terrain untextured with one warning, and still true
-(`src/scene/asset.c3:1861`). Decoding KTX2 into the existing texture path is
+(`src/scene/asset.c3:2039`). Decoding KTX2 into the existing texture path is
 small, self-contained, independent of the sky, and changes this milestone's value
 from "skyboxes" to "shipped assets work". `ktx::vk` is the VkFormat table and
 block-size arithmetic `gpu/texture.c3` needs to upload an image it did not
@@ -368,18 +362,20 @@ complains about.
 The world is built and stepped; these are bindings that do not exist, not
 mechanisms that are missing.
 
-- **No velocity and no impulse**, which is the one that stops a character being
-  built on this world at all. `Rigidbody.apply_linear_impulse`,
-  `linear_velocity` and `angular_velocity` all exist
-  (`collision.c3l` `solver/resolver.c3:769`); the binding exposes `physicsAdd`,
-  `physicsRemove`, `physicsGravityGet`/`Set`, `physicsCount` and
-  `physicsTransform`, and nothing that pushes a body. So a dynamic body can be
-  dropped and watched but never steered, and a kinematic one is steered but never
-  stopped — there is no combination that walks *and* collides.
-  `examples/village` works around it with 123 hand-registered circles and
-  oriented rectangles resolved in JavaScript every frame. Binding
-  `body.velocity` and `body.applyImpulse` is hours, and it is a binding rather
-  than a solver change.
+**Velocity and impulse are bound**, which was the one that stopped a character
+being built on this world at all. `three.physics.setVelocity(object, [x, y, z])`
+assigns a speed, `applyImpulse(object, [x, y, z], at)` adds one, and
+`velocity(object)` reads both back — so a dynamic capsule with its velocity set
+each frame walks *and* collides, which no combination of the previous verbs
+could. Static and kinematic bodies refuse by name rather than absorbing the call:
+a static body's inverse mass is zero and a kinematic one has its velocity
+overwritten a fraction of a step later, so both would have looked like the verb
+doing nothing.
+
+The thing that made it more than a binding was sleep. A settled body is skipped
+by integration, so an impulse without a wake changes a number nothing reads —
+and worse than that, it hangs (§1). What is left:
+
 - **No character controller.** With velocity bound, a dynamic capsule with locked
   rotation *is* a character, so this is the step after rather than a prerequisite.
   What it buys is that every game stops rewriting the village's 120 lines: sweep
@@ -559,17 +555,29 @@ assertion whose probe was outside the region it claimed to test.
 a lazy loader lazy — nothing else notices when it quietly starts uploading
 everything again.
 
-**Two things make an input-driven scene untestable.** A headless boot has no
-keyboard, so `examples/village` hands its internals to `globalThis.village`
-purely so the walking and the collision could be exercised at all — a scene
-deliberately leaking its own state in order to be testable is the smell, not the
-fix. And the script budget is a fixed 5,000 ms, which killed the first collision
-sweep and forced the test to be cut into pieces that fit the budget rather than
-pieces that meant something. `three.input.press(key)` and a budget a setup or
-test script can raise are both small, and between them they decide whether a
-game's input can be regression tested at all. The sweep that did run — 27,000
-simulated steps at running speed, every one checked — found a 13% failure rate
-that no amount of playing the scene by hand had surfaced.
+**The two things that made an input-driven scene untestable are fixed.**
+`three.input.press(key)` holds a key down until `release(key)`, through the same
+path a real key takes — so `isDown`, `pressed`, `released` and every `onKeyDown`
+handler cannot tell a scripted key from a finger, which is the property that
+makes a game's input regression-testable rather than merely pokeable. And
+`three.budget` lets a script raise its own wall-clock allowance from the default
+5,000 ms to at most ten minutes, so a check that *simulates* is cut into pieces
+that mean something rather than pieces that fit five seconds. The ceiling stays,
+because a limit a script can lift entirely is not a limit and the whole reason
+the interrupt exists is that a wedged loop must be a pause rather than a hang.
+
+Two notes carried forward from doing it. The script budget had to become a
+*separate field* from the live one a frame borrows, or a raised script budget
+would silently have become a raised per-frame budget and one callback could wedge
+a game — `a_raised_script_budget_does_not_reach_the_frame_callback` is what says
+so. And the sweep that motivated all of this remains the argument in one number:
+27,000 simulated steps at running speed found a 13% collision failure rate that
+no amount of playing the scene by hand had surfaced.
+
+**`examples/village` has not been rewritten to use any of it**, and until it is,
+the scene still hands its internals to `globalThis.village` — the leak that was
+the smell rather than the fix. Porting it is the check that these verbs are
+actually sufficient, and it is the honest next step for this section.
 
 Checks worth writing *before* the code they check, because each one guards a
 number that is wrong rather than a picture that is:
@@ -588,33 +596,37 @@ number that is wrong rather than a picture that is:
 
 ## 12. Lighting
 
-**Last in this file and near the front in priority** — the number is where it was
-added, not what it is worth.
+**The four floats are bound.** `three.light.direction` is a live world-space
+surface-to-light vector and `three.light.ambient` is the floor an unlit face
+gets; `three.light.set(direction, ambient)` does both, and a new `Scene` restores
+the default exactly as it restores the background. It is deliberately not
+`scene.add(new three.DirectionalLight(...))`: that name would promise adding,
+removing, colouring and duplicating, and this renderer can do none of them.
 
-`self.light = { 0.35, 0.80, 0.45, 0.25 }` (`render/pass.c3:139`) is a direction
-in xyz and an ambient floor in w. It is packed into `FrameBlock` and uploaded
-every single frame (`render/pass.c3:322`), the shaders already read it, and **no
-JS verb touches it**. Unlike §2, that was never a decision anybody wrote down; it
-simply has not been done.
+Two things the doing of it settled. The direction is **not normalized** on the
+way in, so it reads back as it was written — normalizing at the door would answer
+with numbers the script never typed. And a zero direction is refused by name
+rather than accepted, because `normalize` of it is a NaN, every shading term
+becomes a NaN with it, and the frame that results is black or undefined with
+nothing anywhere pointing at the light.
 
-What it costs today: every north-west face in `examples/village` sits at the 0.25
-ambient floor, which is nearly black. The scene compensates by multiplying
-per-copy colours by 1.22 across the church, the palisade and both mills — a hack
-that lifts the lit faces exactly as much as the shadowed ones, trading a wrong
-answer for a flatter one. Binding four floats is hours and carries no new
-rendering work at all, which makes it the best ratio of payoff to effort on this
-page.
+It landed after §1's colour fix, which was the sequencing note this section
+carried: a light direction chosen against a pipeline that loses a gamma is one
+that gets chosen twice.
 
-**Do it after §1's colour fix, not before.** A light direction chosen against a
-pipeline that loses a gamma is a light direction that will have to be chosen
-again.
+**`examples/village` has not been retuned yet.** It still multiplies per-copy
+colours by 1.22 across the church, the palisade and both mills to compensate for
+the 0.25 ambient floor — a hack that lifts the lit faces exactly as much as the
+shadowed ones, trading a wrong answer for a flatter one. Now that the light is
+reachable, that scene can raise the floor honestly and delete the fudge, and
+doing so is the check that the verb is the right shape.
 
-Beyond the binding, in the order they stop being optional: a second light, or a
-list; a colour per light rather than white; and shadows, which are a depth pass,
-a matrix and a comparison sampler, and are the largest single visual gap left
-after the sky in §4. None of that should land before the four floats do — the
-binding is what makes it possible to find out which of them anybody actually
-misses.
+What is next, in the order they stop being optional: a second light, or a list;
+a colour per light rather than white; and shadows, which are a depth pass, a
+matrix and a comparison sampler, and are the largest single visual gap left after
+the sky in §4. Now that the binding exists, which of them anybody actually misses
+is a question that can be answered rather than guessed — which was the argument
+for doing the binding first.
 
 ---
 
@@ -644,12 +656,16 @@ misses.
 - **The export writes no camera and no lights.** glTF has both and this project
   has one turntable and a hardcoded directional term, neither of which is a scene
   object a script can address. Writing them out would be exporting an
-  implementation detail as though it were content. **§12 changes half of that** —
-  once a script can address the light, the reason not to export it is gone, and
-  this entry should be revisited rather than assumed.
+  implementation detail as though it were content. **Half of that has now
+  changed**: §12 bound `three.light`, so the light *is* addressable and the
+  reason not to export it is gone. One directional light and an ambient floor map
+  onto a glTF `directional` light and nothing else, which is a small and honest
+  write. The camera's half of the argument stands — a turntable is not a
+  `perspective` camera with a transform, and inventing one would be exporting a
+  fiction. Splitting this entry is the next edit to it.
 - **No per-instance texture, and no per-instance alpha blending.** `color.a`
   reaches `shade()` and the opaque pipeline does not blend with it
-  (`gpu/pipeline.c3:465` sets `blendEnable` false). Transparency is a sort order
+  (`gpu/pipeline.c3:473` sets `blendEnable` false). Transparency is a sort order
   and a pipeline state, not a channel. `examples/village` fades its chimney smoke
   by walking the colour toward white and shrinking the sphere, which is what the
   absence costs and is a fair price until something has to be seen *through*

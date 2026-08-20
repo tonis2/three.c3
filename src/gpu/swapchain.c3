@@ -31,6 +31,29 @@ import vk;
 
 faultdef SURFACE_CANNOT_BLIT, NO_PRESENTABLE_SURFACE;
 
+<*
+ Does this format carry the sRGB transfer function, so the hardware encodes on
+ write and decodes on read?
+
+ Only the eight-bit four-channel surface formats are listed, because those are
+ the only ones a surface has ever offered here and a format this does not know
+ is answered `false` — which costs a warning and the old behaviour, never a
+ wrong conversion. There is no bit in `vk::Format` to test for this; the enum is
+ a flat list of names, so a table is the only way to ask.
+*>
+fn bool is_srgb_format(vk::Format format) @local
+{
+	switch (format)
+	{
+		case FORMAT_R8G8B8A8_SRGB:
+		case FORMAT_B8G8R8A8_SRGB:
+		case FORMAT_A8B8G8R8_SRGB_PACK32:
+			return true;
+		default:
+			return false;
+	}
+}
+
 struct Viewer
 {
 	// Externally owned — created from the window, freed by whoever made it.
@@ -82,17 +105,52 @@ fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint
 	defer formats.free();
 	if (formats.len() == 0) return NO_PRESENTABLE_SURFACE~;
 
-	// B8G8R8A8_UNORM if it is offered, else whatever is first. Unlike cui this
-	// choice reaches nothing: the readback reads the *target*, which is always
-	// R8G8B8A8_UNORM, so no swizzle follows from it either way.
+	// **An sRGB format, and this choice does reach something.** It used to prefer
+	// B8G8R8A8_UNORM with a comment saying the preference was inert, which was
+	// true while the target was UNORM too: a UNORM->UNORM blit is a copy.
+	//
+	// The target is now R8G8B8A8_SRGB (`gpu/target.c3` argues why), and
+	// `vkCmdBlitImage` is specified to convert: it reads the source as linear —
+	// decoding sRGB on the way in — and encodes into the destination's format on
+	// the way out. Blitting the encoded target into a UNORM swapchain would
+	// therefore store linear values and present them as sRGB, which is the exact
+	// gamma loss the target change was made to close, reintroduced one step
+	// later and nowhere near the code that looks responsible.
+	//
+	// So: the matching sRGB pair first, any sRGB format second, and only then
+	// whatever the surface listed first. The readback is unaffected either way —
+	// it copies the target, never a swapchain image.
 	self.format = formats[0];
+	bool found = false;
 	foreach (candidate : formats)
 	{
-		if (candidate.format == FORMAT_B8G8R8A8_UNORM && candidate.colorSpace == COLOR_SPACE_SRGB_NONLINEAR_KHR)
+		if (candidate.format == FORMAT_B8G8R8A8_SRGB && candidate.colorSpace == COLOR_SPACE_SRGB_NONLINEAR_KHR)
 		{
 			self.format = candidate;
+			found = true;
 			break;
 		}
+	}
+	if (!found)
+	{
+		foreach (candidate : formats)
+		{
+			if (is_srgb_format(candidate.format) && candidate.colorSpace == COLOR_SPACE_SRGB_NONLINEAR_KHR)
+			{
+				self.format = candidate;
+				found = true;
+				break;
+			}
+		}
+	}
+	// Nothing sRGB on offer is a surface this project has never met. Presenting
+	// through it is still better than refusing to open a window, and the failure
+	// it leaves is the old one — a window that is too dark, with correct
+	// screenshots beside it — so it is worth a line on stderr rather than a
+	// fault the caller cannot act on.
+	if (!found)
+	{
+		io::eprintfn("three: no sRGB surface format offered; the window will present linear values and look dark. Screenshots are unaffected.");
 	}
 
 	if ((uint)(caps.supportedUsageFlags & IMAGE_USAGE_TRANSFER_DST_BIT) == 0) return SURFACE_CANNOT_BLIT~;

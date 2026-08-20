@@ -370,12 +370,20 @@ fn void an_endless_callback_is_stopped_by_the_frame_budget() @test
  would silently hand every later script the frame's tenth of a second — a scene
  build that worked yesterday failing today, with a timeout message naming a
  number nobody typed.
+
+ Set through `script_budget_ns` rather than `budget_ns`, which is what those two
+ fields now mean: `budget_ns` is the live value the interrupt reads and a frame
+ borrows, and `script_budget_ns` is what a run puts back into it at the top of
+ every run. They were one field until `three.budget` let a script raise its own —
+ at which point sharing them would have made a raised script budget into a raised
+ per-frame one, and one animation callback able to wedge a game for as long as
+ it liked.
 *>
 fn void the_frame_budget_is_not_the_script_budget() @test
 {
 	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
 	{
-		run.budget_ns = 200 * 1_000_000;
+		run.script_budget_ns = 200 * 1_000_000;
 		@ok(run, "three.setAnimationLoop(() => {});");
 		run.tick(0);
 
