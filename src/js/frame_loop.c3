@@ -176,7 +176,11 @@ const double ANIMATION_MAX_STEP_MS = 100.0;
 *>
 fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 {
-	self.take_input(input);
+	// Keys a script is holding folded in beside the window's, before anything
+	// reads them — so `three.input.pressed`, `isDown` and every `onKeyDown`
+	// handler see one keyboard rather than two. A no-op until something has
+	// called `three.input.press`.
+	self.take_input(self.synthetic.merge(input));
 
 	// **Animation first, and above the early return.** `game.md` G3/S6: the step
 	// happens in the host frame *before* the callback, so a callback can read

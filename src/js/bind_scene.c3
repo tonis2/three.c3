@@ -52,6 +52,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "texture", &js_texture, 1);
 	self.bind(host, "dataTexture", &js_data_texture, 3);
 	self.bind(host, "textureDispose", &js_texture_dispose, 1);
+	self.bind(host, "textureRead", &js_texture_read, 2);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "lines", &js_lines, 2);
@@ -106,6 +107,10 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "backgroundGet", &js_background_get, 0);
 	self.bind(host, "backgroundSet", &js_background_set, 3);
+	self.bind(host, "budgetGet", &js_budget_get, 0);
+	self.bind(host, "budgetSet", &js_budget_set, 1);
+	self.bind(host, "lightGet", &js_light_get, 0);
+	self.bind(host, "lightSet", &js_light_set, 4);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "frameAll", &js_frame_all, 0);
@@ -295,6 +300,10 @@ fn void js_reset(
 	// than on whatever the last scene painted, so a script that sets a background
 	// and a script that does not render the same first frame.
 	if (self.renderer != null) self.renderer.clear = DEFAULT_CLEAR;
+	// And the light, for exactly the same reason: a scene that sets one and a
+	// scene that does not have to render the same first frame, or "it looked
+	// right when I ran it alone" becomes a thing people say.
+	self.pass.light = DEFAULT_LIGHT;
 
 	self.epoch += 1;
 	*out = qjs::number_value(self.epoch);
@@ -968,9 +977,16 @@ fn void js_background_get(
 
  ## Components, not a hex value
 
- The same contract `mesh.color` has, and the same reason: the components are
- what the pixel gets and there is no colour management anywhere in this project.
- `prelude.js` does the hex arithmetic so both doors divide by 255 identically.
+ The same contract `mesh.color` has, and the same reason: `prelude.js` does the
+ hex arithmetic so both doors divide by 255 identically.
+
+ **These components are sRGB**, which used to be a distinction this project did
+ not draw — the line here read "there is no colour management anywhere in this
+ project", and the cost of that was every textured scene rendering about 2.2 too
+ dark. `gpu/color.c3` has the argument. What it means for this verb is the thing
+ a caller wants to be true and could not previously rely on: `0x2060a0` clears
+ to `0x2060a0`, and `backgroundGet` gives back what `backgroundSet` was handed,
+ because the decode happens at the attachment and not to the stored value.
 *>
 fn void js_background_set(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -990,6 +1006,135 @@ fn void js_background_set(
 		self.renderer.clear[i] = math::clamp(arg_float(&js, argc, args, i), 0.0f, 1.0f);
 	}
 	self.renderer.clear[3] = 1.0f;
+}
+
+<*
+ `budgetGet()` — how long this script may run, in milliseconds.
+*>
+fn void js_budget_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value((double)(self.script_budget_ns / 1_000_000));
+}
+
+<*
+ `budgetSet(ms)` — raise or lower how long a script may run.
+
+ ## Why a script may change this at all
+
+ 5,000 ms is generous for a script that builds a scene and short for one that
+ *simulates* it. The check that proved `examples/village`'s character controller
+ walked thirty thousand steps against a hundred and twenty colliders, and the
+ first attempt at it was killed by the budget — so it had to be cut into pieces
+ that fit five seconds rather than pieces that meant something, which is a worse
+ test written for a reason that has nothing to do with what it tests.
+
+ ## Why there is still a ceiling
+
+ The budget exists so that a wedged agent loop is a pause rather than a hang, and
+ a limit a script can lift entirely is not a limit. `JS_BUDGET_CEILING_MS` is ten
+ minutes: longer than any legitimate scene build by two orders of magnitude,
+ shorter than a person's patience with a stuck process. Asking for more is
+ clamped rather than refused, because a caller asking for an hour wants "as long
+ as possible" and a throw would leave them with the default instead.
+
+ ## It takes effect immediately
+
+ The interrupt handler compares against `budget_ns`, which this writes, and
+ `started` was stamped before the script began — so raising it extends the run
+ that raised it, which is the only useful behaviour. A test does not know it
+ needs longer until it is already running.
+*>
+fn void js_budget_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	double asked = (double)arg_float(&js, argc, args, 0);
+	if (asked <= 0)
+	{
+		*out = js.raise("three.budget wants a positive number of milliseconds — there is no way to turn the interrupt off");
+		return;
+	}
+
+	long ms = (long)asked;
+	if (ms > JS_BUDGET_CEILING_MS) ms = JS_BUDGET_CEILING_MS;
+
+	self.script_budget_ns = ms * 1_000_000;
+	self.budget_ns = self.script_budget_ns;
+}
+
+<*
+ `lightGet()` — the one directional light, as `[x, y, z, ambient]`.
+
+ The direction is surface-to-light in world space; the ambient is the floor a
+ face gets when it is turned right away from it.
+*>
+fn void js_light_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	qjs::Value list = js.array();
+	for (uint i = 0; i < 4; i++) js.set_index(list, i, qjs::number_value(self.pass.light[i]));
+	*out = list;
+}
+
+<*
+ `lightSet(x, y, z, ambient)` — the one directional light.
+
+ ## Why there is one, and why it is not an Object3D
+
+ `render/pass.c3` ships a single `float4` in `FrameBlock` and both shaders read
+ it. That is the whole lighting model, and it had no verb at all until now — not
+ as a decision, it simply had not been done, which cost every north-west face in
+ `examples/village` sitting at the ambient floor and a scene-wide fudge of
+ multiplying per-copy colours by 1.22 to compensate. That fudge lifts the lit
+ faces exactly as much as the shadowed ones, so it trades a wrong answer for a
+ flatter one.
+
+ Three.js's answer is `scene.add(new THREE.DirectionalLight(...))`, and this is
+ deliberately not that: a light that could be added, removed, coloured and
+ duplicated would be an API promising four things the renderer cannot do. It is
+ `plan.md` §4's half-match rule — a name Three.js does not have, so nobody reads
+ it as one that behaves like Three.js's.
+
+ ## The direction is not normalized here
+
+ The shaders normalize on read, so length has never meant anything, and
+ normalizing at the door would make `lightGet` answer with numbers the script
+ did not write. What is refused is the one direction that cannot be normalized
+ at all: a zero vector makes `normalize` a NaN, the lambert term a NaN, and the
+ frame either black or undefined depending on the driver — a failure with
+ nothing anywhere pointing at the light.
+*>
+fn void js_light_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float x = arg_float(&js, argc, args, 0);
+	float y = arg_float(&js, argc, args, 1);
+	float z = arg_float(&js, argc, args, 2);
+
+	if (x * x + y * y + z * z <= 0.0f)
+	{
+		*out = js.raise("three.light.direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term");
+		return;
+	}
+
+	self.pass.light[0] = x;
+	self.pass.light[1] = y;
+	self.pass.light[2] = z;
+	self.pass.light[3] = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
 }
 
 fn void js_camera_get(

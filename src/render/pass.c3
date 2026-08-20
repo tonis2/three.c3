@@ -36,6 +36,21 @@ import collision;
 // costs nothing, large enough that a normal scene never reallocates.
 const sz INITIAL_INSTANCES = 64;
 
+<*
+ The light a renderer starts on: down and to the right, from slightly in front,
+ with a quarter of the surface's colour reaching the shadowed side.
+
+ Named rather than written twice for `DEFAULT_CLEAR`'s reason — it is now
+ something a script can ask to be restored to, and two spellings of a default
+ drift. `three.light` is the verb; `the_default_light_is_the_pass_light` keeps
+ `prelude.js` agreeing with this number.
+
+ **Not normalized here.** The shaders normalize on read, so the magnitude of the
+ direction has never meant anything, and normalizing at the door would make
+ `three.light.direction` answer with numbers a script did not write.
+*>
+const float[4] DEFAULT_LIGHT = { 0.35, 0.80, 0.45, 0.25 };
+
 struct MeshPass
 {
 	// Compiled on demand and kept by content hash. `pipeline` is borrowed from
@@ -136,7 +151,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// asset it named could then be swept out from under it.
 	self.scene.attach_assets(&self.assets);
 	self.camera = default_camera();
-	self.light = { 0.35, 0.80, 0.45, 0.25 };
+	self.light = DEFAULT_LIGHT;
 	// The first `frame_camera` can run before any frame has been recorded — the
 	// CLI loads a file and fits the camera to it during startup — so the aspect
 	// starts from the target rather than from zero. A zero-height target would
@@ -388,6 +403,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
 			.base_color = mesh.base_color,
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | (mesh.has_uvs ? FLAG_HAS_UVS : 0),
+			.uv_transform = self.materials[bucket.material].uv_transform_or_identity(),
 		};
 		// **The reflected size, not `MeshPush::size`.** They are not the same
 		// number: Slang reports the 60 bytes the shader uses and the C3 struct
@@ -610,6 +626,53 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
 		.texture = texture,
 	});
 	return index;
+}
+
+<*
+ `material.repeat` / `material.offset` — how the texture is laid across a
+ surface.
+
+ ## Why this is on the material and not on the texture
+
+ Three.js puts `repeat` and `offset` on the `Texture`, and it is a well-known
+ trap there: two materials sharing a texture cannot disagree, so the answer is to
+ clone the texture. Here it would be worse than a trap. Textures are
+ deduplicated by a content hash across every file and every `DataTexture`, so a
+ `.png` on disk and the identical image inside a `.glb` are deliberately **one**
+ slot — putting a transform on that slot would make a brick wall's tiling change
+ because something unrelated used the same brick image, with nothing in either
+ script mentioning the other.
+
+ On the material it costs nothing extra: `map` already lives there, a material is
+ already one bucket, and two surfaces wanting the same image at different
+ densities are two materials, which is what they already had to be.
+
+ ## Zero is refused rather than accepted
+
+ A repeat of zero maps every texel of a surface to one point of the texture, so
+ it is never what anyone meant — and it is exactly what a struct field left
+ unset looks like. `Material.uv_transform_or_identity` reads all-zero as "no
+ transform"; this refuses to write one, so the two cannot be confused.
+
+ @param repeat_u : `Times across. Must not be zero.`
+ @return? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_REPEAT_IS_ZERO : `A repeat of zero collapses the surface onto one texel.`
+*>
+fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repeat_v, float offset_u, float offset_v)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+	if (repeat_u == 0 || repeat_v == 0) return MATERIAL_REPEAT_IS_ZERO~;
+
+	self.materials[index].uv_transform = { repeat_u, repeat_v, offset_u, offset_v };
+}
+
+<*
+ What `material.repeat` and `material.offset` read back as.
+*>
+fn float[4] MeshPass.material_uv(&self, uint index)
+{
+	if (index >= self.materials.len()) return UV_IDENTITY;
+	return self.materials[index].uv_transform_or_identity();
 }
 
 <*

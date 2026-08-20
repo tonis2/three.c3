@@ -555,3 +555,177 @@ fn void flipping_a_side_costs_no_compile_and_no_pipeline() @test
 		);
 	};
 }
+
+// ============================================================================
+// The light
+// ============================================================================
+
+<*
+ The light reaches the shader, asserted on pixels rather than on a number
+ coming back.
+
+ One plane facing +z, filling the frame, with the ambient floor at zero so the
+ direction is the only thing deciding anything. Point the light at the plane and
+ it is lit; point it away and it is black. A getter that answered correctly
+ while `FrameBlock` carried the old value would pass every round-trip check and
+ fail this one, which is the whole reason it renders.
+*>
+fn void the_light_direction_reaches_the_shader() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2)));
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.direction = [0, 0, 1];
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image lit = renderer.capture()!!;
+		defer lit.free();
+		char[3] front = centre_pixel(&lit);
+
+		three::RunResult away = run.run(`
+			three.light.direction = [0, 0, -1];
+			three.render(scene);
+			return 1;
+		`);
+		defer away.free();
+		test::@check(away.ok, "the second script succeeded: %s", away.error);
+
+		image::Image dark = renderer.capture()!!;
+		defer dark.free();
+		char[3] back = centre_pixel(&dark);
+
+		test::@check(front[0] > 150,
+			"a plane facing the light should be bright, got %d,%d,%d", (int)front[0], (int)front[1], (int)front[2]);
+		test::@check(back[0] < 10,
+			"turned away from it with no ambient it should be black, got %d,%d,%d", (int)back[0], (int)back[1], (int)back[2]);
+	};
+}
+
+<*
+ The ambient floor is the darkest a face gets, and at 1 it is the only thing
+ that decides anything.
+
+ The half that catches a binding which wrote the direction and dropped `w` —
+ which would still pass the check above, because that one only ever sets
+ ambient to zero.
+*>
+fn void the_ambient_floor_is_what_a_face_turned_away_gets() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2)));
+			three.camera.frameAll();
+			// Pointing away, so nothing but the floor can be reaching the face.
+			three.light.set([0, 0, -1], 1);
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image full = renderer.capture()!!;
+		defer full.free();
+		char[3] px = centre_pixel(&full);
+
+		// PRIMITIVE_COLOR is 0.78, 0.78, 0.80 in sRGB, and at ambient 1 the
+		// shading term is exactly 1, so the plane is that colour and no other.
+		test::@check(math::abs((int)px[0] - 199) <= 2 && math::abs((int)px[2] - 204) <= 2,
+			"at ambient 1 a face turned away is still its own colour — expected about 199,199,204, got %d,%d,%d",
+			(int)px[0], (int)px[1], (int)px[2]
+		);
+	};
+}
+
+<*
+ The direction is not normalized on the way in, and the vector it hands back is
+ live.
+
+ Two separate traps in one check. A binding that normalized would answer with
+ numbers the script never wrote, and `three.light.direction.y = -1` on a detached
+ copy would silently do nothing — the same failure `three.camera` refuses by
+ throwing on assignment rather than by pretending.
+*>
+fn void the_light_direction_round_trips_and_writes_through() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			three.light.direction = [0, 4, 0];
+			const kept = [three.light.direction.x, three.light.direction.y, three.light.direction.z];
+			three.light.direction.y = -2;
+			const live = three.light.direction.y;
+			three.light.ambient = 0.4;
+			return { kept, live, ambient: three.light.ambient };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"kept":[0,4,0]`),
+			"a direction of [0,4,0] should come back as [0,4,0], not normalized: %s", result.value);
+		test::@check(result.value.contains(`"live":-2`),
+			"assigning through the returned Vector3 should reach the host: %s", result.value);
+		test::@check(result.value.contains(`"ambient":0.4`),
+			"the ambient floor should round trip: %s", result.value);
+	};
+}
+
+<*
+ A zero direction is refused by name rather than rendering a NaN.
+
+ `normalize` of a zero vector is a NaN, the lambert term is a NaN with it, and
+ what reaches the screen is black or undefined depending on the driver — a
+ failure with nothing anywhere pointing back at the light.
+*>
+fn void a_light_with_no_direction_is_refused() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			try { three.light.direction = [0, 0, 0]; return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("cannot be zero"),
+			"a zero direction should be refused and say why, got '%s'", result.value);
+	};
+}
+
+<*
+ A new Scene puts the light back, exactly as it puts the background back.
+
+ For the same reason, which is worth having a check for rather than a comment:
+ a script that sets a light and a script that does not must render the same
+ first frame, or "it looked right when I ran it on its own" becomes something
+ people say about this engine.
+*>
+fn void a_new_scene_restores_the_default_light() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			three.light.set([0, 0, -1], 0.9);
+			const changed = three.light.ambient;
+			new three.Scene();
+			return { changed, back: three.light.ambient, dir: three.light.direction.y };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// 0.89 rather than 0.9: the host keeps a float, so 0.9 comes back as
+		// 0.8999999761581421 and an exact match would be asserting on binary32.
+		test::@check(result.value.contains(`"changed":0.89`), "the ambient was set: %s", result.value);
+		test::@check(result.value.contains(`"back":0.25`),
+			"a new Scene should restore DEFAULT_LIGHT's ambient of 0.25: %s", result.value);
+		test::@check(result.value.contains(`"dir":0.8`),
+			"and its direction: %s", result.value);
+	};
+}

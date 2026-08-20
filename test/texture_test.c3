@@ -50,6 +50,28 @@ const String TEXTURED = "test/fixtures/textured.glb";
 const uint W = 200;
 const uint H = 150;
 
+<*
+ The same, with a JavaScript runtime over it — for the checks that exercise the
+ verb a script actually calls rather than the function underneath it.
+*>
+macro @with_js_gpu(; @body(three::JsRuntime* run))
+{
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, &renderer)!!;
+	defer runtime.close();
+
+	@body(&runtime);
+}
+
 macro @with_pass(; @body(three::Renderer* renderer))
 {
 	vk::Instance instance = three::create_instance(false, headless: true)!!;
@@ -69,9 +91,13 @@ macro @with_pass(; @body(three::Renderer* renderer))
  by any of the others on screen.
 
  Deliberately loose on brightness and tight on hue. The shader multiplies by the
- light term and the texture is sampled as sRGB into a linear target, so the value
- that arrives is not the value in the file — but nothing in these fixtures turns
- magenta into green on the way.
+ light term and by `PRIMITIVE_COLOR`, so the value that arrives is not the value
+ in the file — but nothing in these fixtures turns magenta into green on the way.
+
+ This used to say the looseness was also for "sampled as sRGB into a linear
+ target", which was a description of the gamma defect written as though it were
+ a fact of life. It is not one any more; `three_tests::color` asserts the round
+ trip exactly, and this suite stays loose only because it is about hue.
 *>
 fn uint count_magenta(image::Image* shot)
 {
@@ -91,6 +117,64 @@ fn uint count_green(image::Image* shot)
 		if (shot.pixels[i + 1] > 60 && shot.pixels[i] < 40 && shot.pixels[i + 2] < 40) found++;
 	}
 	return found;
+}
+
+<*
+ How many times the colour changes along the middle row of the frame.
+
+ The measure `material.repeat` is asserted with, and it is chosen to be robust
+ where a pixel count is not: it does not care how much of the frame the surface
+ covers, how the sampler filtered the edges, or how bright the light was. What it
+ counts is how many tile boundaries crossed the row, which is exactly what a
+ repeat multiplies.
+
+ The threshold is on the sum of the channel differences rather than on any one
+ channel, so it registers a magenta-to-black edge and would register a
+ green-to-blue one too.
+*>
+fn uint row_transitions(image::Image* shot)
+{
+	sz bpp = shot.bytes_per_pixel();
+	sz row = (sz)(shot.height / 2) * (sz)shot.width * bpp;
+	uint changes = 0;
+	for (sz x = 1; x < (sz)shot.width; x++)
+	{
+		sz a = row + (x - 1) * bpp;
+		sz b = row + x * bpp;
+		int delta = math::abs((int)shot.pixels[a] - (int)shot.pixels[b])
+			+ math::abs((int)shot.pixels[a + 1] - (int)shot.pixels[b + 1])
+			+ math::abs((int)shot.pixels[a + 2] - (int)shot.pixels[b + 2]);
+		if (delta > 60) changes++;
+	}
+	return changes;
+}
+
+<*
+ How many pixels differ between two frames of the same size.
+
+ Used where the claim is "the picture changed" rather than "this pixel changed",
+ which is the honest form of it for anything that slides: a single sample can
+ land on the same colour after a shift and say nothing.
+*>
+fn uint pixels_that_differ(image::Image* a, image::Image* b)
+{
+	if (a.pixels.len != b.pixels.len) return 0;
+	uint moved = 0;
+	for (sz i = 0; i < a.pixels.len; i += 4)
+	{
+		int delta = math::abs((int)a.pixels[i] - (int)b.pixels[i])
+			+ math::abs((int)a.pixels[i + 1] - (int)b.pixels[i + 1])
+			+ math::abs((int)a.pixels[i + 2] - (int)b.pixels[i + 2]);
+		if (delta > 60) moved++;
+	}
+	return moved;
+}
+
+fn char[3] centre_of(image::Image* shot)
+{
+	sz bpp = shot.bytes_per_pixel();
+	sz at = ((sz)(shot.height / 2) * (sz)shot.width + (sz)(shot.width / 2)) * bpp;
+	return { shot.pixels[at], shot.pixels[at + 1], shot.pixels[at + 2] };
 }
 
 fn uint count_dark(image::Image* shot)
@@ -727,5 +811,370 @@ fn void a_hull_has_nowhere_to_put_a_map() @test
 		test::@check(drawn > 100, "the hull drew %d lit pixels — this is a geometry failure, not a uv one", drawn);
 		test::@check(count_magenta(&shot) == 0,
 			"%d magenta pixels on a mesh with no uv stream", count_magenta(&shot));
+	};
+}
+
+// ============================================================================
+// Reading pixels back
+//
+// Textures were write-only: pixels went to the device and could not come back.
+// Two costs, and they looked unrelated. `examples/village` needed each generated
+// texture's average colour to bake into its glTF export, and with no readback
+// the choice was a second copy of all eleven generators — which drifts from the
+// real ones silently — or accumulating the mean inside the loop that wrote them,
+// which only works for a script that owns both sides. And a texture nothing can
+// read is a texture nothing can test: every check above goes the long way round,
+// through a rendered frame, because there was no shorter one.
+// ============================================================================
+
+<*
+ A `DataTexture` reads back as the array it was built from, byte for byte.
+
+ The claim worth making exactly rather than approximately, because it pins the
+ whole chain at once: the upload copies, the image is `R8G8B8A8_SRGB`,
+ `vkCmdCopyImageToBuffer` converts nothing, and the layout goes back where the
+ descriptor expects it. Any of those being wrong shows up here as a number.
+
+ Deliberately not a flat colour — a gradient with all four channels moving, so a
+ channel swizzle, a row-stride mistake or a half-copied image cannot pass. A
+ solid fill would survive all three.
+*>
+fn void a_data_texture_reads_back_as_the_bytes_it_was_given() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const w = 16, h = 12;
+			const px = new Uint8Array(w * h * 4);
+			for (let y = 0; y < h; y++) {
+				for (let x = 0; x < w; x++) {
+					const i = (y * w + x) * 4;
+					px[i] = x * 16;
+					px[i + 1] = y * 20;
+					px[i + 2] = (x + y) * 8;
+					px[i + 3] = 255;
+				}
+			}
+			const tex = new three.DataTexture(px, w, h);
+			const back = tex.read();
+
+			let same = 0;
+			for (let i = 0; i < px.length; i++) if (px[i] === back[i]) same++;
+			return { len: back.length, want: px.length, same, first: [back[0], back[1], back[2], back[3]] };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"len":768`), "16x12x4 is 768 bytes: %s", result.value);
+		test::@check(result.value.contains(`"same":768`),
+			"every byte should come back as it went in: %s", result.value);
+	};
+}
+
+<*
+ A texture from a file reads back too, which is the half a script cannot fake.
+
+ A generated texture can always be regenerated; a `.png` cannot, and that is the
+ case the village had no answer to. `checker.png` is magenta and near-black, so
+ the assertion is on what the file actually contains rather than on a length.
+*>
+fn void a_texture_from_a_file_reads_back_its_own_pixels() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = three.texture("test/fixtures/checker.png");
+			const px = tex.read();
+			let magenta = 0, dark = 0;
+			for (let i = 0; i < px.length; i += 4) {
+				if (px[i] > 200 && px[i + 2] > 200 && px[i + 1] < 60) magenta++;
+				else if (px[i] < 60 && px[i + 1] < 60 && px[i + 2] < 60) dark++;
+			}
+			return { len: px.length, magenta, dark, w: tex.width, h: tex.height };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains(`"magenta":0`),
+			"the checkerboard's magenta should be in the bytes that came back: %s", result.value);
+		test::@check(!result.value.contains(`"dark":0`),
+			"and its dark squares: %s", result.value);
+	};
+}
+
+<*
+ Reading a texture leaves it in the layout the descriptor expects, proved by the
+ validation layer rather than by a picture.
+
+ **A picture does not catch this**, and that was established by trying it. The
+ first version of this check read the texture and then rendered again, asserting
+ the checkerboard was still on screen. Deleting the return-leg barrier from
+ `Texture.read_pixels` left that check green: this driver samples an image in
+ `TRANSFER_SRC_OPTIMAL` and produces the same frame, so the bug is invisible to
+ every pixel assertion available. It is still undefined behaviour, and a driver
+ that took the spec literally would produce garbage or nothing.
+
+ That is the same situation `render/pass.c3` records about pushing 64 bytes into
+ a 60-byte range — "pixel-identical either way on this driver, so no test here
+ catches it and only `--validate` does" — and it has the same answer. So this
+ arms the sink, does the read, draws, and requires the layer to have said
+ nothing.
+
+ Skipped when the Khronos layer is not installed, like the eleven other checks
+ that need it, because a machine with no Vulkan SDK must still run the suite —
+ and a check that silently passes without executing is `plan.md` §11's
+ unexercised regression test.
+*>
+fn void reading_a_texture_leaves_it_in_the_layout_it_was_found_in() @test
+{
+	vk::Instance instance = three::create_instance(true, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
+	defer renderer.free();
+
+	if (!renderer.gpu.validation) return;
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Assets* assets = &renderer.pass.assets;
+	three::Scene* scene = &renderer.pass.scene;
+
+	int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+	uint material = renderer.pass.create_texture_material(texture)!!;
+
+	three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::NodeId node = scene.add_mesh(plane, 0);
+	scene.set_material(node, material);
+	renderer.pass.frame_camera();
+
+	// One frame before the read, so anything the layer objects to afterwards is
+	// the read's doing and not the setup's.
+	image::Image warmup = renderer.capture()!!;
+	warmup.free();
+
+	renderer.gpu.begin_capture();
+
+	three::Texture* tex = assets.texture_at(texture);
+	char[] pixels = mem::new_array(char, (sz)tex.width * tex.height * 4);
+	defer free(pixels);
+	tex.read_pixels(&renderer.gpu, pixels)!!;
+
+	image::Image after = renderer.capture()!!;
+	defer after.free();
+
+	String errors = renderer.gpu.sink.errors.str_view();
+	renderer.gpu.end_capture();
+
+	test::@check(errors.len == 0,
+		"reading a texture and drawing with it again produced validation errors, which means the image was left in the wrong layout: %s",
+		errors
+	);
+	test::@check(count_magenta(&after) > 100,
+		"and the texture still draws, got %d magenta pixels", count_magenta(&after));
+}
+
+<*
+ A destination too small is refused with both numbers in the message.
+
+ The one mistake this API's shape makes easy: the caller supplies the buffer, so
+ the caller can supply the wrong one. Writing past it would be a heap corruption
+ inside the engine's own storage, which is the worst available failure.
+*>
+fn void a_read_into_too_small_a_buffer_is_refused() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = new three.DataTexture(new Uint8Array(16 * 16 * 4), 16, 16);
+			try { tex.read(new Uint8Array(100)); return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("1024") && result.value.contains("100"),
+			"the refusal should name what was needed and what was given: %s", result.value);
+	};
+}
+
+<*
+ A disposed texture refuses to be read rather than reading whatever took its
+ slot.
+
+ The same rule every other handle in this API follows, and the reason it matters
+ here specifically: the slot is reused, so the failure without this check is not
+ an error but a *different picture*, which is the kind nobody investigates.
+*>
+fn void a_disposed_texture_cannot_be_read() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = new three.DataTexture(new Uint8Array(4), 1, 1);
+			tex.dispose();
+			try { tex.read(); return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("disposed"),
+			"a disposed texture should refuse to be read: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Laying a texture across a surface
+//
+// Nothing scaled uvs, so a surface mapped its texture exactly once and texel
+// density was a function of how big the mesh was. `examples/village` covered its
+// ground with 484 separate plane meshes on a six-unit grid — one draw call
+// between them, and 484 nodes — purely so one 128px grass image would not
+// stretch across 132 world units. Every large flat surface in every scene would
+// have done the same thing.
+// ============================================================================
+
+<*
+ A repeat tiles the image, asserted by counting edges in the frame.
+
+ **Not by reading a number back**, which is what a binding that stored the value
+ and never pushed it would pass. A two-colour checkerboard on one plane has a
+ fixed number of colour changes across the middle row of the rendered image; ask
+ for four repeats and that count goes up several-fold. Counting transitions
+ rather than pixels is what makes it robust to the plane's size on screen, to
+ filtering, and to the light.
+*>
+fn void a_repeat_tiles_the_image_across_the_surface() @test
+{
+	uint once;
+	uint four_times;
+
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		uint material = renderer.pass.create_texture_material(texture)!!;
+
+		three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		three::NodeId node = scene.add_mesh(plane, 0);
+		scene.set_material(node, material);
+		renderer.pass.frame_camera();
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		once = row_transitions(&plain);
+
+		renderer.pass.set_material_uv(material, 4, 4, 0, 0)!!;
+
+		image::Image tiled = renderer.capture()!!;
+		defer tiled.free();
+		four_times = row_transitions(&tiled);
+	};
+
+	test::@check(once > 0, "the checkerboard has edges to begin with, got %d transitions", once);
+	test::@check(four_times > once * 2,
+		"four repeats should multiply the edges across the middle row: %d at repeat 1, %d at repeat 4",
+		once, four_times
+	);
+}
+
+<*
+ An offset moves the image without changing how much of it there is.
+
+ The half a repeat check cannot catch: a binding that wrote the offset into the
+ scale would change the tiling, and one that dropped the offset entirely would
+ change nothing. So this requires the picture to *move* and the edge count to
+ stay in the same neighbourhood.
+*>
+fn void an_offset_slides_the_image_without_rescaling_it() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		uint material = renderer.pass.create_texture_material(texture)!!;
+
+		three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		three::NodeId node = scene.add_mesh(plane, 0);
+		scene.set_material(node, material);
+		renderer.pass.frame_camera();
+
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+		uint edges_before = row_transitions(&before);
+
+		// A third of a tile rather than a half. Half is the one shift a
+		// symmetric checkerboard can absorb — every square lands where an
+		// identically coloured one was, and the frame comes back byte-identical
+		// while the binding is working perfectly. That is what the first version
+		// of this check asserted, and it failed for the fixture's reason rather
+		// than the code's.
+		renderer.pass.set_material_uv(material, 1, 1, 0.333, 0)!!;
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+		uint edges_after = row_transitions(&after);
+
+		// The whole frame rather than one pixel: "the image slid" is a claim
+		// about the picture, and any single sample can happen to land on the same
+		// colour after a shift.
+		uint moved = pixels_that_differ(&before, &after);
+
+		test::@check(moved > 500,
+			"a third of a tile of offset should move the picture, and only %d pixels changed", moved);
+		test::@check(edges_after > edges_before / 2 && edges_after < edges_before * 2,
+			"and should not have rescaled it: %d edges became %d", edges_before, edges_after
+		);
+	};
+}
+
+<*
+ A material with no transform is unchanged, which is what makes the zero-means-
+ unset rule safe.
+
+ `Material.uv_transform` is a struct field, so C3 zero-fills it wherever an
+ initializer omits it — and a repeat of zero maps an entire surface onto one
+ texel. Every material built before this feature existed is in that state. This
+ is the check that says they still draw the way they always did.
+*>
+fn void a_material_that_was_never_given_a_transform_is_untouched() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = three.texture("test/fixtures/checker.png");
+			const m = new three.MeshLambertMaterial({ map: tex });
+			return { repeat: m.repeat, offset: m.offset };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"repeat":[1,1]`),
+			"an untouched material repeats once, not zero times: %s", result.value);
+		test::@check(result.value.contains(`"offset":[0,0]`),
+			"and starts at the corner: %s", result.value);
+	};
+}
+
+<*
+ A repeat of zero is refused rather than collapsing the surface.
+
+ It is never what anyone means, and it is exactly what an unset field looks
+ like — so accepting it would make the two indistinguishable at the one place
+ where telling them apart matters.
+*>
+fn void a_repeat_of_zero_is_refused() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const m = new three.MeshLambertMaterial({});
+			try { m.repeat = [0, 1]; return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("cannot be zero"),
+			"a zero repeat should be refused and say why: %s", result.value);
 	};
 }

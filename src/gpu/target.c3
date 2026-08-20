@@ -11,9 +11,11 @@
  - **The extent is a parameter, not the window's.** A resize rebuilds the
    swapchain and moves the blit's destination rect. It does not touch the
    target, the depth buffer, the pipeline or the projection.
- - **`R8G8B8A8_UNORM`, so readback is a straight memcpy.** cui swizzles BGRA by
-   hand because it reads back a swapchain image whose format the surface chose.
-   three.c3 chose this one.
+ - **`R8G8B8A8_SRGB`, so readback is a straight memcpy and the bytes are already
+   display-ready.** cui swizzles BGRA by hand because it reads back a swapchain
+   image whose format the surface chose. three.c3 chose this one. The channel
+   order is what makes the memcpy work; the `_SRGB` half is what makes the
+   *values* right, and that is a separate claim — see below.
  - **Headless is the same code path.** No surface, no swapchain, and render +
    readback still work — which is what makes an image test possible under
    `c3c test` with no window server.
@@ -40,8 +42,43 @@ import image::png;
 <*
  Colour is fixed; depth is whatever the device will take (`vk::findDepthFormat`
  walks D32_SFLOAT first).
+
+ ## Why `_SRGB` and not `_UNORM`
+
+ This was `_UNORM` until the round trip was measured, and the round trip was
+ broken in a way that is invisible to every test that only asks the renderer to
+ agree with itself.
+
+ Textures upload as `R8G8B8A8_SRGB` (`gpu/texture.c3`), so the sampler decodes
+ to linear on read and the shaders' lighting arithmetic is linear, which is
+ correct. Under `_UNORM` nothing re-encoded on the way out: the shader's linear
+ float landed in eight bits raw, and both consumers then treated those bits as
+ sRGB — the swapchain because it presents to an sRGB display, the screenshot
+ because a PNG with no chunk saying otherwise *is* sRGB. One decode, no encode,
+ so **every textured scene came out about 2.2 too dark**.
+
+ `_SRGB` makes the hardware encode on write, which closes it for every pipeline
+ at once rather than per shader: the mesh pass, materials, debug lines, and
+ anything added later. The clear colour changes meaning with it — a clear value
+ is specified in linear and encoded like everything else — which is the same
+ rule the shaders now follow rather than a second one.
+
+ Two consumers had to move with it, and one did not:
+
+ - **The swapchain blit does convert.** `vkCmdBlitImage` reads an sRGB source
+   *as linear* and re-encodes into an sRGB destination, so an `_SRGB` target
+   blitted into a `_UNORM` swapchain would land back in linear and undo the
+   fix at the very last step. `gpu/swapchain.c3` now prefers an sRGB surface
+   format for exactly this reason, and says so.
+ - **The readback does not convert.** `vkCmdCopyImageToBuffer` is a copy, not a
+   blit — it moves the stored bytes untouched. So a screenshot now contains
+   sRGB-encoded bytes, which is what a PNG is defined to hold.
+ - **`scene.pick()` never touched this image.** It is a CPU raycast against the
+   hull tree in `scene/pick.c3`, not a colour-buffer read, so it is unaffected.
+   Worth stating because a colour-buffer picker is the usual design and would
+   have been broken by this change.
 *>
-const vk::Format TARGET_COLOR_FORMAT = FORMAT_R8G8B8A8_UNORM;
+const vk::Format TARGET_COLOR_FORMAT = FORMAT_R8G8B8A8_SRGB;
 
 struct Target
 {
@@ -181,9 +218,15 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
  The viewport height is negative, which flips Y so glTF's coordinate system
  lands the right way up in Vulkan's. Every projection matrix in this project
  assumes it.
+
+ @param clear : `sRGB - the same units a script writes scene.background in - and decoded here. The attachment carries the sRGB transfer function, so Vulkan encodes whatever it is handed; an already-linear value would come out as a far too bright frame with nothing in the API saying which space it wanted. Alpha passes through untouched.`
 *>
 fn void Target.begin_render(&self, vk::CommandBuffer cmd, float[4] clear = { 0, 0, 0, 1 })
 {
+	// The one colour in the renderer that never meets a shader, so the one that
+	// cannot be decoded where the others are. `gpu/color.c3` says why the curve
+	// is the piecewise one.
+	float[4] clear_linear = srgb_to_linear_rgb(clear);
 	vk::ImageMemoryBarrier2[2] barriers = { self.to_color_attachment(), vk::depthBarrier(self.depth) };
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
 
@@ -191,7 +234,7 @@ fn void Target.begin_render(&self, vk::CommandBuffer cmd, float[4] clear = { 0, 
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
-		.setClearValue({ .color = { .float32 = clear } });
+		.setClearValue({ .color = { .float32 = clear_linear } });
 
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -274,7 +317,7 @@ fn void Target.record_readback(&self, vk::CommandBuffer cmd, vk::Memory* dst)
  Copy the readback buffer into an owned `image::Image`.
 
  Only safe once the fence guarding `record_readback` has signalled. The target
- is `R8G8B8A8_UNORM`, so this is a memcpy and there is no channel swizzle
+ is `R8G8B8A8_SRGB`, so this is a memcpy and there is no channel swizzle
  anywhere in this project.
 
  Alpha is forced opaque: a half-transparent PNG of a finished frame is never

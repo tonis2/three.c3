@@ -20,6 +20,7 @@ import qjs;
 import vk;
 import std::core::test;
 import std::io;
+import std::time;
 
 macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))
 {
@@ -1485,5 +1486,293 @@ fn void a_click_on_nothing_is_a_miss() @test
 		String seen = @answer(run, "return globalThis.seen;");
 		defer seen.free(mem);
 		test::@check(seen == `"nothing"`, "the corner found nothing, got '%s'", seen);
+	};
+}
+
+// ============================================================================
+// Keys a script holds down
+//
+// A headless boot has no keyboard, so a scene whose whole subject is input was
+// untestable. `examples/village` binds seven keys to a character and had to hand
+// its internals to `globalThis.village` for the walking and the collision to be
+// exercised at all — a scene leaking its own state in order to be testable,
+// which is the smell rather than the fix. The sweep that became possible found a
+// 13% collision failure rate that no amount of playing it by hand had surfaced.
+// ============================================================================
+
+<*
+ A key a script presses is down, and stays down until it is released.
+
+ The held-not-fired half, which is the whole design: a walk is one press, sixty
+ frames and one release. An API where each frame needed its own call would be one
+ where a forgotten frame looks like the character stuttering.
+*>
+fn void a_key_a_script_presses_stays_down() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult held = run.run(`three.input.press('w'); return 1;`);
+		defer held.free();
+		test::@check(held.ok, "the press succeeded: %s", held.error);
+
+		run.tick(16.0);
+		three::RunResult first = run.run(`
+			return { down: three.input.isDown('w'), pressed: three.input.pressed('w') };
+		`);
+		defer first.free();
+		test::@check(first.value.contains(`"down":true`), "it is down on the first frame: %s", first.value);
+		test::@check(first.value.contains(`"pressed":true`), "and that frame is its edge: %s", first.value);
+
+		run.tick(32.0);
+		three::RunResult second = run.run(`
+			return { down: three.input.isDown('w'), pressed: three.input.pressed('w') };
+		`);
+		defer second.free();
+		test::@check(second.value.contains(`"down":true`),
+			"it is still down a frame later, without being pressed again: %s", second.value);
+		test::@check(second.value.contains(`"pressed":false`),
+			"and holding a key is not a second press: %s", second.value);
+
+		run.run(`three.input.release('w'); return 1;`).free();
+		run.tick(48.0);
+		three::RunResult after = run.run(`
+			return { down: three.input.isDown('w'), released: three.input.released('w') };
+		`);
+		defer after.free();
+		test::@check(after.value.contains(`"down":false`), "released, it is up: %s", after.value);
+		test::@check(after.value.contains(`"released":true`), "on the frame it went up: %s", after.value);
+	};
+}
+
+<*
+ A handler bound with `onKeyDown` fires for a key a script pressed.
+
+ The claim that matters for testability: there is **one** keyboard, not a second
+ path that reports edges without running handlers. A game's input is only
+ regression-testable if the thing under test — the handler, the callback, the
+ character — cannot tell a scripted key from a real one.
+*>
+fn void a_handler_fires_for_a_key_a_script_pressed() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult built = run.run(`
+			globalThis.fired = 0;
+			three.onKeyDown('space', () => { globalThis.fired++; });
+			three.input.press('space');
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the setup succeeded: %s", built.error);
+
+		run.tick(16.0);
+		run.tick(32.0);
+		run.tick(48.0);
+
+		three::RunResult count = run.run("return globalThis.fired;");
+		defer count.free();
+		test::@check(count.value == "1",
+			"the handler should have fired exactly once for one press held across three frames, got %s",
+			count.value
+		);
+	};
+}
+
+<*
+ A press and a release between two frames is still both edges.
+
+ The case a held set alone would lose: the key is down and up again before
+ anything samples it, so the difference against the previous frame sees nothing.
+ `fired_down` and `fired_up` are what carry it, and they exist for exactly the
+ reason the window's own event queue is unioned into a real frame rather than
+ replacing the latch.
+*>
+fn void a_press_and_release_inside_one_frame_is_both_edges() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.run(`three.input.press('a'); three.input.release('a'); return 1;`).free();
+		run.tick(16.0);
+
+		three::RunResult state = run.run(`
+			return {
+				down: three.input.isDown('a'),
+				pressed: three.input.pressed('a'),
+				released: three.input.released('a'),
+			};
+		`);
+		defer state.free();
+		test::@check(state.value.contains(`"pressed":true`),
+			"the press happened and has to be reported: %s", state.value);
+		test::@check(state.value.contains(`"released":true`),
+			"and so did the release: %s", state.value);
+		test::@check(state.value.contains(`"down":false`),
+			"and it is not still held: %s", state.value);
+	};
+}
+
+<*
+ `releaseAll` lets go of everything, and the releases are still edges.
+
+ What a test calls between cases. Leaking a held key into the next case is the
+ failure this prevents, and it is the kind that makes an unrelated check fail
+ later for a reason nobody would look for here.
+*>
+fn void release_all_lets_go_of_everything() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.run(`three.input.press('w'); three.input.press('shift'); return 1;`).free();
+		run.tick(16.0);
+
+		three::RunResult before = run.run(`
+			return { w: three.input.isDown('w'), shift: three.input.isDown('shift') };
+		`);
+		defer before.free();
+		test::@check(before.value.contains(`"w":true`) && before.value.contains(`"shift":true`),
+			"both are held to begin with: %s", before.value);
+
+		run.run("three.input.releaseAll(); return 1;").free();
+		run.tick(32.0);
+
+		three::RunResult after = run.run(`
+			return {
+				w: three.input.isDown('w'),
+				shift: three.input.isDown('shift'),
+				released: three.input.released('w'),
+			};
+		`);
+		defer after.free();
+		test::@check(after.value.contains(`"w":false`) && after.value.contains(`"shift":false`),
+			"and neither is after releaseAll: %s", after.value);
+		test::@check(after.value.contains(`"released":true`),
+			"which is still a release edge, because that is what happened: %s", after.value);
+	};
+}
+
+<*
+ A key name nobody has is refused by name, the same way `isDown` refuses one.
+
+ The press path resolves through `named_key`, so a typo says which name was
+ wrong rather than silently holding nothing — which would look like the game
+ ignoring the input.
+*>
+fn void pressing_a_key_that_does_not_exist_is_refused() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult result = run.run(`
+			try { three.input.press('banana'); return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.value.contains("no key called 'banana'"),
+			"a name that is not a key should say so: %s", result.value);
+	};
+}
+
+// ============================================================================
+// The script budget
+// ============================================================================
+
+<*
+ A script can raise its own budget, and the raise applies to the run that made
+ it.
+
+ A script does not know it needs longer until it is already running, so a budget
+ that only took effect next time would be useless for the case it exists for.
+ This asks for more and then runs past the default 5,000 ms to prove the
+ interrupt did not fire — the only assertion that distinguishes a raised budget
+ from a stored number.
+*>
+fn void a_script_can_run_past_the_default_budget_after_raising_it() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult result = run.run(`
+			three.budget = 20000;
+			const started = Date.now();
+			let n = 0;
+			while (Date.now() - started < 5600) { n++; }
+			return { ms: Date.now() - started, budget: three.budget };
+		`);
+		defer result.free();
+		test::@check(result.ok,
+			"a script that raised its budget should not be stopped at the default: %s", result.error);
+		test::@check(result.value.contains(`"budget":20000`),
+			"and the budget reads back as it was set: %s", result.value);
+	};
+}
+
+<*
+ The ceiling holds, and asking for more is clamped rather than refused.
+
+ The budget exists so a wedged loop is a pause rather than a hang, so a limit a
+ script can lift entirely is not a limit. Clamped rather than thrown because a
+ caller asking for an hour means "as long as possible", and a throw would leave
+ them on the default — the opposite of what they asked for.
+*>
+fn void the_budget_has_a_ceiling_and_asking_past_it_clamps() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult result = run.run(`
+			three.budget = 60 * 60 * 1000;
+			const clamped = three.budget;
+			let refused = null;
+			try { three.budget = 0; } catch (e) { refused = e.message; }
+			return { clamped, refused, still: three.budget };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"clamped":600000`),
+			"an hour should clamp to the ten-minute ceiling: %s", result.value);
+		test::@check(result.value.contains("positive number"),
+			"and zero should be refused by name: %s", result.value);
+		test::@check(result.value.contains(`"still":600000`),
+			"leaving the budget where it was: %s", result.value);
+	};
+}
+
+<*
+ A raised script budget does not become a raised per-frame budget.
+
+ The trap in making the budget settable at all. `frame_loop.c3` borrows
+ `budget_ns` for the length of a frame and puts it back, so if a script's budget
+ were the same stored number, raising it to five minutes would let one animation
+ callback wedge the game for five minutes — turning a stutter into a hang, which
+ is the exact failure the 100 ms frame budget exists to prevent. `JsRuntime` keeps
+ `script_budget_ns` separately for this reason and nothing else.
+
+ Asserted on the clock rather than on the message, for
+ `an_endless_callback_is_stopped_by_the_frame_budget`'s reason: the sentence is
+ what the code chose to say, and the elapsed time is the fact it is claiming.
+*>
+fn void a_raised_script_budget_does_not_reach_the_frame_callback() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult built = run.run(`
+			three.budget = 300000;
+			three.setAnimationLoop(() => { while (true) {} });
+			return three.budget;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the setup succeeded: %s", built.error);
+		test::@check(built.value == "300000", "the script budget really was raised, got %s", built.value);
+
+		Clock started = clock::now();
+		test::@check(run.tick(0), "the callback ran");
+		long spent_ms = (long)started.to_now() / 1_000_000;
+
+		test::@check(spent_ms < 1_000,
+			"an endless callback should still be stopped by the frame's 100 ms and not by the script's raised budget: it ran %d ms",
+			spent_ms
+		);
+
+		three::RunResult after = run.run("return 1;");
+		defer after.free();
+		test::@check(after.frame_error.contains("100 ms"),
+			"and be named as the frame budget: '%s'", after.frame_error);
 	};
 }

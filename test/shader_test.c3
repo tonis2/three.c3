@@ -362,10 +362,16 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		);
 	}
 
-	// 60 used of the 64 the C3 struct occupies. The difference is tail padding
+	// 76 used of the 80 the C3 struct occupies. The difference is tail padding
 	// and is the reason `record` pushes the reflected size rather than
 	// `MeshPush::size` — see the comment there.
-	test::@check(mod.layout.push_size == 60, "the block is 60 bytes, got %d", mod.layout.push_size);
+	//
+	// Against `MATERIAL_PUSH_START` rather than a literal: that constant is
+	// derived from the last entry of `MESH_PUSH_FIELDS`, so adding a ninth
+	// pinned field moves both together and this check keeps meaning what it
+	// says. It was a literal 60 until `uv_transform` arrived and made it a 76.
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START,
+		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
 	// One descriptor, and it is the texture. Derived, not declared — until M4
@@ -524,6 +530,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
 		test::@check(pipeline.shader.bindings.len() == 1, "from one reflected binding");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
-		test::@check(pipeline.shader.push_size == 60, "with the shader's push size, got %d", pipeline.shader.push_size);
+		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
+			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
 	};
 }

@@ -336,6 +336,74 @@ fn void js_texture_dispose(
 }
 
 <*
+ `textureRead(index, into)` — copy a texture's pixels into a caller's
+ `Uint8Array`.
+
+ ## The destination is an argument, and that is the design
+
+ Every other way of getting bytes back to a script is worse here. Building a
+ plain `Array` costs one host crossing per element, which is 65,536 of them for
+ a 128x128 texture. Handing out an `ArrayBuffer` over host memory — what
+ `qjs::Context.buffer` does — means the host now owns an allocation whose
+ lifetime is decided by the script, and the only safe end to that is a detach the
+ script has to be trusted to trigger.
+
+ So the script supplies the memory and the host writes into it. `js.bytes` gives
+ a mutable slice of the engine's own storage for the array, no copy, no
+ ownership question, and the same function `dataTexture` already reads *from*.
+ It also puts the allocation at the call site, where a caller reading a texture
+ every frame can see what it costs.
+
+ **The bytes are the uploaded ones, not the sampled ones.** The copy performs no
+ format conversion, so an sRGB texture reads back as the sRGB bytes it was made
+ from — which is what makes `new three.DataTexture(px, w, h).read()` return `px`,
+ and what `png::save_file` wants.
+
+ @return `The number of bytes written, so a caller can assert on it rather than trusting the length it passed.`
+*>
+fn void js_texture_read(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("texture.read() needs a GPU device and this context has none");
+		return;
+	}
+
+	int index = arg_int(&js, argc, args, 0);
+	if (!self.pass.assets.texture_alive(index))
+	{
+		*out = js.raise("texture.read() was given a texture that has been disposed");
+		return;
+	}
+
+	Texture* texture = self.pass.assets.texture_at(index);
+	sz need = (sz)texture.width * (sz)texture.height * 4;
+
+	char[] dst = argc > 1 ? js.bytes(args[1]) : (char[]){};
+	if (dst.len < need)
+	{
+		*out = js.raise(string::tformat(
+			"texture.read() wants a Uint8Array of at least %d bytes for a %dx%d image, and was given %d",
+			need, texture.width, texture.height, dst.len
+		));
+		return;
+	}
+
+	if (catch err = texture.read_pixels(&self.renderer.gpu, dst))
+	{
+		*out = js.raise(string::tformat("texture.read() could not copy the image back: %s", err));
+		return;
+	}
+
+	*out = qjs::int_value((int)need);
+}
+
+<*
  `primitive(kind, a, b, c, u, v, w, capped)` — build a parametric shape, or hand
  back the asset already built for exactly these numbers.
 

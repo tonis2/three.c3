@@ -53,6 +53,7 @@ import std::core::test;
 import std::io;
 import std::io::file;
 import std::math;
+import image;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -1115,5 +1116,207 @@ fn void an_export_wants_a_path() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("wants a path"), "it says so, got '%s'", result.value);
+	};
+}
+
+// ============================================================================
+// Textures a script made
+//
+// `scene.export` used to report `images: 0` for `examples/village` — a scene
+// whose entire character is eleven generated textures — because `texture_for`
+// read bytes out of a source glTF's buffer and a `DataTexture` has no source
+// glTF. It also never consulted `material.map` at all, so an image a script put
+// on a shape with `new three.MeshLambertMaterial({ map })` was invisible to the
+// exporter even when the image *had* come from a file.
+// ============================================================================
+
+<*
+ A generated texture is written into the file, and reloading it gives the same
+ pixels back — byte for byte.
+
+ The round trip rather than a count, because `images: 1` only says *something*
+ was written. This checks it is the right something, and the path it takes is
+ four format boundaries: read off the device, `png::save_bytes`, into the glTF
+ image table, out through the PNG decoder, up onto the device again, and read
+ back a second time. A channel swizzle or a row-order flip at any one of them
+ survives a count and fails here.
+
+ A gradient with all four channels moving, for the same reason: a flat fill
+ would survive a swizzle, a half-copy and a transposed row order alike.
+
+ Written in C3 rather than as a script because the last step has no JavaScript
+ spelling — a mesh that brought its image from a file exposes no `Texture`
+ handle, so there is nothing for `texture.read()` to be called on. That is a real
+ gap and it is `asset.imageAt(i)`-shaped; it is not what this check is about.
+*>
+fn void a_generated_texture_survives_the_round_trip_byte_for_byte() @test
+{
+	String path = "build/export_generated.glb";
+	defer (void)file::delete(path);
+
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
+	defer renderer.free();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	const uint W = 8;
+	const uint H = 8;
+	char[] made = mem::new_array(char, (sz)W * H * 4);
+	defer free(made);
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 0; x < W; x++)
+		{
+			sz i = ((sz)y * W + x) * 4;
+			made[i] = (char)(x * 30);
+			made[i + 1] = (char)(y * 30);
+			made[i + 2] = (char)(255 - x * 20);
+			made[i + 3] = 255;
+		}
+	}
+
+	image::Image source = {
+		.width = W, .height = H, .bit_depth = 8,
+		.format = image::PixelFormat.RGBA, .pixels = made, .allocator = mem,
+	};
+	int slot = renderer.pass.assets.claim_texture(&renderer.gpu, source)!!;
+	uint material = renderer.pass.create_texture_material(slot)!!;
+
+	three::AssetId box = renderer.pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	three::ExportReport report = renderer.pass.export_scene(path)!!;
+	test::@check(report.images == 1, "one image should have been written, got %d", report.images);
+	test::@check(report.shaded == 0,
+		"a texture material is a thing glTF describes, so nothing was lost, got shaded = %d", report.shaded);
+
+	// Back in through the loader, and drawn, so its image reaches the device.
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, path)!!;
+	three::NodeId placed = renderer.pass.scene.add_mesh(reloaded, 0);
+	(void)placed;
+
+	three::GpuMesh* mesh = renderer.pass.assets.mesh(reloaded, 0);
+	test::@check(mesh != null && mesh.texture >= 0,
+		"the reloaded mesh should carry the file's image, got texture %d",
+		mesh == null ? -99 : mesh.texture);
+
+	three::Texture* back = renderer.pass.assets.texture_at(mesh.texture);
+	test::@check(back.width == W && back.height == H,
+		"it should be %dx%d, got %dx%d", W, H, back.width, back.height);
+
+	char[] got = mem::new_array(char, (sz)back.width * back.height * 4);
+	defer free(got);
+	back.read_pixels(&renderer.gpu, got)!!;
+
+	sz same = 0;
+	sz first_wrong = -1;
+	for (sz i = 0; i < made.len; i++)
+	{
+		if (made[i] == got[i]) { same++; }
+		else if (first_wrong < 0) { first_wrong = i; }
+	}
+	test::@check(same == made.len,
+		"%d of %d bytes survived the round trip; first difference at byte %d, %d went in and %d came back",
+		same, made.len, first_wrong,
+		first_wrong < 0 ? 0 : (int)made[first_wrong], first_wrong < 0 ? 0 : (int)got[first_wrong]
+	);
+}
+
+<*
+ `shaded` counts what the file cannot carry, not what is not the default.
+
+ It used to be `material != DEFAULT_MATERIAL`, which counted a
+ `MeshLambertMaterial` — an image and a colour, which is exactly what a glTF
+ material is. On `examples/village` that read `shaded: 3025` of 3029, a number
+ saying almost everything lost its shading about a file where almost nothing did.
+
+ Three meshes, one of each kind, and only the ShaderMaterial counts.
+*>
+fn void shaded_counts_only_what_gltf_cannot_describe() @test
+{
+	String path = "build/export_shaded_kinds.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			// No material at all.
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			// A texture and a side, which glTF has words for.
+			const tex = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(200), 4, 4);
+			const lambert = new three.MeshLambertMaterial({ map: tex });
+			const b = new three.Mesh(new three.SphereGeometry(1, 8, 4), lambert);
+			b.position.x = 3;
+			scene.add(b);
+
+			// A program, which it does not.
+			const shader = new three.ShaderMaterial({
+				uniforms: { tint: [0, 1, 0] },
+				fragment: "float3 shade(Surface s) { return tint; }"
+			});
+			const c = new three.Mesh(new three.BoxGeometry(1, 1, 1), shader);
+			c.position.x = 6;
+			scene.add(c);
+
+			const report = scene.export("build/export_shaded_kinds.glb");
+			return { instances: report.instances, shaded: report.shaded, images: report.images };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"instances":3`), "all three went out: %s", result.value);
+		test::@check(result.value.contains(`"shaded":1`),
+			"only the ShaderMaterial lost anything: %s", result.value);
+		test::@check(result.value.contains(`"images":1`),
+			"and the lambert material's map was written: %s", result.value);
+	};
+}
+
+<*
+ A material's map is what gets written, not the image the mesh brought.
+
+ `MeshPass.record` lets `Material.texture` beat `GpuMesh.texture` so a script can
+ overrule what a file supplied. The exporter did not, so a mesh loaded from
+ `textured.glb` and then re-mapped exported with the *file's* checkerboard — the
+ image the frame did not show. Wrong rather than missing, which is worse.
+*>
+fn void the_materials_map_is_what_the_file_gets() @test
+{
+	String path = "build/export_overridden_map.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const a = three.load("test/fixtures/textured.glb");
+			const m = new three.Mesh(a.mesh("quad_left"));
+
+			// Flat green, nothing like the fixture's magenta checkerboard.
+			const px = new Uint8Array(4 * 4 * 4);
+			for (let i = 0; i < px.length; i += 4) { px[i] = 0; px[i+1] = 200; px[i+2] = 0; px[i+3] = 255; }
+			m.material = new three.MeshLambertMaterial({ map: new three.DataTexture(px, 4, 4) });
+			scene.add(m);
+
+			const report = scene.export("build/export_overridden_map.glb");
+			scene.unload();
+
+			// One image in the file, and it is the green one — proved by reading
+			// it back off the device after a reload.
+			const back = three.load("build/export_overridden_map.glb");
+			const shown = new three.Mesh(back.meshAt(0));
+			new three.Scene().add(shown);
+			return { images: report.images };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"images":1`),
+			"the material's map should be the one image written: %s", result.value);
 	};
 }

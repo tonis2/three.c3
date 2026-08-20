@@ -418,3 +418,239 @@ fn void removing_one_body_leaves_the_rest_standing() @test
 			"four bodies and three live boxes are left: %s", standing.value);
 	};
 }
+
+// ============================================================================
+// Steering a body
+//
+// The gap these close is the one that stopped a character being built on this
+// world at all: a dynamic body could be dropped and watched but never steered,
+// and a kinematic one was steered but never stopped, so there was no
+// combination that walked *and* collided. `examples/village` worked around it
+// with 123 hand-registered shapes resolved in JavaScript every frame.
+//
+// Every check here asserts a position moved, not that a number came back. A
+// binding that wrote `linear_velocity` into a copy of the solver's record would
+// round-trip perfectly through `velocity()` and move nothing.
+// ============================================================================
+
+<*
+ A velocity set from a script carries the body across the floor.
+
+ Sideways rather than up, so gravity is not what is being measured, and against
+ a floor so this is a body that is colliding at the same time as it is being
+ driven — which is the combination that did not exist.
+*>
+fn void a_velocity_set_from_a_script_moves_the_body() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(60, 1, 60));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			box.position.set(0, 0.5, 0);
+			scene.add(box);
+			three.physics.add(box, { shape: 'box', mass: 1 });
+			globalThis.box = box;
+
+			// Set once here so the round trip can be read before any frame has
+			// run, then held every frame — which is what a character does. The
+			// solver recomputes the velocity from what actually happened at the
+			// end of each step, so a single set survives exactly one
+			// integration and a walk has to keep asking.
+			three.physics.setVelocity(box, [4, 0, 0]);
+			const readBack = three.physics.velocity(box)[0];
+			three.setAnimationLoop(() => three.physics.setVelocity(box, [4, 0, 0]));
+			return readBack;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "4", "the velocity reads back as it was set, got '%s'", built.value);
+
+		// One second of the fixed 60 Hz world.
+		for (int i = 1; i <= 60; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run("three.setAnimationLoop(null); return globalThis.box.position.x;");
+		defer after.free();
+		test::@check(after.ok, "reading back succeeded: %s", after.error);
+
+		double x = after.value.to_double() ?? 0.0;
+		// 4 units a second for a second, less whatever friction with the floor
+		// takes. Loose at the top as well as the bottom: a body that shot off to
+		// 40 would mean the velocity was being added to every frame rather than
+		// assigned, which is the mistake this API's shape exists to prevent.
+		test::@check(x > 2.5 && x < 5.0,
+			"a body held at 4 units a second for a second should be about 4 units along, got %f", x);
+	};
+}
+
+<*
+ An impulse adds to what the body was already doing, and a sleeping body
+ answers it.
+
+ The sleep half is the one worth having a check for. A body resting on a floor
+ is asleep within half a second, and a sleeping body is skipped by integration
+ entirely — so a binding that did not wake it would work on a rolling crate and
+ do nothing at all to a settled one, which reads as the verb being unreliable
+ rather than as sleep.
+
+ **Proved by injection, and the injection is more alarming than the check.**
+ Deleting the two lines of `Physics.wake` does not make this go red; it makes
+ the suite **hang**, reproducibly, with the main thread in
+ `collision::WorkerPool.join` on a mutex and a worker parked on a condition
+ variable. Giving a sleeping body a velocity is a state the solver's island
+ bookkeeping does not survive. That is worth knowing beyond this file: it is the
+ state any binding that wrote `linear_velocity` and stopped there would create
+ on its very first push, so the wake is a correctness requirement of the library
+ and not a courtesy of this API.
+*>
+fn void an_impulse_wakes_a_settled_body_and_moves_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(60, 1, 60));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const ball = new three.Mesh(new three.SphereGeometry(0.5, 16, 8));
+			ball.position.set(0, 0.5, 0);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1 });
+			globalThis.ball = ball;
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		// Two seconds of doing nothing, which is four times the sleep timer.
+		for (int i = 1; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult asleep = run.run(`
+			const v = three.physics.velocity(globalThis.ball);
+			return { still: Math.abs(v[0]) < 0.01, y: globalThis.ball.position.y };
+		`);
+		defer asleep.free();
+		test::@check(asleep.ok, "the settling script succeeded: %s", asleep.error);
+		test::@check(asleep.value.contains(`"still":true`),
+			"the ball has to have settled for this to be testing sleep at all: %s", asleep.value);
+
+		three::RunResult push = run.run("three.physics.applyImpulse(globalThis.ball, [6, 0, 0]); return 1;");
+		defer push.free();
+		test::@check(push.ok, "the impulse succeeded: %s", push.error);
+
+		for (int i = 121; i <= 180; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run("return globalThis.ball.position.x;");
+		defer after.free();
+		double x = after.value.to_double() ?? 0.0;
+		test::@check(x > 1.0,
+			"a settled ball given a 6-unit impulse should have travelled, got x = %f — a sleeping body absorbs an impulse into a number nothing reads",
+			x
+		);
+	};
+}
+
+<*
+ A torque impulse spins a body without shoving it.
+*>
+fn void a_torque_impulse_spins_without_shoving() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(box);
+			three.physics.add(box, { shape: 'box', mass: 1 });
+			three.physics.gravity = [0, 0, 0];
+			three.physics.applyTorqueImpulse(box, [0, 2, 0]);
+			const v = three.physics.velocity(box);
+			return { spin: v[4] > 0.1, drift: Math.abs(v[0]) + Math.abs(v[1]) + Math.abs(v[2]) };
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script succeeded: %s", built.error);
+		test::@check(built.value.contains(`"spin":true`),
+			"a torque impulse about y should give an angular velocity about y: %s", built.value);
+		test::@check(built.value.contains(`"drift":0`),
+			"and no linear velocity at all: %s", built.value);
+	};
+}
+
+<*
+ The three bodies that cannot be pushed refuse by name.
+
+ Each one is a different mistake with a different fix, so each gets its own
+ sentence rather than one "cannot" covering all of them. The failure being
+ avoided is the silent kind: a static body absorbs an impulse arithmetically —
+ inverse mass zero — and a kinematic body has its velocity overwritten a
+ fraction of a step later, so both would look like the verb doing nothing.
+*>
+fn void a_body_the_solver_does_not_integrate_refuses_to_be_pushed() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const out = {};
+
+			const wall = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(wall);
+			three.physics.add(wall, { shape: 'box', mass: 0 });
+			try { three.physics.setVelocity(wall, [1, 0, 0]); out.static = 'accepted'; }
+			catch (e) { out.static = e.message; }
+
+			const lift = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			lift.position.x = 4;
+			scene.add(lift);
+			three.physics.add(lift, { shape: 'box', mass: 1, kinematic: true });
+			try { three.physics.applyImpulse(lift, [1, 0, 0]); out.kinematic = 'accepted'; }
+			catch (e) { out.kinematic = e.message; }
+
+			const loose = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			loose.position.x = 8;
+			scene.add(loose);
+			try { three.physics.setVelocity(loose, [1, 0, 0]); out.none = 'accepted'; }
+			catch (e) { out.none = e.message; }
+
+			return out;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("static body"),
+			"a static body should refuse and say why: %s", result.value);
+		test::@check(result.value.contains("kinematic body"),
+			"a kinematic body should refuse and say why: %s", result.value);
+		test::@check(result.value.contains("needs a body"),
+			"an object with no body should say that rather than anything about masses: %s", result.value);
+	};
+}
+
+<*
+ Reading a velocity off something with no body is null, not a throw.
+
+ The asymmetry with the setters is deliberate: a getter is asked in a loop over
+ objects that may or may not have bodies, and making that throw means writing
+ the same guard at every call site.
+*>
+fn void reading_a_velocity_with_no_body_is_null() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(m);
+			return three.physics.velocity(m) === null;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "true", "no body should read back as null, got '%s'", result.value);
+	};
+}

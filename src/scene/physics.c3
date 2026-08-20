@@ -217,6 +217,78 @@ fn PhysicsBody* Physics.body_for(&self, NodeId node)
 }
 
 <*
+ The solver's body for a node, or null.
+
+ `Physics.body_for` answers with this side's record — the node, the collider,
+ the kind. This answers with the *solver's*, which is where the velocity lives
+ and where an impulse has to land. Two lookups rather than one field because the
+ solver owns its own storage and hands out a pointer that a later `add_body`
+ could move; taking it fresh at each call is what makes that safe.
+*>
+fn collision::Rigidbody* Physics.rigidbody_for(&self, NodeId node)
+{
+	PhysicsBody* body = self.body_for(node);
+	if (body == null) return null;
+	if (self.world.bodies.len() == 0) return null;
+
+	collision::Rigidbody*? rigid = self.world.find_body(body.id);
+	if (catch rigid) return null;
+	return rigid;
+}
+
+<*
+ Whether a script may set this node's velocity or push it with an impulse.
+
+ **Dynamic only, and the two refusals are different mistakes.** A static body
+ has an inverse mass of zero, so an impulse is arithmetically a no-op and a
+ velocity written onto it is overwritten by the next integration — the script
+ would see nothing happen and have nothing to read. A kinematic body has its
+ transform driven from the script every step by `set_kinematic_target`, so a
+ velocity written here is discarded a fraction of a step later, which is worse
+ than the static case because it *sometimes* appears to work.
+
+ Both are refused by name at the binding rather than silently absorbed here.
+ That is the same call `Scene.set_position` makes for a dynamic body's transform,
+ pointing the other way: each kind of body has exactly one way to be moved, and
+ the other one throws.
+*>
+fn bool Physics.can_be_pushed(&self, NodeId node)
+{
+	PhysicsBody* body = self.body_for(node);
+	return body != null && body.kind == BodyKind.DYNAMIC;
+}
+
+<*
+ Wake a body that an impulse or a velocity is about to reach.
+
+ The obvious reason first: a body at rest for half a second is asleep, and a
+ sleeping body is skipped by integration entirely, so an impulse applied to one
+ changes a number nothing will ever read. Without this the same line of script
+ works on a rolling crate and does nothing at all to a settled one, which reads
+ as the verb being unreliable rather than as sleep. The *island* rather than the
+ body alone, because whatever this one is resting on has to start being
+ integrated too, or the push drives it into a neighbour that is not moving yet.
+
+ **It is not an optimisation, and that was found the hard way.** Removing these
+ two lines and re-running `three_tests::physics` does not produce a failing
+ check — it produces a **hang**, reproducibly, with the main thread inside
+ `collision::WorkerPool.join` waiting on a mutex while a worker sits in
+ `worker_main` on a condition variable. A sleeping body carrying a non-zero
+ velocity is a state the solver's island bookkeeping does not expect, and it is
+ exactly the state a binding that only wrote `linear_velocity` would leave
+ behind on the first push.
+
+ So a script cannot be trusted to wake a body itself, and this cannot be moved
+ to the prelude: `an_impulse_wakes_a_settled_body_and_moves_it` says so, and its
+ injection record says what happens when it is not here.
+*>
+fn void Physics.wake(&self, collision::Rigidbody* rigid)
+{
+	self.world.wake_island(rigid);
+	rigid.stop_sleeping();
+}
+
+<*
  Whether a script may write this node's transform.
 
  False only for a body the solver drives. A static body never moves and a

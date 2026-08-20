@@ -39,6 +39,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "setUniform", &js_set_uniform, 9);
 	self.bind(host, "setSide", &js_set_side, 2);
 	self.bind(host, "setMap", &js_set_map, 2);
+	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
+	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 }
 
@@ -329,6 +331,65 @@ fn void js_set_side(
 		*out = js.raise("that material is not in this context");
 		return;
 	}
+}
+
+<*
+ `material.repeat = [u, v]` / `material.offset = [u, v]` — how the image is laid
+ across the surface.
+
+ One verb for both, because they are one `float4` in the push block and setting
+ them separately would be two host crossings to write two halves of the same
+ sixteen bytes.
+
+ The reason this is a material property rather than a texture property is at
+ `MeshPass.set_material_uv`, and it is not the reason Three.js has: it is that
+ textures here are deduplicated by content across every file, so a transform on
+ the texture would reach every unrelated surface that happened to use the same
+ image.
+*>
+fn void js_set_material_uv(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	if (catch err = self.pass.set_material_uv(
+		index,
+		arg_float(&js, argc, args, 1),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
+	))
+	{
+		if (err == MATERIAL_REPEAT_IS_ZERO)
+		{
+			*out = js.raise(
+				"material.repeat cannot be zero — every point of the surface would sample the same texel. "
+				"1 is once across, 4 is four times"
+			);
+			return;
+		}
+		*out = js.raise("that material is not in this context");
+		return;
+	}
+}
+
+<*
+ `[repeat_u, repeat_v, offset_u, offset_v]` for a material.
+*>
+fn void js_get_material_uv(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float[4] uv = self.pass.material_uv((uint)arg_int(&js, argc, args, 0));
+	qjs::Value four = js.array();
+	for (uint i = 0; i < 4; i++) js.set_index(four, i, qjs::number_value((double)uv[i]));
+	*out = four;
 }
 
 <*

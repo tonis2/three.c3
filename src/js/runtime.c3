@@ -73,6 +73,20 @@ const usz JS_STACK_LIMIT  = 1 * 1024 * 1024;
 // is a five-second pause rather than a hang.
 const long JS_BUDGET_MS = 5_000;
 
+// The most a script may raise its own budget to, through `three.budget`.
+//
+// **The ceiling is the point, not the default.** A script that simulates rather
+// than builds — thirty thousand steps of a character against a hundred colliders,
+// which is what proved `examples/village`'s collision — needs minutes, and being
+// forced to cut that into five-second pieces means cutting it into pieces that
+// fit the budget rather than pieces that mean something. But a budget a script
+// can raise without limit is no budget: a wedged loop would hang the process,
+// and the whole reason the interrupt exists is that it must not.
+//
+// Ten minutes is longer than any legitimate scene build by two orders of
+// magnitude and shorter than a person's patience with a stuck process.
+const long JS_BUDGET_CEILING_MS = 600_000;
+
 // A promise chain gets this many microtask steps to settle after the script's
 // own body has finished. A script that awaits something that never resolves is
 // reported as unfinished rather than spun on.
@@ -168,6 +182,17 @@ struct JsRuntime
 	DString value;
 	DString error;
 
+	// What a *script* gets, as opposed to what a frame callback gets. Raisable
+	// from JavaScript through `three.budget`, because 5,000 ms is generous for
+	// building a scene and short for simulating thirty thousand steps of one —
+	// the first collision sweep over `examples/village` was killed by it and had
+	// to be cut into pieces that fit the budget rather than pieces that meant
+	// something. `JS_BUDGET_CEILING_MS` is what keeps it from becoming a hang.
+	//
+	// Separate from `budget_ns` on purpose: `frame_loop.c3` overwrites that one
+	// per frame, so a raised script budget must not silently become a raised
+	// per-frame allowance and let one callback wedge a game.
+	long script_budget_ns;
 	// The run's wall-clock budget. `started` is stamped at the top of `run`.
 	Clock started;
 	long budget_ns;
@@ -201,6 +226,10 @@ struct JsRuntime
 	// worst and is replaced whole by every tick; `input_text` backs its `text`,
 	// which would otherwise point into a window buffer that clears itself.
 	InputState input;
+	// Keys a script is holding down through `three.input.press`. Merged into
+	// every frame beside the window's own, which is what makes an input-driven
+	// scene testable without a keyboard — `SyntheticKeys` has the argument.
+	SyntheticKeys synthetic;
 	DString input_text;
 	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
 	usz key_handler_count;
@@ -257,7 +286,8 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.input_text.init(mem, 64);
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
-	self.budget_ns = JS_BUDGET_MS * 1_000_000;
+	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
+	self.budget_ns = self.script_budget_ns;
 	self.epoch = 1;
 	self.ready = true;
 
@@ -372,6 +402,10 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 	self.timed_out = false;
 	self.settled = false;
 	self.rejected = false;
+	// A script's budget, not a frame's. `frame_loop.c3` writes `budget_ns` per
+	// frame from its own constant and this puts it back for the next run, so the
+	// two cannot bleed into one another in either direction.
+	self.budget_ns = self.script_budget_ns;
 	self.started = clock::now();
 
 	@pool()

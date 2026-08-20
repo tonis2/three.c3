@@ -103,13 +103,20 @@ struct MeshPush
 	ulong uvs;
 	float[4] base_color; // rgb albedo factor, a material alpha
 	uint flags;
+	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
+	// the uv before the sample. The eighth pinned field, added when it turned out
+	// that a surface mapping its texture exactly once makes texel density a
+	// function of how big the mesh is: `examples/village` covered its ground with
+	// 484 separate plane meshes purely so one 128px grass texture would not
+	// stretch across 132 units.
+	float[4] uv_transform;
 }
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
 // Not a bound but an equality, because these two numbers are a wire format
 // shared with `shaders/mesh.slang` and a silent change to either side is a
 // misread buffer rather than an error. `Instance` is in `scene/scene.c3`.
-$assert MeshPush::size == 64 : "the push block no longer matches the layout documented above";
+$assert MeshPush::size == 80 : "the push block no longer matches the layout documented above";
 $assert FrameBlock::size == 80 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Instance::size == 148 : "Instance no longer matches shaders/mesh.slang";
 
@@ -134,6 +141,7 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	{ "uvs",       32,  8 },
 	{ "base_color", 40, 16 },
 	{ "flags",     56,  4 },
+	{ "uv_transform", 60, 16 },
 };
 
 <*

@@ -84,14 +84,26 @@ struct MaterialUniform
  Bytes of push block available to material uniforms, after the mesh contract.
 
  128 is the push size every Vulkan implementation must offer and `PUSH_BUDGET`
- treats it as a budget rather than a limit to grow into; the seven fields
- `MESH_PUSH_FIELDS` pins take 60 of it. What is left is what a material may
+ treats it as a budget rather than a limit to grow into; the eight fields
+ `MESH_PUSH_FIELDS` pins take 76 of it. What is left is what a material may
  spend, and it is spelled here as a number rather than derived from
- `MeshPush::size` on purpose: `MeshPush` is 64 bytes and only 60 of them reflect,
+ `MeshPush::size` on purpose: `MeshPush` is 80 bytes and only 76 of them reflect,
  the difference being C3 tail padding, so deriving it would quietly hand out four
  bytes that the shader's layout does not contain.
+
+ **This was 68 and is now 52**, because `uv_transform` was added to the mesh
+ contract. That is four rows of four floats down to three, or five rows of three
+ down to four, and it was not free — the trade was made deliberately. Material
+ uniforms are a `ShaderMaterial` feature and nothing else; the uv transform is
+ needed most by a ground plane wearing a `MeshLambertMaterial`, which has no
+ uniform block to put it in. Spending a shared 16 bytes so that every material
+ can tile is worth more than a fourth row for the ones that compile a body.
+
+ The way past this for either of them is the same and is written down in
+ `plan.md` §2: a device buffer behind a BDA in the push block, at which point the
+ budget stops being 128 bytes and starts being memory.
 *>
-const uint MATERIAL_UNIFORM_BUDGET = 68;
+const uint MATERIAL_UNIFORM_BUDGET = 52;
 
 // The template, looked up the same way `mesh.slang` is — `shaders/` first, then
 // `build/shaders/`, both relative to the working directory.
@@ -145,9 +157,11 @@ const String[*] MATERIAL_RESERVED @local = {
 	// What the template declares.
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
+	"srgb_to_linear",
 	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "MATERIAL_ROWS",
-	// The seven push fields the mesh contract pins.
+	// The eight push fields the mesh contract pins.
 	"frame", "instances", "positions", "normals", "uvs", "base_color", "flags",
+	"uv_transform",
 	// Types.
 	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
 	"int", "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4",

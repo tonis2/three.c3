@@ -129,6 +129,16 @@ const uint MAX_PRIMITIVE_SEGMENTS = 512;
  Light neutral grey rather than the triangle's orange: these are what a scene
  gets built out of, and a scene of orange boxes reads as "something is wrong with
  the material" to an agent looking at its own screenshot.
+
+ **Stated in sRGB and converted where it is used.** `GpuMesh.base_color` is a
+ linear factor, because its dominant source is a glTF `baseColorFactor` and the
+ specification defines that linear. Writing 0.5711 here would be the same colour
+ and would be unreadable, so the number stays the one a colour picker shows and
+ `srgb_to_linear_rgb` runs at the assignment.
+
+ It renders to the same bytes it did before the pipeline was corrected — 199,
+ 199, 204 — so this constant needed no retuning, unlike anything chosen against
+ a *textured* surface.
 *>
 const float[4] PRIMITIVE_COLOR = { 0.78, 0.78, 0.80, 1.0 };
 
@@ -747,7 +757,7 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 		.index_count = (uint)geometry.indices.len(),
 		.has_normals = geometry.normals.len() == geometry.positions.len(),
 		.has_uvs = geometry.uvs.len() == geometry.positions.len(),
-		.base_color = PRIMITIVE_COLOR,
+		.base_color = srgb_to_linear_rgb(PRIMITIVE_COLOR),
 		.texture = -1,
 		.bounds = bounds_of(geometry.positions.array_view()),
 	};

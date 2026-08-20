@@ -65,7 +65,15 @@ fn Texture? Gpu.create_texture(&self, char[] rgba, uint width, uint height)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
 		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		// TRANSFER_SRC as well as DST, so `read_pixels` can copy the image back.
+		// It costs a usage bit and nothing else — no extra memory, no format
+		// restriction on any device this runs on — and without it the readback is
+		// not merely slow but invalid: the layer answers
+		// `VUID-VkImageMemoryBarrier2-oldLayout-01212`, because an image may not be
+		// moved to a layout its usage flags do not admit. That is how this bit came
+		// to be here: `reading_a_texture_leaves_it_in_the_layout_it_was_found_in`
+		// found it on its first run, having been written to catch something else.
+		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(self.handle)!;
 
@@ -142,6 +150,101 @@ fn Texture? Gpu.create_texture(&self, char[] rgba, uint width, uint height)
 		.build(self.handle)!;
 
 	return texture;
+}
+
+<*
+ Copy a texture's pixels back off the device, into a caller's buffer.
+
+ ## Why this exists
+
+ Pixels went to the device and could not come back, which made textures
+ **write-only** and had two costs that looked unrelated. `examples/village`
+ needed each generated texture's average colour to bake into its glTF export,
+ and with no readback the choice was a second copy of all eleven generators —
+ which would silently drift from the real ones — or accumulating the mean inside
+ the loop that wrote them, which only works for a script that owns both sides. A
+ texture loaded from a file had no such option at all. And separately: a texture
+ nothing can read is a texture nothing can test, so every check in
+ `three_tests::texture` had to go the long way round, through a rendered frame.
+
+ ## What comes back
+
+ **Exactly the bytes that were uploaded.** `vkCmdCopyImageToBuffer` is a copy
+ rather than a blit, so it moves stored bytes and performs no conversion — the
+ image is `R8G8B8A8_SRGB` and what lands in `dst` is the sRGB-encoded RGBA the
+ texture was created from, not the linear values the sampler produces. That is
+ the useful answer: it round-trips against `DataTexture`, and it is the same
+ space `png::save_file` wants.
+
+ ## The layout dance
+
+ The image lives in `SHADER_READ_ONLY_OPTIMAL` between uploads, which is where
+ `create_texture` leaves it and where the descriptor expects it. This moves it to
+ `TRANSFER_SRC_OPTIMAL`, copies, and moves it **back** — the return leg is not
+ optional and its absence is invisible until something draws with the texture
+ again, several frames later, as a validation error or a black surface depending
+ on the driver.
+
+ `@single_time_command` submits and waits, so this is synchronous and costs a
+ queue idle. That is the right trade for a verb a script calls at load or in a
+ test, and the wrong one for a per-frame call — which is why nothing here caches
+ and why the JS side takes a destination rather than allocating, so the cost is
+ visible at the call site.
+
+ @param dst : `Filled with width*height*4 bytes. The caller owns it; nothing is retained.`
+ @require dst.len >= (sz)self.width * self.height * 4
+*>
+fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
+{
+	sz bytes = (sz)self.width * (sz)self.height * 4;
+
+	vk::Memory readback = vk::new_buffer(
+		&gpu.allocator,
+		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
+		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data: null,
+		data_size: bytes,
+	)!;
+	defer readback.free();
+
+	gpu.handle.@single_time_command(queue: gpu.graphics; vk::CommandBuffer cmd)
+	{
+		vk::ImageMemoryBarrier2 to_src = vk::transferBarrier(
+			self.image,
+			IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+		);
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_src }));
+
+		vk::BufferImageCopy region = {
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = {
+				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+			.imageOffset = { 0, 0, 0 },
+			.imageExtent = { self.width, self.height, 1 },
+		};
+		vk::cmdCopyImageToBuffer(cmd, self.image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &region);
+
+		// Back where the descriptor expects it. Leaving it in TRANSFER_SRC is
+		// the failure that shows up several frames later in something unrelated.
+		vk::ImageMemoryBarrier2 to_shader = vk::transferBarrier(
+			self.image,
+			IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		);
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
+	}!;
+
+	// Host-coherent, and the single-time command has already waited, so there is
+	// nothing to invalidate — the same reason `Target.decode_readback` maps and
+	// copies with nothing in between.
+	mem::copy(dst.ptr, readback.data(), bytes);
 }
 
 <*

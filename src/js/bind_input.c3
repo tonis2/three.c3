@@ -77,6 +77,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "inputPressed", &js_input_pressed, 1);
 	self.bind(host, "inputReleased", &js_input_released, 1);
 	self.bind(host, "inputText", &js_input_text, 0);
+	self.bind(host, "inputHold", &js_input_hold, 2);
+	self.bind(host, "inputReleaseAll", &js_input_release_all, 0);
 	self.bind(host, "keyNames", &js_key_names, 0);
 	self.bind(host, "onKey", &js_on_key, 3);
 	self.bind(host, "pointer", &js_pointer, 0);
@@ -98,6 +100,58 @@ fn void JsRuntime.take_input(&self, InputState input)
 	self.input_text.clear();
 	self.input_text.append_string(input.text);
 	self.input.text = self.input_text.str_view();
+}
+
+<*
+ `inputHold(key, down)` — press or release a key from a script.
+
+ ## What it is for
+
+ A headless boot has no keyboard, so a scene whose whole subject is input could
+ not be exercised at all. `examples/village` binds seven keys to a character, and
+ the only way to test the walking and the collision was for the scene to hand its
+ internals to `globalThis.village` — a scene leaking its own state in order to be
+ testable, which is the smell and not the fix.
+
+ ## It is a held key, not an event
+
+ The key stays down until it is released, exactly as a finger does, and the edges
+ fall out of the same difference a real key's do. So `three.input.pressed`,
+ `isDown`, `released` and every `onKeyDown` handler behave identically — there is
+ one keyboard, not a second path through the input system to get out of step
+ with. `SyntheticKeys` argues the whole design.
+
+ **It adds to the window rather than replacing it**, so a scripted demo works
+ with a person still at the keyboard, and a test never notices because there is
+ no window.
+*>
+fn void js_input_hold(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	KeyName? row = named_key(self, &js, argc, args, 0, out);
+	if (catch err = row) return;
+
+	self.synthetic.hold(row, arg_truth(&js, argc, args, 1));
+}
+
+<*
+ `inputReleaseAll()` — let go of everything a script is holding.
+
+ What a test calls between cases so one does not leak a held key into the next,
+ and what a scripted sequence calls when it hands control back to a person. The
+ releases are still reported as edges on the next frame, because that is what
+ happened.
+*>
+fn void js_input_release_all(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	self.synthetic.release_all();
 }
 
 <*

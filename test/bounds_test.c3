@@ -328,6 +328,159 @@ fn void measuring_a_loaded_mesh_does_not_upload_it() @test
 	};
 }
 
+// ============================================================================
+// Rotation, where the box used to lie
+// ============================================================================
+
+<*
+ **The four-sided cone at 45 degrees, which is the case that started this.**
+
+ `ConeGeometry(1, 1, 4)` is a square pyramid, and its base sits corner-on to the
+ axes: the four base vertices are at (+-1, 0) and (0, +-1), so the untouched
+ shape spans 2 on x and 2 on z. Turn it 45 degrees about y and the square becomes
+ axis-aligned with a side of sqrt(2), so the honest half-extent is 0.707.
+
+ Bounding the *box* instead of the vertices reports 1.414 — exactly double —
+ because rotating an axis-aligned box by 45 degrees and re-bounding the result
+ grows it by sqrt(2) on both axes, and that is right only for a shape that
+ actually fills its box. A diamond does not.
+
+ Rotate it 45 degrees the other way, or 135, or 225, and the answer is the same
+ 0.707 by symmetry, so the check sweeps them: a fix that special-cased one angle
+ would pass the first and fail the rest.
+
+ This is the shape and the angle every hip roof in `examples/village` is built
+ from, which is why its church reported a spire 3 units longer than it is.
+*>
+fn void a_diamond_turned_45_degrees_is_not_bigger() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const out = [];
+			for (const turn of [0.25, 0.75, 1.25, -0.25]) {
+				const m = new three.Mesh(new three.ConeGeometry(1, 1, 4));
+				m.rotation.y = turn * Math.PI;
+				scene.add(m);
+				const b = m.boundingBox();
+				out.push([b.max.x, b.max.z]);
+				scene.remove(m);
+			}
+			return out;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		// 0.7071 to four places, and nothing anywhere near 1.414.
+		test::@check(!result.value.contains("1.41") && !result.value.contains("1.4142"),
+			"a 45-degree turn is still doubling the box: %s", result.value);
+		test::@check(result.value.contains("0.707"),
+			"the turned pyramid should reach 0.707 on x and z, got %s", result.value);
+	};
+}
+
+<*
+ An axis-aligned rotation is unchanged, which is the half that says the fix did
+ not simply shrink everything.
+
+ A box at 90 degrees is the case where re-bounding the AABB was already exact, so
+ the two methods have to agree here. If they do not, the vertex pass has a
+ transform bug that the 45-degree check would happily hide — it only asserts a
+ number got smaller.
+*>
+fn void a_right_angle_measures_the_same_as_it_always_did() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const m = new three.Mesh(new three.BoxGeometry(4, 1, 2));
+			m.rotation.y = Math.PI / 2;
+			scene.add(m);
+			const b = m.boundingBox();
+			return { x: b.max.x, y: b.max.y, z: b.max.z };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		// 4 x 1 x 2 turned a quarter turn about y is 2 x 1 x 4.
+		test::@check(result.value.contains(`"x":1`), "half-extent x should be 1, got %s", result.value);
+		test::@check(result.value.contains(`"y":0.5`), "half-extent y should be 0.5, got %s", result.value);
+		test::@check(result.value.contains(`"z":2`), "half-extent z should be 2, got %s", result.value);
+	};
+}
+
+<*
+ `align` on a rotated shape puts the face where it was asked for.
+
+ The point of fixing the box at all. `align('y', 'min', 0)` reads the box and
+ subtracts, so a box that over-reports floats the piece by exactly the amount it
+ over-reported — and `BoxHelper`, drawn to check, agrees with it, because it is
+ the same number twice.
+
+ A cone tipped about x rather than turned about y, so the error lands on the axis
+ being aligned rather than beside it.
+*>
+fn void align_lands_a_tipped_shape_on_the_floor() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const m = new three.Mesh(new three.ConeGeometry(1, 2, 4));
+			m.rotation.x = Math.PI / 4;
+			scene.add(m);
+			m.align('y', 'min', 0);
+			return { min: m.boundingBox().min.y };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"min":0`),
+			"align asked for a floor at 0 and the shape did not land on it: %s", result.value);
+	};
+}
+
+<*
+ Adding a glTF mesh to a scene is what keeps `boundingBox()` on the exact path.
+
+ `world_mesh_bounds` falls back to re-bounding the local box when a mesh has no
+ positions on the CPU, and the question worth pinning is whether a script can
+ ever see that fallback. It cannot: `add()` retains the mesh, retaining uploads
+ it, and `boundingBox()` refuses to answer for anything not in a scene. So the
+ exact path is not an optimisation that sometimes applies — it is every case the
+ API can be asked about.
+
+ Asserted the only way that distinguishes it from wishful thinking: the mesh is
+ resident *after the add and before any frame is drawn*. The lazy-loading
+ invariant next door is untouched, because that one measures a mesh reference
+ rather than a scene object.
+*>
+fn void adding_a_mesh_is_what_makes_its_box_exact() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const a = three.load("test/fixtures/textured.glb");
+			const before = three.stats().textures;
+			const m = new three.Mesh(a.mesh("quad_left"));
+			m.rotation.y = Math.PI / 4;
+			scene.add(m);
+			const b = m.boundingBox();
+			return { before, after: three.stats().textures, sized: b.size.x > 0 };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"before":0`),
+			"loading alone should still upload nothing: %s", result.value);
+		test::@check(result.value.contains(`"after":1`),
+			"adding the mesh should have made it resident, which is what puts its vertices on the CPU: %s",
+			result.value);
+		test::@check(result.value.contains(`"sized":true`), "and it has a box: %s", result.value);
+	};
+}
+
 <*
  A reference outliving its asset answers with a throw, not with the size the
  mesh used to be. Every other handle in this API revalidates on use, and a
