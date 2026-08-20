@@ -159,6 +159,24 @@ struct GpuMesh
 }
 
 <*
+ One copy placed by `EXT_mesh_gpu_instancing`: where it sits relative to the node
+ carrying it, and the tint it draws with.
+
+ The tint is the extension's `_COLOR_0`, an application-specific attribute read
+ by the same instance index as the transforms — see `scene/export.c3` for the
+ half that writes it. A file that has transforms and no colours leaves this white
+ for every copy, which is the identity `Node.color` already multiplies by, so
+ nothing downstream has to know which kind of file it came from.
+*>
+struct AssetInstance
+{
+	Vec3 position;
+	Quaternionf rotation;
+	Vec3 scale;
+	float[4] color;
+}
+
+<*
  One glTF node: a local transform, the meshes it draws, and its children.
 
  **The thing `Assets.load` used to throw away.** Until G3 the loader produced a
@@ -185,6 +203,12 @@ struct AssetNode
 	Vec3 position;
 	Quaternionf rotation;
 	Vec3 scale;
+
+	// The copies `EXT_mesh_gpu_instancing` placed on this node, or empty for the
+	// ordinary node that draws once. Owned. `flatten` turns each of these into an
+	// entry of its own, so nothing past that walk has to know the difference
+	// between a file that instanced its crates and one that listed them.
+	List{AssetInstance} instances;
 
 	// The half-open range of `Asset.meshes` this node draws. A glTF *mesh* is a
 	// list of primitives and every primitive became its own `GpuMesh`, so a node
@@ -356,6 +380,12 @@ struct PlacedNode
 	Vec3 position;
 	Quaternionf rotation;
 	Vec3 scale;
+
+	// Straight into `Node.color`. `NO_TINT` for every entry that came from a
+	// plain glTF node — only `EXT_mesh_gpu_instancing`'s `_COLOR_0` puts anything
+	// else here, which is how a per-copy colour survives a round trip without
+	// becoming a material per copy.
+	float[4] color;
 }
 
 <*
@@ -718,6 +748,7 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out)
 				.position = { 0, 0, 0 },
 				.rotation = NO_ROTATION,
 				.scale = { 1, 1, 1 },
+				.color = NO_TINT,
 			});
 		}
 		return;
@@ -744,7 +775,13 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	if (loaded == null || index >= loaded.nodes.len()) return;
 	AssetNode* source = &loaded.nodes[index];
 
-	bool draws_itself = source.mesh_count == 1;
+	// An instanced node is a group over its copies, for the same reason a node
+	// whose glTF mesh has several primitives is: the transform being placed is
+	// not the node's own. The copies are children of it, so the node's own TRS
+	// still applies to all of them and each copy's is relative to that — which is
+	// what the extension says instance transforms are.
+	bool instanced = source.instances.len() > 0 && source.mesh_count > 0;
+	bool draws_itself = source.mesh_count == 1 && !instanced;
 	int here = (int)out.len();
 
 	out.push({
@@ -755,9 +792,33 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 		.position = source.position,
 		.rotation = source.rotation,
 		.scale = source.scale,
+		.color = NO_TINT,
 	});
 
-	if (!draws_itself)
+	if (instanced)
+	{
+		// Every primitive of the mesh, once per copy. A glTF mesh of two
+		// primitives instanced a hundred times is two hundred entries and two
+		// `GpuMesh`es, which is two draw calls of a hundred — the same answer the
+		// renderer would have reached from a hundred hand-written nodes.
+		foreach (&copy : source.instances)
+		{
+			for (uint i = 0; i < source.mesh_count; i++)
+			{
+				out.push({
+					.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
+					.parent = here,
+					.mesh = (int)(source.first_mesh + i),
+					.gltf_node = -1,
+					.position = copy.position,
+					.rotation = copy.rotation,
+					.scale = copy.scale,
+					.color = copy.color,
+				});
+			}
+		}
+	}
+	else if (!draws_itself)
 	{
 		for (uint i = 0; i < source.mesh_count; i++)
 		{
@@ -769,6 +830,7 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 				.position = { 0, 0, 0 },
 				.rotation = NO_ROTATION,
 				.scale = { 1, 1, 1 },
+				.color = NO_TINT,
 			});
 		}
 	}
@@ -1165,6 +1227,8 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 			node.mesh_count = mesh_count[source.mesh];
 		}
 
+		read_instances(&node, stream, source);
+
 		node.children.init(mem, source.children.len());
 		foreach (child : source.children)
 		{
@@ -1183,6 +1247,79 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 }
 
 <*
+ Read one node's `EXT_mesh_gpu_instancing` block into `AssetNode.instances`.
+
+ gltf.c3l has already parsed the extension — `Node.attributes` is its attribute
+ dictionary, accessor indices by name — so what is left is reading the accessors
+ and filling in the identity for whichever of the four are absent. All four are
+ optional: a batch that never rotates writes no `ROTATION`, and a batch of
+ default-coloured copies writes no `_COLOR_0`.
+
+ **The count comes from the accessors, and the shortest of them wins.** The
+ extension has no length field: every attribute holds one entry per copy, so any
+ of them answers for a well-formed file. Taking the shortest is what a
+ malformed one gets, and it is the only answer that cannot read off the end of
+ a buffer — a file whose `SCALE` is short would otherwise place its last copies
+ from whatever follows it in the blob.
+
+ Nothing here can fail loudly. `record_nodes` runs where a broken index gets a
+ group instead of geometry, and this keeps that bargain: an unreadable
+ instancing block leaves the node drawing once, in the right place, which is
+ visibly less than the file promised rather than a crash.
+*>
+fn void read_instances(AssetNode* node, gltf::GltfStream* stream, gltf::Node* source) @local
+{
+	if (source.attributes.len() == 0) return;
+
+	sz? translation = source.attributes.get("TRANSLATION");
+	sz? rotation    = source.attributes.get("ROTATION");
+	sz? scale       = source.attributes.get("SCALE");
+	sz? tint        = source.attributes.get("_COLOR_0");
+
+	sz count = -1;
+	if (try translation) count = shortest(count, stream, translation);
+	if (try rotation)    count = shortest(count, stream, rotation);
+	if (try scale)       count = shortest(count, stream, scale);
+	if (try tint)        count = shortest(count, stream, tint);
+	if (count <= 0) return;
+
+	node.instances.init(mem, count);
+	for (sz i = 0; i < count; i++)
+	{
+		AssetInstance copy = {
+			.position = { 0, 0, 0 },
+			.rotation = NO_ROTATION,
+			.scale = { 1, 1, 1 },
+			.color = NO_TINT,
+		};
+
+		if (try translation) copy.position = stream.@cast_buffer(stream.gltf.accessors[translation], i, Vec3);
+		if (try scale) copy.scale = stream.@cast_buffer(stream.gltf.accessors[scale], i, Vec3);
+		if (try rotation)
+		{
+			Vec4 turned = stream.@cast_buffer(stream.gltf.accessors[rotation], i, Vec4);
+			copy.rotation = { turned[0], turned[1], turned[2], turned[3] };
+		}
+		if (try tint)
+		{
+			Vec4 colored = stream.@cast_buffer(stream.gltf.accessors[tint], i, Vec4);
+			copy.color = { colored[0], colored[1], colored[2], colored[3] };
+		}
+
+		node.instances.push(copy);
+	}
+}
+
+// How many copies an attribute accounts for, against however few the ones
+// already read did. `have` is -1 before anything has answered.
+fn sz shortest(sz have, gltf::GltfStream* stream, sz accessor) @local
+{
+	if (accessor < 0 || accessor >= stream.gltf.accessors.len()) return have;
+	sz count = (sz)stream.gltf.accessors[accessor].count;
+	return have < 0 || count < have ? count : have;
+}
+
+<*
  Give back the node tree: every name, every child list, and the two lists
  themselves.
 
@@ -1197,6 +1334,7 @@ fn void free_nodes(Asset* asset) @local
 	{
 		if (node.name.len > 0) node.name.free(mem);
 		node.children.free();
+		node.instances.free();
 	}
 	asset.nodes.free();
 	asset.roots.free();
@@ -1364,8 +1502,12 @@ fn void free_stream(Asset* asset) @local
  positive scales can express. The sign goes onto X, which is what Three.js's
  `Matrix4.decompose` does; putting it anywhere is arbitrary and putting it
  nowhere renders the mesh inside out.
+
+ Module-visible rather than file-local because `scene/export.c3` needs the same
+ answer for the same reason: a flattened export writes world transforms, and a
+ glTF node states a TRS triple.
 *>
-fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale) @local
+fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale)
 {
 	*position = { m.m[12], m.m[13], m.m[14] };
 

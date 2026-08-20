@@ -365,6 +365,11 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 		node.position = entry.position;
 		node.rotation = entry.rotation;
 		node.scale = entry.scale;
+		// White unless the file instanced this copy and gave it a `_COLOR_0`.
+		// Written unconditionally rather than only when it differs: `add_mesh`
+		// already left it white, so the branch would save an assignment and cost
+		// a comparison.
+		node.color = entry.color;
 		node.dirty = true;
 
 		created.push(id);

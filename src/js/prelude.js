@@ -1043,7 +1043,7 @@
 		// Under `--assets` the path is inside the game directory and cannot
 		// climb out of it — the same rule `three.load` follows.
 		//
-		// Three things are deliberately not in the file:
+		// Two things are deliberately not in the file:
 		//
 		// - **Helpers and hidden subtrees.** The export is what the frame
 		//   shows; a `.glb` with the debug boxes baked in is a file nobody
@@ -1052,22 +1052,54 @@
 		//   describes surfaces, not programs. Those meshes are in the file with
 		//   the base colour and texture their geometry carries, and `shaded`
 		//   counts how many lost a custom shader.
-		// - **Per-copy colour, as a per-copy thing.** glTF has no per-instance
-		//   channel at all, so a copy with its own `color` gets its own
-		//   material and its own `mesh` entry. It still shares the vertices —
-		//   only the entry is duplicated, not the geometry — but that is why
-		//   `entries` can exceed `meshes`, and why a scene of many colours
-		//   reloads as many draw calls where it drew as one. A scene that
-		//   leaves `color` alone round-trips its draw count exactly.
+		//
+		// **Per-copy colour survives, and so does the draw call.** Sibling
+		// copies of one shape are written as a single node carrying an array of
+		// transforms — `EXT_mesh_gpu_instancing`, which is standard and which
+		// any glTF reader can place — plus a `_COLOR_0` array beside them
+		// holding what each copy's `mesh.color` was. A reader that does not
+		// know `_COLOR_0` gets the copies in the material's own colour rather
+		// than in the wrong place. `batches` counts the nodes written that way.
+		//
+		// A copy with no sibling drawing the same shape is left alone: it is
+		// one draw call however it is written, so it keeps its name, its place
+		// in the tree and a material of its own colour. Groups are never
+		// collapsed either — what flattens is a run of leaves under one parent,
+		// into one node beneath that same parent.
+		//
+		// **`{ flatten: true }` batches copies that are not siblings**, which is
+		// the ones `asset.instantiate()` makes: an instantiated subtree arrives
+		// wrapped in a group of its own, so no two of them share a parent and the
+		// sibling rule never compares them. Untinted that costs nothing — the
+		// geometry is shared across the whole scene either way — but a tint has
+		// to travel per copy, so six colours become six materials and six draw
+		// calls without it.
+		//
+		// It is off by default because it gives up the hierarchy: every drawing
+		// node is taken in world space and written under one root, so the groups
+		// and the names of the copies inside them are gone. Leave it off for a
+		// file a person will open; turn it on for a file that is a payload.
 		//
 		// Answers with { path, meshes, entries, materials, images, nodes,
-		// instances, skipped, shaded, bytes }.
-		export(path) {
+		// instances, batches, skipped, shaded, bytes }.
+		export(path, options) {
 			this._check();
 			if (typeof path !== 'string' || path.length === 0) {
 				throw new TypeError('scene.export(path) wants a path to write a .glb to');
 			}
-			return H.exportScene(path);
+			let flatten = false;
+			if (options !== undefined && options !== null) {
+				if (typeof options !== 'object') {
+					throw new TypeError('scene.export(path, options) wants an object for its options, like { flatten: true }');
+				}
+				if (options.flatten !== undefined) {
+					if (typeof options.flatten !== 'boolean') {
+						throw new TypeError('scene.export options.flatten is true or false');
+					}
+					flatten = options.flatten;
+				}
+			}
+			return H.exportScene(path, flatten);
 		}
 
 		// -------------------------------------------------------------------
@@ -1211,7 +1243,7 @@
 			root._asset = [this._a, this._g];
 
 			const built = [];
-			for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode] of rows) {
+			for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a] of rows) {
 				const node = mesh < 0
 					? new Object3D()
 					: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
@@ -1228,6 +1260,11 @@
 				// animation channel's target index became. -1 for the entries
 				// the host synthesized, which no channel can name.
 				node._gltfNode = gltfNode;
+				// Only a copy an instanced node placed has anything but white
+				// here, and only a Mesh has anywhere to put it — a group's row
+				// carries the identity and setting it would define a channel on
+				// an object that has none.
+				if (mesh >= 0 && !(r === 1 && g === 1 && b === 1 && a === 1)) node.color = [r, g, b, a];
 				// Parents always precede their children in the host's walk, so
 				// `built[parent]` is there by the time it is asked for.
 				(parent < 0 ? root : built[parent]).add(node);
@@ -2353,7 +2390,7 @@
 			'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
 			'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral.',
 			'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
-			'The scene comes back OUT with scene.export(path) — a .glb with one mesh per unique geometry and one node per instance, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs. And one thing changes shape: mesh.color is per copy and free here, glTF has no per-instance colour at all, so each distinct colour becomes its own material and its own mesh entry (sharing the vertices). A scene of many colours therefore reloads as many draw calls where it drew as one.',
+			'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
 			'Return a value from your script with `return`; it comes back as the `value` field.',
 		],
 		classes: {
@@ -2694,17 +2731,23 @@
 				+ 'Empty when three was not started with --assets, since there is then no directory to describe.',
 			'scene.export(path)':
 				'Write the scene to a .glb, and answer with { path, meshes, entries, materials, images, '
-				+ 'nodes, instances, skipped, shaded, bytes }. One mesh per unique (asset, mesh) and one '
-				+ 'node per instance, so a thousand walls from one kit are a thousand nodes over one mesh '
-				+ 'in the file exactly as they are one draw call in the frame. Images are written once and '
+				+ 'nodes, instances, batches, skipped, shaded, bytes }. One mesh per unique (asset, mesh), '
+				+ 'so a thousand walls from one kit are one mesh in the file exactly as they are one draw '
+				+ 'call in the frame. Sibling copies of one shape are written as a single node carrying an '
+				+ 'array of transforms — EXT_mesh_gpu_instancing, which any glTF reader can place — with a '
+				+ '_COLOR_0 array beside them holding each copy\'s mesh.color, so a scene of many colours '
+				+ 'reloads as the one draw call it drew as. batches counts the nodes written that way. A '
+				+ 'copy with no sibling drawing the same shape keeps its name and its own material instead, '
+				+ 'which costs no draw call, and groups are never collapsed. Copies made with '
+				+ 'asset.instantiate() are not siblings — each arrives in a group of its own — so they do '
+				+ 'not batch, which only matters if you tinted them: pass { flatten: true } to batch every '
+				+ 'copy of a shape in world space instead, giving up the hierarchy and the copies\' names '
+				+ 'to do it. Images are written once and '
 				+ 'shared across every file they came from. Under --assets the path is inside the game '
 				+ 'directory and cannot climb out of it, as three.load\'s is. Helpers and hidden subtrees '
 				+ 'are not in the file (skipped counts them) and a ShaderMaterial is not either, because it '
 				+ 'is a Slang pipeline and glTF describes surfaces rather than programs — those meshes are '
-				+ 'exported with the base colour and texture their geometry carries, and shaded counts them. '
-				+ 'entries exceeds meshes when copies of one shape carry different mesh.color values: glTF '
-				+ 'has no per-instance colour channel, so each colour needs its own material and its own '
-				+ 'mesh entry. They still share the vertices.',
+				+ 'exported with the base colour and texture their geometry carries, and shaded counts them.',
 			'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 			'three.getApiDocs()': 'This.',
 			'three.input.isDown(key)':

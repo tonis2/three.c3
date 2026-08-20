@@ -298,7 +298,8 @@ produced a file the parser crashed on. The defaults are fixed and the exporter
 does not carry the name across the lifetime boundary — a glTF image name is
 decoration, and decoration is not worth a dangling pointer.
 
-**Three things do not survive, each on purpose.**
+**Three things do not survive, each on purpose.** The third of them no longer
+holds — see the amendment below the list.
 
 - **Helpers and hidden subtrees.** One rule with two consequences: the export is
   what the frame shows. A `.glb` with the debug boxes baked in is a file nobody
@@ -327,6 +328,40 @@ underscore-prefixed attribute no other tool reads, and it would take reader
 support here to buy back something only this project could see. Recorded because
 it is the natural next question and the answer is not obvious.
 
+**Amended: the third bullet is no longer true.** The natural next question got
+asked and the trade came out the other way round. Sibling copies of one shape are
+now written as a single node under `EXT_mesh_gpu_instancing` with a `_COLOR_0`
+attribute beside the transforms, so a scene of many colours reloads as the one
+draw call it drew as, and `entries` no longer runs ahead of `meshes`.
+
+Two things about the reasoning above survived intact and two did not. The
+transforms really are placed by any reader, so the fan-out was never the price —
+what a reader without `_COLOR_0` support loses is only the tint, and it falls
+back to the material's own colour rather than to nothing. And "an attribute no
+other tool reads" was the wrong measure: the tool that has to read it is *this*
+one, on the way back in, which is what makes the round trip whole. What did not
+survive is "it would take reader support here", stated as though that were a cost
+rather than the point, and the assumption that the two layouts are alternatives —
+they are not, because a batch of one is not a batch. A lone copy is still one
+`node` per instance with a material of its own, which costs no draw call, and so
+both layouts appear in the same file.
+
+The writer half of it is in `gltf.c3l`, next to the physics one — `WriteNode`
+had no extensions slot at all beyond `physics`, which is the same shape this
+needed. See `scene/export.c3`, `scene/asset.c3` and `test/export_test.c3`.
+
+**One case the sibling rule cannot reach, and the parameter that does.** Copies
+made with `asset.instantiate()` each arrive wrapped in a group of their own, so
+no two of them are siblings and nothing batches. Untinted that costs nothing —
+geometry is deduplicated across the whole scene regardless of parentage — but a
+tint is per copy, so six colours are back to six materials and six buckets.
+`scene.export(path, { flatten: true })` takes every drawing node in world space
+and batches by shape alone, which fixes it and gives up the hierarchy and the
+copies' names to do it. Off by default, because a file nobody can navigate is a
+worse default than a file with more nodes in it. Measured on six instantiated
+copies of the two-mesh fixture: 19 nodes, 6 materials and 12 draw calls became 3
+nodes, 1 material and 2, and the two files render pixel-identically.
+
 ## Where this departed from `plan.md`
 
 - **M6 is three things, and the export is the last of them.** `plan.md` §5 names
@@ -353,7 +388,8 @@ it is the natural next question and the answer is not obvious.
 - **The export writes `EXT_mesh_gpu_instancing` nowhere.** `plan.md` §5 says one
   `node` per instance and that is what it does, which is also the only layout in
   which per-copy colour can be carried at all. The two are alternatives rather
-  than additions — see S8.
+  than additions — see S8. *Amended: it writes it now, and they were not
+  alternatives. See the amendment in S8.*
 - **`gltf.c3l` grew a materials writer.** The milestone was scoped as work in
   this repository and half of S8 landed in the submodule, because a glTF writer
   that cannot write a material cannot write a scene. Worth naming here so the
@@ -425,6 +461,10 @@ one bucket per copy and nothing else can tell them apart.
 - helpers and hidden subtrees are not in the file; a ShaderMaterial's geometry is
   and says so
 - a colour per copy becomes a material per colour — the caveat, stated
+  *(replaced by the six instancing checks named in the amendment: a colour per
+  copy rides the instance buffer, every copy comes back where it was, only the
+  attributes that vary are written, the file declares the extension it uses, a
+  lone copy is written as itself, and groups survive the collapse)*
 - an empty scene, a scene of only helpers, and an empty path are each refused
   with a sentence and write no file
 
