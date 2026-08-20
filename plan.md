@@ -42,7 +42,7 @@ export that round-trips per-copy colour through `EXT_mesh_gpu_instancing`.
 A game boot (`--assets`, `main.js`), unloading, glTF node animation, and an XPBD
 physics world with contacts, friction, joints, triggers and events.
 
-	c3c test --trust=full       423 passed, 0 failed, leak-clean
+	c3c test --trust=full       424 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -57,16 +57,6 @@ loud and argues for the exception; it does not just stop being true.
 Small, known, and each one is a number or a picture that lies rather than a
 missing feature. Worth clearing before anything on the feature list, because
 every one of them is something a person will trust and be wrong about.
-
-- **`stats().culledLastFrame` is always zero.** `Scene.stats()`
-  (`src/scene/scene.c3:1243`) calls `build_draw_list(assets, null)` — no
-  frustum — and `build_draw_list` sets `self.culled = 0` at line 1126 before
-  the field is read at 1255. The field's own doc comment promises "from the last
-  `update`, not from this call", and the code does not deliver it. Either keep
-  the last real frame's count in a separate field, or change the doc comment and
-  the API docs to say what it actually reports. Do not leave it reading zero
-  under a comment that says otherwise — an agent tuning a scene reads that number
-  and concludes culling is broken.
 
 - **`PipelineCache` never evicts.** An agent iterating on a shader in a loop
   accumulates one `VkPipeline` per distinct source for the life of the process.
@@ -343,6 +333,18 @@ Decisions nobody has made. Each one is cheap to decide and expensive to discover
 ## 10. Traps carried over
 
 Live, all of them. Each cost real time and none is visible in a diff.
+
+- **`c3c build` does not rebuild the test binary, and `c3c test` does not rebuild
+  the app.** `build` produces `./build/three`; `test` produces and runs
+  `./build/testrun`. So `c3c build && ./build/testrun` runs whatever the *last*
+  `c3c test` compiled, and a source change appears to have no effect — which
+  reads exactly like "the injected bug was not caught" and exactly like "the fix
+  did not work". Both misreadings happened in one sitting: an injection appeared
+  to pass, and a live check against a stale `./build/three` reported the bug the
+  edit had just removed. **`c3c test [<target>]` is the build-and-run verb**;
+  `c3c run test` is not, because `run` takes a build target and there is no
+  target named `test`. When a result is surprising, check what you actually ran
+  before believing what it says.
 
 - **A `\n` inside a C3 raw string is a backslash and an `n`.** Backticks do not
   process escapes. Shader source and JSON written with backticks look right in

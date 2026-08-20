@@ -646,6 +646,70 @@ fn void culling_drops_what_is_off_screen() @test
 }
 
 <*
+ `stats()` reports what the last frame culled, not what its own rebuild did.
+
+ The defect this pins answered zero from M2 until M6 went looking: `stats()`
+ rebuilds the draw list with no frustum on purpose, and the counter it read was
+ the one that rebuild had just zeroed. So `culledLastFrame` was zero however much
+ the camera dropped, under a field comment promising the last `update`'s number.
+
+ Three injections, and what each one actually did rather than what it looked
+ like it would do:
+
+ - **`stats()` reads the working counter** — the original defect. Caught by the
+   first check, reporting 0.
+ - **The promotion moved inside `build_draw_list`** instead of `update`. Also
+   caught by the first check, not the second as expected: zeroing at the top of
+   that function means `stats()`'s own rebuild zeroes the field before reading
+   it, so it fails in exactly the same place.
+ - **One counter that is simply never reset.** Passes the first two checks and
+   is caught only by the third, at 1 where 0 is correct — which is why "culling
+   off reports zero" is asserted at all.
+
+ The second check — asking twice answers the same — caught nothing the first one
+ did not. It is kept as a cheap guard on the specific future mistake of letting
+ `stats()` write the field, and it is worth being clear that it is a guard
+ rather than a proven catch.
+
+ The instance count is re-checked beside them so a fix that made the cull count
+ honest by quietly culling during `stats()` cannot pass.
+*>
+fn void stats_reports_what_the_last_frame_culled() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		three::NodeId far_away = scene.add_mesh(TRIANGLE, 0);
+		scene.set_position(far_away, { 1000, 0, 0 });
+
+		three::Camera camera = three::default_camera();
+		camera.frame_bounds({ -0.5, -0.5, 0 }, { 0.5, 0.5, 0 });
+		Matrix4f view_projection = camera.view_projection((float)W / (float)H);
+
+		scene.cull = true;
+		scene.update(&renderer.pass.assets, view_projection);
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.culled_last_frame == 1, "stats() reported %d culled; the frame before it dropped 1", stats.culled_last_frame);
+		test::@check(stats.instances == 2, "stats() reported %d instances; it must not depend on the camera", stats.instances);
+
+		// Asking twice must answer the same. `stats()` rebuilds the draw list,
+		// so a fix that let that rebuild write the field would read 1 then 0.
+		stats = renderer.pass.stats();
+		test::@check(stats.culled_last_frame == 1, "the second stats() call reported %d culled; asking is not a frame", stats.culled_last_frame);
+
+		// Culling off is not "no news". Nothing was dropped, and the number has
+		// to follow rather than keep reporting a camera that stopped being asked.
+		scene.cull = false;
+		scene.update(&renderer.pass.assets, view_projection);
+		stats = renderer.pass.stats();
+		test::@check(stats.culled_last_frame == 0, "with culling off, stats() still reported %d culled", stats.culled_last_frame);
+	};
+}
+
+<*
  Two different files sharing an image upload it once.
 
  The fixture is copied to a second path, so the two loads are genuinely two
