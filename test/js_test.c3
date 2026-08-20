@@ -2214,6 +2214,602 @@ fn void two_materials_over_one_mesh_are_two_draws() @test
 }
 
 <*
+ `three.texture(path)` reports what it loaded, and a material wears it.
+
+ The whole tier-1 texture story in one script: no Slang, no uniforms, no
+ `ShaderMaterial`. If this needs a fragment body to put a picture on a box, the
+ verb has failed at the thing it exists for.
+
+ The extents are asserted because they are the reason `three.texture` answers
+ with an object rather than a handle — a script sizing a plane to an image's
+ aspect ratio reads them, and a texture that loaded at the wrong size otherwise
+ has no symptom until it is on screen.
+*>
+fn void a_texture_loads_and_says_how_big_it_is() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = three.texture("test/fixtures/checker.png");
+			const scene = new three.Scene();
+			const quad = new three.Mesh(
+				new three.PlaneGeometry(2, 2),
+				new three.MeshLambertMaterial({ map: tex }),
+			);
+			scene.add(quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+			return [tex.width, tex.height, tex.alive, three.stats().textures, three.stats().drawCalls];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[8,8,true,1,1]",
+			"an 8x8 png, alive, one texture, one draw call; got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		test::@check(count_near(&shot, 200, 0, 200, 90) > 100,
+			"the checkerboard is not on screen, so MeshLambertMaterial({ map }) drew nothing textured");
+	};
+}
+
+<*
+ A texture assigned after the fact replaces what the mesh brought.
+
+ `material.map = ...` rather than the constructor, because the two go through
+ different verbs — `setMap` and `createTextureMaterial` — and a surface where one
+ works and the other silently does not is exactly the kind an agent gives up on.
+
+ The magenta going to zero is the half that matters. Asserting only that green
+ arrived would pass on a renderer that drew the quad twice.
+*>
+fn void a_map_assigned_afterwards_replaces_the_meshs_own() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			const quad = new three.Mesh(kit.mesh("quad_left"));
+			const mat = new three.MeshLambertMaterial();
+			quad.material = mat;
+			scene.add(quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+
+			mat.map = three.texture("test/fixtures/green.jpg");
+			three.render(scene);
+			return [mat.map.path, mat.map.width, three.stats().textures];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("green.jpg"), "material.map reads back as the texture set; got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		test::@check(count_near(&shot, 0, 150, 0, 90) > 100, "the assigned map is not on screen");
+		test::@check(count_near(&shot, 200, 0, 200, 60) == 0,
+			"the mesh's own checkerboard is still being sampled, so the assignment did nothing");
+	};
+}
+
+<*
+ A disposed texture cannot be used, and says so rather than rendering untextured.
+
+ The failure this refuses is the quiet one: a disposed handle that resolved to
+ `NO_TEXTURE` would leave a mesh drawing its base colour, which is
+ indistinguishable from having forgotten the line — and, worse, the index it
+ carries is *recycled*, so a later load can make a stale handle name a completely
+ different picture. Disposing twice is not an error, because a cleanup path that
+ may run twice is ordinary.
+*>
+fn void a_disposed_texture_refuses_to_be_used() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = three.texture("test/fixtures/checker.png");
+			const before = three.stats().textures;
+			tex.dispose();
+			tex.dispose();
+
+			let threw = '';
+			try { new three.MeshLambertMaterial({ map: tex }); }
+			catch (e) { threw = e.message; }
+
+			return [before, three.stats().textures, tex.alive, threw.includes('disposed')];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,0,false,true]",
+			"one texture, then none, dead, and using it says 'disposed'; got %s", result.value);
+	};
+}
+
+<*
+ Disposing while a material still draws with it leaves the material correct.
+
+ This is what makes `dispose()` a thing a script can call as soon as it is done
+ *referring* to a texture, rather than something that has to be timed against
+ every material using it. The reference the handle holds and the reference the
+ material holds are different references, and only the first one goes.
+*>
+fn void disposing_a_handle_does_not_disturb_a_material_using_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const tex = three.texture("test/fixtures/checker.png");
+			const quad = new three.Mesh(
+				new three.PlaneGeometry(2, 2),
+				new three.MeshLambertMaterial({ map: tex }),
+			);
+			scene.add(quad);
+			tex.dispose();
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+			return three.stats().textures;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "1", "the image is still resident: got %s textures", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+		test::@check(count_near(&shot, 200, 0, 200, 90) > 100,
+			"the image went when the script's handle did");
+	};
+}
+
+<*
+ A `ShaderMaterial` can wear a map too, and it arrives as `Surface.albedo`.
+
+ Documented in `getApiDocs` and true for a reason that is easy to lose:
+ `material.slang` declares the same `[vk::binding(0, 0)] Sampler2D` that
+ `mesh.slang` does and folds the sample into `s.albedo` before the agent's body
+ runs — so a body that never mentions a texture gets one anyway. Nothing else in
+ the suite crosses those two features, and a claim in the docs with no test
+ behind it is the kind that stops being true quietly.
+
+ The body multiplies by a uniform so the assertion cannot be satisfied by the
+ default shader having run instead: `s.albedo * 3` is brighter than anything the
+ fixed pipeline produces from the same texel.
+*>
+fn void a_shader_material_can_wear_a_map() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const mat = new three.ShaderMaterial({
+				uniforms: { boost: 3.0 },
+				fragment: "float3 shade(Surface s) { return s.albedo * boost; }",
+			});
+			mat.map = three.texture("test/fixtures/checker.png");
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+			return [mat.map.width, three.stats().textures, three.stats().drawCalls];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[8,1,1]", "an 8px map, one texture, one draw; got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		// **The green channel is the whole assertion.** The checker's magenta is
+		// (255, 0, 255) and the body triples it, so the lit squares clip to a
+		// bright magenta with green still near zero. A shader whose map never
+		// reached the host samples the 1x1 white stand-in instead and returns
+		// `base_color * 3` — a saturated *white* field, which is bright in every
+		// channel.
+		//
+		// Written first as "bright pixels, and dark pixels" and that caught
+		// nothing: white is bright, and the clear colour is (26, 28, 33), so the
+		// dark count was satisfied by the background whatever the quad did.
+		uint magenta = 0;
+		uint white = 0;
+		for (sz i = 0; i < shot.pixels.len; i += 4)
+		{
+			bool lit = shot.pixels[i] > 200 && shot.pixels[i + 2] > 200;
+			if (lit && shot.pixels[i + 1] < 120) magenta++;
+			if (lit && shot.pixels[i + 1] > 200) white++;
+		}
+		test::@check(magenta > 100,
+			"only %d bright magenta pixels — the agent's shader did not run over the map", magenta);
+		test::@check(white == 0,
+			"%d saturated white pixels — the shader ran over the 1x1 stand-in, so the map never crossed", white);
+	};
+}
+
+<*
+ A material with no map is still a side, and that is what a skydome needs.
+
+ A sphere seen from the inside shows only its back faces, so under the default it
+ is not dim, it is *absent*. Before `MeshLambertMaterial` the only way to ask for
+ `BackSide` was to compile a `ShaderMaterial` for it — a Slang invocation to
+ change one Vulkan enum.
+
+ Asserted as a render from inside the sphere, because "the material was built" is
+ exactly the flag that would pass while the cull mode went the wrong way.
+*>
+fn void a_material_with_no_map_is_how_a_skydome_is_asked_for() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const sky = new three.Mesh(
+				new three.SphereGeometry(10),
+				new three.MeshLambertMaterial({ side: three.BackSide }),
+			);
+			sky.color = [0.2, 0.4, 1.0];
+			scene.add(sky);
+			// Inside it, looking outward.
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 0.5);
+			three.render(scene);
+			return [sky.material.side, sky.material.map];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,null]", "BackSide and no map; got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		uint filled = 0;
+		for (sz i = 0; i < shot.pixels.len; i += 4)
+		{
+			if (shot.pixels[i + 2] > shot.pixels[i] + 20) filled++;
+		}
+		test::@check(filled > (200 * 150) / 2,
+			"only %d pixels are the sky — from inside a FrontSide sphere there is nothing at all", filled);
+	};
+}
+
+<*
+ The same picture reached two ways is one upload.
+
+ The dedup is asserted through the script surface as well as in
+ `three_tests::texture` because this is the number an agent actually watches:
+ `three.stats().textures` is what tells it whether a scene is sharing its images,
+ and it is reported off the deduplicated table.
+
+ **The mesh has to be drawn before the count means anything.** Since G3
+ `three.load` reads metadata and uploads nothing, so a `.glb`'s images arrive when
+ something places one of its meshes — this test was written as load-then-count
+ first and read zero, which is correct behaviour and a useless assertion. The
+ render is what makes `embedded` a real number to compare against.
+
+ The loose file goes *second* on purpose. The other order also passes and proves
+ less: `textured.glb` holds two identical images, so it exercises the hash by
+ itself, and a loose load that made a third slot would be invisible behind it.
+*>
+fn void the_same_image_two_ways_is_one_texture() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(kit.mesh("quad_left")));
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+
+			const embedded = three.stats().textures;
+			const loose = three.texture("test/fixtures/checker.png");
+			return [embedded, three.stats().textures, loose.width];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,1,8]",
+			"a .glb image and the identical file on disk are one upload; got %s", result.value);
+	};
+}
+
+<*
+ The things a texture and a material will not accept, each named.
+
+ One test for the refusals because each is one line and the interesting property
+ is that they are *distinguishable*: a script handed "wants a three.texture" for
+ a bad path and "wants a three.texture" for a bad map has learned nothing about
+ which line to fix.
+*>
+fn void the_texture_verbs_refuse_by_name() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
+			return [
+				said(() => three.texture("test/fixtures/nothing_here.png")).includes('no readable file'),
+				said(() => three.texture("test/fixtures/not_an_image.png")).includes('not a PNG or a JPEG'),
+				said(() => three.texture("test/fixtures/deep.png")).includes('16-bit'),
+				said(() => three.texture(42)).includes('wants a path'),
+				said(() => new three.MeshLambertMaterial({ map: "brick.png" })).includes('wants a three.texture'),
+				said(() => new three.MeshLambertMaterial({ side: 9 })).includes('three.FrontSide'),
+			];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[true,true,true,true,true,true]",
+			"each refusal says which one it is; got %s", result.value);
+	};
+}
+
+<*
+ Two meshes sharing a geometry and a textured material are one draw call.
+
+ The thesis, applied to the new material: `MeshLambertMaterial` must not be a way
+ to accidentally break batching. Two copies of one shape wearing one material are
+ one bucket, and giving the second its own material — even with the same image —
+ is two, because a bucket is (asset, mesh, material) and two materials are two
+ sets of push bytes whatever they contain.
+*>
+fn void textured_copies_of_one_shape_are_one_draw_call() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const tex = three.texture("test/fixtures/checker.png");
+			const mat = new three.MeshLambertMaterial({ map: tex });
+			const box = new three.BoxGeometry(1, 1, 1);
+			for (let i = 0; i < 8; i++) {
+				const m = new three.Mesh(box, mat);
+				m.position.set(i * 2, 0, 0);
+				scene.add(m);
+			}
+			const shared = three.stats().drawCalls;
+
+			const odd = new three.Mesh(box, new three.MeshLambertMaterial({ map: tex }));
+			odd.position.set(-2, 0, 0);
+			scene.add(odd);
+			return [shared, three.stats().drawCalls, three.stats().textures];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,2,1]",
+			"eight textured copies are one draw, a second material makes two, and both share one image; got %s",
+			result.value
+		);
+	};
+}
+
+<*
+ **The headline.** Pixels a script generated and the identical `.png` are one
+ texture.
+
+ This is the strongest check available for the whole path, because it asserts
+ *byte equality* without anything having to state what the bytes are. The content
+ hash is over decoded RGBA and cannot tell where they came from, so landing in
+ one slot means the `Uint8Array` that crossed the boundary was exactly what
+ `image.c3l` produced from `checker.png` — same values, same order, same
+ alignment, no offset, no stride, no channel swap. Any one of those wrong and
+ this is two textures.
+
+ The loop mirrors `png_checker()` in `test/fixtures/make_textured.py`: 8x8, two
+ pixels to a square, magenta and near-black, alpha filled in because the PNG has
+ none and `to_rgba` writes 0xff. Row 0 here is row 0 there, which is the PNG's
+ *top* row — so this pins the row order too.
+*>
+fn void generated_pixels_and_a_file_are_one_texture() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const n = 8;
+			const px = new Uint8Array(n * n * 4);
+			for (let y = 0; y < n; y++) {
+				for (let x = 0; x < n; x++) {
+					const i = (y * n + x) * 4;
+					const on = (((x >> 1) + (y >> 1)) % 2) === 0;
+					px[i] = on ? 255 : 16;
+					px[i + 1] = on ? 0 : 16;
+					px[i + 2] = on ? 255 : 16;
+					px[i + 3] = 255;
+				}
+			}
+			const built = new three.DataTexture(px, n, n);
+			const afterBuilt = three.stats().textures;
+			const loaded = three.texture("test/fixtures/checker.png");
+			return [afterBuilt, three.stats().textures, built.width, built.path, loaded.width];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,1,8,null,8]",
+			"generated pixels and the identical file are one upload; got %s", result.value);
+	};
+}
+
+<*
+ Generated pixels reach the screen, and the rows go the way the docs say.
+
+ The pattern is asymmetric top to bottom on purpose. A checkerboard would render
+ identically whichever way the rows were fed, so it can say "a texture arrived"
+ and nothing about whether it arrived the right way up — and upside down is the
+ single most likely thing to be wrong about a buffer somebody filled by hand.
+
+ What it records: **row 0 of the array is the bottom of the quad on screen.**
+ That is not an arbitrary fact and it is not this verb's doing. `PlaneGeometry`
+ generates Three.js's uvs, where (0, 0) is the bottom-left vertex, and Vulkan
+ samples v = 0 at the *first* texel row — so the first row of any texture, from a
+ file or from here, lands along the bottom edge. Three.js compensates with
+ `texture.flipY = true` by default; there is no flipY here.
+*>
+fn void generated_pixels_reach_the_screen_the_right_way_up() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const n = 16;
+			const px = new Uint8Array(n * n * 4);
+			for (let y = 0; y < n; y++) {
+				for (let x = 0; x < n; x++) {
+					const i = (y * n + x) * 4;
+					// First half of the rows red, second half blue.
+					const red = y < n / 2;
+					px[i] = red ? 255 : 0;
+					px[i + 1] = 0;
+					px[i + 2] = red ? 0 : 255;
+					px[i + 3] = 255;
+				}
+			}
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(
+				new three.PlaneGeometry(2, 2),
+				new three.MeshLambertMaterial({ map: new three.DataTexture(px, n, n) }),
+			));
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+			return three.stats().textures;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "1", "one texture, got %s", result.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		// Where the reddest and the bluest pixels sit vertically. Row 0 of the
+		// captured image is the top of the screen.
+		usz stride = (usz)shot.width * 4;
+		uint red_rows = 0;
+		uint blue_rows = 0;
+		uint red_y = 0;
+		uint blue_y = 0;
+		for (uint y = 0; y < shot.height; y++)
+		{
+			for (uint x = 0; x < shot.width; x++)
+			{
+				sz i = (sz)((usz)y * stride + (usz)x * 4);
+				if (shot.pixels[i] > 90 && shot.pixels[i + 2] < 40) { red_rows++; red_y += y; }
+				if (shot.pixels[i + 2] > 90 && shot.pixels[i] < 40) { blue_rows++; blue_y += y; }
+			}
+		}
+
+		test::@check(red_rows > 100 && blue_rows > 100,
+			"both halves have to be on screen: %d red, %d blue", red_rows, blue_rows);
+		if (red_rows > 0 && blue_rows > 0)
+		{
+			// Larger y is lower on screen.
+			test::@check(red_y / red_rows > blue_y / blue_rows,
+				"the array's first rows are red and belong along the bottom edge, but the red is at y=%d "
+				"and the blue at y=%d — the texture is upside down",
+				red_y / red_rows, blue_y / blue_rows
+			);
+		}
+	};
+}
+
+<*
+ A DataTexture is a Texture in every other way.
+
+ It extends `Texture` rather than reimplementing it, and this is what says so: a
+ map, a dispose that gives the reference back, and extents read off the upload.
+ Written as one test because each half is one line and what is being asserted is
+ that they are *the same* mechanism, not three separate ones that happen to work.
+
+ **The texture is 4x8 rather than square, and that is deliberate.** Every other
+ check here uses a square one, so swapping the two dimensions anywhere along the
+ path — the verb, the `Image`, the upload — produces an identical picture and an
+ identical hash, and passes all of them. Found by injecting exactly that swap and
+ watching the whole suite stay green; this is the check that turns it red.
+*>
+fn void a_data_texture_behaves_like_any_other() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const px = new Uint8Array(4 * 8 * 4).fill(200);
+			const tex = new three.DataTexture(px, 4, 8);
+			const mat = new three.MeshLambertMaterial({ map: tex });
+			const isTexture = tex instanceof three.Texture;
+			const resident = three.stats().textures;
+
+			tex.dispose();
+			const afterDispose = three.stats().textures;   // the material still holds one
+			mat.map = null;
+			return [isTexture, tex.width, tex.height, resident, afterDispose, three.stats().textures, mat.map];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[true,4,8,1,1,0,null]",
+			"a Texture, 4 wide and 8 tall, resident, still resident while a material holds it, gone after; got %s",
+			result.value
+		);
+	};
+}
+
+<*
+ A plain Array works, and a wrong byte count is refused with the arithmetic.
+
+ The Array is accepted because it is what a script most naturally builds and
+ because refusing it would be refusing the obvious thing over a container detail
+ the author cannot see the reason for. It costs a copy, which is what the
+ `Uint8Array` route exists to skip.
+
+ The refusal carries both numbers because that is the difference between a
+ message an agent can act on and one it has to do arithmetic to use — and the
+ mistake being caught is usually a transposition or a forgotten alpha channel,
+ both of which are obvious the moment the two counts are side by side.
+*>
+fn void a_plain_array_works_and_a_wrong_count_says_both_numbers() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
+
+			const plain = [];
+			for (let i = 0; i < 2 * 2 * 4; i++) plain.push(255);
+			const fromArray = new three.DataTexture(plain, 2, 2);
+
+			// Three channels instead of four: the commonest way to get this wrong.
+			const short = new Uint8Array(4 * 4 * 3);
+			const complaint = said(() => new three.DataTexture(short, 4, 4));
+
+			return [
+				fromArray.width,
+				complaint.includes('64') && complaint.includes('48'),
+				said(() => new three.DataTexture(new Uint8Array(16), 2, 2.5)).includes('whole-number'),
+				said(() => new three.DataTexture("nope", 2, 2)).includes('Uint8Array'),
+				said(() => new three.DataTexture(new Uint8Array(4), 1, 1)).length === 0,
+				said(() => new three.DataTexture(new Uint8Array(4), 0, 0)).includes('positive'),
+			];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[2,true,true,true,true,true]",
+			"an Array is widened, and each refusal says which one it is; got %s", result.value);
+	};
+}
+
+<*
  Every name the API exposes is documented where it belongs.
 
  `the_docs_describe_the_surface` checks that the dump contains two string

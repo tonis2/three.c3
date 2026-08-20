@@ -40,9 +40,12 @@ as a control — orbit, pan, zoom, keyboard, click-to-pick, and a frame a script
 can drive. Measuring (`bounds`, `boundingBox`, `align`), debug draw, and glTF
 export that round-trips per-copy colour through `EXT_mesh_gpu_instancing`.
 A game boot (`--assets`, `main.js`), unloading, glTF node animation, and an XPBD
-physics world with contacts, friction, joints, triggers and events.
+physics world with contacts, friction, joints, triggers and events. PNG and JPEG
+textures from a path, pixels generated in a script, and the glTF image table —
+all three sharing one content hash, so the same picture is one upload however it
+arrived.
 
-	c3c test --trust=full       424 passed, 0 failed, leak-clean
+	c3c test --trust=full       455 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -168,8 +171,37 @@ worse than one that answers about a box.
 ## 4. Textures, async load, and a sky
 
 *(was G6)* **Two things wearing one coat, and the sequencing matters more than
-the parts.** `lib/ktx.c3l` is already in, ahead of the milestone that uses it,
-with `test/ktx_test.c3` holding it to compiling and linking so it does not rot.
+the parts.** `lib/ktx.c3l` is already in, ahead of the milestone that uses it.
+
+**Pixels from a script are done too.** `new three.DataTexture(data, width, height)`
+takes a `Uint8Array` (or a plain Array, widened) of RGBA bytes and uploads it
+through the same `claim_texture`, so generated pixels and the identical `.png`
+are one texture. It needed one new function in `lib/quickjs.c3l` —
+`qjs_get_bytes`, over `JS_GetUint8Array`/`JS_GetArrayBuffer` — because the shim
+could hand memory *to* the engine and not read it back. **That is a submodule
+change and is not committed here**; the gitlink needs bumping once it is pushed,
+or a fresh checkout will not build. Measured: the crossing and upload are 2-5 ms
+for 64 KB to 1 MB, and filling the array in JavaScript is 14 ms at 256x256 and
+97 ms at 1024x1024 — so build at load, not per frame, and the boundary is not
+what costs.
+
+**The PNG/JPEG half is done.** `three.texture(path)` decodes through `image.c3l`
+and uploads down the same path a glTF image takes — `Assets.claim_texture`, one
+content hash, one table — so a `.png` on disk and the identical image inside a
+`.glb` are one upload. `new three.MeshLambertMaterial({ map })` puts it on a
+shape without compiling anything, `material.map` works on a `ShaderMaterial` too,
+and `Material.texture` beats `GpuMesh.texture` at record time so a script always
+overrules the file. `test/texture_test.c3` and eight checks in `test/js_test.c3`
+cover it, each proved by injection. What is deliberately not there: mips (so a
+textured floor aliases at grazing angles), and any colourspace but sRGB (so a
+normal or roughness map through this verb would come back gamma-decoded — the
+argument is in `Assets.load_texture_file`).
+
+**`test/ktx_test.c3` does not exist**, and both this file and `project.json:42`
+claimed it did — "holding it to compiling and linking so it does not rot".
+`grep -rn ktx src test` returns nothing: `ktx` is listed in `project.json`'s
+dependencies and imported by nobody, so the rot that comment was written to
+prevent has already happened. Either write that file or stop claiming it.
 
 **Do the glTF half first and out of order.** `image.c3l` decodes PNG and JPEG and
 nothing else, so **every shipped `.glb` using `KHR_texture_basisu` currently

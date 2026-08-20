@@ -625,6 +625,250 @@
 	const BackSide = 1;
 	const DoubleSide = 2;
 
+	// An image on the device, and the handle a script holds it by.
+	//
+	// Three.js's TextureLoader is asynchronous and hands back a Texture that
+	// fills in later; this one is already uploaded by the time the constructor
+	// returns, so `width` and `height` are readable immediately and there is no
+	// onLoad. `await three.texture(...)` still works — awaiting a plain value is
+	// a no-op — so the Three.js-shaped line an agent writes is correct here.
+	//
+	// Deduplicated by the *content* of the decoded image, not by the path: two
+	// calls naming two files that hold the same picture are one upload, and so
+	// are a .png on disk and the identical image inside a .glb. Each call still
+	// answers with its own Texture holding its own reference, so disposing one
+	// does not disturb the other.
+	class Texture {
+		constructor(handle, path = null) {
+			const [index, width, height] = handle;
+			this._t = index;
+			// Null for a DataTexture, which came from no file. Reported as null
+			// rather than as a made-up name like '<data>', so a script can ask
+			// `if (tex.path)` and get an answer rather than a string that looks
+			// like somewhere to look.
+			this._path = path;
+			this._width = width;
+			this._height = height;
+		}
+
+		get width() { return this._width; }
+		get height() { return this._height; }
+		get path() { return this._path; }
+
+		// Whether this handle still names an image. False after dispose(), and
+		// the reason a disposed Texture throws rather than quietly texturing
+		// something with whatever took its slot.
+		get alive() { return this._t >= 0; }
+
+		// Give back the reference this handle holds.
+		//
+		// **Not a free.** The image goes only when nothing names it at all, so
+		// disposing while a material still draws with it leaves that material
+		// correct — which is what makes this safe to call as soon as a script is
+		// done *referring* to the texture, rather than something to be timed
+		// against the materials that use it.
+		//
+		// Disposing twice is not an error. The second call has nothing to give
+		// back and says so by doing nothing, which is what makes dispose() safe
+		// in a cleanup path that may run more than once.
+		dispose() {
+			if (this._t < 0) return;
+			H.textureDispose(this._t);
+			this._t = -1;
+		}
+
+		// What the host wants for a `map`: the index, or NoTexture for none.
+		// Throws rather than falling back to NoTexture, because a disposed
+		// texture assigned to a material is a mistake whose symptom is an
+		// untextured mesh — indistinguishable from having forgotten the line.
+		_index() {
+			if (this._t < 0) {
+				throw new TypeError(
+					`this texture was disposed${this._path ? ` (${this._path})` : ''} — `
+					+ `${this._path ? 'load' : 'build'} it again to use it`
+				);
+			}
+			return this._t;
+		}
+
+		toJSON() {
+			return { path: this._path, width: this._width, height: this._height, alive: this.alive };
+		}
+
+		toString() {
+			return `${this.constructor.name}(${this._path ?? 'data'} ${this._width}x${this._height})`;
+		}
+	}
+
+	// Pixels a script built, uploaded as a texture — Three.js's name for exactly
+	// this, and the reason `Texture` is a class rather than a plain object.
+	//
+	// `new THREE.DataTexture(data, width, height, format)` there takes a format
+	// argument and needs `.needsUpdate = true` before it does anything. This one
+	// is RGBA8 only and is on the device by the time the constructor returns, so
+	// there is nothing to flag and nothing to schedule.
+	//
+	// **Deduplicated against every other texture**, which is worth knowing before
+	// building one in a loop: generated pixels and the identical image loaded
+	// from a .png land in one slot, because the content hash has no idea where
+	// bytes came from. Regenerating the same texture every frame costs one
+	// upload and a hash of the bytes — not nothing, but not an upload.
+	//
+	// A plain Array is accepted and widened. It is what a script most naturally
+	// builds, it has no contiguous bytes for the host to read, and refusing it
+	// over a detail of which container was used would be refusing the obvious
+	// thing for no reason the author can see. A Uint8Array skips the copy.
+	class DataTexture extends Texture {
+		constructor(data, width, height) {
+			if (!Number.isInteger(width) || !Number.isInteger(height)) {
+				throw new TypeError(
+					'new three.DataTexture(data, width, height) wants whole-number dimensions'
+				);
+			}
+			// Before the byte count, and that order is the point. 0x0 wants zero
+			// bytes, so a count check reached first would answer "0 RGBA bytes and
+			// 4 were given" — arithmetically true and useless. The dimensions are
+			// what is wrong.
+			if (width < 1 || height < 1) {
+				throw new RangeError(
+					`new three.DataTexture(data, width, height) wants positive dimensions, got ${width}x${height}`
+				);
+			}
+			const bytes = data instanceof Uint8Array ? data
+				: (Array.isArray(data) || data instanceof Uint8ClampedArray) ? new Uint8Array(data)
+				: null;
+			if (bytes === null) {
+				throw new TypeError(
+					'new three.DataTexture(data, ...) wants a Uint8Array or an Array of RGBA bytes, '
+					+ `not ${data === null ? 'null' : typeof data}`
+				);
+			}
+			// Checked here as well as in the host so the message can do the
+			// arithmetic — "you gave 12288 and 64x64 needs 16384" is a sentence
+			// somebody can act on without reaching for a calculator.
+			if (bytes.length !== width * height * 4) {
+				throw new RangeError(
+					`${width}x${height} is ${width * height * 4} RGBA bytes and ${bytes.length} were given `
+					+ '— four per pixel, in r, g, b, a order'
+				);
+			}
+			super(H.dataTexture(bytes, width, height), null);
+		}
+	}
+
+	// `Material.texture` in scene/material.c3 — "this material has no image of
+	// its own, use whatever the mesh brought".
+	const NoTexture = -1;
+
+	// What every material here has, which is a pipeline index, a side and a map.
+	//
+	// It exists as a base class rather than as duplicated accessors because
+	// `mesh.material` has to accept both kinds and there is exactly one correct
+	// answer to "is this a material" — `instanceof Material`. Writing the check
+	// as a union of the two concrete classes would have to be edited every time
+	// a third arrives, and the edit that gets forgotten is the one that makes a
+	// perfectly good material throw.
+	class Material {
+		constructor(handle, side) {
+			this._m = handle;
+			this._side = side;
+			this._map = null;
+		}
+
+		// Which faces this material keeps.
+		//
+		// Three.js's property, Three.js's constants, and Three.js's default —
+		// `FrontSide`. It is on the material rather than on the mesh because it
+		// is a property of the *pipeline*: two meshes drawing the same geometry
+		// with the same material are one draw call, and they stop being one the
+		// moment they can disagree about which faces to keep. A mesh that wants
+		// another side wants a material.
+		//
+		// This is the setting a sky needs. A sphere seen from the inside shows
+		// only its back faces, so under the default it is not merely dark, it is
+		// *absent* — and scaling it by -1 does not help, because a negative scale
+		// does not reverse a triangle's winding. Before this existed the way
+		// round it was five inward-facing planes.
+		get side() { return this._side; }
+
+		set side(v) {
+			Material._checkSide(v);
+			if (v === this._side) return;
+			H.setSide(this._m, v);
+			this._side = v;
+		}
+
+		// The base colour image, or null.
+		//
+		// The material's map wins over whatever image the *mesh* carries, so a
+		// glTF's own texture can be overridden by assigning one here and cannot
+		// silently override one a script asked for.
+		//
+		// **A mesh with no uvs shows nothing**, and that is the one case where
+		// this looks broken and is not. Every parametric shape and every glTF
+		// mesh carries uvs; a ConvexGeometry does not, because a hull of an
+		// arbitrary point cloud has no natural parameterisation to give it. On
+		// one of those the map is set, correct, and invisible.
+		get map() { return this._map; }
+
+		set map(v) {
+			if (v !== null && v !== undefined && !(v instanceof Texture)) {
+				throw new TypeError('material.map wants a three.texture(path), or null for none');
+			}
+			const texture = v ?? null;
+			H.setMap(this._m, texture === null ? NoTexture : texture._index());
+			this._map = texture;
+		}
+
+		static _checkSide(v) {
+			if (v !== FrontSide && v !== BackSide && v !== DoubleSide) {
+				throw new TypeError(
+					'`side` wants three.FrontSide, three.BackSide or three.DoubleSide, not ' + String(v)
+				);
+			}
+		}
+
+		toJSON() {
+			return { type: this.constructor.name, side: this._side, map: this._map?.toJSON() ?? null };
+		}
+	}
+
+	// The built-in shader with an image on it, and the material to reach for when
+	// what you want is a picture on a shape.
+	//
+	// **It compiles nothing.** The pipeline is the one the renderer built at
+	// startup — the same one every untextured mesh already draws with — so
+	// constructing one is a list push, it cannot fail with a shader diagnostic,
+	// and it works in a build with no Slang. That is the whole reason it is not
+	// a ShaderMaterial with a one-line body.
+	//
+	// Lambert rather than Basic or Standard, because that is what the built-in
+	// shader actually computes: one directional light, an ambient floor, and no
+	// specular term at all. Naming it MeshBasicMaterial would promise unlit and
+	// deliver lit; naming it MeshStandardMaterial would promise metalness,
+	// roughness and an environment and deliver none of them.
+	//
+	// It has no `color`. `mesh.color` is the per-copy channel and multiplies into
+	// the sampled texel, so one material can tint a thousand copies differently
+	// and still be one draw call — a colour here would be a second way to say the
+	// same thing that also splits the batch.
+	class MeshLambertMaterial extends Material {
+		constructor(options = {}) {
+			if (options === null || typeof options !== 'object') {
+				throw new TypeError('new three.MeshLambertMaterial({ map, side }) wants an options object');
+			}
+			const { map = null, side = FrontSide } = options;
+			if (map !== null && map !== undefined && !(map instanceof Texture)) {
+				throw new TypeError('`map` wants a three.texture(path), or null for none');
+			}
+			Material._checkSide(side);
+
+			const texture = map ?? null;
+			super(H.createTextureMaterial(texture === null ? NoTexture : texture._index(), side), side);
+			this._map = texture;
+		}
+	}
+
 	// A shader written by whoever is driving, compiled the moment it is
 	// constructed.
 	//
@@ -639,7 +883,7 @@
 	// Compiling in the constructor rather than at first use is deliberate: the
 	// error names the line the agent wrote, and it arrives at the line that wrote
 	// it rather than three statements later inside render().
-	class ShaderMaterial {
+	class ShaderMaterial extends Material {
 		constructor(options) {
 			if (options === null || typeof options !== 'object') {
 				throw new TypeError('new three.ShaderMaterial({ fragment, uniforms }) wants an options object');
@@ -651,7 +895,7 @@
 			if (uniforms === null || typeof uniforms !== 'object') {
 				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
 			}
-			ShaderMaterial._checkSide(side);
+			Material._checkSide(side);
 
 			// The enumeration happens here because it cannot happen in the host:
 			// the QuickJS shim exposes property *get* by name and nothing that
@@ -673,15 +917,16 @@
 				}
 			}
 
-			this._m = H.createMaterial(
+			// `super` before any `this`, which is why the compile happens in the
+			// argument: the material index is what the base class is made of.
+			super(H.createMaterial(
 				fragment,
 				names.join(','),
 				shapes.map(s => s[0]).join(','),
 				shapes.map(s => s[1]).join(','),
 				side,
-			);
+			), side);
 			this.fragment = fragment;
-			this._side = side;
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 
@@ -723,37 +968,6 @@
 				},
 			});
 			for (const name of names) this._set(name, uniforms[name]);
-		}
-
-		// Which faces this material keeps.
-		//
-		// Three.js's property, Three.js's constants, and Three.js's default —
-		// `FrontSide`. It is on the material rather than on the mesh because it
-		// is a property of the *pipeline*: two meshes drawing the same geometry
-		// with the same material are one draw call, and they stop being one the
-		// moment they can disagree about which faces to keep. A mesh that wants
-		// another side wants a material.
-		//
-		// This is the setting a sky needs. A sphere seen from the inside shows
-		// only its back faces, so under the default it is not merely dark, it is
-		// *absent* — and scaling it by -1 does not help, because a negative scale
-		// does not reverse a triangle's winding. Before this existed the way
-		// round it was five inward-facing planes.
-		get side() { return this._side; }
-
-		set side(v) {
-			ShaderMaterial._checkSide(v);
-			if (v === this._side) return;
-			H.setSide(this._m, v);
-			this._side = v;
-		}
-
-		static _checkSide(v) {
-			if (v !== FrontSide && v !== BackSide && v !== DoubleSide) {
-				throw new TypeError(
-					'`side` wants three.FrontSide, three.BackSide or three.DoubleSide, not ' + String(v)
-				);
-			}
 		}
 
 		// A uniform's shape: how many floats wide, and how many rows.
@@ -848,7 +1062,12 @@
 		}
 
 		toJSON() {
-			return { fragment: this.fragment, side: this._side, uniforms: { ...this._values } };
+			return {
+				fragment: this.fragment,
+				side: this._side,
+				map: this._map?.toJSON() ?? null,
+				uniforms: { ...this._values },
+			};
 		}
 	}
 
@@ -924,8 +1143,15 @@
 		// adds it must not lose the setup.
 		get material() { return this._material; }
 		set material(v) {
-			if (v !== null && !(v instanceof ShaderMaterial)) {
-				throw new TypeError('mesh.material wants a three.ShaderMaterial, or null for the default');
+			// Any Material, not specifically a ShaderMaterial: a
+			// MeshLambertMaterial is one too, and checking for the concrete class
+			// would refuse the material a script reaches for to put a picture on
+			// a box — which is the commoner of the two by a long way.
+			if (v !== null && !(v instanceof Material)) {
+				throw new TypeError(
+					'mesh.material wants a three.MeshLambertMaterial or three.ShaderMaterial, '
+					+ 'or null for the default'
+				);
 			}
 			this._material = v;
 			if (this._i >= 0) H.setMaterial(this._i, this._g, v === null ? 0 : v._m);
@@ -1630,8 +1856,9 @@
 
 		set material(v) {
 			throw new TypeError(
-				'a helper draws with the line material and cannot be given another: a ShaderMaterial is '
-				+ 'a pipeline that draws triangles, and a helper\'s indices are pairs — assigning one '
+				'a helper draws with the line material and cannot be given another: a material is '
+				+ 'a pipeline, every pipeline you can build draws triangles, and a helper\'s indices '
+				+ 'are pairs — assigning one '
 				+ 'would read the pairs as triangles rather than fail. helper.color is per copy and '
 				+ 'free, and is the knob a helper has.');
 		}
@@ -2015,8 +2242,21 @@
 		Group,
 		Vector3,
 		Asset,
-		ShaderMaterial,
+		Texture,
+		DataTexture,
 		camera,
+
+		// The materials. `Material` is exported for `instanceof`, not to be
+		// constructed: it is the base both concrete kinds share and holds `side`
+		// and `map`, which is what makes `mesh.material` one check rather than a
+		// list that has to be edited when a third kind arrives.
+		//
+		// Reach for MeshLambertMaterial to put an image or a side on a shape — it
+		// compiles nothing. Reach for ShaderMaterial when you want to write the
+		// shading itself.
+		Material,
+		MeshLambertMaterial,
+		ShaderMaterial,
 
 		// `material.side`. Numbers rather than an enum object because that is
 		// what Three.js exports and what a script written from memory of it will
@@ -2066,6 +2306,20 @@
 				throw new TypeError('three.load(path) wants a path to a .glb or .gltf');
 			}
 			return new Asset(H.load(path));
+		},
+
+		// Decode a PNG or JPEG and upload it. Synchronous, for three.load's
+		// reason, and under --assets the path is inside the game directory and
+		// cannot climb out of it.
+		//
+		// The format is read from the file's first bytes rather than from its
+		// extension, so a JPEG somebody named .png loads correctly instead of
+		// being reported as corrupt.
+		texture(path) {
+			if (typeof path !== 'string' || path.length === 0) {
+				throw new TypeError('three.texture(path) wants a path to a .png or .jpg');
+			}
+			return new Texture(H.texture(path), path);
 		},
 
 		// Draws one frame into the offscreen target. The PNG that `run_script`
@@ -2426,6 +2680,64 @@
 					'play(name, opts)', 'stop()', 'toJSON()',
 				],
 			},
+			Material: {
+				construct: 'not constructed — it is what MeshLambertMaterial and ShaderMaterial share',
+				note:
+					'The base both materials extend, exported for instanceof and for the two properties '
+					+ 'they have in common. mesh.material accepts anything that is one. Assigning a '
+					+ 'material to a helper throws whatever kind it is: a helper draws line pairs and '
+					+ 'every pipeline you can build draws triangles.',
+				properties: [
+					'map (a three.texture, or null; wins over whatever image the mesh itself carries)',
+					'side (three.FrontSide, three.BackSide or three.DoubleSide)',
+				],
+				methods: ['toJSON()'],
+			},
+			DataTexture: {
+				construct: 'new three.DataTexture(data, width, height)',
+				note:
+					'Pixels a script built, uploaded as a texture. data is a Uint8Array (or a plain '
+					+ 'Array, which is copied) of width*height*4 bytes in r, g, b, a order, row-major '
+					+ 'from the bottom-left corner — uv (0,0) is bottom-left, as it is in Three.js. '
+					+ 'RGBA8 only, and it is on the device when the constructor returns: there is no '
+					+ 'needsUpdate here and nothing to schedule. Deduplicated against every other '
+					+ 'texture by content, so generated pixels and the identical .png are one upload. '
+					+ 'It is a Texture in every other way — map, dispose, width, height. Generating '
+					+ '256x256 in JavaScript costs about 16ms before any of this, so build at load '
+					+ 'rather than per frame. path is null; the side limit is 8192.',
+				properties: ['width', 'height', 'path (null)', 'alive'],
+				methods: ['dispose()', 'toJSON()', 'toString()'],
+			},
+			Texture: {
+				construct: 'three.texture(path)',
+				note:
+					'A PNG or JPEG on the device. Synchronous — it is uploaded by the time the call '
+					+ 'returns, so width and height are readable immediately and there is no onLoad. '
+					+ 'The format is read from the file\'s first bytes, not its extension. Images are '
+					+ 'deduplicated by content: two paths holding the same picture, or a .png and the '
+					+ 'identical image inside a .glb, are one upload — each call still answers with its '
+					+ 'own handle. Under --assets the path is inside the game directory and cannot climb '
+					+ 'out of it. Put it on something with new three.MeshLambertMaterial({ map }). '
+					+ '16-bit PNGs are refused by name; save as 8-bit.',
+				properties: ['width', 'height', 'path', 'alive'],
+				methods: ['dispose()', 'toJSON()', 'toString()'],
+			},
+			MeshLambertMaterial: {
+				construct: 'new three.MeshLambertMaterial({ map, side })',
+				note:
+					'The built-in shader with an image on it — the material to reach for when what you '
+					+ 'want is a picture on a shape. It compiles nothing and cannot fail with a shader '
+					+ 'diagnostic. Lambert is what it actually computes: one directional light and an '
+					+ 'ambient floor, no specular and no environment. It has no color, because mesh.color '
+					+ 'is the per-copy channel and multiplies into the sampled texel — so one material '
+					+ 'tints a thousand copies differently and is still one draw call. With no map it is '
+					+ 'the cheapest way to ask for a side, which is what a skydome needs.',
+				properties: [
+					'map (a three.texture, or null; settable)',
+					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable)',
+				],
+				methods: ['toJSON()'],
+			},
 			ShaderMaterial: {
 				construct: "new three.ShaderMaterial({ fragment, uniforms, side })",
 				note:
@@ -2438,6 +2750,7 @@
 				properties: [
 					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
 					'fragment',
+					'map (a three.texture, or null; sampled as Surface.albedo before your shade() runs)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
 				],
 				methods: ['toJSON()'],
@@ -2802,12 +3115,37 @@
 				'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
 				+ 'return an object from a script. Objects report their name, transform and children; a '
 				+ 'Vector3 reports [x, y, z]; a ShaderMaterial reports its fragment and uniforms.',
+			'three.texture(path)':
+				'Decode a PNG or JPEG and upload it, answering with a Texture. Synchronous. The format '
+				+ 'comes from the file\'s first bytes rather than its name. Deduplicated by the decoded '
+				+ 'image, so the same picture reached by two paths — or by a path and a .glb — is one '
+				+ 'upload, and three.stats().textures counts it once.',
+			'new three.DataTexture(data, width, height)':
+				'Upload pixels a script generated. Rows run bottom-to-top, four bytes per pixel. '
+				+ 'The bytes are read and copied inside the call, so the array is yours again '
+				+ 'immediately. Wrong byte counts are refused with the arithmetic in the message '
+				+ 'rather than uploaded skewed.',
+			'texture.dispose()':
+				'Give back the reference this handle holds. Not a free: the image goes only when nothing '
+				+ 'names it, so disposing while a material still draws with it leaves that material '
+				+ 'correct. Disposing twice does nothing. Using a disposed texture throws.',
+			'new three.MeshLambertMaterial({ map, side })':
+				'The built-in shader with an image. Compiles nothing, needs no Slang, and cannot fail '
+				+ 'with a shader diagnostic — this is the way to put a picture on a shape. With no map it '
+				+ 'is a side and nothing else, which is the cheapest skydome.',
+			'material.map':
+				'The base colour image, or null. The material\'s map wins over whatever texture the mesh '
+				+ 'itself carries, so a glTF\'s own image can be overridden and cannot silently override '
+				+ 'yours. A mesh with no uvs shows nothing: every parametric shape and every glTF mesh '
+				+ 'has them, a ConvexGeometry does not — on one of those the map is set, correct, and '
+				+ 'invisible.',
 			'new three.ShaderMaterial({ fragment, uniforms })':
 				'Compile a fragment function into a material. Uniforms are at most 68 bytes in total '
 				+ '(17 floats); each is a number or an array of up to four numbers.',
 			'mesh.material':
-				'Assign a ShaderMaterial, or null for the default shader. Meshes sharing a mesh ref AND a '
-				+ 'material are one draw call; giving two of them different materials makes two.',
+				'Assign a MeshLambertMaterial or a ShaderMaterial, or null for the default shader. Meshes '
+				+ 'sharing a mesh ref AND a material are one draw call; giving two of them different '
+				+ 'materials makes two.',
 			'material.uniforms.<name>':
 				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
 				+ 'construction exist; assigning to any other name throws. A uniform declared as a table is '

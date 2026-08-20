@@ -114,11 +114,19 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// `LINE_MATERIAL` is index 1 and is built beside it for the same reason: a
 	// node's material is a `uint`, so the pass has to be able to hand out an index
 	// that means "draw this as lines" before any script has asked for one.
+	//
+	// Both name `NO_TEXTURE` explicitly. Leaving it out would zero-fill the field
+	// to texture 0, so every untextured node in the scene would draw with the
+	// first image any asset happened to upload — see `Material.texture`.
 	self.materials.init(mem, 4);
-	self.materials.push({ .pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "" });
+	self.materials.push({
+		.pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "", .texture = NO_TEXTURE
+	});
 	// No culling for lines: a segment has no facing, and `CULL_MODE_NONE` is what
 	// keeps a wireframe from losing half its edges to a rule about triangles.
-	self.materials.push({ .pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "" });
+	self.materials.push({
+		.pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "", .texture = NO_TEXTURE
+	});
 
 	self.assets.init(gpu);
 	self.scene.init();
@@ -352,7 +360,18 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// layout, so a material's shader gets its texture through its own layout
 		// rather than through one baked at load time against a different pipeline.
 		// `scene/asset.c3`'s header has the argument.
-		vk::DescriptorImageInfo image_info = self.assets.texture_for(mesh).descriptor();
+		//
+		// **The material's own texture wins over the mesh's.** `material.map` is
+		// the explicit statement and the mesh's image is what a file happened to
+		// bring, so a script that sets one and gets the other would be overruled
+		// by an asset it did not write. This costs nothing to decide here: the
+		// descriptor is already written per bucket, and a bucket is
+		// `(asset, mesh, material)` — so two nodes over one mesh with different
+		// maps are already two buckets and stay two correct draws.
+		Texture* sampled = material.texture == NO_TEXTURE
+			? self.assets.texture_for(mesh)
+			: self.assets.texture_at(material.texture);
+		vk::DescriptorImageInfo image_info = sampled.descriptor();
 		vk::WriteDescriptorSet write = vk::writeDescriptorSet().setDstBinding(0)
 			.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 			.setImageInfo({ image_info });
@@ -502,6 +521,11 @@ fn uint? MeshPass.create_material(
 			.pipeline = pipeline,
 			.cull = cull_for_side(side),
 			.fragment = fragment.copy(mem),
+			// A `ShaderMaterial` can be given a `map` afterwards like any other
+			// material — `material.slang` declares the same binding 0 that
+			// `mesh.slang` does, so `Surface.uv` samples it either way. It just
+			// does not start with one.
+			.texture = NO_TEXTURE,
 		});
 	};
 	return index;
@@ -538,6 +562,103 @@ fn void? MeshPass.set_material_side(&self, uint index, int side)
 	material.cull = cull_for_side(side);
 }
 
+<*
+ A material that is the built-in shader plus an image — `three.MeshLambertMaterial`.
+
+ **No Slang, no device, no new pipeline.** It borrows `self.pipeline`, the very
+ one `DEFAULT_MATERIAL` draws with, so building one is a push onto a list and a
+ retain. That is why it is its own verb rather than a `ShaderMaterial` with a
+ one-line body: putting a picture on a box should not compile a shader, it should
+ not be able to fail with a compiler diagnostic, and in a build with no Slang it
+ could not happen at all.
+
+ **It has no colour of its own, deliberately.** `mesh.color` is the per-copy
+ channel and `mesh.slang` multiplies it into the sampled texel, so a tinted
+ textured mesh already works and a thousand of them are still one draw call. A
+ colour on the material would be a second way to say the same thing that also
+ splits the bucket.
+
+ The texture is retained here and released by `MeshPass.free` or by
+ `set_material_map` pointing this material somewhere else. The reference the
+ script's own handle holds is a different one, and `dispose()` drops only that:
+ a material outlives the handle that supplied its image.
+
+ **`NO_TEXTURE` is allowed and is not a pointless material.** It is the built-in
+ shader with a `side` of its own, which is the cheapest possible skydome: a
+ sphere seen from inside shows only back faces, and before this the only way to
+ ask for `BackSide` was to compile a `ShaderMaterial` for it. A material that
+ wants neither an image nor a side should still be `DEFAULT_MATERIAL`, which
+ costs no slot at all.
+
+ @param texture : `An index into Assets.textures, or NO_TEXTURE for the mesh's own image.`
+ @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
+ @return `The material index, for Node.material.`
+ @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+*>
+fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FRONT)
+{
+	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
+
+	// Retained before the push, so the count says the material names the slot
+	// from the first instant it does. A no-op for `NO_TEXTURE`, which names none.
+	self.assets.retain_texture(texture);
+	uint index = (uint)self.materials.len();
+	self.materials.push({
+		.pipeline = self.pipeline,
+		.cull = cull_for_side(side),
+		.fragment = "",
+		.texture = texture,
+	});
+	return index;
+}
+
+<*
+ `material.map = texture` — point a material at an image, or at `NO_TEXTURE`.
+
+ **The built-in materials are refused**, for `set_material_side`'s reason and
+ more sharply. `DEFAULT_MATERIAL` is what every node draws with until it is given
+ something else, so a map set on it would texture the entire scene through a
+ handle that reads like it names one material. `LINE_MATERIAL` is refused because
+ a debug line carries no uvs, so the setting would be one that silently does
+ nothing.
+
+ **A mesh with no uvs is not refused and cannot be**, which is the one surprise
+ worth stating out loud: `mesh.slang` samples only under `FLAG_HAS_UVS`, so a map
+ on a convex hull — which has no natural parameterisation and uploads no uv
+ stream — renders exactly as it did without one. The material is not wrong and
+ the texture is not missing; there is nowhere on that geometry to put it. The
+ parametric shapes and glTF meshes all carry uvs, so this is the hull case and
+ the hull case only.
+
+ @param gpu : `For the wait below. Null in a scene-math runtime, which has nothing in flight.`
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture.`
+*>
+fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
+	if (material.texture == texture) return;
+
+	// **Retain before release**, even though it reads redundant. The two indices
+	// can name the same slot — a script can reach one texture through two
+	// handles, and both resolve to one entry because the table deduplicates by
+	// content — and releasing first would take that entry to zero, destroy the
+	// image, and retain a slot that had just been freed.
+	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
+
+	// The old image goes only if nothing else names it, and a frame in flight may
+	// still be sampling the one about to be destroyed — the hazard `unload_unused`
+	// waits for. Waited only when this release is the last one, so re-pointing a
+	// map inside a frame callback costs no stall at all.
+	if (gpu != null && self.assets.texture_refs(material.texture) == 1) gpu.wait_idle();
+	self.assets.release_texture(gpu, material.texture);
+
+	material.texture = texture;
+}
+
 fn void MeshPass.free(&self, Gpu* gpu)
 {
 	for (uint i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -547,6 +668,11 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		self.instance_capacity[i] = 0;
 	}
 	self.scene.free();
+	// Before `assets.free`, which frees every texture slot outright: releasing
+	// afterwards would decrement counts in a freed list. The device is idle by
+	// the time a pass is torn down, so no wait is needed here as it is in
+	// `set_material_map`.
+	foreach (&material : self.materials) self.assets.release_texture(gpu, material.texture);
 	self.assets.free(gpu);
 	// Before the cache, which owns the pipelines these borrow.
 	foreach (&material : self.materials) material.free();

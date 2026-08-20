@@ -49,6 +49,7 @@
 module three;
 
 import std::io;
+import std::io::file;
 import std::collections::list;
 import std::math;
 import std::math::vector;
@@ -61,7 +62,12 @@ import image::png;
 import image::jpeg;
 import collision;
 
-faultdef ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE;
+faultdef
+	ASSET_HAS_NO_MESHES,
+	UNSUPPORTED_IMAGE,
+	TEXTURE_UNREADABLE,
+	TEXTURE_FORMAT_UNKNOWN,
+	TEXTURE_BIT_DEPTH;
 
 <*
  A handle to a loaded asset: which slot, and which occupant of it.
@@ -616,16 +622,56 @@ fn usz Assets.texture_bytes(&self)
  same job: the binding is always occupied, so a textured mesh and an untextured
  one are the same pipeline and there is no shader permutation to manage.
 *>
-fn Texture* Assets.texture_for(&self, GpuMesh* mesh)
+fn Texture* Assets.texture_for(&self, GpuMesh* mesh) => self.texture_at(mesh.texture);
+
+<*
+ A texture by index, or the white stand-in when there is not one.
+
+ `texture_for`'s body, lifted out when a *material* became able to name a
+ texture as well as a mesh. Both callers want the same two things — the image,
+ and something valid when there is no image — so this is one function rather
+ than a mesh-shaped one and a material-shaped one that would drift.
+
+ An out-of-range index and a dead slot both answer white. From a live mesh
+ neither is reachable, because a texture is only freed when nothing names it, so
+ that is the backstop for a bug in the refcount rather than a case anything
+ relies on. White is what it degrades to: a visibly wrong colour, rather than a
+ sampled freed image, which is a picture that is right until it is not.
+*>
+fn Texture* Assets.texture_at(&self, int index)
 {
-	if (mesh.texture < 0 || mesh.texture >= self.textures.len()) return &self.white;
-	SharedTexture* shared = &self.textures[mesh.texture];
-	// A dead slot is unreachable from a live mesh — a texture is only freed when
-	// no mesh names it — so this is the backstop for a bug in that argument
-	// rather than a case. White is what it degrades to, which is a visible
-	// wrong colour rather than a sampled freed image.
+	if (index < 0 || index >= self.textures.len()) return &self.white;
+	SharedTexture* shared = &self.textures[index];
 	if (!shared.alive) return &self.white;
 	return &shared.texture;
+}
+
+<*
+ Whether an index names a texture that is actually there.
+
+ Separate from `texture_at` because the two questions want different answers to
+ the same input: drawing wants a picture and will take white, while *accepting*
+ an index from a script wants to refuse it — a material silently bound to white
+ is a texture that did not load and did not say so.
+*>
+fn bool Assets.texture_alive(&self, int index)
+{
+	if (index < 0 || index >= self.textures.len()) return false;
+	return self.textures[index].alive;
+}
+
+<*
+ How many things name this texture. Zero for an index that names nothing.
+
+ Exposed because the callers that *release* a texture need to know whether their
+ release is the last one: freeing an image the GPU may still be sampling is the
+ hazard `unload_unused` waits for the device over, and waiting on every release
+ instead would put a device stall inside an ordinary `material.map = ...`.
+*>
+fn uint Assets.texture_refs(&self, int index)
+{
+	if (!self.texture_alive(index)) return 0;
+	return self.textures[index].refs;
 }
 
 // ============================================================================
@@ -854,6 +900,14 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 fn void Assets.retain_texture(&self, int index)
 {
 	if (index < 0 || index >= self.textures.len()) return;
+	// **A dead slot is refused, not counted.** An index can outlive the image it
+	// named — `release_texture` frees the slot and `free_textures` hands it to the
+	// next upload — and a retain on one of those would put a live count on an
+	// entry holding a destroyed `VkImage`. Nothing would notice until the slot was
+	// reused, at which point the new occupant would start life one reference too
+	// high and never be freed. `release_texture` makes the same check on the way
+	// out; this is the half that was missing.
+	if (!self.textures[index].alive) return;
 	self.textures[index].refs++;
 }
 
@@ -1824,6 +1878,45 @@ fn int? Assets.decode_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream
 	image::Image decoded = maybe;
 	defer decoded.free();
 
+	// **16-bit is refused rather than narrowed.** `Image.to_rgba` says in its own
+	// comment that it does not handle a 16-bit source, and what it does instead
+	// is index as though the source were 8-bit — so a 16-bit PNG that reaches it
+	// does not come out darker or flatter, it comes out of the wrong bytes.
+	// Garbled pixels look like a decoder bug; a material with no texture looks
+	// like what this is, which is a format that is not supported yet.
+	if (decoded.bit_depth == 16)
+	{
+		if (!self.warned_unsupported_image)
+		{
+			io::printfn(
+				"three: 16-bit %s textures are not decoded; those materials render untextured", image_type_name(mime)
+			);
+			self.warned_unsupported_image = true;
+		}
+		return -1;
+	}
+
+	return self.claim_texture(gpu, decoded);
+}
+
+<*
+ A decoded image to a texture slot, deduplicated by content hash.
+
+ The tail `decode_material_texture` used to own, lifted out when
+ `load_texture_file` needed exactly the same thing. Sharing it is not tidiness:
+ it is what makes `three.texture("brick.png")` and the identical image embedded
+ in a `.glb` **one upload**, because they hash the same decoded bytes against
+ the same table. Two implementations of this would have been two texture slots
+ holding the same picture, which is the bug the hash exists to prevent.
+
+ The new slot starts at one reference and it belongs to the caller.
+
+ @param decoded : `8-bit. A 16-bit source must be refused before here, since to_rgba cannot narrow one.`
+ @require decoded.bit_depth != 16
+ @return `An index into Assets.textures.`
+*>
+fn int? Assets.claim_texture(&self, Gpu* gpu, image::Image decoded)
+{
 	char[] rgba = decoded.to_rgba();
 	defer free(rgba);
 
@@ -1853,6 +1946,88 @@ fn int? Assets.decode_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream
 
 	self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
 	return (int)self.textures.len() - 1;
+}
+
+<*
+ PNG's eight-byte signature. Fixed, at offset zero, and the reason
+ `decode_by_signature` needs no guessing.
+*>
+const char[8] PNG_SIGNATURE = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+
+<*
+ What these bytes are, by their first few rather than by the name of the file.
+
+ **A file named `.png` that holds a JPEG is a thing that happens** — an export
+ step renamed it, or a browser download did — and dispatching on the extension
+ would hand PNG bytes to the JPEG decoder, which reports a corrupt file. That
+ message sends a person looking for a corruption that is not there. Reading the
+ signature costs eight comparisons and is never wrong about it.
+
+ The glTF path next door does not do this and should not: a `.glb` states its
+ own mime type per image, which is a stronger claim than a file name and is
+ already what `decode_image` switches on.
+
+ @return? TEXTURE_FORMAT_UNKNOWN : `Neither a PNG nor a JPEG. Named rather than attempted.`
+*>
+fn image::Image? decode_by_signature(char[] encoded)
+{
+	if (encoded.len >= PNG_SIGNATURE.len)
+	{
+		bool matches = true;
+		foreach (i, byte : PNG_SIGNATURE)
+		{
+			if (encoded[i] != byte) matches = false;
+		}
+		if (matches) return png::load_bytes(encoded);
+	}
+
+	// SOI followed by any marker. Two bytes would be enough to be unambiguous
+	// here, but every real JPEG has a third and requiring it costs nothing.
+	if (encoded.len >= 3 && encoded[0] == 0xff && encoded[1] == 0xd8 && encoded[2] == 0xff)
+	{
+		return jpeg::load_bytes(encoded);
+	}
+
+	return TEXTURE_FORMAT_UNKNOWN~;
+}
+
+<*
+ A PNG or JPEG on disk to a texture slot — `three.texture(path)`'s half of it.
+
+ Goes through `claim_texture`, so it shares the table, the content hash and the
+ refcount with every texture a glTF brought in. The reference it starts at
+ belongs to whoever called: for the JS path that is the `Texture` handle the
+ script is holding, and it is released by `dispose()` and by nothing else.
+ A material naming the texture takes a reference of its own.
+
+ **No mip chain and no colourspace argument.** `Gpu.create_texture` uploads one
+ level as `R8G8B8A8_SRGB`, which is right for the base colour map this is for
+ and wrong for a normal or roughness map — those want UNORM and would come back
+ gamma-decoded. There is no verb that can ask for one yet, so nothing can hit
+ that today; the day one arrives it is a parameter here, not a second path.
+
+ @return `An index into Assets.textures, at one reference.`
+ @return? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
+ @return? TEXTURE_FORMAT_UNKNOWN : `Not a PNG or a JPEG, by its first bytes.`
+ @return? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
+*>
+fn int? Assets.load_texture_file(&self, Gpu* gpu, String path)
+{
+	if (!file::is_file(path)) return TEXTURE_UNREADABLE~;
+
+	char[]? encoded = file::load(mem, path);
+	if (catch encoded) return TEXTURE_UNREADABLE~;
+	defer free(encoded);
+
+	// Counted with the glTF decodes rather than separately: `decodes` answers
+	// "how much decoding has this table paid for", and a script that reloads the
+	// same PNG in a loop is exactly the case that number exists to expose.
+	self.decodes++;
+	image::Image decoded = decode_by_signature(encoded)!;
+	defer decoded.free();
+
+	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
+	return self.claim_texture(gpu, decoded);
 }
 
 <*

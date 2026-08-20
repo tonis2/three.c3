@@ -47,6 +47,7 @@ import vk;
 
 faultdef
 	MATERIAL_UNKNOWN,
+	MATERIAL_TEXTURE_UNKNOWN,
 	MATERIAL_UNIFORM_UNKNOWN,
 	MATERIAL_UNIFORM_WIDTH,
 	MATERIAL_NEEDS_DEVICE;
@@ -158,8 +159,32 @@ struct Material
 	// message when a uniform name does not resolve — "that material has no
 	// uniform called X" is only actionable next to the source that declared them.
 	String fragment;
+	// `material.map` — an index into `Assets.textures`, or `NO_TEXTURE` for
+	// "whatever the mesh brought". Holds one reference to that slot for as long
+	// as it names it; `MeshPass.set_material_map` is the only thing that moves
+	// it, so that the retain and the release cannot get out of step.
+	//
+	// **This must be set explicitly at every site that builds a `Material`.**
+	// C3 zero-fills what a designated initializer leaves out, and zero is a
+	// perfectly ordinary texture index — so a forgotten `.texture` does not
+	// render untextured, it renders whatever the *first* image the table
+	// uploaded happens to be. That is a bug that looks like a texture bug, on a
+	// material nobody gave a texture to. `NO_TEXTURE` is -1 rather than 0 so
+	// that the mistake is possible to make; the alternative, a biased
+	// index-plus-one, makes it impossible and makes every read arithmetic.
+	int texture;
 	char[PUSH_BUDGET] block;
 }
+
+<*
+ `Material.texture` for a material that has none of its own.
+
+ The mesh's texture is what such a material draws with, which is what every
+ material did before `map` existed and is why a glTF's own materials still work
+ unchanged: the file's image rides on the `GpuMesh`, and nothing about that
+ moved.
+*>
+const int NO_TEXTURE = -1;
 
 <*
  Point a uniform at new values.

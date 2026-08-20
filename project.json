@@ -39,8 +39,12 @@
 	// naming a version nobody asked for. Measured; see slang.c3l's README.
 	//
 	// **ktx arrived ahead of the milestone that uses it** — `game.md` G6 — and is
-	// listed here rather than left unlisted so that `test/ktx_test.c3` can hold
-	// it to compiling and linking. A dependency nothing imports rots silently.
+	// listed here rather than left unlisted so that a test could hold it to
+	// compiling and linking. That test was never written: this comment named
+	// `test/ktx_test.c3` as though it existed, and `grep -rn ktx src test` finds
+	// nothing at all. So the dependency is declared, imported by nobody, and
+	// rotting silently — which is the exact outcome the sentence above was
+	// written to prevent. `plan.md` §4 carries it as work.
 	//
 	// **It needs no staging step, unlike slang.** `libzstd.a` is checked in per
 	// target under `lib/ktx.c3l/lib/<target>/` and reached through the library's

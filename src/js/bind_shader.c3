@@ -35,8 +35,10 @@ import qjs;
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
 	self.bind(host, "createMaterial", &js_create_material, 5);
+	self.bind(host, "createTextureMaterial", &js_create_texture_material, 2);
 	self.bind(host, "setUniform", &js_set_uniform, 9);
 	self.bind(host, "setSide", &js_set_side, 2);
+	self.bind(host, "setMap", &js_set_map, 2);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 }
 
@@ -325,6 +327,83 @@ fn void js_set_side(
 	if (catch self.pass.set_material_side(index, side))
 	{
 		*out = js.raise("that material is not in this context");
+		return;
+	}
+}
+
+<*
+ `new three.MeshLambertMaterial({ map })` — the built-in shader, with an image.
+
+ Needs no device *for a compile*, because there is nothing to compile: the
+ pipeline is the one the pass built at startup. It still needs one to have got
+ here at all, since the only source of a texture index is `three.texture`, which
+ refuses a runtime with no GPU by name. So the check below is about the texture
+ and not about the device.
+
+ @param [in] args : `(texture, side).`
+*>
+fn void js_create_texture_material(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int texture = arg_int(&js, argc, args, 0);
+	// Absent means `SIDE_FRONT`, matching `js_create_material`.
+	int side = argc > 1 ? arg_int(&js, argc, args, 1) : SIDE_FRONT;
+
+	uint? made = self.pass.create_texture_material(texture, side);
+	if (catch made)
+	{
+		*out = js.raise(
+			"that texture is not in this context — it was disposed, or it came from another renderer"
+		);
+		return;
+	}
+
+	*out = qjs::int_value((int)made);
+}
+
+<*
+ `material.map = texture` — or `material.map = null`, which is `NO_TEXTURE`.
+
+ The two refusals are told apart in the message rather than flattened into one,
+ because they are different mistakes: a built-in material is one a script may not
+ texture at all, and a dead texture is one it may not texture *with*. Answering
+ "that material is not in this context" to the second would send an agent
+ looking at the wrong object.
+*>
+fn void js_set_map(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	// The prelude sends `NO_TEXTURE` for a cleared map, so absent and cleared are
+	// the same thing here and neither is a texture index.
+	int texture = argc > 1 ? arg_int(&js, argc, args, 1) : NO_TEXTURE;
+
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	if (catch err = self.pass.set_material_map(gpu, index, texture))
+	{
+		*out = js.raise(
+			err == MATERIAL_TEXTURE_UNKNOWN
+				? "that texture is not in this context — it was disposed, or it came from another renderer"
+				: "that material is not in this context, or it is a built-in one that every node shares"
+		);
 		return;
 	}
 }
