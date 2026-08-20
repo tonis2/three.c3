@@ -124,7 +124,11 @@ struct SceneStats
 	uint assets;
 	uint textures;
 	usz texture_bytes;
-	// From the last `update`, not from this call — see the header.
+	// From the last `update`, not from this call — `stats()` rebuilds with
+	// culling off, so there is nothing to count during it. Zero until the first
+	// `update`, and zero again after any `update` made with `Scene.cull` false:
+	// nothing was dropped, and reporting the frame before it would be a stale
+	// number wearing a live one's name.
 	uint culled_last_frame;
 }
 
@@ -168,7 +172,19 @@ struct Scene
 	List{Bucket} buckets;
 
 	bool cull;
+	// The working counter, zeroed at the top of every `build_draw_list`. It is
+	// zero for the whole of a `stats()` call, because that call rebuilds with no
+	// frustum on purpose — which is why the number `SceneStats` reports is the
+	// one below and not this one.
 	uint culled;
+	// What the last `update` culled. Two fields rather than one because the two
+	// callers of `build_draw_list` ask different questions: a frame wants to know
+	// what the camera dropped, and `stats()` deliberately rebuilds with culling
+	// off so its instance count cannot depend on where the camera points. Sharing
+	// one field means that rebuild erases the frame's answer on its way past, and
+	// the reported number is then zero forever — which is what it was until this
+	// was split.
+	uint culled_last_frame;
 	bool started;
 }
 
@@ -1086,6 +1102,12 @@ fn void Scene.update(&self, Assets* assets, Matrix4f view_projection)
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
 	self.build_draw_list(assets, self.cull ? &frustum : null);
+	// Promoted here rather than inside `build_draw_list`, because this call is
+	// what "a frame happened" means and the other caller is a query. Assigned
+	// unconditionally: with `cull` off nothing was dropped and zero is the honest
+	// answer, where holding the previous number would report a camera that has
+	// stopped being consulted.
+	self.culled_last_frame = self.culled;
 }
 
 // ----------------------------------------------------------------------------
@@ -1239,6 +1261,12 @@ fn uint count_unique_meshes(Bucket[] buckets)
  draw call" has to be a fact about the scene, not about where the camera was
  pointing when it was last asked. The side effect is that the draw list is left
  uncalled — the next `update` rebuilds it, which it would have done anyway.
+
+ `culled_last_frame` is the one number here that is deliberately *not* computed
+ fresh, for that same reason: this rebuild culls nothing, so counting during it
+ reports zero however much the camera dropped. It is read off `Scene`'s record of
+ the last `update` instead. That split is the whole of the fix for a field that
+ answered zero from M2 until it was noticed.
 *>
 fn SceneStats Scene.stats(&self, Assets* assets)
 {
@@ -1252,7 +1280,7 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.assets = assets.resident(),
 		.textures = assets.texture_count(),
 		.texture_bytes = assets.texture_bytes(),
-		.culled_last_frame = self.culled,
+		.culled_last_frame = self.culled_last_frame,
 	};
 
 	foreach (&node : self.nodes)
