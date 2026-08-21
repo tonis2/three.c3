@@ -100,6 +100,65 @@ fn vk::CullModeFlags cull_for_side(int side)
 }
 
 <*
+ How a material's colour combines with what is already on screen, in Three.js's
+ own numbering.
+
+ `NoBlending` is 0 there, `NormalBlending` 1 and `AdditiveBlending` 2 — matched
+ for `SIDE_FRONT`'s reason: a script that wrote `blending: 2` from memory of
+ Three.js gets what it meant. Three.js has `Subtractive` and `Multiply` at 3 and
+ 4 as well; they are not here, and leaving the numbers free is what lets them
+ arrive later without renumbering anything a script may have hardcoded.
+
+ The default is `NONE` and not `NORMAL`, which is worth stating because it is the
+ opposite of what "a material has an opacity" suggests. An opaque pipeline
+ ignores the alpha it writes, so a material that never asked to blend renders
+ exactly as every material did before this existed, whatever its opacity says.
+ Three.js behaves the same way — `opacity` without `transparent` does nothing —
+ and the honest reason is the hardware's, not a rule anybody chose.
+*>
+const int BLENDING_NONE = 0;
+const int BLENDING_NORMAL = 1;
+const int BLENDING_ADDITIVE = 2;
+
+<*
+ The pipeline blend mode a `blending` number means.
+
+ `cull_for_side`'s shape and its floor-not-check role: anything unrecognised is
+ `NONE`, the behaviour every material had before blending existed, and the JS
+ side refuses an unknown value **by name** before it reaches here. Two guards
+ rather than one because they answer different questions — the boundary tells an
+ agent what it typed wrong, and this makes sure a value that arrived any other
+ way cannot select a pipeline nobody meant.
+*>
+fn BlendMode blend_for(int blending)
+{
+	switch (blending)
+	{
+		case BLENDING_NORMAL: return BlendMode.ALPHA;
+		case BLENDING_ADDITIVE: return BlendMode.ADDITIVE;
+		default: return BlendMode.NONE;
+	}
+}
+
+<*
+ The render state a blend mode is built over.
+
+ One place rather than a switch at every `acquire`, because the *depth* half of
+ the answer is the part that is easy to get wrong and impossible to see: an
+ `ALPHA_STATE` written by hand with `depth_write: true` renders correctly in
+ every scene where nothing overlaps itself. `ALPHA_STATE` has that argument.
+*>
+fn PipelineState state_for_blend(BlendMode blend)
+{
+	switch (blend)
+	{
+		case ALPHA: return ALPHA_STATE;
+		case ADDITIVE: return ADDITIVE_STATE;
+		case NONE: return SOLID_STATE;
+	}
+}
+
+<*
  The material every debug line draws with.
 
  Index 1 of `MeshPass.materials`, built in `MeshPass.init` from the same
@@ -148,6 +207,29 @@ $assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
 
  `pipeline` is borrowed from `MeshPass.pipelines`, which hands out heap-boxed
  entries precisely so a live pointer survives the cache growing.
+
+ ## Three fields are shaped around C3's zero fill, and each answers it differently
+
+ A designated initializer leaves out what it does not name and C3 writes zero
+ there, so every field here has to have an answer for "what does a construction
+ site that forgot me produce". There are exactly three strategies in use and they
+ are worth reading together, because which one is right depends entirely on
+ whether zero is a *legal value* of the field:
+
+ - `texture` — zero is a perfectly ordinary texture index, so no encoding saves
+   it. `NO_TEXTURE` is -1 and **every construction site names the field**, which
+   makes forgetting possible on purpose: the mistake shows up as a wrong picture
+   rather than being silently absorbed.
+ - `uv_transform` — zero is a legal number but a meaningless *transform*, so the
+   all-zero value is read as "unset" and the boundary refuses a script that tries
+   to write one. Nobody has to remember anything.
+ - `one_minus_opacity` — zero is both legal and meaningful (fully transparent),
+   and the *common* case is the one that must be free. So the field stores the
+   complement: zero fill spells opacity 1, and an opacity of exactly 0 is still
+   representable rather than being stolen by a sentinel.
+
+ The pattern behind all three: encode when zero is meaningful and the default is
+ not zero; require naming when no encoding is honest.
 *>
 struct Material
 {
@@ -189,6 +271,33 @@ struct Material
 	// refused by name at the boundary because a zero repeat means nothing anyone
 	// wants.
 	float[4] uv_transform;
+	// Which blend mode the material's pipeline was built with — `material.blend`
+	// and `material.transparent`, decided once, at construction.
+	//
+	// A copy of what `PipelineState.blend` already says, kept here because the two
+	// readers cannot get at that: `Scene`'s draw ordering needs to know which
+	// buckets are transparent without reaching into a `MeshPipeline`, and the
+	// exporter needs it to write `alphaMode`. `NONE` is the zero fill and means
+	// what every material meant before this field existed.
+	//
+	// **There is no setter**, unlike `cull`. Blending is baked into the pipeline
+	// on this device (`BlendMode` has the measurement), so changing it would mean
+	// re-acquiring — a device, a target and the assembled source read back out of
+	// the cache — to save a script one line. Building a new material is that line.
+	BlendMode blend;
+	// `material.opacity`, stored as **1 - opacity** so that the zero fill is the
+	// common case.
+	//
+	// Reading `1.0` out of a field nobody wrote is the whole reason for the
+	// inversion, and the alternative was tried and thrown out: a plain `opacity`
+	// field would make every forgotten initializer produce an invisible material —
+	// geometry that does not render, on a material nobody said anything about,
+	// which is the failure mode that costs an agent the most to diagnose. A
+	// sentinel would have cost the one value a fade-out has to reach. See the
+	// header for the other two answers to the same problem.
+	//
+	// Never read directly outside `Material.opacity`.
+	float one_minus_opacity;
 	char[PUSH_BUDGET] block;
 	// Whether this slot holds a material at all. False for a slot whose material
 	// was collected, which stays in the list so that every index ever handed out
@@ -226,6 +335,19 @@ fn float[4] Material.uv_transform_or_identity(&self)
 {
 	if (self.uv_transform[0] == 0 && self.uv_transform[1] == 0) return UV_IDENTITY;
 	return self.uv_transform;
+}
+
+<*
+ What `material.opacity` reads back as: `1 - one_minus_opacity`.
+
+ The only reader of the stored field. Everything else asks through here, so the
+ complement stays an implementation detail of the struct rather than something
+ every call site has to remember to undo — which is exactly how a stored
+ complement turns into a bug the second time somebody touches it.
+*>
+fn float Material.opacity(&self)
+{
+	return 1.0f - self.one_minus_opacity;
 }
 
 <*

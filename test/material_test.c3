@@ -851,3 +851,47 @@ fn void a_table_costs_a_row_at_a_time() @test
 		"saying what it asked for: %s", three::material_diagnostic()
 	);
 }
+
+// ============================================================================
+// The material struct
+// ============================================================================
+
+<*
+ A material nobody gave an opacity to is opaque, and one given zero is invisible.
+
+ Both halves are the point, because they are what rules out the two obvious
+ storage choices. C3 zero-fills whatever a designated initializer leaves out, and
+ there are four construction sites for `Material` — so a plain `opacity` field
+ would make every one that forgot it produce geometry that does not render, on a
+ material nobody said anything about. A sentinel would fix that and steal the one
+ value a fade-out has to end on. Storing `1 - opacity` costs a subtraction in one
+ accessor and gives both answers.
+
+ Asserted on the struct rather than through `MeshPass`, deliberately: this file
+ has no GPU and needs none, and the claim is about what C3 writes into memory
+ when nobody names the field — which is the same claim wherever the material was
+ built. `MeshPass.set_material_opacity` is the only other place that knows the
+ storage is inverted.
+
+ **Proved by injection.** `Material.opacity` returning `self.one_minus_opacity`
+ rather than its complement, which is the same code a plain `opacity` field would
+ produce: "a material nobody gave an opacity to is opaque, got 0.000000".
+*>
+fn void a_forgotten_opacity_still_renders_opaque() @test
+{
+	// Named exactly as `MeshPass.claim_slot`'s callers name it, minus the opacity:
+	// a texture, because zero is a real index there, and nothing else.
+	three::Material material = { .texture = three::NO_TEXTURE };
+
+	test::@check(material.opacity() == 1.0f, "a material nobody gave an opacity to is opaque, got %f", material.opacity());
+
+	// The value a sentinel would have cost. Written through the stored field
+	// rather than through a setter because this test has no pass to ask — and the
+	// inversion is exactly what is under test, so spelling it out here is the
+	// check rather than a shortcut around it.
+	material.one_minus_opacity = 1.0f;
+	test::@check(material.opacity() == 0.0f, "and fully transparent is still reachable, got %f", material.opacity());
+
+	material.one_minus_opacity = 0.25f;
+	test::@check(material.opacity() == 0.75f, "with everything between, got %f", material.opacity());
+}

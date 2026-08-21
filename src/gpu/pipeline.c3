@@ -145,6 +145,41 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 };
 
 <*
+ How a material's colour reaches the attachment: not at all, over what is there,
+ or added to it.
+
+ **A field rather than a command, and that was measured rather than assumed**
+ (`plan.md` §10). KosmicKrisp on this machine advertises
+ `VK_EXT_extended_dynamic_state3` and reports every one of its colour-blend
+ feature bits false — `ColorBlendEnable`, `ColorBlendEquation` and
+ `ColorWriteMask` all zero — because Metal carries blending inside
+ `MTLRenderPipelineColorAttachmentDescriptor`, in the compiled pipeline state,
+ with no encoder command that can change it mid-pass. So `vkCmdSetColorBlendEnableEXT`
+ is unusable here and a blend mode has to be baked in.
+
+ That is the exact inverse of the topology case above, where the bit says no and
+ the driver honours the switch anyway — which is why neither direction is worth
+ guessing at.
+
+ The cost is small and bounded, unlike the cull mode's: this is a closed set of
+ three values shared by every material that asks for one, so it is a handful of
+ `VkPipeline` objects for the life of the process and **no extra Slang call at
+ all** — `PipelineCache` keys the compile on the source and the pipeline on the
+ state. `material.side`, by contrast, is an axis an agent varies freely, which is
+ exactly why it went dynamic.
+
+ `NONE` is first so that C3's zero fill spells "opaque": `SOLID_STATE` and
+ `LINE_STATE` name no blend and mean the behaviour every pipeline in this project
+ had before this enum existed.
+*>
+enum BlendMode : char
+{
+	NONE,
+	ALPHA,
+	ADDITIVE,
+}
+
+<*
  The fixed-function state a pipeline is *built* with — as opposed to the state it
  is *told* at record time.
 
@@ -193,6 +228,10 @@ struct PipelineState
 	vk::PrimitiveTopology topology;
 	bool depth_test;
 	bool depth_write;
+	// How the fragment's colour is combined with what is already there. In here
+	// and not in a command because it cannot be a command on this device — see
+	// `BlendMode`.
+	BlendMode blend;
 }
 
 <*
@@ -233,18 +272,75 @@ const PipelineState LINE_STATE = {
 	.depth_write = false,
 };
 
+<*
+ What a transparent material draws with: solid triangles that blend over what is
+ behind them, depth **tested** but not **written**.
+
+ ## Why the depth write is off, which is the only real decision here
+
+ Reading depth is what keeps glass behind a wall behind the wall, so the test
+ stays on. Writing it is the half that has to go, and the reason is this
+ renderer's central claim rather than a convention borrowed from elsewhere.
+
+ A bucket here is `(asset, mesh, material)` drawn as one instanced call, and the
+ copies inside it are **not sortable against each other** — they are one
+ `vkCmdDrawIndexed` and the hardware picks the order. If such a draw wrote depth,
+ two overlapping copies of one mesh would each occlude the other depending on
+ which the rasteriser reached first: the picture would change between runs, or
+ between drivers, with nothing in the scene having moved. Not writing depth makes
+ the overlap *blend* instead, which is order-dependent in colour but never in
+ visibility, and is the same answer Three.js's `depthWrite: false` default for
+ transparent materials gives for the same reason.
+
+ What it costs is the case a depth write would have got right: a transparent
+ surface that is behind another transparent surface of the *same* bucket is not
+ hidden by it. `Scene.build_draw_list` sorts the buckets back to front, which
+ fixes it between buckets and cannot fix it within one — the honest limitation,
+ documented in `getApiDocs` rather than papered over.
+*>
+const PipelineState ALPHA_STATE = {
+	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+	.depth_test = true,
+	.depth_write = false,
+	.blend = BlendMode.ALPHA,
+};
+
+<*
+ `ALPHA_STATE` with the source added to the destination rather than replacing a
+ share of it: fire, sparks, glows — anything that only ever brightens.
+
+ Same depth behaviour and the same argument for it. The difference is entirely in
+ the blend factors, and it is the one blend mode where ordering genuinely does
+ not matter — addition is commutative, so an additive bucket looks the same
+ whichever order its copies land in. It is sorted with the rest anyway, because
+ it still has to land *after* the opaque geometry it brightens.
+*>
+const PipelineState ADDITIVE_STATE = {
+	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+	.depth_test = true,
+	.depth_write = false,
+	.blend = BlendMode.ADDITIVE,
+};
+
 fn ulong PipelineState.hash(self)
 {
 	return ((ulong)self.topology * 0xbf58476d1ce4e5b9)
 		^ (self.depth_test ? 0x94d049bb133111ebUL : 0)
-		^ (self.depth_write ? 0x2545f4914f6cdd1dUL : 0);
+		^ (self.depth_write ? 0x2545f4914f6cdd1dUL : 0)
+		// Multiplied rather than xor'd with a constant per value, so the three
+		// modes are three different numbers and `NONE` still contributes nothing —
+		// every state written before blending existed hashes exactly as it did.
+		^ ((ulong)self.blend.ordinal * 0x9e3779b97f4a7c15);
 }
 
 fn bool PipelineState.equals(self, PipelineState other)
 {
 	return self.topology == other.topology
 		&& self.depth_test == other.depth_test
-		&& self.depth_write == other.depth_write;
+		&& self.depth_write == other.depth_write
+		// The line that makes a blended variant its own cache entry: one Slang
+		// compile, about a millisecond for the extra `VkPipeline`.
+		&& self.blend == other.blend;
 }
 
 struct MeshPipeline
@@ -469,8 +565,35 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 
 	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
 
+	// **Baked in, because it cannot be anything else on this device.** Every
+	// colour-blend bit of `VK_EXT_extended_dynamic_state3` is false on the
+	// KosmicKrisp build this targets — Metal keeps blending inside the compiled
+	// pipeline state — so unlike the cull mode two lines up, this is a pipeline
+	// per mode and not a command per bucket. `plan.md` §10 has the probe that
+	// says so and `BlendMode` has the consequences.
+	//
+	// `vk::defaultColorBlendAttachment` is *already* standard alpha —
+	// SRC_ALPHA / ONE_MINUS_SRC_ALPHA over ONE / ONE_MINUS_SRC_ALPHA
+	// (`lib/Vulkan.c3l/vk/helpers.c3`) — so the `ALPHA` case is the helper
+	// unchanged and the opaque case is the one that has to turn something off.
 	vk::PipelineColorBlendAttachmentState blend = vk::defaultColorBlendAttachment();
-	blend.blendEnable = vk::FALSE;
+	switch (state.blend)
+	{
+		case NONE:
+			blend.blendEnable = vk::FALSE;
+		case ALPHA:
+			// The helper's own defaults are already this mode. Written as an
+			// explicit `break` rather than left to fall off the end, because C3
+			// refuses a case that is only a comment — and rightly: "nothing to do
+			// here" and "somebody deleted a line" look identical otherwise.
+			break;
+		case ADDITIVE:
+			// Source over destination with nothing taken away. The alpha channel
+			// accumulates the same way, which matters only for an offscreen target
+			// somebody reads back — `Target.capture` forces it opaque.
+			blend.dstColorBlendFactor = BLEND_FACTOR_ONE;
+			blend.dstAlphaBlendFactor = BLEND_FACTOR_ONE;
+	}
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::defaultColorBlendState(
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
@@ -620,6 +743,17 @@ struct PipelineCache
 	// of a cache that recompiled and threw the result away.
 	uint compiles;
 	uint hits;
+	// How many modules came off `shader/disk_cache.c3` instead — a miss here and
+	// a hit there, which is the case the disk cache exists for and the one the
+	// in-memory counters above cannot see.
+	//
+	// **`compiles` keeps meaning "Slang ran"**, which is why this is a counter of
+	// its own rather than a second way into `compiles`. Every existing test that
+	// asserts on `compiles` is asserting about *Slang*, and a disk hit that
+	// incremented it would turn all of them into tests of the wrong cache. The
+	// tests that read either counter say which cache they mean by pointing
+	// `shader_cache_set_dir` somewhere first; see `the_pipeline_cache_skips_the_compile`.
+	uint disk_hits;
 	// How many `VkPipeline` objects were built. Separate from `compiles` since the
 	// split, because they are no longer the same number and the whole point of the
 	// split is that the cheap one can happen without the expensive one — a test
@@ -683,8 +817,20 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 		return existing;
 	}
 
-	ShaderModule mod = compile_slang(source, name, MESH_ENTRIES[..])!;
-	self.compiles++;
+	// Through the disk cache, so the *first* compile in a process can be free
+	// too — the one level the in-memory cache above cannot reach. Everything
+	// below this line is unchanged by which side answered, the diagnostic
+	// included: a stored module carries the warning it was compiled with.
+	bool ran = false;
+	ShaderModule mod = compile_slang_cached(source, name, MESH_ENTRIES[..], &ran)!;
+	if (ran)
+	{
+		self.compiles++;
+	}
+	else
+	{
+		self.disk_hits++;
+	}
 
 	// Handed over before the `ok` check, because a successful compile can still
 	// warn and the caller asked for the text, not for the failures.

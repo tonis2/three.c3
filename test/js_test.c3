@@ -3641,13 +3641,18 @@ fn void removing_an_animated_prop_stops_it() @test
  version of this check written on one repeated body would pass against the cache
  that had the defect.
 
- Two entries are never evictable and are subtracted here rather than glossed:
- `DEFAULT_MATERIAL` and `LINE_MATERIAL` hold the built-in shader over two render
- states for the life of the pass, which is what makes them built in.
+ Four entries are never evictable and are added to the cap here rather than
+ glossed: the pass holds `mesh.slang` over four render states for its whole life
+ — `SOLID_STATE` and `LINE_STATE` for `DEFAULT_MATERIAL` and `LINE_MATERIAL`,
+ plus `ALPHA_STATE` and `ADDITIVE_STATE`, which `MeshPass.init` builds up front so
+ that `create_texture_material` can stay device-free. The number was two until
+ blending arrived; it is written as a number rather than read off the pass
+ because the claim being made is about what an *agent's* shaders leave behind,
+ and a cap that quietly grew with the built-ins would stop making it.
 
  **Proved by injection.** `PipelineCache.trim` returning immediately, which is
- the cache exactly as §1 describes it: "twelve compiles left 14 entries, and the
- cap plus the two built-in ones is 10".
+ the cache exactly as §1 describes it: "twelve compiles left 16 entries, and the
+ cap plus the four built-in ones is 12".
 *>
 fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 {
@@ -3666,9 +3671,9 @@ fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 
 		three::PipelineCache* cache = &run.pass.pipelines;
-		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 2;
+		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 4;
 		test::@check(cache.entries.len() <= cap,
-			"twelve compiles left %d entries, and the cap plus the two built-in ones is %d",
+			"twelve compiles left %d entries, and the cap plus the four built-in ones is %d",
 			(int)cache.entries.len(), (int)cap);
 		test::@check(cache.evictions > 0, "something was actually evicted: %d", cache.evictions);
 		test::@check(cache.modules.len() <= cap,
@@ -3770,5 +3775,634 @@ fn void a_mesh_keeps_drawing_with_a_disposed_material() @test
 		test::@check(count_near(&frame, 255, 0, 0) > 100,
 			"only %d red pixels — the disposed material stopped drawing",
 			count_near(&frame, 255, 0, 0));
+	};
+}
+
+// ============================================================================
+// Transparency and blending
+//
+// `plan.md` Phase A: a material can be built to blend with what is already on
+// the screen, transparent draws are sorted farthest-first behind everything that
+// is not, and `opacity` reaches the pixels. Every check here is a picture,
+// because none of it is visible any other way — `stats()` counts buckets out of
+// the scene graph and is deliberately camera-free, so it cannot tell a blended
+// frame from an overwritten one (`plan.md` §10).
+//
+// ## The trap these tests exist inside
+//
+// **Blending happens in linear light behind an `_SRGB` colour attachment.** The
+// hardware decodes the destination, blends, and encodes the result on write — so
+// the pixel that comes back from a half-and-half mix is `encode(0.5·a + 0.5·b)`
+// and **not** the average of the two encoded values. Mid-range the two differ by
+// about thirty eight-bit levels, which is far more than any tolerance worth
+// having, and a check written the wrong way round fails against correct code.
+// `encode_srgb` below is the one place that arithmetic is written.
+//
+// ## And the other one: a generated shape is not white
+//
+// `mesh.color` *multiplies* the shape's own base colour, and a generated shape's
+// is `PRIMITIVE_COLOR` — 0.78, 0.78, 0.80 in sRGB. So `mesh.color = 0xff0000` is
+// not linear (1, 0, 0), it is (0.57, 0, 0), and an expectation of 255 red would
+// be wrong by 56 levels for a reason that has nothing to do with blending. Every
+// expectation below is built from `PRIMITIVE_COLOR` rather than from the colour
+// the script asked for.
+//
+// The light is turned off in each fixture — `three.light.set([0, 0, 1], 1)`, an
+// ambient of 1 — so a surface renders its own flat colour and the numbers are
+// the blend arithmetic and nothing else. It has to come *after*
+// `new three.Scene()`, which restores the default light.
+// ============================================================================
+
+<*
+ One linear channel, as the eight-bit value the frame holds.
+
+ `Target.capture` reads an `_SRGB` image, so every channel in it has been through
+ the encode. Stating an expectation in linear and putting it through this is the
+ only honest way to write down what a blend should produce — see the section
+ header.
+*>
+fn int encode_srgb(float linear)
+{
+	return (int)math::round((double)three::linear_to_srgb(linear) * 255.0);
+}
+
+<*
+ A generated shape's own base colour, in linear light, one channel at a time.
+
+ `mesh.color` multiplies this. Read off `PRIMITIVE_COLOR` rather than written
+ down, so a change to the shade every parametric shape starts at moves these
+ checks with it instead of turning them red for a reason that is not theirs.
+*>
+fn float primitive_linear(usz channel)
+{
+	return three::srgb_to_linear(three::PRIMITIVE_COLOR[channel]);
+}
+
+<*
+ A transparent material blends with what is behind it rather than covering it.
+
+ The whole of Phase A in one picture: an opaque red wall, a half-opacity blue
+ pane a clear two units in front of it, and a camera looking straight down the
+ axis. What must be in the overlap is *neither* source colour.
+
+ **The two quads are separated on purpose.** Interpenetrating transparent
+ geometry has no correct answer under a per-object sort — three.js has the same
+ limit — so a fixture built out of it would be asserting a bug rather than a
+ behaviour.
+
+ The expected mix is computed in linear light and encoded once, because that is
+ what the hardware does: `encode(0.5·blue + 0.5·red)` is (146, 0, 149) and the
+ sRGB-space average of the two encoded colours is (100, 0, 102). Forty-six levels
+ apart in one channel, which is the whole reason `plan.md` §10 has an entry for
+ it.
+
+ The second check is what makes the first one mean something: **no pixel anywhere
+ is the pane's own colour**. A pipeline that ignored the blend state would paint
+ exactly that and would leave a picture that still looks like a blue pane on a
+ red wall to anyone reading a screenshot description rather than the pixels.
+
+ **Proved by injection.** `MeshPipeline.init` ignoring `state.blend` and always
+ setting `blendEnable = FALSE`: "the overlap is the mix of the two, got 0 pixels
+ of it" — and the second check went with it, at 2916 pixels of untouched pane.
+*>
+fn void a_transparent_material_blends_with_what_is_behind_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			const wall = new three.Mesh(new three.PlaneGeometry(4, 4));
+			wall.color = 0xff0000;
+			wall.position.z = -1;
+			scene.add(wall);
+
+			const glass = new three.Mesh(
+				new three.PlaneGeometry(1.5, 1.5),
+				new three.MeshLambertMaterial({ transparent: true, opacity: 0.5 })
+			);
+			glass.color = 0x0000ff;
+			glass.position.z = 1;
+			scene.add(glass);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(scene, three.camera);
+			return [glass.material.transparent, glass.material.blending, glass.material.opacity].join(",");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("true,1,0.5"),
+			"the material says what it was built as: %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		float red = primitive_linear(0);
+		float blue = primitive_linear(2);
+		uint mixed = count_near(&frame, encode_srgb(0.5f * red), 0, encode_srgb(0.5f * blue));
+		uint untouched = count_near(&frame, 0, 0, encode_srgb(blue));
+
+		test::@check(mixed > 500, "the overlap is the mix of the two, got %d pixels of it", mixed);
+		test::@check(untouched == 0,
+			"and nowhere is the pane its own colour, got %d pixels of it", untouched);
+		test::@check(count_near(&frame, encode_srgb(red), 0, 0) > 500,
+			"the wall around the pane is still the wall");
+	};
+}
+
+<*
+ An additive material brightens what is behind it instead of covering it.
+
+ The one blend mode where the order genuinely does not matter, and the reason it
+ exists at all: fire, a glow, a beam. What separates it from alpha blending in a
+ picture is that **both** channels come out high — additive takes nothing away
+ from the destination, so blue over red is magenta and not a darker purple.
+
+ An alpha-blended pane at full opacity is the trap this check is shaped against:
+ it renders as its own colour, which is a red channel of zero. So the assertion
+ is on the red channel surviving underneath, which is exactly the thing the two
+ modes disagree about.
+
+ **Proved by injection.** `ADDITIVE` mapped to the alpha destination factors
+ (`ONE_MINUS_SRC_ALPHA` rather than `ONE`): "the overlap carries both sources,
+ got 0 pixels of it" — with 2916 pixels of pane colour where the mix should be.
+*>
+fn void an_additive_material_brightens_rather_than_covers() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			const wall = new three.Mesh(new three.PlaneGeometry(4, 4));
+			wall.color = 0xff0000;
+			wall.position.z = -1;
+			scene.add(wall);
+
+			const glow = new three.Mesh(
+				new three.PlaneGeometry(1.5, 1.5),
+				new three.MeshLambertMaterial({ blending: three.AdditiveBlending })
+			);
+			glow.color = 0x0000ff;
+			glow.position.z = 1;
+			scene.add(glow);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(scene, three.camera);
+			return [glow.material.transparent, glow.material.blending].join(",");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("true,2"),
+			"an additive material is a transparent one: %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		float red = primitive_linear(0);
+		float blue = primitive_linear(2);
+		uint both = count_near(&frame, encode_srgb(red), 0, encode_srgb(blue));
+		uint covered = count_near(&frame, 0, 0, encode_srgb(blue));
+
+		test::@check(both > 500, "the overlap carries both sources, got %d pixels of it", both);
+		test::@check(covered == 0,
+			"and nothing was taken away from what was behind, got %d covered pixels", covered);
+	};
+}
+
+<*
+ Transparent draws are recorded farthest first, whatever order their materials
+ were built in.
+
+ A blended pipeline writes no depth (`ALPHA_STATE` has the argument), so the only
+ thing deciding which pane shows through which is the order they were recorded
+ in. Getting it backwards is not an error and not an empty frame — it is a
+ picture, of the wrong thing.
+
+ **The fixture is built so that material order and depth order disagree.** The
+ near pane's material *and* its geometry are both created first, so both the
+ material index and the asset index would put it first; only the depth says
+ otherwise. A comparator that never looked at the depth therefore gets it exactly
+ backwards rather than accidentally right.
+
+ The far pane is transparent at full opacity, which is what makes the two orders
+ tell apart in one number: drawn first it is an opaque red backdrop and the near
+ pane blends to the mix; drawn second it replaces whatever the near pane left, so
+ the overlap is flatly the far pane's own colour.
+
+ **Proved by injection.** The comparator's `if (a.order == TRANSPARENT_ORDER)`
+ branch deleted, so transparent draws fall through to the key comparison: "the
+ near pane is blended over the far one, got 0 pixels of the mix".
+*>
+fn void transparent_draws_sort_back_to_front() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			// Near first: lower material index, lower asset index, and the one that
+			// has to be recorded second. See the doc block.
+			const near = new three.Mesh(
+				new three.PlaneGeometry(1.5, 1.5),
+				new three.MeshLambertMaterial({ transparent: true, opacity: 0.5 })
+			);
+			near.color = 0x0000ff;
+			near.position.z = 1;
+			scene.add(near);
+
+			const far = new three.Mesh(
+				new three.PlaneGeometry(4, 4),
+				new three.MeshLambertMaterial({ transparent: true })
+			);
+			far.color = 0xff0000;
+			far.position.z = -1;
+			scene.add(far);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(scene, three.camera);
+			return scene.stats().drawCalls;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "2", "two panes, two buckets; got %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		float red = primitive_linear(0);
+		float blue = primitive_linear(2);
+		uint mixed = count_near(&frame, encode_srgb(0.5f * red), 0, encode_srgb(0.5f * blue));
+
+		test::@check(mixed > 300,
+			"the near pane is blended over the far one, got %d pixels of the mix", mixed);
+	};
+}
+
+<*
+ Every transparent bucket is recorded after every opaque one, whatever their
+ material indices say.
+
+ The failure this prevents does not look like an ordering bug. An opaque draw
+ writes depth *and* tests it, so a wall recorded after the glass in front of it
+ is not blended with — it simply overwrites, and what an agent sees is glass that
+ vanished.
+
+ **The glass's material is built first**, so its index is lower than the wall's
+ and a sort by material index alone puts it first. That is the whole fixture: the
+ band `draw_order` reserves is the only thing that can put it second.
+
+ **Proved by injection.** `draw_order` returning `material` for a transparent
+ draw rather than `TRANSPARENT_ORDER`: "the wall shows through the glass, got 0
+ pixels of the mix" — the frame was a flat wall with no pane in it at all.
+*>
+fn void transparent_buckets_draw_after_opaque_ones() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			// The glass first, so that its material index is *lower* than the
+			// opaque wall's and material order alone would record it first.
+			const glassMaterial = new three.MeshLambertMaterial({ transparent: true, opacity: 0.5 });
+			const wallMaterial = new three.MeshLambertMaterial({});
+
+			const wall = new three.Mesh(new three.PlaneGeometry(4, 4), wallMaterial);
+			wall.color = 0xff0000;
+			wall.position.z = -1;
+			scene.add(wall);
+
+			const glass = new three.Mesh(new three.PlaneGeometry(1.5, 1.5), glassMaterial);
+			glass.color = 0x0000ff;
+			glass.position.z = 1;
+			scene.add(glass);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(scene, three.camera);
+			return [glassMaterial.transparent, wallMaterial.transparent].join(",");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("true,false"),
+			"one of each, and the transparent one built first: %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		float red = primitive_linear(0);
+		float blue = primitive_linear(2);
+		uint mixed = count_near(&frame, encode_srgb(0.5f * red), 0, encode_srgb(0.5f * blue));
+
+		test::@check(mixed > 300,
+			"the wall shows through the glass, got %d pixels of the mix", mixed);
+	};
+}
+
+<*
+ `material.opacity` is settable between frames and the pixels move.
+
+ The property that makes opacity worth having at all: it is one float in the push
+ block rather than pipeline state, so a script may write it every frame. What
+ that is worth is only provable across two captures of the same scene — a single
+ frame at 0.25 proves the number was read once, not that writing it again is
+ free.
+
+ At 1.0 the pane is flatly its own colour; at 0.25 it is a quarter of itself over
+ three quarters of the wall, which in linear light is a colour with a *higher*
+ red channel and a *lower* blue one. Both directions are asserted, because a
+ fade that only moved one channel would be a fade toward black rather than toward
+ what is behind it.
+
+ **Proved by injection.** The `base_color[3] *= material.opacity()` multiply
+ dropped from `MeshPass.record`: "the pane faded toward the wall, got 0 pixels of
+ the quarter mix" — the second capture was byte-identical to the first, which is
+ exactly what "the number was stored and nothing read it" looks like.
+*>
+fn void opacity_is_settable_and_reaches_the_pixels() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult solid = run.run(`
+			globalThis.scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			const wall = new three.Mesh(new three.PlaneGeometry(4, 4));
+			wall.color = 0xff0000;
+			wall.position.z = -1;
+			globalThis.scene.add(wall);
+
+			globalThis.glass = new three.Mesh(
+				new three.PlaneGeometry(1.5, 1.5),
+				new three.MeshLambertMaterial({ transparent: true })
+			);
+			globalThis.glass.color = 0x0000ff;
+			globalThis.glass.position.z = 1;
+			globalThis.scene.add(globalThis.glass);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(globalThis.scene, three.camera);
+			return globalThis.glass.material.opacity;
+		`);
+		defer solid.free();
+		test::@check(solid.ok, "the first run succeeded: %s", solid.error);
+		test::@check(solid.value == "1", "a material starts opaque; got %s", solid.value);
+
+		image::Image full = run.renderer.capture()!!;
+		defer full.free();
+
+		three::RunResult faded = run.run(`
+			globalThis.glass.material.opacity = 0.25;
+			three.render(globalThis.scene, three.camera);
+			return globalThis.glass.material.opacity;
+		`);
+		defer faded.free();
+		test::@check(faded.ok, "the second run succeeded: %s", faded.error);
+		test::@check(faded.value == "0.25", "and it reads back what was set; got %s", faded.value);
+
+		image::Image quarter = run.renderer.capture()!!;
+		defer quarter.free();
+
+		float red = primitive_linear(0);
+		float blue = primitive_linear(2);
+
+		uint whole = count_near(&full, 0, 0, encode_srgb(blue));
+		test::@check(whole > 500,
+			"at opacity 1 the pane is flatly itself, got %d pixels of it", whole);
+
+		uint left = count_near(&quarter, 0, 0, encode_srgb(blue));
+		uint shifted = count_near(&quarter, encode_srgb(0.75f * red), 0, encode_srgb(0.25f * blue));
+		test::@check(shifted > 500,
+			"the pane faded toward the wall, got %d pixels of the quarter mix", shifted);
+		test::@check(left == 0,
+			"and none of it is still flatly itself, got %d pixels", left);
+	};
+}
+
+<*
+ A debug helper draws over glass, as it draws over everything else.
+
+ `draw_order` puts the line material above the transparent band, and the two
+ decisions are the same decision made twice: a helper is drawn to be *seen*, and
+ the times an agent asks where something is are the times it is inside something.
+ A helper that disappeared behind the glass it was drawn to explain would be the
+ same failure the line band already exists to prevent, one layer up.
+
+ The assertion is that the helper's lines are its **own** colour and not a blend
+ of it with the pane in front — which is what a helper recorded before the glass
+ comes back as. Both are pictures; only one of them is a helper.
+
+ **Proved by injection.** The `if (material == LINE_MATERIAL)` line deleted from
+ `draw_order`, so a helper sorts by its material index like anything else: "the
+ helper is drawn over the glass, got 0 pixels of its own colour", with 263 pixels
+ of the blended-under colour in its place.
+*>
+fn void a_debug_helper_still_draws_over_glass() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0, 0, 1], 1);
+
+			const box = new three.Mesh(new three.BoxGeometry(1.4, 1.4, 1.4));
+			box.color = 0xff0000;
+			scene.add(box);
+			scene.add(new three.BoxHelper(box, 0x00ff00));
+
+			const glass = new three.Mesh(
+				new three.PlaneGeometry(3, 3),
+				new three.MeshLambertMaterial({ transparent: true, opacity: 0.5 })
+			);
+			glass.color = 0x0000ff;
+			glass.position.z = 2;
+			scene.add(glass);
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 8);
+			three.render(scene, three.camera);
+			return scene.stats().drawCalls;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "3", "box, helper and pane; got %s", result.value);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		float green = primitive_linear(1);
+		float blue = primitive_linear(2);
+		uint over = count_near(&frame, 0, encode_srgb(green), 0);
+		uint under = count_near(&frame, 0, encode_srgb(0.5f * green), encode_srgb(0.5f * blue));
+
+		test::@check(over > 20,
+			"the helper is drawn over the glass, got %d pixels of its own colour", over);
+		test::@check(under == 0,
+			"and none of it was blended under the pane, got %d pixels", under);
+	};
+}
+
+<*
+ Blending cannot be changed after a material is built, and says why.
+
+ The one place this API deliberately refuses a Three.js line rather than
+ emulating it. Blending is baked into the pipeline on this device — Metal keeps
+ it inside the compiled pipeline state, so every dynamic colour-blend feature bit
+ the driver advertises is false — and a settable `transparent` would mean
+ re-acquiring a pipeline from a device, a target and the assembled shader source,
+ to save a script the one line that builds the material it meant.
+
+ **The refusal has to name the alternative**, which is the whole reason it is a
+ throw and not a silent no-op: a script that assigned `transparent = true` and
+ got nothing would look for the bug in the renderer.
+
+ **Proved by injection.** Both setters replaced with plain field writes: "no
+ throw | no throw | still false at 0" — a material reporting itself opaque while
+ its pipeline had never stopped blending, which is the two halves of the API
+ disagreeing about the same fact.
+*>
+fn void blending_cannot_change_after_construction() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.MeshLambertMaterial({ transparent: true });
+			const said = [];
+			try { mat.transparent = false; said.push("no throw"); } catch (e) { said.push(e.message); }
+			try { mat.blending = three.NoBlending; said.push("no throw"); } catch (e) { said.push(e.message); }
+			said.push("still " + mat.transparent + " at " + mat.blending);
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "neither assignment went through: %s", result.value);
+		test::@check(
+			result.value.contains("blending is baked into the pipeline on this device"),
+			"it says why: %s", result.value
+		);
+		test::@check(
+			result.value.contains("build a new material with { transparent } or { blending } instead"),
+			"and what to do instead: %s", result.value
+		);
+		test::@check(result.value.contains("still true at 1"),
+			"and the material is what it was built as: %s", result.value);
+	};
+}
+
+<*
+ A blending value the API does not know is refused by name, and so is a
+ `transparent` that is not a boolean.
+
+ `_checkSide`'s rule, applied to the second constant this API borrows from
+ Three.js: the message names the three values rather than saying "invalid",
+ because an agent that wrote `blending: 3` was reaching for Three.js's
+ `SubtractiveBlending` and needs to be told it is not here — not told it is
+ wrong.
+
+ `transparent: 0.5` is the mistake worth spending a separate sentence on. It is
+ somebody meaning `opacity`, and a truthiness test would build a blended pipeline
+ and leave the surface fully opaque — a material that is transparent by every
+ flag and solid in the picture.
+
+ **Proved by injection.** `_checkBlending` returning without checking and the
+ `typeof` test dropped from `_resolveBlending`: "no throw | no throw | no throw |
+ no throw | no throw".
+*>
+fn void blending_refuses_a_value_it_does_not_know() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = [];
+			for (const bad of [3, -1, "additive", null]) {
+				try { new three.MeshLambertMaterial({ blending: bad }); said.push("no throw"); }
+				catch (e) { said.push(e.message); }
+			}
+			try { new three.MeshLambertMaterial({ transparent: 0.5 }); said.push("no throw"); }
+			catch (e) { said.push(e.message); }
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "nothing went through: %s", result.value);
+		test::@check(
+			result.value.contains(
+				"`blending` wants three.NoBlending, three.NormalBlending or three.AdditiveBlending, not 3"
+			),
+			"the three constants are named, and so is what arrived: %s", result.value
+		);
+		test::@check(result.value.contains("not additive"),
+			"a string is refused as itself rather than coerced: %s", result.value);
+		test::@check(result.value.contains("not null"), "and so is null: %s", result.value);
+		test::@check(
+			result.value.contains("`transparent` wants true or false, not 0.5"),
+			"a number where a flag belongs is told what it probably meant: %s", result.value
+		);
+	};
+}
+
+<*
+ An opacity outside 0 to 1 is refused, and both ends of the range are not.
+
+ The range check exists because the two ways out of it fail differently and
+ neither fails loudly: above 1 the blend factor saturates and the material is
+ simply opaque, below 0 it clamps and the material is simply gone. Both look like
+ the renderer ignoring a script.
+
+ **0 and 1 are asserted alongside**, because a range check written with the wrong
+ comparison is invisible at every value except its two ends — and 0 is the one
+ the storage format had to be shaped around (`Material.one_minus_opacity` stores
+ the complement precisely so that a fully faded material is representable rather
+ than being stolen by a sentinel).
+
+ **Proved by injection.** The range test in the `opacity` setter reduced to
+ `typeof v !== 'number'`: "no throw | no throw | ... | opacity NaN". Both ends of
+ the range went through, and so did `NaN` — which every comparison written the
+ obvious way lets past — leaving a material whose opacity was not a number at
+ all.
+*>
+fn void opacity_outside_zero_to_one_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.MeshLambertMaterial({ transparent: true });
+			const said = [];
+			for (const bad of [-0.1, 1.5, "half", NaN, null]) {
+				try { mat.opacity = bad; said.push("no throw"); } catch (e) { said.push(e.message); }
+			}
+			said.push("opacity " + mat.opacity);
+			try { new three.MeshLambertMaterial({ transparent: true, opacity: 2 }); said.push("no throw"); }
+			catch (e) { said.push(e.message); }
+			mat.opacity = 0;
+			said.push("zero " + mat.opacity);
+			mat.opacity = 1;
+			said.push("one " + mat.opacity);
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "nothing went through: %s", result.value);
+		test::@check(result.value.contains("`opacity` wants a number from 0 to 1, not -0.1"),
+			"below the range is refused by name: %s", result.value);
+		test::@check(result.value.contains("not 1.5"), "and above it: %s", result.value);
+		test::@check(result.value.contains("not half"), "and a string that looks like a number: %s", result.value);
+		test::@check(result.value.contains("not NaN"), "and a NaN, which every comparison lets through: %s", result.value);
+		test::@check(result.value.contains("opacity 1"),
+			"none of them moved the material: %s", result.value);
+		test::@check(result.value.contains("zero 0"), "0 is a value, not a mistake: %s", result.value);
+		test::@check(result.value.contains("one 1"), "and so is 1: %s", result.value);
 	};
 }

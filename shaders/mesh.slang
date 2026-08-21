@@ -80,7 +80,11 @@ struct PushData
     float3* positions;
     float3* normals;
     float2* uvs;
-    float4 base_color;      // rgb: albedo factor. a: material alpha, unused so far.
+    // rgb: albedo factor. a: the alpha this returns — the mesh's own alpha
+    // times `material.opacity`, folded together on the C3 side so the shader
+    // sees one number. Ignored by an opaque pipeline, which writes no alpha at
+    // all; `BlendMode` says which pipelines read it.
+    float4 base_color;
     uint flags;
     // xy: how many times the texture repeats across the surface. zw: where it
     // starts. `{1, 1, 0, 0}` is the identity and is what a material with no
@@ -220,5 +224,10 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float lambert = max(dot(normal, normalize(light.xyz)), 0.0);
     float ambient = light.w;
 
-    return float4(albedo * (ambient + (1.0 - ambient) * lambert), 1.0);
+    // The material's alpha times this copy's own, exactly as the rgb above
+    // multiplies the two. `mesh.color = [r, g, b, a]` therefore fades one
+    // instance out of a thousand sharing a draw call — and does nothing at all
+    // unless the material was built transparent, because an opaque pipeline
+    // discards this channel. It read a hardcoded `1.0` until blending existed.
+    return float4(albedo * (ambient + (1.0 - ambient) * lambert), push.base_color.a * input.color.a);
 }

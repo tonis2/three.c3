@@ -709,6 +709,391 @@ fn void stats_reports_what_the_last_frame_culled() @test
 	};
 }
 
+// ============================================================================
+// Transparent draw ordering
+// ============================================================================
+
+<*
+ Where a material's bucket landed in the draw list, or -1 if it drew nothing.
+
+ Every ordering check below is "this material is recorded before that one", and
+ the bucket index is the only honest handle on it: `Bucket.material` is what
+ `MeshPass.record` binds a pipeline from, so this is the same identity the frame
+ itself works in rather than a restatement of the sort.
+*>
+fn int bucket_of(three::Scene* scene, uint material)
+{
+	foreach (i, bucket : scene.buckets)
+	{
+		if (bucket.material == material) return (int)i;
+	}
+	return -1;
+}
+
+<*
+ A frame with transparency in it may take more draws than `stats()` reports, and
+ `stats()` reports the same number whichever way the camera is pointing.
+
+ The number `stats()` answers is a fact about the scene — `culling_drops_what_is_off_screen`
+ pinned that against the frustum and this pins it against the sort, which is the
+ same claim one axis further along. Back-to-front ordering interleaves two
+ transparent materials by depth, and interleaving splits buckets: three
+ transparent draws that are two buckets in material order become three when the
+ middle one sits between the other two along the view axis. Turn the camera 90
+ degrees and the same three stop interleaving and collapse back to two.
+
+ So the frame's bucket count is 4 from one side and 3 from the other, and both
+ are correct — that divergence is asserted here rather than assumed, because
+ without it the test would pass against a `stats()` that had started depth
+ sorting and simply never been given a fixture that noticed.
+
+ What must not move is `stats()`: 3 both times. A `drawCalls` that changed when
+ an agent orbited the camera would be unusable as the cost number `plan.md`'s
+ second thesis says it is — the reading would depend on where somebody was
+ standing when they asked. The price is that `stats()` under-reports a
+ transparent scene, and it is a floor rather than an estimate: depth interleaving
+ can only ever split a bucket, never merge two.
+
+ **Proved by injection.** `Scene` given `bool[] stats_transparent` and
+ `Plane stats_near` fields, written by `update` and read by `stats` in place of
+ its `{}` and `null` — which is what "let the query see what the frame saw"
+ amounts to: "the camera moved and stats() changed its mind: 4 draws then 3".
+
+ A second injection lands here as well, from the other direction:
+ `sorting_transparency_does_not_depend_on_culling`'s — the near plane gated on
+ `self.cull` — leaves this fixture unsorted, and it is caught one check earlier
+ at "seen along x the interleaved panes are 4 buckets, got 3". Which is the check
+ that exists to keep the fixture honest doing its job.
+*>
+fn void stats_stays_camera_free_with_transparency() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		// Two transparent materials over one mesh. `NO_TEXTURE` is deliberate: the
+		// picture is not under test, the ordering is, and this way the fixture
+		// needs no image and no shader compile.
+		uint glass = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+		uint water = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+
+		// Laid out so the two axes disagree. Along x the `water` pane sits between
+		// the two `glass` ones and the run of glass is broken; along z it sits
+		// outside them and the two glass panes are adjacent. Same three nodes,
+		// same materials, different number of draws.
+		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(first, glass);
+		scene.set_position(first, { 0, 0, 1 });
+
+		three::NodeId second = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(second, glass);
+		scene.set_position(second, { 2, 0, 2 });
+
+		three::NodeId between = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(between, water);
+		scene.set_position(between, { 1, 0, 0 });
+
+		// One bool per material index, exactly as `MeshPass.record` builds it.
+		// Eight is past the end of a table holding the two built-ins and these two.
+		bool[8] table;
+		table[glass] = true;
+		table[water] = true;
+
+		// Off, so that a node leaving the frustum cannot be mistaken for a bucket
+		// the sort merged. The near plane reaches the sort either way — that is
+		// `sorting_transparency_does_not_depend_on_culling`'s claim, asserted
+		// there rather than relied on here.
+		scene.cull = false;
+
+		three::Camera camera = three::default_camera();
+		camera.target = { 0, 0, 0 };
+		camera.distance = 20;
+		camera.pitch = 0;
+
+		camera.yaw = 90;
+		scene.update(&renderer.pass.assets, camera.view_projection((float)W / (float)H), table[..]);
+		uint along_x = (uint)scene.buckets.len();
+		three::SceneStats from_x = renderer.pass.stats();
+
+		camera.yaw = 0;
+		scene.update(&renderer.pass.assets, camera.view_projection((float)W / (float)H), table[..]);
+		uint along_z = (uint)scene.buckets.len();
+		three::SceneStats from_z = renderer.pass.stats();
+
+		test::@check(along_x == 4, "seen along x the interleaved panes are 4 buckets, got %d", along_x);
+		test::@check(along_z == 3, "seen along z they collapse to 3, got %d", along_z);
+
+		test::@check(
+			from_x.draw_calls == from_z.draw_calls,
+			"the camera moved and stats() changed its mind: %d draws then %d",
+			from_x.draw_calls, from_z.draw_calls
+		);
+		test::@check(
+			from_x.draw_calls == 3,
+			"stats() counts a scene of one opaque triangle and two transparent materials as 3 draws, got %d",
+			from_x.draw_calls
+		);
+		test::@check(from_x.instances == 4, "and finds every instance whatever the camera did, got %d", from_x.instances);
+	};
+}
+
+<*
+ Transparent buckets are sorted farthest first, sit above every opaque bucket and
+ below the lines, and the instance array they index is still a clean tiling.
+
+ Three claims and they fail in three different ways, none of which is an error:
+
+ - **Ordering between the transparent buckets.** `ALPHA_STATE` writes no depth,
+   so the only thing deciding which pane shows through which is the order they
+   were recorded in. Get it backwards and the near pane is blended under the far
+   one, which is a picture — just the wrong one.
+ - **Transparent above opaque.** A pane recorded before the wall behind it is not
+   blended with the wall, it is *overwritten* by it, because the wall does write
+   depth and does test it. What that looks like is glass that vanished.
+ - **The tiling.** `MeshPass.record` hands the shader `instances + first`, so a
+   bucket whose slice overlaps its neighbour draws another bucket's transforms.
+   The sort produces the buckets and the instances in one pass, so a comparator
+   that reorders the draws without the instances following would show up here and
+   nowhere else.
+
+ The near material is created *before* the far one, so its index is lower and
+ material order and depth order disagree — a sort that never looked at the depth
+ puts them the other way round rather than accidentally right.
+
+ The expectation is computed from `camera.eye()` rather than written down, so
+ the check is "the farther one is recorded first" and not "the one at negative z
+ is recorded first", which would agree with the implementation for a reason that
+ has nothing to do with the camera.
+
+ **Proved by injection.** The comparator's depth branch flipped to nearest-first
+ (`a.depth < b.depth` returning -1): "the farther pane is drawn first, got it at
+ bucket 2 and the nearer at 1".
+*>
+fn void a_transparent_scene_sorts_without_moving_instances() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		// Nearer first, so that the lower material index is the one that must sort
+		// second. See the doc block.
+		uint nearer = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+		uint farther = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+
+		Vec3 near_at = { 0, 0, 4 };
+		Vec3 far_at = { 0, 0, -4 };
+
+		three::NodeId near_pane = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(near_pane, nearer);
+		scene.set_position(near_pane, near_at);
+
+		three::NodeId far_pane = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(far_pane, farther);
+		scene.set_position(far_pane, far_at);
+
+		// A debug helper, which has to stay on top of the glass as well as on top
+		// of the scene — `draw_order` has the argument, and this is the node that
+		// makes the transparent band's upper edge assertable.
+		three::NodeId helper = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(helper, three::LINE_MATERIAL);
+
+		bool[8] table;
+		table[nearer] = true;
+		table[farther] = true;
+
+		three::Camera camera = three::default_camera();
+		camera.target = { 0, 0, 0 };
+		camera.distance = 10;
+		camera.yaw = 0;
+		camera.pitch = 0;
+		Matrix4f view_projection = camera.view_projection((float)W / (float)H);
+
+		scene.update(&renderer.pass.assets, view_projection, table[..]);
+
+		// Which one is actually farther, asked of the camera rather than assumed.
+		Vec3 eye = camera.eye();
+		test::@check(
+			(far_at - eye).length() > (near_at - eye).length(),
+			"the fixture puts one pane behind the other: %f against %f",
+			(far_at - eye).length(), (near_at - eye).length()
+		);
+
+		test::@check(scene.instances.len() == 4, "four nodes drew %d instances", scene.instances.len());
+		test::@check(scene.buckets.len() == 4, "four materials over one mesh are 4 buckets, got %d", scene.buckets.len());
+
+		// The slices must tile the instance array exactly once and in order, or a
+		// bucket draws somebody else's transforms.
+		uint total = 0;
+		foreach (bucket : scene.buckets)
+		{
+			test::@check(bucket.first == total, "bucket starts at %d, expected %d — the slices overlap or leave a gap", bucket.first, total);
+			total += bucket.count;
+		}
+		test::@check(total == (uint)scene.instances.len(), "the buckets cover %d of %d instances", total, scene.instances.len());
+
+		int opaque_at = bucket_of(scene, three::DEFAULT_MATERIAL);
+		int near_at_bucket = bucket_of(scene, nearer);
+		int far_at_bucket = bucket_of(scene, farther);
+		int line_at = bucket_of(scene, three::LINE_MATERIAL);
+		test::@check(
+			opaque_at >= 0 && near_at_bucket >= 0 && far_at_bucket >= 0 && line_at >= 0,
+			"every material drew: opaque %d, near %d, far %d, line %d",
+			opaque_at, near_at_bucket, far_at_bucket, line_at
+		);
+
+		test::@check(
+			far_at_bucket < near_at_bucket,
+			"the farther pane is drawn first, got it at bucket %d and the nearer at %d",
+			far_at_bucket, near_at_bucket
+		);
+		test::@check(
+			opaque_at < far_at_bucket && opaque_at < near_at_bucket,
+			"the opaque triangle is drawn before both panes, got it at bucket %d",
+			opaque_at
+		);
+		test::@check(
+			line_at > far_at_bucket && line_at > near_at_bucket,
+			"and the helper after both of them, got it at bucket %d",
+			line_at
+		);
+	};
+}
+
+<*
+ Turning culling off does not turn the depth sort off with it.
+
+ The two share a frustum and nothing else. Culling asks whether a box is inside
+ six planes and is a performance choice a script is free to make — `Scene.cull`
+ is public and `culling_drops_what_is_off_screen` is what it means. The sort asks
+ how far along the view direction a transparent draw sits, and switching it off
+ does not make the frame cheaper, it makes it wrong.
+
+ So the near plane goes into `build_draw_list` unconditionally and `self.cull`
+ gates the frustum pointer alone. That is one `?:` away from being wrong in a way
+ that would be almost impossible to find from the picture: transparency would
+ come out correctly ordered in every default scene and reverse itself the moment
+ somebody turned culling off to debug something else.
+
+ The same fixture as `a_transparent_scene_sorts_without_moving_instances` and the
+ same assertion, made twice with `cull` on and off. The near material's index is
+ lower than the far one's, so the fallback the injection produces — no near
+ plane, so every transparent draw at depth zero and the tie broken by material —
+ is the exact reverse of the right answer rather than a coin flip.
+
+ **Proved by injection.** `Scene.update` passing `self.cull ? &frustum.planes[4] : null`:
+ "with culling off the farther pane is still drawn first, got it at bucket 2 and
+ the nearer at 1".
+*>
+fn void sorting_transparency_does_not_depend_on_culling() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+
+		three::Scene* scene = &renderer.pass.scene;
+		uint nearer = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+		uint farther = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+
+		three::NodeId near_pane = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(near_pane, nearer);
+		scene.set_position(near_pane, { 0, 0, 4 });
+
+		three::NodeId far_pane = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(far_pane, farther);
+		scene.set_position(far_pane, { 0, 0, -4 });
+
+		bool[8] table;
+		table[nearer] = true;
+		table[farther] = true;
+
+		three::Camera camera = three::default_camera();
+		camera.target = { 0, 0, 0 };
+		camera.distance = 10;
+		camera.yaw = 0;
+		camera.pitch = 0;
+		Matrix4f view_projection = camera.view_projection((float)W / (float)H);
+
+		scene.cull = true;
+		scene.update(&renderer.pass.assets, view_projection, table[..]);
+		test::@check(scene.culled == 0, "the fixture is entirely on screen, %d instances were culled", scene.culled);
+		test::@check(
+			bucket_of(scene, farther) < bucket_of(scene, nearer),
+			"with culling on the farther pane is drawn first, got it at bucket %d and the nearer at %d",
+			bucket_of(scene, farther), bucket_of(scene, nearer)
+		);
+
+		scene.cull = false;
+		scene.update(&renderer.pass.assets, view_projection, table[..]);
+		test::@check(
+			bucket_of(scene, farther) < bucket_of(scene, nearer),
+			"with culling off the farther pane is still drawn first, got it at bucket %d and the nearer at %d",
+			bucket_of(scene, farther), bucket_of(scene, nearer)
+		);
+	};
+}
+
+<*
+ A rendered frame sorts by what the materials actually are, not by what the
+ scene was told.
+
+ The other three checks in this section hand `Scene.update` a table they built
+ themselves, which pins the sort and says nothing about where a real frame's
+ table comes from. This one renders through `MeshPass.record` and never mentions
+ transparency to the scene at all: the only thing that can put these two buckets
+ in the right order is `record` reading `Material.blend` off its own table and
+ handing the answer across.
+
+ The transparent material is created **first**, so it holds the lower index. That
+ is what makes the failure visible rather than lucky: with no table the sort falls
+ back to the material index, which puts the glass before the wall it is supposed
+ to be seen through — and since `ALPHA_STATE` writes no depth, the wall then
+ overwrites the glass entirely. A frame that renders with no error and no glass
+ in it is the failure mode this whole ordering exists to prevent.
+
+ `Scene` still knows nothing about `MeshPass.materials` — the boundary
+ `Scene.set_material` documents — and that is the point of asserting on the
+ finished bucket order instead of on the slice: what crosses is one bit per
+ index, and this is the check that it crosses at all.
+
+ **Proved by injection.** The table dropped from the call in `MeshPass.record`,
+ leaving `self.scene.update(&self.assets, view_projection)` — the frame as it was
+ written before blending existed: "the wall is drawn before the glass, got the
+ wall at bucket 2 and the glass at 1".
+*>
+fn void a_rendered_frame_learns_which_materials_blend() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = &renderer.pass.scene;
+
+		uint glass = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
+		uint wall = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NONE)!!;
+		test::@check(glass < wall, "the transparent material holds the lower index, %d against %d", glass, wall);
+
+		three::NodeId pane = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(pane, glass);
+		scene.set_position(pane, { 0, 0, 1 });
+
+		three::NodeId behind = scene.add_mesh(TRIANGLE, 0);
+		scene.set_material(behind, wall);
+		scene.set_position(behind, { 0, 0, -1 });
+
+		// The camera was fitted to the triangle `load_triangle` placed, not to
+		// these two. Culling off keeps the fixture about ordering.
+		scene.cull = false;
+		renderer.render_offscreen()!!;
+
+		test::@check(
+			bucket_of(scene, wall) < bucket_of(scene, glass),
+			"the wall is drawn before the glass, got the wall at bucket %d and the glass at %d",
+			bucket_of(scene, wall), bucket_of(scene, glass)
+		);
+	};
+}
+
 <*
  Two different files sharing an image upload it once.
 

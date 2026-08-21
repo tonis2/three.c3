@@ -516,6 +516,10 @@ fn void backside_is_what_makes_a_dome_visible_from_inside() @test
 *>
 fn void flipping_a_side_costs_no_compile_and_no_pipeline() @test
 {
+	// `compiles` means Slang, not the disk cache — see
+	// `the_pipeline_cache_skips_the_compile` in shader_test.c3 for the convention.
+	three::shader_cache_set_dir("");
+
 	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
 	{
 		three::RunResult made = run.run(`

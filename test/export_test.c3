@@ -1320,3 +1320,84 @@ fn void the_materials_map_is_what_the_file_gets() @test
 			"the material's map should be the one image written: %s", result.value);
 	};
 }
+
+<*
+ A transparent material comes out of the file as `alphaMode: BLEND`, and does not
+ take an opaque one with it.
+
+ Two halves, and the second is the one that took the work. glTF states blending
+ on the *material*, and materials here are deduplicated by content — so the
+ moment blending became a thing a material could have, it had to become part of
+ that key. Without it, a scene holding one opaque and one transparent material of
+ the same colour and the same image writes **one** glTF material, and whichever
+ was walked first decides whether both come back solid or both come back
+ see-through. Neither failure is an error, and both look like an exporter bug on
+ the wrong side of the file.
+
+ The three shapes differ so that nothing else can be doing the work. Two siblings
+ drawing the *same* shape are folded into one instanced node, which carries one
+ material by construction — that would prove nothing about the dedup at all —
+ and a difference in opacity would separate the pair through `baseColorFactor`
+ rather than through the blend mode. So the second and third shapes agree on
+ every byte of the key except the one under test.
+
+ The alpha the file states is the alpha the frame had: opacity is multiplied into
+ `baseColorFactor`'s fourth channel, which is why the first shape's 0.5 is
+ asserted in the JSON as well as the mode.
+
+ **Proved by injection.** `known.transparent != transparent` dropped from
+ `material_for`'s compare: "the file holds one material per (colour, image, blend
+ mode), got ... \"materials\":2 ..." — the clear sphere and the solid cylinder
+ collapsed into one entry, and it was the transparent one, so the cylinder
+ exported as glass.
+*>
+fn void a_transparent_material_exports_alpha_blend() @test
+{
+	String path = "build/export_glass.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			// Half-faded glass: a blend mode *and* an alpha of its own.
+			const faded = new three.Mesh(
+				new three.BoxGeometry(1, 1, 1),
+				new three.MeshLambertMaterial({ transparent: true, opacity: 0.5 })
+			);
+			scene.add(faded);
+
+			// The pair the dedup key is really about. Same colour, same absent
+			// texture, same opacity of 1 — the blend mode is the *only* thing that
+			// can keep these two apart in the file.
+			const clear = new three.Mesh(
+				new three.SphereGeometry(0.5, 8, 6),
+				new three.MeshLambertMaterial({ transparent: true })
+			);
+			clear.position.x = 2;
+			scene.add(clear);
+
+			const solid = new three.Mesh(
+				new three.CylinderGeometry(0.4, 0.4, 1, 8),
+				new three.MeshLambertMaterial({})
+			);
+			solid.position.x = 4;
+			scene.add(solid);
+
+			return scene.export("build/export_glass.glb");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"materials":3`),
+			"the file holds one material per (colour, image, blend mode), got %s", result.value);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"alphaMode":"BLEND"`),
+			"the transparent one says so in the format's own words: %s", json);
+		test::@check(!json.contains(`"alphaMode":"OPAQUE"`),
+			"and the opaque one leaves the default unstated: %s", json);
+		test::@check(json.contains(`,0.5]`),
+			"the opacity rode into baseColorFactor's alpha: %s", json);
+	};
+}
