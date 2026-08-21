@@ -88,21 +88,19 @@ struct Controls
 	float damping_ms;
 }
 
-fn Controls default_controls()
-{
-	return {
-		.orbit_degrees_per_point = 0.4,
-		.zoom_per_scroll_point = 0.01,
-		.min_distance = 0.01,
-		// Short. A hard flick is around 0.6 degrees per millisecond, and this
-		// buys it another thirty-odd degrees over a third of a second — enough
-		// to read as weight rather than as a camera that will not settle. Most
-		// drags end slowly anyway, which is exactly why the velocity is measured
-		// from the *last* frame of the drag: a hand that decelerates before it
-		// lets go is saying it wants to stop there.
-		.damping_ms = 60,
-	};
-}
+const Controls DEFAULT_CONTROLS = {
+	.orbit_degrees_per_point = 0.4,
+	.zoom_per_scroll_point = 0.01,
+	.min_distance = 0.01,
+	// Short. A hard flick is around 0.6 degrees per millisecond, and this
+	// buys it another thirty-odd degrees over a third of a second — enough
+	// to read as weight rather than as a camera that will not settle. Most
+	// drags end slowly anyway, which is exactly why the velocity is measured
+	// from the *last* frame of the drag: a hand that decelerates before it
+	// lets go is saying it wants to stop there.
+	.damping_ms = 60,
+};
+
 
 // The coast is integrated over a clamped step. A frame that took no time cannot
 // say how fast anything was going, and one that took a second — a tool call ran

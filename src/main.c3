@@ -360,7 +360,7 @@ fn void? run(Options opts)
 		return;
 	}
 
-	Controls controls = default_controls();
+	Controls controls = DEFAULT_CONTROLS;
 	c3w::CursorShape shown;
 	Hover hover;
 	Clock since_start = clock::now();
@@ -612,7 +612,7 @@ fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets =
 		io::printn("     drag to orbit, right-drag to pan, scroll to zoom");
 	}
 
-	Controls controls = default_controls();
+	Controls controls = DEFAULT_CONTROLS;
 	InputTracker keyboard;
 	InputState input;
 	c3w::CursorShape shown;

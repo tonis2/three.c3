@@ -106,7 +106,7 @@ fn void the_scene_turns_with_the_hand() @test
 	Vec3 probe = { 0, 0, 1 };
 
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	float[<2>] before = project(&camera, probe);
 	test::@check(close(before[0], VIEW_W * 0.5f, 0.5), "the probe did not start on the view axis");
@@ -123,7 +123,7 @@ fn void the_scene_turns_with_the_hand() @test
 	);
 
 	camera = straight_on();
-	controls = three::default_controls();
+	controls = three::DEFAULT_CONTROLS;
 	test::@check(close(camera.eye().y, 0.0, 0.001), "the eye did not start on the horizon");
 
 	hover(&controls, &camera, 400, 300);
@@ -150,7 +150,7 @@ fn void the_scene_turns_with_the_hand() @test
 fn void pressing_a_button_does_not_move_the_camera() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	hover(&controls, &camera, 780, 40);
 	bool moved = orbit(&controls, &camera, 780, 40);
@@ -183,7 +183,7 @@ fn void pressing_a_button_does_not_move_the_camera() @test
 fn void a_button_already_down_is_not_a_drag_until_it_is_released() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	// Held from the first frame the loop ever ran, and moving.
 	orbit(&controls, &camera, 100, 300);
@@ -212,7 +212,7 @@ fn void a_button_already_down_is_not_a_drag_until_it_is_released() @test
 fn void a_second_press_does_not_replay_the_gap() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	hover(&controls, &camera, 100, 300);
 	orbit(&controls, &camera, 100, 300);
@@ -245,7 +245,7 @@ fn void a_second_press_does_not_replay_the_gap() @test
 fn void the_eye_cannot_reach_the_pole() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	hover(&controls, &camera, 400, 300);
 	orbit(&controls, &camera, 400, 300);
@@ -288,7 +288,7 @@ fn void a_pan_tracks_the_cursor_point_for_point() @test
 	Vec3 probe = { 0, 0, 0 };
 
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	float[<2>] before = project(&camera, probe);
 
@@ -322,7 +322,7 @@ fn void a_pan_tracks_the_cursor_point_for_point() @test
 fn void zoom_is_a_fraction_of_where_the_eye_already_is() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	float started = camera.distance;
 
@@ -359,7 +359,7 @@ fn void zoom_is_a_fraction_of_where_the_eye_already_is() @test
 fn void zoom_cannot_reach_the_target() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	wheel(&controls, &camera, 100_000);
 
@@ -384,7 +384,7 @@ fn void an_idle_pointer_changes_nothing() @test
 {
 	three::Camera camera = straight_on();
 	three::Camera untouched = camera;
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	for (uint i = 0; i < 120; i++)
 	{
@@ -414,7 +414,7 @@ fn void an_idle_pointer_changes_nothing() @test
 fn void a_pan_with_no_viewport_yet_is_skipped() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	controls.apply(&camera, { .x = 400, .y = 300 }, 0.0);
 	controls.apply(&camera, { .pan = true, .x = 400, .y = 300 }, 0.0);
@@ -441,7 +441,7 @@ fn void a_pan_with_no_viewport_yet_is_skipped() @test
 fn void the_planes_follow_the_distance() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	wheel(&controls, &camera, -400);
 
@@ -471,7 +471,7 @@ fn void the_planes_follow_the_distance() @test
 fn void yaw_does_not_wander_off() @test
 {
 	three::Camera camera = straight_on();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	hover(&controls, &camera, 0, 300);
 	orbit(&controls, &camera, 0, 300);
@@ -533,7 +533,7 @@ fn void flick(three::Controls* controls, three::Camera* camera, float by = 60.0f
 fn void a_flick_keeps_turning_after_the_hand_lets_go() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 	float at_release = camera.yaw;
@@ -557,7 +557,7 @@ fn void a_flick_keeps_turning_after_the_hand_lets_go() @test
 fn void the_coast_slows_down_and_stops() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 
@@ -583,7 +583,7 @@ fn void the_coast_slows_down_and_stops() @test
 fn void the_coast_decays() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 
@@ -608,7 +608,7 @@ fn void the_coast_decays() @test
 fn void a_hand_that_stops_before_it_lets_go_does_not_throw_the_scene() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 	// Still held, and now still.
@@ -625,7 +625,7 @@ fn void a_hand_that_stops_before_it_lets_go_does_not_throw_the_scene() @test
 fn void grabbing_a_coasting_scene_stops_it() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 	idle_for(&controls, &camera, 16);
@@ -647,7 +647,7 @@ fn void grabbing_a_coasting_scene_stops_it() @test
 fn void a_pan_catches_the_coast_as_well() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 	controls.apply(&camera, { .pan = true, .x = 400, .y = 300 }, VIEW_H, 16);
@@ -664,7 +664,7 @@ fn void a_pan_catches_the_coast_as_well() @test
 fn void damping_off_stops_the_scene_dead() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 	controls.damping_ms = 0;
 
 	flick(&controls, &camera);
@@ -681,7 +681,7 @@ fn void damping_off_stops_the_scene_dead() @test
 fn void a_caller_with_no_clock_never_coasts() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	hover(&controls, &camera, 400, 300);
 	orbit(&controls, &camera, 400, 300);
@@ -704,7 +704,7 @@ fn void a_caller_with_no_clock_never_coasts() @test
 fn void a_very_long_frame_does_not_fling_the_camera() @test
 {
 	three::Camera camera = three::default_camera();
-	three::Controls controls = three::default_controls();
+	three::Controls controls = three::DEFAULT_CONTROLS;
 
 	flick(&controls, &camera);
 	float at_release = camera.yaw;
