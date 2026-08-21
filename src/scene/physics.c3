@@ -269,18 +269,27 @@ fn bool Physics.can_be_pushed(&self, NodeId node)
  body alone, because whatever this one is resting on has to start being
  integrated too, or the push drives it into a neighbour that is not moving yet.
 
- **It is not an optimisation, and that was found the hard way.** Removing these
- two lines and re-running `three_tests::physics` does not produce a failing
- check — it produces a **hang**, reproducibly, with the main thread inside
- `collision::WorkerPool.join` waiting on a mutex while a worker sits in
- `worker_main` on a condition variable. A sleeping body carrying a non-zero
- velocity is a state the solver's island bookkeeping does not expect, and it is
- exactly the state a binding that only wrote `linear_velocity` would leave
- behind on the first push.
+ **It is not an optimisation.** Removing these two lines turns
+ `an_impulse_wakes_a_settled_body_and_moves_it` red: a settled ball given a
+ six-unit impulse travels -0.003 units, because the push landed in a velocity
+ the integrator never reads. That is exactly the state a binding which only
+ wrote `linear_velocity` would leave behind on its very first call.
 
  So a script cannot be trusted to wake a body itself, and this cannot be moved
- to the prelude: `an_impulse_wakes_a_settled_body_and_moves_it` says so, and its
- injection record says what happens when it is not here.
+ to the prelude: `an_impulse_wakes_a_settled_body_and_moves_it` says so.
+
+ **This entry used to claim the injection produced a hang rather than a red
+ check, and blamed the solver's island bookkeeping. That was wrong**, and the
+ way it was wrong is worth keeping. The hang was real but second-order: a
+ failing check `longjmp`s out of the test, which skips every `defer` and so
+ skipped `Physics.close`, leaving the solver's worker thread parked on a mutex
+ inside the abandoned test's stack frame — which the *next* physics test then
+ reused for its own world. The pool has been fixed to hold that state in a
+ heap block the workers own (`collision.c3l`'s `PoolState`, and
+ `collision_tests::pool::an_abandoned_pool_does_not_capture_the_next_one`), so
+ the injection now reports itself as the red check above. Sleep and the thread
+ pool were never connected; a check that fails loudly is the only reason it
+ ever looked as though they were.
 *>
 fn void Physics.wake(&self, collision::Rigidbody* rigid)
 {
