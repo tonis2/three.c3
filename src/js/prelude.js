@@ -338,7 +338,7 @@
 		// ShaderMaterial it was given; a helper answers with the line material,
 		// which is the one thing here a script cannot name. A Group has no
 		// `_material` at all, so it answers -1 and costs no crossing.
-		_hostMaterial() { return this._material ? this._material._m : -1; }
+		_hostMaterial() { return this._material ? this._material._index() : -1; }
 
 		// -------------------------------------------------------------------
 		// Animation
@@ -806,6 +806,46 @@
 			this._map = null;
 		}
 
+		// Whether this handle still names a material. False after dispose().
+		get alive() { return this._m >= 0; }
+
+		// The index the host wants, or a throw.
+		//
+		// Every crossing goes through this rather than reading `_m` directly, so
+		// that a disposed handle fails at the line that used it. The alternative
+		// — passing -1 along — reaches the host as "no such material", which is
+		// the same message a handle from another renderer gets and sends whoever
+		// is reading it to the wrong question.
+		_index() {
+			if (this._m < 0) {
+				throw new TypeError(
+					'this material was disposed — build it again to use it'
+				);
+			}
+			return this._m;
+		}
+
+		// Give back the reference this handle holds.
+		//
+		// **Not a free**, exactly as `texture.dispose()` is not. The material goes
+		// when nothing names it at all, so disposing while a mesh is still drawing
+		// with it leaves that mesh correct and collects the material when the mesh
+		// goes — which is what makes this safe to call as soon as a script is done
+		// *referring* to the material.
+		//
+		// What it gives back is the pipeline. A material an agent compiled holds a
+		// `VkPipeline` for the life of the process otherwise, and an agent
+		// iterating on a shader compiles a new one every run — `plan.md` §1.
+		//
+		// Disposing twice does nothing, so a cleanup path may run more than once.
+		// The two built-in materials cannot be disposed at all: `mesh.material =
+		// null` is what gives one of those back, and it was never a handle.
+		dispose() {
+			if (this._m < 0) return;
+			H.disposeMaterial(this._m);
+			this._m = -1;
+		}
+
 		// Which faces this material keeps.
 		//
 		// Three.js's property, Three.js's constants, and Three.js's default —
@@ -824,8 +864,9 @@
 
 		set side(v) {
 			Material._checkSide(v);
+			const index = this._index();
 			if (v === this._side) return;
-			H.setSide(this._m, v);
+			H.setSide(index, v);
 			this._side = v;
 		}
 
@@ -847,7 +888,7 @@
 				throw new TypeError('material.map wants a three.texture(path), or null for none');
 			}
 			const texture = v ?? null;
-			H.setMap(this._m, texture === null ? NoTexture : texture._index());
+			H.setMap(this._index(), texture === null ? NoTexture : texture._index());
 			this._map = texture;
 		}
 
@@ -869,14 +910,15 @@
 		// Zero throws. It maps every point of the surface to one texel, which is
 		// never what anyone meant and is exactly what an unset field looks like.
 		get repeat() {
-			const [u, v] = H.getMaterialUv(this._m);
+			const [u, v] = H.getMaterialUv(this._index());
 			return [u, v];
 		}
 
 		set repeat(value) {
 			const [u, v] = asPair(value, 'material.repeat');
-			const uv = H.getMaterialUv(this._m);
-			H.setMaterialUv(this._m, u, v, uv[2], uv[3]);
+			const index = this._index();
+			const uv = H.getMaterialUv(index);
+			H.setMaterialUv(index, u, v, uv[2], uv[3]);
 		}
 
 		// Where the map starts, as [u, v]. One whole repeat is 1, so 0.5 shifts
@@ -884,14 +926,15 @@
 		// wants, and what stops two neighbouring walls from having visibly the
 		// same crack in the same place.
 		get offset() {
-			const [, , u, v] = H.getMaterialUv(this._m);
+			const [, , u, v] = H.getMaterialUv(this._index());
 			return [u, v];
 		}
 
 		set offset(value) {
 			const [u, v] = asPair(value, 'material.offset');
-			const uv = H.getMaterialUv(this._m);
-			H.setMaterialUv(this._m, uv[0], uv[1], u, v);
+			const index = this._index();
+			const uv = H.getMaterialUv(index);
+			H.setMaterialUv(index, uv[0], uv[1], u, v);
 		}
 
 		static _checkSide(v) {
@@ -907,8 +950,12 @@
 				type: this.constructor.name,
 				side: this._side,
 				map: this._map?.toJSON() ?? null,
-				repeat: this.repeat,
-				offset: this.offset,
+				alive: this.alive,
+				// Only for a live material. A disposed one has no transform to
+				// report and `_index` would throw out of a `JSON.stringify`, which
+				// is the one place a throw is least expected.
+				repeat: this.alive ? this.repeat : null,
+				offset: this.alive ? this.offset : null,
 			};
 		}
 	}
@@ -1106,7 +1153,7 @@
 				}
 			}
 			H.setUniform(
-				this._m, name,
+				this._index(), name,
 				+n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length,
 				row, rows,
 			);
@@ -1233,8 +1280,11 @@
 					+ 'or null for the default'
 				);
 			}
+			// Read before the assignment, so a disposed material is refused rather
+			// than stored on a mesh that would then draw with nothing.
+			const index = v === null ? 0 : v._index();
 			this._material = v;
-			if (this._i >= 0) H.setMaterial(this._i, this._g, v === null ? 0 : v._m);
+			if (this._i >= 0) H.setMaterial(this._i, this._g, index);
 		}
 	}
 
@@ -2955,8 +3005,9 @@
 					'side (three.FrontSide, three.BackSide or three.DoubleSide)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
+					'alive (false once dispose() has been called on it)',
 				],
-				methods: ['toJSON()'],
+				methods: ['dispose()', 'toJSON()'],
 			},
 			DataTexture: {
 				construct: 'new three.DataTexture(data, width, height)',
@@ -3003,8 +3054,9 @@
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
+					'alive (false once dispose() has been called on it)',
 				],
-				methods: ['toJSON()'],
+				methods: ['dispose()', 'toJSON()'],
 			},
 			ShaderMaterial: {
 				construct: "new three.ShaderMaterial({ fragment, uniforms, side })",
@@ -3022,8 +3074,9 @@
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
+					'alive (false once dispose() has been called on it)',
 				],
-				methods: ['toJSON()'],
+				methods: ['dispose()', 'toJSON()'],
 			},
 			Group: {
 				construct: 'new three.Group(), or asset.instantiate()',
@@ -3468,6 +3521,14 @@
 				'Assign a MeshLambertMaterial or a ShaderMaterial, or null for the default shader. Meshes '
 				+ 'sharing a mesh ref AND a material are one draw call; giving two of them different '
 				+ 'materials makes two.',
+			'material.dispose()':
+				'Give back the reference this handle holds, and with it the pipeline the material was '
+				+ 'compiled into. Not a free: the material goes when no mesh names it either, so disposing '
+				+ 'while a mesh still draws with it leaves that mesh correct and collects the material when '
+				+ 'the mesh goes. Call it on a ShaderMaterial you are done with — an agent iterating on a '
+				+ 'shader compiles a new pipeline every run, and without this they accumulate for the life '
+				+ 'of the process. Disposing twice does nothing; using a disposed material throws. The '
+				+ 'default and line materials are shared and cannot be disposed.',
 			'material.uniforms.<name>':
 				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
 				+ 'construction exist; assigning to any other name throws. A uniform declared as a table is '

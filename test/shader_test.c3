@@ -534,3 +534,171 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
 	};
 }
+
+// ============================================================================
+// Eviction
+// ============================================================================
+
+<*
+ A released pipeline is kept, not destroyed.
+
+ `PipelineCache.release` gives a borrow back and the entry is only *evictable*
+ afterwards — the same distinction `texture.dispose()` draws. Asserted because
+ the obvious implementation is the wrong one: destroying on the last release
+ turns this into a refcounted allocator, and a script that disposes a material
+ and builds the same one again — which is what an agent iterating on a scene
+ does every run — would rebuild a pipeline the cache was still holding.
+
+ **Proved by injection.** `trim` evicting whenever anything is unreferenced,
+ rather than when the unreferenced ones outgrow the cap: "the entry stayed: 0".
+*>
+fn void a_released_pipeline_is_kept_for_the_next_acquire() @test
+{
+	@with_gpu(; three::Gpu* gpu, three::Target* target)
+	{
+		String source = three::load_source(MESH_PATH)!!;
+		defer source.free(mem);
+
+		three::PipelineCache cache;
+		cache.init();
+		defer cache.free(gpu);
+
+		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		cache.release(gpu, first);
+
+		test::@check(cache.entries.len() == 1, "the entry stayed: %d", (int)cache.entries.len());
+		test::@check(cache.evictions == 0, "and nothing was evicted: %d", cache.evictions);
+
+		three::MeshPipeline* again = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		test::@check(again == first, "the same pipeline came back");
+		test::@check(cache.builds == 1, "and no second VkPipeline was built: %d", cache.builds);
+		test::@check(cache.compiles == 1, "nor a second compile: %d", cache.compiles);
+	};
+}
+
+<*
+ The cache stops growing.
+
+ `plan.md` §1's defect, and the whole reason any of this exists: an agent
+ iterating on a shader accumulated one `VkPipeline` per distinct source for the
+ life of the process, because nothing ever came off the list.
+
+ Ten entries over five sources, which is two render states each and so five
+ compiles rather than ten — the split `a_different_render_state_is_a_different_pipeline`
+ pins, reused here to buy the entry count cheaply. Releasing all ten leaves two
+ over `MAX_UNUSED_PIPELINES`, and the two that go are the two released first.
+
+ **The module count is the second half and the more easily forgotten one.** Both
+ of source zero's entries are evicted, so nothing holds its SPIR-V any more, and
+ a cache that dropped the pipelines while keeping the compiles would have half
+ of §1's accumulation still running.
+
+ ## Proved by injection
+
+ - **`trim` returning immediately**, which is the cache as `plan.md` §1 found
+   it: "the cache trimmed to its cap of 8, and holds 10".
+ - **`evict_at` not dropping the module at zero references:** "and the module
+   nothing was built from any more went with them: 5". The entry count still
+   comes back to 8, which is why both are asserted.
+*>
+fn void the_pipeline_cache_evicts_what_nothing_uses() @test
+{
+	@with_gpu(; three::Gpu* gpu, three::Target* target)
+	{
+		String source = three::load_source(MESH_PATH)!!;
+		defer source.free(mem);
+
+		three::PipelineCache cache;
+		cache.init();
+		defer cache.free(gpu);
+
+		three::MeshPipeline*[10] held;
+		@pool()
+		{
+			for (int i = 0; i < 5; i++)
+			{
+				// A trailing comment is a different source and the same shader:
+				// the cache keys on content, so this is the cheapest way to ask
+				// for a compile it has not seen.
+				String variant = string::tformat("%s\n// %d\n", source, i);
+				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE)!!;
+			}
+		};
+
+		test::@check(cache.entries.len() == 10, "ten entries went in: %d", (int)cache.entries.len());
+		test::@check(cache.modules.len() == 5, "over five modules: %d", (int)cache.modules.len());
+		test::@check(cache.evictions == 0, "and nothing was evicted while they were held: %d", cache.evictions);
+
+		foreach (pipeline : held) cache.release(gpu, pipeline);
+
+		test::@check(cache.entries.len() == (sz)three::MAX_UNUSED_PIPELINES,
+			"the cache trimmed to its cap of %d, and holds %d", three::MAX_UNUSED_PIPELINES, (int)cache.entries.len());
+		test::@check(cache.evictions == 2, "two entries were evicted: %d", cache.evictions);
+		test::@check(cache.modules.len() == 4,
+			"and the module nothing was built from any more went with them: %d", (int)cache.modules.len());
+	};
+}
+
+<*
+ A pipeline something still holds is not evicted, however cold it is.
+
+ The first entry is retained a second time, so releasing every entry once leaves
+ it at one borrow while its nine neighbours reach zero. It was also the *first*
+ released, which is exactly the one the eviction order would reach for — so a
+ cache that trimmed by age without consulting the count would take the one
+ pipeline still being drawn with.
+
+ Its module survives with it, and that is the same claim from the other side:
+ the sibling entry over the same source *is* evicted, and the SPIR-V has to
+ outlive that because something is still built from it.
+
+ **Proved by injection.** `trim` not consulting `refs` when it picks: "one entry
+ was evicted rather than two: 2" — the retained pipeline is the second one
+ destroyed, and every material still drawing with it would then bind freed
+ memory.
+*>
+fn void a_pipeline_something_still_holds_survives_the_eviction() @test
+{
+	@with_gpu(; three::Gpu* gpu, three::Target* target)
+	{
+		String source = three::load_source(MESH_PATH)!!;
+		defer source.free(mem);
+
+		three::PipelineCache cache;
+		cache.init();
+		defer cache.free(gpu);
+
+		three::MeshPipeline*[10] held;
+		@pool()
+		{
+			for (int i = 0; i < 5; i++)
+			{
+				String variant = string::tformat("%s\n// %d\n", source, i);
+				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE)!!;
+			}
+		};
+
+		// The second borrow, standing in for a material that still draws with it.
+		cache.retain(held[0]);
+
+		foreach (pipeline : held) cache.release(gpu, pipeline);
+
+		test::@check(cache.evictions == 1, "one entry was evicted rather than two: %d", cache.evictions);
+		test::@check(cache.entries.len() == 9, "leaving nine: %d", (int)cache.entries.len());
+		test::@check(cache.modules.len() == 5, "and every module still has a pipeline: %d", (int)cache.modules.len());
+
+		// Not merely present — the same pointer, still usable. `entry_for` is a
+		// pointer comparison, so a cache that had rebuilt this entry would answer
+		// a different address and this would fail.
+		bool kept = false;
+		foreach (entry : cache.entries)
+		{
+			if (&entry.pipeline == held[0]) kept = true;
+		}
+		test::@check(kept, "and the held pipeline is the one that stayed");
+
+		cache.release(gpu, held[0]);
+	};
+}

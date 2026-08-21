@@ -55,6 +55,12 @@ const String FIXTURE_COPY = "build/unload_fixture_copy.glb";
  count used to be taken.
 *>
 const String SHARED = "test/fixtures/shared_material.glb";
+
+<*
+ A plain image, for the material checks: `load_texture_file` wants a picture and
+ every other fixture in this file is a `.glb`.
+*>
+const String CHECKER = "test/fixtures/checker.png";
 const String SHARED_COPY = "build/unload_shared_copy.glb";
 
 const uint W = 200;
@@ -531,5 +537,238 @@ fn void a_generated_shape_unloads_like_a_file() @test
 		test::@check(assets.slot(rebuilt) != null, "rebuilding the box answered with a dead slot");
 		test::@check(rebuilt.generation != first.generation,
 			"rebuilding answered with the handle the unload invalidated");
+	};
+}
+
+// ============================================================================
+// Materials
+// ============================================================================
+
+<*
+ A fragment body per index, so that each material is its own compile.
+
+ Distinct sources are the whole point: two identical bodies are one pipeline by
+ design (`the_pipeline_cache_skips_the_compile`), and a check about accumulation
+ written on identical bodies would pass against a cache that never grew because
+ it never had anything to grow with.
+*>
+fn String shading_body(uint n, alloc::Allocator allocator)
+{
+	return string::format(allocator, "float3 shade(Surface s) { return s.albedo * %d.0; }", n + 1);
+}
+
+<*
+ The cache entry a handed-out pipeline belongs to, or null.
+
+ The test's own version of `PipelineCache.entry_for`, which is not exported.
+ Pointer identity, as the cache's is.
+*>
+fn three::CachedPipeline* entry_for(three::PipelineCache* cache, three::MeshPipeline* pipeline)
+{
+	foreach (entry : cache.entries)
+	{
+		if (&entry.pipeline == pipeline) return entry;
+	}
+	return null;
+}
+
+<*
+ Disposing a material gives its pipeline back to the cache.
+
+ The reference, not the pipeline: the entry stays cached and evictable, which is
+ `a_released_pipeline_is_kept_for_the_next_acquire`'s claim from the other end.
+ What this asserts is the count, because the count is what eviction reads and
+ the count is what nothing was keeping before — every `Material` pinned its
+ pipeline for the life of the process, so `plan.md` §1's cache could never have
+ evicted anything even if it had tried.
+
+ ## Proved by injection
+
+ - **`free_material` not releasing the pipeline:** "and gave its reference back:
+   1" — the material is collected, the pipeline is pinned forever, and nothing
+   else in the suite says so.
+ - **`MeshPass.material` ignoring `alive`:** "the material was collected" fails,
+   because a collected slot answers with its zeroed self and a null pipeline.
+*>
+fn void a_disposed_material_gives_its_pipeline_back() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+
+		uint material;
+		@pool()
+		{
+			material = pass.create_material(
+				&renderer.gpu, &renderer.target, shading_body(0, tmem), {}
+			)!!;
+		};
+
+		three::MeshPipeline* pipeline = pass.material(material).pipeline;
+		three::CachedPipeline* entry = entry_for(&pass.pipelines, pipeline);
+		test::@check(entry != null, "the material's pipeline came out of the cache");
+		test::@check(entry.refs == 1, "and the material holds the one reference: %d", entry.refs);
+
+		pass.dispose_material(&renderer.gpu, material)!!;
+
+		test::@check(pass.material(material) == null, "the material was collected");
+		test::@check(entry.refs == 0, "and gave its reference back: %d", entry.refs);
+	};
+}
+
+<*
+ A disposed material a mesh still draws with is not collected.
+
+ `texture.dispose()`'s rule, applied to the thing textures are put on: giving
+ back a handle is a statement about the handle. A mesh that is still drawing
+ with the material is not wrong for doing so, and collecting underneath it would
+ turn `dispose()` into something a script has to time against its own scene.
+
+ The second half is the one that makes the first half safe rather than merely
+ lenient. Once the mesh goes, the next render collects — so a script that
+ disposes early does not have to come back and dispose again.
+
+ **Proved by injection.** `collect_materials` ignoring which materials a node
+ names: "the material outlived the handle" fails at the first check, and the box
+ stops drawing from that frame on.
+*>
+fn void a_disposed_material_survives_the_mesh_that_draws_with_it() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		three::Scene* scene = &pass.scene;
+
+		uint material;
+		@pool()
+		{
+			material = pass.create_material(
+				&renderer.gpu, &renderer.target, shading_body(0, tmem), {}
+			)!!;
+		};
+
+		three::AssetId box = pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+		three::NodeId node = scene.add_mesh(box, 0);
+		scene.set_material(node, material);
+
+		pass.dispose_material(&renderer.gpu, material)!!;
+		test::@check(pass.material(material) != null, "the material outlived the handle");
+		test::@check(pass.pending_materials == 1, "and is waiting on the mesh: %d", pass.pending_materials);
+
+		// It still draws, which is the part a premature collection would break
+		// silently: `MeshPass.record` skips a bucket whose material does not
+		// resolve, so the symptom is a missing shape and not a crash.
+		renderer.pass.frame_camera();
+		renderer.render_offscreen()!!;
+		test::@check(pass.material(material) != null, "and a frame did not take it either");
+
+		scene.remove(node);
+		renderer.render_offscreen()!!;
+
+		test::@check(pass.material(material) == null, "the mesh went and the material followed");
+		test::@check(pass.pending_materials == 0, "with nothing left pending: %d", pass.pending_materials);
+	};
+}
+
+<*
+ A collected slot is handed to the next material rather than left behind.
+
+ The same claim as `a_freed_texture_slot_is_reused` and for the same reason: a
+ count that comes back to zero while the table grows is a leak wearing a passing
+ test's clothes. An agent iterating compiles a material per run, and the list
+ those land in has to stop growing as well as the cache they name.
+
+ **Proved by injection.** `claim_slot` always pushing: "the freed slot came
+ back: 2 then 3".
+*>
+fn void a_collected_material_slot_is_reused() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+
+		uint first;
+		@pool()
+		{
+			first = pass.create_material(&renderer.gpu, &renderer.target, shading_body(0, tmem), {})!!;
+		};
+		sz slots = pass.materials.len();
+
+		pass.dispose_material(&renderer.gpu, first)!!;
+
+		uint second;
+		@pool()
+		{
+			second = pass.create_material(&renderer.gpu, &renderer.target, shading_body(1, tmem), {})!!;
+		};
+
+		test::@check(second == first, "the freed slot came back: %d then %d", first, second);
+		test::@check(pass.materials.len() == slots,
+			"and the table did not grow: %d then %d", (int)slots, (int)pass.materials.len());
+	};
+}
+
+<*
+ A disposed material gives its image back too.
+
+ The material holds one reference to the texture slot it names — the one
+ `create_texture_material` took — and collecting it has to give that back or the
+ image outlives everything that ever pointed at it. Asserted through the count
+ rather than through a picture, because the leak this catches is invisible in
+ every frame: the texture is still correct, it is just immortal.
+
+ **Proved by injection.** The release dropped from `free_material`: "the
+ material's reference came back with it: 2".
+*>
+fn void a_disposed_material_gives_its_image_back() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		three::Assets* assets = &pass.assets;
+
+		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		uint material = pass.create_texture_material(texture)!!;
+		test::@check(assets.texture_refs(texture) == 2,
+			"the script's handle and the material: %d", assets.texture_refs(texture));
+
+		pass.dispose_material(&renderer.gpu, material)!!;
+		test::@check(assets.texture_refs(texture) == 1,
+			"the material's reference came back with it: %d", assets.texture_refs(texture));
+
+		assets.release_texture(&renderer.gpu, texture);
+		test::@check(assets.texture_refs(texture) == 0, "and the last one is the script's");
+	};
+}
+
+<*
+ The built-in materials refuse to be disposed.
+
+ `the_built_in_materials_refuse_a_map`'s argument, applied to the sharper verb.
+ `DEFAULT_MATERIAL` is what every node that never asked for a material draws
+ with, so collecting it would take the pipeline out from under the whole scene
+ through a handle that reads like it names one thing. `LINE_MATERIAL` is every
+ debug helper's.
+
+ **Proved by injection.** The guard removed from `dispose_material`: "built-in
+ material 0 was disposed out from under every node".
+*>
+fn void the_built_in_materials_refuse_dispose() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		uint[2] built_in = { three::DEFAULT_MATERIAL, three::LINE_MATERIAL };
+		foreach (index : built_in)
+		{
+			if (catch err = renderer.pass.dispose_material(&renderer.gpu, index))
+			{
+				test::@check(err == three::MATERIAL_UNKNOWN, "material %d refused with %s", index, err);
+			}
+			else
+			{
+				test::@check(false, "built-in material %d was disposed out from under every node", index);
+			}
+			test::@check(renderer.pass.material(index) != null, "and material %d is still there", index);
+		}
 	};
 }

@@ -562,6 +562,12 @@ struct CachedModule
 	// plausible and wrong.
 	String source;
 	ShaderModule mod;
+	// How many `CachedPipeline` entries were built from it. Not how many callers
+	// asked: two render states over one source are two entries and one module,
+	// and the SPIR-V has to outlive both of them. At zero the module is freed
+	// outright rather than kept warm, because a source with no pipeline left is
+	// exactly the accumulation eviction exists to stop.
+	uint refs;
 }
 
 <*
@@ -577,6 +583,14 @@ struct CachedPipeline
 	CachedModule* compiled;
 	PipelineState state;
 	MeshPipeline pipeline;
+	// How many live borrows there are. `acquire` hands one out, `retain` takes
+	// another, `release` gives one back — and **an entry at zero is not yet
+	// freed**, it is merely evictable. See `PipelineCache.trim`.
+	uint refs;
+	// The cache's own ordinal at the moment `refs` last reached zero, which is
+	// what makes the eviction order least-recently-released rather than
+	// whichever the scan reached first. Meaningless while `refs > 0`.
+	ulong released_at;
 }
 
 <*
@@ -612,7 +626,34 @@ struct PipelineCache
 	// that only watched `compiles` would pass on a cache that had stopped caching
 	// pipelines at all.
 	uint builds;
+	// How many entries have been evicted and their pipelines retired. Asserted on
+	// for the same reason `compiles` is: "the cache did not grow" would also be
+	// true of a cache that never cached anything.
+	uint evictions;
+	// Ticks once per release-to-zero. Only its order is read — see
+	// `CachedPipeline.released_at`.
+	ulong clock;
 }
+
+<*
+ How many unreferenced entries the cache keeps before it starts evicting.
+
+ **Not zero, and that is the whole design.** Dropping an entry the instant its
+ last borrow goes would make this a refcounted allocator rather than a cache: a
+ script that disposes a material and builds the same one again — which is what
+ an agent iterating on a scene does every run — would pay to rebuild a pipeline
+ it had just given back. Keeping a few costs a handful of driver objects and
+ makes that case free.
+
+ **Not unbounded, which is what it was.** `plan.md` §1: an agent iterating on a
+ shader accumulated one `VkPipeline` per distinct source for the life of the
+ process, because nothing ever came off this list.
+
+ Eight is one bucket per material an interactive scene plausibly cycles through,
+ and it is not a number anybody measured. `the_pipeline_cache_evicts_what_nothing_uses`
+ pins the behaviour rather than the constant.
+*>
+const uint MAX_UNUSED_PIPELINES = 8;
 
 fn void PipelineCache.init(&self)
 {
@@ -711,6 +752,9 @@ fn MeshPipeline*? PipelineCache.acquire(
 		// Pointer identity is exact here in a way a hash is not — both entries
 		// came out of `module_for`, which has already confirmed the source.
 		if (entry.compiled != compiled || !entry.state.equals(state)) continue;
+		// A hit takes a borrow like a miss does, so the caller's `release` is the
+		// same call either way and does not have to know which it got.
+		entry.refs++;
 		return &entry.pipeline;
 	}
 
@@ -724,9 +768,149 @@ fn MeshPipeline*? PipelineCache.acquire(
 	entry.compiled = compiled;
 	entry.state = state;
 	entry.pipeline = built;
+	entry.refs = 1;
+	// The module is kept alive by its pipelines and by nothing else. A build that
+	// failed on the line above leaves a freshly compiled module at zero — cached,
+	// so the retry is free, and released at `free` rather than by eviction, which
+	// only ever runs off an entry. That is a driver-level failure and one module.
+	compiled.refs++;
 
 	self.entries.push(entry);
 	return &entry.pipeline;
+}
+
+<*
+ The entry a handed-out pipeline belongs to, or null if it came from elsewhere.
+
+ By pointer identity, which is what the cache promised: entries are heap-boxed
+ precisely so the address it returned stays the address it owns.
+*>
+fn CachedPipeline* PipelineCache.entry_for(&self, MeshPipeline* pipeline)
+{
+	if (pipeline == null) return null;
+	foreach (entry : self.entries)
+	{
+		if (&entry.pipeline == pipeline) return entry;
+	}
+	return null;
+}
+
+<*
+ Take another borrow of a pipeline `acquire` already handed out.
+
+ For a second holder of one pointer that did not go through `acquire` to get it
+ — `MeshPass.create_texture_material` copies `MeshPass.pipeline` rather than
+ asking the cache for the built-in shader again, because it knows the answer.
+
+ A pointer this cache never handed out is ignored rather than faulted on. There
+ is exactly one caller and it cannot produce one; a fault path here would be an
+ unreachable branch in every build.
+*>
+fn void PipelineCache.retain(&self, MeshPipeline* pipeline)
+{
+	CachedPipeline* entry = self.entry_for(pipeline);
+	if (entry == null) return;
+	entry.refs++;
+}
+
+<*
+ Give a borrow back.
+
+ **Not a free.** At zero the entry becomes *evictable*, which is the same
+ distinction `texture.dispose()` draws and for the same reason: the thing goes
+ when nothing wants it and the cache has run out of room to be generous, not the
+ instant one holder lets go. `MAX_UNUSED_PIPELINES` is where that room is
+ argued.
+
+ @param gpu : `The device the pipeline was built on, for the retire. Null defers the trim to the next release that has one — a pipeline cannot be destroyed without the device that made it, and holding an extra entry is the cheaper half of that trade.`
+*>
+fn void PipelineCache.release(&self, Gpu* gpu, MeshPipeline* pipeline)
+{
+	CachedPipeline* entry = self.entry_for(pipeline);
+	if (entry == null || entry.refs == 0) return;
+
+	entry.refs--;
+	if (entry.refs > 0) return;
+
+	entry.released_at = ++self.clock;
+	self.trim(gpu);
+}
+
+<*
+ Evict least-recently-released entries until the unused ones fit in the cap.
+
+ Linear in the number of entries, per eviction, which is the right shape here:
+ the list is bounded by the cap plus whatever is live, and the alternative — a
+ second list threaded in release order — is a second thing to keep in step for a
+ scan over a few dozen pointers.
+*>
+fn void PipelineCache.trim(&self, Gpu* gpu)
+{
+	if (gpu == null) return;
+
+	while (true)
+	{
+		uint unused = 0;
+		sz oldest = 0;
+		bool found = false;
+		foreach (i, entry : self.entries)
+		{
+			if (entry.refs > 0) continue;
+			unused++;
+			if (!found || entry.released_at < self.entries[oldest].released_at)
+			{
+				oldest = (sz)i;
+				found = true;
+			}
+		}
+		if (!found || unused <= MAX_UNUSED_PIPELINES) return;
+		self.evict_at(gpu, oldest);
+	}
+}
+
+<*
+ Drop one entry: off the list, into the deletion queue, and its module with it if
+ that was the last pipeline holding it.
+
+ The pipeline is copied out before the entry is freed, and retired rather than
+ destroyed — a command buffer submitted two frames ago may still bind it, which
+ is the hazard `gpu/retire.c3` exists for.
+*>
+fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
+{
+	CachedPipeline* entry = self.entries[index];
+	self.entries.remove_at(index);
+
+	gpu.retire_pipeline(entry.pipeline);
+
+	CachedModule* compiled = entry.compiled;
+	if (compiled != null && compiled.refs > 0)
+	{
+		compiled.refs--;
+		// Freed outright rather than kept warm. A module whose pipelines have all
+		// been evicted is SPIR-V for a source nothing draws with, and holding it
+		// would leave half of what §1 called a leak still accumulating.
+		if (compiled.refs == 0) self.drop_module(compiled);
+	}
+
+	mem::free(entry);
+	self.evictions++;
+}
+
+<*
+ Free a module and take it off the list. Its last pipeline is already gone.
+*>
+fn void PipelineCache.drop_module(&self, CachedModule* compiled)
+{
+	foreach (i, existing : self.modules)
+	{
+		if (existing != compiled) continue;
+		self.modules.remove_at((sz)i);
+		break;
+	}
+	compiled.mod.free();
+	if (compiled.source.ptr != null) compiled.source.free(mem);
+	mem::free(compiled);
 }
 
 fn void PipelineCache.free(&self, Gpu* gpu)

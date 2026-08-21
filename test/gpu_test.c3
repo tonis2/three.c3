@@ -486,3 +486,81 @@ fn void captures_are_reproducible() @test
 		}
 	};
 }
+
+// ============================================================================
+// The deletion queue
+// ============================================================================
+
+<*
+ A retired pipeline outlives the frames that may still bind it.
+
+ `MAX_FRAMES_IN_FLIGHT` is 2, so a command buffer submitted two frames ago may
+ still be reading an object handed back now. This is the arithmetic in
+ `gpu/retire.c3` asserted from the outside: queued, still queued one frame
+ later, gone the frame after that.
+
+ **The middle check is the one that matters, and nothing else can make it.**
+ Destroying on the next frame rather than the one after is undefined behaviour
+ that surfaces as a corrupted draw under load, and no picture here catches it —
+ nor does `--validate`, which is usually the answer when a picture cannot. Both
+ headless frame paths wait on their own fence immediately after submitting, so
+ by the time either returns the device has finished with everything it bound.
+ The hazard is only reachable through `Renderer.frame`, which needs a window.
+ The ordinal is therefore asserted directly, because it is the only part of this
+ that a headless suite can see at all.
+
+ A zeroed `MeshPipeline` stands in for a real one. Its `free` is a no-op on null
+ handles, which keeps this about the queue's arithmetic rather than about
+ building a pipeline to throw away.
+
+ **Proved by injection.** `retire_at` set to `frame + 1` rather than
+ `frame + MAX_FRAMES_IN_FLIGHT`: "still held after one frame: 0". Nothing else
+ in the suite notices, which is the argument for the check.
+*>
+fn void a_retired_pipeline_waits_out_the_frames_in_flight() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		three::Gpu* gpu = &renderer.gpu;
+		three::MeshPipeline nothing;
+
+		gpu.retire_pipeline(nothing);
+		test::@check(gpu.deletions.pipelines.len() == 1,
+			"queued rather than destroyed: %d", (int)gpu.deletions.pipelines.len());
+
+		renderer.render_offscreen()!!;
+		test::@check(gpu.deletions.pipelines.len() == 1,
+			"still held after one frame: %d", (int)gpu.deletions.pipelines.len());
+
+		renderer.render_offscreen()!!;
+		test::@check(gpu.deletions.pipelines.len() == 0,
+			"and destroyed after two: %d", (int)gpu.deletions.pipelines.len());
+	};
+}
+
+<*
+ A caller that retires and never renders does not grow the queue forever.
+
+ The lazy mechanism needs frames to make progress and a headless script that
+ builds and disposes materials without drawing gives it none. Past
+ `MAX_PENDING_DELETES` the queue falls back to `wait_idle` and empties itself,
+ which is the honest answer: the stall is the thing the frame ordinal exists to
+ avoid, not a thing it must never do.
+
+ **Proved by injection.** The bound removed from `retire_pipeline`: "the queue
+ drained itself rather than growing past 32, and holds 33".
+*>
+fn void a_queue_nothing_is_draining_falls_back_to_the_stall() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		three::Gpu* gpu = &renderer.gpu;
+		three::MeshPipeline nothing;
+
+		for (uint i = 0; i <= three::MAX_PENDING_DELETES; i++) gpu.retire_pipeline(nothing);
+
+		test::@check(gpu.deletions.pipelines.len() == 0,
+			"the queue drained itself rather than growing past %d, and holds %d",
+			three::MAX_PENDING_DELETES, (int)gpu.deletions.pipelines.len());
+	};
+}

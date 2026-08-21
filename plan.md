@@ -49,8 +49,10 @@ One directional light with a verb (`three.light`). Velocity and impulse on a
 dynamic body, which is what makes a character possible. `texture.read()`, a uv
 transform per material, and a glTF export that writes a texture a script made.
 Keys a script can hold down, and a budget a script can raise.
+`material.dispose()`, an evicting pipeline cache, and a frame-tagged deletion
+queue underneath both.
 
-	c3c test --trust=full       494 passed, 0 failed, leak-clean
+	c3c test --trust=full       507 passed, 0 failed, leak-clean
 
 **`examples/village` is where most of what follows came from.** A walled village
 wearing nothing but generated textures — eleven `DataTexture`s and no image file
@@ -73,12 +75,6 @@ loud and argues for the exception; it does not just stop being true.
 Small, known, and each one is a number or a picture that lies rather than a
 missing feature. Worth clearing before anything on the feature list, because
 every one of them is something a person will trust and be wrong about.
-
-- **`PipelineCache` never evicts.** An agent iterating on a shader in a loop
-  accumulates one `VkPipeline` per distinct source for the life of the process.
-  The cache is keyed on source and cull mode and hands out borrowed pointers, so
-  eviction needs a deferred-delete queue that survives the frames in flight —
-  which is the same queue §2 wants. Do them together.
 
 - **Linux and Windows compile and have never been run.** Both backends
   type-check; neither has had a window on screen since any of the mouse, cursor
@@ -104,12 +100,27 @@ every one of them is something a person will trust and be wrong about.
 Each of these was a decision, not an oversight. The trigger is written down so
 the decision can be revisited on evidence rather than on somebody's mood.
 
-- **The frame-tagged deletion queue.** What exists is the simple half: one
-  `vkDeviceWaitIdle` per sweep, which is right for a level boundary because a
-  level boundary is already a stall. A game that streams chunks mid-play wants
-  buffers tagged with the frame counter and destroyed two frames on.
-  **Trigger:** something unloads during gameplay. Nothing else has to move for
-  it, and `PipelineCache` eviction lands on top of it for free.
+- **The frame-tagged deletion queue exists now, for pipelines only.**
+  `gpu/retire.c3`: a retired object records the frame ordinal it was given back
+  at and is destroyed once `MAX_FRAMES_IN_FLIGHT` frames have started since,
+  which the fence wait at the top of every frame path is what makes sound. It
+  was built for `PipelineCache` eviction and carries one list, of pipelines.
+  Buffers are a second list beside it and the same ordinal — a tagged union
+  before there are two tags to carry would be a name for something that has one.
+  The unload sweep and `set_material_map` still use `vkDeviceWaitIdle`, which is
+  right for a level boundary because a level boundary is already a stall.
+  **Trigger:** something unloads during gameplay.
+
+- **A material nobody disposes is still immortal**, exactly as a texture nobody
+  disposes is. `material.dispose()` gives back the handle's reference and the
+  collector takes the material once no node names it either, so the mechanism is
+  there and an agent's loop is bounded the moment it uses it — but a script that
+  never calls it still accumulates one pipeline per distinct shader source.
+  Three.js has the same property and the same verb, and the alternative here is
+  a `FinalizationRegistry` hooking QuickJS's GC, which would free GPU objects at
+  a moment nothing chose and on a schedule nothing can assert on. **Trigger:**
+  evidence that scripts in practice do not dispose — at which point the answer
+  is probably a warning naming the count, not a finalizer.
 
 - **A uniform table is capped by the 68-byte push budget** — four rows of four
   floats, or five of three. A table of hundreds needs a device buffer behind a
@@ -439,6 +450,17 @@ Decisions nobody has made. Each one is cheap to decide and expensive to discover
 ## 10. Traps carried over
 
 Live, all of them. Each cost real time and none is visible in a diff.
+
+- **`stats()` counts buckets, not draws that happened.** `scene.stats()` and
+  `MeshPass.stats` rebuild the draw list out of the scene graph and never
+  consult the material table, but `MeshPass.record` skips any bucket whose
+  material does not resolve. So a bucket that draws nothing at all still reports
+  as a draw call, and a check written on `drawCalls` cannot tell "it drew" from
+  "it was going to". Live for the length of one test:
+  `a_mesh_keeps_drawing_with_a_disposed_material` was written on the count,
+  passed against a deliberately broken material collector, and only started
+  failing when it was rewritten to count red pixels. **Anything about whether a
+  material reached the screen has to be asserted on the screen.**
 
 - **`c3c build` does not rebuild the test binary, and `c3c test` does not rebuild
   the app.** `build` produces `./build/three`; `test` produces and runs
