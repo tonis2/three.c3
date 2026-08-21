@@ -74,20 +74,6 @@ Small, known, and each one is a number or a picture that lies rather than a
 missing feature. Worth clearing before anything on the feature list, because
 every one of them is something a person will trust and be wrong about.
 
-- **The physics worker pool can deadlock on a body that is asleep and moving.**
-  Found by injection rather than by reading: deleting the wake from
-  `Physics.wake` and running `three_tests::physics` **hangs**, reproducibly, with
-  the main thread in `collision::WorkerPool.join` on a mutex and a worker parked
-  on a condition variable in `worker_main`. Giving a sleeping body a non-zero
-  velocity is a state the island bookkeeping does not survive. The binding never
-  produces it — `three.physics.setVelocity` and `applyImpulse` wake the island
-  first, and `an_impulse_wakes_a_settled_body_and_moves_it` is what keeps that
-  true — so nothing a script can write reaches it today. It is listed because a
-  library that hangs rather than misbehaves on bad input is one bad input away
-  from hanging a game, and because the *next* verb over that world (a joint, a
-  soft body, `snapshot`/`restore`) will not have this one's guard by accident.
-  The fix belongs in `collision.c3l`.
-
 - **`PipelineCache` never evicts.** An agent iterating on a shader in a loop
   accumulates one `VkPipeline` per distinct source for the life of the process.
   The cache is keyed on source and cull mode and hands out borrowed pointers, so
@@ -373,8 +359,10 @@ overwritten a fraction of a step later, so both would have looked like the verb
 doing nothing.
 
 The thing that made it more than a binding was sleep. A settled body is skipped
-by integration, so an impulse without a wake changes a number nothing reads —
-and worse than that, it hangs (§1). What is left:
+by integration, so an impulse without a wake changes a number nothing reads.
+This was believed to *hang* the solver as well, and it does not — that was the
+worker pool being captured by an earlier failing test, which §10 now records in
+full. What is left:
 
 - **No character controller.** With velocity bound, a dynamic capsule with locked
   rotation *is* a character, so this is the step after rather than a prerequisite.
@@ -464,6 +452,30 @@ Live, all of them. Each cost real time and none is visible in a diff.
   target named `test`. When a result is surprising, check what you actually ran
   before believing what it says.
 
+- **A failing check does not run your `defer`s, and what leaks can be a thread.**
+  `test::@check` failing `longjmp`s to the runner, which unwinds past every
+  `defer` in the test — so a fixture macro's `defer runtime.close()` never runs
+  and everything it owned is abandoned *in a stack frame the next test reuses*.
+  This was live for a whole milestone as "the physics worker pool deadlocks on a
+  sleeping body that is moving", recorded in §1, in `Physics.wake` and in
+  `an_impulse_wakes_a_settled_body_and_moves_it`, and it was none of those
+  things. Deleting the wake makes that check go red; the red check skipped
+  `Physics.close`; the solver's worker thread stayed parked on a mutex inside
+  the dead frame; the next physics test built its world over those bytes and
+  initialized a new pool on top of the sleeping worker. Then `join()` waited on
+  a queue two workers were draining and the suite hung, naming neither the check
+  nor the cause. **A red check that turns into a hang erases the red check**,
+  which is why this is worth more than the bug was. Two things fixed it and only
+  one is a fix: `collision.c3l`'s pool now keeps its mutex, condition variables
+  and counters in a heap block the workers own (`PoolState`), so an abandoned
+  pool leaks a thread rather than capturing the next one
+  (`collision_tests::pool::an_abandoned_pool_does_not_capture_the_next_one`,
+  whose injected form hangs — that is the shape of what it guards). The general
+  lesson is the other one: **anything a fixture hands out that is not memory —
+  a thread, a device queue, a file handle — is not released by a failing
+  check**, and if it points at the fixture's own frame it will be found again by
+  whatever runs next. TSan is what named it in the end (`--sanitize=thread`);
+  ASan changed the timing enough to hide it entirely.
 - **A `\n` inside a C3 raw string is a backslash and an `n`.** Backticks do not
   process escapes. Shader source and JSON written with backticks look right in
   the editor and are wrong at runtime.

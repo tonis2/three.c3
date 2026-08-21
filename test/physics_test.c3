@@ -498,15 +498,26 @@ fn void a_velocity_set_from_a_script_moves_the_body() @test
  do nothing at all to a settled one, which reads as the verb being unreliable
  rather than as sleep.
 
- **Proved by injection, and the injection is more alarming than the check.**
- Deleting the two lines of `Physics.wake` does not make this go red; it makes
- the suite **hang**, reproducibly, with the main thread in
- `collision::WorkerPool.join` on a mutex and a worker parked on a condition
- variable. Giving a sleeping body a velocity is a state the solver's island
- bookkeeping does not survive. That is worth knowing beyond this file: it is the
- state any binding that wrote `linear_velocity` and stopped there would create
- on its very first push, so the wake is a correctness requirement of the library
- and not a courtesy of this API.
+ **Proved by injection.** Deleting the two lines of `Physics.wake` makes this
+ go red at the last check with `x = -0.002877` — the impulse landed in a
+ velocity nothing integrates. That is the state any binding that wrote
+ `linear_velocity` and stopped there would create on its very first push, so
+ the wake is a correctness requirement of the library and not a courtesy of
+ this API.
+
+ **That injection used to hang the suite instead, and the reason is worth
+ keeping**, because it is a trap any check in this file can still spring. A
+ failed `test::@check` `longjmp`s to the runner, which unwinds past every
+ `defer` — so `@with_gpu_js`'s `defer runtime.close()` never ran, the physics
+ world was never freed, and its worker thread stayed parked on a mutex in this
+ test's abandoned stack frame. The next physics test built its world in that
+ same frame and initialized a new pool over the sleeping worker's bytes, and
+ `join()` then waited on a queue two workers were draining. It was read for a
+ while as the solver's island bookkeeping failing on a sleeping body carrying
+ velocity; it was neither about sleep nor about islands. `collision.c3l` now
+ keeps the pool's state in a heap block the workers own, so an abandoned world
+ leaks a thread instead of capturing the next one — see
+ `collision_tests::pool::an_abandoned_pool_does_not_capture_the_next_one`.
 *>
 fn void an_impulse_wakes_a_settled_body_and_moves_it() @test
 {
