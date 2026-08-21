@@ -3623,3 +3623,152 @@ fn void removing_an_animated_prop_stops_it() @test
 		advance(run, 500, 1500);
 	};
 }
+
+// ============================================================================
+// material.dispose()
+// ============================================================================
+
+<*
+ **The defect in `plan.md` §1, closed.**
+
+ "An agent iterating on a shader in a loop accumulates one `VkPipeline` per
+ distinct source for the life of the process." Twelve distinct bodies is that
+ loop, written the way an agent writes it — a fresh `ShaderMaterial` per run —
+ and the check is that the cache comes back under its cap rather than holding
+ all twelve.
+
+ The bodies have to differ. Two identical ones are one pipeline on purpose, so a
+ version of this check written on one repeated body would pass against the cache
+ that had the defect.
+
+ Two entries are never evictable and are subtracted here rather than glossed:
+ `DEFAULT_MATERIAL` and `LINE_MATERIAL` hold the built-in shader over two render
+ states for the life of the pass, which is what makes them built in.
+
+ **Proved by injection.** `PipelineCache.trim` returning immediately, which is
+ the cache exactly as §1 describes it: "twelve compiles left 14 entries, and the
+ cap plus the two built-in ones is 10".
+*>
+fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			for (let i = 0; i < 12; i++) {
+				const mat = new three.ShaderMaterial({
+					fragment: "float3 shade(Surface s) { return s.albedo * " + (i + 1) + ".0; }"
+				});
+				mat.dispose();
+			}
+			return "done";
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		three::PipelineCache* cache = &run.pass.pipelines;
+		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 2;
+		test::@check(cache.entries.len() <= cap,
+			"twelve compiles left %d entries, and the cap plus the two built-in ones is %d",
+			(int)cache.entries.len(), (int)cap);
+		test::@check(cache.evictions > 0, "something was actually evicted: %d", cache.evictions);
+		test::@check(cache.modules.len() <= cap,
+			"and the SPIR-V went with the pipelines: %d modules", (int)cache.modules.len());
+	};
+}
+
+<*
+ A disposed material handle throws, and disposing twice does not.
+
+ `texture.dispose()`'s pair of rules, and they pull in opposite directions on
+ purpose. The second call has nothing to give back and says so by doing nothing,
+ which is what makes `dispose()` safe in a cleanup path that runs more than
+ once. *Using* the handle afterwards is a different thing entirely: passing the
+ dead index along would reach the host as "no such material", which is the
+ message a handle from another renderer gets, and would send whoever read it to
+ the wrong question.
+
+ **Proved by injection.** `Material._index` handing back `_m` without checking
+ it: "dead | disposed twice | that material is not in this context | no throw" —
+ the throw came from the host, one call later, saying the wrong thing, and the
+ mesh took the dead material without complaint.
+*>
+fn void a_disposed_material_handle_throws() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return s.albedo; }"
+			});
+			const said = [];
+			mat.dispose();
+			said.push(mat.alive === false ? "dead" : "alive");
+			mat.dispose();
+			said.push("disposed twice");
+			try { mat.side = three.BackSide; said.push("no throw"); }
+			catch (e) { said.push(e.message); }
+			try { new three.Mesh(new three.BoxGeometry(1, 1, 1), mat); said.push("no throw"); }
+			catch (e) { said.push("refused by the mesh"); }
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("dead"), "the handle knows it is gone: %s", result.value);
+		test::@check(result.value.contains("disposed twice"),
+			"and the second dispose was not an error: %s", result.value);
+		test::@check(result.value.contains("disposed"),
+			"using it said so by name: %s", result.value);
+		test::@check(!result.value.contains("no throw"), "nothing went through: %s", result.value);
+	};
+}
+
+<*
+ A mesh keeps drawing with a material whose handle has been given back.
+
+ The script-level half of `a_disposed_material_survives_the_mesh_that_draws_with_it`,
+ asserted on the picture rather than on the bookkeeping — because the failure
+ mode of collecting too early is not a crash. `MeshPass.record` skips a bucket
+ whose material does not resolve, so what a premature collection produces is an
+ empty frame, and an empty frame is exactly what a script that got its camera
+ wrong produces too.
+
+ **Proved by injection**, and the first version of this check did not survive
+ it. `collect_materials` ignoring which materials a node names left
+ `scene.stats().drawCalls` at 1 and the test **passing** — `stats` counts
+ buckets out of the scene graph and never consults the material table, so it
+ reports a bucket `record` went on to skip. Against the pixels the same
+ injection reads "only 0 red pixels".
+*>
+fn void a_mesh_keeps_drawing_with_a_disposed_material() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const mat = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(1, 0, 0); }"
+			});
+			const scene = new three.Scene();
+			const mesh = new three.Mesh(new three.BoxGeometry(1, 1, 1), mat);
+			scene.add(mesh);
+			three.camera.frameAll();
+			mat.dispose();
+			three.render(scene, three.camera);
+			return scene.stats().drawCalls;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("1"),
+			"the box is still one bucket: %s", result.value);
+
+		// The picture, and it has to be the picture. `stats()` counts buckets out
+		// of the scene graph and never consults the material table, so it answers
+		// "one draw call" just as happily for a bucket `record` went on to skip.
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+		test::@check(count_near(&frame, 255, 0, 0) > 100,
+			"only %d red pixels — the disposed material stopped drawing",
+			count_near(&frame, 255, 0, 0));
+	};
+}

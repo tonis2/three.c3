@@ -42,6 +42,7 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
+	self.bind(host, "disposeMaterial", &js_dispose_material, 1);
 }
 
 <*
@@ -429,6 +430,42 @@ fn void js_create_texture_material(
 	}
 
 	*out = qjs::int_value((int)made);
+}
+
+<*
+ `material.dispose()` — give back the reference the script's handle holds.
+
+ The prelude has already refused a second call on the same handle, so what
+ reaches here is either a live material or a mistake. The mistake it can still
+ be is a built-in one, and that is refused with `setSide`'s sentence for
+ `setSide`'s reason: `DEFAULT_MATERIAL` belongs to every node that never asked
+ for a material, and it is not a script's to give back.
+
+ What this does *not* do is free anything on its own. See
+ `MeshPass.dispose_material`.
+*>
+fn void js_dispose_material(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	if (catch self.pass.dispose_material(gpu, index))
+	{
+		*out = js.raise(
+			"that material is not in this context, or it is a built-in one that every node shares"
+		);
+		return;
+	}
 }
 
 <*

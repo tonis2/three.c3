@@ -190,6 +190,23 @@ struct Material
 	// wants.
 	float[4] uv_transform;
 	char[PUSH_BUDGET] block;
+	// Whether this slot holds a material at all. False for a slot whose material
+	// was collected, which stays in the list so that every index ever handed out
+	// keeps meaning what it meant — and is handed to the next `create_material`
+	// rather than growing the list forever.
+	//
+	// Never set at a construction site: `MeshPass.claim_slot` is the only thing
+	// that makes a material live, precisely so that C3's zero-fill cannot produce
+	// a material that is dead the moment it is built.
+	bool alive;
+	// Whether the script's handle has been given back — `material.dispose()`.
+	//
+	// **Not the same as dead.** A material is collected when this is true *and*
+	// no node still names it, which is the rule `texture.dispose()` already
+	// follows: giving back a handle is a statement about the handle, and a mesh
+	// that is still drawing with the material is not wrong for doing so.
+	// `MeshPass.collect_materials` is where the two halves meet.
+	bool released;
 }
 
 <*
@@ -286,4 +303,9 @@ fn void Material.free(&self)
 {
 	if (self.fragment.len > 0) self.fragment.free(mem);
 	*self = { };
+	// **Not left at the zero fill.** Zero is a perfectly ordinary texture index —
+	// the hazard `Material.texture` spends a paragraph on — and a collected slot
+	// that reads as naming texture 0 would have that slot released a second time
+	// by `MeshPass.free`'s sweep at teardown.
+	self.texture = NO_TEXTURE;
 }

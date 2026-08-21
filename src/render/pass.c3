@@ -79,6 +79,11 @@ struct MeshPass
 	// xyz: surface-to-light in world space. w: the ambient floor, which keeps
 	// unlit faces readable rather than black.
 	float[4] light;
+	// How many materials have had their handle given back and are still named by
+	// a node. Nonzero is the only thing that makes `record` walk the scene for
+	// collectible materials, so the sweep costs nothing in the overwhelmingly
+	// common case of a scene where nobody has disposed anything.
+	uint pending_materials;
 
 	// Per frame in flight — see the header.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
@@ -133,13 +138,20 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// Both name `NO_TEXTURE` explicitly. Leaving it out would zero-fill the field
 	// to texture 0, so every untextured node in the scene would draw with the
 	// first image any asset happened to upload — see `Material.texture`.
+	//
+	// Both take a reference on the pipeline they draw with, on top of the one
+	// `acquire` gave the field above. Every stored `MeshPipeline*` in this file is
+	// a counted borrow without exception — the alternative, "the pass's own two
+	// are special", is a rule that has to be remembered at every future release.
 	self.materials.init(mem, 4);
-	self.materials.push({
+	self.pipelines.retain(self.pipeline);
+	self.claim_slot({
 		.pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "", .texture = NO_TEXTURE
 	});
 	// No culling for lines: a segment has no facing, and `CULL_MODE_NONE` is what
 	// keeps a wireframe from losing half its edges to a rule about triangles.
-	self.materials.push({
+	self.pipelines.retain(self.line_pipeline);
+	self.claim_slot({
 		.pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "", .texture = NO_TEXTURE
 	});
 
@@ -176,6 +188,37 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 }
 
 <*
+ Put a material in the table and answer the index that names it.
+
+ **The one place a material becomes live.** `alive` is never written at a
+ construction site, so C3's zero fill cannot produce a material that is dead the
+ moment it is built — the mirror of the hazard `Material.texture` describes,
+ where the zero fill produces something that is wrong rather than something that
+ is missing.
+
+ A collected slot is reused before the list grows. That is what keeps an agent
+ building a material per run from growing this table for the life of the
+ process, and it is safe for the same reason the collection was: a slot is only
+ free once no node names it and the script's handle has been given back, so
+ there is no live index left to be surprised by the new occupant.
+*>
+fn uint MeshPass.claim_slot(&self, Material material)
+{
+	material.alive = true;
+
+	foreach (i, &existing : self.materials)
+	{
+		if (existing.alive) continue;
+		*existing = material;
+		return (uint)i;
+	}
+
+	uint index = (uint)self.materials.len();
+	self.materials.push(material);
+	return index;
+}
+
+<*
  Resolve a material index.
 
  @return `The material, or null if the index names nothing — which the draw loop treats as "skip this bucket" rather than as a fault.`
@@ -183,7 +226,12 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 fn Material* MeshPass.material(&self, uint index)
 {
 	if (index >= self.materials.len()) return null;
-	return &self.materials[index];
+	Material* material = &self.materials[index];
+	// A collected slot names nothing. It answers null rather than handing back
+	// the zeroed struct, which would resolve to a null pipeline and crash the
+	// draw loop instead of skipping the bucket the way an unknown index does.
+	if (!material.alive) return null;
+	return material;
 }
 
 <*
@@ -325,6 +373,11 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 {
 	if (!self.ready) return;
 
+	// Before the draw list is built, so a material whose last node died in the
+	// same breath as the dispose does not have its pipeline held for one more
+	// frame than it needs to be. Costs nothing unless something is pending.
+	self.collect_materials(gpu);
+
 	float aspect = (float)target.extent.width / (float)target.extent.height;
 	// Remembered for `frame_camera`, which runs between frames and so has no
 	// target of its own to measure. A resize therefore reaches the next fit.
@@ -403,7 +456,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
 			.base_color = mesh.base_color,
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | (mesh.has_uvs ? FLAG_HAS_UVS : 0),
-			.uv_transform = self.materials[bucket.material].uv_transform_or_identity(),
+			.uv_transform = material.uv_transform_or_identity(),
 		};
 		// **The reflected size, not `MeshPush::size`.** They are not the same
 		// number: Slang reports the 60 bytes the shader uses and the C3 struct
@@ -532,8 +585,9 @@ fn uint? MeshPass.create_material(
 			gpu, target, source, "three.material", SOLID_STATE, diagnostic
 		)!;
 
-		index = (uint)self.materials.len();
-		self.materials.push({
+		// The reference `acquire` handed out is the material's from here — no
+		// retain, because there is no second holder.
+		index = self.claim_slot({
 			.pipeline = pipeline,
 			.cull = cull_for_side(side),
 			.fragment = fragment.copy(mem),
@@ -618,14 +672,16 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
 	// Retained before the push, so the count says the material names the slot
 	// from the first instant it does. A no-op for `NO_TEXTURE`, which names none.
 	self.assets.retain_texture(texture);
-	uint index = (uint)self.materials.len();
-	self.materials.push({
+	// Retained rather than acquired. This borrows the pipeline the pass already
+	// holds instead of asking the cache for the built-in shader again — it knows
+	// the answer — so the reference has to be taken by hand.
+	self.pipelines.retain(self.pipeline);
+	return self.claim_slot({
 		.pipeline = self.pipeline,
 		.cull = cull_for_side(side),
 		.fragment = "",
 		.texture = texture,
 	});
-	return index;
 }
 
 <*
@@ -722,6 +778,106 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 	material.texture = texture;
 }
 
+<*
+ `material.dispose()` — give back the script's reference to a material.
+
+ **Not a free**, and the wording is `texture.dispose()`'s on purpose because the
+ rule is the same one. A material is collected when the handle has been given
+ back *and* no node still names it. Disposing while a mesh is still drawing with
+ it leaves that mesh correct and collects the material when the mesh goes —
+ which is what makes this safe to call as soon as a script is done *referring* to
+ the material, rather than something that has to be timed against the scene.
+
+ The alternative was to refuse the call while a node still names it. That reads
+ stricter and is worse: `new three.Scene()` followed by a rebuild is the shape
+ an agent iterating actually writes, and under a refusal every one of those runs
+ would have to dispose in an order nobody wants to think about.
+
+ **The built-in materials are refused**, for `set_material_side`'s reason.
+ `DEFAULT_MATERIAL` is what every node without a material of its own draws with,
+ so collecting it would take the pipeline out from under the whole scene.
+
+ Disposing twice is not an error — the second call has nothing to give back.
+
+ @param gpu : `For the collection this may trigger. Null defers it to the next one that has a device.`
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+*>
+fn void? MeshPass.dispose_material(&self, Gpu* gpu, uint index)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+	if (material.released) return;
+
+	material.released = true;
+	self.pending_materials++;
+	self.collect_materials(gpu);
+}
+
+<*
+ Free every material whose handle is gone and which no node names.
+
+ Run from `dispose_material`, which is when the first half becomes true, and
+ from `record`, which is the only reliable point at which the *second* half
+ changes: nodes die through `Scene.kill` and through `new three.Scene()`, and
+ neither tells the pass anything. Guarded on `pending_materials`, so a scene
+ nobody has disposed in never walks its nodes for this at all.
+
+ One pass over the nodes rather than one per candidate. The candidates are
+ usually one and the nodes are usually thousands, so the loop that has to be
+ cheap is the one over nodes.
+*>
+fn void MeshPass.collect_materials(&self, Gpu* gpu)
+{
+	if (self.pending_materials == 0) return;
+
+	@pool()
+	{
+		bool[] named = alloc::new_array(tmem, bool, self.materials.len());
+		foreach (&node : self.scene.nodes)
+		{
+			if (!node.alive) continue;
+			if (node.material < named.len) named[node.material] = true;
+		}
+
+		foreach (i, &material : self.materials)
+		{
+			if (!material.alive || !material.released || named[i]) continue;
+			self.free_material(gpu, (uint)i);
+			self.pending_materials--;
+		}
+	};
+}
+
+<*
+ Give back everything one material holds, and empty its slot.
+
+ The texture first and the pipeline second, which is the order the two tables
+ were built in. Both are releases rather than frees: an image several materials
+ share outlives this one, and so does a pipeline — `PipelineCache.release` has
+ the argument for why a last release is still not a destroy.
+*>
+fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
+{
+	Material* material = &self.materials[index];
+
+	// The same wait `set_material_map` makes, for the same reason and only when
+	// this release is the last one: a frame in flight may still be sampling the
+	// image about to be destroyed. The pipeline below needs no equivalent — it
+	// goes through the deletion queue, which is that hazard's other answer, and
+	// routing images through it too is what `plan.md` §2 wants next.
+	//
+	// **This can land inside a frame**, since `record` collects. It lands at the
+	// top of one, before the draw list is built and immediately after the frame's
+	// own fence wait, which is the cheapest moment a stall can happen at — and it
+	// happens only when a disposed material held the last reference to an image.
+	if (gpu != null && self.assets.texture_refs(material.texture) == 1) gpu.wait_idle();
+	self.assets.release_texture(gpu, material.texture);
+
+	self.pipelines.release(gpu, material.pipeline);
+	material.free();
+}
+
 fn void MeshPass.free(&self, Gpu* gpu)
 {
 	for (uint i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -735,9 +891,18 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// afterwards would decrement counts in a freed list. The device is idle by
 	// the time a pass is torn down, so no wait is needed here as it is in
 	// `set_material_map`.
-	foreach (&material : self.materials) self.assets.release_texture(gpu, material.texture);
+	// Live slots only. A collected one released its image when it was collected,
+	// and `Material.free` leaves `texture` at `NO_TEXTURE` so that a second pass
+	// over it here would be a no-op even if this forgot to ask.
+	foreach (&material : self.materials)
+	{
+		if (material.alive) self.assets.release_texture(gpu, material.texture);
+	}
 	self.assets.free(gpu);
-	// Before the cache, which owns the pipelines these borrow.
+	// Before the cache, which owns the pipelines these borrow. No release, unlike
+	// `free_material`: `PipelineCache.free` destroys every entry whatever its
+	// count says, and routing a teardown through the eviction path would push
+	// pipelines into a deletion queue that is about to be drained anyway.
 	foreach (&material : self.materials) material.free();
 	self.materials.free();
 	self.pipelines.free(gpu);

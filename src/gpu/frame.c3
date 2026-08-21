@@ -294,6 +294,13 @@ fn bool? Renderer.frame(&self)
 
 	fence.reset(self.gpu.handle)!;
 
+	// Here rather than beside the fence wait above, and this is load-bearing: the
+	// acquire between them can bail out to `rebuild` without submitting anything,
+	// and an ordinal advanced by a frame that never submitted would credit the
+	// next-but-one frame's fence wait with work it did not cover. `gpu/retire.c3`
+	// has the invariant in full.
+	self.gpu.begin_frame();
+
 	vk::CommandBuffer cmd = self.frames.buffers[slot];
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
@@ -349,6 +356,7 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 	vk::Fence fence = self.frames.fences[slot];
 	fence.wait(self.gpu.handle)!;
 	fence.reset(self.gpu.handle)!;
+	self.gpu.begin_frame();
 
 	vk::CommandBuffer cmd = self.frames.buffers[slot];
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
@@ -386,6 +394,7 @@ fn void? Renderer.render_offscreen(&self)
 	vk::Fence fence = self.frames.fences[slot];
 	fence.wait(self.gpu.handle)!;
 	fence.reset(self.gpu.handle)!;
+	self.gpu.begin_frame();
 
 	vk::CommandBuffer cmd = self.frames.buffers[slot];
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;

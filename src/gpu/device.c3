@@ -143,6 +143,11 @@ struct Gpu
 	// arming.
 	bool validation;
 	ValidationSink sink;
+	// GPU objects given back but not yet destroyable — see `gpu/retire.c3`. Lives
+	// on the device rather than on whatever owns the objects because the frames in
+	// flight are a property of the device, and two owners retiring into two queues
+	// would each have to be swept from the frame loop separately.
+	DeletionQueue deletions;
 }
 
 <*
@@ -367,6 +372,10 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 {
 	self.instance = instance;
 	self.surface = surface;
+	// Before anything below can fail. `Gpu.free` runs on a partially initialised
+	// device and walks this list, and a list is only safe to walk once it owns its
+	// storage — `DeletionQueue.init` has the note.
+	self.deletions.init();
 
 	// Asked twice, because neither question is sufficient on its own.
 	//
@@ -646,10 +655,18 @@ fn void Gpu.free(&self)
 	if (self.handle != null)
 	{
 		self.handle.waitIdle();
+		// After the idle and before the allocator: every retired pipeline is
+		// unreachable by definition once the device is idle, and destroying them
+		// here is what keeps a process that exits mid-queue from leaking whatever
+		// the last two frames gave back.
+		self.drain_deletions();
 		self.allocator.free();
 		self.handle.free();
 		self.handle = (vk::Device)null;
 	}
+	// Owns nothing by now — `drain_deletions` emptied it — but the list's own
+	// storage is still ours to give back.
+	self.deletions.pipelines.free();
 	if (self.debug != null)
 	{
 		self.debug.free(self.instance);
