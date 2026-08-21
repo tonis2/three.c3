@@ -60,6 +60,19 @@ struct MeshPass
 	// The same shader over `LINE_STATE`. `LINE_MATERIAL` is the index that reaches
 	// it, and this is the pointer that index resolves to.
 	MeshPipeline* line_pipeline;
+	// The same shader again, over `ALPHA_STATE` and `ADDITIVE_STATE`. These are
+	// what a `three.MeshLambertMaterial` with `transparent: true` draws with.
+	//
+	// Held here rather than acquired when one is asked for, and that is a design
+	// decision rather than an optimisation: `create_texture_material` promises in
+	// its own doc block that putting a picture on a box needs no device, no Slang
+	// and no new pipeline, and a lazily-acquired variant would break all three the
+	// first time a script wrote `transparent: true`. Building them here costs one
+	// `VkPipeline` each — about a millisecond, no Slang at all, since `acquire`
+	// keys the compile on the source and this is the same `mesh.slang` byte for
+	// byte — and it happens once at startup where nothing is waiting on a frame.
+	MeshPipeline* alpha_pipeline;
+	MeshPipeline* additive_pipeline;
 	// Every material any node can name. Index 0 is `DEFAULT_MATERIAL`, built in
 	// `init` from `pipeline`, so a scene that never mentions a material still has
 	// one. Lives here rather than on `JsRuntime` for the same reason `assets`
@@ -124,6 +137,14 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 		// pipeline creation inside whichever frame first added a box helper, and
 		// the whole point of a debug tool is that reaching for it is free.
 		self.line_pipeline = self.pipelines.acquire(gpu, target, source, path, LINE_STATE)!;
+
+		// And the two blended variants, for the same reason and at the same price.
+		// Neither is claimed by a built-in material — nothing draws with them until
+		// a script asks for a transparent one — so unlike the two above they take
+		// no second reference here: what `acquire` handed back is the pass's own,
+		// and `create_texture_material` retains per material on top of it.
+		self.alpha_pipeline = self.pipelines.acquire(gpu, target, source, path, ALPHA_STATE)!;
+		self.additive_pipeline = self.pipelines.acquire(gpu, target, source, path, ADDITIVE_STATE)!;
 	};
 
 	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
@@ -384,7 +405,30 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	self.aspect = aspect;
 	Matrix4f view_projection = self.camera.view_projection(aspect);
 
-	self.scene.update(&self.assets, view_projection);
+	// **The whole of what `Scene` is told about materials**, and deliberately not a
+	// pointer to them. `Scene.set_material`'s doc block draws the boundary: the
+	// scene graph has no view of `MeshPass.materials`, and giving it one would put
+	// the render pass inside the scene graph to save a loop. Draw ordering needs
+	// exactly one bit per material index — does this one blend — so one bit per
+	// index is what crosses: a flat `bool[]` off the temp arena, built here, read
+	// only for the length of the call.
+	//
+	// Indexed by material index and exactly as long as the table, so a node naming
+	// a material past the end reads as opaque — which is the right answer for a
+	// bucket the draw loop below is going to skip anyway. `alive` is asked for the
+	// same reason `MeshPass.material` asks it: a collected slot names nothing, and
+	// reading a blend mode off one would be reading a material that is not there.
+	// `Material.free` happens to zero the field, so this guard changes no answer
+	// today; it is here so that it never has to.
+	@pool()
+	{
+		bool[] transparent = alloc::new_array(tmem, bool, self.materials.len());
+		foreach (i, &material : self.materials)
+		{
+			transparent[i] = material.alive && material.blend != BlendMode.NONE;
+		}
+		self.scene.update(&self.assets, view_projection, transparent);
+	};
 	if (self.scene.buckets.len() == 0) return;
 
 	FrameBlock frame = { .view_projection = view_projection, .light = self.light };
@@ -445,6 +489,16 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.setImageInfo({ image_info });
 		vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &write);
 
+		// The mesh's own factor, faded by the material's opacity. Multiplied rather
+		// than replaced so that a glTF's own alpha and a script's `opacity` compose
+		// — the file said what the surface is, the script says how much of it to
+		// show — and it is the only place the two meet.
+		//
+		// Costs nothing on an opaque material: `Material.opacity` is 1 unless
+		// somebody set it, and the opaque pipeline discards the alpha regardless.
+		float[4] base_color = mesh.base_color;
+		base_color[3] *= material.opacity();
+
 		MeshPush push = {
 			.frame = frame_address,
 			// Offset on the CPU rather than passed as a base index: the shader
@@ -454,7 +508,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.positions = mesh.positions.address,
 			.normals = mesh.has_normals ? mesh.normals.address : 0,
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
-			.base_color = mesh.base_color,
+			.base_color = base_color,
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | (mesh.has_uvs ? FLAG_HAS_UVS : 0),
 			.uv_transform = material.uv_transform_or_identity(),
 		};
@@ -563,7 +617,14 @@ fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
  with `ok == true` and an agent that never sees its warnings writes the same
  mistake twice.
 
+ The blend mode is part of the pipeline and so is decided here, once. It costs
+ **no extra compile**: the cache keys the SPIR-V on the source and the pipeline
+ on the render state, so a body written twice — once opaque, once transparent —
+ is one Slang call and two `VkPipeline` objects. There is no setter for the same
+ reason; `Material.blend` says why.
+
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
+ @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Baked into the pipeline, so it cannot change afterwards.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
 *>
@@ -574,15 +635,17 @@ fn uint? MeshPass.create_material(
 	String fragment,
 	MaterialUniform[] uniforms,
 	int side = SIDE_FRONT,
+	int blending = BLENDING_NONE,
 	String* diagnostic = null
 )
 {
 	uint index;
+	BlendMode blend = blend_for(blending);
 	@pool()
 	{
 		String source = material_source(fragment, uniforms, tmem)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
-			gpu, target, source, "three.material", SOLID_STATE, diagnostic
+			gpu, target, source, "three.material", state_for_blend(blend), diagnostic
 		)!;
 
 		// The reference `acquire` handed out is the material's from here — no
@@ -590,6 +653,7 @@ fn uint? MeshPass.create_material(
 		index = self.claim_slot({
 			.pipeline = pipeline,
 			.cull = cull_for_side(side),
+			.blend = blend,
 			.fragment = fragment.copy(mem),
 			// A `ShaderMaterial` can be given a `map` afterwards like any other
 			// material — `material.slang` declares the same binding 0 that
@@ -633,14 +697,78 @@ fn void? MeshPass.set_material_side(&self, uint index, int side)
 }
 
 <*
+ `material.opacity = ...` — how much of what is behind this material shows
+ through it.
+
+ Settable, unlike the blend mode beside it, and the difference is the whole
+ shape of this file: opacity is *push data*, multiplied into the alpha `record`
+ sends with the draw, so changing it costs a float and reaches the next frame.
+ Blending is pipeline state, so changing that would cost a pipeline. One is a
+ setter, the other is a constructor argument, and which is which is decided by
+ the hardware rather than by taste.
+
+ **It does nothing on a material that is not transparent**, and that is stated
+ rather than enforced: an opaque pipeline discards the alpha it writes, so the
+ number is stored, reported and simply never read. Refusing it would be refusing
+ the order a script naturally writes things in, and Three.js behaves the same way.
+
+ Stored as its complement — `Material.one_minus_opacity` has the argument, and
+ this is one of the two places that knows.
+
+ **The built-in materials are refused**, for `set_material_side`'s reason:
+ `DEFAULT_MATERIAL` is shared by every node that was never given a material of
+ its own, so fading it would fade the entire scene through a handle that reads
+ like it names one thing. `LINE_MATERIAL` is refused because debug lines draw
+ over everything by design and a half-faded helper is not a thing anyone asked
+ for.
+
+ The range is not checked here. The JS boundary refuses anything outside 0..1 by
+ name, which is where a script's mistake can be reported against the line that
+ made it; this is the floor under that.
+
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+*>
+fn void? MeshPass.set_material_opacity(&self, uint index, float opacity)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+
+	material.one_minus_opacity = 1.0f - opacity;
+}
+
+<*
+ What `material.opacity` reads back as.
+
+ An index that names nothing answers 1.0 rather than faulting, which is
+ `material_uv`'s rule: a getter on a disposed handle should say what a material
+ that never asked for anything would say, and every material starts opaque.
+*>
+fn float MeshPass.material_opacity(&self, uint index)
+{
+	Material* material = self.material(index);
+	if (material == null) return 1.0f;
+	return material.opacity();
+}
+
+<*
  A material that is the built-in shader plus an image — `three.MeshLambertMaterial`.
 
- **No Slang, no device, no new pipeline.** It borrows `self.pipeline`, the very
- one `DEFAULT_MATERIAL` draws with, so building one is a push onto a list and a
- retain. That is why it is its own verb rather than a `ShaderMaterial` with a
- one-line body: putting a picture on a box should not compile a shader, it should
- not be able to fail with a compiler diagnostic, and in a build with no Slang it
- could not happen at all.
+ **No Slang, no device, no new pipeline.** It borrows one of the pass's own
+ pipelines — `self.pipeline` is the very one `DEFAULT_MATERIAL` draws with — so
+ building one is a push onto a list and a retain. That is why it is its own verb
+ rather than a `ShaderMaterial` with a one-line body: putting a picture on a box
+ should not compile a shader, it should not be able to fail with a compiler
+ diagnostic, and in a build with no Slang it could not happen at all.
+
+ **That promise is what makes the blend variants prebuilt.** A blend mode is a
+ pipeline field on this device (`BlendMode` has the measurement), so a
+ transparent material needs a different `VkPipeline` from an opaque one — and
+ building it here would need the `Gpu` and the `Target` this signature does not
+ take, inside whichever frame first said `transparent: true`. `MeshPass.init`
+ builds all three up front instead: same `mesh.slang`, so no Slang call, about a
+ millisecond each, once, at startup. This function stays a list push and a
+ retain, and picks among them.
 
  **It has no colour of its own, deliberately.** `mesh.color` is the per-copy
  channel and `mesh.slang` multiplies it into the sampled texel, so a tinted
@@ -662,23 +790,34 @@ fn void? MeshPass.set_material_side(&self, uint index, int side)
 
  @param texture : `An index into Assets.textures, or NO_TEXTURE for the mesh's own image.`
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
+ @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Selects one of the three pipelines built in init; nothing is compiled here whichever it is.`
  @return `The material index, for Node.material.`
  @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
 *>
-fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FRONT)
+fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FRONT, int blending = BLENDING_NONE)
 {
 	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 
 	// Retained before the push, so the count says the material names the slot
 	// from the first instant it does. A no-op for `NO_TEXTURE`, which names none.
 	self.assets.retain_texture(texture);
-	// Retained rather than acquired. This borrows the pipeline the pass already
+
+	BlendMode blend = blend_for(blending);
+	MeshPipeline* pipeline = self.pipeline;
+	switch (blend)
+	{
+		case ALPHA: pipeline = self.alpha_pipeline;
+		case ADDITIVE: pipeline = self.additive_pipeline;
+		case NONE: break;
+	}
+	// Retained rather than acquired. This borrows a pipeline the pass already
 	// holds instead of asking the cache for the built-in shader again — it knows
 	// the answer — so the reference has to be taken by hand.
-	self.pipelines.retain(self.pipeline);
+	self.pipelines.retain(pipeline);
 	return self.claim_slot({
-		.pipeline = self.pipeline,
+		.pipeline = pipeline,
 		.cull = cull_for_side(side),
+		.blend = blend,
 		.fragment = "",
 		.texture = texture,
 	});
@@ -908,5 +1047,10 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.pipelines.free(gpu);
 	self.pipeline = null;
 	self.line_pipeline = null;
+	// The same treatment and for the same reason: these are borrows into a cache
+	// that has just destroyed every entry it owned, so there is nothing to give
+	// back — only a pointer that must stop looking live.
+	self.alpha_pipeline = null;
+	self.additive_pipeline = null;
 	self.ready = false;
 }

@@ -50,9 +50,18 @@ dynamic body, which is what makes a character possible. `texture.read()`, a uv
 transform per material, and a glTF export that writes a texture a script made.
 Keys a script can hold down, and a budget a script can raise.
 `material.dispose()`, an evicting pipeline cache, and a frame-tagged deletion
-queue underneath both.
+queue underneath both. Transparent and additive materials, asked for when a
+material is built and baked into its pipeline because this device gives no other
+choice, with every blended draw sorted farthest-first and recorded after the
+opaque ones and under the debug lines. Compiled shaders now outlive the process:
+each one is stored under a hash of its own source, entry points and compiler
+arguments and checked against them byte for byte on the way back in, so the
+second sight of any shader on any later run is a millisecond of reading instead
+of seventeen of compiling — and a run that compiles nothing never starts the
+fifty-five millisecond Slang session at all, which is most of why a screenshot
+now takes 0.19 s warm against 0.28 s cold.
 
-	c3c test --trust=full       507 passed, 0 failed, leak-clean
+	c3c test --trust=full       532 passed, 0 failed, leak-clean
 
 **`examples/village` is where most of what follows came from.** A walled village
 wearing nothing but generated textures — eleven `DataTexture`s and no image file
@@ -92,6 +101,16 @@ every one of them is something a person will trust and be wrong about.
   reports a cursor offset vertically by however much it grew. The win32 backend
   reads `GetClientRect` for exactly this; x11 and wayland could ask their own
   equivalents. Not fixed because it cannot be seen from this machine.
+
+- **`ExportBatch` keys on `(asset, mesh)` alone**, so sibling nodes drawing one
+  shape with different materials collapse into a single instanced glTF node
+  wearing the *first* member's material — its texture, and since blending
+  landed, its `alphaMode` too. A wall and a window cut from one pane mesh
+  export as two copies of whichever came first, which is the same shape of bug
+  the old `texture_slot` collapse was: an export that looks right in the count
+  and wrong in the viewer. The fix is the material joining the batch key, which
+  splits the instanced node exactly where the frame's own buckets already
+  split. Surfaced by the blending work, not caused by it.
 
 ---
 
@@ -154,6 +173,48 @@ the decision can be revisited on evidence rather than on somebody's mood.
   of debris. Triplanar projection in the shader is probably less work than an
   unwrap, and an extrude/prism primitive with real uvs would cover the
   flat-sided cases outright.
+
+- **glTF `alphaMode` is written on export and ignored on import.** A `.glb`
+  authored with `BLEND` loads and renders opaque, because consuming it at load
+  would mean the loader creating material slots — and the loader has no concept
+  of a material at all: `upload_primitive` folds `baseColorFactor` and
+  `baseColorTexture` into the `GpuMesh` and there is nowhere for a blend mode to
+  live. That is the same missing unit as the per-material-loading entry above,
+  and it should be answered once rather than twice. The workaround is one script
+  line — `mesh.material = new three.MeshLambertMaterial({ transparent: true })`
+  — which is why the export side closed on its own: this engine's own round trips
+  are honest, and only somebody else's file is affected. **Trigger:** shipped
+  assets that rely on it, or a round trip through a tool that authors blending.
+
+- **The driver's own pipeline cache is not persisted.** `shader/disk_cache.c3`
+  keeps the seventeen-millisecond half of a shader — the Slang compile — and
+  leaves the remaining millisecond, the driver turning SPIR-V into a
+  `VkPipeline`, to be paid on every run. Keeping that half means
+  `vkCreatePipelineCache` with a blob read off disk, which is a second binary
+  format with a second and stricter validity rule: the blob is only valid for the
+  device's `pipelineCacheUUID`, a driver update invalidates it with no error, and
+  a driver handed a blob from elsewhere is entitled to do anything at all. So it
+  needs the same header, version and identity treatment the shader cache has,
+  written a second time, to save about a millisecond per distinct pipeline out of
+  a startup that is now under two hundred. **Trigger:** pipeline creation
+  measurably hurting startup — a scene with dozens of distinct materials, or a
+  post chain rebuilt often enough to notice.
+
+- **The Slang version is not in the shader cache key.** `lib/slang.c3l` exposes
+  no compiler version — there is no build tag, no version query and nothing
+  version-shaped anywhere in the binding — so a stored module is keyed on its
+  source, its entry points, `SLANG_ARGUMENTS` and `SHADER_CACHE_FORMAT_VERSION`,
+  and on nothing whatever about the compiler that produced it. Upgrading the SDK
+  therefore leaves `build/shader-cache` full of modules built by a compiler that
+  is no longer installed, and they will be loaded and used. The manual lever is
+  the format version: bump it and every stored module fails the loader's version
+  check, which `the_cache_key_covers_the_arguments_and_the_format_version` is
+  what keeps in place. The blunt lever is `rm -rf build/shader-cache`. Hashing
+  `libslang.dylib` was considered and refused — 35 MB of reading per process to
+  save seventeen milliseconds. **Trigger:** a Slang upgrade that emits different
+  SPIR-V for identical source. Expect it to arrive as "the shader still behaves
+  the way it did before the upgrade", true on a machine whose cache is warm and
+  not reproducible on one whose cache is empty.
 
 - **A stale asset handle is refused at `add()`, not at `new three.Mesh()`.** The
   constructor validates the shape of what it was handed and not the liveness of
@@ -521,6 +582,54 @@ Live, all of them. Each cost real time and none is visible in a diff.
   `VK_KHR_push_descriptor` are both required by name. The requested API version
   is 1.3, so push descriptors are an extension here rather than the core feature
   they became in 1.4.
+- **A cache that outlives the process makes a test pass for a different reason on
+  its second run.** `shader/disk_cache.c3` is on by default and writes to
+  `build/shader-cache`, so the first `c3c test` after a shader changes compiles
+  it and every later one loads it. A check written on `PipelineCache.compiles` is
+  then green on run one because Slang ran exactly once, and green on run two
+  because Slang never ran at all — one assertion measuring two different things,
+  and the run that would have caught a regression is the one where the counter is
+  stuck at zero for reasons of its own. Nothing in a diff shows this: the
+  variable is *when* you ran, not what you changed, and it flips the first time
+  somebody runs the suite twice. The fix is a convention rather than a mechanism.
+  Every test that reads either cache says which one it means on its **first**
+  line — `shader_cache_set_dir("")` for the six that count in-memory compiles, a
+  scratch directory of the test's own for the ones that are about the disk — set
+  at the start and never restored at the end, because a `defer` does not survive
+  a failing check (above) and a restore is precisely the line that does not run
+  on the run that needed it. **Anything asserting that work was avoided has to
+  name the cache it means.**
+- **An extension being present says nothing. The feature bits are the answer,
+  and they have to be read on the device.** `VK_EXT_extended_dynamic_state3` is
+  advertised by KosmicKrisp on an Apple M5 and every one of its colour-blend bits
+  is zero — `ColorBlendEnable`, `ColorBlendEquation` and `ColorWriteMask` all
+  false — so `vkCmdSetColorBlendEnableEXT` is unusable on the device this project
+  targets. Metal carries blending in `MTLRenderPipelineColorAttachmentDescriptor`,
+  inside the compiled pipeline state, with no encoder command to change it
+  mid-pass; `PolygonMode` and the multisample bits are zero for the same kind of
+  reason. What *is* set on that device: `DepthClampEnable`, `DepthClipEnable`,
+  `SampleLocationsEnable`, `ProvokingVertexMode`, `LineRasterizationMode`,
+  `TessellationDomainOrigin`, `DepthClipNegativeOneToOne`.
+
+  **This is the exact inverse of the topology case in `gpu/pipeline.c3`**, and
+  both halves are worth holding at once. There the bit says no
+  (`dynamicPrimitiveTopologyUnrestricted` false) and the driver honours the
+  switch anyway, pixel for pixel, because Metal takes the primitive type at draw
+  time — so the bit understates what works. Here the bit says no and means it.
+  Neither direction is derivable from the extension list; a five-line probe
+  calling `vkGetPhysicalDeviceFeatures2` answers in one run and is the only thing
+  that should be trusted.
+
+  The consequence for the transparency entry at the end of this file: **a blend
+  mode is a field of `PipelineState`, not a command.** That is cheap — a closed
+  enum of three or four values shared by every material that asks, so a handful
+  of pipelines for the process, and `PipelineCache` already keys on
+  `PipelineState`. It is nothing like `material.side`, which is a per-material
+  axis an agent varies freely and is exactly why the cull mode went dynamic.
+- **A passing `c3c test` check prints nothing.** The runner captures a check's
+  output and shows it only on failure, so `io::printn` in a green test is
+  invisible on both stdout and stderr — which reads as "the probe did not run".
+  Write the answer to a file, or assert on it.
 - **Two frames in flight means any buffer the GPU may still be reading must be
   double-buffered.** The per-frame instance buffer is one buffer per frame slot,
   written and grown only after that slot's fence has been waited on.
@@ -535,6 +644,19 @@ Live, all of them. Each cost real time and none is visible in a diff.
   picture convincing enough that four tests had to say so. The only trustworthy
   check is comparing the artifacts. There is no shader build step any more, which
   is the only real fix.
+- **Blend arithmetic happens in linear light behind an `_SRGB` attachment**, so a
+  test expectation computed in sRGB space is simply wrong. The hardware decodes
+  the destination, blends, and encodes on write: a half-and-half mix comes back as
+  `encode(0.5·a + 0.5·b)` and not as the average of the two encoded values. The
+  two differ by **tens of eight-bit levels** through the whole mid-range: 146
+  against 100 in one channel of the fixture in
+  `a_transparent_material_blends_with_what_is_behind_it`, and 188 against 128 for
+  a half mix of black and white. Far outside any tolerance worth having, so a
+  check written the wrong way round fails against correct code and reads like a
+  blending bug. Compounding it, a *generated* shape
+  is not white: `PRIMITIVE_COLOR` is 0.78, 0.78, 0.80 sRGB and `mesh.color`
+  multiplies it, so `mesh.color = 0xff0000` renders 199 and not 255. Both are
+  written down once, in `encode_srgb` and `primitive_linear` in `js_test.c3`.
 - **A pixel is a square, and its coordinate is a corner.** The rasterizer decides
   coverage at the pixel's *centre*, so anything claiming to agree with the
   picture — a picker, a hit test, a readback comparison — has to add the half.
@@ -697,15 +819,25 @@ for doing the binding first.
   write. The camera's half of the argument stands — a turntable is not a
   `perspective` camera with a transform, and inventing one would be exporting a
   fiction. Splitting this entry is the next edit to it.
-- **No per-instance texture, and no per-instance alpha blending.** `color.a`
-  reaches `shade()` and the opaque pipeline does not blend with it
-  (`gpu/pipeline.c3:473` sets `blendEnable` false). Transparency is a sort order
-  and a pipeline state, not a channel. `examples/village` fades its chimney smoke
-  by walking the colour toward white and shrinking the sphere, which is what the
-  absence costs and is a fair price until something has to be seen *through*
-  rather than faded. **Trigger:** water, glass or foliage cards — at which point
-  the work is back-to-front ordering against instanced buckets, not the blend
-  state, and alpha-to-coverage is probably the cheaper first answer for cutouts.
+- **No per-instance texture, and no alpha-to-coverage. Blending itself is
+  done.** This entry used to read "no per-instance alpha blending", and it named
+  its own trigger — "water, glass or foliage cards, at which point the work is
+  back-to-front ordering against instanced buckets, not the blend state" — which
+  is exactly the work that was then done. A blend mode is a `PipelineState` field
+  and a cache key (dynamic blend state is unusable here, §10), `mesh.color.a`
+  fades one copy of a shared draw call, and every transparent bucket is sorted
+  farthest-first against the near plane and recorded after the opaque ones.
+  `examples/village` no longer has to fade its chimney smoke by walking the
+  colour toward white.
+
+  What is still absent, and why. **Per-instance texture**: an instance carries a
+  colour and a variant, and a texture per copy would need bindless or an atlas,
+  either of which changes what a draw call is. **Alpha-to-coverage** — still the
+  cheaper first answer for cutouts than sorting — is static pipeline state that
+  needs a multisampled target, and the offscreen one is not multisampled.
+  **Sorting inside one instanced bucket**: copies fused into a single draw cannot
+  be depth-ordered against each other, which is three.js's limit too, and the
+  cost of the fix is the batching this project exists to keep.
 - **No line width, and no fourth debug-line shape.** `wideLines` is false on the
   bundled driver, so every line here is one pixel and there is nothing to set.
 - **No helper that follows its object.** `BoxHelper.update()` is called by hand,

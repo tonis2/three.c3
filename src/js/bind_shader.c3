@@ -34,10 +34,12 @@ import qjs;
 *>
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "createMaterial", &js_create_material, 5);
-	self.bind(host, "createTextureMaterial", &js_create_texture_material, 2);
+	self.bind(host, "createMaterial", &js_create_material, 6);
+	self.bind(host, "createTextureMaterial", &js_create_texture_material, 3);
 	self.bind(host, "setUniform", &js_set_uniform, 9);
 	self.bind(host, "setSide", &js_set_side, 2);
+	self.bind(host, "setOpacity", &js_set_opacity, 2);
+	self.bind(host, "getOpacity", &js_get_opacity, 1);
 	self.bind(host, "setMap", &js_set_map, 2);
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
@@ -166,6 +168,11 @@ fn void js_create_material(
 		// side could be named — `cull_for_side` maps anything it does not know
 		// there too, and the prelude has already refused an unknown value by name.
 		int side = argc > 4 ? arg_int(&js, argc, args, 4) : SIDE_FRONT;
+		// Absent means `BLENDING_NONE`, which is what every material meant before
+		// one could ask to blend — and is what `Material._resolveBlending` answers
+		// for a script that named neither `transparent` nor `blending`. `blend_for`
+		// maps anything it does not know there too.
+		int blending = argc > 5 ? arg_int(&js, argc, args, 5) : BLENDING_NONE;
 
 		String diagnostic;
 		uint? made = self.pass.create_material(
@@ -174,7 +181,10 @@ fn void js_create_material(
 			fragment,
 			uniforms.array_view(),
 			side,
-			&diagnostic
+			blending,
+			// Named, so that an argument arriving between `blending` and the
+			// diagnostic does not have to be threaded through here.
+			diagnostic: &diagnostic
 		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
@@ -335,6 +345,63 @@ fn void js_set_side(
 }
 
 <*
+ `material.opacity = 0.5` — how much of what is behind this material shows
+ through it.
+
+ A verb rather than a uniform, and unlike `material.side` it is not render state
+ either: it is one float in the push block, written into `base_color.a` at record
+ time. So it is free to animate — no pipeline, no device, no rebuild — which is
+ the whole reason it is settable while `blending` is not.
+
+ **It does nothing unless the material was built transparent.** An opaque
+ pipeline discards the alpha the fragment writes, so setting this on a material
+ that never asked to blend changes a number and no pixels. That is the hardware's
+ answer rather than a rule anybody chose, and it is Three.js's behaviour as well;
+ refusing the write instead would make the two APIs disagree about a line an
+ agent is very likely to write from memory.
+
+ The prelude has already refused a value outside 0..1 by name, so what reaches
+ here is a number in range or a caller that went around the prelude.
+*>
+fn void js_set_opacity(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	if (catch self.pass.set_material_opacity(index, arg_float(&js, argc, args, 1)))
+	{
+		// `js_dispose_material`'s sentence, because it is the same pair of
+		// mistakes: an index this context never handed out, or one of the two
+		// built-ins, which belong to every node that never asked for a material.
+		*out = js.raise(
+			"that material is not in this context, or it is a built-in one that every node shares"
+		);
+		return;
+	}
+}
+
+<*
+ `material.opacity` — what it reads back as.
+
+ An index that names nothing answers 1.0 rather than throwing, which is
+ `getMaterialUv`'s rule: a getter should answer what a material that was never
+ asked for anything would answer. The prelude's `_index()` has already thrown for
+ a disposed handle before this is reached.
+*>
+fn void js_get_opacity(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	*out = qjs::number_value((double)self.pass.material_opacity((uint)arg_int(&js, argc, args, 0)));
+}
+
+<*
  `material.repeat = [u, v]` / `material.offset = [u, v]` — how the image is laid
  across the surface.
 
@@ -402,7 +469,7 @@ fn void js_get_material_uv(
  refuses a runtime with no GPU by name. So the check below is about the texture
  and not about the device.
 
- @param [in] args : `(texture, side).`
+ @param [in] args : `(texture, side, blending).`
 *>
 fn void js_create_texture_material(
 	qjs::ContextRef ctx,
@@ -419,8 +486,12 @@ fn void js_create_texture_material(
 	int texture = arg_int(&js, argc, args, 0);
 	// Absent means `SIDE_FRONT`, matching `js_create_material`.
 	int side = argc > 1 ? arg_int(&js, argc, args, 1) : SIDE_FRONT;
+	// And absent means `BLENDING_NONE`, for the same reason. The pass has all
+	// three variants of the built-in pipeline built already, so this stays the
+	// list push and retain its doc block promises whichever one arrives.
+	int blending = argc > 2 ? arg_int(&js, argc, args, 2) : BLENDING_NONE;
 
-	uint? made = self.pass.create_texture_material(texture, side);
+	uint? made = self.pass.create_texture_material(texture, side, blending);
 	if (catch made)
 	{
 		*out = js.raise(

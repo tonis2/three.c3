@@ -57,7 +57,9 @@ struct PushData
     float3* positions;
     float3* normals;
     float2* uvs;
-    float4 base_color;      // rgb: albedo factor. a: the alpha `fragmentMain` returns.
+    // rgb: albedo factor. a: the material's opacity, folded into the mesh's own
+    // alpha on the C3 side. `fragmentMain` multiplies it by the instance's.
+    float4 base_color;
     uint flags;
     // xy repeat, zw offset. See `mesh.slang`. It is one of the **eight** fields
     // the mesh contract pins now, so material uniforms still only ever go after
@@ -218,10 +220,16 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // class of failure this project spends its comments on.
     s.variant = min(input.variant, MATERIAL_ROWS - 1u);
 
-    // **Alpha is not the agent's to return.** `shade` answers with linear rgb and
-    // the alpha comes from the material's base colour, so a body cannot make
-    // geometry invisible by accident — a failure that looks like nothing
-    // rendered rather than like a shader bug, and therefore one an agent spends
-    // its budget on the wrong file for.
-    return float4(shade(s), push.base_color.a);
+    // **Alpha is still not the agent's to return**, and blending did not change
+    // that. `shade` answers with linear rgb; the alpha is the material's own
+    // opacity times this copy's `mesh.color.a`, which is to say it is decided by
+    // whoever built the material and whoever placed the instance — never by the
+    // body. A *body* therefore cannot make geometry invisible by accident, which
+    // is the failure that looks like nothing rendered rather than like a shader
+    // bug, and so is the one an agent spends its budget on the wrong file for. A
+    // *script* can, deliberately, by asking for it in the two places that say so.
+    //
+    // It also does nothing unless the material was built transparent: an opaque
+    // pipeline writes no alpha. See `BlendMode`.
+    return float4(shade(s), push.base_color.a * input.color.a);
 }

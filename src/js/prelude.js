@@ -625,6 +625,28 @@
 	const BackSide = 1;
 	const DoubleSide = 2;
 
+	// How a material's colour combines with what is already on the screen.
+	// Three.js's names and Three.js's numbers again — see `blend_for` in
+	// scene/material.c3, which is where these stop being a convention and become
+	// a Vulkan blend state.
+	//
+	// `NoBlending` is the default and that is worth reading twice, because it is
+	// the opposite of what "a material has an opacity" suggests: an opaque
+	// pipeline throws the alpha away, so `opacity` on a material that never asked
+	// to blend does nothing at all. Three.js behaves the same way. Ask for
+	// `{ transparent: true }` — or for a blending mode by name — and the opacity
+	// starts meaning something.
+	const NoBlending = 0;
+	const NormalBlending = 1;
+	const AdditiveBlending = 2;
+
+	// What `material.transparent = true` and `material.blending = ...` answer.
+	// Written once because the two refusals are the same refusal, and two copies
+	// of a sentence are two things to keep in step.
+	const BLENDING_IS_BAKED =
+		'blending is baked into the pipeline on this device — build a new material '
+		+ 'with { transparent } or { blending } instead';
+
 	// An image on the device, and the handle a script holds it by.
 	//
 	// Three.js's TextureLoader is asynchronous and hands back a Texture that
@@ -800,9 +822,14 @@
 	// a third arrives, and the edit that gets forgotten is the one that makes a
 	// perfectly good material throw.
 	class Material {
-		constructor(handle, side) {
+		constructor(handle, side, blending = NoBlending) {
 			this._m = handle;
 			this._side = side;
+			// Stored rather than asked for, because there is nothing to ask: the
+			// blend mode is baked into the pipeline the handle names and the host
+			// has no verb that reads one back. It cannot go stale either — see the
+			// setter, which is a throw.
+			this._blending = blending;
 			this._map = null;
 		}
 
@@ -868,6 +895,51 @@
 			if (v === this._side) return;
 			H.setSide(index, v);
 			this._side = v;
+		}
+
+		// Whether this material blends with what is already on the screen, and
+		// how.
+		//
+		// `transparent` is Three.js's flag and `blending` is Three.js's mode; here
+		// the first is derived from the second, because a material that blends is
+		// exactly a material whose mode is not NoBlending and two fields that can
+		// disagree about one fact are a bug waiting for a script to write both.
+		//
+		// **Both are read-only, and that is a property of this device rather than
+		// a design preference.** Metal bakes blending into the compiled pipeline
+		// state, so the Vulkan driver here reports every dynamic colour-blend
+		// feature as false (`plan.md` §10 has the probe). Changing this would mean
+		// building another pipeline, which needs the device, the target and the
+		// assembled shader source read back out of a cache — all to save a script
+		// the one line that builds the material it meant.
+		get transparent() { return this._blending !== NoBlending; }
+
+		set transparent(v) { throw new TypeError(BLENDING_IS_BAKED); }
+
+		get blending() { return this._blending; }
+
+		set blending(v) { throw new TypeError(BLENDING_IS_BAKED); }
+
+		// How much of this material shows, 0 to 1.
+		//
+		// **Settable and free**, unlike `blending`: it is one float in the push
+		// block, so an animation callback may write it every frame and nothing is
+		// rebuilt. It multiplies whatever alpha the mesh itself carries, so a
+		// glTF's own transparency and a script's fade compose rather than one
+		// overwriting the other.
+		//
+		// **It does nothing unless the material was built transparent.** An opaque
+		// pipeline discards the alpha the shader writes, so this reads back as the
+		// number that was set and the picture does not move. That is the hardware's
+		// answer rather than a rule chosen here, and it is Three.js's behaviour
+		// too — `opacity` without `transparent` is inert there as well.
+		get opacity() { return H.getOpacity(this._index()); }
+
+		set opacity(v) {
+			if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+				throw new TypeError('`opacity` wants a number from 0 to 1, not ' + String(v));
+			}
+			H.setOpacity(this._index(), v);
 		}
 
 		// The base colour image, or null.
@@ -945,17 +1017,59 @@
 			}
 		}
 
+		static _checkBlending(v) {
+			if (v !== NoBlending && v !== NormalBlending && v !== AdditiveBlending) {
+				throw new TypeError(
+					'`blending` wants three.NoBlending, three.NormalBlending or three.AdditiveBlending, not '
+					+ String(v)
+				);
+			}
+		}
+
+		// Which blend mode a material's options add up to.
+		//
+		// Two spellings of one thing, so there has to be a rule about which wins,
+		// and it is Three.js's: **an explicit `blending` wins**. That is what makes
+		// `{ transparent: true, blending: three.NoBlending }` an opaque material in
+		// both APIs rather than a contradiction one of them resolves the other way.
+		// With no `blending` at all, `transparent: true` is NormalBlending — which
+		// is the line an agent writes from memory of Three.js and has to work.
+		//
+		// A `transparent` that is not a boolean is refused by name rather than
+		// coerced: `transparent: 0.5` is somebody meaning `opacity`, and a truthy
+		// test would silently build a blended pipeline and leave the surface fully
+		// opaque, which is the shape of failure that gets blamed on the renderer.
+		static _resolveBlending(options) {
+			if (options.blending !== undefined) {
+				Material._checkBlending(options.blending);
+				return options.blending;
+			}
+			if (options.transparent === undefined) return NoBlending;
+			if (typeof options.transparent !== 'boolean') {
+				throw new TypeError(
+					'`transparent` wants true or false, not ' + String(options.transparent)
+					+ ' — for a partial fade, set opacity'
+				);
+			}
+			return options.transparent ? NormalBlending : NoBlending;
+		}
+
 		toJSON() {
 			return {
 				type: this.constructor.name,
 				side: this._side,
+				transparent: this.transparent,
+				blending: this._blending,
 				map: this._map?.toJSON() ?? null,
 				alive: this.alive,
 				// Only for a live material. A disposed one has no transform to
 				// report and `_index` would throw out of a `JSON.stringify`, which
-				// is the one place a throw is least expected.
+				// is the one place a throw is least expected. `opacity` crosses to
+				// the host the same way and is null for the same reason; `blending`
+				// is remembered on this side and survives the dispose.
 				repeat: this.alive ? this.repeat : null,
 				offset: this.alive ? this.offset : null,
+				opacity: this.alive ? this.opacity : null,
 			};
 		}
 	}
@@ -982,17 +1096,31 @@
 	class MeshLambertMaterial extends Material {
 		constructor(options = {}) {
 			if (options === null || typeof options !== 'object') {
-				throw new TypeError('new three.MeshLambertMaterial({ map, side }) wants an options object');
+				throw new TypeError(
+					'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity }) wants an options object'
+				);
 			}
 			const { map = null, side = FrontSide } = options;
 			if (map !== null && map !== undefined && !(map instanceof Texture)) {
 				throw new TypeError('`map` wants a three.texture(path), or null for none');
 			}
 			Material._checkSide(side);
+			// Before `super`, because the blend mode is part of what the material
+			// is made of: it chooses which of the three pipelines the pass built at
+			// startup this handle names. Nothing is compiled either way.
+			const blending = Material._resolveBlending(options);
 
 			const texture = map ?? null;
-			super(H.createTextureMaterial(texture === null ? NoTexture : texture._index(), side), side);
+			super(
+				H.createTextureMaterial(texture === null ? NoTexture : texture._index(), side, blending),
+				side,
+				blending,
+			);
 			this._map = texture;
+			// After `super`, because it is a write through the handle rather than a
+			// part of it — and the setter is what refuses a value outside 0..1, so
+			// the option and the property are checked by exactly one piece of code.
+			if (options.opacity !== undefined) this.opacity = options.opacity;
 		}
 	}
 
@@ -1023,6 +1151,10 @@
 				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
 			}
 			Material._checkSide(side);
+			// After the fragment and the uniforms, so that a material with a
+			// missing body is told about the body first — the blend mode is the
+			// least of what is wrong with it.
+			const blending = Material._resolveBlending(options);
 
 			// The enumeration happens here because it cannot happen in the host:
 			// the QuickJS shim exposes property *get* by name and nothing that
@@ -1052,8 +1184,10 @@
 				shapes.map(s => s[0]).join(','),
 				shapes.map(s => s[1]).join(','),
 				side,
-			), side);
+				blending,
+			), side, blending);
 			this.fragment = fragment;
+			if (options.opacity !== undefined) this.opacity = options.opacity;
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 
@@ -1192,6 +1326,11 @@
 			return {
 				fragment: this.fragment,
 				side: this._side,
+				transparent: this.transparent,
+				blending: this._blending,
+				// Live only, for `Material.toJSON`'s reason: reading it is a host
+				// crossing and a disposed handle has nothing to cross with.
+				opacity: this.alive ? this.opacity : null,
 				map: this._map?.toJSON() ?? null,
 				uniforms: { ...this._values },
 			};
@@ -2485,6 +2624,16 @@
 		BackSide,
 		DoubleSide,
 
+		// `material.blending`, and Three.js's numbers for the same reason. The
+		// usual way to reach for one of these is `{ transparent: true }`, which
+		// means NormalBlending; name a mode when what you want is the other one.
+		// Three.js's Subtractive and Multiply are 3 and 4 there and are not here,
+		// and their numbers are left free so they can arrive without renumbering
+		// anything a script hardcoded.
+		NoBlending,
+		NormalBlending,
+		AdditiveBlending,
+
 		// Exported for `instanceof` and for building one by hand, which a script
 		// wants when it is describing a volume the scene does not hold yet — a
 		// plot to fill, a gap to check. Neither is constructed by the host.
@@ -3003,6 +3152,9 @@
 				properties: [
 					'map (a three.texture, or null; wins over whatever image the mesh itself carries)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide)',
+					'transparent (whether it blends; derived from blending, and read-only — see blending)',
+					'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
+					'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
 					'alive (false once dispose() has been called on it)',
@@ -3040,7 +3192,7 @@
 				methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 			},
 			MeshLambertMaterial: {
-				construct: 'new three.MeshLambertMaterial({ map, side })',
+				construct: 'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity })',
 				note:
 					'The built-in shader with an image on it — the material to reach for when what you '
 					+ 'want is a picture on a shape. It compiles nothing and cannot fail with a shader '
@@ -3052,6 +3204,9 @@
 				properties: [
 					'map (a three.texture, or null; settable)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable)',
+					'transparent (whether it blends; derived from blending, and read-only — see blending)',
+					'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
+					'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
 					'alive (false once dispose() has been called on it)',
@@ -3059,19 +3214,25 @@
 				methods: ['dispose()', 'toJSON()'],
 			},
 			ShaderMaterial: {
-				construct: "new three.ShaderMaterial({ fragment, uniforms, side })",
+				construct: "new three.ShaderMaterial({ fragment, uniforms, side, transparent, blending, opacity })",
 				note:
 					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
 					+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo) '
 					+ 'and variant (its row of the table, clamped). Each uniform is readable in the body by '
 					+ 'its own name; a uniform written as an array of arrays is a table column, read as '
 					+ 'name[s.variant]. Compiles on construction, so a bad shader throws here, carrying the '
-					+ 'Slang diagnostic with the line number you wrote. Needs a GPU device.',
+					+ 'Slang diagnostic with the line number you wrote. Needs a GPU device. '
+					+ 'shade() returns rgb and never alpha: how much of the surface shows is the '
+					+ 'material\'s opacity times this copy\'s mesh.color alpha, so a body cannot make '
+					+ 'geometry invisible by accident and a script can, deliberately.',
 				properties: [
 					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
 					'fragment',
 					'map (a three.texture, or null; sampled as Surface.albedo before your shade() runs)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
+					'transparent (whether it blends; derived from blending, and read-only — see blending)',
+					'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
+					'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
 					'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 					'offset ([u, v]: where the map starts, in whole repeats)',
 					'alive (false once dispose() has been called on it)',
@@ -3536,7 +3697,11 @@
 			'mesh.color':
 				'This copy\'s own tint, multiplied into albedo. [r, g, b], [r, g, b, a], {r, g, b} or a hex '
 				+ 'number like 0xff8800. Costs no draw call: copies of one mesh may all differ. Works with no '
-				+ 'material at all, and reaches a shade() body as s.color with albedo already tinted.',
+				+ 'material at all, and reaches a shade() body as s.color with albedo already tinted. '
+				+ 'The fourth channel fades this copy when — and only when — its material was built '
+				+ 'transparent: it multiplies the material\'s own opacity, so one of a thousand copies '
+				+ 'sharing a draw call can be half there while the rest are solid. On an opaque material '
+				+ 'the alpha is discarded by the pipeline and changes nothing.',
 			'mesh.variant':
 				'Which row of the material\'s uniform table this copy draws with, as s.variant in the body. '
 				+ 'Costs no draw call either. Zero and meaningless until the material declares a table; past '
@@ -3566,6 +3731,22 @@
 				'Both at once. ambient may be omitted to leave it alone. There is no second light, no colour '
 				+ 'per light and no shadow, which is why this is not scene.add(new DirectionalLight(...)) — '
 				+ 'a name Three.js has would be read as a promise of the three things it cannot do.',
+			'three.NoBlending / three.NormalBlending / three.AdditiveBlending':
+				'The values material.blending takes — 0, 1 and 2, Three.js\'s numbers again. '
+				+ 'NormalBlending is what { transparent: true } means and is what glass, water and a '
+				+ 'foliage card want; AdditiveBlending never darkens what is behind it and is what fire, '
+				+ 'a glow and a beam want. Both are decided when the material is constructed and neither '
+				+ 'can be assigned afterwards: this device bakes blending into the pipeline, so changing '
+				+ 'it is building another material, which is one line. Three things follow and are worth '
+				+ 'knowing before a scene is built on them. Transparent draws are sorted farthest-first '
+				+ 'against the near plane and drawn after every opaque one, so glass shows the wall '
+				+ 'behind it. Copies inside ONE instanced bucket are not sorted against each other — '
+				+ 'they are one draw call, and the depth order within it is whatever the vertex order '
+				+ 'is; Three.js\'s per-object sort has the same limit, and the fix in both is to space '
+				+ 'the panes out or split them. And a transparent frame may issue more draw calls than '
+				+ 'stats().drawCalls reports, deliberately: depth interleaving splits buckets and the '
+				+ 'split depends on where the camera is, so stats() answers what the scene costs rather '
+				+ 'than what this angle cost. The number is a floor, never an over-estimate.',
 			'three.FrontSide / three.BackSide / three.DoubleSide':
 				'The values material.side takes — 0, 1 and 2, the same numbers Three.js gives them. '
 				+ 'BackSide keeps the back faces, which is what makes a sphere visible from inside: it is '

@@ -138,14 +138,27 @@ struct SceneStats
 // uints and narrowing either half to make room would be a silent wrap rather
 // than an error. Two compares instead of one is the cheaper price.
 //
-// Material leads the sort so that consecutive buckets share a pipeline wherever
-// they can, which is what keeps the per-bucket `cmdBindPipeline` from thrashing
-// once a scene uses more than one material.
+// `order` leads the sort and is the material index for everything that is not
+// blended or a line, so consecutive buckets share a pipeline wherever they can —
+// which is what keeps the per-bucket `cmdBindPipeline` from thrashing once a
+// scene uses more than one material. The two bands above it buy correctness with
+// exactly as much of that locality as they have to; see `draw_order`.
 struct Draw @local
 {
 	uint material;
 	ulong key;
 	uint slot;
+	// Where this draw sits in the frame — `draw_order`'s answer, not the material
+	// index. **Computed at push time because the comparator cannot compute it**:
+	// `quicksort` takes a captureless function pointer, so the sort has no way to
+	// reach a table saying which materials are transparent, and the only place
+	// that knowledge exists is the loop below that was handed it.
+	uint order;
+	// Signed distance from the near plane to the world-bounds centre, for the
+	// back-to-front sort. Zero for an opaque draw, which never pays for it: the
+	// blended pipelines write no depth, so ordering is what stands in for the
+	// depth buffer, and only the draws that lost the depth buffer need it.
+	float depth;
 }
 
 struct Scene
@@ -1169,13 +1182,21 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 <*
  Bring the world matrices up to date and rebuild the draw list for a camera.
 
- @param view_projection : `What the frustum is derived from. Culling is skipped entirely when Scene.cull is false.`
+ The near plane goes in **whether or not culling is on**, and the two uses of the
+ frustum are worth separating because they are now genuinely different questions.
+ Culling asks whether a box is inside six planes and is a performance choice a
+ script can turn off; the depth sort asks how far along the view direction a
+ transparent draw sits, and turning that off would not make the frame faster, it
+ would make it wrong. So `self.cull` gates the frustum pointer and nothing else.
+
+ @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
+ @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes; see MeshPass.record for why this crosses as a flat slice.`
 *>
-fn void Scene.update(&self, Assets* assets, Matrix4f view_projection)
+fn void Scene.update(&self, Assets* assets, Matrix4f view_projection, bool[] transparent = {})
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	self.build_draw_list(assets, self.cull ? &frustum : null);
+	self.build_draw_list(assets, self.cull ? &frustum : null, transparent, &frustum.planes[4]);
 	// Promoted here rather than inside `build_draw_list`, because this call is
 	// what "a frame happened" means and the other caller is a query. Assigned
 	// unconditionally: with `cull` off nothing was dropped and zero is the honest
@@ -1187,21 +1208,44 @@ fn void Scene.update(&self, Assets* assets, Matrix4f view_projection)
 // ----------------------------------------------------------------------------
 
 <*
+ Where every transparent draw sits, whatever material it names.
+
+ One band above every opaque material and one below the lines. A real material
+ index colliding with it would need four billion materials in one context, which
+ is several orders of magnitude past the point at which the `List{Material}`
+ holding them stopped fitting in memory — so this is a reserved band rather than
+ a value anything has to be checked against.
+*>
+const uint TRANSPARENT_ORDER = 0xfffffffe;
+
+<*
  Where a material sits in the frame, as opposed to what its index is.
 
- Identity everywhere except the line material, which sorts last however low its
- index is. `LINE_MATERIAL` is 1 — it has to be a small number, because it is
- built before any script can ask for a material and indices are handed out in
- order — and 1 would otherwise put every debug line *underneath* the scene it is
- drawn to explain.
+ Identity everywhere except two bands at the top. The line material sorts last
+ however low its index is: `LINE_MATERIAL` is 1 — it has to be a small number,
+ because it is built before any script can ask for a material and indices are
+ handed out in order — and 1 would otherwise put every debug line *underneath*
+ the scene it is drawn to explain.
 
  That would not look like an ordering bug. `LINE_STATE` writes no depth and tests
  none, so a line drawn first is simply painted over by the next opaque triangle
  and vanishes — which reads as "the helper did not work".
+
+ Transparency takes the band just below it, and the two decisions are the same
+ decision made twice. A blended pipeline writes no depth either (`ALPHA_STATE`
+ has the argument), so a transparent draw recorded before an opaque one behind it
+ is overwritten rather than blended with, and glass drawn before its own wall
+ shows the clear colour through it. Lines stay above transparency deliberately: a
+ debug helper is drawn to be *seen*, and one that disappears behind the glass it
+ was drawn to explain is the same failure the line band already exists to
+ prevent.
+
+ @param transparent : `Whether this material blends — MeshPass.record's table, not something Scene can work out for itself.`
 *>
-fn uint draw_order(uint material) @local
+fn uint draw_order(uint material, bool transparent) @local
 {
-	return material == LINE_MATERIAL ? 0xffffffffu : material;
+	if (material == LINE_MATERIAL) return 0xffffffffu;
+	return transparent ? TRANSPARENT_ORDER : material;
 }
 
 <*
@@ -1213,8 +1257,11 @@ fn uint draw_order(uint material) @local
  allocation. It also means the cost is `n log n` in *instances* rather than
  anything in unique meshes — a scene of ten thousand distinct meshes buckets as
  cheaply as a scene of one repeated ten thousand times.
+
+ @param transparent : `One bool per material index — whether that material blends. Empty is an opaque frame, and is what stats() passes.`
+ @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
 *>
-fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
+fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum, bool[] transparent = {}, Plane* near = null)
 {
 	self.draws.clear();
 	self.instances.clear();
@@ -1234,31 +1281,81 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum)
 		// answer a material whose texture would not decode gets.
 		if (!mesh.uploaded) continue;
 
+		// Read before the bounds because it decides whether the bounds are needed
+		// at all. An index past the end of the table is opaque: the table is exactly
+		// as long as `MeshPass.materials`, so past its end is an index that resolves
+		// to nothing and draws nothing anyway.
+		bool is_transparent = node.material < transparent.len && transparent[node.material];
+
+		// The world box has two readers now and neither wants it unconditionally:
+		// the frustum test wants it when culling is on, and a transparent draw wants
+		// its centre for the depth sort whether culling is on or not. Computed once
+		// for both, and **not at all** in the case that has to stay free — an opaque
+		// draw in an unculled frame — so nothing about the opaque path costs more
+		// than it did before transparency existed.
+		//
 		// **Conservative on purpose, unlike the measuring paths.** A box that is
 		// too big keeps a draw that could have been skipped; a box that is too
 		// small drops geometry the camera can see. `world_mesh_bounds` would be
 		// tighter and would cost a pass over every vertex of every node every
-		// frame to save a handful of draws, which is the trade backwards.
-		if (frustum != null && !frustum.contains(transform_aabb(node.world, mesh.bounds)))
+		// frame to save a handful of draws, which is the trade backwards. The same
+		// slack is harmless in the sort: it moves a centre, and sorting centres is
+		// already an approximation of an order no per-object sort gets exactly
+		// right.
+		float depth = 0;
+		bool sorted = is_transparent && near != null;
+		if (frustum != null || sorted)
 		{
-			self.culled++;
-			continue;
+			collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+			if (frustum != null && !frustum.contains(box))
+			{
+				self.culled++;
+				continue;
+			}
+			// Signed distance to the near plane: positive in front of the camera and
+			// larger the further away, so "farthest first" is a descending sort with
+			// no camera position anywhere in it.
+			if (sorted) depth = near.normal.dot(box.center()) + near.distance;
 		}
 
 		self.draws.push({
 			.material = node.material,
 			.key = bucket_key(node.asset.index, node.mesh),
 			.slot = (uint)slot,
+			.order = draw_order(node.material, is_transparent),
+			.depth = depth,
 		});
 	}
 
 	if (self.draws.len() == 0) return;
 
+	// **Sorted emit, not a permutation of finished buckets.** This one sort puts
+	// the draws in the order they will be recorded in, and the coalescing loop
+	// below is exactly the loop it was before transparency existed: it walks the
+	// sorted list and opens a bucket wherever (key, material) changes. So adjacent
+	// transparent draws sharing both still fuse into one instanced bucket, and
+	// depth-interleaved ones split into more — a wall of glass panes seen edge-on
+	// is one draw, and the same panes with something else woven between them is
+	// several. That cost is the honest one and it is three.js's too, whose
+	// per-object sort splits the same way; the alternative is sorting buckets after
+	// the fact, which cannot order two panes that landed in the same bucket.
+	//
+	// `order` and `depth` were computed at push time because this comparator is a
+	// captureless function pointer — see `Draw`.
 	quicksort(self.draws.array_view(), fn int(Draw a, Draw b) {
-		uint left = draw_order(a.material);
-		uint right = draw_order(b.material);
-		if (left < right) return -1;
-		if (left > right) return 1;
+		if (a.order < b.order) return -1;
+		if (a.order > b.order) return 1;
+		// Farthest first, and only within the transparent band: everything else is
+		// depth-tested and depth-written, so its order is the hardware's business
+		// and sorting it would only scatter the pipeline binds. Material and key
+		// break the tie so that draws at equal depth still coalesce.
+		if (a.order == TRANSPARENT_ORDER)
+		{
+			if (a.depth > b.depth) return -1;
+			if (a.depth < b.depth) return 1;
+			if (a.material < b.material) return -1;
+			if (a.material > b.material) return 1;
+		}
 		if (a.key < b.key) return -1;
 		if (a.key > b.key) return 1;
 		return 0;
@@ -1346,6 +1443,20 @@ fn uint count_unique_meshes(Bucket[] buckets)
  reports zero however much the camera dropped. It is read off `Scene`'s record of
  the last `update` instead. That split is the whole of the fix for a field that
  answered zero from M2 until it was noticed.
+
+ ## Transparency makes this an under-count, on purpose
+
+ The rebuild passes neither the transparent table nor a near plane, so nothing
+ here is depth-sorted — which means a frame with transparent materials in it may
+ issue **more** draws than this reports. Depth interleaving can only ever split a
+ bucket, never merge two, so the number below is a floor rather than an estimate.
+
+ That is the same decision `cull` already forced, one axis further along. A
+ depth-sorted count would answer a different number for every camera angle, and
+ `draw_calls` would stop being a fact about the scene and start being a fact about
+ where somebody was standing. `stats()` answers "what does this scene cost",
+ not "what did this camera angle cost"; the second question is a profiler's and
+ wants the frame, not the query.
 *>
 fn SceneStats Scene.stats(&self, Assets* assets)
 {

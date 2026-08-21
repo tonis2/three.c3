@@ -180,9 +180,9 @@ struct ExportGeometry @local
 	int indices;
 }
 
-// A material by content: the colour it resolves to and the image it samples.
-// Two nodes agreeing on both share one, which is what "deduplicated by content"
-// means once the image itself is already deduplicated.
+// A material by content: the colour it resolves to, the image it samples, and
+// whether it blends. Two nodes agreeing on all three share one, which is what
+// "deduplicated by content" means once the image itself is already deduplicated.
 struct ExportMaterial @local
 {
 	float[4] base_color;
@@ -190,6 +190,16 @@ struct ExportMaterial @local
 	// than for the array it indexes, because the image and the texture are
 	// one-to-one here — see `ExportImage`.
 	int image;
+	// Whether this one was written with `alphaMode: BLEND`.
+	//
+	// **Part of the key, not a property hung off it.** Two materials of the same
+	// colour and the same image that disagree about blending are two glTF
+	// materials, and a dedup that ignored this would collapse them into one —
+	// whose `alphaMode` would then be whichever of the two happened to be written
+	// first. The failure is silent in both directions: an opaque wall that comes
+	// back see-through, or glass that comes back solid, depending on the order the
+	// scene was walked in.
+	bool transparent;
 	uint material;
 }
 
@@ -685,15 +695,29 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	// behaviour, and it is why baking a stand-in colour used to mean choosing
 	// between matching this engine and matching a colour-managed viewer — two
 	// numbers that should be one, and now are.
+	//
+	// **Opacity is the third factor**, and it is in the product for the same
+	// reason the other two are: `MeshPass.record` multiplies `material.opacity()`
+	// into `base_color.a` before the draw, so the alpha the file states is only
+	// the alpha the frame had if it carries all three. A material with no opacity
+	// set answers 1 and the product is what it always was.
+	Material* material_of = self.pass.material(node.material);
+	float opacity = material_of == null ? 1.0f : material_of.opacity();
 	float[4] linear_tint = srgb_to_linear_rgb(tint);
 	float[4] color = {
 		mesh.base_color[0] * linear_tint[0],
 		mesh.base_color[1] * linear_tint[1],
 		mesh.base_color[2] * linear_tint[2],
-		mesh.base_color[3] * linear_tint[3],
+		mesh.base_color[3] * linear_tint[3] * opacity,
 	};
 	int texture = self.texture_for(node)!;
-	int material = self.material_for(color, texture);
+	// A null material is one whose slot was collected while a node still named it,
+	// which `MeshPass.record` draws as nothing at all. Opaque is the honest answer
+	// for it: `BlendMode.NONE` is what every material meant before blending
+	// existed and is what the zero fill spells.
+	int material = self.material_for(
+		color, texture, material_of != null && material_of.blend != BlendMode.NONE
+	);
 
 	foreach (&known : self.entries)
 	{
@@ -948,13 +972,16 @@ fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
 }
 
 <*
- The material for a colour and a texture, written once per distinct pair.
+ The material for a colour, a texture and a blend mode, written once per distinct
+ triple.
+
+ @param transparent : `Whether the material this node draws with blends. Part of the dedup key — ExportMaterial says why.`
 *>
-fn int Exporter.material_for(&self, float[4] color, int texture)
+fn int Exporter.material_for(&self, float[4] color, int texture, bool transparent)
 {
 	foreach (&known : self.materials)
 	{
-		if (known.image != texture) continue;
+		if (known.image != texture || known.transparent != transparent) continue;
 		if (known.base_color[0] != color[0] || known.base_color[1] != color[1]) continue;
 		if (known.base_color[2] != color[2] || known.base_color[3] != color[3]) continue;
 		return (int)known.material;
@@ -963,14 +990,26 @@ fn int Exporter.material_for(&self, float[4] color, int texture)
 	// Fully rough and not metallic: `mesh.slang` is a Lambert term and a texture,
 	// with no specular of any kind, so a metallic material would render in a glTF
 	// viewer as something this never showed.
+	//
+	// `BLEND` rather than `MASK`, because that is what this renderer does: the
+	// alpha is a blend factor, not a cutoff, and `alpha_cutoff` is left at its
+	// default because `BLEND` does not read it. An opaque material stays `OPAQUE`
+	// rather than being written as `BLEND` with an alpha of 1 — the two render
+	// the same and only one of them tells a viewer it may skip the sort.
 	uint written = self.out.add_material(
 		"",
 		{ color[0], color[1], color[2], color[3] },
 		metallic: 0.0,
 		roughness: 1.0,
 		base_color_texture: texture,
+		alpha_mode: transparent ? gltf::AlphaMode.BLEND : gltf::AlphaMode.OPAQUE,
 	);
-	self.materials.push({ .base_color = color, .image = texture, .material = written });
+	self.materials.push({
+		.base_color = color,
+		.image = texture,
+		.transparent = transparent,
+		.material = written,
+	});
 	self.report.materials++;
 	return (int)written;
 }
