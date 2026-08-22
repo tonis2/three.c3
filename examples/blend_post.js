@@ -1,8 +1,11 @@
 // blend_post.js — the blending modes and the post pass, in one window
 //
-// Paste into `run_script` against a serving instance:
+// Run it:
 //
-//     ./build/three --mcp          # a window you can watch
+//     ./build/three --script examples/blend_post.js
+//     ./build/three --script examples/blend_post.js --mcp   # and attach an agent
+//
+// or paste it into `run_script` against a `./build/three --mcp`.
 //
 // Keys once it is up:
 //

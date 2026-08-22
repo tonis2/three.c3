@@ -583,8 +583,17 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 		String path = cache_path(cache_key(args, source, entries));
 
 		ShaderModule loaded;
-		if (cache_load(path, args, source, &loaded)) return loaded;
+		if (cache_load(path, args, source, &loaded))
+		{
+			@debug_log("shader cache: %s hit %s", name, path);
+			return loaded;
+		}
 
+		// The interesting half of the pair: a miss means Slang runs, which is the
+		// difference between a startup measured in milliseconds and one measured
+		// in tenths of a second, and it is invisible from the outside. `%s miss`
+		// on every run is a key that is not stabilising.
+		@debug_log("shader cache: %s miss %s", name, path);
 		ShaderModule mod = compile_slang(source, name, entries)!;
 		if (compiled != null) *compiled = true;
 		// Overwrites whatever was there, which is the answer to every way a

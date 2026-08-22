@@ -11,6 +11,7 @@
 	--headless            no window, no surface, no swapchain
 	--validate            Vulkan validation layers + debug messenger
 	--no-validate         turn them off — --mcp turns them on by default
+	--script <file.js>    boot one script, then keep the window running
 	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
 	--grid <n>            n instances of the model, to see M2's claim hold
 
@@ -24,13 +25,14 @@
  CLI the base stage was driven by, kept because it is how a human looks at a
  file and how `--stress-resize` and `--grid` stay runnable.
 
- **`--mcp` implies `--validate`.** `plan.md` §4: "run the validation layers
- whenever a script is executing". Serving is when scripts execute, and a
- validation error only becomes part of `run_script`'s answer if the layer that
- produces it is loaded — so leaving it to the caller would mean the third of the
- four things a run answers with is usually absent. `--no-validate` is the way
- back out; a machine with no layer installed needs neither, because
- `create_instance` skips it and says so.
+ **`--mcp` implies `--validate`, in a debug build.** `plan.md` §4: "run the
+ validation layers whenever a script is executing". Serving is when scripts
+ execute, and a validation error only becomes part of `run_script`'s answer if
+ the layer that produces it is loaded — so leaving it to the caller would mean
+ the third of the four things a run answers with is usually absent.
+ `--no-validate` is the way back out; a machine with no layer installed needs
+ neither, because `create_instance` skips it and says so. A binary built without
+ `-D DEBUG` has no layer to imply — `src/debug.c3` has the argument.
 
  The server's handlers run on *this* thread — `Listener` moves bytes on its own
  and `pump` runs the work on the caller's — so a script, the scene it builds and
@@ -40,6 +42,7 @@
 module three;
 
 import std::io;
+import std::io::file;
 import std::thread;
 import std::time;
 import c3w;
@@ -54,6 +57,8 @@ struct Options
 	String model;
 	// The game directory: `.js` to run, `.glb` to describe. `game.md` G1.
 	String assets;
+	// One `.js` file, run the way `run_script` runs one — see `boot_script`.
+	String script;
 	String screenshot;
 	uint width;
 	uint height;
@@ -78,7 +83,7 @@ struct Options
 
 const int DEFAULT_MCP_PORT = 8808;
 
-faultdef BAD_ARGUMENT, MISSING_VALUE, RESIZE_HAD_NO_EFFECT;
+faultdef BAD_ARGUMENT, MISSING_VALUE, RESIZE_HAD_NO_EFFECT, SCRIPT_NOT_READABLE;
 
 fn Options? parse_args(String[] args)
 {
@@ -105,6 +110,9 @@ fn Options? parse_args(String[] args)
 			case "--assets":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.assets = args[++i];
+			case "--script":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.script = args[++i];
 			case "--shader":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.shader = args[++i];
@@ -169,8 +177,13 @@ fn Options? parse_args(String[] args)
 	// what `run_script` answers with — see the header. `--no-validate` wins
 	// outright rather than by position, because a flag whose meaning depends on
 	// what came before it on the line is a flag people get wrong.
+	//
+	// **The implication is a debug build's**, and only the implication: an
+	// explicit `--validate` is left standing so that `create_instance` can refuse
+	// it out loud. Nobody asked for this one, so nothing is printed when it is
+	// dropped — see `src/debug.c3`.
 	if (opts.no_validate) { opts.validate = false; }
-	else if (opts.mcp_port > 0) { opts.validate = true; }
+	else if (opts.mcp_port > 0) { opts.validate = DEBUG_BUILD; }
 
 	return opts;
 }
@@ -188,8 +201,14 @@ fn void usage()
 	io::printn("  --width <n>           offscreen render width  (default 1280)");
 	io::printn("  --height <n>          offscreen render height (default 720)");
 	io::printn("  --headless            no window, no surface, no swapchain");
+	io::printn("  --script <file.js>    run one script, then keep the window running");
+	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
 	io::printn("  --validate            Vulkan validation layers + debug messenger");
 	io::printn("  --no-validate         turn them off — --mcp turns them on by default");
+	if (!DEBUG_BUILD)
+	{
+		io::printn("                        (this binary has neither: build with -D DEBUG)");
+	}
 	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
 	io::printn("  --grid <n>            place n instances of the model in a grid");
 	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");
@@ -230,6 +249,14 @@ fn int main(String[] args)
 		{
 			io::printn("  shaders/mesh.slang is not on the search path.");
 			io::printn("  Run from the project root, or point at one with --shader <path>.");
+		}
+		// The path is named here rather than in the fault, because this is the
+		// only place that still has it: a `--script` typo is otherwise a bare
+		// fault name over a path the shell may well have expanded.
+		if (err == SCRIPT_NOT_READABLE)
+		{
+			io::printfn("  --script %s: not a file this can read.", opts.script);
+			io::printn("  A directory is --assets, and it boots main.js as a module.");
 		}
 		// Not a shader error — a shader error is a Slang diagnostic, already
 		// printed above this by the compiler with a line and a column.
@@ -325,13 +352,17 @@ fn void? run(Options opts)
 		stats.triangles
 	);
 
-	// Before every one-shot path below: neither a server nor a game renders one
-	// frame and exits, and both work with or without a window. They compose —
-	// `--assets ./game --mcp` plays and answers tool calls at the same time,
-	// which is the loop `game.md` exists for.
-	if (opts.mcp_port > 0 || opts.assets.len > 0)
+	// Before every one-shot path below: neither a server, a game nor a booted
+	// script renders one frame and exits, and all three work with or without a
+	// window. They compose — `--assets ./game --mcp` plays and answers tool calls
+	// at the same time, which is the loop `game.md` exists for, and `--script`
+	// adds one more thing for the same loop to have run before the first frame.
+	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0)
 	{
-		live(&renderer, windowed ? &window : null, opts.mcp_port, opts.assets, opts.screenshot)!;
+		live(
+			&renderer, windowed ? &window : null, opts.mcp_port,
+			assets: opts.assets, screenshot: opts.screenshot, script: opts.script
+		)!;
 		return;
 	}
 
@@ -520,13 +551,14 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  The live loop: a JS context, a frame, and — optionally — the tool server and a
  game booted from a directory.
 
- **One loop for both, and that is the point rather than an economy.** `--mcp`
- wants a context that answers tool calls; `--assets` wants a context that runs
- `main.js` and keeps ticking. They are the same loop with the same frame, so
- `--assets ./game --mcp` needs no arbitration at all: the agent's `run_script`
- and the game's `setAnimationLoop` are already the two things `JsRuntime`
- interleaves every frame, and an agent attaches to a game that is *playing*
- rather than to a copy of one.
+ **One loop for all three, and that is the point rather than an economy.**
+ `--mcp` wants a context that answers tool calls; `--assets` wants a context
+ that runs `main.js` and keeps ticking; `--script` wants one that has run a file
+ and keeps ticking. They are the same loop with the same frame, so `--assets
+ ./game --mcp` needs no arbitration at all: the agent's `run_script` and the
+ game's `setAnimationLoop` are already the two things `JsRuntime` interleaves
+ every frame, and an agent attaches to a game that is *playing* rather than to a
+ copy of one.
 
  **The handlers run on this loop's thread.** `Listener` gives its own thread to
  moving bytes — accept, read one message, queue it — and `pump` is where
@@ -537,9 +569,13 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @param window : `Null when headless: the loop then only serves, and there is nothing to present.`
  @param port : `Zero to run without a listener, which is a game with no agent attached.`
  @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
- @require port > 0 || assets.len > 0 : "a loop that neither serves nor plays has nothing to do"
+ @param script : `One .js file, or empty. Run once, as a script, before the first frame — see boot_script.`
+ @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
-fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets = "", String screenshot = "")
+fn void? live(
+	Renderer* renderer, c3w::Window* window, int port,
+	String assets = "", String screenshot = "", String script = ""
+)
 {
 	bool serving = port > 0;
 
@@ -567,6 +603,12 @@ fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets =
 			io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
 		}
 	}
+
+	// After the game and before the first frame. Both orders are defensible and
+	// this one is the one that composes: `--assets ./game --script probe.js`
+	// runs the script against the world `main.js` built, which is what the same
+	// two things would do through the server.
+	if (script.len > 0) boot_script(&runtime, script)!;
 
 	// One frame of the booted game and out, which is how a game is checked
 	// without a person watching it — and the only path in this function that is
@@ -603,6 +645,7 @@ fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets =
 		io::printn("     run_script, screenshot, get_api_docs");
 	}
 	if (assets.len > 0) io::printfn("game: %s/%s", assets, ENTRY_MODULE);
+	if (script.len > 0) io::printfn("script: %s", script);
 	if (window == null)
 	{
 		io::printn("     headless — ctrl-c to stop");
@@ -617,6 +660,14 @@ fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets =
 	InputState input;
 	c3w::CursorShape shown;
 	Hover hover;
+
+	// What the frames have said, drained into the terminal once a frame when
+	// there is no agent to read it instead — `JsRuntime.take_frame_output` has
+	// the argument. One buffer for the whole loop, reused rather than allocated
+	// sixty times a second; it holds whatever the noisiest frame logged.
+	DString said;
+	said.init(mem, 256);
+	defer said.free();
 
 	// What the animation callback is told the time is. Stamped once, here, so it
 	// is monotonic across every registration a script makes — which is what
@@ -740,7 +791,69 @@ fn void? live(Renderer* renderer, c3w::Window* window, int port, String assets =
 				thread::sleep_ms(4)!!;
 			}
 		}
+
+		// **Only when nobody is serving**, and that condition is the whole of the
+		// decision: with a listener up, what the frames logged belongs to the next
+		// `run_script`, and draining it here would take it away from the agent
+		// that asked. With no listener there is no next run — the terminal is the
+		// only reader there will ever be. See `JsRuntime.take_frame_output`.
+		if (!serving)
+		{
+			said.clear();
+			runtime.take_frame_output(&said);
+			if (said.len() > 0) io::print(said.str_view());
+		}
 	}
+}
+
+<*
+ Run one `.js` file the way `run_script` runs one, before the first frame.
+
+ **A script and not a module**, which is the whole difference from `--assets`:
+ the source is wrapped in an async function, so top-level `await` and top-level
+ `return` both work and `import` does not. That makes `--script examples/vfx.js`
+ mean exactly what pasting the same file into `run_script` means — which is what
+ every file in `examples/` is written against, and the property worth keeping.
+ A program in several files is what `--assets` is for.
+
+ For the same reason there is no assets root: a path the script hands to
+ `three.load` is relative to where the process was started, as it is for an
+ agent, rather than to wherever the script happens to live.
+
+ **The frame policy is the game's**, though. `game_frames` decides what happens
+ when a callback runs long, and the choice is between stopping it for good and
+ counting it — `js/frame_loop.c3` argues both. Stopping is right when an agent
+ is sitting there to be told and a runaway loop would wedge the tool surface;
+ a script booted from a command line is somebody watching a window, where the
+ answer to one slow frame is not to kill the animation. `--assets` decides the
+ same way for the same reason.
+
+ A script that throws is printed and carried on with, exactly as a game that
+ fails to boot is: with a window, that means seeing the reason beside the scene
+ it did not finish building, and with `--mcp` it means an agent can attach and
+ ask. Exiting would take away both.
+
+ @return? SCRIPT_NOT_READABLE : `Nothing at that path, or it is a directory — a typo on the command line, not something to debug in a running scene.`
+*>
+fn void? boot_script(JsRuntime* runtime, String path)
+{
+	// The frame policy, before anything the script does can register a callback.
+	runtime.play_frames();
+
+	@pool()
+	{
+		if (!file::is_file(path)) return SCRIPT_NOT_READABLE~;
+		char[]? source = file::load_temp(path);
+		if (catch source) return SCRIPT_NOT_READABLE~;
+
+		// Named by the path it was given, so a stack trace says `vfx.js:412` and
+		// not `<script>:412`.
+		RunResult ran = runtime.run((String)source, path);
+		defer ran.free();
+
+		if (ran.log.len > 0) io::printn(ran.log);
+		if (!ran.ok) io::printfn("three: %s did not run: %s", path, ran.error);
+	};
 }
 
 <*

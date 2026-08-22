@@ -173,13 +173,26 @@ struct Gpu
  Not cached. It is only asked when validation was requested, it costs one
  enumeration at startup, and a `false` cached from before `vk::init()` bound the
  loader would be a lie with no expiry.
+
+ **This is also the one lock `-D DEBUG` turns.** Without a debug build the
+ answer is false whatever is installed, and that is deliberately the *only*
+ place the build flag is read on this path: `create_instance` gates the layer
+ and the extension on it, `Gpu.init` gates the messenger on it, and both go on
+ asking the same question they always asked. Three separate `$if`s would be
+ three places that could each forget. See `src/debug.c3`.
 *>
 fn bool validation_layer_present()
 {
-	vk::StringList? installed = vk::getValidationLayers();
-	if (catch err = installed) return false;
-	defer installed.release();
-	return installed.contains(VALIDATION_LAYER.str_view());
+	$if !DEBUG_BUILD:
+		// Installed or not, there is nothing here to report to: the messenger,
+		// the sink and the callback are all compiled out below.
+		return false;
+	$else
+		vk::StringList? installed = vk::getValidationLayers();
+		if (catch err = installed) return false;
+		defer installed.release();
+		return installed.contains(VALIDATION_LAYER.str_view());
+	$endif
 }
 
 <*
@@ -220,7 +233,16 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 	bool validating = validate && validation_layer_present();
 	if (validate && !validating)
 	{
-		io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
+		// Two different failures wearing the same face, and telling them apart is
+		// the whole reason this is not one sentence: in a debug build the layer is
+		// missing from the machine and the fix is to install the SDK; in a release
+		// build the machinery is not in the binary and the layer being installed
+		// changes nothing.
+		$if DEBUG_BUILD:
+			io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
+		$else
+			io::printn("three: built without -D DEBUG — validation layers are not compiled in");
+		$endif
 	}
 
 	vk::ZStringList extensions;
@@ -250,7 +272,21 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 				driver_list = vk::directDriverList(&driver_info, 1);
 				extensions.push(vk::DIRECT_DRIVER_LOADING_EXTENSION_NAME);
 				direct_driver = true;
+				@debug_log("driver: bundled, handed to the loader directly");
 			}
+			else
+			{
+				@debug_log("driver: bundled one found, but this loader cannot be handed one");
+			}
+		}
+		else
+		{
+			// The `./setup.sh driver` case, and the one worth a line: a missing
+			// bundled driver is not an error — the loader falls back to whatever
+			// ICD it discovers — so nothing else anywhere says which driver drew
+			// the picture. `project.json` has the argument for why it can be
+			// absent from a plain checkout.
+			@debug_log("driver: no bundled one; using whatever the loader discovers");
 		}
 	}
 

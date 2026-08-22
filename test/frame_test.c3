@@ -571,3 +571,131 @@ fn void a_flood_of_logging_is_bounded_and_says_what_it_dropped() @test
 		test::@check(!result.log.contains("line 0 "), "and the oldest did not");
 	};
 }
+
+// ============================================================================
+// The other reader: a terminal, when there is no agent
+// ============================================================================
+
+<*
+ A host with a terminal drains the lines *and* the reason the callback stopped.
+
+ `--mcp` keeps both for the next tool call, because the next tool call is the
+ first moment anyone is listening. A `--script` or `--assets` boot with no
+ listener has no next call: the callback dies, the window stops moving, and
+ without this the reason sits in a buffer until the process exits.
+
+ The reason comes after the lines because that is the order they happened — a
+ callback logs and *then* throws.
+*>
+fn void a_host_with_a_terminal_drains_what_the_frames_said() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			let n = 0;
+			three.setAnimationLoop(() => {
+				console.log('frame ' + n);
+				if (n++ === 1) throw new Error('the wheels came off');
+			});
+		`);
+
+		run.tick(0);
+		run.tick(16);
+
+		DString said;
+		said.init(mem, 128);
+		defer said.free();
+		run.take_frame_output(&said);
+		String text = said.str_view();
+
+		test::@check(text.contains("frame 0\nframe 1\n"), "both lines, in order: '%s'", text);
+		test::@check(text.contains("the wheels came off"), "and why it stopped: '%s'", text);
+		test::@check(
+			text.index_of("frame 1")!! < text.index_of("the wheels")!!,
+			"the reason comes last, because it happened last: '%s'", text
+		);
+	};
+}
+
+<*
+ What the terminal took is gone: not printed twice, and not left for an agent.
+
+ Both halves matter and they fail differently. Draining without clearing turns a
+ callback that logged one line into a loop printing it sixty times a second —
+ the check below runs a *second* drain with nothing in between, which is exactly
+ what the next iteration of the host loop does. Leaving it for a run as well
+ would mean an attached agent reading a stopped-callback report it has already
+ been given, on every call, forever.
+*>
+fn void what_a_terminal_took_is_not_reported_twice() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, "three.setAnimationLoop(() => { console.log('once'); throw new Error('and out'); });");
+		run.tick(0);
+
+		DString said;
+		said.init(mem, 128);
+		defer said.free();
+		run.take_frame_output(&said);
+		test::@check(said.str_view().contains("once"), "the first drain has it: '%s'", said.str_view());
+
+		said.clear();
+		run.take_frame_output(&said);
+		test::@check(said.len() == 0, "and the second has nothing: '%s'", said.str_view());
+
+		three::RunResult result = run.run("return 1;");
+		defer result.free();
+		test::@check(!result.log.contains("once"), "and a run is not told again: '%s'", result.log);
+		test::@check(result.frame_error.len == 0, "nor given the reason again: '%s'", result.frame_error);
+	};
+}
+
+<*
+ A boot from a command line counts a slow frame; a served one does not.
+
+ The switch `play_frames` throws, asserted on the one thing that separates the
+ two modes at a survivable cost — an endless callback separates them too, but
+ only by sitting for the script's five seconds.
+
+ Thirty milliseconds against an eight millisecond frame: nearly four times over,
+ so no machine this runs on can make it a near miss in either direction.
+*>
+fn void a_boot_from_a_command_line_counts_a_slow_frame() @test
+{
+	String slow = `
+		three.setAnimationLoop(() => {
+			const until = Date.now() + 30;
+			while (Date.now() < until) {}
+		});
+	`;
+
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.play_frames();
+		@ok(run, slow);
+		run.tick(0);
+
+		test::@check(run.tick(16), "the callback is still registered after running long");
+
+		three::RunResult result = run.run("return 1;");
+		defer result.free();
+		test::@check(result.frame_overruns == 2, "both frames counted, got %d", result.frame_overruns);
+		test::@check(
+			result.frame_error.contains("over the 8 ms a frame has"),
+			"and the first one said so: '%s'", result.frame_error
+		);
+	};
+
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, slow);
+		run.tick(0);
+		run.tick(16);
+
+		three::RunResult result = run.run("return 1;");
+		defer result.free();
+		test::@check(result.frame_overruns == 0, "a served run counts nothing, got %d", result.frame_overruns);
+		test::@check(result.frame_error.len == 0, "and says nothing: '%s'", result.frame_error);
+	};
+}

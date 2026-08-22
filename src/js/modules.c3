@@ -290,8 +290,8 @@ fn void JsRuntime.set_assets_root(&self, String root)
 	self.assets_root = root.copy(mem);
 
 	// A directory that boots is a game, and a game's frames are warned about
-	// rather than killed. `js/frame_loop.c3` carries the argument.
-	self.game_frames = true;
+	// rather than killed. `JsRuntime.play_frames` carries the argument.
+	self.play_frames();
 
 	self.module_hooks = {
 		.normalize = &js_module_normalize,

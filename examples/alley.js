@@ -1,9 +1,11 @@
 // alley.js — material.repeat / material.offset and the physics verbs
 //
-// Paste into `run_script` against a serving instance:
+// Run it:
 //
-//     ./build/three --mcp          # a window you can watch
-//     ./build/three --mcp --headless
+//     ./build/three --script examples/alley.js
+//     ./build/three --script examples/alley.js --mcp   # and attach an agent to it
+//
+// or paste it into `run_script` against a `./build/three --mcp`.
 //
 // Once it is running, the keys are: space to roll, `r` to re-rack, `b` to
 // bomb the stack from underneath, `a` to stop and start the auto-cycle. Left
