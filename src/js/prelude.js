@@ -1124,6 +1124,115 @@
 		}
 	}
 
+	// -----------------------------------------------------------------------
+	// Uniforms
+	//
+	// Two things in this file have uniforms — a ShaderMaterial and the one post
+	// pass — and everything about how a script reaches them is the same. So it
+	// is written once here rather than twice: one Proxy implementation, one
+	// shape reader, one value check, and therefore one set of sentences a script
+	// can be refused with.
+
+	// A uniform's shape: how many floats wide, and how many rows.
+	//
+	// `[1, 0, 0]` is one row of three. `[[1, 0, 0], [0, 1, 0]]` is two rows
+	// of three — a **column of the material's table**, indexed in the shader
+	// by `s.variant`, which each mesh sets for itself. That is what lets one
+	// material give a thousand copies four different looks in one draw call.
+	//
+	// `tables` is false for the post pass, which draws one triangle over the
+	// whole frame and has no instance for a row to belong to. It changes the
+	// sentence and not only the answer, because "an array of those for a table"
+	// is advice a post body cannot take.
+	function uniformShape(name, v, tables = true) {
+		if (typeof v === 'number') return [1, 1];
+		if (Array.isArray(v) && v.length >= 1 && v.length <= 4 && v.every(c => typeof c === 'number')) {
+			return [v.length, 1];
+		}
+		if (tables && Array.isArray(v) && v.length >= 1 && v.every(Array.isArray)) {
+			const width = v[0].length;
+			if (!(width >= 1 && width <= 4)) {
+				throw new TypeError(`uniform '${name}': each row is a number or up to four numbers`);
+			}
+			if (v.some(row => row.length !== width)) {
+				throw new TypeError(`uniform '${name}': every row of a table has to be the same width, and the first is ${width}`);
+			}
+			return [width, v.length];
+		}
+		// A table where tables are not a thing gets its own sentence rather than
+		// the general one, because "wants a number or an array" is true and does
+		// not say why the array it was given is the wrong kind. `validate_post`
+		// refuses it one layer down in the same words.
+		if (!tables && Array.isArray(v) && v.length >= 1 && v.every(Array.isArray)) {
+			throw new TypeError(
+				`uniform '${name}' is a table, and a post pass draws one triangle over the whole frame — `
+				+ 'there are no instances to select a row with'
+			);
+		}
+		throw new TypeError(
+			tables
+				? `uniform '${name}' wants a number, an array of up to four numbers, or an array of those for a table`
+				: `uniform '${name}' wants a number or an array of up to four numbers`
+		);
+	}
+
+	// The numbers one write is made of, checked. Not the shape — this is the
+	// value side, run on every assignment rather than once at construction.
+	function uniformValues(name, v) {
+		const n = typeof v === 'number' ? [v] : v;
+		if (!Array.isArray(n) || n.length < 1 || n.length > 4) {
+			throw new TypeError(`uniform '${name}' wants a number or an array of up to four numbers`);
+		}
+		for (const c of n) {
+			if (!Number.isFinite(+c)) {
+				throw new TypeError(`uniform '${name}' was given a non-finite value`);
+			}
+		}
+		return n;
+	}
+
+	// The live `uniforms` object: reads give the last value written, writes go
+	// to the device.
+	//
+	// A Proxy rather than accessors on a sealed object, because a script is
+	// not evaluated in strict mode: assigning an unknown property to a sealed
+	// object *silently does nothing* there, so `mat.uniforms.tnit = [0, 1, 0]`
+	// would be a no-op that renders unchanged and reads like a shader bug. A set
+	// trap throws either way. Measured, not assumed — the sealed version was
+	// written first and `an_undeclared_uniform_cannot_be_assigned` caught it.
+	//
+	// `owner` supplies `_values`, `_rows`, `_set` and `_column`; `what` is how
+	// the refusal names the thing that has no such uniform.
+	function uniformsProxy(owner, declared, what) {
+		return new Proxy({}, {
+			get(_, name) {
+				// A table hands back a proxy of its own, so that
+				// `mat.uniforms.palette[2] = [1, 0, 0]` writes row 2 to the
+				// device. Handing back the plain array instead would make that
+				// line mutate a JavaScript value nothing ever reads again —
+				// the same silent no-op the `set` trap below exists to
+				// prevent, one level down.
+				if (owner._rows[name] > 1) return owner._column(name);
+				return owner._values[name];
+			},
+			has(_, name) { return declared.has(name); },
+			ownKeys() { return [...declared]; },
+			getOwnPropertyDescriptor(_, name) {
+				if (!declared.has(name)) return undefined;
+				return { enumerable: true, configurable: true, value: owner._values[name] };
+			},
+			set(_, name, v) {
+				if (!declared.has(name)) {
+					throw new TypeError(
+						`${what} has no uniform called '${String(name)}' — it declared ${[...declared].join(', ') || 'none'}`
+					);
+				}
+				owner._set(name, v);
+				return true;
+			},
+		});
+	}
+
 	// A shader written by whoever is driving, compiled the moment it is
 	// constructed.
 	//
@@ -1161,7 +1270,7 @@
 			// lists keys. So the names cross as a joined string — see
 			// js/bind_shader.c3.
 			const names = Object.keys(uniforms);
-			const shapes = names.map(n => ShaderMaterial._shape(n, uniforms[n]));
+			const shapes = names.map(n => uniformShape(n, uniforms[n]));
 			// Every table in one material is a column of the same table, so the
 			// row counts have to agree. Checked here as well as in the host so
 			// the message can name both columns before a shader is written.
@@ -1191,70 +1300,12 @@
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 
-			// A Proxy rather than accessors on a sealed object, because a script is
-			// not evaluated in strict mode: assigning an unknown property to a
-			// sealed object *silently does nothing* there, so `mat.uniforms.tnit =
-			// [0, 1, 0]` would be a no-op that renders unchanged and reads like a
-			// shader bug. A set trap throws either way. Measured, not assumed —
-			// the sealed version was written first and
-			// `an_undeclared_uniform_cannot_be_assigned` caught it.
+			// The Proxy is `uniformsProxy` above, shared with the post pass: one
+			// implementation of "assigning an undeclared uniform throws", and so
+			// no way for the two to drift apart.
 			this._values = {};
-			const declared = new Set(names);
-			const owner = this;
-			this.uniforms = new Proxy({}, {
-				get(_, name) {
-					// A table hands back a proxy of its own, so that
-					// `mat.uniforms.palette[2] = [1, 0, 0]` writes row 2 to the
-					// device. Handing back the plain array instead would make that
-					// line mutate a JavaScript value nothing ever reads again —
-					// the same silent no-op the `set` trap below exists to
-					// prevent, one level down.
-					if (owner._rows[name] > 1) return owner._column(name);
-					return owner._values[name];
-				},
-				has(_, name) { return declared.has(name); },
-				ownKeys() { return [...declared]; },
-				getOwnPropertyDescriptor(_, name) {
-					if (!declared.has(name)) return undefined;
-					return { enumerable: true, configurable: true, value: owner._values[name] };
-				},
-				set(_, name, v) {
-					if (!declared.has(name)) {
-						throw new TypeError(
-							`this material has no uniform called '${String(name)}' — it declared ${[...declared].join(', ') || 'none'}`
-						);
-					}
-					owner._set(name, v);
-					return true;
-				},
-			});
+			this.uniforms = uniformsProxy(this, new Set(names), 'this material');
 			for (const name of names) this._set(name, uniforms[name]);
-		}
-
-		// A uniform's shape: how many floats wide, and how many rows.
-		//
-		// `[1, 0, 0]` is one row of three. `[[1, 0, 0], [0, 1, 0]]` is two rows
-		// of three — a **column of the material's table**, indexed in the shader
-		// by `s.variant`, which each mesh sets for itself. That is what lets one
-		// material give a thousand copies four different looks in one draw call.
-		static _shape(name, v) {
-			if (typeof v === 'number') return [1, 1];
-			if (Array.isArray(v) && v.length >= 1 && v.length <= 4 && v.every(c => typeof c === 'number')) {
-				return [v.length, 1];
-			}
-			if (Array.isArray(v) && v.length >= 1 && v.every(Array.isArray)) {
-				const width = v[0].length;
-				if (!(width >= 1 && width <= 4)) {
-					throw new TypeError(`uniform '${name}': each row is a number or up to four numbers`);
-				}
-				if (v.some(row => row.length !== width)) {
-					throw new TypeError(`uniform '${name}': every row of a table has to be the same width, and the first is ${width}`);
-				}
-				return [width, v.length];
-			}
-			throw new TypeError(
-				`uniform '${name}' wants a number, an array of up to four numbers, or an array of those for a table`
-			);
 		}
 
 		// The whole uniform: one row, or every row of a column.
@@ -1277,15 +1328,7 @@
 			if (!(row >= 0 && row < rows)) {
 				throw new RangeError(`uniform '${name}' has ${rows} row${rows === 1 ? '' : 's'}, so row ${row} is not one of them`);
 			}
-			const n = typeof v === 'number' ? [v] : v;
-			if (!Array.isArray(n) || n.length < 1 || n.length > 4) {
-				throw new TypeError(`uniform '${name}' wants a number or an array of up to four numbers`);
-			}
-			for (const c of n) {
-				if (!Number.isFinite(+c)) {
-					throw new TypeError(`uniform '${name}' was given a non-finite value`);
-				}
-			}
+			const n = uniformValues(name, v);
 			H.setUniform(
 				this._index(), name,
 				+n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length,
@@ -1335,6 +1378,67 @@
 				uniforms: { ...this._values },
 			};
 		}
+	}
+
+	// -----------------------------------------------------------------------
+	// The post pass
+	//
+	// One shader over the whole finished frame, and there is exactly one of it.
+	// That is why `three.setPost(spec)` is a verb and there is no
+	// `new three.PostPass(...)`: a constructor implies an assignment target —
+	// somewhere to put the second one, something to swap between — and there is
+	// none. Setting replaces what was running and retires the old pipeline in the
+	// same call.
+	//
+	// What a script gets back is a handle onto the one live pass: the body that
+	// is running, and a live uniforms Proxy. It goes stale the moment another
+	// setPost replaces it, and says so, for the reason a Scene does: the
+	// alternative is `old.uniforms.gain = 2` quietly steering the *new* shader's
+	// uniform of the same name.
+
+	// Bumped by every call that changes what is running — a successful setPost
+	// and a setPost(null). A handle remembers the number it was made at.
+	let postEpoch = 0;
+
+	function postHandle(fragment, names) {
+		postEpoch++;
+		const epoch = postEpoch;
+		const handle = { fragment };
+		// Off the enumeration, so that returning the handle from a script
+		// stringifies as the two things it is — the body and the uniforms — and
+		// not as the bookkeeping behind them.
+		const internals = {
+			_values: {},
+			// Every post uniform is one row. The map is here because
+			// `uniformsProxy` reads it, and it stays empty because a post pass
+			// draws one triangle over the whole frame: there is no instance for a
+			// table to be indexed by, and `uniformShape` has already refused one.
+			_rows: {},
+			_check() {
+				if (postEpoch !== epoch) {
+					throw new Error(
+						'this post handle was replaced by a later three.setPost() — there is one post pass '
+						+ 'at a time, and writing through the old handle would steer the new shader'
+					);
+				}
+			},
+			_column(name) {
+				throw new TypeError(
+					`uniform '${name}' is not a table — a post pass has no instances to index one by`
+				);
+			},
+			_set(name, v) {
+				internals._check();
+				const n = uniformValues(name, v);
+				H.setPostUniform(name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length);
+				internals._values[name] = typeof v === 'number' ? +v : n.map(Number);
+			},
+		};
+		for (const key of Object.keys(internals)) {
+			Object.defineProperty(handle, key, { value: internals[key], enumerable: false });
+		}
+		handle.uniforms = uniformsProxy(handle, new Set(names), 'the post pass');
+		return handle;
 	}
 
 	// `new three.Mesh(geometry, material)`, and `geometry` is either half of what
@@ -2706,6 +2810,68 @@
 			H.render();
 		},
 
+		// The one shader that runs over the finished frame.
+		//
+		// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`
+		// and makes it the pass every frame goes through — the window, three.render()
+		// and every screenshot alike, because there is one recording function
+		// behind all three and the branch is inside it. `three.setPost(null)`
+		// clears it and puts the frame back on the path it was on before.
+		//
+		// A verb rather than a class: there is one post slot, so a constructor
+		// would imply somewhere to put the second one. What comes back is a
+		// handle onto the live pass — `{ fragment, uniforms }` — with the same
+		// live uniforms Proxy a ShaderMaterial has, so `handle.uniforms.gain = 2`
+		// is a 4-byte write that takes effect on the next frame with no compile.
+		//
+		// It compiles here, at this line, so a body that does not compile throws
+		// where it was written and carries Slang's diagnostic with `post:<line>`
+		// coordinates counting the agent's own lines. A failed set leaves the
+		// previous shader running — the pass is the old shader or the new one and
+		// never neither.
+		//
+		// The pass is a property of the renderer and not of the scene, so it
+		// survives new three.Scene() and outlives the script that set it. Nothing
+		// clears it but three.setPost(null).
+		setPost(spec) {
+			if (spec === null || spec === undefined) {
+				H.clearPost();
+				// After the host call, so a handle is only invalidated by a call
+				// that actually changed what is running.
+				postEpoch++;
+				return null;
+			}
+			if (typeof spec !== 'object') {
+				throw new TypeError(
+					'three.setPost({ fragment, uniforms }) wants an options object, or null to clear the pass'
+				);
+			}
+			const { fragment, uniforms = {} } = spec;
+			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
+				throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
+			}
+			if (uniforms === null || typeof uniforms !== 'object') {
+				throw new TypeError('`uniforms` wants an object like { gain: 1, tint: [1, 0.5, 0.2] }');
+			}
+
+			// The enumeration happens here for `ShaderMaterial`'s reason: the
+			// QuickJS shim exposes property *get* by name and nothing that lists
+			// keys, so the names cross as a joined string. See js/bind_post.c3.
+			const names = Object.keys(uniforms);
+			const shapes = names.map(n => uniformShape(n, uniforms[n], false));
+
+			H.setPost(fragment, names.join(','), shapes.map(s => s[0]).join(','));
+
+			// **After the compile, and not before it.** Setting a post shader
+			// zeroes the push block — the new shader's uniforms are new fields at
+			// new offsets, so carrying the old bytes over would be writing one
+			// shader's values into another's layout. So the values the spec gave
+			// are written afterwards, exactly as a ShaderMaterial writes its own.
+			const handle = postHandle(fragment, names);
+			for (const name of names) handle._set(name, uniforms[name]);
+			return handle;
+		},
+
 		stats() { return H.stats(); },
 
 		// Free every asset no live mesh names, and every texture that goes with
@@ -3088,6 +3254,7 @@
 			'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
 			'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
 			'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
+			'There is post-processing, and it is ONE pass: three.setPost({ fragment }) runs a float3 post(Post p) over the finished frame and three.setPost(null) stops it. There is no EffectComposer, no pass chain and no render target to manage — one shader, whose input is the scene as rendered and whose output is the frame. It applies to the window, to render() and to screenshots alike, and it belongs to the renderer rather than to the scene, so it survives new three.Scene() and outlives the script that set it.',
 			'A mesh with no material draws with the base colour and texture its glTF material carried.',
 			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
@@ -3697,6 +3864,32 @@
 				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
 				+ 'construction exist; assigning to any other name throws. A uniform declared as a table is '
 				+ 'written a row at a time — material.uniforms.palette[1] = [0, 1, 0] — or all at once.',
+			'three.setPost({ fragment, uniforms })':
+				'Run one shader over the whole finished frame. fragment is a Slang function '
+				+ '`float3 post(Post p)` returning linear rgb; Post has color (this pixel of the rendered '
+				+ 'scene, already decoded to linear), uv (0..1 across the frame, (0,0) top left), resolution '
+				+ '(the frame in pixels — 1.0 / p.resolution is one texel, which is what a blur steps by) and '
+				+ 'time (seconds since this shader was set, wall clock rather than a game clock). Each '
+				+ 'uniform is readable in the body by its own name; they are at most 112 bytes in total (28 '
+				+ 'floats), each a number or an array of up to four numbers, and NOT a table — a post pass '
+				+ 'draws one triangle over the whole frame, so there are no instances for a row to belong to. '
+				+ 'Compiles on the call, so a bad body throws here carrying the Slang diagnostic with '
+				+ 'post:<line> counting the lines you wrote; a failed set leaves the previous shader running, '
+				+ 'so the pass is the old shader or the new one and never neither. Needs a GPU device. '
+				+ 'It applies identically to the window, to three.render() and to every screenshot — there is '
+				+ 'one recording path and the branch is inside it — so what you see is what a PNG comes back '
+				+ 'as. post() returns rgb and never alpha, for shade()\'s reason and one more: a screenshot '
+				+ 'forces alpha opaque anyway, so a body that could dim it would make the window and the file '
+				+ 'disagree. There is ONE post pass: setting again replaces (the old pipeline is retired for '
+				+ 'you), and it belongs to the renderer rather than to the scene, so it survives '
+				+ 'new three.Scene() and outlives the script that set it. three.setPost(null) is the only '
+				+ 'thing that clears it.',
+			'the handle three.setPost() answers with':
+				'{ fragment, uniforms } — the body that is running, and a live uniforms object exactly like a '
+				+ 'material\'s: post.uniforms.gain = 2 is a 4-byte write that takes effect on the next frame '
+				+ 'with no compile and no pipeline, which is what makes an animated post pass free. Only '
+				+ 'names given at setPost exist; assigning any other throws. A later setPost replaces the '
+				+ 'pass, and writing through the older handle throws rather than steering the new shader.',
 			'mesh.color':
 				'This copy\'s own tint, multiplied into albedo. [r, g, b], [r, g, b, a], {r, g, b} or a hex '
 				+ 'number like 0xff8800. Costs no draw call: copies of one mesh may all differ. Works with no '

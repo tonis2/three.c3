@@ -9,6 +9,12 @@
  `shaders/material.slang`, replaces three marker lines, and hands back a
  self-contained module.
 
+ **The marker walk itself lives in `shader/assemble.c3`**, which
+ `shaders/post.slang` goes through as well. What stays here is everything a
+ *material* is: the mesh contract it appends to, the uniform table, the reserved
+ names and the budget. What moved is the line counting, because it is the one
+ half of the two that must not exist twice.
+
  ## Why the line numbers are the interesting part
 
  The agent wrote four lines and gets back a four-hundred-line module. A
@@ -37,21 +43,15 @@
 
  - The filename **must** be a double-quoted string literal. `#line 1 material`
    is `E15102`, a hard preprocessor error that kills the compile. Nothing
-   interpolated into a directive here can contain a quote or a backslash, which
-   is one of the things `MATERIAL_RESERVED`'s identifier check is really for.
+   interpolated into a directive can contain a quote or a backslash, which is one
+   of the things `MATERIAL_RESERVED`'s identifier check is really for.
  - The directive numbers the line that *follows* it, so the body starts at `1`
    and not `0`. `0` is accepted and faithfully reported as `:0:`.
  - The restore number is the physical line of the text after the directive,
-   which nothing but the assembler can know. `physical` below is counted rather
-   than computed, because every marker replacement changes it.
+   which nothing but the assembler can know — it is counted rather than
+   computed, because every marker replacement changes it.
 
- ## The trap this file is made of
-
- `plan.md` §6: **a `\n` inside a C3 backtick raw string is a backslash and an
- `n`.** Every newline in a generated shader is an instance of it, and the result
- looks right in the editor and is one enormous line at runtime. There is no
- newline in any literal here — the assembler appends `'\n'` explicitly, once per
- line, which is also what makes `physical` countable.
+ All three are now stated where they are implemented, in `shader/assemble.c3`.
 *>
 module three;
 
@@ -128,13 +128,6 @@ const String MATERIAL_BODY_NAME = "material";
 *>
 const String MATERIAL_PREAMBLE_NAME = "three.material";
 
-// The marker lines in `shaders/material.slang`. Matched after trimming, so the
-// template can indent them to read naturally.
-const String MARKER_UNIFORMS @local = "//@uniforms";
-const String MARKER_ROWS @local = "//@rows";
-const String MARKER_DEFINES @local = "//@defines";
-const String MARKER_SHADE @local = "//@shade";
-
 <*
  Names a material uniform may not take.
 
@@ -202,9 +195,7 @@ fn String material_diagnostic() => (String)material_message[:material_message_le
 
 fn void material_note(String message) @local
 {
-	usz n = message.len < MATERIAL_DIAGNOSTIC_MAX ? message.len : MATERIAL_DIAGNOSTIC_MAX;
-	material_message[:n] = message[:n];
-	material_message_len = n;
+	material_message_len = shader_note_into(material_message[..], message);
 }
 
 <*
@@ -219,11 +210,9 @@ fn void material_note(String message) @local
 fn uint material_uniform_bytes(MaterialUniform[] uniforms)
 {
 	uint total = 0;
-	foreach (uniform : uniforms) total += uniform.components * material_rows_of(uniform) * 4;
+	foreach (uniform : uniforms) total += uniform.components * uniform_rows_of(uniform) * 4;
 	return total;
 }
-
-fn uint material_rows_of(MaterialUniform uniform) @local => uniform.rows < 1 ? 1 : uniform.rows;
 
 <*
  How many rows this material's table has, or 1 when it declared none.
@@ -238,33 +227,10 @@ fn uint material_rows(MaterialUniform[] uniforms)
 	uint rows = 1;
 	foreach (uniform : uniforms)
 	{
-		uint declared = material_rows_of(uniform);
+		uint declared = uniform_rows_of(uniform);
 		if (declared > rows) rows = declared;
 	}
 	return rows;
-}
-
-fn String slang_type_of(uint components) @local
-{
-	switch (components)
-	{
-		case 2: return "float2";
-		case 3: return "float3";
-		case 4: return "float4";
-		default: return "float";
-	}
-}
-
-fn bool is_identifier(String name) @local
-{
-	if (name.len == 0) return false;
-	foreach (i, c : name)
-	{
-		bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
-		bool digit = c >= '0' && c <= '9';
-		if (!alpha && !(digit && i > 0)) return false;
-	}
-	return true;
 }
 
 <*
@@ -334,10 +300,10 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
 			// One table, not a bag of arrays — see `MaterialUniform`. Checked
 			// against the first column that has more than one row rather than
 			// against the maximum, so the message can name both of them.
-			uint rows = material_rows_of(uniform);
+			uint rows = uniform_rows_of(uniform);
 			foreach (other : uniforms)
 			{
-				uint other_rows = material_rows_of(other);
+				uint other_rows = uniform_rows_of(other);
 				if (other_rows == 1 || rows == 1 || other_rows == rows) continue;
 				material_note(string::tformat(
 					"material: '%s' has %d rows and '%s' has %d; every array in one material is a column of the same table and they must agree",
@@ -367,33 +333,6 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
 }
 
 <*
- Append `text` line by line, normalising the ending, and say how many lines that
- was.
-
- The count is the point. `#line` restores numbering by absolute line, so the
- assembler has to know exactly how tall the body it just wrote is — and a body
- that arrived without a trailing newline, or with a `\r` on every line because it
- came from a script authored on Windows, must not change that answer.
-*>
-fn uint append_lines(DString* out, String text) @local
-{
-	uint lines = 0;
-	usz start = 0;
-	while (start < text.len)
-	{
-		usz end = start;
-		while (end < text.len && text[end] != '\n') end++;
-		usz stop = end;
-		if (stop > start && text[stop - 1] == '\r') stop--;
-		out.append_string(text[start:stop - start]);
-		out.append_char('\n');
-		lines++;
-		start = end + 1;
-	}
-	return lines;
-}
-
-<*
  Assemble the full Slang module for a material.
 
  The result is self-contained: it declares its own `PushData`, its own binding
@@ -412,105 +351,12 @@ fn uint append_lines(DString* out, String text) @local
 fn String? material_source(String fragment, MaterialUniform[] uniforms, alloc::Allocator allocator = mem)
 {
 	validate_material(fragment, uniforms)!;
-
-	@pool()
-	{
-		String path = find_shader(MATERIAL_TEMPLATE, tmem)!;
-		String template = load_source(path, tmem)!;
-
-		DString out;
-		out.tinit(template.len + 1024);
-
-		// Physical lines written so far, counted rather than derived. Every
-		// marker replaces one line with a different number of lines, so nothing
-		// upstream of here knows what line the text after the body lands on.
-		uint physical = 0;
-
-		usz start = 0;
-		while (start < template.len)
-		{
-			usz end = start;
-			while (end < template.len && template[end] != '\n') end++;
-			String line = template[start:end - start];
-			start = end + 1;
-
-			String marker = line.trim();
-			if (marker == MARKER_UNIFORMS)
-			{
-				foreach (uniform : uniforms)
-				{
-					uint rows = material_rows_of(uniform);
-					if (rows > 1)
-					{
-						out.appendf("    %s %s[%d];", slang_type_of(uniform.components), uniform.name, rows)!!;
-					}
-					else
-					{
-						out.appendf("    %s %s;", slang_type_of(uniform.components), uniform.name)!!;
-					}
-					out.append_char('\n');
-					physical++;
-				}
-				continue;
-			}
-			if (marker == MARKER_ROWS)
-			{
-				// A `static const` rather than a `#define`, so it is a typed value
-				// the clamp in `fragmentMain` can use and not a token the agent's
-				// body could accidentally shadow.
-				out.appendf("static const uint MATERIAL_ROWS = %du;", material_rows(uniforms))!!;
-				out.append_char('\n');
-				physical++;
-				continue;
-			}
-			if (marker == MARKER_DEFINES)
-			{
-				foreach (uniform : uniforms)
-				{
-					out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
-					out.append_char('\n');
-					physical++;
-				}
-				continue;
-			}
-			if (marker == MARKER_SHADE)
-			{
-				// The quotes are not optional: an unquoted filename is E15102, a
-				// preprocessor error that kills the compile. Nothing variable goes
-				// inside them — both names are constants in this file — so there is
-				// no quote or backslash to escape.
-				out.appendf(`#line 1 "%s"`, MATERIAL_BODY_NAME)!!;
-				out.append_char('\n');
-				physical++;
-
-				physical += append_lines(&out, fragment);
-
-				// The directive itself lands on line `physical + 1` and numbers the
-				// line after it, so it says `physical + 2` — which is the first
-				// `#undef`, or `fragmentMain`'s blank line when there are no
-				// uniforms.
-				out.appendf(`#line %d "%s"`, physical + 2, MATERIAL_PREAMBLE_NAME)!!;
-				out.append_char('\n');
-				physical++;
-
-				// Undefined immediately, so the substitution reaches the agent's
-				// lines and stops. Without this a uniform named `a` rewrites
-				// `push.base_color.a` in `fragmentMain`, and the diagnostic for it
-				// points at a line in the preamble.
-				foreach (uniform : uniforms)
-				{
-					out.appendf("#undef %s", uniform.name)!!;
-					out.append_char('\n');
-					physical++;
-				}
-				continue;
-			}
-
-			out.append_string(line);
-			out.append_char('\n');
-			physical++;
-		}
-
-		return out.copy_str(allocator);
-	};
+	return assemble_shader(
+		MATERIAL_TEMPLATE,
+		fragment,
+		uniforms,
+		MATERIAL_BODY_NAME,
+		MATERIAL_PREAMBLE_NAME,
+		allocator
+	);
 }

@@ -165,11 +165,21 @@ fn void Target.free(&self, Gpu* gpu)
 // The render pass — dynamic rendering, no VkRenderPass and no VkFramebuffer
 // ============================================================================
 
-fn vk::ImageMemoryBarrier2 Target.to_color_attachment(&self)
+<*
+ The barrier a colour attachment is opened with, for whichever image the pass
+ is about to write.
+
+ Takes the image rather than reading `self.color`, and sits beside
+ `vk::depthBarrier` rather than being a method, because the scene does not
+ always draw into the target: a pass that post-processes it draws into
+ `self.color` while the scene draws into an image that pass then samples.
+ `begin_render_to` is the other half of that.
+*>
+fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 {
 	return {
 		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-		.image = self.color,
+		.image = image,
 		// ALL_COMMANDS with no source access is an execution dependency and
 		// nothing more, which is exactly what the hazard here needs: last
 		// frame *read* this image (blit, or readback copy) and this frame
@@ -213,24 +223,76 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 }
 
 <*
- Transition in, begin dynamic rendering, and set a full-target viewport.
+ The other way a finished colour attachment can be consumed: read by a later
+ pass in the same command buffer instead of copied out of.
+
+ Never `self.color`, whose two-layout contract is the one at the top of this
+ file — this is for an image a pass renders into so that the next pass can
+ sample it, which is a write-then-read inside one submission and so needs the
+ access masks a layout change alone would not give.
+*>
+fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
+{
+	return {
+		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.subresourceRange = {
+			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+}
+
+<*
+ Transition in, begin dynamic rendering, and set a full-target viewport — into
+ the target's own colour image.
+
+ @param clear : `sRGB - the same units a script writes scene.background in - and decoded here. The attachment carries the sRGB transfer function, so Vulkan encodes whatever it is handed; an already-linear value would come out as a far too bright frame with nothing in the API saying which space it wanted. Alpha passes through untouched.`
+*>
+fn void Target.begin_render(&self, vk::CommandBuffer cmd, float[4] clear = { 0, 0, 0, 1 })
+	=> self.begin_render_to(cmd, self.color, self.color_view, clear);
+
+<*
+ The same, into a colour image that is not necessarily the target's.
+
+ The extent, the depth buffer and the viewport are still the target's — what
+ varies is only where the colour lands, because a pass that reads the frame
+ back out (post-processing) needs the scene in an image it can sample while
+ still sharing the depth attachment and the geometry it was drawn with. Every
+ such image is created at `self.extent`; nothing here rescales.
 
  The viewport height is negative, which flips Y so glTF's coordinate system
  lands the right way up in Vulkan's. Every projection matrix in this project
  assumes it.
 
- @param clear : `sRGB - the same units a script writes scene.background in - and decoded here. The attachment carries the sRGB transfer function, so Vulkan encodes whatever it is handed; an already-linear value would come out as a far too bright frame with nothing in the API saying which space it wanted. Alpha passes through untouched.`
+ @param image : `The colour image being written. Its layout is not read - the barrier discards whatever was there.`
+ @param view : `A view of image, and the attachment's format follows the image's, not the target's.`
 *>
-fn void Target.begin_render(&self, vk::CommandBuffer cmd, float[4] clear = { 0, 0, 0, 1 })
+fn void Target.begin_render_to(
+	&self,
+	vk::CommandBuffer cmd,
+	vk::Image image,
+	vk::ImageView view,
+	float[4] clear = { 0, 0, 0, 1 }
+)
 {
 	// The one colour in the renderer that never meets a shader, so the one that
 	// cannot be decoded where the others are. `gpu/color.c3` says why the curve
 	// is the piecewise one.
 	float[4] clear_linear = srgb_to_linear_rgb(clear);
-	vk::ImageMemoryBarrier2[2] barriers = { self.to_color_attachment(), vk::depthBarrier(self.depth) };
+	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image), vk::depthBarrier(self.depth) };
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
 
-	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(self.color_view)
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)

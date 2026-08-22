@@ -145,6 +145,23 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 };
 
 <*
+ The whole of the post pass's push contract: one `float4` and nothing else.
+
+ `shaders/post.slang` declares `info` first — xy the target's extent, z seconds
+ since the shader was set, w reserved — and the agent's uniforms after it, so
+ `POST_PUSH_START` is 16 and the budget is the other 112.
+
+ **It shares nothing with `MESH_PUSH_FIELDS` and that is deliberate.** A post
+ pass has no geometry, no instances and no frame block, so a contract that
+ required `positions` would be requiring a pointer nothing could supply. Which
+ list a pipeline is checked against is the argument `check_push_block` now
+ takes, rather than a second copy of the check.
+*>
+const PushFieldLayout[*] POST_PUSH_FIELDS = {
+	{ "info", 0, 16 },
+};
+
+<*
  How a material's colour reaches the attachment: not at all, over what is there,
  or added to it.
 
@@ -355,16 +372,23 @@ struct MeshPipeline
 }
 
 <*
- Check the shader's push block against `MESH_PUSH_FIELDS`.
+ Check the shader's push block against the contract a pipeline draws under.
 
- Every field this side expects must be present at the same offset and the same
- size. Extra fields in the shader are not an error — a field the C3 struct never
- reads is harmless, and refusing it would mean a shader cannot carry anything
- this pass does not use.
+ Every field the contract expects must be present at the same offset and the
+ same size. Extra fields in the shader are not an error — a field this side never
+ reads is harmless, and refusing it would mean a shader cannot carry anything the
+ pass does not use. That is what makes a material's uniforms legal: they are
+ exactly such extra fields, appended past `uv_transform`.
 
- @return? PUSH_BLOCK_MISMATCH : `The shader's push block does not lay out the way MeshPush does. The offending field is printed, because "they disagree" is not something anyone can act on.`
+ **The contract is a parameter as of Phase D**, because there are now two:
+ `MESH_PUSH_FIELDS` for anything that draws geometry and `POST_PUSH_FIELDS` for
+ the pass that draws one triangle over the frame. A second copy of this function
+ would be a second place for the budget check to be forgotten.
+
+ @param fields : `The push contract to hold the shader to — MESH_PUSH_FIELDS or POST_PUSH_FIELDS.`
+ @return? PUSH_BLOCK_MISMATCH : `The shader's push block does not lay out the way the contract does. The offending field is printed, because "they disagree" is not something anyone can act on.`
 *>
-fn void? check_push_block(ShaderLayout* layout)
+fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 {
 	// Against the budget, not against `MeshPush::size`. The doc comment above has
 	// always said extra fields are allowed, but until M5 this line capped the
@@ -383,7 +407,7 @@ fn void? check_push_block(ShaderLayout* layout)
 		return PUSH_BLOCK_MISMATCH~;
 	}
 
-	foreach (expected : MESH_PUSH_FIELDS)
+	foreach (expected : fields)
 	{
 		ShaderField* found = layout.field_of(expected.name);
 		if (found == null)
@@ -394,7 +418,7 @@ fn void? check_push_block(ShaderLayout* layout)
 		if (found.offset != expected.offset || found.size != expected.size)
 		{
 			io::eprintfn(
-				"shader: push field '%s' is at %d+%d and MeshPush has it at %d+%d",
+				"shader: push field '%s' is at %d+%d and the contract has it at %d+%d",
 				expected.name,
 				found.offset,
 				found.size,
@@ -435,25 +459,24 @@ fn void? check_entry_points(ShaderModule* mod)
 }
 
 <*
- Build the mesh pipeline from a compiled Slang module.
+ Everything a pipeline needs before there is a `VkPipeline`: the checks, the
+ descriptor set layout and the pipeline layout.
 
- No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment
- formats are declared here through `PipelineRenderingCreateInfo` and the
- attachments themselves at record time.
+ Shared by `init` and `init_post` because it is the half that has nothing to do
+ with how the pass rasterises — it is the module's own declarations turned into
+ Vulkan objects, and a module is a module. What the two constructors differ by is
+ entirely below: attachments, depth, blending and culling.
 
- **The module's `ShaderLayout` is moved into the pipeline**, which then owns it.
- The caller's `ShaderModule` keeps the SPIR-V and the diagnostic and is still
- theirs to free; its `layout` is left empty, and freeing an empty one is a no-op.
- The alternative — a pointer into the module — would make the pipeline outlive
- what it points at the first time a caller freed the module after building.
+ The one thing that varies here is which push contract the shader is held to,
+ which is exactly the parameter `check_push_block` takes.
 
- @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
- @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
- @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
- @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
- @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
+ @param fields : `MESH_PUSH_FIELDS or POST_PUSH_FIELDS — see check_push_block.`
+ @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout.`
+ @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs.`
+ @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this creates one.`
+ @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something no Vulkan descriptor type covers.`
 *>
-fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state)
+fn void? MeshPipeline.build_layouts(&self, Gpu* gpu, ShaderModule* mod, PushFieldLayout[] fields)
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
 	// The *shader's* block, not `MeshPush::size`. Since M5 a material appends its
@@ -463,7 +486,7 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
 
 	check_entry_points(mod)!;
-	check_push_block(&mod.layout)!;
+	check_push_block(&mod.layout, fields)!;
 
 	if (mod.layout.set_count > 1)
 	{
@@ -517,6 +540,30 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	self.layout = vk::pipelineLayoutCreateInfo().setSetLayouts({ self.descriptor_layout })
 		.setPushConstantRanges({ push_range })
 		.build(gpu.handle)!;
+}
+
+<*
+ Build the mesh pipeline from a compiled Slang module.
+
+ No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment
+ formats are declared here through `PipelineRenderingCreateInfo` and the
+ attachments themselves at record time.
+
+ **The module's `ShaderLayout` is moved into the pipeline**, which then owns it.
+ The caller's `ShaderModule` keeps the SPIR-V and the diagnostic and is still
+ theirs to free; its `layout` is left empty, and freeing an empty one is a no-op.
+ The alternative — a pointer into the module — would make the pipeline outlive
+ what it points at the first time a caller freed the module after building.
+
+ @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
+ @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
+ @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
+ @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
+ @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
+*>
+fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state)
+{
+	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..])!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
@@ -637,6 +684,106 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 	//
 	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
 	// the argument against borrowing instead.
+	self.shader = mod.layout.copy();
+
+	return *self;
+}
+
+<*
+ Build the post-processing pipeline from a compiled Slang module.
+
+ The same object as `init` produces, so `Gpu.retire_pipeline` and
+ `MeshPipeline.free` cover it with no new machinery — swapping the post shader
+ while frames are in flight is the deletion queue's ordinary case rather than a
+ mechanism of its own. Four things differ, and each of them would be a bug if it
+ did not:
+
+ - **No depth attachment, no depth test and no depth write.** Dynamic rendering
+   matches the pipeline's declared depth format against the one the attachment
+   actually carries, so declaring a depth format and then beginning a pass
+   without one is a validation error rather than a wasted attachment.
+   `PostPass.record` begins with colour alone, and this is the other half of it.
+ - **No blending.** The post pass writes every pixel of the frame from the
+   scene image it just sampled; blending it over the previous contents would
+   compose it with a target that is about to be cleared anyway.
+ - **`CULL_MODE_NONE`, statically.** The fullscreen triangle is clockwise on
+   screen, which is the opposite of everything else this project draws, and
+   `DYNAMIC_STATE_CULL_MODE` is deliberately *not* declared: the post draw
+   follows `MeshPass.record`, which sets the cull mode per bucket, so an
+   inherited dynamic value would decide whether the frame appears. Getting this
+   wrong is an empty frame with no validation message — `shaders/post.slang`
+   says so too.
+ - **`POST_PUSH_FIELDS`, not the mesh contract.** There is no geometry to point
+   at, so a shader required to declare `positions` could not be written.
+
+ @param mod : `A module from post_source + compile_slang_cached. Its layout is copied, not moved.`
+ @return? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
+*>
+fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, Target* target, ShaderModule* mod)
+{
+	self.build_layouts(gpu, mod, POST_PUSH_FIELDS[..])!;
+
+	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
+	defer module_handle.free(gpu.handle);
+
+	vk::PipelineShaderStageCreateInfo[2] stages = {
+		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
+		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT).setMod(module_handle).setName("fragmentMain"),
+	};
+
+	// Colour only. `setDepthAttachmentFormat` is absent rather than set to
+	// FORMAT_UNDEFINED for readability; the zero the struct starts with is
+	// FORMAT_UNDEFINED, which is what "there is no depth attachment" is spelled
+	// as in `VkPipelineRenderingCreateInfo`.
+	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
+		.setColorAttachmentFormats((vk::Format[]) { target.color_format });
+
+	// Empty, like every pipeline here — and for once literally rather than by
+	// convention: the three vertices come out of `SV_VertexID` arithmetic and
+	// there is no buffer behind them at all.
+	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
+
+	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
+		.setTopology(PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+		.setPrimitiveRestartEnable(vk::FALSE);
+
+	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
+		.setCullMode(CULL_MODE_NONE)
+		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
+		.setPolygonMode(POLYGON_MODE_FILL);
+
+	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
+
+	vk::PipelineColorBlendAttachmentState blend = vk::defaultColorBlendAttachment();
+	blend.blendEnable = vk::FALSE;
+	vk::PipelineColorBlendStateCreateInfo color_blend = vk::defaultColorBlendState(
+		(vk::PipelineColorBlendAttachmentState[]) { blend }
+	);
+
+	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
+		.setDepthTestEnable(vk::FALSE)
+		.setDepthWriteEnable(vk::FALSE);
+
+	// Two, not three: the cull mode is static here. See the header.
+	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };
+	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
+		.setDynamicStates(dynamic_states[..]);
+
+	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
+		.setScissorCount(1);
+
+	self.handle = vk::graphicsPipelineCreateInfo().setNext(&rendering).setStages(stages[..])
+		.setVertexInputState(&vertex_input)
+		.setInputAssemblyState(&input_assembly)
+		.setViewportState(&viewport)
+		.setRasterizationState(&rasterization)
+		.setMultisampleState(&multisample)
+		.setColorBlendState(&color_blend)
+		.setDepthStencilState(&depth)
+		.setDynamicState(&dynamic)
+		.setLayout(self.layout)
+		.build(gpu.handle)!;
+
 	self.shader = mod.layout.copy();
 
 	return *self;
