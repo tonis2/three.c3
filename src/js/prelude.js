@@ -4108,10 +4108,15 @@
 				+ 'written a row at a time — material.uniforms.palette[1] = [0, 1, 0] — or all at once.',
 			'three.setPost({ fragment, uniforms, textures })':
 				'Run one shader over the whole finished frame. fragment is a Slang function '
-				+ '`float3 post(Post p)` returning linear rgb; Post has color (this pixel of the rendered '
-				+ 'scene, already decoded to linear), uv (0..1 across the frame, (0,0) top left), resolution '
+				+ '`float3 post(Post p)` returning linear rgb; Post has color (this pixel of what ran before '
+				+ 'this pass, already decoded to linear — the rendered scene, for the first pass of a chain), '
+				+ 'scene (this pixel of the rendered scene whatever has run since; equal to color on the '
+				+ 'first pass), uv (0..1 across the frame, (0,0) top left), resolution '
 				+ '(the frame in pixels — 1.0 / p.resolution is one texel, which is what a blur steps by) and '
-				+ 'time (seconds since this shader was set, wall clock rather than a game clock). Each '
+				+ 'time (seconds since this shader was set, wall clock rather than a game clock). p gives you '
+				+ 'this pixel; the two images behind color and scene are also in scope as samplers named prev '
+				+ 'and scene, so a body that needs the NEIGHBOURS reads prev.Sample(p.uv + off) — which is '
+				+ 'what the texel step is for, and the whole of how a blur is written. Each '
 				+ 'uniform is readable in the body by its own name; they are at most 112 bytes in total (28 '
 				+ 'floats), each a number or an array of up to four numbers, and NOT a table — a post pass '
 				+ 'draws one triangle over the whole frame, so there are no instances for a row to belong to. '
