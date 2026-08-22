@@ -33,6 +33,18 @@
 // body that *means* to, discards, and the burn edge is a ramp lookup on the
 // distance from the threshold.
 //
+// **Geometry moves in the vertex stage, and nothing is re-uploaded.** Four of the
+// materials below carry a `void displace(inout Vertex v)` body: the dome bulges
+// where it is hit, the plasma core boils along its own normals, the banners wave
+// from their own local length, and the crates come apart per vertex as the
+// dissolve front passes. The meshes are the same assets they were, the copies are
+// still instanced, and the whole thing is a handful of floats a frame.
+//
+// **Every one of them says `bounds`.** Culling tests a mesh's own box, so a body
+// that pushes vertices outside it draws something the frustum was never told
+// about — the geometry vanishes near the edge of the screen and comes back when
+// the camera turns. The number is how far the body can move a vertex.
+//
 // **The shield's rim needs the camera, and the camera is a uniform.** There is
 // no view vector in `Surface`, so the loop computes the eye from the turntable
 // and writes it as a 3-float uniform every frame — 12 bytes, no compile.
@@ -42,8 +54,8 @@
 // itself. The shockwave is a uv displacement sampling `scene` at an offset, so
 // it is one pass and not two.
 //
-// The whole scene is 5 draw calls and 41 instances. The 24 crates are one of
-// them, and so are the 15 pieces of the plasma core.
+// The whole scene is 6 draw calls. The 24 crates are one of them, the 15 pieces
+// of the plasma core are another, and the four banners are a third.
 
 // ---------------------------------------------------------------------------
 // Pixels
@@ -156,6 +168,10 @@ const shieldRamp = rampTexture(64, [
 const burnRamp = rampTexture(64, [
 	[0.00, 255, 240, 200], [0.35, 255, 140, 30], [0.75, 90, 20, 8], [1.00, 8, 6, 6],
 ]);
+// The banners: warm, so they read against the shield rather than into it.
+const clothRamp = rampTexture(64, [
+	[0.00, 58, 26, 18], [0.40, 168, 74, 34], [0.75, 232, 148, 62], [1.00, 255, 216, 150],
+]);
 // The post grade: a slightly cool, lifted-black filmic curve.
 const gradeLut = rampTexture(64, [
 	[0.00, 14, 16, 26], [0.25, 62, 70, 92], [0.55, 140, 140, 150],
@@ -239,6 +255,28 @@ const shieldMat = new three.ShaderMaterial({
 
 	    return colour * energy * 1.5;
 	}`,
+	// The dome does not merely light up where it is hit — it moves. The same
+	// travelling band the fragment body draws is pushed out along the surface
+	// normal here, so the impact has a shape from every angle instead of being a
+	// picture painted on a sphere.
+	//
+	// `v.local` rather than `v.position`: the band should ride the dome's own
+	// parameterisation wherever the dome is, not a plane of the world.
+	vertex: `
+	void displace(inout Vertex v)
+	{
+	    float band = 1.0 - abs(v.uv.y - (1.0 - hit)) * 8.0;
+	    // Not called push: a uniform reaches your body as push.name, so a local
+	    // of that name shadows the block every one of them goes through, and the
+	    // error arrives as "t is not a member of float" against a line of
+	    // generated code you have never seen.
+	    float bulge = saturate(band) * hit;
+	    // A little breathing even at rest, so the shield reads as held rather
+	    // than as a static mesh waiting for something to happen.
+	    float idle = sin(t * 1.6 + v.local.y * 0.8) * 0.03;
+	    v.position += normalize(v.normal) * (bulge * 0.55 + idle);
+	}`,
+	bounds: 0.6,
 	uniforms: { eye: [0, 0, 0], t: 0, hit: 0, channel: 0 },
 	textures: { hex_map: hex, noise_map: coarse, ramp_map: shieldRamp },
 });
@@ -284,6 +322,21 @@ const coreMat = new three.ShaderMaterial({
 
 	    return ramp_map.Sample(lut(heat)).rgb * heat * 2.2;
 	}`,
+	// The core boils. Two noise taps at different speeds along the normal, which
+	// is what makes a sphere read as a mass of burning gas rather than as a
+	// sphere with fire painted on it.
+	//
+	// **SampleLevel, not Sample.** A vertex shader has no neighbouring fragments
+	// to derive a mip level from, so the LOD is stated. This is the one thing
+	// about sampling that differs between the two stages.
+	vertex: `
+	void displace(inout Vertex v)
+	{
+	    float a = warp_map.SampleLevel(v.uv * 2.0 + float2(0.0, t * 0.20), 0).r;
+	    float b = noise_map.SampleLevel(v.uv * 3.0 - float2(t * 0.15, 0.0), 0).r;
+	    v.position += normalize(v.normal) * ((a + b - 1.0) * 0.42 * gain);
+	}`,
+	bounds: 0.6,
 	uniforms: { t: 0, gain: 1 },
 	textures: { noise_map: fine, warp_map: coarse, ramp_map: fireRamp },
 });
@@ -352,6 +405,26 @@ const dissolveMat = new three.ShaderMaterial({
 
 	    return lerp(plate, burn * 2.4, heat * heat);
 	}`,
+	// The crates come apart rather than simply thinning out. `v.index` is the
+	// vertex number — a per-vertex seed, and the only thing in `Vertex` that
+	// gives two corners of one face a reason to differ. Hashed into a direction,
+	// it scatters the surviving geometry as the front eats through it.
+	vertex: `
+	float hash11(float x)
+	{
+	    return frac(sin(x * 12.9898) * 43758.5453);
+	}
+	void displace(inout Vertex v)
+	{
+	    if (edge < 0.002) return;
+	    float3 dir = normalize(float3(
+	        hash11(float(v.index) * 1.0) - 0.5,
+	        hash11(float(v.index) * 2.3) * 0.6,
+	        hash11(float(v.index) * 3.7) - 0.5
+	    ) + 1e-5);
+	    v.position += dir * edge * edge * 0.9;
+	}`,
+	bounds: 1.0,
 	uniforms: { edge: 0 },
 	textures: { plate_map: plate, noise_map: coarse, ramp_map: burnRamp },
 });
@@ -368,8 +441,69 @@ for (let i = 0; i < 24; i++) {
 	crates.push(c);
 }
 
+
 // ---------------------------------------------------------------------------
-// 4. The post pass — a grade to look through and a grain to dither with
+// 4. The banners — the canonical vertex effect, and the one that needs a normal
+//
+// A flag is where a vertex body earns its place: the geometry is a flat grid, the
+// wave is two sines, and the mesh never changes. What makes it look like cloth
+// rather than like a wobbling plane is the *normal* — nothing recomputes it for
+// you, so the body writes the one the wave implies and the lighting rolls with
+// the fabric.
+//
+// `v.local` is the input, not `v.position`: the wave should run along the
+// banner's own length wherever the banner is standing, and world space would make
+// four flags around a circle wave in four different directions.
+// ---------------------------------------------------------------------------
+
+const bannerMat = new three.ShaderMaterial({
+	side: three.DoubleSide,
+	vertex: `
+	void displace(inout Vertex v)
+	{
+	    // Pinned at the top edge, free at the bottom: the amplitude grows with
+	    // distance from the pole, which is what stops it looking like a sheet
+	    // being waved from both ends.
+	    float droop = saturate(0.5 - v.local.y);
+	    float wave = sin(v.local.y * 2.6 - t * 2.4) + 0.4 * sin(v.local.x * 3.1 + t * 1.7);
+	    v.position.z += wave * droop * 0.55;
+
+	    // The normal the wave implies: the surface tilts by the slope of the
+	    // displacement, so the derivative of the sine is the whole of it. Without
+	    // this the banner moves and the shading does not, which reads as a
+	    // texture sliding over a still object.
+	    float slope = cos(v.local.y * 2.6 - t * 2.4) * 2.6 * droop * 0.55;
+	    v.normal = normalize(float3(v.normal.x, v.normal.y - slope, 1.0));
+	}`,
+	bounds: 0.7,
+	fragment: `
+	float2 lut(float k)
+	{
+	    return float2(0.0078 + saturate(k) * 0.9844, 0.5);
+	}
+	float3 shade(Surface s)
+	{
+	    float3 cloth = ramp_map.Sample(lut(1.0 - s.uv.y * 0.8)).rgb;
+	    return cloth * s.color.rgb * (0.35 + 0.65 * lambert(s.normal));
+	}`,
+	uniforms: { t: 0 },
+	textures: { ramp_map: clothRamp },
+});
+
+const bannerGeo = new three.PlaneGeometry(1.7, 3.4, 8, 14);
+const banners = [];
+for (let i = 0; i < 4; i++) {
+	const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+	const b = new three.Mesh(bannerGeo, bannerMat);
+	b.position.set(Math.cos(a) * 11.5, 2.4, Math.sin(a) * 11.5);
+	b.rotation.y = -a + Math.PI / 2;
+	b.color = i % 2 ? [1, 0.9, 0.75, 1] : [1, 0.75, 0.55, 1];
+	scene.add(b);
+	banners.push(b);
+}
+
+// ---------------------------------------------------------------------------
+// 5. The post pass — a grade to look through and a grain to dither with
 //
 // The shockwave is a uv displacement: sample `scene` at an offset that rides an
 // expanding ring, rather than a second pass over a blurred copy. One pass is all
@@ -434,8 +568,8 @@ float3 post(Post p)
 // ---------------------------------------------------------------------------
 
 const V = globalThis.vfx = {
-	scene, shield, core, embers, crates,
-	shieldMat, coreMat, dissolveMat,
+	scene, shield, core, embers, crates, banners,
+	shieldMat, coreMat, dissolveMat, bannerMat,
 	pass: null, post: POST_BODY,
 	now: 0, hit: 0, mark: 0, auto: true,
 	dissolving: false, edge: 0, grade: true, orbit: true, channel: 0,
@@ -483,6 +617,7 @@ three.setAnimationLoop((ms) => {
 	V.shieldMat.uniforms.t = t;
 	V.shieldMat.uniforms.eye = V.eye();
 	V.coreMat.uniforms.t = t;
+	V.bannerMat.uniforms.t = t;
 	V.coreMat.uniforms.gain = 0.85 + 0.15 * Math.sin(t * 3.1);
 
 	// The impact decays over about half a second.
@@ -533,8 +668,15 @@ return {
 		o: 'auto-orbit on/off',
 		1: 'shield: all, rim, lattice, ring',
 	},
+	displaces: {
+		shield: 'the dome bulges where it is hit',
+		core: 'boils along its normals, sampling in the vertex stage',
+		banners: 'wave from their own local length, normals rewritten',
+		crates: 'come apart per vertex, seeded by v.index',
+	},
 	samplers: {
 		shield: Object.keys(shieldMat.textures),
+		banners: Object.keys(bannerMat.textures),
 		core: Object.keys(coreMat.textures),
 		crates: Object.keys(dissolveMat.textures),
 		post: Object.keys(V.pass.textures),

@@ -615,6 +615,14 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					want.push("    float3 palette[2];");
 				case "//@rows":
 					want.push("static const uint MATERIAL_ROWS = 2u;");
+				case "//@vdefines":
+					// Nothing: this material declared no vertex body, so the
+					// uniform macros are not opened over `vertexMain` at all.
+					break;
+				case "//@vertex":
+					// The identity, which is what a material without a `vertex:`
+					// gets — one line, and the same one every time.
+					want.push("void displace(inout Vertex v) { }");
 				case "//@textures":
 					// Nothing: this material declared no samplers, and a marker with
 					// nothing to generate is replaced by zero lines rather than left

@@ -1192,11 +1192,11 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
  @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
  @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes; see MeshPass.record for why this crosses as a flat slice.`
 *>
-fn void Scene.update(&self, Assets* assets, Matrix4f view_projection, bool[] transparent = {})
+fn void Scene.update(&self, Assets* assets, Matrix4f view_projection, bool[] transparent = {}, float[] margins = {})
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	self.build_draw_list(assets, self.cull ? &frustum : null, transparent, &frustum.planes[4]);
+	self.build_draw_list(assets, self.cull ? &frustum : null, transparent, &frustum.planes[4], margins);
 	// Promoted here rather than inside `build_draw_list`, because this call is
 	// what "a frame happened" means and the other caller is a query. Assigned
 	// unconditionally: with `cull` off nothing was dropped and zero is the honest
@@ -1261,7 +1261,16 @@ fn uint draw_order(uint material, bool transparent) @local
  @param transparent : `One bool per material index — whether that material blends. Empty is an opaque frame, and is what stats() passes.`
  @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
 *>
-fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum, bool[] transparent = {}, Plane* near = null)
+fn void Scene.build_draw_list(
+	&self,
+	Assets* assets,
+	Frustum* frustum,
+	bool[] transparent = {},
+	Plane* near = null,
+	// Indexed by material, exactly as `transparent` is, and empty when nobody has
+	// asked for one. See the growth below.
+	float[] margins = {}
+)
 {
 	self.draws.clear();
 	self.instances.clear();
@@ -1307,6 +1316,21 @@ fn void Scene.build_draw_list(&self, Assets* assets, Frustum* frustum, bool[] tr
 		if (frustum != null || sorted)
 		{
 			collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+			// A material with a vertex body draws geometry its own bounds do not
+			// contain, and the box is what the frustum is asked about — so the
+			// material says how far it moves things and the box grows by that
+			// much. Grown in *world* units after the transform rather than in
+			// object units before it, because the displacement in a body is
+			// world-space too: `v.position + something` is metres of scene,
+			// whatever the node is scaled by.
+			//
+			// Zero for every material that has no vertex body, so the common case
+			// adds one compare and no arithmetic.
+			if (node.material < margins.len && margins[node.material] > 0)
+			{
+				float m = margins[node.material];
+				box = { .min = box.min - {m, m, m}, .max = box.max + {m, m, m} };
+			}
 			if (frustum != null && !frustum.contains(box))
 			{
 				self.culled++;

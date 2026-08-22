@@ -44,7 +44,20 @@ const String MARKER_UNIFORMS @private = "//@uniforms";
 const String MARKER_ROWS @private = "//@rows";
 const String MARKER_DEFINES @private = "//@defines";
 const String MARKER_TEXTURES @private = "//@textures";
+const String MARKER_VDEFINES @private = "//@vdefines";
+const String MARKER_VERTEX @private = "//@vertex";
 const String MARKER_SHADE @private = "//@shade";
+
+<*
+ What a material with no vertex body gets instead of one.
+
+ An empty function rather than an absent one, so `vertexMain` calls `displace`
+ unconditionally and there is no second spelling of the vertex stage to keep in
+ step with the first. Every compiler folds it away; the SPIR-V is the same either
+ way, which is the claim `a_material_without_a_vertex_body_is_the_shader_it_was`
+ holds down.
+*>
+const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 
 <*
  The binding index the first agent-declared sampler gets.
@@ -239,7 +252,9 @@ fn uint append_lines(DString* out, String text) @private
  @param fragment : `The agent's body, appended verbatim between the two #line directives.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see TEXTURE_BINDING_FIRST.`
+ @param vertex : `The agent's vertex body, or empty for the identity. Only a template with a //@vertex marker has anywhere to put one.`
  @param body_name : `What the agent's own lines are called in a diagnostic — "material", "post".`
+ @param vertex_name : `The same, for the vertex body — "vertex". Unused when there is no vertex body.`
  @param preamble_name : `What everything three.c3 generated is called — "three.material", "three.post".`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? SHADER_NOT_FOUND : `The template is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
@@ -249,7 +264,9 @@ fn String? assemble_shader(
 	String fragment,
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures,
+	String vertex,
 	String body_name,
+	String vertex_name,
 	String preamble_name,
 	alloc::Allocator allocator
 ) @private
@@ -309,6 +326,58 @@ fn String? assemble_shader(
 				foreach (uniform : uniforms)
 				{
 					out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+					out.append_char('\n');
+					physical++;
+				}
+				continue;
+			}
+			if (marker == MARKER_VDEFINES)
+			{
+				// **Nothing at all when there is no vertex body**, which is the
+				// half that matters. A `#define tint (push.tint)` left live here
+				// would reach `vertexMain`'s own lines rather than the agent's,
+				// and the whole reason the fragment block is `#undef`ed straight
+				// after the body is that the template's code must not be
+				// rewritten by a name a script chose.
+				if (vertex.len > 0)
+				{
+					foreach (uniform : uniforms)
+					{
+						out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+						out.append_char('\n');
+						physical++;
+					}
+				}
+				continue;
+			}
+			if (marker == MARKER_VERTEX)
+			{
+				if (vertex.len == 0)
+				{
+					out.append_string(IDENTITY_DISPLACE);
+					out.append_char('\n');
+					physical++;
+					continue;
+				}
+
+				// `#line 1 "vertex"`, so a diagnostic in a vertex body reads
+				// `vertex:3:12` and a diagnostic in a fragment body reads
+				// `material:3:12` — two names rather than one, because an agent
+				// that wrote both needs to know which of the two the compiler is
+				// talking about before it can read the line number at all.
+				out.appendf(`#line 1 "%s"`, vertex_name)!!;
+				out.append_char('\n');
+				physical++;
+
+				physical += append_lines(&out, vertex);
+
+				out.appendf(`#line %d "%s"`, physical + 2, preamble_name)!!;
+				out.append_char('\n');
+				physical++;
+
+				foreach (uniform : uniforms)
+				{
+					out.appendf("#undef %s", uniform.name)!!;
 					out.append_char('\n');
 					physical++;
 				}

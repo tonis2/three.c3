@@ -749,6 +749,25 @@ Live, all of them. Each cost real time and none is visible in a diff.
   check would have quietly stopped asking. This plan predicted the cancellation
   in Phase D item 2 and was wrong; it was caught by writing the test the plan
   asked for rather than by reasoning about it again.
+- **A uniform is a macro, so it collides with anything the agent's own body
+  names — including the fields of the structs it was handed.** `#define time
+  (push.time)` is live across exactly the lines the script wrote, so a post pass
+  with `uniforms: { time: 1 }` has the `p.time` in its own body rewritten to
+  `p.(push.time)`. Slang reports macro-expansion failures **at the `#define`
+  line**, not at the use, so the diagnostic is a caret under a line of generated
+  preamble the agent has never seen, about a member access it wrote correctly.
+  This was live from the day uniforms existed and had no test; `time` is the most
+  likely uniform name anybody writes for a post pass. The fix is a second reserved
+  list per contract — `MATERIAL_CONTRACT_FIELDS`, `POST_CONTRACT_FIELDS` — with
+  its own sentence, because "that name is reserved" is true and useless when the
+  thing using it is the struct five characters away.
+
+  The mirror image cannot be refused and has to be documented instead: a **local**
+  in the body named `push` shadows the push block every uniform expands through,
+  and the error arrives as `'t' is not a member of 'float'` against the same
+  `#define` line. It cost twenty minutes in `examples/vfx.js`, where the shield's
+  vertex body called its displacement amount `push`. Nothing parses the body, so
+  nothing can catch it — the note lives in the example that hit it.
 - **A gradient sampled as a lookup table wraps at both ends.** Samplers here
   repeat, and a ramp read at `float2(k, 0.5)` with `k` at 0 or 1 lands exactly on
   the seam — where bilinear filtering blends the *first* texel with the *last*.

@@ -257,6 +257,27 @@ struct Material
 	// message when a uniform name does not resolve — "that material has no
 	// uniform called X" is only actionable next to the source that declared them.
 	String fragment;
+	// The vertex body, owned, or an empty slice for a material that has none.
+	// Kept for `toJSON` and for the same reason `fragment` is: a message about a
+	// shader is worth much less than the shader beside it.
+	String vertex;
+	// How far this material's vertex body can move a vertex, in world units.
+	//
+	// **A cull margin, and nothing else.** `build_draw_list` tests a mesh's own
+	// bounds against the frustum, and those bounds describe the geometry as it
+	// was uploaded — a body that pushes a vertex two metres out is drawing
+	// something the box does not contain, so the draw is dropped while the
+	// displaced part is still on screen. The symptom is geometry vanishing as it
+	// reaches the edge of the view and coming back when the camera turns, which
+	// reads as a culling bug in the engine rather than as a number the material
+	// never gave.
+	//
+	// Zero for every material without a vertex body, which is exactly right for
+	// them: the zero fill means "displaces nothing", and a material that does
+	// displace says how far. It is deliberately not derived — nothing can read a
+	// bound out of an arbitrary shader body, and a conservative guess would
+	// either cost draw calls everywhere or be wrong in the one case it mattered.
+	float bounds;
 	// `material.map` — an index into `Assets.textures`, or `NO_TEXTURE` for
 	// "whatever the mesh brought". Holds one reference to that slot for as long
 	// as it names it; `MeshPass.set_material_map` is the only thing that moves
@@ -516,6 +537,7 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
 fn void Material.free(&self)
 {
 	if (self.fragment.len > 0) self.fragment.free(mem);
+	if (self.vertex.len > 0) self.vertex.free(mem);
 	*self = { };
 	// **Not left at the zero fill.** Zero is a perfectly ordinary texture index —
 	// the hazard `Material.texture` spends a paragraph on — and a collected slot

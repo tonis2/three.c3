@@ -1652,3 +1652,192 @@ fn void two_draws_with_different_textures_do_not_bleed() @test
 		);
 	};
 }
+
+// ============================================================================
+// The vertex stage, where it meets the draw list
+//
+// Two claims that only pixels can settle: that a `displace` body moves geometry
+// on the screen without moving the node, and that `material.bounds` is what keeps
+// the moved geometry from being culled. The second is the one with no other
+// symptom — a body with no bounds renders perfectly until the camera turns.
+// ============================================================================
+
+// Unlit and flat on purpose: the light is straight down the view axis at full
+// ambient, so the quad is exactly its own colour and a pixel test is about where
+// the geometry is rather than about how it is shaded.
+const String FLAT_GREEN = `float3 shade(Surface s) { return float3(0.1, 0.95, 0.2); }`;
+const String SHIFT_X = `void displace(inout Vertex v) { v.position.x += shift; }`;
+
+<*
+ The mean x of everything that drew, as a fraction of the frame's width, and how
+ many pixels that was.
+
+ A centroid rather than `count_drawn` because the question here is *where* the
+ geometry is: a displacement that moved a quad and one that did nothing both draw
+ the same number of pixels.
+*>
+fn float drawn_centroid_x(image::Image* shot, uint* count)
+{
+	sz bpp = shot.bytes_per_pixel();
+	double total = 0;
+	uint drawn = 0;
+	for (sz y = 0; y < (sz)shot.height; y++)
+	{
+		for (sz x = 0; x < (sz)shot.width; x++)
+		{
+			if (shot.pixels[(y * (sz)shot.width + x) * bpp + 1] < 100) continue;
+			total += (double)x;
+			drawn++;
+		}
+	}
+	*count = drawn;
+	return drawn == 0 ? 0 : (float)(total / (double)drawn / (double)shot.width);
+}
+
+<*
+ A vertex body moves geometry on the screen, and the node does not move with it.
+
+ The second half is what makes this a test of the vertex stage rather than of
+ anything else: `Node.position` is untouched throughout, so a displacement that
+ was quietly happening on the CPU — or not happening at all — cannot produce this.
+ The quad is drawn three times through one material and one geometry, with a
+ 4-byte uniform write between them.
+
+ Symmetric offsets rather than one, because a body that ignored the uniform and a
+ body that applied it to a fixed direction both survive a single check.
+
+ **Proved by injection.** `vertexMain` building `sv_position` from `world` rather
+ than from `v.position` — the quad stays at 0.5 in all three frames, which is
+ exactly what a vertex stage nobody wired up looks like.
+*>
+fn void a_vertex_body_moves_geometry_without_moving_the_node() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		pass.light = { 0, 0, 1, 1 };
+
+		uint material;
+		@pool()
+		{
+			three::MaterialUniform[1] uniforms = { { "shift", 1, 1 } };
+			material = pass.create_material(
+				&renderer.gpu, &renderer.target, FLAT_GREEN, uniforms[..],
+				three::SIDE_DOUBLE, three::BLENDING_NONE, {}, SHIFT_X, 8.0
+			)!!;
+		};
+
+		three::AssetId quad = pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		three::NodeId node = pass.scene.add_mesh(quad, 0);
+		pass.scene.set_material(node, material);
+		pass.camera.target = { 0, 0, 0 };
+		pass.camera.yaw = 0;
+		pass.camera.pitch = 0;
+		pass.camera.distance = 14;
+
+		uint at_rest;
+		image::Image centred = renderer.capture()!!;
+		defer centred.free();
+		float x0 = drawn_centroid_x(&centred, &at_rest);
+		test::@check(at_rest > 100, "the quad drew at all: %d pixels", at_rest);
+		test::@check(math::abs(x0 - 0.5) < 0.02, "and starts centred, at %f", x0);
+
+		uint moved_count;
+		pass.material(material).set_uniform("shift", (float[]) { 3.0 })!!;
+		image::Image right = renderer.capture()!!;
+		defer right.free();
+		float x1 = drawn_centroid_x(&right, &moved_count);
+
+		pass.material(material).set_uniform("shift", (float[]) { -3.0 })!!;
+		image::Image left = renderer.capture()!!;
+		defer left.free();
+		uint back_count;
+		float x2 = drawn_centroid_x(&left, &back_count);
+
+		test::@check(x1 > x0 + 0.08, "a positive shift moved the quad right: %f -> %f", x0, x1);
+		test::@check(x2 < x0 - 0.08, "and a negative one moved it left: %f -> %f", x0, x2);
+		// The same amount of geometry throughout: this moved the quad rather than
+		// scaling, skewing or clipping it.
+		test::@check(
+			moved_count > at_rest * 9 / 10 && moved_count < at_rest * 11 / 10,
+			"drawing the same quad either way: %d against %d", moved_count, at_rest
+		);
+
+		// The node never moved. A displacement that had leaked into the transform
+		// would read identically on screen and completely differently here.
+		test::@check(pass.scene.node(node).position.x == 0,
+			"the node is still at the origin: %f", pass.scene.node(node).position.x);
+	};
+}
+
+<*
+ `material.bounds` is what keeps displaced geometry from being culled.
+
+ **The failure this exists for has no other symptom.** `build_draw_list` tests a
+ mesh's own bounds against the frustum, and those describe the geometry as it was
+ uploaded — so a body that pushes vertices outside them draws something the
+ frustum was never told about. Nothing errors; the draw is simply dropped, and
+ what an agent sees is geometry vanishing near the edge of the view and returning
+ when the camera turns.
+
+ The fixture makes it total rather than marginal: the node sits thirty units off
+ to the left, entirely outside the frustum, and the body brings it back to the
+ middle of the screen. With no margin the frustum sees a box thirty units away and
+ drops it — the frame is empty. With a margin wider than the displacement the box
+ reaches the camera and the quad draws where the body put it.
+
+ **Proved by injection.** The margin lookup removed from `build_draw_list`: the
+ second half of this drops to zero pixels while every other check in the suite
+ stays green, because nothing else in it displaces anything.
+*>
+fn void a_displacement_is_culled_unless_the_material_says_how_far() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		pass.light = { 0, 0, 1, 1 };
+		pass.camera.target = { 0, 0, 0 };
+		pass.camera.yaw = 0;
+		pass.camera.pitch = 0;
+		pass.camera.distance = 14;
+
+		three::AssetId quad = pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+
+		// Two materials over one body, differing only in what they claim about how
+		// far it moves things — which is the whole variable under test.
+		uint unbounded;
+		uint bounded;
+		@pool()
+		{
+			three::MaterialUniform[1] uniforms = { { "shift", 1, 1 } };
+			unbounded = pass.create_material(
+				&renderer.gpu, &renderer.target, FLAT_GREEN, uniforms[..],
+				three::SIDE_DOUBLE, three::BLENDING_NONE, {}, SHIFT_X, 0.0
+			)!!;
+			bounded = pass.create_material(
+				&renderer.gpu, &renderer.target, FLAT_GREEN, uniforms[..],
+				three::SIDE_DOUBLE, three::BLENDING_NONE, {}, SHIFT_X, 32.0
+			)!!;
+		};
+		pass.material(unbounded).set_uniform("shift", (float[]) { 30.0 })!!;
+		pass.material(bounded).set_uniform("shift", (float[]) { 30.0 })!!;
+
+		three::NodeId node = pass.scene.add_mesh(quad, 0);
+		pass.scene.set_position(node, { -30, 0, 0 });
+		pass.scene.set_material(node, unbounded);
+
+		image::Image dropped = renderer.capture()!!;
+		defer dropped.free();
+		uint without = count_drawn(&dropped, renderer.clear);
+		test::@check(without == 0,
+			"a material claiming no displacement is culled where its geometry is: %d pixels", without);
+
+		pass.scene.set_material(node, bounded);
+
+		image::Image kept = renderer.capture()!!;
+		defer kept.free();
+		uint with = count_drawn(&kept, renderer.clear);
+		test::@check(with > 100,
+			"and one that says how far survives to draw where the body put it: %d pixels", with);
+	};
+}
