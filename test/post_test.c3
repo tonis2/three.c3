@@ -995,12 +995,17 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
  Setting, clearing and setting again is silent under the validation layer.
 
  The barriers are the whole reason this file has a device half. Image A goes
- COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL between the two passes and
- `target.color` goes UNDEFINED → COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
- around the second, all inside one command buffer, and **none of it has a pixel
- symptom on this driver**. A missing barrier renders correctly here and is a
- race on hardware that reorders; a wrong layout is undefined contents that
- happen to be right.
+ COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL before anything reads it,
+ the ping-pong image the pass writes goes the same way before the tonemap reads
+ it, and `target.color` goes UNDEFINED → COLOR_ATTACHMENT_OPTIMAL →
+ TRANSFER_SRC_OPTIMAL around the tonemap, all inside one command buffer, and
+ **none of it has a pixel symptom on this driver**. A missing barrier renders
+ correctly here and is a race on hardware that reorders; a wrong layout is
+ undefined contents that happen to be right.
+
+ `a_chain_is_silent_under_validation` is the same instrument at N = 3. This one
+ stays at N = 1 because that is the shape every script writes first and the one
+ whose barriers are `record_chain`'s own rather than its loop's.
 
  The layer is the only instrument that sees any of it, so the assertion is on
  its silence — and the sequence is deliberately the awkward one: post, no post,
@@ -1011,14 +1016,17 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
  in this project that need it, because a machine with no Vulkan SDK must still
  run the suite.
 
- **Proved by injection.** The `shader_read_barrier(self.image)` half of
- `PostPass.record`'s barrier pair removed: "VUID-vkCmdDraw-imageLayout-00344:
+ **Proved by injection.** `record_chain`'s opening
+ `shader_read_barrier(self.scene.image)` removed: "VUID-vkCmdDraw-imageLayout-00344:
  vkCmdDraw(): Cannot use VkImage ... with specific layout
  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (specified by combined image sampler
- descriptor ... variable 'scene') that doesn't match the previous known layout
- VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL" — with every pixel check in this file
- still green, which is the whole argument for this check existing. Restored,
- green again.
+ descriptor [Set 0, Binding 0, Index 0, variable 'prev']) that doesn't match the
+ previous known layout VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL" — with every
+ pixel check in this file still green, which is the whole argument for this check
+ existing. Restored, green again.
+
+ The variable is `prev` and not `scene` because on a chain of one both reserved
+ bindings point at image A, and binding 0 is the one the layer names first.
 *>
 fn void the_post_pass_is_silent_under_validation() @test
 {
@@ -1075,13 +1083,21 @@ fn void the_post_pass_is_silent_under_validation() @test
 // ============================================================================
 
 <*
- A declared texture is a binding beside `scene`, not instead of it.
+ A declared texture is a binding beside `prev` and `scene`, not instead of
+ either.
 
- The thing that would break silently: image A is bound at 0 by
- `PostPass.record`, so a generated declaration that landed there would push the
- frame into the agent's sampler and leave the body reading its own lookup table
- as though it were the picture. `TEXTURE_BINDING_FIRST` is why it cannot, and
- this asserts both ends of that rather than the constant.
+ The thing that would break silently: the chain binds the pass before this one at
+ 0 and image A at 1 (`PostStage.record`), so a generated declaration that landed
+ on either would push a frame into the agent's sampler and leave the body reading
+ its own lookup table as though it were the picture. `POST_BINDING_FIRST` is why
+ it cannot, and this asserts both ends of that rather than the constant.
+
+ **Two reserved bindings and not one**, which is the half that would break
+ quietly the other way: raising the shared `TEXTURE_BINDING_FIRST` instead of
+ giving the two kinds their own base would have renumbered every *material*
+ sampler by one, and every material's reflection would still have agreed with
+ itself. So the count is asserted, and `material_test`'s own binding check is the
+ other end of it.
 *>
 fn void a_post_texture_is_a_binding_beside_the_scene() @test
 {
@@ -1103,17 +1119,20 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 3,
-		"the frame and the two the body asked for, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 4,
+		"the two reserved and the two the body asked for, got %d", mod.layout.bindings.len());
+
+	three::ShaderBinding* previous = mod.layout.binding_of("prev");
+	test::@check(previous != null && previous.binding == 0, "the pass before this one is binding 0");
 
 	three::ShaderBinding* frame = mod.layout.binding_of("scene");
-	test::@check(frame != null && frame.binding == 0, "the frame is still binding 0");
+	test::@check(frame != null && frame.binding == 1, "image A is binding 1");
 
 	three::ShaderBinding* lut = mod.layout.binding_of("grade_lut");
 	test::@check(lut != null, "the first declared texture is there by name");
 	if (lut == null) return;
-	test::@check(lut.binding == three::TEXTURE_BINDING_FIRST,
-		"at %d, got %d", three::TEXTURE_BINDING_FIRST, lut.binding);
+	test::@check(lut.binding == three::POST_BINDING_FIRST,
+		"at %d, got %d", three::POST_BINDING_FIRST, lut.binding);
 	test::@check(lut.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 		"as a combined image sampler, got %d", (uint)lut.type);
 
@@ -1249,5 +1268,284 @@ fn void a_post_texture_reaches_the_pixels_and_can_be_swapped() @test
 		renderer.post.clear(&renderer.gpu, &renderer.pass.assets);
 		test::@check(renderer.pass.assets.texture_refs(blue) == 1,
 			"and clearing gave it back: %d", renderer.pass.assets.texture_refs(blue));
+	};
+}
+
+// ============================================================================
+// The chain
+//
+// Everything above this line is one pass, which is the chain's N = 1 case and
+// says nothing about the other N. These are the checks that N > 1 exists: that
+// the passes run in the order they were added, that a later one can still reach
+// the frame the geometry left, that the ping-pong images are barriered, and
+// that what travels between passes is float rather than eight bits.
+// ============================================================================
+
+<*
+ A chain runs its passes in the order they were added.
+
+ The two bodies are deliberately **not commutative**, because a check built on
+ commutative ones would pass with the chain reversed, with the chain running
+ twice, or with the list iterated backwards. Adding a quarter to red and then
+ zeroing red is black; zeroing red and then adding a quarter is a quarter.
+
+ The second body is also what makes this a check on the *ping-pong* rather than
+ only on the list: pass 2 samples what pass 1 wrote, so a chain that handed every
+ pass image A instead would leave the fixture's own red in place and answer with
+ the fixture rather than with zero.
+*>
+fn void a_chain_runs_its_passes_in_order() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
+		uint second = renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
+
+		test::@check(second == 1, "the second pass took index 1, got %d", second);
+		test::@check(renderer.post.count() == 2, "and the chain is two long, got %d", renderer.post.count());
+
+		image::Image added = renderer.capture()!!;
+		defer added.free();
+
+		test::@check(band_mean(&added, 0, true) < 1.0,
+			"red was added and then zeroed, so it is gone: %f", band_mean(&added, 0, true));
+		test::@check(band_mean(&added, 2, true) > 20.0,
+			"and blue came through both passes untouched: %f", band_mean(&added, 2, true));
+
+		// The same two bodies the other way round, which is the whole control: if
+		// order did not reach the GPU these two frames would be the same picture.
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
+
+		image::Image reversed = renderer.capture()!!;
+		defer reversed.free();
+
+		test::@check(band_mean(&reversed, 0, true) > 100.0,
+			"reversed, the quarter of red is the last thing that happened: %f",
+			band_mean(&reversed, 0, true));
+	};
+}
+
+<*
+ A later pass can read the frame the geometry left, not only its predecessor.
+
+ `p.scene` is the chain's one non-adjacent edge and the whole reason there are
+ two reserved bindings rather than one — bloom is `blur(bright(scene)) + scene`,
+ which wants the original picture three passes later. This is that, reduced to
+ the smallest thing that cannot pass by accident: **pass 1 destroys the frame
+ completely** and pass 2 rebuilds it from `p.scene`, so the result is the
+ unposted frame if and only if binding 1 is image A.
+
+ **Proved by injection.** Binding 1 wired to `io.prev` in `PostStage.record`:
+ "the second pass read image A past a pass that returned black: 141 levels".
+ Wired to nothing the sampler reads white, which is the same size of failure in
+ the other direction — and that is why the first body returns black rather than
+ something subtler.
+
+ It also exercises the reflection guard on the reserved bindings: pass 1 never
+ mentions `p.color` or `p.scene`, so Slang is free to drop both samplers from its
+ layout, and pushing a descriptor for a binding the layout does not declare is a
+ validation error. `pipeline_declares_binding` is why this is silent.
+*>
+fn void a_later_pass_reads_the_scene_and_not_only_its_predecessor() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return float3(0, 0, 0); }`, {})!!;
+
+		image::Image blacked = renderer.capture()!!;
+		defer blacked.free();
+		test::@check(band_mean(&blacked, 2, true) < 1.0,
+			"the first pass really did destroy the frame: %f", band_mean(&blacked, 2, true));
+
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.scene; }`, {})!!;
+
+		image::Image restored = renderer.capture()!!;
+		defer restored.free();
+
+		int delta = worst_channel_delta(&plain, &restored);
+		test::@check(delta <= 1,
+			"the second pass read image A past a pass that returned black: %d levels", delta);
+	};
+}
+
+<*
+ What travels between two passes is linear float, not eight bits.
+
+ **The check that pins `POST_CHAIN_FORMAT`**, and it is built the only way a
+ clamp can be seen from the outside: multiply by sixteen and divide by sixteen
+ again. Both are exact in half float, so an unclamped chain is the identity —
+ while an 8-bit intermediate saturates every channel above 1/16 at 1.0 and hands
+ the second pass 1/16 back for all of them, which is a visibly flat, dark frame.
+
+ Powers of two on purpose. A factor like 3 would leave the identity claim
+ resting on rounding as well as on range, and the failure this is about is range.
+
+ **Sixteen and not four**, which was measured rather than chosen: this fixture is
+ lit, so its linear values sit around a quarter, and ×4 puts them right at the
+ clamp edge — the injection below reported 4 levels with it, which is a check that
+ technically bites and would not survive a slightly darker scene.
+
+ **Proved by injection.** `POST_CHAIN_FORMAT` set to `FORMAT_R8G8B8A8_SRGB`:
+ "the chain clamped what passed between its two passes: 70 levels". Restored,
+ green again — and worth knowing that every other check in this file stayed green
+ throughout, including the identity one, because a chain of one never puts a
+ value above 1.0 into a ping-pong image.
+*>
+fn void the_chain_carries_values_above_one_between_passes() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		image::Image once = renderer.capture()!!;
+		defer once.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * 16.0; }`, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * 0.0625; }`, {})!!;
+
+		image::Image amplified = renderer.capture()!!;
+		defer amplified.free();
+
+		int delta = worst_channel_delta(&once, &amplified);
+		test::@check(delta <= 1, "the chain clamped what passed between its two passes: %d levels", delta);
+	};
+}
+
+<*
+ A chain of three is silent under the validation layer.
+
+ `the_post_pass_is_silent_under_validation` for N > 1, and the barriers it adds
+ are the ones nothing above it covers: **P0 and P1 go COLOR_ATTACHMENT_OPTIMAL →
+ SHADER_READ_ONLY_OPTIMAL between passes and are re-opened from UNDEFINED by the
+ pass after next**, which is the ping-pong reuse. Three passes rather than two so
+ that P0 is written, sampled and written again inside one command buffer, which
+ is the case a chain of two never reaches.
+
+ Same instrument and same reason as the single-pass check: none of this has a
+ pixel symptom on this driver. The frames are captured and dropped; the assertion
+ is on the layer's silence.
+
+ **Proved by injection.** The `shader_read_barrier(dst.image)` at the end of
+ `record_chain`'s loop removed: "VUID-vkCmdDraw-imageLayout-00344: vkCmdDraw():
+ Cannot use VkImage ... with specific layout
+ VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (specified by combined image sampler
+ descriptor [Set 0, Binding 0, Index 0, variable 'prev']) that doesn't match the
+ previous known layout VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL", with every
+ pixel check in this file still green. Restored, green again.
+*>
+fn void a_chain_is_silent_under_validation() @test
+{
+	@with_validating_pass(; three::Renderer* renderer)
+	{
+		if (!renderer.gpu.validation) return;
+
+		asymmetric_scene(renderer);
+
+		image::Image warmup = renderer.capture()!!;
+		warmup.free();
+
+		renderer.gpu.begin_capture();
+
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * 1.5; }`, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return (p.color + p.scene) * 0.5; }`, {})!!;
+
+		image::Image one = renderer.capture()!!;
+		one.free();
+		image::Image two = renderer.capture()!!;
+		two.free();
+
+		// The frame path with no consumer after it, for the single-pass check's
+		// reason: "they all go through one function" is a claim worth holding down
+		// rather than repeating.
+		renderer.render_offscreen()!!;
+
+		// Back to one pass and then to none, so the chain shrinks as well as
+		// grows inside one captured span — the ping-pong image that pass 3 was
+		// writing is left in SHADER_READ_ONLY by the frame before and must be
+		// re-opened from UNDEFINED by the frame after.
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		image::Image shrunk = renderer.capture()!!;
+		shrunk.free();
+
+		renderer.post.clear(&renderer.gpu);
+		image::Image bare = renderer.capture()!!;
+		bare.free();
+
+		String errors = renderer.gpu.sink.errors.str_view();
+		String warnings = renderer.gpu.sink.warnings.str_view();
+		renderer.gpu.end_capture();
+
+		test::@check(errors.len == 0, "the chain produced validation errors: %s", errors);
+		test::@check(warnings.len == 0, "and warnings: %s", warnings);
+	};
+}
+
+<*
+ Every stage keeps its own uniforms, and setting one does not reach the other.
+
+ The failure this is about is the quiet one: a chain whose uniform writes all
+ landed on stage 0 would look completely correct on any script that only ever
+ called `setPost`, and would silently ignore half of what a script using
+ `addPass` asked for. Both passes here declare a uniform of the *same name*,
+ which is what makes a shared block indistinguishable from a working one by any
+ check that used different names.
+*>
+fn void each_stage_has_its_own_uniform_block() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		three::MaterialUniform[1] gain = { { .name = "gain", .components = 1, .rows = 1 } };
+
+		// Pass 1 scales, pass 2 scales again. With one shared block the second
+		// write would overwrite the first and both passes would use it.
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * gain; }`, gain[..])!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color * gain; }`, gain[..])!!;
+
+		// 4 then 0.25 is the identity; a shared block would make it 0.25 twice
+		// (a sixteenth of the frame) or 4 twice (a clipped white one).
+		renderer.post.set_uniform("gain", (float[]) { 4.0 }, 0)!!;
+		renderer.post.set_uniform("gain", (float[]) { 0.25 }, 1)!!;
+
+		image::Image scaled = renderer.capture()!!;
+		defer scaled.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		int delta = worst_channel_delta(&plain, &scaled);
+		test::@check(delta <= 1,
+			"each stage used its own gain, so the two cancel: %d levels", delta);
+
+		// And the stage index is checked rather than clamped: a write past the end
+		// of the chain is a mistake with a name, not a write to the last pass.
+		fault past = @catch(renderer.post.set_uniform("gain", (float[]) { 1.0 }, 7));
+		test::@check(past == three::MATERIAL_UNIFORM_UNKNOWN,
+			"a uniform written past the end of the chain is refused, got %s", past);
 	};
 }

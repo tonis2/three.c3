@@ -4575,8 +4575,8 @@ fn three::RunResult red_wall_scene(three::JsRuntime* run)
  processing still goes through it. `three.setPost(null)` is the only thing that
  stops it, which is what the docs promise.
 
- **Proved by injection.** The `if (posted) self.post.record(...)` branch dropped
- from the tail of `Renderer.record_scene`, so the scene is drawn into image A and
+ **Proved by injection.** The `if (posted) self.post.record_chain(...)` line
+ dropped from `Renderer.record_scene`, so the scene is drawn into image A and
  nothing ever reads it — the same shape as a post pass that compiled and was then
  never bound: "the post pass did not reach the frame: 0 blue pixels, 14400 still
  red". Restored, green again.
@@ -4630,6 +4630,119 @@ fn void a_post_pass_reaches_the_screen() @test
 			"the pass did not survive the script that set it: %d blue pixels",
 			count_near(&still, 0, 0, red)
 		);
+	};
+}
+
+<*
+ `three.addPass` builds a chain, and every handle in it stays live.
+
+ The script-facing half of `three_tests::post`'s chain checks, and what it adds
+ to them is the part that only exists up here: **an `addPass` does not invalidate
+ the handles a script is already holding.** That is the difference between the
+ two verbs from a script's point of view — `setPost` replaces the chain and every
+ earlier handle throws, `addPass` appends and every earlier handle keeps working
+ — and it is what makes an animated multi-pass effect writable at all, since the
+ script has to be able to steer pass 1's uniforms after pass 2 exists.
+
+ The bodies are the non-commutative pair `three_tests::post` uses for the same
+ reason: `bgr` then "keep only red" is the wall's blue in the red channel, and
+ the two the other way round is black. So the frame says which order ran, not
+ merely that two things did.
+
+ **Proved by injection.** `postEpoch++` added to `addPass` in `prelude.js`, which
+ is what would happen if appending were implemented as a replacement: "the chain
+ was built: Error: this post handle was replaced by a later three.setPost() — that
+ call replaces the whole chain...". Restored, green again.
+*>
+fn void a_script_can_chain_passes_and_keep_every_handle() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		int red = encode_srgb(primitive_linear(0));
+
+		three::RunResult chained = run.run(`
+			// On globalThis because the second script below has to reach them:
+			// each run_script is its own function scope.
+			const first = globalThis.first = three.setPost({
+				fragment: "float3 post(Post p) { return p.color.bgr * gain; }",
+				uniforms: { gain: 1 },
+			});
+			// The same uniform name in both, so the check below is the staleness
+			// one for both handles rather than an undeclared-name refusal for one.
+			const second = globalThis.second = three.addPass({
+				fragment: "float3 post(Post p) { return float3(p.color.r * gain, 0, 0); }",
+				uniforms: { gain: 1 },
+			});
+
+			// Through the handle made *before* the second pass existed, which is
+			// the claim: appending leaves earlier passes exactly where they were.
+			first.uniforms.gain = 1;
+
+			three.render(globalThis.scene, three.camera);
+			return [first.index, second.index, first.fragment.includes("bgr")].join(",");
+		`);
+		defer chained.free();
+		test::@check(chained.ok, "the chain was built: %s", chained.error);
+		test::@check(chained.value.contains("0,1,true"),
+			"the two handles know where they are and what they run: %s", chained.value);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+		// bgr puts the wall's red into blue; then only red survives, so the wall
+		// goes black. The reverse order would leave it red-in-blue.
+		test::@check(count_near(&shot, 0, 0, red) == 0,
+			"the second pass ran after the first: %d pixels are still the swap's blue",
+			count_near(&shot, 0, 0, red));
+		test::@check(count_near(&shot, red, 0, 0) == 0,
+			"and none of it is the wall's own colour either: %d",
+			count_near(&shot, red, 0, 0));
+
+		// A body that does not compile is refused at the addPass line and leaves
+		// the chain it was going to join exactly as it was — `PostPass.add`'s
+		// failure path, which is `set`'s and needs saying once for each door.
+		three::RunResult refused = run.run(`
+			try {
+				three.addPass({ fragment: "float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
+				return "no throw";
+			} catch (e) { return e.message; }
+		`);
+		defer refused.free();
+		test::@check(refused.ok, "the refusal script succeeded: %s", refused.error);
+		test::@check(refused.value.contains("post:3"),
+			"a bad addPass body throws at the line the agent wrote: %s", refused.value);
+
+		three::RunResult again = run.run(`three.render(globalThis.scene, three.camera);`);
+		defer again.free();
+		image::Image after = run.renderer.capture()!!;
+		defer after.free();
+		test::@check(count_near(&after, 0, 0, red) == 0 && count_near(&after, red, 0, 0) == 0,
+			"and the two passes it was going to join still run: %d of the swap's blue, %d of the wall's red",
+			count_near(&after, 0, 0, red), count_near(&after, red, 0, 0));
+
+		// A `setPost` after an `addPass` is the verb that *does* replace, and both
+		// handles have to know it.
+		three::RunResult replaced = run.run(`
+			const said = [];
+			three.setPost({ fragment: "float3 post(Post p) { return p.color; }" });
+			for (const [what, h] of [["first", globalThis.first], ["second", globalThis.second]]) {
+				if (!h) { said.push(what + ": MISSING"); continue; }
+				try { h.uniforms.gain = 2; said.push(what + ": no throw"); }
+				catch (e) { said.push(what + ": " + e.message.slice(0, 60)); }
+			}
+			return said.join(" | ");
+		`);
+		defer replaced.free();
+		test::@check(replaced.ok, "the replacement script succeeded: %s", replaced.error);
+		test::@check(!replaced.value.contains("MISSING"),
+			"both handles are still reachable to be asked: %s", replaced.value);
+		test::@check(!replaced.value.contains("no throw"),
+			"a handle from before a setPost does not steer what replaced it: %s", replaced.value);
+		test::@check(replaced.value.contains("replaced by a later three.setPost"),
+			"and says so in the sentence: %s", replaced.value);
 	};
 }
 

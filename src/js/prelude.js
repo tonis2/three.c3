@@ -1509,29 +1509,36 @@
 	}
 
 	// -----------------------------------------------------------------------
-	// The post pass
+	// The post chain
 	//
-	// One shader over the whole finished frame, and there is exactly one of it.
-	// That is why `three.setPost(spec)` is a verb and there is no
-	// `new three.PostPass(...)`: a constructor implies an assignment target —
-	// somewhere to put the second one, something to swap between — and there is
-	// none. Setting replaces what was running and retires the old pipeline in the
-	// same call.
+	// Full-screen shaders over the finished frame, in the order they were added.
+	// `three.setPost(spec)` makes one pass the whole chain; `three.addPass(spec)`
+	// puts another at the end of it. Each reads what the pass before it wrote,
+	// and the original frame as `p.scene` — that is the entire dependency
+	// declaration, and it is the pass's position in the list.
 	//
-	// What a script gets back is a handle onto the one live pass: the body that
-	// is running, and a live uniforms Proxy. It goes stale the moment another
-	// setPost replaces it, and says so, for the reason a Scene does: the
-	// alternative is `old.uniforms.gain = 2` quietly steering the *new* shader's
-	// uniform of the same name.
+	// Verbs and not a class, because there is one chain and it belongs to the
+	// renderer: a constructor implies an assignment target — somewhere to put a
+	// second chain, something to swap between — and there is none.
+	//
+	// What a script gets back is a handle onto one live pass: the body that is
+	// running, its index in the chain, and a live uniforms Proxy. It goes stale
+	// the moment a setPost replaces the chain, and says so, for the reason a
+	// Scene does: the alternative is `old.uniforms.gain = 2` quietly steering the
+	// *new* shader's uniform of the same name.
 
-	// Bumped by every call that changes what is running — a successful setPost
+	// Bumped by every call that replaces the whole chain — a successful setPost
 	// and a setPost(null). A handle remembers the number it was made at.
+	//
+	// **addPass does not bump it**, and that is the whole difference between the
+	// two verbs from a handle's point of view: appending leaves every earlier
+	// pass exactly where it was, at the same index, running the same shader, so
+	// there is nothing for an existing handle to have gone stale about.
 	let postEpoch = 0;
 
-	function postHandle(fragment, names, declared = { names: [], values: {} }) {
-		postEpoch++;
+	function postHandle(fragment, names, declared = { names: [], values: {} }, index = 0) {
 		const epoch = postEpoch;
-		const handle = { fragment };
+		const handle = { fragment, index };
 		// Off the enumeration, so that returning the handle from a script
 		// stringifies as the two things it is — the body and the uniforms — and
 		// not as the bookkeeping behind them.
@@ -1545,8 +1552,9 @@
 			_check() {
 				if (postEpoch !== epoch) {
 					throw new Error(
-						'this post handle was replaced by a later three.setPost() — there is one post pass '
-						+ 'at a time, and writing through the old handle would steer the new shader'
+						'this post handle was replaced by a later three.setPost() — that call replaces the '
+						+ 'whole chain, and writing through the old handle would steer whatever is at its '
+						+ 'index now. three.addPass() appends and leaves earlier handles alone'
 					);
 				}
 			},
@@ -1558,7 +1566,7 @@
 			_set(name, v) {
 				internals._check();
 				const n = uniformValues(name, v);
-				H.setPostUniform(name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length);
+				H.setPostUniform(name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length, index);
 				internals._values[name] = typeof v === 'number' ? +v : n.map(Number);
 			},
 			// What the samplers hold, and the write path for changing one. The
@@ -1568,7 +1576,7 @@
 			_textureValues: { ...declared.values },
 			_setTexture(name, texture) {
 				internals._check();
-				H.setPostTexture(name, texture === null ? NoTexture : texture._index());
+				H.setPostTexture(name, texture === null ? NoTexture : texture._index(), index);
 			},
 		};
 		for (const key of Object.keys(internals)) {
@@ -1576,6 +1584,55 @@
 		}
 		handle.uniforms = uniformsProxy(handle, new Set(names), 'the post pass');
 		handle.textures = texturesProxy(handle, new Set(declared.names), 'the post pass');
+		return handle;
+	}
+
+	// Everything `setPost` and `addPass` do to a spec before it crosses, which is
+	// all of it. Shared rather than written twice because the two verbs differ by
+	// where the pass lands and by nothing else — and two copies of this would be
+	// two chances for the two doors to disagree about what a post spec is.
+	function postSpec(spec, wanted) {
+		if (spec === null || spec === undefined || typeof spec !== 'object') {
+			throw new TypeError(wanted);
+		}
+		const { fragment, uniforms = {}, textures = {} } = spec;
+		if (typeof fragment !== 'string' || fragment.trim().length === 0) {
+			throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
+		}
+		if (uniforms === null || typeof uniforms !== 'object') {
+			throw new TypeError('`uniforms` wants an object like { gain: 1, tint: [1, 0.5, 0.2] }');
+		}
+		const declared = textureLists(textures, 'this post pass\'s');
+
+		// The enumeration happens here for `ShaderMaterial`'s reason: the
+		// QuickJS shim exposes property *get* by name and nothing that lists
+		// keys, so the names cross as a joined string. See js/bind_post.c3.
+		const names = Object.keys(uniforms);
+		const shapes = names.map(n => uniformShape(n, uniforms[n], false));
+
+		return {
+			fragment,
+			names,
+			uniforms,
+			declared,
+			args: [
+				fragment,
+				names.join(','),
+				shapes.map(s => s[0]).join(','),
+				declared.names.join(','),
+				declared.ids.join(','),
+			],
+		};
+	}
+
+	// **After the compile, and not before it.** Putting a shader in the chain
+	// zeroes that stage's push block — the new shader's uniforms are new fields at
+	// new offsets, so carrying old bytes over would be writing one shader's values
+	// into another's layout. So the values the spec gave are written afterwards,
+	// exactly as a ShaderMaterial writes its own.
+	function postFinish(parsed, index) {
+		const handle = postHandle(parsed.fragment, parsed.names, parsed.declared, index);
+		for (const name of parsed.names) handle._set(name, parsed.uniforms[name]);
 		return handle;
 	}
 
@@ -2948,27 +3005,29 @@
 			H.render();
 		},
 
-		// The one shader that runs over the finished frame.
+		// The shaders that run over the finished frame.
 		//
 		// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`
-		// and makes it the pass every frame goes through — the window, three.render()
-		// and every screenshot alike, because there is one recording function
-		// behind all three and the branch is inside it. `three.setPost(null)`
-		// clears it and puts the frame back on the path it was on before.
+		// and makes it the chain every frame goes through — the window,
+		// three.render() and every screenshot alike, because there is one
+		// recording function behind all three and the branch is inside it.
+		// `three.setPost(null)` clears it and puts the frame back on the path it
+		// was on before.
 		//
-		// A verb rather than a class: there is one post slot, so a constructor
-		// would imply somewhere to put the second one. What comes back is a
-		// handle onto the live pass — `{ fragment, uniforms }` — with the same
-		// live uniforms Proxy a ShaderMaterial has, so `handle.uniforms.gain = 2`
-		// is a 4-byte write that takes effect on the next frame with no compile.
+		// A verb rather than a class: the chain belongs to the renderer, so a
+		// constructor would imply somewhere to put a second chain. What comes back
+		// is a handle onto the live pass — `{ fragment, index, uniforms }` — with
+		// the same live uniforms Proxy a ShaderMaterial has, so
+		// `handle.uniforms.gain = 2` is a 4-byte write that takes effect on the
+		// next frame with no compile.
 		//
 		// It compiles here, at this line, so a body that does not compile throws
 		// where it was written and carries Slang's diagnostic with `post:<line>`
 		// coordinates counting the agent's own lines. A failed set leaves the
-		// previous shader running — the pass is the old shader or the new one and
-		// never neither.
+		// previous chain running — it is the old shaders or the new one and never
+		// neither.
 		//
-		// The pass is a property of the renderer and not of the scene, so it
+		// The chain is a property of the renderer and not of the scene, so it
 		// survives new three.Scene() and outlives the script that set it. Nothing
 		// clears it but three.setPost(null).
 		setPost(spec) {
@@ -2979,42 +3038,49 @@
 				postEpoch++;
 				return null;
 			}
-			if (typeof spec !== 'object') {
-				throw new TypeError(
-					'three.setPost({ fragment, uniforms }) wants an options object, or null to clear the pass'
-				);
-			}
-			const { fragment, uniforms = {}, textures = {} } = spec;
-			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
-				throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
-			}
-			if (uniforms === null || typeof uniforms !== 'object') {
-				throw new TypeError('`uniforms` wants an object like { gain: 1, tint: [1, 0.5, 0.2] }');
-			}
-			const declared = textureLists(textures, 'this post pass\'s');
-
-			// The enumeration happens here for `ShaderMaterial`'s reason: the
-			// QuickJS shim exposes property *get* by name and nothing that lists
-			// keys, so the names cross as a joined string. See js/bind_post.c3.
-			const names = Object.keys(uniforms);
-			const shapes = names.map(n => uniformShape(n, uniforms[n], false));
-
-			H.setPost(
-				fragment,
-				names.join(','),
-				shapes.map(s => s[0]).join(','),
-				declared.names.join(','),
-				declared.ids.join(','),
+			const parsed = postSpec(
+				spec,
+				'three.setPost({ fragment, uniforms }) wants an options object, or null to clear the pass'
 			);
+			H.setPost(...parsed.args);
+			// After the host call, for the same reason the null branch bumps after
+			// it: a set that threw changed nothing, and handles from before it are
+			// still pointing at what is still running.
+			postEpoch++;
+			return postFinish(parsed, 0);
+		},
 
-			// **After the compile, and not before it.** Setting a post shader
-			// zeroes the push block — the new shader's uniforms are new fields at
-			// new offsets, so carrying the old bytes over would be writing one
-			// shader's values into another's layout. So the values the spec gave
-			// are written afterwards, exactly as a ShaderMaterial writes its own.
-			const handle = postHandle(fragment, names, declared);
-			for (const name of names) handle._set(name, uniforms[name]);
-			return handle;
+		// `three.addPass(spec)` — put another full-screen pass at the end of the
+		// chain.
+		//
+		// The same spec `setPost` takes, and the same handle back. What differs is
+		// where it lands and what it reads:
+		//
+		//     p.color   what the pass before this one wrote — the scene, for the
+		//               first pass in the chain
+		//     p.scene   the frame as the geometry left it, whatever has run since
+		//
+		// Those two are the chain's whole dependency model. A pass reads its
+		// predecessor and it reads the original picture, and everything a
+		// multi-pass effect actually wants is one of those two — bloom is
+		// `blur(bright(scene)) + scene`, which is `scene` three passes later.
+		//
+		// Adding to an empty chain is exactly a setPost, which is what makes
+		// addPass usable without one in front of it. **It does not invalidate
+		// handles**: earlier passes keep their index and their shader, so a script
+		// can hold every handle it made and keep writing uniforms through all of
+		// them.
+		//
+		// There is no removePass. Reordering or dropping one pass out of the
+		// middle would renumber the handles after it, and `three.setPost(spec)`
+		// followed by the addPass calls you want is the same effect said in a way
+		// that cannot leave a handle pointing at somebody else's shader.
+		addPass(spec) {
+			// No "or null" clause, because there is no such call: addPass appends,
+			// and the verb that empties the chain is three.setPost(null).
+			const parsed = postSpec(spec, 'three.addPass({ fragment, uniforms }) wants an options object');
+			const index = H.addPass(...parsed.args);
+			return postFinish(parsed, index);
 		},
 
 		stats() { return H.stats(); },
@@ -3401,7 +3467,7 @@
 			'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
 			'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
 			'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
-			'There is post-processing, and it is ONE pass: three.setPost({ fragment }) runs a float3 post(Post p) over the finished frame and three.setPost(null) stops it. There is no EffectComposer, no pass chain and no render target to manage — one shader, whose input is the scene as rendered and whose output is the frame. It applies to the window, to render() and to screenshots alike, and it belongs to the renderer rather than to the scene, so it survives new three.Scene() and outlives the script that set it.',
+			'There is post-processing and it is a CHAIN, not an EffectComposer: three.setPost({ fragment }) runs a float3 post(Post p) over the finished frame, three.addPass({ fragment }) puts another after it, and three.setPost(null) stops all of them. There are no render targets to manage and no dependency declarations — a pass reads what the pass before it wrote as p.color and the frame as the geometry left it as p.scene, and those two are the whole model. The chain runs in linear float, so a pass may return values above 1 and the next one still sees them, which is what a bright pass followed by a blur needs; the encode to the display happens once, at the end, and is the engine\'s. It applies to the window, to render() and to screenshots alike, and it belongs to the renderer rather than to the scene, so it survives new three.Scene() and outlives the script that set it.',
 			'A mesh with no material draws with the base colour and texture its glTF material carried.',
 			'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 			'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
@@ -4056,23 +4122,41 @@
 				+ 'Tile one by the frame rather than by uv, p.uv * p.resolution / 256, or it stretches with '
 				+ 'the window. A sampler you leave null reads white. '
 				+ 'Compiles on the call, so a bad body throws here carrying the Slang diagnostic with '
-				+ 'post:<line> counting the lines you wrote; a failed set leaves the previous shader running, '
-				+ 'so the pass is the old shader or the new one and never neither. Needs a GPU device. '
+				+ 'post:<line> counting the lines you wrote; a failed set leaves the previous chain running, '
+				+ 'so it is the old shaders or the new one and never neither. Needs a GPU device. '
 				+ 'It applies identically to the window, to three.render() and to every screenshot — there is '
 				+ 'one recording path and the branch is inside it — so what you see is what a PNG comes back '
 				+ 'as. post() returns rgb and never alpha, for shade()\'s reason and one more: a screenshot '
 				+ 'forces alpha opaque anyway, so a body that could dim it would make the window and the file '
-				+ 'disagree. There is ONE post pass: setting again replaces (the old pipeline is retired for '
-				+ 'you), and it belongs to the renderer rather than to the scene, so it survives '
-				+ 'new three.Scene() and outlives the script that set it. three.setPost(null) is the only '
-				+ 'thing that clears it.',
-			'the handle three.setPost() answers with':
-				'{ fragment, uniforms, textures } — the body that is running, and live uniforms and textures '
-				+ 'objects exactly like a material\'s: post.uniforms.gain = 2 is a 4-byte write that takes '
-				+ 'effect on the next frame with no compile and no pipeline, which is what makes an animated '
-				+ 'post pass free, and post.textures.grade_lut = other swaps an image the same way. Only '
-				+ 'names given at setPost exist; assigning any other throws. A later setPost replaces the '
-				+ 'pass, and writing through the older handle throws rather than steering the new shader.',
+				+ 'disagree. setPost REPLACES the whole chain (the old pipelines are retired for you) and '
+				+ 'three.addPass adds to it. The chain belongs to the renderer rather than to the scene, so '
+				+ 'it survives new three.Scene() and outlives the script that set it. three.setPost(null) is '
+				+ 'the only thing that clears it.',
+			'three.addPass({ fragment, uniforms, textures })':
+				'Put another full-screen pass at the end of the chain. The same spec three.setPost takes and '
+				+ 'the same handle back, and the difference is what the body reads: p.color is what the pass '
+				+ 'BEFORE this one wrote, and p.scene is the frame as the geometry left it, whatever has run '
+				+ 'since. Those two are the whole dependency model — a pass reads its predecessor and it '
+				+ 'reads the original picture — and between them they cover what a multi-pass effect wants: '
+				+ 'bloom is blur(bright(scene)) + scene, which is p.scene three passes later. For the first '
+				+ 'pass in a chain the two are the same image, so a body written for setPost keeps working '
+				+ 'unchanged. Everything between passes is linear float rather than 8-bit, so a pass may '
+				+ 'return values above 1 and the next one still sees them; the display encode happens once, '
+				+ 'after the last pass, and is not yours to write. Adding to an empty chain is exactly a '
+				+ 'setPost. It does NOT invalidate handles you already hold — earlier passes keep their '
+				+ 'index and their shader — which is what lets a script animate every pass at once. There is '
+				+ 'no removePass: dropping one out of the middle would renumber the handles after it, and a '
+				+ 'setPost followed by the addPass calls you want is the same effect said in a way that '
+				+ 'cannot leave a handle pointing at somebody else\'s shader.',
+			'the handle three.setPost() and three.addPass() answer with':
+				'{ fragment, index, uniforms, textures } — the body that is running, where in the chain it '
+				+ 'runs, and live uniforms and textures objects exactly like a material\'s: '
+				+ 'post.uniforms.gain = 2 is a 4-byte write that takes effect on the next frame with no '
+				+ 'compile and no pipeline, which is what makes an animated post pass free, and '
+				+ 'post.textures.grade_lut = other swaps an image the same way. Only names given at the call '
+				+ 'exist; assigning any other throws. A later setPost replaces the whole chain, and writing '
+				+ 'through a handle from before it throws rather than steering whatever is at that index '
+				+ 'now. addPass leaves earlier handles working.',
 			'mesh.color':
 				'This copy\'s own tint, multiplied into albedo. [r, g, b], [r, g, b, a], {r, g, b} or a hex '
 				+ 'number like 0xff8800. Costs no draw call: copies of one mesh may all differ. Works with no '

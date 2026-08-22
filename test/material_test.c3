@@ -952,8 +952,8 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 	if (noise == null) return;
 	test::@check(noise.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 		"as a combined image sampler, got %d", (uint)noise.type);
-	test::@check(noise.set == 0 && noise.binding == three::TEXTURE_BINDING_FIRST,
-		"at 0,%d — got %d,%d", three::TEXTURE_BINDING_FIRST, noise.set, noise.binding);
+	test::@check(noise.set == 0 && noise.binding == three::MATERIAL_BINDING_FIRST,
+		"at 0,%d — got %d,%d", three::MATERIAL_BINDING_FIRST, noise.set, noise.binding);
 	test::@check(noise.count == 1, "one descriptor, not an array: %d", noise.count);
 
 	// Binding 0 is still the template's own and is untouched by any of this.

@@ -703,9 +703,9 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
    actually carries, so declaring a depth format and then beginning a pass
    without one is a validation error rather than a wasted attachment.
    `PostPass.record` begins with colour alone, and this is the other half of it.
- - **No blending.** The post pass writes every pixel of the frame from the
-   scene image it just sampled; blending it over the previous contents would
-   compose it with a target that is about to be cleared anyway.
+ - **No blending.** A post pass writes every pixel of the frame from the image
+   it just sampled; blending it over the previous contents would compose it with
+   an attachment that is about to be cleared anyway.
  - **`CULL_MODE_NONE`, statically.** The fullscreen triangle is clockwise on
    screen, which is the opposite of everything else this project draws, and
    `DYNAMIC_STATE_CULL_MODE` is deliberately *not* declared: the post draw
@@ -716,10 +716,26 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
  - **`POST_PUSH_FIELDS`, not the mesh contract.** There is no geometry to point
    at, so a shader required to declare `positions` could not be written.
 
+ ## The colour format is a parameter, and that is the chain's doing
+
+ It used to be `target.color_format` unconditionally, because there was one post
+ pass and it wrote the target. In a chain every pass a script writes reads float
+ and writes float, and the engine's own tonemap is the only thing that writes
+ `target.color` — so there are exactly two answers, `POST_CHAIN_FORMAT` and the
+ target's, and which one a pipeline was built with is not something the pipeline
+ can be asked afterwards.
+
+ **Passing it is what keeps it out of the cache key.** The alternative is deriving
+ it from the pass's position, at which point the same body at slot 3 and at slot N
+ is two `VkPipeline`s, output format enters the key, and reordering a chain is a
+ recompile. `plan.md` §13 has the argument; `render/post.c3` is where the two
+ callers are.
+
  @param mod : `A module from post_source + compile_slang_cached. Its layout is copied, not moved.`
+ @param color_format : `What this pass writes — POST_CHAIN_FORMAT for a chain pass, target.color_format for the tonemap. Dynamic rendering checks it against the attachment, so a wrong one is a validation error rather than a wrong colour.`
  @return? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
 *>
-fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, Target* target, ShaderModule* mod)
+fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::Format color_format)
 {
 	self.build_layouts(gpu, mod, POST_PUSH_FIELDS[..])!;
 
@@ -736,7 +752,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, Target* target, ShaderM
 	// FORMAT_UNDEFINED, which is what "there is no depth attachment" is spelled
 	// as in `VkPipelineRenderingCreateInfo`.
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
-		.setColorAttachmentFormats((vk::Format[]) { target.color_format });
+		.setColorAttachmentFormats((vk::Format[]) { color_format });
 
 	// Empty, like every pipeline here — and for once literally rather than by
 	// convention: the three vertices come out of `SV_VertexID` arithmetic and

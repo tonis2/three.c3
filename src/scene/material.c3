@@ -402,8 +402,24 @@ const int NO_TEXTURE = -1;
  The textures sitting in one shader's own sampler bindings.
 
  A struct rather than a field on `Material` because a post pass has exactly the
- same thing — samplers at bindings 1..N, filled by name, bound every draw — and
- the bias below is not something two files should each know about.
+ same thing — samplers above the ones its template reserves, filled by name,
+ bound every draw — and the bias below is not something two files should each
+ know about.
+
+ ## Indexed by the binding itself, which is the half that changed
+
+ This used to be `int[MATERIAL_TEXTURE_LIMIT]` with `binding - TEXTURE_BINDING_FIRST`
+ for a subscript, which was exact while both kinds of shader reserved exactly one
+ binding. A post pass now reserves two (`prev` and `scene`), so there is no single
+ first binding left to subtract — see `MATERIAL_BINDING_FIRST`.
+
+ Carrying the base into the accessors was the other option and is the worse one:
+ the base would have had to be passed correctly at every call site, and a call
+ site that passed a material's base for a post pass would read a real texture out
+ of the wrong slot rather than fault. **Indexing by the absolute binding cannot
+ be got wrong** — a binding is the same number to everybody — at a cost of
+ `MAX_SAMPLED_BINDINGS` ints per material instead of `MATERIAL_TEXTURE_LIMIT`,
+ which is one int.
 
  ## What is stored is the index plus one
 
@@ -419,7 +435,7 @@ const int NO_TEXTURE = -1;
 *>
 struct TextureSlots
 {
-	int[MATERIAL_TEXTURE_LIMIT] stored;
+	int[MAX_SAMPLED_BINDINGS] stored;
 }
 
 <*
@@ -432,16 +448,18 @@ struct TextureSlots
  reason: the caller is `record`, the answer picks an image, and white is a picture
  that is visibly wrong rather than a draw that does not happen.
 
- @param binding : `The shader's own binding index, from TEXTURE_BINDING_FIRST up.`
+ **Binding 0 is refused in both kinds**, which is what lets `sampler_binding_of`
+ answer 0 for "no such sampler": it is the template's own in a material
+ (`base_color_map`) and in a post pass (`prev`), reached through
+ `material.map` and through the chain respectively, and never by name.
+
+ @param binding : `The shader's own binding index, from its kind's first agent binding up.`
  @return `An index into Assets.textures, or NO_TEXTURE for a binding nothing was put in.`
 *>
 fn int TextureSlots.at(&self, uint binding)
 {
-	if (binding < TEXTURE_BINDING_FIRST || binding >= TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT)
-	{
-		return NO_TEXTURE;
-	}
-	int stored = self.stored[binding - TEXTURE_BINDING_FIRST];
+	if (binding == 0 || binding >= MAX_SAMPLED_BINDINGS) return NO_TEXTURE;
+	int stored = self.stored[binding];
 	return stored == 0 ? NO_TEXTURE : stored - 1;
 }
 
@@ -459,8 +477,8 @@ fn int TextureSlots.at(&self, uint binding)
 *>
 fn void TextureSlots.set(&self, uint binding, int texture)
 {
-	if (binding < TEXTURE_BINDING_FIRST || binding >= TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT) return;
-	self.stored[binding - TEXTURE_BINDING_FIRST] = texture == NO_TEXTURE ? 0 : texture + 1;
+	if (binding == 0 || binding >= MAX_SAMPLED_BINDINGS) return;
+	self.stored[binding] = texture == NO_TEXTURE ? 0 : texture + 1;
 }
 
 <*
@@ -471,7 +489,8 @@ fn void TextureSlots.set(&self, uint binding, int texture)
  of a pipeline that is not a material's. Zero means no; see there for why zero can
  mean that.
 *>
-fn uint Material.binding_of_texture(&self, String name) => sampler_binding_of(self.pipeline, name);
+fn uint Material.binding_of_texture(&self, String name)
+	=> sampler_binding_of(self.pipeline, name, MATERIAL_BINDING_FIRST);
 
 <*
  Point a uniform at new values.

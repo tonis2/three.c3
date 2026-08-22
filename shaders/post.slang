@@ -22,7 +22,8 @@
 // ## What is deliberately absent
 //
 // No `Instance`, no `FrameBlock`, no geometry pointers, no depth: this pass
-// draws three vertices with no vertex input and reads one image. That is also
+// draws three vertices with no vertex input and reads two images — the pass
+// before it and the scene, which are the same image on a chain of one. That is also
 // why its push block shares nothing with the mesh contract — `POST_PUSH_FIELDS`
 // pins `info` at 0 and nothing else, and `MeshPipeline.init_post` checks against
 // that list rather than `MESH_PUSH_FIELDS`.
@@ -42,14 +43,33 @@ struct PushData
 };
 [vk_push_constant] const PushData push;
 
-// The frame the scene was rendered into, as `src/render/post.c3` created it:
-// `R8G8B8A8_SRGB`, so **the sampler decodes to linear on read**. A body works in
-// linear throughout and the `_SRGB` attachment this shader writes re-encodes on
-// the way out, which closes the round trip by format rather than by arithmetic.
-// An identity body is therefore an identity, to within eight bits.
-[vk::binding(0, 0)] Sampler2D scene;
+// **The two reserved samplers, and the whole of what a chain edge is.**
+//
+// `prev` is what the pass before this one wrote; `scene` is always image A, the
+// frame the geometry was rendered into. On a chain of one they are the same
+// image, which is what makes every post shader written before the chain existed
+// keep working with no edit — `p.color == p.scene` there.
+//
+// The second one is the non-adjacent read, and it is a binding rather than a
+// dependency solver on purpose: bloom is `blur(bright(scene)) + scene`, which
+// wants the original three passes later, and that is the only edge anybody
+// actually reaches for. `plan.md` §13 has the argument.
+//
+// Their formats differ and both are read as linear:
+//
+//     prev    R16G16B16A16_SFLOAT for a chain pass, or image A for the first —
+//             a float image holds raw linear values and needs no decode, so a
+//             pass may write above 1.0 and the next one still sees it.
+//     scene   image A, R8G8B8A8_SRGB, so **the sampler decodes to linear**.
+//
+// Nothing here writes `_SRGB`. Every pass a script writes reads float and writes
+// float; the engine's own tonemap is the only thing that encodes, and it is
+// always last. That is what keeps one pipeline shape for every body and makes
+// reordering a chain free rather than a recompile.
+[vk::binding(0, 0)] Sampler2D prev;
+[vk::binding(1, 0)] Sampler2D scene;
 
-// The samplers the agent asked for, at bindings 1..N in declaration order —
+// The samplers the agent asked for, at bindings 2..N in declaration order —
 // `shaders/material.slang` has the argument for why the indices are generated
 // rather than written. A post pass wants them for the things a frame cannot
 // supply about itself: a colour ramp to grade through, a noise field to distort
@@ -67,8 +87,14 @@ struct PushData
 // `material.slang`, over a much smaller surface because there is much less here.
 struct Post
 {
-    // This pixel of the rendered scene, **linear** — the sampler decoded it.
+    // This pixel of whatever ran before this pass, **linear**. On the first pass
+    // of a chain — and on every chain of one — that is the rendered scene, which
+    // is why this field did not change meaning when the chain arrived.
     float3 color;
+    // This pixel of the rendered scene, **linear**, whatever else has run since.
+    // Equal to `color` on the first pass. A later pass wanting the picture as the
+    // geometry left it reads this rather than trying to undo what came between.
+    float3 scene;
     // Where this pixel is: 0..1 across the frame, with (0, 0) at the top left,
     // which is both the texture convention and the screen convention here.
     //
@@ -142,12 +168,13 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     p.uv = input.uv;
     p.resolution = push.info.xy;
     p.time = push.info.z;
-    p.color = scene.Sample(input.uv).rgb;
+    p.color = prev.Sample(input.uv).rgb;
+    p.scene = scene.Sample(input.uv).rgb;
 
     // **Alpha is not the agent's to return**, for `material.slang`'s reason and
-    // one more: this is the last thing written before the blit and the readback,
-    // and `Target.decode_readback` forces alpha opaque regardless. A body that
-    // could dim it would be a body that could make a screenshot look different
-    // from the window.
+    // one more: the last thing this chain writes goes to the blit and the
+    // readback, and `Target.decode_readback` forces alpha opaque regardless. A
+    // body that could dim it would be a body that could make a screenshot look
+    // different from the window.
     return float4(post(p), 1.0);
 }

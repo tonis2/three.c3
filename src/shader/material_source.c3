@@ -66,7 +66,7 @@ faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY,
  point. A texture is a `Sampler2D` because that is the only image kind this
  project binds; and its binding index is **generated from the position of this
  entry in the array** rather than carried on it, which is what keeps the number
- out of every layer above `shader/assemble.c3`. See `TEXTURE_BINDING_FIRST`.
+ out of every layer above `shader/assemble.c3`. See `MATERIAL_BINDING_FIRST`.
 
  So a material's textures are, end to end, a list of names: the script writes
  them, the assembler numbers them, reflection reads the numbers back, and
@@ -483,6 +483,7 @@ fn String? material_source(
 		MATERIAL_BODY_NAME,
 		MATERIAL_VERTEX_NAME,
 		MATERIAL_PREAMBLE_NAME,
+		MATERIAL_BINDING_FIRST,
 		allocator
 	);
 }

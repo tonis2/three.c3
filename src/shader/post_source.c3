@@ -13,7 +13,7 @@
 	 push block       76 bytes of mesh        16 bytes of `info`
 	 budget           52 bytes                112 bytes
 	 tables           yes, `//@rows`          no — there are no instances
-	 bindings         the base colour map     the frame just rendered
+	 bindings         the base colour map     the frame before and image A
 
  ## Why the budget is 112 and not 128
 
@@ -43,7 +43,8 @@ import std::io;
 faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
 
 <*
- How many samplers of its own a post pass may declare, on top of `scene`.
+ How many samplers of its own a post pass may declare, on top of `prev` and
+ `scene`.
 
  `MATERIAL_TEXTURE_LIMIT`'s number and most of its argument, minus the part about
  per-bucket traffic: there is one post draw in a frame, so the cost of a binding
@@ -107,13 +108,15 @@ const String POST_PREAMBLE_NAME = "three.post";
  - `post` and `p` are the body's own function and parameter. A `#define p
    (push.p)` is live across exactly the lines the agent wrote, so it rewrites
    the signature they are declared in.
- - `scene` is the sampler. A body has no reason to touch it — `p.color` is that
-   sample already — but a uniform by that name would make the template's own
-   line unparseable.
+ - `prev` and `scene` are the two reserved samplers — the pass before this one
+   and image A. A body has both as same-pixel samples already (`p.color` and
+   `p.scene`) and reaches the globals only to sample a *different* pixel, which
+   is what a blur or a bloom combine does. A uniform by either name would make
+   the template's own declaration unparseable.
 *>
 const String[*] POST_RESERVED @local = {
 	// What the template declares.
-	"push", "PushData", "info", "scene", "Post", "p", "VertexOutput",
+	"push", "PushData", "info", "prev", "scene", "Post", "p", "VertexOutput",
 	"vertexMain", "fragmentMain", "post", "output", "vid",
 	// Types.
 	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
@@ -140,7 +143,7 @@ const String[*] POST_RESERVED @local = {
  uniform is usually redundant: `p.time` already carries seconds since the shader
  was set.
 *>
-const String[*] POST_CONTRACT_FIELDS @local = { "color", "uv", "resolution", "time" };
+const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time" };
 
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
@@ -302,7 +305,7 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 
  @param fragment : `The agent's body. Must define float3 post(Post p); everything else is theirs.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names. rows must be 0 or 1.`
- @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
+ @param textures : `Samplers the body wants, in declaration order. Bindings 2..N, generated from that order — a post pass reserves two.`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence.`
  @return? POST_NAME_INVALID : `A uniform or texture name, a width or a row count is one this cannot generate. post_diagnostic() names it.`
@@ -325,6 +328,6 @@ fn String? post_source(
 	// with no geometry behind them and nothing an agent could usefully move.
 	return assemble_shader(
 		POST_TEMPLATE, fragment, uniforms, textures, "",
-		POST_BODY_NAME, POST_BODY_NAME, POST_PREAMBLE_NAME, allocator
+		POST_BODY_NAME, POST_BODY_NAME, POST_PREAMBLE_NAME, POST_BINDING_FIRST, allocator
 	);
 }
