@@ -3512,7 +3512,10 @@
 				+ 'in between, which gives a fresh one and makes the old handle throw. '
 				+ 'asset.instantiate() for the file\'s own hierarchy, asset.mesh(name) for one piece of it.',
 			'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
-			'three.stats()': 'The numbers below, for the whole scene, with culling off.',
+			'three.stats()':
+				'The numbers below, for the whole scene, with culling off. gpuMs is the one exception: it is '
+				+ 'not a fact about the scene but a measurement of the last frame drawn, so it moves when '
+				+ 'nothing about the scene has.',
 			'three.unloadUnused()':
 				'Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and '
 				+ 'every texture that goes with them. Answers with { assets, meshes, textures, bytes } — '
@@ -3771,6 +3774,13 @@
 			textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 			textureBytes: 'What those cost.',
 			culledLastFrame: 'Instances the frustum dropped in the last render().',
+			gpuMs: 'Milliseconds the GPU spent on the frame you just asked for, measured on the GPU\'s own '
+				+ 'clock rather than timed from here. three.render() and a screenshot each leave their own '
+				+ 'measurement behind, so render first and read this after. 0 before anything has been drawn, '
+				+ 'and 0 for the whole run in a context with no device — the same zero either way, so use '
+				+ 'renderSize() if you need to tell "nothing drawn" from "nothing to draw with". The span is '
+				+ 'the whole submission, including the blit or the readback copy that puts the frame where you '
+				+ 'can see it, so it answers what the frame cost rather than what the draws cost.',
 		},
 		intersection: {
 			object: 'The Mesh that was hit. Null only for a node this script did not build — one opened from the command line.',

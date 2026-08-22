@@ -4406,3 +4406,114 @@ fn void opacity_outside_zero_to_one_is_refused() @test
 		test::@check(result.value.contains("one 1"), "and so is 1: %s", result.value);
 	};
 }
+
+// ============================================================================
+// GPU time through the binding
+//
+// `plan.md` Phase C: the renderer measures a frame on the GPU's own clock, and
+// `stats().gpuMs` is where a script reads it. The number itself is proved in
+// `gpu_test.c3` — that it is non-zero, that it is a millisecond count and not a
+// tick count, that a capture reports its own frame. What is proved here is the
+// *join*: `SceneStats` has no `gpu_ms` field and never will, so the two halves
+// of `stats()` come from two places, and either one of them can go missing
+// without the other noticing.
+//
+// The value assertion is `> 0` and nothing tighter. A 200x150 clear with one box
+// in it costs tens of microseconds on this device, and a threshold picked to
+// look meaningful would be a benchmark that fails on a faster machine.
+// ============================================================================
+
+<*
+ A script that renders a frame can read what that frame cost.
+
+ The render comes first and the read comes after, which is the order the docs
+ promise works: `three.render()` goes through `render_offscreen`, which waits on
+ its own fence and collects its own timing, so "render, then read the stats" sees
+ the render it just asked for rather than the one before it.
+
+ Both halves of the object are checked in one script. `drawCalls` beside `gpuMs`
+ is the point — the scene facts and the device measurement arrive as one answer,
+ and a join that dropped either would still return a plausible-looking object.
+
+ **Proved by injection.** `js_stats` setting `gpuMs` to a hardcoded 0 rather
+ than asking the renderer — the shape of the mistake where the key is added to
+ the object literal and the wiring behind it is forgotten: "the frame was
+ measured: {"drawCalls":1,"gpuMs":0,"present":true,"positive":false} (this
+ device reports timestamps=true)". Restored, green again.
+*>
+fn void stats_reports_the_renderers_gpu_time() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+
+			const s = three.stats();
+			return {
+				drawCalls: s.drawCalls,
+				gpuMs: s.gpuMs,
+				present: "gpuMs" in s,
+				positive: s.gpuMs > 0,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"present":true`), "stats() carries a gpuMs: %s", result.value);
+		test::@check(result.value.contains(`"positive":true`),
+			"the frame was measured: %s (this device reports timestamps=%s)",
+			result.value, run.renderer.gpu.limits.timestamps);
+		test::@check(result.value.contains(`"drawCalls":1`),
+			"and the scene facts came through the same call: %s", result.value);
+
+		// The host's own reading and the script's are the same number, which is
+		// what says the binding read the renderer rather than something that
+		// merely moves like it.
+		test::@check(result.gpu_ms == run.renderer.gpu_ms(),
+			"the run result agrees with the renderer: %f vs %f", result.gpu_ms, run.renderer.gpu_ms());
+	};
+}
+
+<*
+ No device, no measurement — but still a key, and still a number.
+
+ This is the case that makes `gpuMs` unconditional. A scene-math runtime has no
+ renderer at all, so there is nothing to ask, and the tempting shape is to set
+ the property only when there is something to set. That produces `undefined`,
+ which is not 0 in any of the ways a script would use it: `s.gpuMs > 16` is
+ quietly false, `s.gpuMs.toFixed(1)` throws somewhere unrelated, and
+ `total += s.gpuMs` turns into NaN and stays that way. The whole check is on the
+ *key*, and the value being 0 is the second half of the same sentence.
+
+ The exact-string comparison is deliberate: `contains("gpuMs")` would pass on
+ `"gpuMs":null` and on `"gpuMs":undefined`, which is the failure this exists to
+ catch.
+
+ **Proved by injection.** `js_stats` guarding the set with
+ `if (self.renderer != null)`: "a runtime with no device answers
+ {"present":false} — the key has to be there, with a 0 behind it". Note what the
+ script got back: not a null, not a zero, but a property that `JSON.stringify`
+ dropped on the floor because its value was `undefined`. Every other check in
+ this file stayed green, since nothing else reads the field. Restored, green
+ again.
+*>
+fn void a_runtime_without_a_device_reports_zero_gpu_time() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const s = three.stats();
+			return { present: "gpuMs" in s, gpuMs: s.gpuMs };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"present":true,"gpuMs":0}`,
+			"a runtime with no device answers %s — the key has to be there, with a 0 behind it",
+			result.value);
+		test::@check(result.gpu_ms == 0.0, "and so does the run result: %f", result.gpu_ms);
+	};
+}

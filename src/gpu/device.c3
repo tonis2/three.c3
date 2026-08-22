@@ -89,6 +89,16 @@ struct GpuLimits
 	bool push_descriptor;
 	bool fill_mode_non_solid;
 	uint max_push_constants_size;
+	// Nanoseconds per timestamp tick. Meaningless unless `timestamps` is true —
+	// a device that cannot write a timestamp is entitled to report anything here.
+	float timestamp_period;
+	// **Both halves, because `gpu/timing.c3` needs both.** The queue has to be
+	// able to write a timestamp at all (`timestampComputeAndGraphics`), and the
+	// host has to be able to recycle the query without a command buffer
+	// (`hostQueryReset`) — resetting from the host is what lets the reset sit
+	// beside the fence wait instead of inside the recording, where it would have
+	// to be ordered against a submission that has not happened yet.
+	bool timestamps;
 	char[256] device_name;
 }
 
@@ -444,6 +454,12 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.push_descriptor = push_descriptor.maxPushDescriptors > 0,
 		.fill_mode_non_solid = features.features.fillModeNonSolid == vk::TRUE,
 		.max_push_constants_size = properties.limits.maxPushConstantsSize,
+		.timestamp_period = properties.limits.timestampPeriod,
+		// `hostQueryReset` is read off the same `v12` that is handed to
+		// `deviceCreateInfo` below unchanged, so it is enabled exactly when it is
+		// supported — this is a claim about the device *and* about what was asked
+		// for, and the two cannot disagree here by construction.
+		.timestamps = properties.limits.timestampComputeAndGraphics == vk::TRUE && v12.hostQueryReset == vk::TRUE,
 		.device_name = properties.deviceName,
 	};
 
@@ -625,6 +641,8 @@ fn void Gpu.report(&self)
 	io::printfn("  pushDescriptor       %s", self.limits.push_descriptor);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);
+	io::printfn("  timestamps           %s", self.limits.timestamps);
+	io::printfn("  timestampPeriod      %f", self.limits.timestamp_period);
 }
 
 <*
