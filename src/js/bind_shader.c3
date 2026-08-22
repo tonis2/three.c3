@@ -54,8 +54,12 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
  the result is used. Empty input is an empty list rather than one empty field,
  because a material with no uniforms is the ordinary case and `"".split(",")`
  answering `[""]` would invent one called nothing.
+
+ `@private` rather than `@local` because `bind_post.c3` splits the same two
+ joined strings for the same reason — one post pass's uniforms cross exactly as
+ one material's do.
 *>
-fn void split_commas(String text, List{String}* out) @local
+fn void split_commas(String text, List{String}* out) @private
 {
 	if (text.len == 0) return;
 

@@ -4517,3 +4517,439 @@ fn void a_runtime_without_a_device_reports_zero_gpu_time() @test
 		test::@check(result.gpu_ms == 0.0, "and so does the run result: %f", result.gpu_ms);
 	};
 }
+
+// ============================================================================
+// The post pass, from JavaScript
+//
+// `plan.md` Phase D item 6: `three.setPost({ fragment, uniforms })`. What is
+// proved here is the **boundary** and nothing else — that the verb compiles at
+// the line that wrote it, that the handle's Proxy reaches the device, that
+// clearing goes through, that the refusals are sentences. The engine below it is
+// `three_tests::post`'s: image A's format, the positive viewport, the identity
+// round trip, retiring a swapped-out pipeline and the barriers under validation
+// are all pinned there and are deliberately not repeated here.
+//
+// The fixture is Phase A's: a plane the size of the view, `mesh.color = 0xff0000`
+// over `PRIMITIVE_COLOR`, and the light turned off with an ambient of 1 so the
+// surface renders its own flat colour. Every expectation is built from
+// `primitive_linear` for the reason the blending section gives — a generated
+// shape is not white, so 255 red is never the number.
+// ============================================================================
+
+<*
+ Put a red wall in front of the camera, lit flat.
+
+ The one fixture every check below shares. A single colour across most of the
+ frame is what makes `count_near` a usable instrument: a post body that swaps two
+ channels moves several thousand pixels at once, and nothing in the picture is
+ near the swapped colour by accident.
+*>
+fn three::RunResult red_wall_scene(three::JsRuntime* run)
+{
+	return run.run(`
+		globalThis.scene = new three.Scene();
+		three.light.set([0, 0, 1], 1);
+		const wall = new three.Mesh(new three.PlaneGeometry(4, 4));
+		wall.color = 0xff0000;
+		globalThis.scene.add(wall);
+		three.camera.lookAt(0, 0, 0);
+		three.camera.orbit(0, 0, 6);
+		three.render(globalThis.scene, three.camera);
+	`);
+}
+
+<*
+ A post body an agent wrote reaches the screen, and stays there across scripts.
+
+ `an_agent_written_shader_reaches_the_screen` for the pass that has no geometry,
+ and the same argument: the claim is not that a body compiles — `three_tests::post`
+ proves that without a device — it is that the compiled thing is *recorded and
+ drawn*. `p.color.bgr` swaps red and blue, so a red wall comes back blue, which
+ no return value from the script could say.
+
+ The third run is the other half and is the decision this file documents: the
+ post pass belongs to the renderer and not to the scene, so it survives the end
+ of the script that set it. Nobody clears it between `run()` calls — which is
+ exactly the MCP server's case, where every `run_script` is a fresh scope over
+ the same renderer — and a frame drawn by a script that never mentions post
+ processing still goes through it. `three.setPost(null)` is the only thing that
+ stops it, which is what the docs promise.
+
+ **Proved by injection.** The `if (posted) self.post.record(...)` branch dropped
+ from the tail of `Renderer.record_scene`, so the scene is drawn into image A and
+ nothing ever reads it — the same shape as a post pass that compiled and was then
+ never bound: "the post pass did not reach the frame: 0 blue pixels, 14400 still
+ red". Restored, green again.
+*>
+fn void a_post_pass_reaches_the_screen() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		int red = encode_srgb(primitive_linear(0));
+
+		image::Image plain = run.renderer.capture()!!;
+		defer plain.free();
+		test::@check(count_near(&plain, red, 0, 0) > 500,
+			"the fixture is a red wall, got %d red pixels", count_near(&plain, red, 0, 0));
+
+		three::RunResult posted = run.run(`
+			const post = three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			three.render(globalThis.scene, three.camera);
+			return post.fragment;
+		`);
+		defer posted.free();
+		test::@check(posted.ok, "the post shader compiled: %s", posted.error);
+		test::@check(posted.value.contains("p.color.bgr"),
+			"the handle carries the body that is running: %s", posted.value);
+
+		image::Image swapped = run.renderer.capture()!!;
+		defer swapped.free();
+		test::@check(
+			count_near(&swapped, 0, 0, red) > 500,
+			"the post pass did not reach the frame: %d blue pixels, %d still red",
+			count_near(&swapped, 0, 0, red),
+			count_near(&swapped, red, 0, 0)
+		);
+		test::@check(count_near(&swapped, red, 0, 0) == 0,
+			"and nowhere is the wall still its own colour, got %d pixels of it",
+			count_near(&swapped, red, 0, 0));
+
+		// A script that says nothing about post processing at all.
+		three::RunResult later = run.run(`three.render(globalThis.scene, three.camera);`);
+		defer later.free();
+		test::@check(later.ok, "the later script succeeded: %s", later.error);
+
+		image::Image still = run.renderer.capture()!!;
+		defer still.free();
+		test::@check(
+			count_near(&still, 0, 0, red) > 500,
+			"the pass did not survive the script that set it: %d blue pixels",
+			count_near(&still, 0, 0, red)
+		);
+	};
+}
+
+<*
+ `three.setPost(null)` puts the frame back.
+
+ The verb's other half, and the reason it is `null` rather than a `clear()` on
+ the handle: there is one post slot, so the thing being cleared is the slot and
+ not the object a script happens to be holding. It answers with `null` as well,
+ so `post = three.setPost(null)` leaves a script's variable saying what is true.
+
+ The assertion is on the red wall coming back *and* on no blue being left, which
+ together are the whole of "the frame is the one it was before any shader was
+ set". Byte-for-byte restoration is `three_tests::post`'s check and is not
+ repeated here; what this adds is that the JS verb reaches it.
+
+ **Proved by injection.** `js_clear_post` returning before it calls
+ `PostPass.clear` — the shape of the mistake where the verb is bound and wired to
+ nothing: "clearing did not put the wall back: 0 red pixels, 14400 still blue".
+ Restored, green again.
+*>
+fn void clearing_the_post_pass_restores_the_frame() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		int red = encode_srgb(primitive_linear(0));
+
+		three::RunResult cleared = run.run(`
+			three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			three.render(globalThis.scene, three.camera);
+			const answer = three.setPost(null);
+			three.render(globalThis.scene, three.camera);
+			return { answer, cleared: answer === null };
+		`);
+		defer cleared.free();
+		test::@check(cleared.ok, "the script succeeded: %s", cleared.error);
+		test::@check(cleared.value.contains(`"cleared":true`),
+			"clearing answers with null: %s", cleared.value);
+
+		image::Image restored = run.renderer.capture()!!;
+		defer restored.free();
+		test::@check(
+			count_near(&restored, red, 0, 0) > 500,
+			"clearing did not put the wall back: %d red pixels, %d still blue",
+			count_near(&restored, red, 0, 0),
+			count_near(&restored, 0, 0, red)
+		);
+		test::@check(count_near(&restored, 0, 0, red) == 0,
+			"and no blue is left over, got %d pixels of it", count_near(&restored, 0, 0, red));
+	};
+}
+
+<*
+ A post uniform written through the handle's Proxy is live between frames.
+
+ Two claims in one picture, and they fail in opposite directions:
+
+ - **The initial value reaches the device.** `PostPass.set` zeroes the push
+   block, deliberately — a new shader's uniforms are new fields at new offsets —
+   so the values the spec gave have to be written *after* the compile succeeds.
+   A prelude that passed them to `setPost` and stopped there would leave `gain`
+   at zero and the first frame black.
+ - **A later write reaches it too**, with no compile and no pipeline: the whole
+   point of the uniform block, and what makes an animated post pass free.
+
+ The first frame is asserted to be the wall at full strength and the second to be
+ the wall at a quarter of it — computed in linear and encoded once, because the
+ multiply happens in the body before the `_SRGB` write and a quarter of an
+ encoded value is a different number entirely.
+
+ **Proved by injection.** The `for (const name of names) handle._set(...)` loop
+ removed from `three.setPost`, so the spec's uniforms are enumerated, crossed and
+ never written: "the initial uniform value did not reach the device: 0 pixels at
+ full strength" — a black frame, which is what a body multiplying by an unwritten
+ uniform produces. The pixel check is asserted before the handle's read-back on
+ purpose: the read-back fails under this injection too, and a test that stopped
+ there would be proving that JavaScript remembered a number rather than that the
+ GPU got one. Restored, green again.
+*>
+fn void post_uniforms_are_live_between_frames() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		float red = primitive_linear(0);
+
+		three::RunResult first = run.run(`
+			globalThis.post = three.setPost({
+				fragment: "float3 post(Post p) { return p.color * gain; }",
+				uniforms: { gain: 1 }
+			});
+			three.render(globalThis.scene, three.camera);
+			return globalThis.post.uniforms.gain;
+		`);
+		defer first.free();
+		test::@check(first.ok, "the post shader compiled: %s", first.error);
+
+		image::Image bright = run.renderer.capture()!!;
+		defer bright.free();
+		test::@check(
+			count_near(&bright, encode_srgb(red), 0, 0) > 500,
+			"the initial uniform value did not reach the device: %d pixels at full strength",
+			count_near(&bright, encode_srgb(red), 0, 0)
+		);
+		test::@check(first.value.contains("1"), "the handle reads back what it wrote: %s", first.value);
+
+		three::RunResult second = run.run(`
+			globalThis.post.uniforms.gain = 0.25;
+			three.render(globalThis.scene, three.camera);
+		`);
+		defer second.free();
+		test::@check(second.ok, "the second script succeeded: %s", second.error);
+
+		image::Image dim = run.renderer.capture()!!;
+		defer dim.free();
+		test::@check(
+			count_near(&dim, encode_srgb(0.25f * red), 0, 0) > 500,
+			"the write through the Proxy did not reach the frame: %d pixels at a quarter",
+			count_near(&dim, encode_srgb(0.25f * red), 0, 0)
+		);
+		test::@check(
+			count_near(&dim, encode_srgb(red), 0, 0) == 0,
+			"and %d pixels are still at full strength, so the write went nowhere",
+			count_near(&dim, encode_srgb(red), 0, 0)
+		);
+	};
+}
+
+<*
+ A post body that does not compile throws Slang's own text, at the agent's line.
+
+ `plan.md` §5's done condition for a material, applied to the pass: the error a
+ script catches has to *carry the diagnostic*, because a fault on its own leaves
+ an agent with "it did not work" and nothing to edit. Both coordinates are
+ asserted — `post:` is the file name the `#line` directive gives the body, and
+ `3` is the line inside it, which is the line the script itself wrote the mistake
+ on. Either alone would pass for a diagnostic naming the right file at the wrong
+ line.
+
+ The failure leaving the previous shader running is pinned at engine level and
+ is not repeated; what is checked here is the JS half of it — that the throw
+ happens at the `setPost` line and that a handle from before the failure is still
+ the live one.
+
+ **Proved by injection.** `post_failure` returning its fault sentence
+ unconditionally, with the `if (diagnostic.len > 0)` test removed — the shape of
+ the mistake where the diagnostic is collected and then not used: "the throw does
+ not carry the Slang text: the post shader failed to compile and Slang said
+ nothing about why". Restored, green again.
+*>
+fn void a_bad_post_shader_throws_the_diagnostic() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		three::RunResult result = run.run(`
+			const good = three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			try {
+				three.setPost({ fragment: "float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
+				return "no throw";
+			} catch (e) {
+				good.uniforms;
+				return e.message;
+			}
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"),
+			"a body calling a function that does not exist was accepted");
+		test::@check(
+			result.value.contains("post:3") || result.value.contains("post(3)"),
+			"the throw does not carry the Slang text: %s",
+			result.value
+		);
+		test::@check(run.renderer.post.active, "the failed set left the pass with no shader at all");
+	};
+}
+
+<*
+ Everything `three.setPost` will not take, and what it says about each.
+
+ No device is needed for any of these, which is the point: they are refused in
+ JavaScript before a byte crosses to the host, so an agent gets the sentence at
+ the line rather than a Slang error about a module that should never have been
+ assembled. The one exception rides along at the end — a *valid* spec on a
+ runtime with no GPU, which is the host's refusal and is the only one that could
+ not be made here.
+
+ `three.setPost(null)` with no device is checked too, and answers null rather
+ than throwing: clearing a pass that cannot exist is not a mistake, and a script
+ that tidies up unconditionally should not have to ask first.
+
+ **Proved by injection.** The `typeof fragment !== 'string'` test dropped from
+ `three.setPost`, so a spec with no body crosses to the host and is refused there
+ for the wrong reason: "and a spec with no body says which field: ... empty:
+ compiling a post shader needs a GPU device and this context has none | blank:
+ compiling a post shader needs a GPU device and this context has none ...". Note
+ that everything still *threw* — a device is missing either way — which is why
+ this check reads the sentences and not merely the absence of a success.
+ Restored, green again.
+*>
+fn void a_post_spec_that_is_not_one_is_refused() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const body = "float3 post(Post p) { return p.color; }";
+			const said = [];
+			const refuse = (what, spec) => {
+				try { three.setPost(spec); said.push(what + ": no throw"); }
+				catch (e) { said.push(what + ": " + e.message); }
+			};
+
+			refuse("number", 5);
+			refuse("empty", {});
+			refuse("blank", { fragment: "   " });
+			refuse("uniforms", { fragment: body, uniforms: 5 });
+			refuse("word", { fragment: body, uniforms: { gain: "loud" } });
+			refuse("table", { fragment: body, uniforms: { palette: [[1, 0, 0], [0, 1, 0]] } });
+			refuse("wide", { fragment: body, uniforms: { m: [1, 2, 3, 4, 5] } });
+			refuse("valid", { fragment: body });
+
+			said.push("cleared: " + three.setPost(null));
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "everything was refused: %s", result.value);
+		test::@check(result.value.contains("wants an options object, or null to clear the pass"),
+			"a number is not a spec: %s", result.value);
+		test::@check(result.value.contains("needs a `fragment` body"),
+			"and a spec with no body says which field: %s", result.value);
+		test::@check(result.value.contains("blank: a post pass needs a `fragment` body"),
+			"whitespace is not a body: %s", result.value);
+		test::@check(result.value.contains("`uniforms` wants an object"),
+			"and neither is a number of uniforms: %s", result.value);
+		test::@check(result.value.contains("uniform 'gain' wants a number or an array of up to four numbers"),
+			"a uniform that is a word is refused by name: %s", result.value);
+		test::@check(result.value.contains("no instances to select a row with"),
+			"and a table says why a post pass cannot have one: %s", result.value);
+		test::@check(result.value.contains("uniform 'm' wants a number"),
+			"five floats is not a uniform: %s", result.value);
+		test::@check(result.value.contains("needs a GPU device"),
+			"and a valid spec with no device says which piece is missing: %s", result.value);
+		test::@check(result.value.contains("cleared: null"),
+			"clearing without a device is not a mistake: %s", result.value);
+	};
+}
+
+<*
+ A handle from before a replacement will not steer the shader that replaced it.
+
+ There is one post slot, so `three.setPost` twice leaves a script holding two
+ objects and one pass. The dangerous shape is the quiet one: the old handle's
+ uniform names are usually the *same* names, so a write through it would land on
+ the new shader's block and change the picture in a way that reads as the new
+ body being wrong. An epoch check turns that into a sentence, which is the same
+ trade `Scene` makes when a second `new three.Scene()` replaces the first.
+
+ The new handle is exercised in the same breath, because a check that only proved
+ the old one throws would also pass if *both* did.
+
+ **Proved by injection.** The handle's `_check` neutered to `if (false)` — every
+ handle answering as the live one, which is the version where nothing goes stale:
+ "the replaced handle wrote through: old: no throw | new: 0.5 | unknown: the post
+ pass has no uniform called 'nope' — it declared gain". Note the other two checks
+ stayed green, which is the whole reason the stale write is asserted separately
+ from the live one. Restored, green again.
+*>
+fn void a_replaced_post_handle_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		three::RunResult result = run.run(`
+			const said = [];
+			const first = three.setPost({
+				fragment: "float3 post(Post p) { return p.color * gain; }",
+				uniforms: { gain: 1 }
+			});
+			const second = three.setPost({
+				fragment: "float3 post(Post p) { return p.color * gain * 0.5; }",
+				uniforms: { gain: 1 }
+			});
+
+			try { first.uniforms.gain = 0.25; said.push("old: no throw"); }
+			catch (e) { said.push("old: " + e.message); }
+
+			second.uniforms.gain = 0.5;
+			said.push("new: " + second.uniforms.gain);
+
+			try { second.uniforms.nope = 1; said.push("unknown: no throw"); }
+			catch (e) { said.push("unknown: " + e.message); }
+
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "the replaced handle wrote through: %s", result.value);
+		test::@check(result.value.contains("replaced by a later three.setPost()"),
+			"and it says what happened to it: %s", result.value);
+		test::@check(result.value.contains("new: 0.5"),
+			"the live handle still writes: %s", result.value);
+		test::@check(result.value.contains("the post pass has no uniform called 'nope'"),
+			"and an undeclared name is refused by the same Proxy a material uses: %s", result.value);
+	};
+}

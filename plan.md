@@ -69,8 +69,22 @@ behind the last one to complete, since it never waits for its own. The number is
 joined to `stats()` at each boundary rather than living in `SceneStats`, which
 stays a device-free fact about the scene, and it is 0 rather than absent when
 there is nothing to ask.
+And the finished frame is now something a script can write over: one
+agent-authored `float3 post(Post p)` runs across the whole picture, with
+`p.color` the scene pixel already decoded to linear, plus `uv`, `resolution` and
+a clock. `three.setPost({ fragment, uniforms })` compiles it on the line that
+asked and throws Slang's own diagnostic at the body's own line numbers;
+`three.setPost(null)` puts the frame back on the path it was on before. With a
+pass active the scene renders into a second sampled `_SRGB` image and the post
+shader writes the target the blit already reads, so the round trip closes by
+format and nothing downstream of `target.color` knows any of it happened —
+window, `render()` and every screenshot go through one recording function and
+cannot disagree about it. The 112 bytes of push block the pass has to itself are
+written live between frames through the same uniforms Proxy a `ShaderMaterial`
+has, and the pass belongs to the renderer rather than to the scene, so it
+survives `new three.Scene()` and outlives the script that set it.
 
-	c3c test --trust=full       537 passed, 0 failed, leak-clean
+	c3c test --trust=full       558 passed, 0 failed, leak-clean
 
 **`examples/village` is where most of what follows came from.** A walled village
 wearing nothing but generated textures — eleven `DataTexture`s and no image file
@@ -224,6 +238,45 @@ the decision can be revisited on evidence rather than on somebody's mood.
   SPIR-V for identical source. Expect it to arrive as "the shader still behaves
   the way it did before the upgrade", true on a machine whose cache is warm and
   not reproducible on one whose cache is empty.
+
+- **The post pass is one pass, and there is no chain.** `three.setPost` replaces
+  whatever was running; there is no way to say "blur, then bloom, then tonemap".
+  A chain is ping-pong: a second sampled image, N-1 extra full-screen passes, and
+  a rule for which of the two images the last one writes so that `target.color`
+  is still what the blit reads. The machinery is nearly all there — `PostPass`
+  already owns an image, a sampler and a pipeline, and `Renderer.record_scene`
+  already has the branch — but the *ownership* changes: one live pipeline becomes
+  a list, and the argument for owning it outright rather than through
+  `PipelineCache` (one slot, one key) stops holding. Composing effects inside one
+  body is the workaround and it is a real one, because a hand-written combined
+  body is cheaper than two passes anyway. **Trigger:** something that genuinely
+  cannot be one body — a separable blur, or anything wanting a downsampled
+  intermediate.
+
+- **A post body sees colour and nothing else.** No depth, no normals, no motion
+  vectors, so no depth of field, no SSAO, no fog that respects distance and no
+  edge detection that is not luminance-based. The depth image exists and is
+  already the right size (`target.depth`), so the cost is not the resource: it is
+  that the depth attachment would have to be transitioned to
+  `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and back around the post pass, a second
+  binding appears in `post.slang`, and `Post` grows a field whose value is a
+  non-linear device depth that almost every body would want linearized — which
+  means shipping the near/far reconstruction with it or shipping a footgun.
+  **Trigger:** a first request for depth-aware post. Do it with `p.depth` already
+  linearized to world units, using the camera's derived near and far, rather than
+  handing over the raw buffer.
+
+- **`p.time` is a wall clock, not a game clock.** `PostPass` reads
+  `clock::now()` at `set` and reports the seconds since, so a post pass animates
+  at real-time speed and keeps animating while the simulation is paused, stepped
+  or scrubbed. Nothing in `render/post.c3` knows a simulation exists — the frame
+  loop's elapsed milliseconds are a `frame_loop.c3` concept and the physics
+  world's step count is a third clock again — and picking one of them here would
+  be choosing on behalf of a caller that has not asked yet. The workaround is a
+  uniform: declare `t` and write it from the animation callback, which is one
+  line and gives the body exactly the clock the script means. **Trigger:** a
+  screenshot test that has to be reproducible with a post pass active, or a
+  pause that has to look paused.
 
 - **A stale asset handle is refused at `add()`, not at `new three.Mesh()`.** The
   constructor validates the shape of what it was handed and not the liveness of
@@ -666,6 +719,36 @@ Live, all of them. Each cost real time and none is visible in a diff.
   is not white: `PRIMITIVE_COLOR` is 0.78, 0.78, 0.80 sRGB and `mesh.color`
   multiplies it, so `mesh.color = 0xff0000` renders 199 and not 255. Both are
   written down once, in `encode_srgb` and `primitive_linear` in `js_test.c3`.
+- **An intermediate image a shader samples and re-writes has to carry the same
+  `_SRGB` format as the target, or the encode happens twice.** The post pass
+  renders the scene into image A and then samples it: under `R8G8B8A8_SRGB` the
+  attachment encodes on write, the sampler decodes on read, the body works in
+  linear like every other shader here, and the `_SRGB` target re-encodes — the
+  round trip closes **by format rather than by arithmetic**, and an identity body
+  is an identity to within one eight-bit level. Under `_UNORM` the sample arrives
+  already encoded, is treated as linear, and is encoded a second time. The
+  signature is what makes it expensive: black stays black, white stays white, and
+  everything between shifts — **69 levels** at the mid-tones in
+  `an_identity_post_pass_leaves_the_frame_where_it_was`, measured by injecting
+  exactly that. It does not look like a bug. It looks like the post pass being "a
+  bit washed out", which is a sentence that gets a body rewritten instead of a
+  format changed. The general form: any offscreen image in a chain is a colour
+  *space* decision and not only a memory one.
+- **The negative-height viewport does not cancel through a sampled full-screen
+  pass.** Every other pipeline in this project sets a negative viewport height to
+  undo Vulkan's Y-down NDC so a glm-convention projection lands the right way up,
+  and the intuition that two flips — one writing the intermediate, one reading it
+  — cancel is wrong, because there is only one. The full-screen pass has no
+  projection: its three vertices *are* NDC and its `uv` is the number they were
+  built from, so a negative height makes a fragment at framebuffer row `r` carry
+  `uv.y = 1 - r/height` and sample row `height - r`. The frame comes back upside
+  down and **no validation layer says a word**, because nothing about it is
+  invalid. So `PostPass.record` sets a *positive* viewport, `shaders/post.slang`
+  has no flip anywhere in it, and the pin is a deliberately asymmetric fixture —
+  a top-to-bottom-symmetric one would satisfy the comparison inverted and the
+  check would have quietly stopped asking. This plan predicted the cancellation
+  in Phase D item 2 and was wrong; it was caught by writing the test the plan
+  asked for rather than by reasoning about it again.
 - **A pixel is a square, and its coordinate is a corner.** The rasterizer decides
   coverage at the pixel's *centre*, so anything claiming to agree with the
   picture — a picker, a hit test, a readback comparison — has to add the half.
@@ -819,7 +902,20 @@ for doing the binding first.
 - **No networking.** The physics work makes lockstep *possible* — `state_hash`
   and `snapshot`/`restore` are the hard parts and they exist — and nothing here
   builds it.
-- **No render graph, no deferred path, no post-processing stack.**
+- **No render graph and no deferred path.** Both are answers to a pass count this
+  project does not have: forward, one light, one post pass at most. A graph that
+  schedules four passes is a scheduler with nothing to schedule.
+- **No post-processing *stack*. One pass is done.** This entry used to read "no
+  post-processing stack" as part of the line above, and the whole of it was
+  meant. It was revisited at the user's request and the single-pass half was
+  built: `three.setPost({ fragment, uniforms })` runs one agent-written
+  `float3 post(Post p)` over the finished frame, on the window, on `render()` and
+  on every screenshot alike, with the scene rendered into a sampled `_SRGB` image
+  and the post shader writing the target the blit already reads. What stays
+  absent is the *stack* — no chain, no ping-pong, no named passes to compose, and
+  §2 carries the trigger. Composing effects inside one body is not a workaround
+  so much as the cheaper thing: two passes cost a second full-screen read and
+  write that a combined body does not.
 - **No `setPivot`.** Reinterpreting an origin adds a second place a piece's
   position comes from, and the next script has to know which one is in play.
   `align` moves the object to put a *face* where it belongs and leaves the pivot

@@ -28,9 +28,10 @@
 	                                      |
 	                                   rebuild
 
- Recording is the same three calls whether or not there is a window, because
- the target is offscreen either way (`plan.md` §1): begin the target, draw, end
- the target. The blit and the readback are optional consumers appended after.
+ Recording is the same one call whether or not there is a window, because the
+ target is offscreen either way (`plan.md` §1): `record_scene` begins the
+ target, draws and ends it. The blit and the readback are optional consumers
+ appended after.
 *>
 module three;
 
@@ -159,6 +160,11 @@ struct Renderer
 	// The scene graph, the asset table and the one pipeline that draws them.
 	// The frame path above does not know any of that is in there.
 	MeshPass pass;
+	// The one agent-written shader that runs over the finished frame, and the
+	// image the scene goes into while it does. Inert until something calls
+	// `set` — see `render/post.c3`, which is also where the argument for it
+	// being a field of the renderer rather than of the pass is.
+	PostPass post;
 	bool windowed;
 	// What every render begins with. Reachable from a script since M6 as
 	// `scene.background` — a daylight scene against this was rendering itself a
@@ -210,6 +216,10 @@ fn void Renderer.free(&self)
 {
 	if (self.gpu.handle != null) self.gpu.handle.waitIdle();
 	self.pass.free(&self.gpu);
+	// Before the target, because it holds an image created at the target's
+	// extent — and after the idle, because it frees a pipeline outright rather
+	// than retiring it.
+	self.post.free(&self.gpu);
 	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
 	self.viewer.free(&self.gpu);
@@ -226,8 +236,8 @@ fn void Renderer.free(&self)
 
  `frames.slot` is passed down because the instance array is per frame in flight
  (see the rule at the top of this file). It is read here rather than threaded
- through a parameter because both callers advance it only *after* recording, so
- it is the current slot in both.
+ through a parameter because every frame path advances it only *after*
+ recording, so it is the current slot on all of them.
 
  A pass that was never given a pipeline records nothing, which is what lets the
  M0 tests and a headless clear-colour render work with no shader on disk.
@@ -235,6 +245,62 @@ fn void Renderer.free(&self)
 fn void? Renderer.draw(&self, vk::CommandBuffer cmd)
 {
 	return self.pass.record(&self.gpu, cmd, &self.target, self.frames.slot);
+}
+
+<*
+ A whole frame of scene, recorded into `cmd`: begin the target, draw, end the
+ target.
+
+ The one description of what a frame contains, and the reason it is a function
+ is that there are three callers. `frame()`, `capture()` and
+ `render_offscreen()` were the same three calls written out three times, which
+ is the shape every "the window shows something the screenshot does not" bug
+ has: nothing enforced that the three stayed identical except that they
+ currently were. They cannot disagree now.
+
+ What the three paths legitimately differ by stays with them — the acquire, the
+ blit, the readback, the timestamps that span all of it. This is only the part
+ that must be the same.
+
+ ## The post branch
+
+ With a post shader set, the scene is drawn into `PostPass.image` instead and
+ the post pass writes `target.color` from it. **The branch is here and nowhere
+ else**, which is the payoff for there being one recording function: window,
+ screenshot and `render()` get post-processing at the same moment and cannot
+ disagree about it. Everything downstream of `target.color` — the blit, the
+ readback, the layout contract — is unchanged and unaware.
+
+ With no post shader the two calls below are the same two calls this function
+ has always made, so an unposted frame is byte-identical to one from before the
+ pass existed rather than merely equivalent to it.
+*>
+fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
+{
+	// Read once: `active` must not be allowed to change between the begin and
+	// the end of one recording, and reading it twice is how that becomes
+	// possible.
+	bool posted = self.post.active;
+
+	if (posted)
+	{
+		self.target.begin_render_to(cmd, self.post.image, self.post.view, self.clear);
+	}
+	else
+	{
+		self.target.begin_render(cmd, self.clear);
+	}
+
+	self.draw(cmd)!;
+
+	if (posted)
+	{
+		self.post.record(cmd, &self.target);
+	}
+	else
+	{
+		self.target.end_render(cmd);
+	}
 }
 
 <*
@@ -330,9 +396,7 @@ fn bool? Renderer.frame(&self)
 	// First and last commands in the buffer. The blit is inside the span on
 	// purpose — `gpu/timing.c3` says why.
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.target.begin_render(cmd, self.clear);
-	self.draw(cmd)!;
-	self.target.end_render(cmd);
+	self.record_scene(cmd)!;
 	self.viewer.record_blit(cmd, &self.target, index);
 	self.timer.end(cmd, slot);
 
@@ -389,9 +453,7 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.target.begin_render(cmd, self.clear);
-	self.draw(cmd)!;
-	self.target.end_render(cmd);
+	self.record_scene(cmd)!;
 	self.target.record_readback(cmd, &readback);
 	self.timer.end(cmd, slot);
 
@@ -434,9 +496,7 @@ fn void? Renderer.render_offscreen(&self)
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.target.begin_render(cmd, self.clear);
-	self.draw(cmd)!;
-	self.target.end_render(cmd);
+	self.record_scene(cmd)!;
 	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;

@@ -91,6 +91,9 @@ fn void JsRuntime.install_bindings(&self)
 	// Materials (js/bind_shader.c3)
 	self.bind_shader_verbs(host);
 
+	// The one post shader (js/bind_post.c3)
+	self.bind_post_verbs(host);
+
 	// The animation loop (js/frame_loop.c3)
 	self.bind_frame_verbs(host);
 
