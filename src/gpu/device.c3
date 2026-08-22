@@ -99,7 +99,49 @@ struct GpuLimits
 	// beside the fence wait instead of inside the recording, where it would have
 	// to be ordered against a submission that has not happened yet.
 	bool timestamps;
+	// What the *device* reports, not what `create_instance` asked for. The
+	// instance's `apiVersion` is a ceiling; this is the answer, and it is what
+	// decides whether a 1.4 core feature struct may be chained into
+	// `deviceCreateInfo` at all — handing one to a 1.3 device is invalid usage
+	// rather than a struct it politely walks past.
+	uint api_version;
+	// `dynamicRenderingLocalRead`, core in 1.4: reading an attachment written
+	// earlier in the same `cmdBeginRendering` block, at the same pixel. Enabled
+	// wherever it is offered and **used by nothing yet** — `plan.md` §13 has what
+	// it is for (fusing the pointwise post passes, at no image and no barrier)
+	// and why the sampled chain is built before the fusion that would replace it
+	// for half the cases.
+	bool dynamic_rendering_local_read;
 	char[256] device_name;
+}
+
+<*
+ The Vulkan version the instance asks for.
+
+ **`apiVersion` is a ceiling, not a demand**, and the natural reading is the
+ opposite one. It declares the highest version this code is written against; a
+ device reporting less still works and simply may not be handed 1.4 core entry
+ points, which is what `GpuLimits.api_version` is read for. So raising this does
+ not narrow what `select_device` accepts, and 1.3 hardware is exactly as welcome
+ after it as before.
+
+ The one loader that would refuse is a Vulkan 1.0 one — implementations at 1.1
+ and above must not return `ERROR_INCOMPATIBLE_DRIVER` for *any* `apiVersion` —
+ and it is detected the way the spec says to detect one: `vkEnumerateInstanceVersion`
+ is simply absent from a 1.0 loader. Asking it what it supports and taking the
+ lower of the two costs one call at startup and means this can never be the
+ reason an instance fails to create.
+*>
+fn uint wanted_api_version()
+{
+	const uint V1_0 = vk::@makeApiVersion(0, 1, 0, 0);
+	const uint V1_4 = vk::@makeApiVersion(0, 1, 4, 0);
+
+	if (vk::vkEnumerateInstanceVersion == null) return V1_0;
+
+	uint loader;
+	if (catch vk::enumerateInstanceVersion(&loader)) return V1_0;
+	return loader < V1_4 ? loader : V1_4;
 }
 
 // The layer that produces the messages, and the instance extension that carries
@@ -300,7 +342,7 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 		.pEngineName = "three.c3",
 		.applicationVersion = vk::@makeApiVersion(0, 0, 1, 0),
 		.engineVersion = vk::@makeApiVersion(0, 0, 1, 0),
-		.apiVersion = vk::@makeApiVersion(0, 1, 3, 0),
+		.apiVersion = wanted_api_version(),
 	};
 
 	vk::InstanceCreateInfo info = vk::instanceCreateInfo().setApplicationInfo(&app_info);
@@ -453,21 +495,6 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	// VK_KHR_portability_subset would have to have it enabled, but no such
 	// device gets this far: `select_device` turns them away.
 
-	// Queried, then handed to deviceCreateInfo unchanged, so exactly what the
-	// device supports is what gets enabled — and what the checks below read is
-	// what the device will actually have.
-	vk::PhysicalDeviceVulkan13Features v13 = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-	vk::PhysicalDeviceVulkan12Features v12 = {
-		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-		.pNext = &v13,
-	};
-	vk::PhysicalDeviceVulkan11Features v11 = {
-		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-		.pNext = &v12,
-	};
-	vk::PhysicalDeviceFeatures2 features = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
-	vk::getPhysicalDeviceFeatures2(self.pdevice, &features);
-
 	// Through properties2 rather than the v1 call, because that is the only way
 	// to reach `maxPushDescriptors`. A device without VK_KHR_push_descriptor
 	// walks past the struct it has never heard of and leaves it as it was, so
@@ -483,6 +510,33 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	vk::getPhysicalDeviceProperties2(self.pdevice, &properties2);
 	vk::PhysicalDeviceProperties properties = properties2.properties;
 
+	// **The properties are read before the features, and the order is the
+	// point.** Unlike the push-descriptor struct above — which a device that has
+	// never heard of it leaves untouched, so asking costs nothing — a
+	// `VkPhysicalDeviceVulkan14Features` handed to a 1.3 device is invalid usage
+	// rather than a no-op. Whether it may be chained at all is a question only
+	// the properties can answer, so they have to be asked first.
+	bool has_1_4 = properties.apiVersion >= vk::@makeApiVersion(0, 1, 4, 0);
+
+	// Queried, then handed to deviceCreateInfo unchanged, so exactly what the
+	// device supports is what gets enabled — and what the checks below read is
+	// what the device will actually have.
+	vk::PhysicalDeviceVulkan14Features v14 = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES };
+	vk::PhysicalDeviceVulkan13Features v13 = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+		.pNext = has_1_4 ? (void*)&v14 : null,
+	};
+	vk::PhysicalDeviceVulkan12Features v12 = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+		.pNext = &v13,
+	};
+	vk::PhysicalDeviceVulkan11Features v11 = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+		.pNext = &v12,
+	};
+	vk::PhysicalDeviceFeatures2 features = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
+	vk::getPhysicalDeviceFeatures2(self.pdevice, &features);
+
 	self.limits = {
 		.scalar_block_layout = v12.scalarBlockLayout == vk::TRUE,
 		.buffer_device_address = v12.bufferDeviceAddress == vk::TRUE,
@@ -496,6 +550,12 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		// supported — this is a claim about the device *and* about what was asked
 		// for, and the two cannot disagree here by construction.
 		.timestamps = properties.limits.timestampComputeAndGraphics == vk::TRUE && v12.hostQueryReset == vk::TRUE,
+		.api_version = properties.apiVersion,
+		// Read off the same `v14` that goes to `deviceCreateInfo` below, so — as
+		// with `hostQueryReset` above — this is a claim about the device *and*
+		// about what was asked for, and the two cannot disagree by construction.
+		// False on a 1.3 device because the struct was never chained there.
+		.dynamic_rendering_local_read = has_1_4 && v14.dynamicRenderingLocalRead == vk::TRUE,
 		.device_name = properties.deviceName,
 	};
 
@@ -670,11 +730,14 @@ fn uint validation_message(
 fn void Gpu.report(&self)
 {
 	io::printfn("device       %s", (ZString)&self.limits.device_name);
+	uint api = self.limits.api_version;
+	io::printfn("  apiVersion           %d.%d.%d", (api >> 22) & 0x7F, (api >> 12) & 0x3FF, api & 0xFFF);
 	io::printfn("  validation           %s", self.validation ? "on" : "off");
 	io::printfn("  scalarBlockLayout    %s", self.limits.scalar_block_layout);
 	io::printfn("  bufferDeviceAddress  %s", self.limits.buffer_device_address);
 	io::printfn("  dynamicRendering     %s", self.limits.dynamic_rendering);
 	io::printfn("  pushDescriptor       %s", self.limits.push_descriptor);
+	io::printfn("  localRead            %s", self.limits.dynamic_rendering_local_read);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);
 	io::printfn("  timestamps           %s", self.limits.timestamps);

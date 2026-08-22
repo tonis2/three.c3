@@ -251,7 +251,10 @@ the decision can be revisited on evidence rather than on somebody's mood.
   body is the workaround and it is a real one, because a hand-written combined
   body is cheaper than two passes anyway. **Trigger:** something that genuinely
   cannot be one body — a separable blur, or anything wanting a downsampled
-  intermediate.
+  intermediate. **§13 is the design**, and it settles the ownership question this
+  entry leaves open along with the two that turned out to sit underneath it: what
+  format image A should be before there are three of it, and which reserved
+  binding a pass reads its predecessor through.
 
 - **A post body sees colour and nothing else.** No depth, no normals, no motion
   vectors, so no depth of field, no SSAO, no fog that respects distance and no
@@ -437,6 +440,14 @@ pleasant.
 blit — so `--screenshot` and the MCP `screenshot` capture the UI too. **An agent
 that cannot see the HUD it just built cannot correct it**, which is the same
 argument `getApiDocs()` makes, applied to the HUD.
+
+"Before the blit" was written when a frame had one pass, and it is now ambiguous:
+**after the post chain, not before it**, or every effect a script sets bloods into
+the HUD. §13 places it as the last stage before the target closes, and prices it —
+it needs no attachment of its own and at most one barrier, because it writes the
+colour image everything else already writes. A HUD is a pipeline, a vertex buffer
+and a glyph atlas; none of the cost is in scheduling, which is why this milestone
+is the two decisions below and not a rendering problem.
 
 **Input arbitration is the whole difficulty.** A click on a button must not also
 shoot the gun. The UI gets the pointer first and marks the event consumed;
@@ -924,6 +935,489 @@ for doing the binding first.
 
 ---
 
+## 13. The pass system, and what it is not
+
+Nothing in this section is built. It is written before the work rather than after
+it because one of the decisions in it — the format of the image the scene renders
+into — is a one-line edit today and a three-image, two-pipeline-variant edit once
+a chain exists.
+
+It came out of a question §12's "what is next" list could not answer on its own:
+post-processing landed, shadows and a UI layer are both wanted, PBR is on the
+horizon, and the entry below says there is no render graph and never will be. Is
+that still true once a frame has four things in it? It is, and the counting is
+here — but the counting also produced the shape those features should land in.
+
+### What a frame is now, counted
+
+	inactive   scene ────────────────────────────────► target.color ──► blit
+	active     scene ──► image A ──[sample]──► post ──► target.color ──► blit
+
+Two render passes at most, three owned images (`target.color`, `target.depth`,
+`PostPass.image`), and **four barrier call sites in the entire frame path** — two
+in `gpu/target.c3`, two in `render/post.c3` — plus the swapchain's two around the
+blit. `Renderer.record_scene` is one `if`.
+
+What the named features add to that, which is the number the render graph
+question actually turns on:
+
+	shadows        +1 site   the shadow map's attachment transition. The read-side
+	                         transition folds into begin_render_to's existing
+	                         two-element array. Cascades are layers of one image:
+	                         more draw calls, the same two transitions.
+	UI             +1 site   or zero. Same target.color, LOAD_OP_LOAD, a different
+	                         pipeline, no attachment of its own.
+	post chain     +1 site   one ping-pong helper called N times, not one per pass.
+	depth in post  +0 sites  two more elements in arrays that already exist.
+	               ────────
+	               ~7 total
+
+Seven is not a number that buys a dependency solver. **UI is the one that looks
+expensive and is not:** it draws into the colour attachment everything else
+already writes, so it costs a pipeline, a vertex buffer and a glyph atlas, and
+nothing whatever in scheduling — `pushDescriptor` means the atlas is one more
+`SampledBindings.add`, exactly like a material texture. The expensive half of a UI
+layer is text layout and hit-testing, and no pass system touches either.
+
+### What the driver offers, measured
+
+Probed rather than assumed, by the method §10 insists on — a temporary test
+calling `vk::getDeviceExtensions` and one chained `getPhysicalDeviceFeatures2`,
+run once and deleted:
+
+	device               Apple M5, KosmicKrisp (lib/Vulkan.c3l/macos-aarch64)
+	apiVersion           1.4.359     <- create_instance asks for 1.3
+	device extensions    144
+	maxPushConstantsSize 256
+
+	dynamicRenderingLocalRead    true
+	unifiedImageLayouts          true
+	hostImageCopy                true
+	maintenance5, maintenance6   true
+	pushDescriptor (1.4 core)    true
+	VK_EXT_shader_object         absent
+
+§10 already carries the `VK_EXT_extended_dynamic_state3` half of this same run
+and nothing here disturbs it: every colour-blend bit false, so **a blend mode
+stays a `PipelineState` field**. `VK_EXT_shader_object` being absent is the other
+half of that — it is the extension that would have removed pipeline objects
+outright and with them the "am I last" variant problem below. It is not there.
+
+**1. `apiVersion` moves to 1.4.** It is what the device reports, and it makes
+`push_descriptor`, `dynamic_rendering_local_read`, `maintenance5`/`6` and
+`hostImageCopy` core rather than extension strings — one
+`VkPhysicalDeviceVulkan14Features` in place of a list.
+
+*This does not refuse 1.3 devices, which is worth writing down because the
+opposite is the natural assumption.* `VkApplicationInfo::apiVersion` declares the
+maximum version the app may use; it is not a demand. A 1.4 instance runs on a 1.3
+physical device and simply may not call 1.4 core entry points there. The two real
+checks are `vkEnumerateInstanceVersion` before `vkCreateInstance` — only a
+pre-1.1 loader fails outright — and `VkPhysicalDeviceProperties::apiVersion` **per
+device**, which `select_device` already fetches. One comparison, not a rejection
+path.
+
+**2. `IMAGE_LAYOUT_GENERAL` was tried, measured and reverted.** It was written in
+full — five files, every image this project owns — and taken back out once the
+cost below was measured. `gpu/target.c3`'s two-layout contract stands. What
+follows is why it looked right, because the reasoning is sound up to the last
+step and somebody will have it again.
+
+Two separate facts get merged in the usual argument for it, and only one of them
+is about support:
+
+- **`VK_IMAGE_LAYOUT_GENERAL` has been legal on every device since Vulkan 1.0.**
+  No extension, no feature bit. Not "most modern GPUs" — all of them, always.
+- **`VK_KHR_unified_image_layouts` is the promise that GENERAL costs nothing**,
+  and *that* is the rare one. Present here because Metal has no layout concept at
+  all, which is the same reason the transitions were always no-ops on this driver.
+
+So GENERAL would be adopted **without gating on the extension**. Two clauses of
+the old contract would have survived, and both are load-bearing:
+
+- **`UNDEFINED` stays as a source layout wherever contents are discarded.** That
+  is what `color_attachment_barrier` does today, and on a tiler the discard is
+  worth more than the layout — it is the difference between loading a tile and
+  not.
+- **The swapchain image still needs `PRESENT_SRC_KHR`.** `gpu/swapchain.c3` keeps
+  a real transition; GENERAL does not reach the thing that gets presented.
+
+**Barriers do not go away, and expecting them to is the trap.** `srcStageMask`,
+`dstStageMask` and the access masks are the actual content of a barrier; only
+`oldLayout`/`newLayout` collapse. The barrier *count* is unchanged. What is
+deleted is the layout bookkeeping and the class of bug where an image is in the
+wrong layout for its next use — which is the half of the `FullscreenPass`
+protocol below that C3 could not have typed anyway.
+
+The cost that was expected, stated because it is real rather than free: on desktop
+AMD and NVIDIA, GENERAL can disable colour compression and depth in GENERAL can
+lose HiZ.
+
+**And the cost that was not expected, which is larger and was measured after the
+change was written.** Adopting GENERAL does not delete a bug class. It deletes
+the *detector* for one that is still there:
+
+- Core validation catches a missing barrier by noticing that an image is in the
+  wrong **layout** for what is about to read it. That is the mechanism, and it is
+  the only one core validation has for this.
+- With every image in GENERAL there is no layout left to be wrong, so a missing
+  barrier — the hazard the barrier actually exists for — is invisible to it.
+- Measured, not reasoned: deleting `shader_read_barrier` from `PostPass.record`
+  used to produce `VUID-vkCmdDraw-imageLayout-00344`, which
+  `the_post_pass_is_silent_under_validation` records as its proof by injection.
+  With GENERAL, that same deletion leaves **all 18 post checks green**.
+- Synchronization validation does not fill the hole on this driver. Enabled three
+  ways — `VkValidationFeaturesEXT` in the instance chain, the deprecated
+  `VK_LAYER_ENABLES`, and the layer's current `VK_LAYER_VALIDATE_SYNC=1` — the
+  missing barrier still reports nothing. (The first of those the layer now calls
+  deprecated outright, which is worth knowing separately.)
+
+That inverts the trade for **this** project specifically. `test/post_test.c3`'s
+own header says why: "none of it has a pixel symptom on this driver — a missing
+barrier renders correctly here and is a race everywhere else". The layout system
+was not bookkeeping this codebase was carrying for nothing; it was the instrument
+standing between a missing barrier and a silent race on hardware this project
+cannot test on. The layout mistake GENERAL removes is one the code was never
+making — the contract was documented and correct. The barrier mistake it hides is
+the one that costs a race.
+
+**So it was reverted, and the revert was verified the same way the cost was.**
+With the two-layout contract back, deleting `shader_read_barrier` fails
+`the_post_pass_is_silent_under_validation` with exactly the VUID that check's own
+comment records — image A seen as `SHADER_READ_ONLY_OPTIMAL` by the descriptor
+against a previous known layout of `COLOR_ATTACHMENT_OPTIMAL`. The detector is
+demonstrably back rather than presumed back.
+
+The general lesson, which outlives this particular extension: **a simplification
+that removes a mistake nobody is making, at the cost of an instrument that catches
+one they might, is not a simplification.** The layout bookkeeping here reads like
+ceremony precisely because it has been working. Anything that proposes to delete a
+safety mechanism should be asked to show what still catches the failure
+afterwards, and the way to ask is an injection rather than an argument.
+
+**3. `dynamic_rendering_local_read` is a fusion path, and an optimisation rather
+than a design.** Within one `cmdBeginRendering` block it can read attachments
+written earlier in that block — the extension mobile deferred renderers live on,
+and an Apple tiler is its home. Fusing the tonemap into the scene's block would
+cost no image and no round trip: the HDR attachment is `STORE_OP_DONT_CARE` and
+on a tiler need never reach main memory, which is ~8 MB of write plus 8 MB of read
+a frame at 1080p that image A otherwise spends.
+
+**The hard limit is same-pixel only** — no neighbour sampling — and it splits post
+passes in two:
+
+	fusable      tonemap, exposure, colour grade, vignette, depth fog,
+	             soft particles. Same pixel. No image, no barrier.
+	not fusable  blur, bloom, depth of field, SSAO, edge detect.
+	             Neighbourhood reads. The ping-pong chain as designed.
+
+And **fusion and sampling want different images**: local read needs
+`INPUT_ATTACHMENT` usage and wants `TRANSIENT_ATTACHMENT` with lazily allocated
+memory to earn the memoryless win; the chain needs `SAMPLED`. One image cannot be
+both to any effect. So this is not a flag to flip later — it is a second path,
+which is exactly why the chain is built first: it is correct on any driver, the
+fusion is identical output with less bandwidth, and designing the general case
+around the special one gets both wrong. **Trigger:** the chain working, and a
+measurement.
+
+It also nearly dissolves §2's depth-in-post entry for the pointwise half. Depth
+becomes an input attachment in the block that is already using it, so the
+transition to `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and back stops existing — for fog
+and soft particles, which want the same pixel. Depth of field and SSAO want
+neighbours and stay where that entry left them.
+
+**4. `PipelineState` keeps all four fields, and this entry is a retraction.** A
+version bump promotes extensions to core; it cannot add support a driver does not
+implement, so nothing above buys dynamic blend. `VK_EXT_extended_dynamic_state`
+and `…state2` did go core in **1.3** and are mandatory there, this project uses
+exactly one thing from them (`DYNAMIC_STATE_CULL_MODE`), and
+`DYNAMIC_STATE_DEPTH_TEST_ENABLE` and `…WRITE_ENABLE` really are free for the
+asking. This entry used to conclude from that that both depth fields should leave
+the cache key, and claimed it would halve the key's cardinality.
+
+**It would halve nothing.** Every `PipelineState` in the program is one of four
+constants, and `state_for_blend` (`scene/material.c3:164`) is a pure function from
+`BlendMode` to one of them — there is no site anywhere that builds a state with an
+independent depth choice. Written out:
+
+	                topology       depth_test  depth_write  blend
+	SOLID_STATE     TRIANGLE_LIST  true        true         NONE
+	LINE_STATE      LINE_LIST      false       false        NONE
+	ALPHA_STATE     TRIANGLE_LIST  true        false        ALPHA
+	ADDITIVE_STATE  TRIANGLE_LIST  true        false        ADDITIVE
+
+`(depth_test, depth_write)` is a **function of `(topology, blend)`** — no two rows
+share the left pair and differ on the right. Dropping both fields therefore
+changes the pipeline count by exactly zero, today and for as long as those four
+are the only states.
+
+And the cost is not zero. Two commands per bucket is the small half. The real one
+is that `ALPHA_STATE`'s doc comment is where the argument lives for why a
+transparent instanced draw must not write depth — copies inside one bucket are not
+sortable against each other, so a depth write makes visibility depend on
+rasteriser order — and `material.c3:161` already records that writing
+`depth_write: true` by hand *looks* right in any scene where nothing overlaps
+itself. Moving that choice from a named constant to a call site turns a
+guarantee into something each bucket can get wrong, in exchange for nothing.
+
+**Trigger:** a pass that genuinely wants a depth combination the four states do
+not have. A UI layer is the likely first one — alpha blending with the depth test
+*off* is not among the rows above — and at that point the question is whether it
+is a fifth constant or a dynamic state, which is a question worth having a real
+case for.
+
+**Deferred: `hostImageCopy`.** `vkCopyImageToMemory` moves image data to host
+memory with no staging buffer, no command buffer and no submission, which is
+`Target.create_readback` + `record_readback` + `decode_readback` collapsing toward
+one call, and the same for `gpu/texture.c3`'s upload. The breadth question answers
+itself once 1.4 is declared — `VK_EXT_host_image_copy` was **promoted to core in
+1.4**, so every 1.4 device has it and desktop NVIDIA, AMD and Mesa all ship 1.4.
+Held back anyway: it is a readback convenience rather than a pass change, it
+blocks nothing, and it needs `HOST_TRANSFER` usage set at image creation — so it
+belongs with the format work below, decided once rather than twice.
+
+### Three kinds of pass, and they do not unify
+
+	1. geometry     scene, shadow. Driven by the scene graph, write attachments.
+	                gpu, cmd, target, frame slot, instance buffer.
+	2. full-screen  the post chain, tonemap. Driven by a list.
+	                cmd, target, source view, destination view, assets.
+	3. one-shot     mip generation, an IBL bake. Run at load, write persistent
+	                textures. No per-frame command buffer at all — texture.c3's
+	                @single_time_command is already this, and is where a bake goes.
+
+Unifying all three under one abstraction is what a render graph attempts, and it
+is where a graph earns its complexity in an engine with fifteen passes. Here #3
+already has a working home, #1 is two stages, and #2 is a list. **Three small
+mechanisms that each fit cost less than one that fits all three approximately.**
+
+The line worth writing down, because it says what not to force: the chain is
+*full-screen 2D passes over the finished frame, at target extent*. An IBL bake
+fails every clause — cubemap, mip chain, wrong extent, runs once, writes a
+persistent texture rather than `target.color`.
+
+**PBR is not a pass and does not appear in this list.** It is a BRDF in
+`mesh.slang` plus material parameters with nowhere to live, which is §2's
+"per-material glTF loading has no unit to load into" — a data-model blocker, not
+a scheduling one. The only place PBR touches this section is the format decision
+below, and that touch is load-bearing.
+
+### The frame is a list, not a graph
+
+`record_scene` today branches twice on one bool. With four stages the question
+*who writes `target.color`, and who issues the final `to_transfer_src`* has 2 × 2
+× N answers, and written as nested ifs that is exactly where the bug goes — the
+"window shows something the screenshot does not" family this function exists to
+prevent.
+
+So the frame becomes a sequence with the destination decided once at the top:
+
+	bool posted  = self.post.active;
+	bool overlay = self.ui.active;
+
+	if (self.shadows.active) self.shadows.record(cmd, &self.scene)!;
+	self.target.begin_render_to(cmd, scene_destination);
+	self.draw(cmd)!;
+	if (posted)  self.post.record_chain(cmd, &self.target, final_color)!;
+	if (overlay) self.ui.record(cmd, &self.target);
+	self.target.close(cmd);
+
+**The invariant, which is what the current `if (posted) … else end_render()` is
+smuggling and what a third stage would break: exactly one stage writes
+`target.color`, and the close happens exactly once, here.** It wants a test that
+fails when a second stage claims the target.
+
+Each stage keeps its own honest signature. A common `record(PassContext*)` across
+all three kinds would need a context carrying gpu, cmd, target, slot, assets,
+scene, src view, dst view and extent, with every pass reading three of the nine —
+and the specific loss is that you could no longer tell from a signature what a
+pass touches, in a file where every doc comment exists to say exactly that.
+
+### The chain: three images and two rules
+
+	pass i    reads  P[(i-1)&1] as `prev`, A as `scene`
+	          writes P[i&1]
+	pass N-1  writes target.color instead
+
+Three images regardless of chain length: A (what `PostPass.image` already is) plus
+two ping-pong images. P0 and P1 are allocated lazily, so **N = 1 allocates neither
+and is the code path that runs today** — the chain generalises the current frame
+rather than replacing it, and a runtime that never sets a post shader still pays
+for nothing.
+
+Each pass issues exactly the two-element `cmdPipelineBarrier2` that
+`PostPass.record` already issues. `color_attachment_barrier` discards from
+`UNDEFINED`, which is already correct for reusing P0 on pass 2 after pass 1
+sampled it. **No new barrier code — the existing function called N times.**
+
+**A second reserved binding, and it is not free.** Binding 0 becomes `prev`;
+binding 1 becomes `scene`, image A, always available. That is what covers the one
+non-adjacent read anybody actually wants — bloom is `blur(bright(scene)) + scene`,
+which needs the original three passes later. *The edge people reach for a DAG to
+express is a binding, not a solver.*
+
+The cost is that `TEXTURE_BINDING_FIRST` stops being one number. Its own comment
+in `shader/assemble.c3` says why it is 1 — "zero is always taken and always
+occupied: `base_color_map` in a material, `scene` in a post pass" — and that is a
+coincidence of both kinds reserving exactly one. A post pass reserving two ends
+it. So the constant becomes a parameter of the assembly (`assemble.c3:400`
+generates indices from it) and of the cut in `SampledBindings.collect`
+(`bind.c3:120`, `:155`), with materials keeping 1 and post taking 2. Doing that
+as a shared bump instead would silently renumber every material sampler.
+
+On a single pass, bindings 0 and 1 point at the same image, so `p.color == p.scene`
+and **every post shader written today keeps working with no edit**.
+
+### The format decision, which must happen before the chain
+
+PBR with physical light intensities produces values above 1.0, and
+`TARGET_COLOR_FORMAT` is `R8G8B8A8_SRGB` — an attachment that clamps them, losing
+exactly the highlights bloom and tonemapping exist to shape. Real PBR means the
+scene renders into `R16G16B16A16_SFLOAT`, the chain runs in linear HDR, and a
+tonemap pass converts to display.
+
+`target.color` stays `_SRGB`. It is the final destination, so `readback_size`'s
+`w*h*4`, `decode_readback` and the PNG path are untouched and screenshots keep
+working. **The change is contained to image A and the ping-pong images.**
+
+`render/post.c3`'s colour argument survives and improves: `_SFLOAT` sampled is raw
+linear floats needing no decode, the body works in linear as it does now, and the
+final write to `_SRGB` encodes. The 8-bit round trip disappears. That header
+paragraph needs rewriting, not retracting.
+
+**The consequence that shapes the chain.** `gpu/pipeline.c3:577` and `:739` take
+their colour attachment format from `target.color_format`. In an HDR chain the
+intermediate passes write float and the last writes `_SRGB`, so *"am I last"*
+becomes a pipeline variant: the same body at slot 3 and at slot N is two different
+`VkPipeline`s, output format enters the cache key, and reordering the chain is a
+recompile. The fix is to take the decision away from user passes:
+
+> **Every script-authored pass reads float and writes float. A fixed,
+> engine-owned tonemap pass is the only thing that writes `target.color`.**
+
+One pipeline shape for every `addPass` body, one fixed pipeline for the encode,
+no format in the key, free reordering. It also makes the tonemap always present
+and always last, which is what physical lighting wants anyway — a user pass that
+forgot to encode would be the washed-out failure §10 already carries as a trap.
+
+### The interface, scoped to one kind
+
+C3 interfaces fit the full-screen chain and nothing else here, because that is the
+one kind whose contract is uniform across implementers: read one full-screen image,
+write another at the same extent. A user pass is one shader; an engine-provided
+bloom is internally a pyramid of twelve. Same contract, different types — which is
+what dynamic dispatch is for.
+
+	<*
+	 One full-screen pass over the frame.
+
+	 **The protocol, which the interface cannot express and every implementer
+	 must honour:** on entry `src` is in SHADER_READ_ONLY_OPTIMAL and `dst` is
+	 in whatever last frame left — open it with `color_attachment_barrier`,
+	 which discards from UNDEFINED. On exit `dst` is in
+	 COLOR_ATTACHMENT_OPTIMAL with rendering ended. `target.depth` is not yours.
+	*>
+	interface FullscreenPass
+	{
+		fn void? record(vk::CommandBuffer cmd, PassIo io);
+		fn void? resize(Gpu* gpu, vk::Extent2D extent) @optional;
+		fn void free(Gpu* gpu) @optional;
+	}
+
+Both halves of that are real and neither is expressible in a signature. The layout
+half is at least *checked* — entry 2 above is the whole story of finding out that
+it is the only half core validation can check, which is why it is still there to
+be got wrong.
+
+`PassIo` is three fields — `src` view, `dst` view, extent — because the kind is
+narrow. `@optional` earns its keep at once: a single-shader pass needs no
+`resize`, a pyramid does.
+
+Worth declaring at the point `PostStage` becomes its only implementer, precisely
+because it costs nothing at one implementer and means a bloom pass drops in later
+without restructuring the chain.
+
+**Why not across all three kinds.** An interface types the arguments; it cannot
+type the layout protocol. Applied to geometry and full-screen passes together it
+would grant compile-time substitutability the GPU does not honour — the compiler
+would accept a shadow pass in a full-screen slot, and the failure is a validation
+error in a debug build or a black frame in a release one — and since `-D DEBUG`
+(`src/debug.c3`) the release build is the one without the layer. Today the passes
+simply having different functions with different arguments prevents that
+outright, and that is the stronger guarantee.
+
+Two things to know before writing it:
+
+- **Interface values are pointers.** A `List` that grows invalidates every
+  interface value taken from it, and `addPass` mutates the list at arbitrary
+  times. Take them fresh from `&list[i]` each frame; never cache one.
+- **This would be the project's first interface.** `src/` contains no `interface`
+  declaration and no `@dynamic` anywhere. That is a reason to introduce exactly
+  one, where it pays, rather than four.
+
+### What this does not cover
+
+- **Downsampled intermediates.** A bloom pyramid at ½, ¼, ⅛ means per-pass
+  extents, so P0/P1 become a pool keyed by extent. Still not a solver, but not two
+  fields either. This is the piece that grows first.
+- **Reading three passes back**, or a pass fanning out to two consumers. `prev`
+  and `scene` are the only two edges.
+- **MRT** — a pass writing two attachments.
+
+### Order of work
+
+	1. driver batch          DONE, and half of it by deletion. apiVersion 1.4 with
+	                         the per-device check, and dynamicRenderingLocalRead
+	                         enabled and not yet used — those two shipped. GENERAL
+	                         was written in full and reverted (entry 2); depth state
+	                         out of PipelineState was dropped before it was written
+	                         (entry 4). Both are recorded above with the measurement
+	                         that killed them.
+	2. image A's format      one line. Unblocks 3 and 7.
+	3. chain + ping-pong     behind the existing single-pass API, float-to-float,
+	                         tonemap owns the encode. Every current test stays green.
+	4. the material unit     §2's blocker. The actual PBR work; touches none of the above.
+	5. IBL bake              on texture.c3's one-shot path. hostImageCopy lands here.
+	6. three.addPass         once the chain is proven.
+	7. fuse the pointwise    local read, measured against 3 rather than assumed. The
+	                         first step whose value is a number and not a shape.
+
+3 and 4 do not touch each other, which is the useful part: the pass work and the
+PBR work are separable, and only the format decision sits across both.
+
+**1 was worth doing on its own, and half of what it was worth was finding out
+which half was wrong.** Two of its four items did not survive being written down
+against the actual code — one died on reading four constants, the other on an
+injection test — and both would have been far more expensive to discover with a
+post chain, a shadow pass and a UI layer already built on top of them. That is the
+argument for taking the cheap, independent, fully-tested batch first, and it is a
+better argument after the fact than it was before it.
+
+### Why not a render graph, and what would change it
+
+A graph's executable form *is* a list — the topological sort is a preprocessing
+step that produces one. But the sort is not what a graph is for. The **edges** are,
+because barriers and resource lifetimes are derived from them. And that is the
+whole argument for the shape above:
+
+> **In a chain, adjacency is the edge set.**
+
+A general DAG needs explicit edges precisely because list position no longer tells
+you who reads whom. A chain does not have that problem, so constraining the
+topology buys the derived barriers back for nothing.
+
+`three.addPass` does not undermine this. It makes the *order* script-authored, and
+insertion order is already the topological order — there is no ambiguity for a
+sort to resolve, and you would have to make the API worse (declare dependencies
+without declaring order) to manufacture one.
+
+**Trigger:** script-authored *edges* — a script naming which pass's output another
+pass reads, where the answer is not its predecessor. That is the point at which no
+human is left in the loop to reason about the dependency and a solver is the
+honest answer. Pass count is not the trigger and never was.
+
+---
+
 ## What is deliberately absent, and stays absent
 
 - **No `BufferGeometry` and no attribute access.** That is the thesis. Nothing in
@@ -938,8 +1432,15 @@ for doing the binding first.
   and `snapshot`/`restore` are the hard parts and they exist — and nothing here
   builds it.
 - **No render graph and no deferred path.** Both are answers to a pass count this
-  project does not have: forward, one light, one post pass at most. A graph that
-  schedules four passes is a scheduler with nothing to schedule.
+  project does not have. A frame is two render passes, three images and four
+  barrier call sites; shadows, a UI layer, a post chain and depth-in-post together
+  take that to about seven. A graph that schedules four passes is a scheduler with
+  nothing to schedule. **§13 is the counting and the shape the alternative takes**
+  — a stage list, a chain whose adjacency is its own edge set, and the one trigger
+  that would change the answer, which is script-authored *edges* rather than pass
+  count. This entry used to read "forward, one light, one post pass at most",
+  which was written before `setPost` existed and read as though post were
+  hypothetical.
 - **No post-processing *stack*. One pass is done.** This entry used to read "no
   post-processing stack" as part of the line above, and the whole of it was
   meant. It was revisited at the user's request and the single-pass half was
