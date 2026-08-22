@@ -199,6 +199,9 @@ fn Renderer? Renderer.init(
 
 	self.gpu.init(instance, surface, validate)!;
 	self.target.init(&self.gpu, width, height)!;
+	// Before anything can push a stage — an uninitialised `List` falls back to the
+	// temp allocator on its first push. `PostPass.init` has the note.
+	self.post.init();
 
 	uint image_count = 0;
 	if (self.windowed)
@@ -268,18 +271,40 @@ fn void? Renderer.draw(&self, vk::CommandBuffer cmd)
  blit, the readback, the timestamps that span all of it. This is only the part
  that must be the same.
 
- ## The post branch
+ ## A sequence, with the destination decided once at the top
 
- With a post shader set, the scene is drawn into `PostPass.image` instead and
- the post pass writes `target.color` from it. **The branch is here and nowhere
- else**, which is the payoff for there being one recording function: window,
- screenshot and `render()` get post-processing at the same moment and cannot
- disagree about it. Everything downstream of `target.color` — the blit, the
+ This used to be two `if (posted)` blocks with an `end_render` inside the second
+ one's `else`, which was exact for one optional stage and is the shape every
+ "window shows something the screenshot does not" bug has: with shadows, a post
+ chain and a UI layer the question *who writes `target.color`, and who closes it*
+ has two-by-two-by-N answers, and nested ifs are where that goes wrong.
+
+ So it is a sequence, and the invariant the sequence exists to hold is:
+
+ > **Exactly one stage writes `target.color`, and the close happens exactly once,
+ > here.**
+
+ With a post chain running, the scene is drawn into image A instead and the
+ chain's tonemap is the stage that writes `target.color`. **The branch is here and
+ nowhere else**, which is the payoff for there being one recording function:
+ window, screenshot and `render()` get post-processing at the same moment and
+ cannot disagree about it. Everything downstream of `target.color` — the blit, the
  readback, the layout contract — is unchanged and unaware.
 
- With no post shader the two calls below are the same two calls this function
- has always made, so an unposted frame is byte-identical to one from before the
- pass existed rather than merely equivalent to it.
+ With no post shader, the calls below are the calls this function has always
+ made, so an unposted frame is byte-identical to one from before the chain
+ existed rather than merely equivalent to it.
+
+ **The invariant is checked, and by an instrument that already existed.** A second
+ close — the shape a careless third stage would take — is a layout transition out
+ of COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in TRANSFER_SRC, so
+ the validation checks in `three_tests::post` fail on it:
+ "VUID-VkImageMemoryBarrier2-oldLayout-01197: ... cannot transition the layout ...
+ from VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL when the previous known layout is
+ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL". Proved by injection: a second
+ `self.target.close(cmd)` here, and both of them fail. That is worth knowing
+ before a fourth stage is written, because it means the rule is enforced rather
+ than merely documented.
 *>
 fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 {
@@ -290,7 +315,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 
 	if (posted)
 	{
-		self.target.begin_render_to(cmd, self.post.image, self.post.view, self.clear);
+		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear);
 	}
 	else
 	{
@@ -299,17 +324,17 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 
 	self.draw(cmd)!;
 
-	if (posted)
-	{
-		// The asset table comes down with it because the post shader's own
-		// samplers resolve through it — the frame that is being written is
-		// binding 0, and everything above that is an image a script named.
-		self.post.record(cmd, &self.target, &self.pass.assets);
-	}
-	else
-	{
-		self.target.end_render(cmd);
-	}
+	// The scene's rendering ends here on both paths, which is what lets the chain
+	// below be a list of passes rather than a thing that also has to know how the
+	// frame started.
+	vk::cmdEndRendering(cmd);
+
+	// The asset table comes down with it because each post shader's own samplers
+	// resolve through it — bindings 0 and 1 are the chain's own images, and
+	// everything above them is an image a script named.
+	if (posted) self.post.record_chain(cmd, &self.target, &self.pass.assets)!;
+
+	self.target.close(cmd);
 }
 
 <*

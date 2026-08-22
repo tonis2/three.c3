@@ -43,17 +43,29 @@ module three;
 
 import vk;
 
+// One past the last binding each kind of shader can have: its template's
+// reserved bindings plus what an agent may declare on top of them. A material
+// reserves one and a post pass reserves two — see `MATERIAL_BINDING_FIRST`.
+// Loop bounds, and the two halves of the maximum below.
+const uint MATERIAL_BINDINGS_END = MATERIAL_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
+const uint POST_BINDINGS_END = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
+
 <*
- The most sampler bindings one draw can carry here: the template's own, plus what
- an agent may declare.
+ The most sampler bindings one draw can carry here: whichever kind of shader
+ wants the most.
 
- Derived rather than chosen, so that raising `MATERIAL_TEXTURE_LIMIT` raises this
- with it and the `$assert` below stops being satisfiable if the two ever drift.
+ Derived rather than chosen, so that raising either limit — or reserving a third
+ binding in either template — raises this with it. It used to be one sum because
+ both kinds started at the same binding; the max is what that expression becomes
+ once they do not.
+
+ It is also `TextureSlots`'s array length, which is why it is a maximum rather
+ than a per-kind number: one struct holds either kind's slots, indexed by the
+ binding itself.
 *>
-const uint MAX_SAMPLED_BINDINGS = TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
-
-$assert MAX_SAMPLED_BINDINGS >= TEXTURE_BINDING_FIRST + POST_TEXTURE_LIMIT :
-	"a post pass may declare more samplers than SampledBindings can carry";
+const uint MAX_SAMPLED_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END
+	? MATERIAL_BINDINGS_END
+	: POST_BINDINGS_END;
 
 <*
  The image writes for one draw, gathered before any of them is pushed.
@@ -98,13 +110,14 @@ fn void SampledBindings.add(&self, uint binding, vk::DescriptorImageInfo info)
 }
 
 <*
- Fill every binding the shader declared past the first, from a material's own
- table.
+ Fill every binding the shader declared past the ones its template reserves, from
+ a material's own table.
 
- Binding 0 is the caller's to add and is not touched here, because the two callers
- mean different things by it: a material's is `material.map` or the mesh's own
- image, and a post pass's is the frame that was just rendered. Everything above it
- is the agent's and resolves the same way for both.
+ The reserved bindings are the caller's to add and are not touched here, because
+ the two callers mean different things by them: a material's binding 0 is
+ `material.map` or the mesh's own image, and a post pass's 0 and 1 are the pass
+ before it and image A. Everything above them is the agent's and resolves the same
+ way for both — which is why `first` is a parameter and not a constant.
 
  **Driven by the reflected bindings, not by the textures the material holds.** A
  sampler the script never supplied gets white rather than being skipped — see the
@@ -112,12 +125,13 @@ fn void SampledBindings.add(&self, uint binding, vk::DescriptorImageInfo info)
 
  @param pipeline : `Whose reflected layout says which bindings exist.`
  @param slots : `Where the indices come from. Null binds white to every declared sampler.`
+ @param first : `The first binding that is the agent's — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST. Everything below it belongs to the template and the caller has already added it.`
 *>
-fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slots, Assets* assets)
+fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slots, Assets* assets, uint first)
 {
 	foreach (binding : pipeline.shader.bindings)
 	{
-		if (binding.binding < TEXTURE_BINDING_FIRST) continue;
+		if (binding.binding < first) continue;
 		if (binding.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
 
 		int index = slots == null ? NO_TEXTURE : slots.at(binding.binding);
@@ -136,25 +150,55 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
  this is where that becomes a `1`.
 
  **Zero means no**, and can, because zero is never a legal answer: binding 0 is
- the template's own `base_color_map` or `scene`, which is reached through
- `material.map` and deliberately not by name. A name that reflects at binding 0
- is refused exactly like a name that reflects at nothing at all.
+ the template's own `base_color_map` or `prev`, which is reached through
+ `material.map` and through the chain respectively, and deliberately not by name.
+ A name that reflects below `first` is refused exactly like a name that reflects
+ at nothing at all — which is what keeps a post shader from reaching `scene` at
+ binding 1 by declaring a texture called something else and hoping.
 
  A name the body declared and never sampled may be absent here — Slang is free to
  drop a parameter nothing reads — which is a case the caller must have an answer
  for and cannot distinguish from a typo. The two setters have that answer, in a
  sentence naming both possibilities.
 
+ @param first : `The first binding that is the agent's — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST.`
  @return `The binding index, or 0 for a name this shader has no sampler for.`
 *>
-fn uint sampler_binding_of(MeshPipeline* pipeline, String name)
+fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
 {
 	if (pipeline == null) return 0;
 	ShaderBinding* found = pipeline.shader.binding_of(name);
 	if (found == null) return 0;
-	if (found.binding < TEXTURE_BINDING_FIRST) return 0;
+	if (found.binding < first) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
 	return found.binding;
+}
+
+<*
+ Does this pipeline's layout have a sampler at this exact binding?
+
+ The question the *reserved* bindings have to ask, and it exists because the
+ answer is not always yes. A template declares its own samplers unconditionally,
+ but reflection reports the linked program — and **Slang is free to drop a
+ parameter nothing reads**. A post body that never touches `p.scene` gives it
+ every reason to drop `scene`, and pushing a write for a binding the layout does
+ not declare is a validation error rather than a wasted descriptor.
+
+ So the reserved bindings go through the same question the agent's own do
+ (`sampler_binding_of`), by index instead of by name — because a reserved binding
+ has a fixed number and a name the caller must not have to spell.
+
+ @param binding : `An absolute binding index. 0 and 1 are the only callers today.`
+*>
+fn bool pipeline_declares_binding(MeshPipeline* pipeline, uint binding)
+{
+	if (pipeline == null) return false;
+	foreach (declared : pipeline.shader.bindings)
+	{
+		if (declared.binding != binding) continue;
+		return declared.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	}
+	return false;
 }
 
 <*

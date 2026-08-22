@@ -498,7 +498,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// script left empty.
 		SampledBindings samplers;
 		samplers.add(0, sampled.descriptor());
-		samplers.collect(pipeline, &material.textures, &self.assets);
+		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
 
 		// The mesh's own factor, faded by the material's opacity. Multiplied rather
@@ -1102,7 +1102,7 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	// swapped out from under the material and the slots are the record of what is
 	// actually held: a reference is released by whoever took it, not by whoever
 	// still declares a name for it.
-	for (uint binding = TEXTURE_BINDING_FIRST; binding < TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT; binding++)
+	for (uint binding = MATERIAL_BINDING_FIRST; binding < MATERIAL_BINDINGS_END; binding++)
 	{
 		int held = material.textures.at(binding);
 		if (held == NO_TEXTURE) continue;
@@ -1140,7 +1140,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		// material's five references and not the other four would be the kind of
 		// asymmetry that reads as a bug in whichever of the two is looked at
 		// second.
-		for (uint b = TEXTURE_BINDING_FIRST; b < TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT; b++)
+		for (uint b = MATERIAL_BINDING_FIRST; b < MATERIAL_BINDINGS_END; b++)
 		{
 			self.assets.release_texture(gpu, material.textures.at(b));
 		}

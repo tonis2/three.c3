@@ -239,22 +239,25 @@ the decision can be revisited on evidence rather than on somebody's mood.
   the way it did before the upgrade", true on a machine whose cache is warm and
   not reproducible on one whose cache is empty.
 
-- **The post pass is one pass, and there is no chain.** `three.setPost` replaces
-  whatever was running; there is no way to say "blur, then bloom, then tonemap".
-  A chain is ping-pong: a second sampled image, N-1 extra full-screen passes, and
-  a rule for which of the two images the last one writes so that `target.color`
-  is still what the blit reads. The machinery is nearly all there — `PostPass`
-  already owns an image, a sampler and a pipeline, and `Renderer.record_scene`
-  already has the branch — but the *ownership* changes: one live pipeline becomes
-  a list, and the argument for owning it outright rather than through
-  `PipelineCache` (one slot, one key) stops holding. Composing effects inside one
-  body is the workaround and it is a real one, because a hand-written combined
-  body is cheaper than two passes anyway. **Trigger:** something that genuinely
-  cannot be one body — a separable blur, or anything wanting a downsampled
-  intermediate. **§13 is the design**, and it settles the ownership question this
-  entry leaves open along with the two that turned out to sit underneath it: what
-  format image A should be before there are three of it, and which reserved
-  binding a pass reads its predecessor through.
+- **The post chain is built, and what it still cannot express is edges.** This
+  entry used to read "the post pass is one pass, and there is no chain", and the
+  chain it asked for is `render/chain.c3`: `three.addPass` appends, three images
+  serve any length, and the ownership question this entry left open was answered
+  the way it guessed — one live pipeline became a list of boxed stages, still
+  owned outright rather than through `PipelineCache`, because the swap case a
+  cache exists for is not the case a post shader is in.
+
+  Two things underneath it were answered as well, and one of them differently
+  than expected: a pass reads its predecessor through binding 0 and image A
+  through binding 1, and image A's format **stayed** `_SRGB` while the chain's
+  intermediates went float. §13's format section has why.
+
+  What is still absent is the thing this entry never named: **a script cannot say
+  which pass another pass reads.** Adjacency is the edge set, plus `p.scene` for
+  the original frame, and those two cover bloom. A pass wanting a *third* source,
+  or a downsampled one, is where this grows next. **Trigger:** script-authored
+  edges — the point at which no human is left in the loop to reason about the
+  dependency.
 
 - **A post body sees colour and nothing else.** No depth, no normals, no motion
   vectors, so no depth of field, no SSAO, no fog that respects distance and no
@@ -937,10 +940,18 @@ for doing the binding first.
 
 ## 13. The pass system, and what it is not
 
-Nothing in this section is built. It is written before the work rather than after
-it because one of the decisions in it — the format of the image the scene renders
-into — is a one-line edit today and a three-image, two-pipeline-variant edit once
-a chain exists.
+**Steps 1, 2, 3 and 6 of the order of work below are now built** — the driver
+batch, the format decision, the chain, and `three.addPass`. This section was
+written *before* that work rather than after it, and it has been edited in place
+since rather than rewritten, so that where the design and the code disagreed the
+disagreement is still readable. There are three such places and each is marked:
+`IMAGE_LAYOUT_GENERAL` (entry 2), depth state out of `PipelineState` (entry 4),
+and which image gets the float format (the format section).
+
+It was written first because one of the decisions in it — the format of the image
+the scene renders into — looked like a one-line edit before a chain existed and a
+three-image, two-pipeline-variant edit afterwards. That turned out to be right
+about the urgency and wrong about the image.
 
 It came out of a question §12's "what is next" list could not answer on its own:
 post-processing landed, shadows and a UI layer are both wanted, PBR is on the
@@ -948,7 +959,7 @@ horizon, and the entry below says there is no render graph and never will be. Is
 that still true once a frame has four things in it? It is, and the counting is
 here — but the counting also produced the shape those features should land in.
 
-### What a frame is now, counted
+### What a frame was when this was written, counted
 
 	inactive   scene ────────────────────────────────► target.color ──► blit
 	active     scene ──► image A ──[sample]──► post ──► target.color ──► blit
@@ -957,6 +968,13 @@ Two render passes at most, three owned images (`target.color`, `target.depth`,
 `PostPass.image`), and **four barrier call sites in the entire frame path** — two
 in `gpu/target.c3`, two in `render/post.c3` — plus the swapchain's two around the
 blit. `Renderer.record_scene` is one `if`.
+
+*What it is now, after the chain:* the same when inactive, and
+`scene ─► A ─► P0 ─► … ─► tonemap ─► target.color` when not. Two more owned
+images, and the barrier count went from four to `3 + N` — one for A, one per pass,
+one to close the target — with every one of them still coming out of
+`color_attachment_barrier` and `shader_read_barrier`. **No new barrier code was
+written**, which is the prediction below that held.
 
 What the named features add to that, which is the number the render graph
 question actually turns on:
@@ -1227,6 +1245,17 @@ smuggling and what a third stage would break: exactly one stage writes
 `target.color`, and the close happens exactly once, here.** It wants a test that
 fails when a second stage claims the target.
 
+*As built:* `record_scene` is that sequence, `cmdEndRendering` moved into it so
+both paths end the scene's rendering in one place, and `Target.close` is
+`end_render`'s second half on its own. **The test it wanted already existed.** A
+second close is a transition out of COLOR_ATTACHMENT_OPTIMAL on an image the layer
+knows is in TRANSFER_SRC, so `the_post_pass_is_silent_under_validation` and
+`a_chain_is_silent_under_validation` both fail on it with
+`VUID-VkImageMemoryBarrier2-oldLayout-01197` — verified by injecting a second
+`self.target.close(cmd)`, not by reasoning about it. So the rule is enforced
+rather than merely written down, which is the thing to know before a shadow pass
+and a UI layer are added on top of it.
+
 Each stage keeps its own honest signature. A common `record(PassContext*)` across
 all three kinds would need a context carrying gpu, cmd, target, slot, assets,
 scene, src view, dst view and extent, with every pass reading three of the nine —
@@ -1240,15 +1269,23 @@ pass touches, in a file where every doc comment exists to say exactly that.
 	pass N-1  writes target.color instead
 
 Three images regardless of chain length: A (what `PostPass.image` already is) plus
-two ping-pong images. P0 and P1 are allocated lazily, so **N = 1 allocates neither
-and is the code path that runs today** — the chain generalises the current frame
-rather than replacing it, and a runtime that never sets a post shader still pays
-for nothing.
+two ping-pong images. P0 and P1 are allocated lazily, and a runtime that never
+sets a post shader still pays for nothing.
 
-Each pass issues exactly the two-element `cmdPipelineBarrier2` that
-`PostPass.record` already issues. `color_attachment_barrier` discards from
-`UNDEFINED`, which is already correct for reusing P0 on pass 2 after pass 1
-sampled it. **No new barrier code — the existing function called N times.**
+*As built, one clause of that moved:* the format decision below makes the tonemap
+— not the last user pass — the thing that writes `target.color`, so a chain of one
+writes P0 and the tonemap reads it. **N = 1 allocates P0 and not P1**, and it is
+two draws rather than one. That is the price of user passes having no format to
+get wrong, it is paid only by frames that asked for a post pass, and it is the
+one place where the chain does not literally reduce to the code that came before
+it. `an_identity_post_pass_leaves_the_frame_where_it_was` still holds at one
+level of tolerance across the extra hop, which was the question.
+
+Each pass issues exactly the `color_attachment_barrier` that `PostPass.record`
+already issues, and the chain closes each destination with `shader_read_barrier`.
+`color_attachment_barrier` discards from `UNDEFINED`, which is already correct for
+reusing P0 on pass 2 after pass 1 sampled it. **No new barrier code — the existing
+two functions called N times**, which is what shipped.
 
 **A second reserved binding, and it is not free.** Binding 0 becomes `prev`;
 binding 1 becomes `scene`, image A, always available. That is what covers the one
@@ -1265,10 +1302,29 @@ generates indices from it) and of the cut in `SampledBindings.collect`
 (`bind.c3:120`, `:155`), with materials keeping 1 and post taking 2. Doing that
 as a shared bump instead would silently renumber every material sampler.
 
-On a single pass, bindings 0 and 1 point at the same image, so `p.color == p.scene`
-and **every post shader written today keeps working with no edit**.
+*As built:* `MATERIAL_BINDING_FIRST` and `POST_BINDING_FIRST`, both parameters of
+`assemble_shader`, `SampledBindings.collect` and `sampler_binding_of`. One thing
+this did not predict came out of it — `TextureSlots` indexed its array by
+`binding - TEXTURE_BINDING_FIRST`, so there was a *third* place the number lived.
+It is indexed by the absolute binding now: carrying a base into the accessors
+would have meant a call site that passed a material's base for a post pass reading
+a real texture out of the wrong slot rather than faulting, and a binding is the
+same number to everybody. It costs one `int` per material.
 
-### The format decision, which must happen before the chain
+The other thing measurement added: **the reserved bindings have to be checked
+against the reflected layout too.** Slang drops a parameter nothing reads, and a
+body that never touches `p.scene` gives it every reason to drop `scene` — pushing
+a descriptor for a binding the layout does not declare is a validation error. So
+`pipeline_declares_binding` asks by index what `sampler_binding_of` asks by name,
+and `a_later_pass_reads_the_scene_and_not_only_its_predecessor` reaches it with a
+first pass that returns a constant.
+
+On a single pass, bindings 0 and 1 point at the same image, so `p.color == p.scene`
+and **every post shader written today keeps working with no edit** — which held:
+every post test that existed passed unchanged except the one asserting how many
+bindings a module has.
+
+### The format decision, which happened before the chain and moved
 
 PBR with physical light intensities produces values above 1.0, and
 `TARGET_COLOR_FORMAT` is `R8G8B8A8_SRGB` — an attachment that clamps them, losing
@@ -1278,19 +1334,20 @@ tonemap pass converts to display.
 
 `target.color` stays `_SRGB`. It is the final destination, so `readback_size`'s
 `w*h*4`, `decode_readback` and the PNG path are untouched and screenshots keep
-working. **The change is contained to image A and the ping-pong images.**
+working.
 
-`render/post.c3`'s colour argument survives and improves: `_SFLOAT` sampled is raw
-linear floats needing no decode, the body works in linear as it does now, and the
-final write to `_SRGB` encodes. The 8-bit round trip disappears. That header
-paragraph needs rewriting, not retracting.
+**This section used to end "the change is contained to image A and the ping-pong
+images", and called it one line. It is one line and it does not compile.** The
+retraction is below, after the half that was right.
 
-**The consequence that shapes the chain.** `gpu/pipeline.c3:577` and `:739` take
-their colour attachment format from `target.color_format`. In an HDR chain the
-intermediate passes write float and the last writes `_SRGB`, so *"am I last"*
-becomes a pipeline variant: the same body at slot 3 and at slot N is two different
-`VkPipeline`s, output format enters the cache key, and reordering the chain is a
-recompile. The fix is to take the decision away from user passes:
+#### The half that was right, and shipped
+
+`gpu/pipeline.c3:577` and `:739` take their colour attachment format from
+`target.color_format`. In an HDR chain the intermediate passes write float and the
+last writes `_SRGB`, so *"am I last"* becomes a pipeline variant: the same body at
+slot 3 and at slot N is two different `VkPipeline`s, output format enters the
+cache key, and reordering the chain is a recompile. The fix is to take the
+decision away from user passes:
 
 > **Every script-authored pass reads float and writes float. A fixed,
 > engine-owned tonemap pass is the only thing that writes `target.color`.**
@@ -1299,6 +1356,52 @@ One pipeline shape for every `addPass` body, one fixed pipeline for the encode,
 no format in the key, free reordering. It also makes the tonemap always present
 and always last, which is what physical lighting wants anyway — a user pass that
 forgot to encode would be the washed-out failure §10 already carries as a trap.
+
+That is exactly what `render/chain.c3` does. `POST_CHAIN_FORMAT` is
+`R16G16B16A16_SFLOAT`, `MeshPipeline.init_post` takes the format as a parameter,
+and `TONEMAP_BODY` — the identity, whose whole job today is the encode — is the
+one caller that passes `target.color_format`.
+
+`render/post.c3`'s colour argument survives and improves, as this said it would:
+a pass's *output* is raw linear float needing no decode by the next pass, the
+body works in linear as it does now, and the final write to `_SRGB` encodes. The
+8-bit round trip between passes disappears.
+
+#### The half that was wrong: image A is not the float image
+
+Image A is what the *scene* renders into, and a scene pipeline's colour
+attachment format is fixed when the pipeline is built. Dynamic rendering checks
+the pipeline's declared format against the attachment, so **a float A makes every
+mesh pipeline wrong the moment a post pass is set.** The ways out are both large,
+and both are the opposite of one line:
+
+- **A second variant of every mesh pipeline**, keyed on whether a post pass is
+  active. That puts a format in the pipeline cache key and makes `setPost` rebuild
+  every material's pipeline — the precise thing the paragraph above exists to
+  avoid, one layer down.
+- **Render the scene into A always**, tonemapping even when no script asked for a
+  post pass. A full-size attachment and a full-screen draw on every frame of every
+  scene, and it deletes the property that an unposted frame is *the code path it
+  always was* rather than a new one that agrees with it.
+
+And neither buys anything today, which is the part that settles it: **nothing in
+this renderer produces a value above 1.0.** `target.color` has always clamped
+them and no shader has ever complained. What HDR is actually blocked on is
+physical light intensities — step 4's material unit — not this step.
+
+So the float went where it pays for itself immediately instead. A pass may now
+write above 1.0 and the next pass sees it, which is what a bright pass followed
+by a blur needs and what an 8-bit intermediate destroys, and
+`the_chain_carries_values_above_one_between_passes` pins it by injection: the
+chain's format set to `R8G8B8A8_SRGB` clamps a ×16 ÷16 round trip by 70 levels.
+When the scene becomes HDR, A joins the chain's format and the always-on path
+becomes the right answer — for a reason that will exist by then.
+
+**The lesson is the same shape as entry 2's and worth stating once more:** "one
+line" was a claim about the *edit*, and the cost was in what the edit was
+declared against. A format that lives on a pipeline rather than on an image is
+not visible from the image, and the way that surfaces is writing the line and
+compiling it rather than counting the files it touches.
 
 ### The interface, scoped to one kind
 
@@ -1333,9 +1436,29 @@ be got wrong.
 narrow. `@optional` earns its keep at once: a single-shader pass needs no
 `resize`, a pyramid does.
 
+*As built it is seven*, and none of the four extras is padding: `prev` and `scene`
+are two sources because the chain has two edges; the destination arrives as an
+image *and* a view because the pass opens it with a barrier and a barrier names an
+image; the sampler is the chain's; and the asset table is what a pass's own
+samplers resolve through. What stayed absent is the list that mattered — no `Gpu`,
+no `Target`, no frame slot, no scene, no instance buffer.
+
+Two things C3 required that this did not know. **A struct must declare the
+interfaces it implements** — `struct PostStage (FullscreenPass)`, not merely
+having the methods; `@dynamic` on the methods alone gives
+"'PostStage*' cannot be implicitly cast to 'FullscreenPass'". And the receiver is
+implicit in the declaration and explicit in the implementation
+(`fn void? PostStage.record(&self, …) @dynamic`). Both were established by
+compiling a twenty-line throwaway before any of this was written, which is the
+same move §10 insists on for driver features.
+
 Worth declaring at the point `PostStage` becomes its only implementer, precisely
 because it costs nothing at one implementer and means a bloom pass drops in later
-without restructuring the chain.
+without restructuring the chain. **The tonemap made it two implementers on the
+first day** — not a second type, but a second *instance* going down the identical
+`record` with a different destination and a different pipeline format, which is
+the cheapest possible evidence that the contract is a contract rather than a
+description of one call site.
 
 **Why not across all three kinds.** An interface types the arguments; it cannot
 type the layout protocol. Applied to geometry and full-screen passes together it
@@ -1353,7 +1476,7 @@ Two things to know before writing it:
   times. Take them fresh from `&list[i]` each frame; never cache one.
 - **This would be the project's first interface.** `src/` contains no `interface`
   declaration and no `@dynamic` anywhere. That is a reason to introduce exactly
-  one, where it pays, rather than four.
+  one, where it pays, rather than four. *It is still exactly one.*
 
 ### What this does not cover
 
@@ -1373,17 +1496,31 @@ Two things to know before writing it:
 	                         out of PipelineState was dropped before it was written
 	                         (entry 4). Both are recorded above with the measurement
 	                         that killed them.
-	2. image A's format      one line. Unblocks 3 and 7.
-	3. chain + ping-pong     behind the existing single-pass API, float-to-float,
-	                         tonemap owns the encode. Every current test stays green.
+	2. image A's format      DONE, and not where this said. The *chain* is
+	                         R16G16B16A16_SFLOAT; image A stayed `_SRGB`, because
+	                         the format is declared on the scene's pipelines and
+	                         not on the image — see "The format decision".
+	3. chain + ping-pong     DONE. render/chain.c3 — three images, two rules,
+	                         FullscreenPass, an engine-owned tonemap. Every test
+	                         that existed stayed green; five new ones cover N > 1.
 	4. the material unit     §2's blocker. The actual PBR work; touches none of the above.
 	5. IBL bake              on texture.c3's one-shot path. hostImageCopy lands here.
-	6. three.addPass         once the chain is proven.
+	6. three.addPass         DONE, with the chain. Handles carry a stage index and
+	                         an append does not invalidate the ones already held.
 	7. fuse the pointwise    local read, measured against 3 rather than assumed. The
 	                         first step whose value is a number and not a shape.
 
 3 and 4 do not touch each other, which is the useful part: the pass work and the
-PBR work are separable, and only the format decision sits across both.
+PBR work are separable, and only the format decision sits across both — which is
+the sentence entry 5 below turned out to be about.
+
+**6 came with 3 rather than after it, and the reason is worth keeping.** It was
+listed second so that the chain could be proven before a script could reach it,
+and once the chain existed `addPass` was one C3 verb, one binding and a stage
+index on the handles — while *not* shipping it would have left `record_chain`
+looping over a list that could only ever hold one entry, which is a loop no test
+could exercise. The proving happened in the tests instead, which is where it
+belonged: four of the five new checks are only reachable at N > 1.
 
 **1 was worth doing on its own, and half of what it was worth was finding out
 which half was wrong.** Two of its four items did not survive being written down
@@ -1441,17 +1578,28 @@ honest answer. Pass count is not the trigger and never was.
   count. This entry used to read "forward, one light, one post pass at most",
   which was written before `setPost` existed and read as though post were
   hypothetical.
-- **No post-processing *stack*. One pass is done.** This entry used to read "no
-  post-processing stack" as part of the line above, and the whole of it was
-  meant. It was revisited at the user's request and the single-pass half was
-  built: `three.setPost({ fragment, uniforms })` runs one agent-written
+- **The post-processing stack is a chain, and it is built.** This entry has been
+  overtaken twice. It first read "no post-processing stack" as part of the line
+  above and the whole of it was meant; then the single-pass half was built at the
+  user's request (`three.setPost({ fragment, uniforms })`, one agent-written
   `float3 post(Post p)` over the finished frame, on the window, on `render()` and
-  on every screenshot alike, with the scene rendered into a sampled `_SRGB` image
-  and the post shader writing the target the blit already reads. What stays
-  absent is the *stack* — no chain, no ping-pong, no named passes to compose, and
-  §2 carries the trigger. Composing effects inside one body is not a workaround
-  so much as the cheaper thing: two passes cost a second full-screen read and
-  write that a combined body does not.
+  on every screenshot alike); now the chain is.
+  `three.addPass({ fragment, uniforms })` puts another full-screen pass at the end
+  of the list, each reading what the one before it wrote as `p.color` and the
+  frame the geometry left as `p.scene`, in linear float end to end, with an
+  engine-owned tonemap doing the display encode last. Three images whatever the
+  length, and the barriers derived from adjacency rather than declared. §13 is the
+  whole argument.
+- **What stays absent from the chain: named passes, edges, removal from the
+  middle, and downsampled intermediates.** A pass reads its predecessor and the
+  original frame and nothing else, so a bloom pyramid at ½ and ¼ is the piece that
+  grows first (§13's "what this does not cover"), and reordering is a `setPost`
+  followed by the `addPass` calls you want rather than a mutation — which is what
+  keeps a handle from ever pointing at somebody else's shader. The old advice
+  holds where it still applies: composing two *pointwise* effects inside one body
+  is cheaper than two passes, which cost a full-screen read and write apiece. The
+  chain is for the effects that genuinely cannot be one body, which is anything
+  sampling its neighbours.
 - **No `setPivot`.** Reinterpreting an origin adds a second place a piece's
   position comes from, and the next script has to know which one is in play.
   `align` moves the object to put a *face* where it belongs and leaves the pivot
@@ -1509,5 +1657,5 @@ TODO:
 What's actually off the table
 
 - No depth in post — p.depth doesn't exist (verified: "'depth' is not a member of 'Post'"). So no depth of field, no soft particles, no depth fog, no SSAO.
-- One post pass — a second setPost replaces the first. Bloom is a single-pass 12-tap threshold approximation, not a downsample pyramid.
+- Passes chain (three.addPass) but do not branch: a pass reads the one before it and the original frame, nothing else, and every pass runs at full resolution. Bloom is a threshold-and-blur at full res, not a downsample pyramid, and there is no way to say "this pass reads that one".
 - No render-to-texture / feedback — no accumulation trails, no motion blur history.

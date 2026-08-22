@@ -60,20 +60,34 @@ const String MARKER_SHADE @private = "//@shade";
 const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 
 <*
- The binding index the first agent-declared sampler gets.
+ The binding index the first agent-declared sampler gets, per kind of shader.
 
- One, because zero is always taken and always occupied: `base_color_map` in a
- material, `scene` in a post pass. Both templates declare theirs at binding 0
- explicitly, so this is the number after it in both.
+ **This used to be one number for both, and it stopped being one the moment a
+ post pass reserved two bindings.** Its old comment said why it was 1 — "zero is
+ always taken and always occupied: `base_color_map` in a material, `scene` in a
+ post pass" — and that was a coincidence of both templates reserving exactly one,
+ not a shared rule. A post pass now reserves `prev` at 0 and `scene` at 1
+ (`shaders/post.slang` has what they are), so it starts at 2 and a material still
+ starts at 1.
+
+ Raising the shared constant instead would have been the quiet failure: every
+ material sampler would have been renumbered by one, the reflection would have
+ agreed with itself, and the only symptom would be textures arriving in the wrong
+ slots of shaders nobody had touched.
 
  **Nothing outside this file chooses a binding index.** The declaration order
- the caller passed is the binding order, generated here, read back by reflection
- and resolved by *name* everywhere above — which is what makes inserting a
- texture at the front of the list a non-event rather than a silent renumbering
- of every sampler after it. A script that could write `[vk::binding(3, 0)]`
- itself would be a script that can collide with the two names above.
+ the caller passed is the binding order, generated here from whichever base the
+ front door passed, read back by reflection and resolved by *name* everywhere
+ above — which is what makes inserting a texture at the front of the list a
+ non-event rather than a silent renumbering of every sampler after it. A script
+ that could write `[vk::binding(3, 0)]` itself would be a script that can collide
+ with the reserved names.
 *>
-const uint TEXTURE_BINDING_FIRST = 1;
+const uint MATERIAL_BINDING_FIRST = 1;
+
+// `prev` at 0 and `scene` at 1 — see `MATERIAL_BINDING_FIRST` and
+// `shaders/post.slang`.
+const uint POST_BINDING_FIRST = 2;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the
@@ -251,7 +265,8 @@ fn uint append_lines(DString* out, String text) @private
  @param template_name : `A file name, looked up by find_shader — shaders/ first, then build/shaders/.`
  @param fragment : `The agent's body, appended verbatim between the two #line directives.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
- @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see TEXTURE_BINDING_FIRST.`
+ @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see MATERIAL_BINDING_FIRST.`
+ @param binding_first : `What the first of them is numbered — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST, whichever this template reserves up to.`
  @param vertex : `The agent's vertex body, or empty for the identity. Only a template with a //@vertex marker has anywhere to put one.`
  @param body_name : `What the agent's own lines are called in a diagnostic — "material", "post".`
  @param vertex_name : `The same, for the vertex body — "vertex". Unused when there is no vertex body.`
@@ -268,6 +283,7 @@ fn String? assemble_shader(
 	String body_name,
 	String vertex_name,
 	String preamble_name,
+	uint binding_first,
 	alloc::Allocator allocator
 ) @private
 {
@@ -397,7 +413,7 @@ fn String? assemble_shader(
 				{
 					out.appendf(
 						"[vk::binding(%d, 0)] Sampler2D %s;",
-						TEXTURE_BINDING_FIRST + (uint)i,
+						binding_first + (uint)i,
 						texture.name
 					)!!;
 					out.append_char('\n');

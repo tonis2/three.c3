@@ -328,6 +328,22 @@ fn void Target.begin_render_to(
 fn void Target.end_render(&self, vk::CommandBuffer cmd)
 {
 	vk::cmdEndRendering(cmd);
+	self.close(cmd);
+}
+
+<*
+ The second half of `end_render`, on its own: hand the colour image to whatever
+ reads it next.
+
+ Split out because **the frame is a list now and the close happens exactly once,
+ at the end of it** — see `Renderer.record_scene`. With a post chain running it is
+ the tonemap that ends the last rendering rather than the scene, and the close is
+ the same either way; keeping them fused would mean two spellings of "the frame is
+ finished", which is precisely the shape of the bug that function exists to
+ prevent.
+*>
+fn void Target.close(&self, vk::CommandBuffer cmd)
+{
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ self.to_transfer_src() }));
 }
 
