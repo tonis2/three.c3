@@ -423,11 +423,17 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	@pool()
 	{
 		bool[] transparent = alloc::new_array(tmem, bool, self.materials.len());
+		// Beside it and built in the same pass, because it answers a question of
+		// the same shape — something the *material* knows that the *scene* needs
+		// while it is culling. See `Material.bounds`: a body that moves a vertex
+		// draws outside the box the frustum was asked about.
+		float[] margins = alloc::new_array(tmem, float, self.materials.len());
 		foreach (i, &material : self.materials)
 		{
 			transparent[i] = material.alive && material.blend != BlendMode.NONE;
+			margins[i] = material.alive ? material.bounds : 0;
 		}
-		self.scene.update(&self.assets, view_projection, transparent);
+		self.scene.update(&self.assets, view_projection, transparent, margins);
 	};
 	if (self.scene.buckets.len() == 0) return;
 
@@ -632,6 +638,8 @@ fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Baked into the pipeline, so it cannot change afterwards.`
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_material_texture per name, because that is where the references are taken.`
+ @param vertex : `A void displace(inout Vertex v) body, or empty for a material that does not move its geometry.`
+ @param bounds : `How far that body can move a vertex, world units. Grows the box the frustum is tested against — see Material.bounds.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
 *>
@@ -644,6 +652,8 @@ fn uint? MeshPass.create_material(
 	int side = SIDE_FRONT,
 	int blending = BLENDING_NONE,
 	MaterialTexture[] textures = {},
+	String vertex = "",
+	float bounds = 0,
 	String* diagnostic = null
 )
 {
@@ -651,7 +661,7 @@ fn uint? MeshPass.create_material(
 	BlendMode blend = blend_for(blending);
 	@pool()
 	{
-		String source = material_source(fragment, uniforms, tmem, textures)!;
+		String source = material_source(fragment, uniforms, tmem, textures, vertex)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
 			gpu, target, source, "three.material", state_for_blend(blend), diagnostic
 		)!;
@@ -663,6 +673,11 @@ fn uint? MeshPass.create_material(
 			.cull = cull_for_side(side),
 			.blend = blend,
 			.fragment = fragment.copy(mem),
+			// Copied only when there is one, so a material without a vertex body
+			// carries a zero slice rather than a pointer into static memory that
+			// `Material.free` would hand to the allocator.
+			.vertex = vertex.len > 0 ? vertex.copy(mem) : (String){},
+			.bounds = bounds,
 			// A `ShaderMaterial` can be given a `map` afterwards like any other
 			// material — `material.slang` declares the same binding 0 that
 			// `mesh.slang` does, so `Surface.uv` samples it either way. It just

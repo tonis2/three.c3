@@ -159,6 +159,17 @@ const String MATERIAL_TEMPLATE = "material.slang";
 const String MATERIAL_BODY_NAME = "material";
 
 <*
+ What the agent's *vertex* lines are called in a diagnostic.
+
+ A second name rather than a second file: both bodies are spliced into one module
+ and Slang reports one coordinate, so `vertex:3:12` against `material:3:12` is the
+ only thing that says which of the two an error is in. An agent that wrote both
+ and got `material:3` for a mistake in its vertex body would look at the wrong
+ four lines.
+*>
+const String MATERIAL_VERTEX_NAME = "vertex";
+
+<*
  What everything three.c3 generated is called in a diagnostic.
 
  Deliberately self-describing rather than short. Slang's `candidate:` notes point
@@ -191,6 +202,10 @@ const String[*] MATERIAL_RESERVED @local = {
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
 	"srgb_to_linear",
+	// The vertex half of the same contract. `v` and `displace` are the body's own
+	// parameter and function, exactly as `s` and `shade` are the fragment body's;
+	// `Vertex` is the struct both of them name.
+	"v", "displace", "Vertex",
 	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "MATERIAL_ROWS",
 	// The eight push fields the mesh contract pins.
 	"frame", "instances", "positions", "normals", "uvs", "base_color", "flags",
@@ -210,6 +225,33 @@ const String[*] MATERIAL_RESERVED @local = {
 // Long enough for any message below with the offending name spelled in full and
 // short enough to be a global. A name longer than this is refused before it can
 // be quoted anyway.
+<*
+ The field names of `Surface` and `Vertex`, which a uniform may not take either.
+
+ **A different refusal from `MATERIAL_RESERVED`, because it is a different
+ mistake and it breaks in a place the reserved list's message would not explain.**
+ A uniform is a `#define` live across the agent's own lines, so a uniform called
+ `normal` rewrites the `s.normal` *in the body that declared it* into
+ `s.(push.normal)` — a syntax error inside generated code, reported at a line in
+ the preamble, about a member access the agent wrote correctly.
+
+ It is worth its own sentence for the same reason: "the shader already uses it" is
+ true and useless here, because the thing using it is the struct the agent is
+ reading five characters away.
+
+ This was live before the vertex stage existed and had no test — `uniforms: { time
+ : 1 }` on a post pass, which is the single most likely uniform anybody writes,
+ failed with `three.post:134` under a caret pointing at a `#define`. The vertex
+ body only made it easier to hit, because `Vertex` has seven fields and a body
+ touches most of them.
+*>
+const String[*] MATERIAL_CONTRACT_FIELDS @local = {
+	// Surface.
+	"albedo", "normal", "uv", "position", "color", "variant",
+	// Vertex adds these two; the rest it shares with Surface.
+	"local", "index",
+};
+
 const usz MATERIAL_DIAGNOSTIC_MAX @local = 512;
 
 // The message the last refusal carried. See `material_diagnostic`.
@@ -317,6 +359,18 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 				return MATERIAL_NAME_INVALID~;
 			}
 
+			foreach (field : MATERIAL_CONTRACT_FIELDS)
+			{
+				if (uniform.name != field) continue;
+				material_note(string::tformat(
+					"material: uniform name '%s' is a field of Surface and Vertex, so it would rewrite s.%s and v.%s in your own body — rename the uniform",
+					uniform.name,
+					uniform.name,
+					uniform.name
+				));
+				return MATERIAL_NAME_INVALID~;
+			}
+
 			foreach (j, earlier : uniforms)
 			{
 				if (j >= i) break;
@@ -415,7 +469,8 @@ fn String? material_source(
 	// that predates textures passes the allocator positionally, and putting this
 	// where it belongs would silently turn one of those into a texture list. The
 	// project already makes this trade for `create_material`'s `diagnostic`.
-	MaterialTexture[] textures = {}
+	MaterialTexture[] textures = {},
+	String vertex = ""
 )
 {
 	validate_material(fragment, uniforms, textures)!;
@@ -424,7 +479,9 @@ fn String? material_source(
 		fragment,
 		uniforms,
 		textures,
+		vertex,
 		MATERIAL_BODY_NAME,
+		MATERIAL_VERTEX_NAME,
 		MATERIAL_PREAMBLE_NAME,
 		allocator
 	);

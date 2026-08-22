@@ -1326,9 +1326,29 @@
 			if (options === null || typeof options !== 'object') {
 				throw new TypeError('new three.ShaderMaterial({ fragment, uniforms }) wants an options object');
 			}
-			const { fragment, uniforms = {}, textures = {}, side = FrontSide } = options;
+			const { uniforms = {}, textures = {}, vertex = '', bounds = 0, side = FrontSide } = options;
+			if (vertex !== '' && typeof vertex !== 'string') {
+				throw new TypeError('`vertex` wants a Slang body — void displace(inout Vertex v) { ... }');
+			}
+			// **The fragment body is optional once there is a vertex one**, and
+			// defaults to the shading the built-in shader does. A material that
+			// only wants to move geometry should not have to retype the default
+			// look to say so — and the default is written here, once, rather than
+			// left to whoever is generating the script to remember.
+			const fragment = (typeof options.fragment === 'string' && options.fragment.trim().length > 0)
+				? options.fragment
+				: (vertex ? 'float3 shade(Surface s) { return s.albedo * lambert(s.normal); }' : options.fragment);
 			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 				throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
+			}
+			// A displacement the frustum does not know about is geometry that
+			// vanishes at the edge of the screen and comes back when the camera
+			// turns — which reads as a bug in the renderer. So the number is asked
+			// for rather than guessed, and refused when it is not one.
+			if (typeof bounds !== 'number' || !Number.isFinite(bounds) || bounds < 0) {
+				throw new TypeError(
+					'`bounds` wants how far your vertex body can move a vertex, in world units — a number of 0 or more'
+				);
 			}
 			if (uniforms === null || typeof uniforms !== 'object') {
 				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
@@ -1376,8 +1396,12 @@
 				blending,
 				declared.names.join(','),
 				declared.ids.join(','),
+				vertex,
+				bounds,
 			), side, blending);
 			this.fragment = fragment;
+			this.vertex = vertex;
+			this.bounds = bounds;
 			if (options.opacity !== undefined) this.opacity = options.opacity;
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
@@ -1464,6 +1488,9 @@
 		toJSON() {
 			return {
 				fragment: this.fragment,
+				// Both only when there is one, so a material that does not move its
+				// geometry serialises as it did before a vertex stage existed.
+				...(this.vertex ? { vertex: this.vertex, bounds: this.bounds } : {}),
 				side: this._side,
 				transparent: this.transparent,
 				blending: this._blending,
@@ -3358,6 +3385,7 @@
 			'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
 			'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
 			'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row.',
+			'A ShaderMaterial has a vertex stage as well as a fragment one: { vertex: `void displace(inout Vertex v) { v.position.y += sin(v.local.x * 3 + t) * 0.4; }` } moves geometry per vertex with no draw call, no upload and no geometry change — the mesh is still the same asset and a thousand copies of it are still one call. Vertex is the varyings: position (world), normal, uv, color and variant are read back after your body runs, and local (object space) and index (the vertex number) are inputs. The normal is not recomputed for you. Always pass `bounds` with a vertex body — the number of world units it can displace by — because culling tests the mesh\'s undisplaced box and geometry outside it is dropped while still on screen.',
 			'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 			'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
@@ -3500,7 +3528,7 @@
 				methods: ['dispose()', 'toJSON()'],
 			},
 			ShaderMaterial: {
-				construct: "new three.ShaderMaterial({ fragment, uniforms, textures, side, transparent, blending, opacity })",
+				construct: "new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, transparent, blending, opacity })",
 				note:
 					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
 					+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo) '
@@ -3518,11 +3546,31 @@
 					+ 'shade() returns rgb and never alpha: how much of the surface shows is the '
 					+ 'material\'s opacity times this copy\'s mesh.color alpha, so a body cannot make '
 					+ 'geometry invisible by accident and a script can, deliberately. discard works in a '
-					+ 'body and is how a dissolve or a cutout is done, since the alpha is not yours to return.',
+					+ 'body and is how a dissolve or a cutout is done, since the alpha is not yours to return. '
+					+ 'vertex is the other half: a Slang function `void displace(inout Vertex v)` that runs '
+					+ 'per vertex, before anything is projected. Vertex IS the varyings — write v.position '
+					+ '(world space, after the mesh\'s own transform) to move the vertex, and v.normal, v.uv, '
+					+ 'v.color and v.variant to change what the fragment stage receives; v.local (object '
+					+ 'space, before the transform) and v.index (the vertex number, a per-vertex seed) are '
+					+ 'inputs only. Waves, flags, breathing, jitter, explosions, a mesh that inflates on a '
+					+ 'hit — all of them are one line here and none of them costs a draw call, because the '
+					+ 'geometry never changes. The normal is NOT recomputed from what you do to the position: '
+					+ 'write v.normal yourself if you moved the surface enough for the lighting to care. '
+					+ 'A sampler reads with SampleLevel(uv, 0) in a vertex body, not Sample — there are no '
+					+ 'derivatives to pick a mip with. Omitting fragment is allowed once vertex is given: it '
+					+ 'defaults to the built-in lit look. '
+					+ 'bounds is what a vertex body owes the renderer: how far, in world units, it can move '
+					+ 'a vertex. Culling tests a mesh\'s own bounds, so a body that pushes geometry outside '
+					+ 'them draws something the frustum was never told about — and the symptom is geometry '
+					+ 'vanishing at the edge of the screen and coming back when the camera turns, which reads '
+					+ 'as a renderer bug. Set it to the largest displacement your body can produce; too big '
+					+ 'costs a draw call that could have been skipped, too small drops geometry you can see.',
 				properties: [
 					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
 					'textures (live: mat.textures.noise_map = otherTexture, or null to put white back. Only the names given at construction exist; assigning any other throws)',
 					'fragment',
+					'vertex (the displace body, or an empty string; read-only, like fragment — a new body is a new material)',
+					'bounds (how far the vertex body moves a vertex, world units; read-only, and what the frustum test is widened by)',
 					'map (a three.texture, or null; sampled as Surface.albedo before your shade() runs)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
 					'transparent (whether it blends; derived from blending, and read-only — see blending)',

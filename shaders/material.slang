@@ -115,6 +115,56 @@ struct Surface
     uint variant;
 };
 
+// **The other contract with the agent**, and the one thing about it worth
+// reading twice is what it is a picture of: `Vertex` is the *varyings*. The five
+// fields at the top are exactly what crosses into the fragment stage, so a body
+// that writes one is writing what `Surface` will see — not a request that
+// something downstream may or may not honour.
+//
+// The two at the bottom are inputs and are not read back, which is the only
+// asymmetry here and is what keeps the first five honest: `local` is where the
+// vertex was before the instance's matrix touched it and there is nowhere to put
+// a new one, and `index` names a vertex rather than describing it.
+//
+// A body is `void displace(inout Vertex v)`, and the default one is empty — so a
+// material with no `vertex:` produces a call the compiler folds away and a module
+// that is the same shader it was before this existed.
+struct Vertex
+{
+    // Where this copy of this vertex is, **world space**, after the instance's
+    // model matrix. Write it to move the vertex; `Surface.position` is whatever
+    // this ends up as.
+    float3 position;
+    // The mesh's normal, rotated into world space. **Not recomputed from
+    // anything you do to `position`** — nothing here can know what surface a
+    // displaced vertex belongs to. A body that moves a surface far enough for
+    // the lighting to notice should write this too; one that ripples a flag by a
+    // few centimetres generally should not bother.
+    float3 normal;
+    // Before `material.repeat` and `material.offset`, which the fragment stage
+    // applies on top of whatever this is. So a body that scrolls uv here and a
+    // material that tiles compose rather than fight.
+    float2 uv;
+    // This copy's own colour, in the space `mesh.color` is in — the fragment
+    // stage decodes it. Writable, which is how a vertex body tints per copy
+    // without a second material.
+    float4 color;
+    // Already clamped to the rows the material declared, so `palette[v.variant]`
+    // is in bounds here for the same reason it is in `shade`.
+    uint variant;
+
+    // ---- inputs, not read back ----
+
+    // Object space, exactly as the mesh stores it: the position before the
+    // instance's model matrix. This is what a displacement wants to be a function
+    // of when the effect should scale with the mesh — a wave along a plane's own
+    // length rather than along the world's X axis.
+    float3 local;
+    // `SV_VertexID`. A per-vertex seed, which is what a hash-driven jitter or a
+    // scatter needs and nothing else in here provides.
+    uint index;
+};
+
 struct VertexOutput
 {
     float3 normal : NORMAL;
@@ -166,6 +216,25 @@ float lambert(float3 normal)
     return ambient + (1.0 - ambient) * n_dot_l;
 }
 
+// The agent's vertex body, bracketed by `#line` exactly as the fragment one is
+// and preceded by its own copy of the uniform `#define`s — which are `#undef`ed
+// again immediately after it. **Two scoped copies rather than one block covering
+// both stages**, because `vertexMain` sits between them and a uniform named
+// `position`, `normal`, `world` or `output` would otherwise rewrite its locals
+// into push fields. That is `material_source.c3`'s argument for `#undef`, one
+// stage further along.
+//
+// Placed here rather than beside `Vertex` so that a vertex body sees everything a
+// fragment body does — `MATERIAL_ROWS`, `lambert`, `srgb_to_linear` and the
+// samplers are all above this line. The two bodies differ in what they are handed
+// and in nothing else they can reach.
+//
+// When the material declared no vertex body this is `void displace(inout Vertex
+// v) { }` and nothing else: an empty function the compiler folds into the call
+// below, so a material without one compiles to the module it always did.
+//@vdefines
+//@vertex
+
 [shader("vertex")]
 VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
@@ -175,20 +244,41 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 
     float3 position = push.positions[vid];
     float4 world = mul(instance.model, float4(position, 1.0));
-    output.world = world.xyz;
-    output.sv_position = mul(push.frame[0].view_projection, world);
 
     // An `if` rather than a ternary: a ternary lets the compiler evaluate both
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
-    output.normal = mul((float3x3)instance.normal, normal);
 
-    output.uv = float2(0.0, 0.0);
-    if ((push.flags & FLAG_HAS_UVS) != 0) output.uv = push.uvs[vid];
+    // Everything the fragment stage is going to receive, gathered into one struct
+    // *before* the agent's body runs and read back out of it afterwards. The
+    // gather is what makes `Vertex` a picture of the varyings rather than a
+    // parallel set of values that has to be kept in step with them.
+    Vertex v;
+    v.position = world.xyz;
+    v.normal = mul((float3x3)instance.normal, normal);
+    v.uv = float2(0.0, 0.0);
+    if ((push.flags & FLAG_HAS_UVS) != 0) v.uv = push.uvs[vid];
+    v.color = instance.color;
+    // Clamped **here**, before the body sees it, so that `palette[v.variant]` in
+    // a vertex body is in bounds for the same reason it is in a fragment one.
+    // `fragmentMain` clamps again rather than trusting this, because a body may
+    // write the field.
+    v.variant = min(instance.variant, MATERIAL_ROWS - 1u);
+    v.local = position;
+    v.index = vid;
 
-    output.color = instance.color;
-    output.variant = instance.variant;
+    displace(v);
+
+    output.world = v.position;
+    // Built from the displaced position, which is the whole point: a vertex that
+    // moved and a clip position that did not would be geometry lit and textured
+    // as though it were somewhere it is not drawn.
+    output.sv_position = mul(push.frame[0].view_projection, float4(v.position, 1.0));
+    output.normal = v.normal;
+    output.uv = v.uv;
+    output.color = v.color;
+    output.variant = v.variant;
 
     return output;
 }

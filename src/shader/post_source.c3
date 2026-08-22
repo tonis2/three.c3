@@ -127,6 +127,21 @@ const String[*] POST_RESERVED @local = {
 	"groupshared",
 };
 
+<*
+ The field names of `Post`, which a uniform may not take either.
+
+ `MATERIAL_CONTRACT_FIELDS`'s argument exactly, and this is the list it was found
+ on: a post pass's most natural uniform name is `time`, `Post` has a field called
+ `time`, and `#define time (push.time)` turns the `p.time` in the agent's own body
+ into `p.(push.time)`. The failure is a syntax error at a line of generated
+ preamble, about a member access that was written correctly.
+
+ `time` is the one worth refusing loudly rather than quietly renaming, because the
+ uniform is usually redundant: `p.time` already carries seconds since the shader
+ was set.
+*>
+const String[*] POST_CONTRACT_FIELDS @local = { "color", "uv", "resolution", "time" };
+
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
 char[POST_DIAGNOSTIC_MAX] post_message @local;
@@ -198,6 +213,18 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 				post_note(string::tformat(
 					"post: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
 					uniform.name
+				));
+				return POST_NAME_INVALID~;
+			}
+
+			foreach (field : POST_CONTRACT_FIELDS)
+			{
+				if (uniform.name != field) continue;
+				post_note(string::tformat(
+					"post: uniform name '%s' is a field of Post, so it would rewrite p.%s in your own body — rename the uniform%s",
+					uniform.name,
+					uniform.name,
+					uniform.name == "time" ? " (and p.time is already the clock)" : ""
 				));
 				return POST_NAME_INVALID~;
 			}
@@ -293,7 +320,11 @@ fn String? post_source(
 )
 {
 	validate_post(fragment, uniforms, textures)!;
+	// No vertex body, and no way to pass one: `post.slang` has no `//@vertex`
+	// marker, because a post pass's three vertices are `SV_VertexID` arithmetic
+	// with no geometry behind them and nothing an agent could usefully move.
 	return assemble_shader(
-		POST_TEMPLATE, fragment, uniforms, textures, POST_BODY_NAME, POST_PREAMBLE_NAME, allocator
+		POST_TEMPLATE, fragment, uniforms, textures, "",
+		POST_BODY_NAME, POST_BODY_NAME, POST_PREAMBLE_NAME, allocator
 	);
 }

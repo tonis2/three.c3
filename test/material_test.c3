@@ -1165,3 +1165,192 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 	defer source.free(mem);
 	test::@check(source.len > 0, "and the limit itself is allowed");
 }
+
+// ============================================================================
+// The vertex stage
+//
+// A second body, spliced above `vertexMain` instead of above `fragmentMain`, and
+// almost everything here is about the two of them staying separable: separate
+// diagnostics, separately scoped uniform macros, and a module that is unchanged
+// when only one of them was written.
+// ============================================================================
+
+const String WAVE_BODY = `void displace(inout Vertex v)
+{
+    v.position.y += sin(v.local.x * 3.0 + t) * amp;
+}`;
+
+<*
+ A vertex body reaches the module, and its uniforms reach the vertex stage.
+
+ The uniform half is the part worth pinning: the push block is one block shared by
+ both stages, and the `#define`s that turn `amp` into `push.amp` are emitted twice
+ — once above the vertex body and once above the fragment one — because
+ `vertexMain` sits between them. A body that could not read a uniform would be a
+ vertex stage that could only do the same thing every frame.
+*>
+fn void a_vertex_body_compiles_and_reads_the_uniforms() @test
+{
+	three::MaterialUniform[2] uniforms = { { "t", 1, 1 }, { "amp", 1, 1 } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`,
+		uniforms[..],
+		mem,
+		{},
+		WAVE_BODY
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
+
+	// Both stages, from one module — the vertex body did not displace the
+	// fragment one.
+	test::@check(mod.entries.len() == 2, "two entry points, got %d", mod.entries.len());
+	test::@check(mod.layout.field_of("amp") != null, "and the uniform the body reads is in the push block");
+}
+
+<*
+ A material with no vertex body is the shader it was.
+
+ The claim behind generating `void displace(inout Vertex v) { }` rather than
+ branching the template: the call is there either way, and a compiler that folds
+ an empty function leaves a module with the same push block, the same bindings and
+ the same entry points as one written before a vertex stage existed.
+
+ Asserted against the *push contract* rather than against the SPIR-V, because the
+ SPIR-V is Slang's to optimise and the contract is the thing anything else
+ depends on. `the_material_push_block_keeps_the_mesh_contract` covers the same
+ ground for a material without either body; this says the identity vertex body
+ does not move it.
+*>
+fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
+{
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
+	String body = `float3 shade(Surface s) { return s.albedo * tint; }`;
+
+	String plain = three::material_source(body, uniforms[..], mem)!!;
+	defer plain.free(mem);
+	String identity = three::material_source(body, uniforms[..], mem, {}, "")!!;
+	defer identity.free(mem);
+
+	test::@check(plain == identity, "an omitted vertex body and an empty one assemble identically");
+
+	three::ShaderModule mod = three::compile_slang(plain, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "and it compiles: %s", mod.diagnostic);
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
+		"with the push block it always had, got %d", mod.layout.push_size);
+	test::@check(mod.layout.bindings.len() == 1, "and the one binding, got %d", mod.layout.bindings.len());
+}
+
+<*
+ A bad vertex body is reported at `vertex:<line>`, not at `material:<line>`.
+
+ **The reason there are two body names rather than one.** Both bodies are spliced
+ into one module and Slang reports one coordinate; an agent that wrote four lines
+ of vertex and four of fragment and got `material:3` for a mistake in the first
+ would read the wrong four lines and change the wrong thing. The arrow form is
+ asserted for `a_bad_body_reports_the_line_the_agent_wrote`'s reason: `--> vertex:3:`
+ cannot also be matched by a line in the preamble.
+
+ The error is on line 3 of a four-line body so that a preamble which happened to
+ be the right length cannot make this pass by accident.
+*>
+fn void a_bad_vertex_body_reports_the_vertex_file() @test
+{
+	String broken = `void displace(inout Vertex v)
+{
+    v.position.y += notAFunction(v.uv);
+}`;
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return s.albedo; }`, {}, mem, {}, broken
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "three.material", both_stages())!!;
+	defer mod.free();
+
+	test::@check(!mod.ok, "the body does not compile");
+	test::@check(mod.diagnostic.contains("--> vertex:3:"),
+		"and is reported at vertex:3: %s", mod.diagnostic);
+	test::@check(mod.diagnostic.contains("notAFunction"),
+		"naming what the agent typed: %s", mod.diagnostic);
+}
+
+<*
+ A uniform whose name is a field of `Surface` or `Vertex` is refused, by name.
+
+ **This was broken before the vertex stage and had no test.** A uniform is a
+ `#define` live across the agent's own lines, so `uniforms: { normal: 1 }` rewrote
+ the `s.normal` in the very body that declared it into `s.(push.normal)` — a
+ syntax error inside generated code, reported against a line of preamble, about a
+ member access the agent wrote correctly. The vertex stage made it easier to reach
+ rather than newly possible: `Vertex` has seven fields and a body touches most of
+ them.
+
+ `position` is the one asserted because it is a field of both structs and a
+ perfectly reasonable thing to want to call a uniform.
+*>
+fn void a_uniform_named_after_a_contract_field_is_refused() @test
+{
+	three::MaterialUniform[1] clashing = { { "position", 3, 1 } };
+	fault refused = @catch(three::material_source(
+		`float3 shade(Surface s) { return s.albedo; }`, clashing[..], mem, {},
+		`void displace(inout Vertex v) { v.position += position; }`
+	));
+
+	test::@check(refused == three::MATERIAL_NAME_INVALID, "'position' is refused, got %s", refused);
+	test::@check(
+		three::material_diagnostic().contains("position")
+			&& three::material_diagnostic().contains("v.position"),
+		"saying it would rewrite the body's own member access: %s",
+		three::material_diagnostic()
+	);
+
+	// `albedo` is a `Surface` field and reaches the same refusal through a
+	// material with no vertex body at all — which is the half that says this was
+	// always a bug rather than one the vertex stage introduced.
+	three::MaterialUniform[1] fragment_side = { { "albedo", 1, 1 } };
+	fault also = @catch(three::material_source(
+		`float3 shade(Surface s) { return s.albedo * albedo; }`, fragment_side[..]
+	));
+	test::@check(also == three::MATERIAL_NAME_INVALID, "and so is 'albedo', got %s", also);
+}
+
+<*
+ A vertex body may write every varying, and the fragment stage receives what it
+ wrote.
+
+ `Vertex` is a picture of the varyings rather than a parallel set of values, and
+ this is the check that keeps it one: a body writes uv, colour and variant, and
+ the module still compiles with a fragment body that reads all three off
+ `Surface`. If the gather in `vertexMain` ever stops reading a field back out of
+ `v`, the varying silently keeps its pre-body value and nothing else says so.
+*>
+fn void a_vertex_body_writes_what_the_fragment_stage_receives() @test
+{
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 2 } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return tint[s.variant] * s.color.rgb * s.albedo; }`,
+		uniforms[..],
+		mem,
+		{},
+		`void displace(inout Vertex v)
+{
+    v.uv = v.uv * 2.0;
+    v.color = float4(v.color.rgb * 0.5, v.color.a);
+    v.variant = v.index % 2u;
+    v.normal = normalize(v.normal + float3(0.0, 0.2, 0.0));
+}`
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
+}

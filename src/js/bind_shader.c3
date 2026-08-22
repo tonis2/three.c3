@@ -34,7 +34,7 @@ import qjs;
 *>
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "createMaterial", &js_create_material, 8);
+	self.bind(host, "createMaterial", &js_create_material, 10);
 	self.bind(host, "setMaterialTexture", &js_set_material_texture, 3);
 	self.bind(host, "createTextureMaterial", &js_create_texture_material, 3);
 	self.bind(host, "setUniform", &js_set_uniform, 9);
@@ -206,6 +206,13 @@ fn void js_create_material(
 		textures.tinit(4);
 		foreach (name : texture_name_list) textures.push({ .name = name });
 
+		// The vertex body and how far it moves things. Absent means the identity
+		// and a margin of zero, which is what every material written before there
+		// was a vertex stage meant — and the pair travels together because a
+		// displacement nobody declared a bound for is geometry that culls wrong.
+		String vertex = argc > 8 ? arg_text(&js, argc, args, 8, tmem) : "";
+		float bounds = argc > 9 ? arg_float(&js, argc, args, 9) : 0;
+
 		String diagnostic;
 		uint? made = self.pass.create_material(
 			&self.renderer.gpu,
@@ -215,7 +222,9 @@ fn void js_create_material(
 			side,
 			blending,
 			textures.array_view(),
-			// Named, so that an argument arriving between the textures and the
+			vertex,
+			bounds,
+			// Named, so that an argument arriving between the bounds and the
 			// diagnostic does not have to be threaded through here.
 			diagnostic: &diagnostic
 		);
