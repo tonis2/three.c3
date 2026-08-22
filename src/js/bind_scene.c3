@@ -835,6 +835,21 @@ fn void js_raycast(
 
  camelCase, because everything a script touches is JavaScript and `draw_calls`
  beside `drawCalls` in the same object graph is a seam an agent has to remember.
+
+ ## `gpuMs` is merged in here rather than living in `SceneStats`
+
+ Every other number in this object is a fact about the scene: it is the same
+ whatever device is behind it, and the same from every camera angle — which is
+ what `stats_stays_camera_free_with_transparency` pins. GPU milliseconds are a
+ fact about a *device* that drew a *frame*, so putting the field in `SceneStats`
+ would mean the scene layer either carrying a number it cannot produce or
+ growing a renderer it does not have. It is joined to the answer at this
+ boundary instead, where both halves are in scope.
+
+ **Always set, even at zero.** A script reading `stats().gpuMs` on a runtime
+ with no device gets 0, not `undefined`: a missing key makes `ms > 16` false and
+ `ms.toFixed(2)` throw, and neither failure names the reason. Zero is the honest
+ answer — nothing was measured — and it arrives in the shape the caller expects.
 *>
 fn void js_stats(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -856,6 +871,7 @@ fn void js_stats(
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
 	js.set_property(object, "culledLastFrame", qjs::int_value((int)stats.culled_last_frame));
+	js.set_property(object, "gpuMs", qjs::number_value(self.renderer != null ? self.renderer.gpu_ms() : 0.0));
 	*out = object;
 }
 

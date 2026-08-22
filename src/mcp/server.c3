@@ -152,7 +152,7 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 	}
 
 	report.append_string(`,"stats":`);
-	append_stats(&report, result.stats);
+	append_stats(&report, result.stats, result.gpu_ms);
 
 	// Only when there is something to say. A `"frame"` block on every result
 	// would be noise on the overwhelming majority of scripts, which never
@@ -316,11 +316,20 @@ fn void append_json_string(DString* out, String text)
  The same names on both sides on purpose: an agent that reads `drawCalls` off a
  tool result and then asserts on `scene.stats().drawCalls` in its next script
  should not have to notice that they were spelled differently.
+
+ `gpuMs` rides along for the same reason, and is a separate argument because it
+ is not a scene fact: `SceneStats` is device-free, and the millisecond count
+ belongs to whichever frame the run last drew. `js/bind_scene.c3`'s `js_stats`
+ makes the same join on the script side, so the two spellings still agree.
+
+ Six decimal places rather than two: a headless 200x150 frame costs tens of
+ microseconds, and `%.2f` would report every one of them as `0.00` — a number
+ that looks like the "nothing was measured" zero and is not one.
 *>
-fn void append_stats(DString* out, SceneStats stats)
+fn void append_stats(DString* out, SceneStats stats, double gpu_ms)
 {
 	out.appendf(
-		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d}`,
+		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d,"gpuMs":%f}`,
 		stats.draw_calls,
 		stats.unique_meshes,
 		stats.instances,
@@ -330,6 +339,7 @@ fn void append_stats(DString* out, SceneStats stats)
 		stats.vertices,
 		stats.textures,
 		stats.texture_bytes,
-		stats.culled_last_frame
+		stats.culled_last_frame,
+		gpu_ms
 	)!!;
 }

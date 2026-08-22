@@ -60,8 +60,17 @@ second sight of any shader on any later run is a millisecond of reading instead
 of seventeen of compiling — and a run that compiles nothing never starts the
 fifty-five millisecond Slang session at all, which is most of why a screenshot
 now takes 0.19 s warm against 0.28 s cold.
+A frame is now measured rather than guessed at: two timestamps written by the
+GPU itself around the whole submission — the blit and the readback copy
+included, deliberately — collected off the fence that was already being waited
+on, and surfaced as `stats().gpuMs` beside the scene's own counters. `render()`
+and a screenshot leave behind the frame they just drew; the windowed loop leaves
+behind the last one to complete, since it never waits for its own. The number is
+joined to `stats()` at each boundary rather than living in `SceneStats`, which
+stays a device-free fact about the scene, and it is 0 rather than absent when
+there is nothing to ask.
 
-	c3c test --trust=full       532 passed, 0 failed, leak-clean
+	c3c test --trust=full       537 passed, 0 failed, leak-clean
 
 **`examples/village` is where most of what follows came from.** A walled village
 wearing nothing but generated textures — eleven `DataTexture`s and no image file
@@ -674,6 +683,17 @@ Live, all of them. Each cost real time and none is visible in a diff.
   transposition**, and picking code is made almost entirely of transpositions.
   Four separate checks in this project passed for the wrong reason; three of them
   were symmetric fixtures.
+- **Resetting a query pool from the host needs `hostQueryReset`, and it is a
+  *feature*, not a limit.** `timestampComputeAndGraphics` says the queue can
+  write timestamps; it says nothing about whether `vkResetQueryPool` exists, and
+  calling it without the feature enabled is undefined behaviour that validation
+  will name but a working machine may not. `GpuLimits.timestamps` is therefore
+  the *conjunction* of the two, and the reason it cannot drift out of agreement
+  with what the device was actually created with is structural: the feature
+  chain is queried once and handed to `vkCreateDevice` unchanged, so the bit the
+  limit reads is the same bit that was enabled. Anything later that starts
+  editing that chain on the way to device creation breaks the argument, not just
+  the value.
 - **glTF stores rotation as a quaternion, so an euler-built pose cannot
   round-trip bit-exactly.** Measured on a 227-copy scene: positions and scales
   return exactly, worst pose error 1.9 µm on a 30-unit scene, and 0.11% of pixels

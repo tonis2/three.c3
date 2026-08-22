@@ -120,6 +120,12 @@ struct RunResult
 	// The message and, when the throw carried one, the stack. Empty when `ok`.
 	String error;
 	SceneStats stats;
+	// What the GPU spent on the last frame this run drew, in milliseconds, and 0
+	// when it drew none or when there is no device to measure — `gpu/timing.c3`
+	// argues which frame that is. Beside `stats` rather than inside it: a
+	// `SceneStats` is a fact about the scene and is produced with no device at
+	// all, so the two are joined here, where the runtime can see both.
+	double gpu_ms;
 
 	// What the animation loop did between the last run and this one, which is
 	// the only window an agent has onto it: nothing else reports a callback that
@@ -463,6 +469,7 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.value = self.value.copy_str(mem),
 		.error = self.error.copy_str(mem),
 		.stats = stats,
+		.gpu_ms = self.renderer != null ? self.renderer.gpu_ms() : 0.0,
 		.frame_running = self.frame_active,
 		.frame_ticks = frame_ticks,
 		.frame_overruns = frame_overruns,

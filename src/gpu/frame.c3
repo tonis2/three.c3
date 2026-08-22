@@ -152,6 +152,10 @@ struct Renderer
 	Target target;
 	Viewer viewer;
 	Frames frames;
+	// What the last frame cost the GPU. Beside `frames` because its query pool
+	// is indexed by frame slot and shares that lifetime exactly — see
+	// `gpu/timing.c3` for which frame "the last" means on which path.
+	FrameTimer timer;
 	// The scene graph, the asset table and the one pipeline that draws them.
 	// The frame path above does not know any of that is in there.
 	MeshPass pass;
@@ -197,6 +201,7 @@ fn Renderer? Renderer.init(
 		image_count = self.viewer.image_count;
 	}
 	self.frames.init(&self.gpu, image_count)!;
+	self.timer.init(&self.gpu)!;
 
 	return *self;
 }
@@ -205,6 +210,7 @@ fn void Renderer.free(&self)
 {
 	if (self.gpu.handle != null) self.gpu.handle.waitIdle();
 	self.pass.free(&self.gpu);
+	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
 	self.viewer.free(&self.gpu);
 	self.target.free(&self.gpu);
@@ -230,6 +236,22 @@ fn void? Renderer.draw(&self, vk::CommandBuffer cmd)
 {
 	return self.pass.record(&self.gpu, cmd, &self.target, self.frames.slot);
 }
+
+<*
+ What the GPU spent on a frame, in milliseconds.
+
+ **Which frame depends on how it was drawn**, and `gpu/timing.c3` is where that
+ is argued rather than here: `capture()` and `render_offscreen()` leave behind
+ the frame they just drew, `frame()` leaves behind the last one to have
+ completed. 0 before anything has been rendered, and 0 for the whole run on a
+ device that cannot write timestamps.
+
+ A method rather than a public field so that the one place that decides what
+ "the last frame" means stays inside this module — the same shape as
+ `Scene.stats().culled_last_frame`, which is also a number about the past that
+ callers may only read.
+*>
+fn double Renderer.gpu_ms(&self) => self.timer.gpu_ms;
 
 <*
  Rebuild the swapchain for the window's current size.
@@ -305,10 +327,14 @@ fn bool? Renderer.frame(&self)
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
+	// First and last commands in the buffer. The blit is inside the span on
+	// purpose — `gpu/timing.c3` says why.
+	self.timer.begin(&self.gpu, cmd, slot)!;
 	self.target.begin_render(cmd, self.clear);
 	self.draw(cmd)!;
 	self.target.end_render(cmd);
 	self.viewer.record_blit(cmd, &self.target, index);
+	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;
 
@@ -362,10 +388,12 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
+	self.timer.begin(&self.gpu, cmd, slot)!;
 	self.target.begin_render(cmd, self.clear);
 	self.draw(cmd)!;
 	self.target.end_render(cmd);
 	self.target.record_readback(cmd, &readback);
+	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;
 	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
@@ -373,6 +401,11 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 	// The buffer is host-coherent and the fence covers the copy, so there is
 	// nothing to invalidate and nothing to map — vk::Memory pages stay mapped.
 	fence.wait(self.gpu.handle)!;
+
+	// Collected here rather than left to this slot's next `begin`, which is two
+	// frames away: a caller that captures and then asks what it cost should be
+	// told about the capture it just took, not the one before it.
+	self.timer.collect(&self.gpu, slot)!;
 
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 	return self.target.decode_readback(&readback, allocator);
@@ -400,9 +433,11 @@ fn void? Renderer.render_offscreen(&self)
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
+	self.timer.begin(&self.gpu, cmd, slot)!;
 	self.target.begin_render(cmd, self.clear);
 	self.draw(cmd)!;
 	self.target.end_render(cmd);
+	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;
 	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
@@ -411,6 +446,9 @@ fn void? Renderer.render_offscreen(&self)
 	// buffer for this slot is rewritten on the next record, and the rule at the
 	// top of this file is that it may not be while the GPU is still reading it.
 	fence.wait(self.gpu.handle)!;
+	// The wait is already paid for, so the frame's own timing is free to take —
+	// same argument as in `capture`.
+	self.timer.collect(&self.gpu, slot)!;
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 

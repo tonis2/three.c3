@@ -564,3 +564,107 @@ fn void a_queue_nothing_is_draining_falls_back_to_the_stall() @test
 			three::MAX_PENDING_DELETES, (int)gpu.deletions.pipelines.len());
 	};
 }
+
+// ============================================================================
+// GPU frame timing
+// ============================================================================
+
+// **The `timestamps == false` path is not tested, and cannot be here.** Every
+// machine this project has run on reports `timestampComputeAndGraphics` and
+// `hostQueryReset`, so a check for "a device without timestamps reports 0 and
+// does not crash" would be a check that never executed a line of the branch it
+// names — `plan.md` §7's unexercised regression test. What is written instead
+// is a branch that is obviously inert: `FrameTimer` owns no query pool when the
+// device says no, and every entry point returns on a null pool as its first
+// statement. The checks below name the capability in their failure text, so a
+// machine that does lack it says so rather than reading as a timing bug.
+//
+// These are also the one place in this suite where a number rises and falls
+// with the machine. They assert a *range*, not a value: a frame took some
+// non-zero time and did not take a second. A tighter bound would be a
+// benchmark, and a benchmark under the leak-tracked runner is noise.
+
+<*
+ A rendered frame leaves behind how long the GPU spent on it.
+
+ Two renders rather than one so that both frame slots have been through
+ `begin`/`end` at least once — a timer that only ever armed slot 0, or that read
+ slot 0's pair for slot 1, passes a single-frame check and fails here.
+
+ The upper bound is what makes this more than "is it non-zero". A 64x48 clear
+ costs microseconds; a millisecond count above 1000 means the tick arithmetic is
+ wrong (`timestampPeriod` dropped, nanoseconds mistaken for the answer, or the
+ high half of a 64-bit stamp read as garbage), and every one of those failures
+ produces a number that is enormous rather than absent.
+
+ **Proved by injection.** `FrameTimer.end` returning before it sets
+ `armed[slot]`: "the GPU time after two frames is 0.000000 ms (this device
+ reports timestamps=true)". Restored, green again.
+*>
+fn void gpu_time_is_reported_after_a_frame() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+
+		double ms = renderer.gpu_ms();
+		test::@check(ms > 0.0,
+			"the GPU time after two frames is %f ms (this device reports timestamps=%s)",
+			ms, renderer.gpu.limits.timestamps);
+		test::@check(ms < 1000.0,
+			"a 64x48 clear was measured at %f ms, which is not a frame time but a unit mistake", ms);
+	};
+}
+
+<*
+ Nothing rendered, nothing to report.
+
+ The zero is the documented answer rather than an accident: it is what a
+ windowed run reports before its first frame completes, which is the semantics
+ `gpu/timing.c3` writes down, and it is the only check here that a *plausible*
+ number cannot satisfy by luck. The two checks above assert a range, so
+ anything in range passes them.
+
+ **Proved by injection.** `Renderer.gpu_ms` returning `timer.period` — the
+ confusion between "nanoseconds per tick" and "milliseconds per frame", which
+ is the mistake this arithmetic invites: "a renderer that has not drawn reports
+ 41.666668 ms". Both range checks above stayed green on it, which is the
+ argument for this being a separate check. Restored, green again.
+*>
+fn void gpu_time_is_zero_before_the_first_frame() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		test::@check(renderer.gpu_ms() == 0.0,
+			"a renderer that has not drawn reports %f ms", renderer.gpu_ms());
+	};
+}
+
+<*
+ One capture is enough: the number belongs to the frame just taken.
+
+ This is the half of `gpu/timing.c3`'s contract that the two-frame check above
+ cannot see. `capture` waits on its own fence before returning, so it can afford
+ to collect its own timing rather than leaving it for this slot's next `begin` —
+ which is two frames away, and may never come. A script that renders once and
+ reads the stats is the common case, and previous-frame semantics would answer
+ it with a zero.
+
+ **Proved by injection.** The `timer.collect` after `capture`'s trailing fence
+ wait removed: "one capture left the GPU time at 0.000000 ms". The two-frame
+ check stayed green throughout — `render_offscreen` keeps its own collect —
+ which is the argument for this being a separate check. Restored, green again.
+*>
+fn void capture_updates_the_gpu_time_it_measured() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+
+		double ms = renderer.gpu_ms();
+		test::@check(ms > 0.0, "one capture left the GPU time at %f ms", ms);
+		test::@check(ms < 1000.0, "one capture was measured at %f ms", ms);
+	};
+}
