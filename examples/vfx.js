@@ -1,9 +1,13 @@
 // vfx.js — what a material's own samplers are for
 //
-// Paste into `run_script` against a serving instance:
+// Run it:
 //
-//     ./build/three --mcp          # a window you can watch
-//     ./build/three --mcp --headless
+//     ./build/three --script examples/vfx.js
+//     ./build/three --script examples/vfx.js --mcp   # and attach an agent to it
+//
+// or paste it into `run_script` against a `./build/three --mcp` — the two are
+// the same thing, which is why `--script` runs a file as a script and not as a
+// module.
 //
 // Keys: space fires the cannon (shield hit + shockwave), `d` dissolves the
 // crates, `g` toggles the grade, `o` stops and starts the orbit, `1` shows the

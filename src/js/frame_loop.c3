@@ -94,6 +94,25 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 }
 
 <*
+ Say that the frames belong to a program somebody is watching, not to an agent.
+
+ The one switch `JS_GAME_FRAME_SOFT_MS` describes from the other side, and both
+ boots that come off a command line throw it: `--assets` through
+ `set_assets_root`, `--script` through `main.c3`'s `boot_script`. Everything a
+ server runs leaves it alone, which is what keeps a runaway `run_script`
+ callback from wedging the tool surface.
+
+ One-way on purpose. There is no `stop_playing`: the two callers set it before
+ anything can register a callback, and a frame policy that changed underneath a
+ running loop would mean the same callback was killed or counted depending on
+ when it happened to run long.
+*>
+fn void JsRuntime.play_frames(&self)
+{
+	self.game_frames = true;
+}
+
+<*
  Whether a tick would do anything: is anything registered at all, **or is a clip
  playing**.
 
@@ -466,6 +485,55 @@ fn void JsRuntime.drain_frame_log(&self)
 
 	self.frame_log.clear();
 	self.frame_dropped = 0;
+}
+
+<*
+ Move what the frames said into a host that has a terminal instead of an agent.
+
+ `stop_frame` keeps its reason "for the next run to report", and under `--mcp`
+ that is exactly right: nobody is reading a terminal, and the next tool call is
+ the first moment anyone is listening. A `--script` or `--assets` boot with no
+ listener has no next run at all — the callback dies, the window stops moving,
+ and the reason sits in a buffer until the process exits. That is the case this
+ exists for, and it is why `main.c3` only calls it when nothing is serving:
+ draining it with a server up would take the log away from the agent that is
+ about to ask for it.
+
+ The failure comes after the lines rather than before, because it is the last
+ thing that happened — a callback logs and *then* throws.
+
+ **Appended, and the caller clears.** One buffer for a whole loop that may run
+ for hours is the point; a function that allocated a string per frame would be
+ sixty allocations a second to say nothing at all, which is what almost every
+ frame has to say.
+
+ @param out : `Appended to. Cleared by the caller, so an empty result is a frame that said nothing.`
+*>
+fn void JsRuntime.take_frame_output(&self, DString* out)
+{
+	if (self.frame_dropped > 0)
+	{
+		out.appendf("[%d earlier lines dropped]\n", self.frame_dropped)!!;
+		self.frame_dropped = 0;
+	}
+
+	String lines = self.frame_log.str_view();
+	if (lines.len > 0)
+	{
+		out.append_string(lines);
+		// A callback stopped mid-line by the budget leaves one unterminated, and
+		// whatever is printed next must not continue it.
+		if (lines[lines.len - 1] != '\n') out.append_char('\n');
+		self.frame_log.clear();
+	}
+
+	String why = self.frame_error.str_view();
+	if (why.len > 0)
+	{
+		out.append_string(why);
+		if (why[why.len - 1] != '\n') out.append_char('\n');
+		self.frame_error.clear();
+	}
 }
 
 // ============================================================================

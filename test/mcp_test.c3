@@ -424,6 +424,11 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
  permanently empty — which from the outside looks exactly like a device that
  never complains.
 
+ **In a debug build.** `-D DEBUG` is what puts the layer in the binary at all,
+ so a release build has nothing to imply and says so through `--help` and
+ through `create_instance` rather than by pretending. `src/debug.c3` carries the
+ argument for the switch being a compile-time one.
+
  The last case is the one worth writing down: `--no-validate` wins wherever it
  appears, because a flag whose meaning depends on what came before it on the
  line is a flag people get wrong.
@@ -432,7 +437,16 @@ fn void serving_turns_validation_on_and_no_validate_turns_it_off() @test
 {
 	String[*] serving = { "three", "--mcp", "--headless" };
 	three::Options on = three::parse_args(serving[..])!!;
-	test::@check(on.validate, "--mcp left validation off");
+	// **The one place the build flag is visible from outside**, so it is asserted
+	// as an equality rather than branched around: a release build that implied
+	// validation would be asking for a layer it cannot load, and a debug build
+	// that stopped implying it would empty a third of every `run_script` answer.
+	// One line fails on either mistake. See `src/debug.c3`.
+	test::@check(
+		on.validate == three::DEBUG_BUILD,
+		"--mcp implies validation in a debug build and only there: validate=%s, DEBUG_BUILD=%s",
+		on.validate, three::DEBUG_BUILD
+	);
 
 	String[*] refused = { "three", "--mcp", "--no-validate", "--headless" };
 	three::Options off = three::parse_args(refused[..])!!;
@@ -445,6 +459,40 @@ fn void serving_turns_validation_on_and_no_validate_turns_it_off() @test
 	String[*] both = { "three", "--validate", "--no-validate", "--mcp" };
 	three::Options wins = three::parse_args(both[..])!!;
 	test::@check(!wins.validate, "--no-validate lost to a --validate that came first");
+}
+
+<*
+ `--script` takes a file, and takes it beside everything else on the line.
+
+ The flag exists so a person can run what an agent would paste into
+ `run_script`, and the three cases below are the three shapes that has: alone,
+ which is the whole point; with `--mcp`, where the boot happens and *then* the
+ server comes up over the scene it built; and beside a model, which is the trap
+ `--mcp` already documents from the other side — a flag that swallowed the
+ positional argument would boot the script and then report no file.
+*>
+fn void the_script_flag_names_a_file_beside_everything_else() @test
+{
+	String[*] alone = { "three", "--script", "examples/vfx.js" };
+	three::Options only = three::parse_args(alone[..])!!;
+	test::@check(only.script == "examples/vfx.js", "--script kept '%s'", only.script);
+	test::@check(only.mcp_port == 0, "and asked for no server, got %d", only.mcp_port);
+
+	String[*] served = { "three", "--mcp", "--script", "examples/vfx.js" };
+	three::Options both = three::parse_args(served[..])!!;
+	test::@check(both.script == "examples/vfx.js" && both.mcp_port > 0, "--mcp --script does both");
+
+	String[*] with_model = { "three", "--script", "boot.js", "model.glb" };
+	three::Options kept = three::parse_args(with_model[..])!!;
+	test::@check(kept.script == "boot.js", "the script is '%s'", kept.script);
+	test::@check(kept.model == "model.glb", "and the model is '%s'", kept.model);
+
+	// A value it has no way to invent. The alternative — treating a bare
+	// `--script` as "no script" — is a command line that opens the built-in
+	// triangle and says nothing about why.
+	String[*] naked = { "three", "--script" };
+	three::Options? refused = three::parse_args(naked[..]);
+	test::@check(@catch(refused), "a --script with no file is refused");
 }
 
 // ============================================================================
