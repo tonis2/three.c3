@@ -1,7 +1,7 @@
 <*
  The base stage's renderer, checked with no window and no window server.
 
-	`c3c test --trust=full --test-noleak --test-filter three_tests::gpu`
+ `c3c test --trust=full --test-noleak --test-filter three_tests::gpu`
 
  Every check here runs headless, which is not a compromise — it is the whole
  argument for `plan.md` §1. The offscreen target is what `render()` draws into
@@ -129,10 +129,20 @@ fn void device_comes_up_headless() @test
 	{
 		test::@check(gpu.handle != null, "no logical device");
 		test::@check(gpu.graphics.handle != null, "no graphics queue");
-		test::@check(gpu.limits.buffer_device_address, "bufferDeviceAddress is off; geometry has no route to the shader");
+		test::@check(
+			gpu.limits.buffer_device_address,
+			"bufferDeviceAddress is off; geometry has no route to the shader"
+		);
 		test::@check(gpu.limits.dynamic_rendering, "dynamicRendering is off; this project has no VkRenderPass path");
-		test::@check(gpu.limits.max_push_constants_size >= 128, "maxPushConstantsSize is %d, below the 128 every device must offer", gpu.limits.max_push_constants_size);
-		test::@check(gpu.limits.push_descriptor, "pushDescriptor is off; since M5 there are no descriptor sets to fall back to");
+		test::@check(
+			gpu.limits.max_push_constants_size >= 128,
+			"maxPushConstantsSize is %d, below the 128 every device must offer",
+			gpu.limits.max_push_constants_size
+		);
+		test::@check(
+			gpu.limits.push_descriptor,
+			"pushDescriptor is off; since M5 there are no descriptor sets to fall back to"
+		);
 	};
 }
 
@@ -163,18 +173,15 @@ fn void device_comes_up_headless() @test
 *>
 fn void without_the_validation_layer_none_of_these_are_tests() @test
 {
-	if (!three::DEBUG_BUILD)
+	if (three::DEBUG_BUILD)
 	{
-		io::printn("  (the validation half of this suite needs `c3c test --trust=full -D DEBUG`)");
-		return;
+		test::@check(
+			three::validation_layer_present(),
+			"VK_LAYER_KHRONOS_validation is not installed, so every validation check in this "
+				"suite passed without running. Install the Vulkan SDK, or read this one failure as "
+				"'the validation half of M5 is untested on this machine'."
+		);
 	}
-
-	test::@check(
-		three::validation_layer_present(),
-		"VK_LAYER_KHRONOS_validation is not installed, so every validation check in this "
-		"suite passed without running. Install the Vulkan SDK, or read this one failure as "
-		"'the validation half of M5 is untested on this machine'."
-	);
 }
 
 <*
@@ -189,8 +196,7 @@ fn void without_the_validation_layer_none_of_these_are_tests() @test
 *>
 fn void provoke_validation_error(three::Gpu* gpu)
 {
-	vk::Buffer? refused = vk::bufferCreateInfo()
-		.setSize(0)
+	vk::Buffer? refused = vk::bufferCreateInfo().setSize(0)
 		.setUsage((vk::BufferUsageFlags)vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT)
 		.build(gpu.handle);
 	// The layer refuses it, so there is normally nothing here. Guarded rather
@@ -208,20 +214,15 @@ fn void provoke_validation_error(three::Gpu* gpu)
  not just the function body. It is the only way to ask about a severity this
  project has deliberately not subscribed to.
 *>
-fn void submit_message(
-	three::Gpu* gpu,
-	vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
-	ZString id,
-	ZString text
-)
+fn void submit_message(three::Gpu* gpu, vk::DebugUtilsMessageSeverityFlagBitsEXT severity, ZString id, ZString text)
 {
-	vk::DebugUtilsMessengerCallbackDataEXT data = vk::debugUtilsMessengerCallbackDataEXT()
-		.setMessageIdName((char*)id)
+	vk::DebugUtilsMessengerCallbackDataEXT data = vk::debugUtilsMessengerCallbackDataEXT().setMessageIdName((char*)id)
 		.setMessage((char*)text);
 	vk::submitDebugUtilsMessageEXT(
 		gpu.instance,
 		severity,
-		(vk::DebugUtilsMessageTypeFlagsEXT)vk::DebugUtilsMessageTypeFlagBitsEXT.DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+		(vk::DebugUtilsMessageTypeFlagsEXT)vk::DebugUtilsMessageTypeFlagBitsEXT
+			.DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
 		&data
 	);
 }
@@ -320,7 +321,7 @@ fn void a_warning_does_not_land_where_the_errors_go() @test
 			"a warning the loader was asked to deliver"
 		);
 		String warnings = gpu.sink.warnings.str_view();
-		String errors = gpu.sink.errors.str_view();
+		String errors   = gpu.sink.errors.str_view();
 		gpu.end_capture();
 
 		test::@check(warnings.contains("validation WARNING"), "it is labelled a warning: %s", warnings);
@@ -352,7 +353,7 @@ fn void verbose_messages_are_not_delivered_at_all() @test
 			"chatter that should never reach a script"
 		);
 		String warnings = gpu.sink.warnings.str_view();
-		String errors = gpu.sink.errors.str_view();
+		String errors   = gpu.sink.errors.str_view();
 		gpu.end_capture();
 
 		test::@check(warnings.len == 0, "verbose reached the warnings: %s", warnings);
@@ -380,7 +381,8 @@ fn void a_message_outside_a_capture_does_not_stay_in_the_sink() @test
 		// No begin_capture: this is the CLI's state, not a run's.
 		provoke_validation_error(gpu);
 
-		test::@check(gpu.sink.errors.str_view().len == 0, "the sink kept a message nobody was capturing: %s", gpu.sink.errors.str_view());
+		test::@check(gpu.sink.errors.str_view()
+			.len == 0, "the sink kept a message nobody was capturing: %s", gpu.sink.errors.str_view());
 		test::@check(gpu.sink.warnings.str_view().len == 0, "and the same for warnings");
 
 		// **The same call again, capturing.** Without this the check above holds
@@ -434,8 +436,14 @@ fn void target_at_two_extents() @test
 	{
 		three::Target small;
 		small.init(gpu, 320, 240)!!;
-		test::@check(small.extent.width == 320 && small.extent.height == 240, "the target did not take the extent it was given");
-		test::@check(small.color_format == three::TARGET_COLOR_FORMAT, "the colour format is not the one three.c3 chose");
+		test::@check(
+			small.extent.width == 320 && small.extent.height == 240,
+			"the target did not take the extent it was given"
+		);
+		test::@check(
+			small.color_format == three::TARGET_COLOR_FORMAT,
+			"the colour format is not the one three.c3 chose"
+		);
 
 		three::Target large;
 		large.init(gpu, 1280, 720)!!;
@@ -464,8 +472,21 @@ fn void headless_render_produces_the_clear_colour() @test
 		image::Image shot = renderer.capture()!!;
 		defer shot.free();
 
-		test::@check(shot.width == W && shot.height == H, "read back %dx%d, expected %dx%d", shot.width, shot.height, W, H);
-		test::@check(shot.pixels.len == (sz)W * H * 4, "read back %d bytes for a %dx%d RGBA image", shot.pixels.len, W, H);
+		test::@check(
+			shot.width == W && shot.height == H,
+			"read back %dx%d, expected %dx%d",
+			shot.width,
+			shot.height,
+			W,
+			H
+		);
+		test::@check(
+			shot.pixels.len == (sz)W * H * 4,
+			"read back %d bytes for a %dx%d RGBA image",
+			shot.pixels.len,
+			W,
+			H
+		);
 
 		// UNORM, so the byte is the float scaled by 255 and rounded. A
 		// one-count tolerance covers the rounding the driver is entitled to
@@ -524,7 +545,13 @@ fn void captures_are_reproducible() @test
 		test::@check(first.pixels.len == second.pixels.len, "two captures came back different sizes");
 		foreach (i, byte : first.pixels)
 		{
-			test::@check(byte == second.pixels[i], "byte %d differs between two captures: %d then %d", i, byte, second.pixels[i]);
+			test::@check(
+				byte == second.pixels[i],
+				"byte %d differs between two captures: %d then %d",
+				i,
+				byte,
+				second.pixels[i]
+			);
 		}
 	};
 }
@@ -567,16 +594,25 @@ fn void a_retired_pipeline_waits_out_the_frames_in_flight() @test
 		three::MeshPipeline nothing;
 
 		gpu.retire_pipeline(nothing);
-		test::@check(gpu.deletions.pipelines.len() == 1,
-			"queued rather than destroyed: %d", (int)gpu.deletions.pipelines.len());
+		test::@check(
+			gpu.deletions.pipelines.len() == 1,
+			"queued rather than destroyed: %d",
+			(int)gpu.deletions.pipelines.len()
+		);
 
 		renderer.render_offscreen()!!;
-		test::@check(gpu.deletions.pipelines.len() == 1,
-			"still held after one frame: %d", (int)gpu.deletions.pipelines.len());
+		test::@check(
+			gpu.deletions.pipelines.len() == 1,
+			"still held after one frame: %d",
+			(int)gpu.deletions.pipelines.len()
+		);
 
 		renderer.render_offscreen()!!;
-		test::@check(gpu.deletions.pipelines.len() == 0,
-			"and destroyed after two: %d", (int)gpu.deletions.pipelines.len());
+		test::@check(
+			gpu.deletions.pipelines.len() == 0,
+			"and destroyed after two: %d",
+			(int)gpu.deletions.pipelines.len()
+		);
 	};
 }
 
@@ -601,9 +637,12 @@ fn void a_queue_nothing_is_draining_falls_back_to_the_stall() @test
 
 		for (uint i = 0; i <= three::MAX_PENDING_DELETES; i++) gpu.retire_pipeline(nothing);
 
-		test::@check(gpu.deletions.pipelines.len() == 0,
+		test::@check(
+			gpu.deletions.pipelines.len() == 0,
 			"the queue drained itself rather than growing past %d, and holds %d",
-			three::MAX_PENDING_DELETES, (int)gpu.deletions.pipelines.len());
+			three::MAX_PENDING_DELETES,
+			(int)gpu.deletions.pipelines.len()
+		);
 	};
 }
 
@@ -620,7 +659,7 @@ fn void a_queue_nothing_is_draining_falls_back_to_the_stall() @test
 // device says no, and every entry point returns on a null pool as its first
 // statement. The checks below name the capability in their failure text, so a
 // machine that does lack it says so rather than reading as a timing bug.
-//
+// 
 // These are also the one place in this suite where a number rises and falls
 // with the machine. They assert a *range*, not a value: a frame took some
 // non-zero time and did not take a second. A tighter bound would be a
@@ -651,11 +690,17 @@ fn void gpu_time_is_reported_after_a_frame() @test
 		renderer.render_offscreen()!!;
 
 		double ms = renderer.gpu_ms();
-		test::@check(ms > 0.0,
+		test::@check(
+			ms > 0.0,
 			"the GPU time after two frames is %f ms (this device reports timestamps=%s)",
-			ms, renderer.gpu.limits.timestamps);
-		test::@check(ms < 1000.0,
-			"a 64x48 clear was measured at %f ms, which is not a frame time but a unit mistake", ms);
+			ms,
+			renderer.gpu.limits.timestamps
+		);
+		test::@check(
+			ms < 1000.0,
+			"a 64x48 clear was measured at %f ms, which is not a frame time but a unit mistake",
+			ms
+		);
 	};
 }
 
@@ -678,8 +723,7 @@ fn void gpu_time_is_zero_before_the_first_frame() @test
 {
 	@with_renderer(; three::Renderer* renderer)
 	{
-		test::@check(renderer.gpu_ms() == 0.0,
-			"a renderer that has not drawn reports %f ms", renderer.gpu_ms());
+		test::@check(renderer.gpu_ms() == 0.0, "a renderer that has not drawn reports %f ms", renderer.gpu_ms());
 	};
 }
 
