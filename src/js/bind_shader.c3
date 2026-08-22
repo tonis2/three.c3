@@ -34,7 +34,8 @@ import qjs;
 *>
 fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "createMaterial", &js_create_material, 6);
+	self.bind(host, "createMaterial", &js_create_material, 8);
+	self.bind(host, "setMaterialTexture", &js_set_material_texture, 3);
 	self.bind(host, "createTextureMaterial", &js_create_texture_material, 3);
 	self.bind(host, "setUniform", &js_set_uniform, 9);
 	self.bind(host, "setSide", &js_set_side, 2);
@@ -178,6 +179,33 @@ fn void js_create_material(
 		// maps anything it does not know there too.
 		int blending = argc > 5 ? arg_int(&js, argc, args, 5) : BLENDING_NONE;
 
+		// The samplers, as a fourth and fifth joined list: the names the body
+		// declares, and the texture each one starts bound to. They cross the same
+		// way the uniforms do and for the same reason — the QuickJS shim can read
+		// a property by name and cannot enumerate one — and they are two lists
+		// rather than one because a name with no image is legal here. `-1` is
+		// `NO_TEXTURE`, which is what `textures: { noise_map: null }` means: the
+		// sampler exists, the body may read it, and white is what comes back.
+		String texture_names = arg_text(&js, argc, args, 6, tmem);
+		String texture_ids = arg_text(&js, argc, args, 7, tmem);
+
+		List{String} texture_name_list;
+		List{String} texture_id_list;
+		texture_name_list.tinit(4);
+		texture_id_list.tinit(4);
+		split_commas(texture_names, &texture_name_list);
+		split_commas(texture_ids, &texture_id_list);
+
+		if (texture_name_list.len() != texture_id_list.len())
+		{
+			*out = js.raise("every texture needs a value — a name arrived without one");
+			return;
+		}
+
+		List{MaterialTexture} textures;
+		textures.tinit(4);
+		foreach (name : texture_name_list) textures.push({ .name = name });
+
 		String diagnostic;
 		uint? made = self.pass.create_material(
 			&self.renderer.gpu,
@@ -186,7 +214,8 @@ fn void js_create_material(
 			uniforms.array_view(),
 			side,
 			blending,
-			// Named, so that an argument arriving between `blending` and the
+			textures.array_view(),
+			// Named, so that an argument arriving between the textures and the
 			// diagnostic does not have to be threaded through here.
 			diagnostic: &diagnostic
 		);
@@ -205,7 +234,98 @@ fn void js_create_material(
 			if (!diagnostic.ends_with("\n")) self.log.append_char('\n');
 		}
 
+		// Filled after the compile, because a binding index is something only the
+		// compiled module knows: the names went in as a list and come back as a
+		// reflected layout, and `set_material_texture` is the join.
+		//
+		// **A failure here disposes the material it just made.** The script is
+		// about to be thrown at, so nothing will ever hold the handle — and a
+		// material nobody can name still holds a pipeline until the process ends.
+		foreach (i, name : texture_name_list)
+		{
+			int texture = texture_id_list[i].to_int() ?? NO_TEXTURE;
+			if (catch err = self.pass.set_material_texture(&self.renderer.gpu, made, name, texture))
+			{
+				// Discarded rather than `!!`: the only way this can fail is a
+				// material that is not there, which is the state the dispose was
+				// asking for anyway — and a panic on the failure path of a *script
+				// error* would take the process down over a typed texture name.
+				@catch(self.pass.dispose_material(&self.renderer.gpu, made));
+				*out = js.raise(material_texture_failure(err, name));
+				return;
+			}
+		}
+
 		*out = qjs::int_value((int)made);
+	};
+}
+
+<*
+ Turn a sampler fault into a sentence an agent can act on.
+
+ The `MATERIAL_SAMPLER_UNKNOWN` case is the one worth the words. It has two
+ causes that look identical from here — a name that is not in the body at all, and
+ a name that is in the body and never sampled, which Slang is free to drop from
+ the module before reflection sees it — and the fix differs: one is a typo and the
+ other is a line of shader that has to actually read the texture. Naming both is
+ the difference between an agent fixing it and an agent trying the same spelling
+ twice.
+*>
+fn String material_texture_failure(fault err, String name) @local
+{
+	switch (err)
+	{
+		case MATERIAL_SAMPLER_UNKNOWN:
+			return string::tformat(
+				"this material's shader has no sampler called '%s' — either the name is not the one the body uses, "
+				"or the body never samples it and Slang dropped it from the module",
+				name
+			);
+		case MATERIAL_TEXTURE_UNKNOWN:
+			return string::tformat("the texture for '%s' was disposed, or came from another renderer", name);
+		default:
+			return string::tformat("'%s' could not be bound: %s", name, err);
+	}
+}
+
+<*
+ `material.textures.<name> = texture` — put an image in one of the samplers the
+ body declared.
+
+ `js_set_map` for the bindings above zero. The verb is separate from `setMap`
+ rather than `setMap` growing a name argument, because the two resolve
+ differently: binding 0 is the template's and is reached through the property
+ Three.js already calls `map`, while these are the agent's own and are reached by
+ the name the agent wrote.
+*>
+fn void js_set_material_texture(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		uint material = (uint)arg_int(&js, argc, args, 0);
+		String name = arg_text(&js, argc, args, 1, tmem);
+		int texture = arg_int(&js, argc, args, 2);
+
+		Gpu* gpu = self.renderer != null ? &self.renderer.gpu : null;
+		if (catch err = self.pass.set_material_texture(gpu, material, name, texture))
+		{
+			*out = js.raise(
+				err == MATERIAL_UNKNOWN
+					? "that material cannot take a texture — it is the default material or it was disposed"
+					: material_texture_failure(err, name)
+			);
+			return;
+		}
 	};
 }
 
@@ -235,7 +355,17 @@ fn String material_failure(fault err, String diagnostic) @local
 		case MATERIAL_NAME_INVALID:
 			return "a uniform name must be a plain identifier and must not shadow the shader's own";
 		case MATERIAL_TOO_MANY_UNIFORMS:
-			return "those uniforms do not fit the push block — a material has 68 bytes, 17 floats";
+			// Spelled from the constant rather than written out, which `post_failure`
+			// already does: this said "68 bytes, 17 floats" for as long as the budget
+			// had been 52, because a number in a sentence has nothing to keep it
+			// honest.
+			return string::tformat(
+				"those uniforms do not fit the push block — a material has %d bytes, %d floats",
+				MATERIAL_UNIFORM_BUDGET,
+				MATERIAL_UNIFORM_BUDGET / 4
+			);
+		case MATERIAL_TOO_MANY_TEXTURES:
+			return string::tformat("a material may declare %d textures of its own", MATERIAL_TEXTURE_LIMIT);
 		case SHADER_COMPILE_FAILED:
 			return "the material shader failed to compile and Slang said nothing about why";
 		default:

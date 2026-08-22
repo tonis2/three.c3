@@ -772,3 +772,103 @@ fn void the_built_in_materials_refuse_dispose() @test
 		}
 	};
 }
+
+<*
+ A material gives back the images its own samplers held.
+
+ The lifetime half of `textures:`. A `ShaderMaterial` can now hold up to five
+ references into the texture table — `map` and four samplers of its own — and
+ every one of them has to come back when the material is collected, or a script
+ that rebuilds its materials every run leaks an image per run and
+ `scene.unload()` quietly stops emptying.
+
+ Three separate moments are checked, because they are three different pieces of
+ code: taking a reference (`set_material_texture` retains), replacing one
+ (retain the new, release the old — and the retain comes *first*, because the two
+ indices can name one slot), and collecting the material (`free_material` walks
+ the bindings). A test that only checked the last would pass with the middle one
+ leaking.
+
+ **Proved by injection.** The sampler loop removed from `free_material`: "the
+ material gave its samplers back: 2" — the images stay pinned at the count the
+ material took them to, and every other test in the suite stays green.
+*>
+fn void a_material_gives_back_the_textures_its_samplers_held() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+
+		int red = solid_texture(renderer, 220, 40, 40);
+		int green = solid_texture(renderer, 40, 220, 60);
+		test::@check(pass.assets.texture_refs(red) == 1, "the table holds each image once to start with");
+
+		uint material;
+		@pool()
+		{
+			three::MaterialTexture[2] textures = { { "noise_map" }, { "ramp_map" } };
+			material = pass.create_material(
+				&renderer.gpu,
+				&renderer.target,
+				`float3 shade(Surface s)
+				{
+				    return noise_map.Sample(s.uv).rgb * ramp_map.Sample(s.uv).rgb;
+				}`,
+				{},
+				three::SIDE_FRONT,
+				three::BLENDING_NONE,
+				textures[..]
+			)!!;
+		};
+
+		// Declared but not yet filled: the samplers exist and hold nothing, which
+		// is the state a body reads as white.
+		test::@check(pass.material_texture(material, "noise_map") == three::NO_TEXTURE,
+			"a declared sampler starts empty");
+
+		pass.set_material_texture(&renderer.gpu, material, "noise_map", red)!!;
+		pass.set_material_texture(&renderer.gpu, material, "ramp_map", green)!!;
+		test::@check(pass.assets.texture_refs(red) == 2,
+			"the material took a reference: %d", pass.assets.texture_refs(red));
+		test::@check(pass.material_texture(material, "noise_map") == red, "and reads back by name");
+
+		// Replacing one gives the old image back and holds the new one, which is
+		// where a release-before-retain would take a shared slot to zero.
+		pass.set_material_texture(&renderer.gpu, material, "noise_map", green)!!;
+		test::@check(pass.assets.texture_refs(red) == 1,
+			"replacing released the old image: %d", pass.assets.texture_refs(red));
+		test::@check(pass.assets.texture_refs(green) == 3,
+			"and both samplers now name the new one: %d", pass.assets.texture_refs(green));
+
+		// A name the shader does not have is refused rather than ignored, and a
+		// texture that is not there is a different fault from a sampler that is not.
+		fault unknown = @catch(pass.set_material_texture(&renderer.gpu, material, "no_such_map", red));
+		test::@check(unknown == three::MATERIAL_SAMPLER_UNKNOWN, "an unknown sampler is refused, got %s", unknown);
+		fault dead = @catch(pass.set_material_texture(&renderer.gpu, material, "noise_map", 4242));
+		test::@check(dead == three::MATERIAL_TEXTURE_UNKNOWN, "and an unknown texture is its own fault, got %s", dead);
+
+		pass.dispose_material(&renderer.gpu, material)!!;
+		test::@check(pass.material(material) == null, "the material was collected");
+		test::@check(pass.assets.texture_refs(green) == 1,
+			"and gave its samplers back: %d", pass.assets.texture_refs(green));
+	};
+}
+
+<*
+ A one-pixel image, uploaded, for a test that needs a texture and does not care
+ what is in it.
+*>
+fn int solid_texture(three::Renderer* renderer, char r, char g, char b)
+{
+	char[4] pixels = { r, g, b, 255 };
+	image::Image one = {
+		.width = 1,
+		.height = 1,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		// No allocator, left at the zero fill: `Image.free` frees nothing without
+		// one, which is what makes a stack array safe to hand over here.
+		.pixels = pixels[..],
+	};
+	return renderer.pass.assets.claim_texture(&renderer.gpu, one)!!;
+}

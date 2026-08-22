@@ -483,11 +483,17 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		Texture* sampled = material.texture == NO_TEXTURE
 			? self.assets.texture_for(mesh)
 			: self.assets.texture_at(material.texture);
-		vk::DescriptorImageInfo image_info = sampled.descriptor();
-		vk::WriteDescriptorSet write = vk::writeDescriptorSet().setDstBinding(0)
-			.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-			.setImageInfo({ image_info });
-		vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &write);
+
+		// Binding 0 by hand and everything above it from the shader's own
+		// reflection — `render/bind.c3` has the argument, and the short version is
+		// that only this line knows binding 0 is "the material's map or the mesh's
+		// image". A body that declared `noise_map` gets it at whatever index the
+		// assembler generated, resolved by name, with white in any sampler the
+		// script left empty.
+		SampledBindings samplers;
+		samplers.add(0, sampled.descriptor());
+		samplers.collect(pipeline, &material.textures, &self.assets);
+		samplers.push(cmd, pipeline);
 
 		// The mesh's own factor, faded by the material's opacity. Multiplied rather
 		// than replaced so that a glTF's own alpha and a script's `opacity` compose
@@ -625,6 +631,7 @@ fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
 
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Baked into the pipeline, so it cannot change afterwards.`
+ @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_material_texture per name, because that is where the references are taken.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
 *>
@@ -636,6 +643,7 @@ fn uint? MeshPass.create_material(
 	MaterialUniform[] uniforms,
 	int side = SIDE_FRONT,
 	int blending = BLENDING_NONE,
+	MaterialTexture[] textures = {},
 	String* diagnostic = null
 )
 {
@@ -643,7 +651,7 @@ fn uint? MeshPass.create_material(
 	BlendMode blend = blend_for(blending);
 	@pool()
 	{
-		String source = material_source(fragment, uniforms, tmem)!;
+		String source = material_source(fragment, uniforms, tmem, textures)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
 			gpu, target, source, "three.material", state_for_blend(blend), diagnostic
 		)!;
@@ -918,6 +926,67 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 }
 
 <*
+ `material.textures.<name> = texture` — put an image in one of the sampler
+ bindings the body declared.
+
+ `set_material_map` for the bindings above zero, and the differences are all in
+ the first line: the binding is found **by name, through the shader's own
+ reflection**, so a script says `noise_map` and never says `1`. `map` keeps its
+ own verb because binding 0 is the one binding no agent declared — it is the
+ template's, it is what an untextured mesh falls back through, and reaching it by
+ the name the template happens to use would make `base_color_map` part of the
+ script-facing API.
+
+ **The built-in materials are refused**, for `set_material_map`'s reason and more
+ simply: neither declares a sampler past binding 0, so there is no name here that
+ could resolve.
+
+ The retain/release dance is `set_material_map`'s exactly — retain before release
+ because the two indices can name the same slot, and wait for the device only when
+ this release is the last reference to an image a frame in flight may be sampling.
+
+ @param name : `The sampler as the body spells it.`
+ @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back.`
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones.`
+ @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return? MATERIAL_SAMPLER_UNKNOWN : `This material's shader has no sampler by that name.`
+*>
+fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name, int texture)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
+
+	uint binding = material.binding_of_texture(name);
+	if (binding == 0) return MATERIAL_SAMPLER_UNKNOWN~;
+
+	int held = material.textures.at(binding);
+	if (held == texture) return;
+
+	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
+	if (gpu != null && self.assets.texture_refs(held) == 1) gpu.wait_idle();
+	self.assets.release_texture(gpu, held);
+
+	material.textures.set(binding, texture);
+}
+
+<*
+ Which texture is in one of a material's own sampler bindings.
+
+ `NO_TEXTURE` for a material that does not exist and for a name that is not one of
+ its samplers alike, which is `material_opacity`'s rule: a getter answers what a
+ material that was never given anything would answer rather than faulting, and the
+ *setter* is where a bad name is reported against the line that wrote it.
+*>
+fn int MeshPass.material_texture(&self, uint index, String name)
+{
+	Material* material = self.material(index);
+	if (material == null) return NO_TEXTURE;
+	return material.textures.at(material.binding_of_texture(name));
+}
+
+<*
  `material.dispose()` — give back the script's reference to a material.
 
  **Not a free**, and the wording is `texture.dispose()`'s on purpose because the
@@ -1013,6 +1082,19 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	if (gpu != null && self.assets.texture_refs(material.texture) == 1) gpu.wait_idle();
 	self.assets.release_texture(gpu, material.texture);
 
+	// The agent's own samplers, on the same terms. Walked by binding rather than
+	// by the reflected layout, because this runs *after* a shader may have been
+	// swapped out from under the material and the slots are the record of what is
+	// actually held: a reference is released by whoever took it, not by whoever
+	// still declares a name for it.
+	for (uint binding = TEXTURE_BINDING_FIRST; binding < TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT; binding++)
+	{
+		int held = material.textures.at(binding);
+		if (held == NO_TEXTURE) continue;
+		if (gpu != null && self.assets.texture_refs(held) == 1) gpu.wait_idle();
+		self.assets.release_texture(gpu, held);
+	}
+
 	self.pipelines.release(gpu, material.pipeline);
 	material.free();
 }
@@ -1035,7 +1117,18 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// over it here would be a no-op even if this forgot to ask.
 	foreach (&material : self.materials)
 	{
-		if (material.alive) self.assets.release_texture(gpu, material.texture);
+		if (!material.alive) continue;
+		self.assets.release_texture(gpu, material.texture);
+		// And the agent's own samplers, on the same terms as `map`. The counts do
+		// not survive the next line either way — `assets.free` destroys every slot
+		// whatever it is holding — but a teardown that gave back one of a
+		// material's five references and not the other four would be the kind of
+		// asymmetry that reads as a bug in whichever of the two is looked at
+		// second.
+		for (uint b = TEXTURE_BINDING_FIRST; b < TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT; b++)
+		{
+			self.assets.release_texture(gpu, material.textures.at(b));
+		}
 	}
 	self.assets.free(gpu);
 	// Before the cache, which owns the pipelines these borrow. No release, unlike

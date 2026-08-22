@@ -49,6 +49,18 @@ struct PushData
 // An identity body is therefore an identity, to within eight bits.
 [vk::binding(0, 0)] Sampler2D scene;
 
+// The samplers the agent asked for, at bindings 1..N in declaration order —
+// `shaders/material.slang` has the argument for why the indices are generated
+// rather than written. A post pass wants them for the things a frame cannot
+// supply about itself: a colour ramp to grade through, a noise field to distort
+// or dither by, a mask that says where an effect applies.
+//
+// Unlike a material's, these are not sampled with a surface's uv. `p.uv` is the
+// screen, so a lookup wants a coordinate the body builds — `p.color.r` for a
+// ramp, `p.uv * resolution / 256` for tiled noise that does not stretch with the
+// window.
+//@textures
+
 // **The contract with the agent.** Four values, none of them a Vulkan concept
 // and none of them a pointer. A body that only ever touches `Post` cannot
 // address the wrong buffer — the same claim `Surface` makes in

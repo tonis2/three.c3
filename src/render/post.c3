@@ -115,6 +115,17 @@ struct PostPass
 	// with no per-uniform loop.
 	char[PUSH_BUDGET] block;
 
+	// The samplers the body declared, at bindings 1..N. Binding 0 is image A and
+	// is not in here — it is the pass's own, the way `base_color_map` is a
+	// material's own. `TextureSlots` has what is stored and why it is biased.
+	//
+	// **Held across nothing.** A `set` releases these before the new shader's
+	// bindings exist, for the same reason it does not carry the uniform block
+	// across: the new module's binding 1 is a different sampler with a different
+	// name, and keeping an image in it would be putting one shader's texture into
+	// another shader's slot.
+	TextureSlots textures;
+
 	// When `set` was called. `info.z` is seconds since — wall clock, not a game
 	// clock, because nothing here knows about a simulation. `plan.md` §2 has the
 	// deferral.
@@ -144,6 +155,8 @@ struct PostPass
 
  @param fragment : `The agent's body. Must define float3 post(Post p).`
  @param uniforms : `Names and widths, appended to the push block after info. Reached from the body as bare names.`
+ @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_texture per name.`
+ @param assets : `Where the textures the *previous* shader held go back to. Null skips that release, which is only safe on a pass that never had any.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller. Null keeps the old behaviour of printing to stderr.`
  @return? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence, and it is copied into diagnostic too.`
  @return? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
@@ -159,6 +172,8 @@ fn void? PostPass.set(
 	Target* target,
 	String fragment,
 	MaterialUniform[] uniforms,
+	MaterialTexture[] textures = {},
+	Assets* assets = null,
 	String* diagnostic = null
 )
 {
@@ -166,7 +181,7 @@ fn void? PostPass.set(
 	// the caller asked for the text. Written here rather than left to
 	// `post_source` because `post_diagnostic()` is a view into a fixed buffer
 	// that the next call overwrites, and the caller's copy is not.
-	String? assembled = post_source(fragment, uniforms, mem);
+	String? assembled = post_source(fragment, uniforms, mem, textures);
 	if (catch reason = assembled)
 	{
 		if (diagnostic != null) *diagnostic = post_diagnostic().copy(mem);
@@ -210,6 +225,12 @@ fn void? PostPass.set(
 	// Past every fault: from here the swap cannot fail half way.
 	if (self.active) gpu.retire_pipeline(self.pipeline);
 	if (self.fragment.ptr != null) self.fragment.free(mem);
+	// The outgoing shader's images, before the incoming shader's bindings exist.
+	// Here rather than at the top of the function for the same reason the retire
+	// is here: a `set` that fails leaves the previous pass running, and a pass
+	// running without the textures it was given would be a worse outcome than the
+	// compile error the caller is about to be handed.
+	self.release_textures(gpu, assets);
 
 	self.pipeline = built;
 	self.fragment = fragment.copy(mem);
@@ -231,9 +252,10 @@ fn void? PostPass.set(
  Safe on a pass that was never set — `clear` on an inactive pass is a no-op, so
  a script can call it unconditionally.
 *>
-fn void PostPass.clear(&self, Gpu* gpu)
+fn void PostPass.clear(&self, Gpu* gpu, Assets* assets = null)
 {
 	if (!self.active) return;
+	self.release_textures(gpu, assets);
 	gpu.retire_pipeline(self.pipeline);
 	self.pipeline = {};
 	if (self.fragment.ptr != null) self.fragment.free(mem);
@@ -291,6 +313,89 @@ fn void PostPass.uniform_fields(&self, List{ShaderField}* out)
 	{
 		if (field.offset >= POST_PUSH_START) out.push(field);
 	}
+}
+
+<*
+ `post.textures.<name> = texture` — put an image in one of the sampler bindings
+ the body declared.
+
+ `MeshPass.set_material_texture` for the pass with no geometry, and the same three
+ moves in the same order: resolve the name through the shader's own reflection,
+ retain the new index before releasing the old one because the two can name one
+ slot, and wait for the device only when this release is the last reference to an
+ image a frame in flight may still be sampling.
+
+ The `Assets` arrives as an argument rather than being a field, which is the one
+ structural difference: a `PostPass` belongs to the renderer and the texture table
+ belongs to the mesh pass, and giving the post pass a pointer to the other's
+ innards to save one parameter is the kind of coupling that outlives the reason
+ for it.
+
+ @param name : `The sampler as the body spells it.`
+ @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back.`
+ @return? MATERIAL_UNKNOWN : `The pass has no shader — there is nothing declaring samplers.`
+ @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return? MATERIAL_SAMPLER_UNKNOWN : `This post shader has no sampler by that name.`
+*>
+fn void? PostPass.set_texture(&self, Gpu* gpu, Assets* assets, String name, int texture)
+{
+	if (!self.active || assets == null) return MATERIAL_UNKNOWN~;
+	if (texture != NO_TEXTURE && !assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
+
+	uint binding = sampler_binding_of(&self.pipeline, name);
+	if (binding == 0) return MATERIAL_SAMPLER_UNKNOWN~;
+
+	int held = self.textures.at(binding);
+	if (held == texture) return;
+
+	if (texture != NO_TEXTURE) assets.retain_texture(texture);
+	if (gpu != null && assets.texture_refs(held) == 1) gpu.wait_idle();
+	assets.release_texture(gpu, held);
+
+	self.textures.set(binding, texture);
+}
+
+<*
+ Give every image this pass holds back, and empty the slots.
+
+ Run from `set`, from `clear` and from the renderer's teardown — every point at
+ which the shader that named these bindings stops being the one that runs.
+
+ **Emptying the slots is not optional.** A release that left the indices behind
+ would have the next `clear` release them a second time, which is the failure
+ `Assets` cannot detect: a slot back at zero references is destroyed, and a second
+ release of it takes a live image's count down instead.
+
+ A null `assets` skips the whole thing rather than faulting, which is what makes
+ the default argument on `clear` honest: a pass that never held a texture has
+ nothing to give back, and every call site that might is a call site with the
+ table in scope.
+*>
+fn void PostPass.release_textures(&self, Gpu* gpu, Assets* assets)
+{
+	if (assets == null) return;
+
+	for (uint binding = TEXTURE_BINDING_FIRST; binding < MAX_SAMPLED_BINDINGS; binding++)
+	{
+		int held = self.textures.at(binding);
+		if (held == NO_TEXTURE) continue;
+		if (gpu != null && assets.texture_refs(held) == 1) gpu.wait_idle();
+		assets.release_texture(gpu, held);
+	}
+	self.textures = {};
+}
+
+<*
+ Which texture is in one of this pass's sampler bindings.
+
+ `MeshPass.material_texture`'s rule: a getter answers `NO_TEXTURE` for a name that
+ is not a sampler rather than faulting, because the setter is where a bad name is
+ reported against the line that wrote it.
+*>
+fn int PostPass.texture(&self, String name)
+{
+	if (!self.active) return NO_TEXTURE;
+	return self.textures.at(sampler_binding_of(&self.pipeline, name));
 }
 
 <*
@@ -426,7 +531,7 @@ fn void PostPass.free(&self, Gpu* gpu)
  So the flip that exists for projections is left off for the pass that has none,
  and `shaders/post.slang` needs no `uv` flip anywhere in it.
 *>
-fn void PostPass.record(&self, vk::CommandBuffer cmd, Target* target)
+fn void PostPass.record(&self, vk::CommandBuffer cmd, Target* target, Assets* assets = null)
 {
 	vk::cmdEndRendering(cmd);
 
@@ -468,15 +573,20 @@ fn void PostPass.record(&self, vk::CommandBuffer cmd, Target* target)
 	// Pushed, not bound — the same argument `MeshPass.record` makes: there is no
 	// descriptor set anywhere in this project, so image A is specified inline
 	// against this pipeline's own layout.
-	vk::DescriptorImageInfo image_info = {
+	//
+	// Binding 0 is image A and is written here, by hand, because this is the only
+	// line that knows what binding 0 of a *post* shader means. Everything above it
+	// comes from the shader's own reflection, resolved by name — see
+	// `render/bind.c3`. A pass with no textures pushes exactly the one write it
+	// always pushed.
+	SampledBindings samplers;
+	samplers.add(0, {
 		.sampler = self.sampler,
 		.imageView = self.view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-	};
-	vk::WriteDescriptorSet write = vk::writeDescriptorSet().setDstBinding(0)
-		.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-		.setImageInfo({ image_info });
-	vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.layout, 0, 1, &write);
+	});
+	if (assets != null) samplers.collect(&self.pipeline, &self.textures, assets);
+	samplers.push(cmd, &self.pipeline);
 
 	// `info` is rewritten here and nowhere else. The uniforms above it are
 	// whatever `set_uniform` last wrote, which is what makes them live between

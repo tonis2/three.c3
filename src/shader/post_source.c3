@@ -40,7 +40,18 @@ module three;
 
 import std::io;
 
-faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY;
+faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
+
+<*
+ How many samplers of its own a post pass may declare, on top of `scene`.
+
+ `MATERIAL_TEXTURE_LIMIT`'s number and most of its argument, minus the part about
+ per-bucket traffic: there is one post draw in a frame, so the cost of a binding
+ here is paid once rather than once per material. The limit is the same anyway,
+ because the reason to keep it small is the second half of that argument — five
+ images is an atlas or an array, and neither is a thing this project has.
+*>
+const uint POST_TEXTURE_LIMIT = 4;
 
 <*
  Bytes of push block available to post uniforms, after `info`.
@@ -156,10 +167,11 @@ fn uint post_uniform_bytes(MaterialUniform[] uniforms)
  them is known to be a real uniform.
 
  @return? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return? POST_NAME_INVALID : `A uniform name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
+ @return? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
  @return? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
+ @return? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
 *>
-fn void? validate_post(String fragment, MaterialUniform[] uniforms) @local
+fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
 {
 	@pool()
 	{
@@ -226,6 +238,18 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms) @local
 			}
 		}
 
+		// `validate_material`'s placement and its reason: a sampler is checked
+		// against the uniforms as well as against the template's own names, so
+		// both lists have to be individually sound first.
+		String texture_note = texture_problem(
+			POST_BODY_NAME, textures, uniforms, POST_RESERVED[..], POST_TEXTURE_LIMIT
+		);
+		if (texture_note.len > 0)
+		{
+			post_note(texture_note);
+			return textures.len > POST_TEXTURE_LIMIT ? POST_TOO_MANY_TEXTURES~ : POST_NAME_INVALID~;
+		}
+
 		uint wanted = post_uniform_bytes(uniforms);
 		if (wanted > POST_UNIFORM_BUDGET)
 		{
@@ -251,14 +275,25 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms) @local
 
  @param fragment : `The agent's body. Must define float3 post(Post p); everything else is theirs.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names. rows must be 0 or 1.`
+ @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence.`
- @return? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
+ @return? POST_NAME_INVALID : `A uniform or texture name, a width or a row count is one this cannot generate. post_diagnostic() names it.`
  @return? POST_TOO_MANY_UNIFORMS : `The uniforms do not fit in what info leaves of the push block.`
+ @return? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT. post_diagnostic() has the count.`
  @return? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
-fn String? post_source(String fragment, MaterialUniform[] uniforms, alloc::Allocator allocator = mem)
+fn String? post_source(
+	String fragment,
+	MaterialUniform[] uniforms,
+	alloc::Allocator allocator = mem,
+	// After the allocator, for `material_source`'s reason: every caller written
+	// before textures existed passes it positionally.
+	MaterialTexture[] textures = {}
+)
 {
-	validate_post(fragment, uniforms)!;
-	return assemble_shader(POST_TEMPLATE, fragment, uniforms, POST_BODY_NAME, POST_PREAMBLE_NAME, allocator);
+	validate_post(fragment, uniforms, textures)!;
+	return assemble_shader(
+		POST_TEMPLATE, fragment, uniforms, textures, POST_BODY_NAME, POST_PREAMBLE_NAME, allocator
+	);
 }

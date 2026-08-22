@@ -43,7 +43,24 @@ import std::io;
 const String MARKER_UNIFORMS @private = "//@uniforms";
 const String MARKER_ROWS @private = "//@rows";
 const String MARKER_DEFINES @private = "//@defines";
+const String MARKER_TEXTURES @private = "//@textures";
 const String MARKER_SHADE @private = "//@shade";
+
+<*
+ The binding index the first agent-declared sampler gets.
+
+ One, because zero is always taken and always occupied: `base_color_map` in a
+ material, `scene` in a post pass. Both templates declare theirs at binding 0
+ explicitly, so this is the number after it in both.
+
+ **Nothing outside this file chooses a binding index.** The declaration order
+ the caller passed is the binding order, generated here, read back by reflection
+ and resolved by *name* everywhere above — which is what makes inserting a
+ texture at the front of the list a non-event rather than a silent renumbering
+ of every sampler after it. A script that could write `[vk::binding(3, 0)]`
+ itself would be a script that can collide with the two names above.
+*>
+const uint TEXTURE_BINDING_FIRST = 1;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the
@@ -78,6 +95,90 @@ fn bool is_identifier(String name) @private
 		if (!alpha && !(digit && i > 0)) return false;
 	}
 	return true;
+}
+
+<*
+ Everything a list of sampler names can be refused for, as a sentence.
+
+ Shared by both front doors rather than written twice, unlike the uniform checks
+ beside it — and the reason for the difference is that the uniform rules genuinely
+ differ between a material and a post pass (one has tables and a 52-byte budget,
+ the other has neither) while these rules are the same rules with a different word
+ in front of them. Two copies would be two chances for the collision list and the
+ duplicate check to drift apart.
+
+ The name must not collide with a *uniform* either, which is the one check that
+ could not be inferred from either list alone: a uniform is a `#define` live
+ across the body, so a sampler sharing its name would be rewritten to `push.<name>`
+ at every use — a diagnostic about a push field the agent never mentioned.
+
+ @param prefix : `"material" or "post" — what the sentence calls the thing being built.`
+ @param reserved : `The template's own vocabulary, which a sampler may not take either.`
+ @param limit : `How many samplers this kind of shader may declare.`
+ @return `The empty string when the names are usable, or the sentence to refuse them with. Allocated from tmem.`
+*>
+fn String texture_problem(
+	String prefix,
+	MaterialTexture[] textures,
+	MaterialUniform[] uniforms,
+	String[] reserved,
+	uint limit
+) @private
+{
+	// Counted first, so that a script that passed eight names is told the number
+	// rather than being told about the first one that also happened to be
+	// misspelled.
+	if (textures.len > limit)
+	{
+		return string::tformat(
+			"%s: %d textures were declared and a %s may have %d; a shader wanting more images than that wants an atlas, which is one texture",
+			prefix,
+			textures.len,
+			prefix,
+			limit
+		);
+	}
+
+	foreach (i, texture : textures)
+	{
+		if (!is_identifier(texture.name))
+		{
+			return string::tformat(
+				"%s: texture name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
+				prefix,
+				texture.name
+			);
+		}
+
+		foreach (word : reserved)
+		{
+			if (texture.name != word) continue;
+			return string::tformat(
+				"%s: texture name '%s' is reserved; the shader three.c3 generates around your body already uses it",
+				prefix,
+				texture.name
+			);
+		}
+
+		foreach (j, earlier : textures)
+		{
+			if (j >= i) break;
+			if (earlier.name != texture.name) continue;
+			return string::tformat("%s: texture '%s' is declared twice", prefix, texture.name);
+		}
+
+		foreach (uniform : uniforms)
+		{
+			if (uniform.name != texture.name) continue;
+			return string::tformat(
+				"%s: '%s' is both a uniform and a texture; a uniform is a macro live across your body, so it would rewrite the sampler's every use",
+				prefix,
+				texture.name
+			);
+		}
+	}
+
+	return "";
 }
 
 <*
@@ -137,6 +238,7 @@ fn uint append_lines(DString* out, String text) @private
  @param template_name : `A file name, looked up by find_shader — shaders/ first, then build/shaders/.`
  @param fragment : `The agent's body, appended verbatim between the two #line directives.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
+ @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see TEXTURE_BINDING_FIRST.`
  @param body_name : `What the agent's own lines are called in a diagnostic — "material", "post".`
  @param preamble_name : `What everything three.c3 generated is called — "three.material", "three.post".`
  @return `The whole module, allocated from allocator and owned by the caller.`
@@ -146,6 +248,7 @@ fn String? assemble_shader(
 	String template_name,
 	String fragment,
 	MaterialUniform[] uniforms,
+	MaterialTexture[] textures,
 	String body_name,
 	String preamble_name,
 	alloc::Allocator allocator
@@ -206,6 +309,28 @@ fn String? assemble_shader(
 				foreach (uniform : uniforms)
 				{
 					out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+					out.append_char('\n');
+					physical++;
+				}
+				continue;
+			}
+			if (marker == MARKER_TEXTURES)
+			{
+				// **A declaration, not a `#define`.** A uniform is a push field
+				// reached through a macro that is undefined again after the body;
+				// a sampler is a global of the module, so the agent's name *is*
+				// the declaration's name and there is nothing to undo. That also
+				// means a sampler is visible to the template's own lines as well
+				// as to the body — which is harmless here and would not be if
+				// these were macros, and is why `MATERIAL_RESERVED` refuses the
+				// same names for both.
+				foreach (i, texture : textures)
+				{
+					out.appendf(
+						"[vk::binding(%d, 0)] Sampler2D %s;",
+						TEXTURE_BINDING_FIRST + (uint)i,
+						texture.name
+					)!!;
 					out.append_char('\n');
 					physical++;
 				}

@@ -215,11 +215,17 @@ fn Renderer? Renderer.init(
 fn void Renderer.free(&self)
 {
 	if (self.gpu.handle != null) self.gpu.handle.waitIdle();
-	self.pass.free(&self.gpu);
 	// Before the target, because it holds an image created at the target's
 	// extent — and after the idle, because it frees a pipeline outright rather
 	// than retiring it.
+	//
+	// **And before the mesh pass**, which is newer and is the ordering that
+	// matters now: the post shader's own samplers hold references into
+	// `pass.assets`, and `MeshPass.free` frees every texture slot outright. Giving
+	// them back afterwards would be reading a table that no longer exists.
+	self.post.release_textures(&self.gpu, &self.pass.assets);
 	self.post.free(&self.gpu);
+	self.pass.free(&self.gpu);
 	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
 	self.viewer.free(&self.gpu);
@@ -295,7 +301,10 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 
 	if (posted)
 	{
-		self.post.record(cmd, &self.target);
+		// The asset table comes down with it because the post shader's own
+		// samplers resolve through it — the frame that is being written is
+		// binding 0, and everything above that is an image a script named.
+		self.post.record(cmd, &self.target, &self.pass.assets);
 	}
 	else
 	{

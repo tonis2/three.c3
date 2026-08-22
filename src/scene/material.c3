@@ -11,8 +11,16 @@
  ## The uniforms ride in the push block, not in a uniform buffer
 
  `shaders/material.slang` appends the agent's uniforms to the same push block the
- mesh contract already uses, after `flags`. That is 68 free bytes — 17 floats —
- and it is the whole storage story.
+ mesh contract already uses, after `uv_transform`. That is 52 free bytes — 13
+ floats — and it is the whole storage story for *values*.
+
+ **Textures are not in it and never were.** A sampler is a descriptor, so the
+ four a material may declare cost the push block nothing at all and the budget
+ below is only ever about floats. That is why `textures:` arrived without the
+ uniform buffer this header used to say it depended on: the thing that was
+ missing was never storage, it was the *write* site — two hardcoded
+ `setDstBinding(0)` calls that could not express a second image however much room
+ there was. `render/bind.c3` is where that changed.
 
  The alternative, a `ConstantBuffer<Params>` reached by descriptor, costs four
  things that do not exist yet: reflection of uniform-block *members* (Slang
@@ -24,11 +32,11 @@
  of push fields by name and byte offset is already built, already tested
  byte-for-byte, and already the mechanism `base_color` reaches the shader through.
 
- What it refuses is a material with more than 68 bytes of uniforms — no textures
- of its own, no arrays, no matrices beyond a couple. That is the right trade for
- tier 2, whose whole claim is "a fragment function, not a pipeline". The day a
- material wants its own texture is the day the uniform buffer gets written, and
- `MATERIAL_UNIFORM_BUDGET` is where that conversation starts.
+ What it refuses is a material with more than 52 bytes of uniforms — no long
+ arrays, no matrices beyond a couple, and a table of four float3 rows plus a clock
+ is already over. That is the right trade for tier 2, whose whole claim is "a
+ fragment function, not a pipeline", and `MATERIAL_UNIFORM_BUDGET` is where the
+ conversation about widening it starts.
 
  ## A material is an index, and the default one is shared
 
@@ -48,6 +56,11 @@ import vk;
 faultdef
 	MATERIAL_UNKNOWN,
 	MATERIAL_TEXTURE_UNKNOWN,
+	// A name that is not one of this material's samplers. Separate from
+	// `MATERIAL_TEXTURE_UNKNOWN`, which is about the *image*: one says the picture
+	// is not there and the other says the shader has nowhere to put it, and the
+	// two are fixed in different files.
+	MATERIAL_SAMPLER_UNKNOWN,
 	MATERIAL_UNIFORM_UNKNOWN,
 	MATERIAL_UNIFORM_WIDTH,
 	MATERIAL_NEEDS_DEVICE,
@@ -258,6 +271,10 @@ struct Material
 	// that the mistake is possible to make; the alternative, a biased
 	// index-plus-one, makes it impossible and makes every read arithmetic.
 	int texture;
+	// The samplers the body declared, at bindings 1..N. Binding 0 is `texture`
+	// above and is not in here. See `TextureSlots` for what is stored and why it
+	// is not simply the index.
+	TextureSlots textures;
 	// `material.repeat` and `material.offset` — xy is how many times the texture
 	// repeats across the surface, zw is where it starts.
 	//
@@ -359,6 +376,81 @@ fn float Material.opacity(&self)
  moved.
 *>
 const int NO_TEXTURE = -1;
+
+<*
+ The textures sitting in one shader's own sampler bindings.
+
+ A struct rather than a field on `Material` because a post pass has exactly the
+ same thing — samplers at bindings 1..N, filled by name, bound every draw — and
+ the bias below is not something two files should each know about.
+
+ ## What is stored is the index plus one
+
+ Zero is an ordinary texture index, and this is an *array*: requiring every
+ construction site to spell it out, the way `Material.texture` is spelled out,
+ would mean four entries at each of them, and the site that wrote three would bind
+ whatever image the table uploaded first to the fourth. So this takes the third of
+ the three strategies `Material`'s header lays out — encode when zero is
+ meaningful and the default is not zero. The zero fill means "nothing here", a
+ real index `n` is stored as `n + 1`, and the arithmetic lives only in the two
+ accessors below, exactly as the opacity complement lives only in
+ `Material.opacity`.
+*>
+struct TextureSlots
+{
+	int[MATERIAL_TEXTURE_LIMIT] stored;
+}
+
+<*
+ Which texture is in one binding.
+
+ The only reader of the bias, so nothing above this has to remember it was there.
+
+ A binding outside the range answers `NO_TEXTURE` rather than faulting, which is
+ the call `Assets.texture_at` makes about an unknown index and for the same
+ reason: the caller is `record`, the answer picks an image, and white is a picture
+ that is visibly wrong rather than a draw that does not happen.
+
+ @param binding : `The shader's own binding index, from TEXTURE_BINDING_FIRST up.`
+ @return `An index into Assets.textures, or NO_TEXTURE for a binding nothing was put in.`
+*>
+fn int TextureSlots.at(&self, uint binding)
+{
+	if (binding < TEXTURE_BINDING_FIRST || binding >= TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT)
+	{
+		return NO_TEXTURE;
+	}
+	int stored = self.stored[binding - TEXTURE_BINDING_FIRST];
+	return stored == 0 ? NO_TEXTURE : stored - 1;
+}
+
+<*
+ Put a texture in one binding.
+
+ The only writer of the bias. **It takes no references and gives none back** —
+ retaining the new index and releasing the old one belongs to whoever has the
+ `Assets` and a device to wait on, which is `MeshPass.set_material_texture` for a
+ material and `PostPass.hold_textures` for a post pass. Writing through here
+ directly leaks a reference, which is why it is said here and not only there.
+
+ @param binding : `The shader's own binding index. Out of range is ignored.`
+ @param texture : `An index into Assets.textures, or NO_TEXTURE to empty the binding.`
+*>
+fn void TextureSlots.set(&self, uint binding, int texture)
+{
+	if (binding < TEXTURE_BINDING_FIRST || binding >= TEXTURE_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT) return;
+	self.stored[binding - TEXTURE_BINDING_FIRST] = texture == NO_TEXTURE ? 0 : texture + 1;
+}
+
+<*
+ Which binding a sampler name means, through this material's own pipeline.
+
+ One line, because the resolution itself is `sampler_binding_of` in
+ `render/bind.c3` — shared with the post pass, which asks the identical question
+ of a pipeline that is not a material's. Zero means no; see there for why zero can
+ mean that.
+*>
+fn uint Material.binding_of_texture(&self, String name) => sampler_binding_of(self.pipeline, name);
 
 <*
  Point a uniform at new values.
