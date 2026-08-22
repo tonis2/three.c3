@@ -57,7 +57,26 @@ module three;
 
 import std::io;
 
-faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY;
+faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY, MATERIAL_TOO_MANY_TEXTURES;
+
+<*
+ One sampler the agent asked for, as the JS side named it.
+
+ There is no width, no type and no binding index here, and each absence is the
+ point. A texture is a `Sampler2D` because that is the only image kind this
+ project binds; and its binding index is **generated from the position of this
+ entry in the array** rather than carried on it, which is what keeps the number
+ out of every layer above `shader/assemble.c3`. See `TEXTURE_BINDING_FIRST`.
+
+ So a material's textures are, end to end, a list of names: the script writes
+ them, the assembler numbers them, reflection reads the numbers back, and
+ `Material.set_texture` resolves a name to a binding through the reflected
+ layout. The number exists in exactly one file.
+*>
+struct MaterialTexture
+{
+	String name;  // borrowed from the caller
+}
 
 <*
  One material uniform, as the JS side described it.
@@ -104,6 +123,27 @@ struct MaterialUniform
  budget stops being 128 bytes and starts being memory.
 *>
 const uint MATERIAL_UNIFORM_BUDGET = 52;
+
+<*
+ How many samplers of its own a material may declare, on top of `map`.
+
+ A budget rather than a device limit, the same way `PUSH_BUDGET` is. The real
+ ceiling is `maxPushDescriptors`, which every implementation that offers the
+ extension must report as at least 32 — so four plus the base colour map cannot
+ be refused by a device, and nothing here has to query anything or have a
+ fallback path for a machine that says a smaller number.
+
+ Four because of what the fifth would cost rather than what it would gain: the
+ descriptors are pushed **per bucket**, so every sampler is per-draw command
+ traffic on every material that declares one, and a material wanting more images
+ than this is usually wanting an atlas or a texture array — both of which are one
+ binding and neither of which exists here yet.
+
+ Three is what the effects this was built for actually use: a pattern, a ramp and
+ a mask. The fourth is the one that stops that from being a cap somebody has to
+ work around on their first attempt.
+*>
+const uint MATERIAL_TEXTURE_LIMIT = 4;
 
 // The template, looked up the same way `mesh.slang` is — `shaders/` first, then
 // `build/shaders/`, both relative to the working directory.
@@ -242,10 +282,11 @@ fn uint material_rows(MaterialUniform[] uniforms)
  useful once each of them is known to be a real uniform.
 
  @return? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return? MATERIAL_NAME_INVALID : `A uniform name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, or is not 1 to 4 floats wide.`
+ @return? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, or is not 1 to 4 floats wide.`
  @return? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
+ @return? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
 *>
-fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
+fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
 {
 	@pool()
 	{
@@ -316,6 +357,22 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
 			}
 		}
 
+		// After the uniforms, because a texture name is checked *against* them:
+		// the collision that matters most here is a sampler sharing a uniform's
+		// name, and `texture_problem` can only report it once both lists are known
+		// to be individually sound.
+		String texture_note = texture_problem(
+			MATERIAL_BODY_NAME, textures, uniforms, MATERIAL_RESERVED[..], MATERIAL_TEXTURE_LIMIT
+		);
+		if (texture_note.len > 0)
+		{
+			material_note(texture_note);
+			// The count is its own fault because it is the one a caller fixes
+			// differently — every other sentence here is answered by renaming
+			// something, and this one is answered by asking for fewer images.
+			return textures.len > MATERIAL_TEXTURE_LIMIT ? MATERIAL_TOO_MANY_TEXTURES~ : MATERIAL_NAME_INVALID~;
+		}
+
 		uint wanted = material_uniform_bytes(uniforms);
 		if (wanted > MATERIAL_UNIFORM_BUDGET)
 		{
@@ -342,19 +399,31 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms) @local
 
  @param fragment : `The agent's body. Must define float3 shade(Surface s); everything else is theirs.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
+ @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? MATERIAL_BODY_EMPTY : `The body is empty. material_diagnostic() has the sentence.`
- @return? MATERIAL_NAME_INVALID : `A uniform name or width is one this cannot generate. material_diagnostic() names it.`
+ @return? MATERIAL_NAME_INVALID : `A uniform or texture name, or a uniform width, is one this cannot generate. material_diagnostic() names it.`
  @return? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms do not fit in what the mesh contract leaves of the push block.`
+ @return? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT. material_diagnostic() has the count.`
  @return? SHADER_NOT_FOUND : `shaders/material.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
-fn String? material_source(String fragment, MaterialUniform[] uniforms, alloc::Allocator allocator = mem)
+fn String? material_source(
+	String fragment,
+	MaterialUniform[] uniforms,
+	alloc::Allocator allocator = mem,
+	// **After the allocator**, which reads wrong and is deliberate: every caller
+	// that predates textures passes the allocator positionally, and putting this
+	// where it belongs would silently turn one of those into a texture list. The
+	// project already makes this trade for `create_material`'s `diagnostic`.
+	MaterialTexture[] textures = {}
+)
 {
-	validate_material(fragment, uniforms)!;
+	validate_material(fragment, uniforms, textures)!;
 	return assemble_shader(
 		MATERIAL_TEMPLATE,
 		fragment,
 		uniforms,
+		textures,
 		MATERIAL_BODY_NAME,
 		MATERIAL_PREAMBLE_NAME,
 		allocator

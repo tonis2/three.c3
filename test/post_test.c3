@@ -615,6 +615,14 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					want.push("    float3 palette[2];");
 				case "//@rows":
 					want.push("static const uint MATERIAL_ROWS = 2u;");
+				case "//@textures":
+					// Nothing: this material declared no samplers, and a marker with
+					// nothing to generate is replaced by zero lines rather than left
+					// in place. Spelled as an empty case rather than left to
+					// `default`, because falling through to `default` would push the
+					// marker line itself and the byte comparison below would say
+					// twelve bytes and not why.
+					break;
 				case "//@defines":
 					want.push("#define tint (push.tint)");
 					want.push("#define time (push.time)");
@@ -948,7 +956,9 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
 		defer good.free();
 
 		String diagnostic;
-		fault refused = @catch(renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY, {}, &diagnostic));
+		fault refused = @catch(
+			renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY, {}, diagnostic: &diagnostic)
+		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
 		test::@check(
@@ -1044,5 +1054,192 @@ fn void the_post_pass_is_silent_under_validation() @test
 
 		test::@check(errors.len == 0, "the post pass produced validation errors: %s", errors);
 		test::@check(warnings.len == 0, "and warnings: %s", warnings);
+	};
+}
+
+// ============================================================================
+// Textures
+//
+// A post pass's own samplers. `material_test`'s texture section has the general
+// claims — that the indices are generated, that they cost the push block
+// nothing — and this is what is different here: binding 0 is the frame rather
+// than a material's map, and there is a device at the end of it.
+// ============================================================================
+
+<*
+ A declared texture is a binding beside `scene`, not instead of it.
+
+ The thing that would break silently: image A is bound at 0 by
+ `PostPass.record`, so a generated declaration that landed there would push the
+ frame into the agent's sampler and leave the body reading its own lookup table
+ as though it were the picture. `TEXTURE_BINDING_FIRST` is why it cannot, and
+ this asserts both ends of that rather than the constant.
+*>
+fn void a_post_texture_is_a_binding_beside_the_scene() @test
+{
+	three::MaterialTexture[2] textures = { { "grade_lut" }, { "grain_map" } };
+
+	String source = three::post_source(
+		`float3 post(Post p)
+		{
+		    float3 graded = grade_lut.Sample(float2(p.color.r, 0.5)).rgb;
+		    return graded + grain_map.Sample(p.uv).rgb * 0.05;
+		}`,
+		{},
+		mem,
+		textures[..]
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
+
+	test::@check(mod.layout.bindings.len() == 3,
+		"the frame and the two the body asked for, got %d", mod.layout.bindings.len());
+
+	three::ShaderBinding* frame = mod.layout.binding_of("scene");
+	test::@check(frame != null && frame.binding == 0, "the frame is still binding 0");
+
+	three::ShaderBinding* lut = mod.layout.binding_of("grade_lut");
+	test::@check(lut != null, "the first declared texture is there by name");
+	if (lut == null) return;
+	test::@check(lut.binding == three::TEXTURE_BINDING_FIRST,
+		"at %d, got %d", three::TEXTURE_BINDING_FIRST, lut.binding);
+	test::@check(lut.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		"as a combined image sampler, got %d", (uint)lut.type);
+
+	// `info` is 16 bytes and stays 16 bytes: a sampler is a descriptor, not push
+	// data, so declaring two of them moves nothing in the block.
+	test::@check(mod.layout.push_size == three::POST_PUSH_START,
+		"and the push block is still just info, got %d", mod.layout.push_size);
+}
+
+<*
+ `scene` cannot be taken by a post texture, and neither can a uniform's name.
+
+ `scene` is the sampler the template declares, so a second one is a redefinition
+ in generated code — and it is the one name in `POST_RESERVED` whose collision is
+ specifically about a *texture* rather than about a `#define`.
+*>
+fn void a_post_texture_name_the_template_already_uses_is_refused() @test
+{
+	three::MaterialTexture[1] theirs = { { "scene" } };
+	fault refused = @catch(three::post_source(IDENTITY, {}, mem, theirs[..]));
+	test::@check(refused == three::POST_NAME_INVALID, "'scene' is refused, got %s", refused);
+	test::@check(
+		three::post_diagnostic().contains("scene") && three::post_diagnostic().contains("reserved"),
+		"as reserved, by name: %s",
+		three::post_diagnostic()
+	);
+
+	three::MaterialUniform[1] uniforms = { { "amount", 1, 1 } };
+	three::MaterialTexture[1] clashing = { { "amount" } };
+	fault both = @catch(three::post_source(IDENTITY, uniforms[..], mem, clashing[..]));
+	test::@check(both == three::POST_NAME_INVALID, "a uniform's name is refused too, got %s", both);
+
+	three::MaterialTexture[5] too_many = {
+		{ "a_map" }, { "b_map" }, { "c_map" }, { "d_map" }, { "e_map" },
+	};
+	fault counted = @catch(three::post_source(IDENTITY, {}, mem, too_many[..]));
+	test::@check(counted == three::POST_TOO_MANY_TEXTURES, "and five is too many, got %s", counted);
+}
+
+<*
+ A one-pixel image, uploaded, for a test that needs a texture and does not care
+ what is in it beyond its colour.
+*>
+fn int solid_texture(three::Renderer* renderer, char r, char g, char b)
+{
+	char[4] pixels = { r, g, b, 255 };
+	image::Image one = {
+		.width = 1,
+		.height = 1,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		// No allocator, left at the zero fill: `Image.free` frees nothing without
+		// one, which is what makes a stack array safe to hand over here.
+		.pixels = pixels[..],
+	};
+	return renderer.pass.assets.claim_texture(&renderer.gpu, one)!!;
+}
+
+<*
+ A post texture reaches the pixels, and swapping it reaches them again.
+
+ **The end-to-end claim of the whole feature**, and the only test that exercises
+ every layer of it at once: a name in a list becomes a generated
+ `[vk::binding(1, 0)]`, comes back through reflection as a binding index, is
+ pushed as a descriptor by `SampledBindings`, and is what the body samples. Any
+ one of those failing is a frame that is not the colour of the texture.
+
+ The body ignores `p.color` entirely, so the assertion does not have to reason
+ about what the scene was: whatever the frame contained, it comes out the colour
+ of the sampler — which is also what makes the swap unambiguous.
+
+ **Proved by injection.** `SampledBindings.collect` returning without adding
+ anything — the frame comes back white, because the binding the layout declares
+ goes unwritten and the sampler reads the driver's idea of nothing. That is
+ precisely the undefined behaviour `render/bind.c3`'s header describes, and it is
+ why every declared binding is written every draw rather than only the filled
+ ones.
+*>
+fn void a_post_texture_reaches_the_pixels_and_can_be_swapped() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		int green = solid_texture(renderer, 20, 230, 40);
+		int blue = solid_texture(renderer, 30, 40, 220);
+
+		three::MaterialTexture[1] textures = { { "tint_map" } };
+		renderer.post.set(
+			&renderer.gpu,
+			&renderer.target,
+			`float3 post(Post p) { return tint_map.Sample(float2(0.5, 0.5)).rgb; }`,
+			{},
+			textures[..],
+			&renderer.pass.assets
+		)!!;
+		renderer.post.set_texture(&renderer.gpu, &renderer.pass.assets, "tint_map", green)!!;
+
+		image::Image tinted = renderer.capture()!!;
+		defer tinted.free();
+		float red_mean = band_mean(&tinted, 0, true);
+		float green_mean = band_mean(&tinted, 1, true);
+		float blue_mean = band_mean(&tinted, 2, true);
+		test::@check(
+			green_mean > red_mean + 40.0 && green_mean > blue_mean + 40.0,
+			"the frame is the texture's green: r %f g %f b %f",
+			red_mean, green_mean, blue_mean
+		);
+
+		// Live, with no compile: the same pipeline, a different descriptor.
+		renderer.post.set_texture(&renderer.gpu, &renderer.pass.assets, "tint_map", blue)!!;
+
+		image::Image swapped = renderer.capture()!!;
+		defer swapped.free();
+		test::@check(
+			band_mean(&swapped, 2, true) > band_mean(&swapped, 1, true) + 40.0,
+			"and swapping the texture swapped the frame: g %f b %f",
+			band_mean(&swapped, 1, true), band_mean(&swapped, 2, true)
+		);
+
+		// A name the shader does not declare is refused rather than ignored — the
+		// setter is where a typo is reported, because the getter cannot be.
+		fault unknown = @catch(
+			renderer.post.set_texture(&renderer.gpu, &renderer.pass.assets, "no_such_map", blue)
+		);
+		test::@check(unknown == three::MATERIAL_SAMPLER_UNKNOWN, "an unknown sampler is refused, got %s", unknown);
+
+		// And the references are given back with the shader that held them, so a
+		// pass that is cleared is not still pinning two images.
+		test::@check(renderer.pass.assets.texture_refs(blue) == 2,
+			"the pass holds the image it is showing plus this test's own reference: %d",
+			renderer.pass.assets.texture_refs(blue));
+		renderer.post.clear(&renderer.gpu, &renderer.pass.assets);
+		test::@check(renderer.pass.assets.texture_refs(blue) == 1,
+			"and clearing gave it back: %d", renderer.pass.assets.texture_refs(blue));
 	};
 }

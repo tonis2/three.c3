@@ -1233,6 +1233,80 @@
 		});
 	}
 
+	// The declared samplers of a shader, as `{ name: texture }`, checked before
+	// anything crosses.
+	//
+	// Two lists come back rather than one object, because that is the shape the
+	// host takes — names joined and ids joined, the same crossing the uniforms
+	// make and for the same reason (the QuickJS shim reads a property by name and
+	// cannot enumerate one).
+	//
+	// **`null` is a legal value and is not the same as leaving the name out.**
+	// Leaving it out means the shader does not declare that sampler at all; `null`
+	// means it declares it and starts it white, which is what a body that fills a
+	// texture in later wants. `NoTexture` is what says so on the wire.
+	function textureLists(textures, what) {
+		if (textures === null || textures === undefined) return { names: [], ids: [], values: {} };
+		if (typeof textures !== 'object') {
+			throw new TypeError(`\`textures\` wants an object like { noise_map: three.texture('noise.png') }`);
+		}
+		const names = Object.keys(textures);
+		const values = {};
+		const ids = names.map((name) => {
+			const v = textures[name];
+			if (v !== null && v !== undefined && !(v instanceof Texture)) {
+				throw new TypeError(
+					`${what} texture '${name}' wants a three.texture(path) or a three.DataTexture, `
+					+ 'or null for a sampler that starts white'
+				);
+			}
+			values[name] = v ?? null;
+			return v ? v._index() : NoTexture;
+		});
+		return { names, ids, values };
+	}
+
+	// The live `textures` object: reads give the texture last put in a sampler,
+	// writes send it to the device.
+	//
+	// `uniformsProxy`'s shape and every one of its arguments — a Proxy rather than
+	// a sealed object, because a script is not in strict mode and assigning an
+	// unknown property to a sealed object silently does nothing, which here would
+	// be a texture that never appears and a shader that looks broken.
+	//
+	// It is a *separate* proxy from `uniforms` rather than a merged one, because
+	// the two are separate in the shader as well: a uniform is push-block bytes and
+	// a texture is a descriptor, they are refused for different reasons, and a name
+	// that is both is refused outright by `texture_problem`.
+	function texturesProxy(owner, declared, what) {
+		return new Proxy({}, {
+			get(_, name) { return owner._textureValues[name]; },
+			has(_, name) { return declared.has(name); },
+			ownKeys() { return [...declared]; },
+			getOwnPropertyDescriptor(_, name) {
+				if (!declared.has(name)) return undefined;
+				return { enumerable: true, configurable: true, value: owner._textureValues[name] };
+			},
+			set(_, name, v) {
+				if (!declared.has(name)) {
+					throw new TypeError(
+						`${what} has no texture called '${String(name)}' — it declared ${[...declared].join(', ') || 'none'}`
+					);
+				}
+				if (v !== null && v !== undefined && !(v instanceof Texture)) {
+					throw new TypeError(
+						`texture '${String(name)}' wants a three.texture(path) or a three.DataTexture, `
+						+ 'or null to put white back'
+					);
+				}
+				const texture = v ?? null;
+				owner._setTexture(String(name), texture);
+				owner._textureValues[name] = texture;
+				return true;
+			},
+		});
+	}
+
 	// A shader written by whoever is driving, compiled the moment it is
 	// constructed.
 	//
@@ -1252,13 +1326,19 @@
 			if (options === null || typeof options !== 'object') {
 				throw new TypeError('new three.ShaderMaterial({ fragment, uniforms }) wants an options object');
 			}
-			const { fragment, uniforms = {}, side = FrontSide } = options;
+			const { fragment, uniforms = {}, textures = {}, side = FrontSide } = options;
 			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 				throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
 			}
 			if (uniforms === null || typeof uniforms !== 'object') {
 				throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
 			}
+			// Every sampler the body wants, checked here so that a mistyped value
+			// is refused before a shader is compiled for it. The names become
+			// `[vk::binding(1, 0)] Sampler2D <name>;` lines in the generated
+			// module, in this order — and nothing on this side ever says which
+			// number: the host resolves them back by name through reflection.
+			const declared = textureLists(textures, 'this material\'s');
 			Material._checkSide(side);
 			// After the fragment and the uniforms, so that a material with a
 			// missing body is told about the body first — the blend mode is the
@@ -1294,11 +1374,19 @@
 				shapes.map(s => s[1]).join(','),
 				side,
 				blending,
+				declared.names.join(','),
+				declared.ids.join(','),
 			), side, blending);
 			this.fragment = fragment;
 			if (options.opacity !== undefined) this.opacity = options.opacity;
 			this._rows = {};
 			for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
+
+			// Bound by the host during `createMaterial` — the constructor took the
+			// ids with it — so this is the record of what went in rather than a
+			// second pass of crossings.
+			this._textureValues = { ...declared.values };
+			this.textures = texturesProxy(this, new Set(declared.names), 'this material');
 
 			// The Proxy is `uniformsProxy` above, shared with the post pass: one
 			// implementation of "assigning an undeclared uniform throws", and so
@@ -1342,6 +1430,14 @@
 			}
 		}
 
+		// One sampler, sent to the device. `null` puts white back rather than
+		// leaving the binding empty — a binding the draw does not write is
+		// undefined behaviour that nothing reports, so there is no such thing as
+		// "empty" past this line.
+		_setTexture(name, texture) {
+			H.setMaterialTexture(this._index(), name, texture === null ? NoTexture : texture._index());
+		}
+
 		// A live view of one column: reads give the row, writes send it to the
 		// device. Rebuilt per access rather than cached, because it holds nothing
 		// but the name and a script that keeps one is holding a view rather than
@@ -1376,6 +1472,11 @@
 				opacity: this.alive ? this.opacity : null,
 				map: this._map?.toJSON() ?? null,
 				uniforms: { ...this._values },
+				// The names as well as the images, so a material with a sampler it
+				// has not filled yet still says the sampler is there.
+				textures: Object.fromEntries(
+					Object.keys(this._textureValues).map(n => [n, this._textureValues[n]?.toJSON() ?? null])
+				),
 			};
 		}
 	}
@@ -1400,7 +1501,7 @@
 	// and a setPost(null). A handle remembers the number it was made at.
 	let postEpoch = 0;
 
-	function postHandle(fragment, names) {
+	function postHandle(fragment, names, declared = { names: [], values: {} }) {
 		postEpoch++;
 		const epoch = postEpoch;
 		const handle = { fragment };
@@ -1433,11 +1534,21 @@
 				H.setPostUniform(name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length);
 				internals._values[name] = typeof v === 'number' ? +v : n.map(Number);
 			},
+			// What the samplers hold, and the write path for changing one. The
+			// staleness check is the same one the uniforms make and for the same
+			// reason: writing a texture through a replaced handle would put it in
+			// the *new* shader's sampler of that name.
+			_textureValues: { ...declared.values },
+			_setTexture(name, texture) {
+				internals._check();
+				H.setPostTexture(name, texture === null ? NoTexture : texture._index());
+			},
 		};
 		for (const key of Object.keys(internals)) {
 			Object.defineProperty(handle, key, { value: internals[key], enumerable: false });
 		}
 		handle.uniforms = uniformsProxy(handle, new Set(names), 'the post pass');
+		handle.textures = texturesProxy(handle, new Set(declared.names), 'the post pass');
 		return handle;
 	}
 
@@ -2846,13 +2957,14 @@
 					'three.setPost({ fragment, uniforms }) wants an options object, or null to clear the pass'
 				);
 			}
-			const { fragment, uniforms = {} } = spec;
+			const { fragment, uniforms = {}, textures = {} } = spec;
 			if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 				throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
 			}
 			if (uniforms === null || typeof uniforms !== 'object') {
 				throw new TypeError('`uniforms` wants an object like { gain: 1, tint: [1, 0.5, 0.2] }');
 			}
+			const declared = textureLists(textures, 'this post pass\'s');
 
 			// The enumeration happens here for `ShaderMaterial`'s reason: the
 			// QuickJS shim exposes property *get* by name and nothing that lists
@@ -2860,14 +2972,20 @@
 			const names = Object.keys(uniforms);
 			const shapes = names.map(n => uniformShape(n, uniforms[n], false));
 
-			H.setPost(fragment, names.join(','), shapes.map(s => s[0]).join(','));
+			H.setPost(
+				fragment,
+				names.join(','),
+				shapes.map(s => s[0]).join(','),
+				declared.names.join(','),
+				declared.ids.join(','),
+			);
 
 			// **After the compile, and not before it.** Setting a post shader
 			// zeroes the push block — the new shader's uniforms are new fields at
 			// new offsets, so carrying the old bytes over would be writing one
 			// shader's values into another's layout. So the values the spec gave
 			// are written afterwards, exactly as a ShaderMaterial writes its own.
-			const handle = postHandle(fragment, names);
+			const handle = postHandle(fragment, names, declared);
 			for (const name of names) handle._set(name, uniforms[name]);
 			return handle;
 		},
@@ -3240,6 +3358,7 @@
 			'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
 			'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
 			'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row.',
+			'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 			'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
 			'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
 			'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
@@ -3381,19 +3500,28 @@
 				methods: ['dispose()', 'toJSON()'],
 			},
 			ShaderMaterial: {
-				construct: "new three.ShaderMaterial({ fragment, uniforms, side, transparent, blending, opacity })",
+				construct: "new three.ShaderMaterial({ fragment, uniforms, textures, side, transparent, blending, opacity })",
 				note:
 					'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
 					+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo) '
 					+ 'and variant (its row of the table, clamped). Each uniform is readable in the body by '
 					+ 'its own name; a uniform written as an array of arrays is a table column, read as '
-					+ 'name[s.variant]. Compiles on construction, so a bad shader throws here, carrying the '
+					+ 'name[s.variant]. textures is the same idea for images: { noise_map: tex } declares a '
+					+ 'Sampler2D called noise_map that the body samples by that name — noise_map.Sample(uv) — '
+					+ 'and up to four of them. You never write a binding number: the shader is generated with '
+					+ 'the bindings in it and the host resolves each name back through the compiled module\'s '
+					+ 'own reflection. Sample with any uv you like, which is the point — s.uv + float2(t, 0) '
+					+ 'scrolls, s.uv * 4 tiles, float2(k, 0.5) reads a gradient as a lookup table. A sampler '
+					+ 'left null, or one you never fill, reads as 1x1 opaque white rather than as nothing. '
+					+ 'Compiles on construction, so a bad shader throws here, carrying the '
 					+ 'Slang diagnostic with the line number you wrote. Needs a GPU device. '
 					+ 'shade() returns rgb and never alpha: how much of the surface shows is the '
 					+ 'material\'s opacity times this copy\'s mesh.color alpha, so a body cannot make '
-					+ 'geometry invisible by accident and a script can, deliberately.',
+					+ 'geometry invisible by accident and a script can, deliberately. discard works in a '
+					+ 'body and is how a dissolve or a cutout is done, since the alpha is not yours to return.',
 				properties: [
 					'uniforms (live: mat.uniforms.tint = [1, 0, 0], or mat.uniforms.palette[2] = [1, 0, 0])',
+					'textures (live: mat.textures.noise_map = otherTexture, or null to put white back. Only the names given at construction exist; assigning any other throws)',
 					'fragment',
 					'map (a three.texture, or null; sampled as Surface.albedo before your shade() runs)',
 					'side (three.FrontSide, three.BackSide or three.DoubleSide; settable, and cheap after the first time each side is asked for)',
@@ -3864,7 +3992,7 @@
 				'Read or write a uniform. Writing takes effect on the next render. Only names declared at '
 				+ 'construction exist; assigning to any other name throws. A uniform declared as a table is '
 				+ 'written a row at a time — material.uniforms.palette[1] = [0, 1, 0] — or all at once.',
-			'three.setPost({ fragment, uniforms })':
+			'three.setPost({ fragment, uniforms, textures })':
 				'Run one shader over the whole finished frame. fragment is a Slang function '
 				+ '`float3 post(Post p)` returning linear rgb; Post has color (this pixel of the rendered '
 				+ 'scene, already decoded to linear), uv (0..1 across the frame, (0,0) top left), resolution '
@@ -3873,6 +4001,12 @@
 				+ 'uniform is readable in the body by its own name; they are at most 112 bytes in total (28 '
 				+ 'floats), each a number or an array of up to four numbers, and NOT a table — a post pass '
 				+ 'draws one triangle over the whole frame, so there are no instances for a row to belong to. '
+				+ 'textures is a ShaderMaterial\'s: { grade_lut: tex } declares a Sampler2D the body reads by '
+				+ 'that name, up to four, with no binding number written anywhere. They are what a frame '
+				+ 'cannot supply about itself — a ramp to grade through with grade_lut.Sample(float2(p.color.r, '
+				+ '0.5)), a noise field to distort or dither by, a mask that says where the effect applies. '
+				+ 'Tile one by the frame rather than by uv, p.uv * p.resolution / 256, or it stretches with '
+				+ 'the window. A sampler you leave null reads white. '
 				+ 'Compiles on the call, so a bad body throws here carrying the Slang diagnostic with '
 				+ 'post:<line> counting the lines you wrote; a failed set leaves the previous shader running, '
 				+ 'so the pass is the old shader or the new one and never neither. Needs a GPU device. '
@@ -3885,9 +4019,10 @@
 				+ 'new three.Scene() and outlives the script that set it. three.setPost(null) is the only '
 				+ 'thing that clears it.',
 			'the handle three.setPost() answers with':
-				'{ fragment, uniforms } — the body that is running, and a live uniforms object exactly like a '
-				+ 'material\'s: post.uniforms.gain = 2 is a 4-byte write that takes effect on the next frame '
-				+ 'with no compile and no pipeline, which is what makes an animated post pass free. Only '
+				'{ fragment, uniforms, textures } — the body that is running, and live uniforms and textures '
+				+ 'objects exactly like a material\'s: post.uniforms.gain = 2 is a 4-byte write that takes '
+				+ 'effect on the next frame with no compile and no pipeline, which is what makes an animated '
+				+ 'post pass free, and post.textures.grade_lut = other swaps an image the same way. Only '
 				+ 'names given at setPost exist; assigning any other throws. A later setPost replaces the '
 				+ 'pass, and writing through the older handle throws rather than steering the new shader.',
 			'mesh.color':

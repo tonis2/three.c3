@@ -39,9 +39,10 @@ import qjs;
 *>
 fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "setPost", &js_set_post, 3);
+	self.bind(host, "setPost", &js_set_post, 5);
 	self.bind(host, "clearPost", &js_clear_post, 0);
 	self.bind(host, "setPostUniform", &js_set_post_uniform, 6);
+	self.bind(host, "setPostTexture", &js_set_post_texture, 2);
 }
 
 <*
@@ -115,6 +116,29 @@ fn void js_set_post(
 			uniforms.push({ .name = name, .components = (uint)components, .rows = 1 });
 		}
 
+		// The samplers, as two more joined lists — `js_create_material` has the
+		// argument, and it is the same one: names the body declares, and the
+		// texture each starts bound to, with `-1` for a sampler that starts white.
+		String texture_names = arg_text(&js, argc, args, 3, tmem);
+		String texture_ids = arg_text(&js, argc, args, 4, tmem);
+
+		List{String} texture_name_list;
+		List{String} texture_id_list;
+		texture_name_list.tinit(4);
+		texture_id_list.tinit(4);
+		split_commas(texture_names, &texture_name_list);
+		split_commas(texture_ids, &texture_id_list);
+
+		if (texture_name_list.len() != texture_id_list.len())
+		{
+			*out = js.raise("every texture needs a value — a name arrived without one");
+			return;
+		}
+
+		List{MaterialTexture} textures;
+		textures.tinit(4);
+		foreach (name : texture_name_list) textures.push({ .name = name });
+
 		// Collected whether the compile failed or only warned, exactly as
 		// `js_create_material` collects it: the warning path logs and the failure
 		// path throws, and an agent who never sees a warning writes the same
@@ -128,6 +152,11 @@ fn void js_set_post(
 			&self.renderer.target,
 			fragment,
 			uniforms.array_view(),
+			textures.array_view(),
+			// Where the outgoing shader's images go back to. The table belongs to
+			// the mesh pass and the post pass belongs to the renderer, so this is
+			// the layer that has both.
+			&self.pass.assets,
 			diagnostic: &diagnostic
 		));
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
@@ -143,6 +172,90 @@ fn void js_set_post(
 			self.log.append_string("post: ");
 			self.log.append_string(diagnostic);
 			if (!diagnostic.ends_with("\n")) self.log.append_char('\n');
+		}
+
+		// After the compile, because a binding index is something only the
+		// compiled module knows — `js_create_material` has the note. A failure
+		// here does not need to undo anything: the pass is one slot, the script is
+		// about to be thrown at, and the shader that is running is the one it just
+		// asked for with a sampler still showing white.
+		foreach (i, name : texture_name_list)
+		{
+			int texture = texture_id_list[i].to_int() ?? NO_TEXTURE;
+			if (catch bind_err = self.renderer.post.set_texture(
+				&self.renderer.gpu, &self.pass.assets, name, texture
+			))
+			{
+				*out = js.raise(post_texture_failure(bind_err, name));
+				return;
+			}
+		}
+	};
+}
+
+<*
+ Turn a post sampler fault into a sentence an agent can act on.
+
+ `material_texture_failure`'s two causes for the unknown-name case, which are the
+ same two here: a name the body does not use, and a name the body declares and
+ never samples, which Slang may drop before reflection sees it.
+*>
+fn String post_texture_failure(fault err, String name) @local
+{
+	switch (err)
+	{
+		case MATERIAL_SAMPLER_UNKNOWN:
+			return string::tformat(
+				"this post shader has no sampler called '%s' — either the name is not the one the body uses, "
+				"or the body never samples it and Slang dropped it from the module",
+				name
+			);
+		case MATERIAL_TEXTURE_UNKNOWN:
+			return string::tformat("the texture for '%s' was disposed, or came from another renderer", name);
+		default:
+			return string::tformat("'%s' could not be bound: %s", name, err);
+	}
+}
+
+<*
+ `post.textures.<name> = texture` — put an image in one of the samplers the body
+ declared.
+
+ `js_set_material_texture` for the pass with no geometry.
+*>
+fn void js_set_post_texture(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is no post pass in this context — it has no GPU device");
+		return;
+	}
+
+	@pool()
+	{
+		String name = arg_text(&js, argc, args, 0, tmem);
+		int texture = arg_int(&js, argc, args, 1);
+
+		if (catch err = self.renderer.post.set_texture(
+			&self.renderer.gpu, &self.pass.assets, name, texture
+		))
+		{
+			*out = js.raise(
+				err == MATERIAL_UNKNOWN
+					? "there is no post shader running — three.setPost({ fragment, textures }) first"
+					: post_texture_failure(err, name)
+			);
+			return;
 		}
 	};
 }
@@ -181,6 +294,8 @@ fn String post_failure(fault err, String diagnostic) @local
 				POST_UNIFORM_BUDGET,
 				POST_UNIFORM_BUDGET / 4
 			);
+		case POST_TOO_MANY_TEXTURES:
+			return string::tformat("a post pass may declare %d textures of its own", POST_TEXTURE_LIMIT);
 		case SHADER_COMPILE_FAILED:
 			return "the post shader failed to compile and Slang said nothing about why";
 		default:
@@ -206,7 +321,9 @@ fn void js_clear_post(
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	if (self.renderer == null) return;
-	self.renderer.post.clear(&self.renderer.gpu);
+	// With the table, so the shader's images are given back rather than held by a
+	// pass that is no longer running.
+	self.renderer.post.clear(&self.renderer.gpu, &self.pass.assets);
 }
 
 <*

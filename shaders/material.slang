@@ -80,6 +80,20 @@ static const uint FLAG_HAS_UVS     = 2u;
 // layout and the same pipeline.
 [vk::binding(0, 0)] Sampler2D base_color_map;
 
+// The samplers the agent asked for, one line each, at bindings 1..N in the order
+// they were declared. **The indices are generated** — `shader/assemble.c3` writes
+// them and `shader/reflect.c3` reads them back out of the compiled module, so
+// nothing above this file ever spells a binding number and inserting a texture at
+// the front of the list cannot silently renumber the ones after it.
+//
+// They are declared here rather than beside the body so that `fragmentMain` is
+// downstream of them too. Nothing generated samples one — an unused sampler is
+// exactly what a material that declared a texture and never read it should be —
+// and each is bound every draw regardless, with the same 1x1 white image
+// `base_color_map` falls back to. A binding the layout declares and the draw
+// leaves unwritten is undefined behaviour that no validation layer reports.
+//@textures
+
 // **The contract with the agent.** Six values, all of them in world space, in
 // texture space, or per instance; none of them a pointer and none of them a
 // Vulkan concept. A body that only ever touches `Surface` cannot address the

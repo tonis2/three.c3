@@ -749,6 +749,22 @@ Live, all of them. Each cost real time and none is visible in a diff.
   check would have quietly stopped asking. This plan predicted the cancellation
   in Phase D item 2 and was wrong; it was caught by writing the test the plan
   asked for rather than by reasoning about it again.
+- **A gradient sampled as a lookup table wraps at both ends.** Samplers here
+  repeat, and a ramp read at `float2(k, 0.5)` with `k` at 0 or 1 lands exactly on
+  the seam — where bilinear filtering blends the *first* texel with the *last*.
+  So the darkest input comes back as a mix of the darkest and the brightest
+  colour in the ramp, and on a 64-wide table that mix is nearly half the bright
+  end. The signature is a whole scene lifted towards the ramp's top colour: in
+  `examples/vfx.js` a near-black background came back mid-beige, which reads as
+  the grade being too strong rather than as a wrap mode, and the same bug lit
+  every shield and every ember at full brightness where they should have been
+  dark. Half a texel in at each end is the fix — `0.0078 + saturate(k) * 0.9844`
+  for a 64-wide ramp — and it belongs in a helper the body calls rather than at
+  each lookup, because the lookup that gets forgotten is the one that is only
+  wrong at the extremes. This is *not* an argument for `CLAMP_TO_EDGE` on the
+  shared sampler: a material's own textures are tiled far more often than they
+  are used as tables, and scrolling `s.uv + float2(t, 0)` under clamping is a
+  smear instead of a scroll.
 - **A pixel is a square, and its coordinate is a corner.** The rasterizer decides
   coverage at the pixel's *centre*, so anything claiming to agree with the
   picture — a picker, a hit test, a readback comparison — has to add the half.
@@ -961,3 +977,17 @@ for doing the binding first.
   every scene with no helpers in it, or a dirty flag on every object for the
   benefit of a debug tool — and the failure it would prevent is visible in the
   picture the helper is being looked at in.
+
+
+TODO:
+
+- There is no vertex stage. The splice point is fragment-only; the vertex shader is fixed. No GPU vertex displacement — no waving banners, no ribbon trails, no GPU-simulated particles. Motion is JS moving nodes in setAnimationLoop, which stays one draw call but is CPU work under a 100 ms/frame kill switch.
+- No per-pixel alpha. Soft fade is material.opacity (whole material) or mesh.color[3] (per copy). Per-pixel is discard (hard edge) or additive (black is transparent). Covers most energy/fire/dissolve looks; doesn't cover a soft-edged alpha smoke puff.
+- Blending is baked at construction, so "fade from solid to additive" is two materials, not a property write.
+- 13 floats is tight — a 3-row float3 table plus a clock is already 52 bytes and the 14th float is refused by name. Bake constants into the shader text, spend uniforms only on what moves.
+
+What's actually off the table
+
+- No depth in post — p.depth doesn't exist (verified: "'depth' is not a member of 'Post'"). So no depth of field, no soft particles, no depth fog, no SSAO.
+- One post pass — a second setPost replaces the first. Bloom is a single-pass 12-tap threshold approximation, not a downsample pyramid.
+- No render-to-texture / feedback — no accumulation trails, no motion blur history.

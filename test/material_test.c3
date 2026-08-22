@@ -895,3 +895,273 @@ fn void a_forgotten_opacity_still_renders_opaque() @test
 	material.one_minus_opacity = 0.25f;
 	test::@check(material.opacity() == 0.75f, "with everything between, got %f", material.opacity());
 }
+
+// ============================================================================
+// Textures
+//
+// A material's own samplers: names in, `[vk::binding(n, 0)] Sampler2D` lines
+// out, and the numbers read back off the module that would run. The whole point
+// of the feature is that no layer above `shader/assemble.c3` ever writes one of
+// those numbers, so every test here asserts the *reflection* rather than the
+// text — the text is what was generated, and the reflection is what the draw
+// will actually bind against.
+// ============================================================================
+
+// A body that samples three of them, so nothing here depends on Slang keeping a
+// parameter it could prove was unused. The one test that does depend on that
+// says so in its own name.
+const String SAMPLING_BODY = `
+float3 shade(Surface s)
+{
+    float3 n = noise_map.Sample(s.uv).rgb;
+    float3 g = ramp_map.Sample(float2(s.uv.x, 0.5)).rgb;
+    return lerp(n, g, mask_map.Sample(s.uv).r);
+}`;
+
+<*
+ A declared texture is a combined image sampler at binding 1, and the body can
+ read it by the name it was given.
+
+ The headline of the feature, and the two halves matter separately. That it
+ *compiles* is the assembler putting a declaration where the marker was; that it
+ reflects as `COMBINED_IMAGE_SAMPLER` is what `MeshPipeline.init` will hand
+ `vkCreateDescriptorSetLayout` — and a `Sampler2D` that came back as
+ `SAMPLED_IMAGE` is a black screen with no validation message, which is the
+ failure `shader/reflect.c3`'s header spends its longest paragraph on.
+
+ **Proved by injection.** Emitting `Texture2D` instead of `Sampler2D` in
+ `assemble_shader` compiles and reflects at the right index — only the type check
+ below catches it.
+*>
+fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
+{
+	three::MaterialTexture[3] textures = { { "noise_map" }, { "ramp_map" }, { "mask_map" } };
+
+	String source = three::material_source(SAMPLING_BODY, {}, mem, textures[..])!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
+
+	test::@check(mod.layout.bindings.len() == 4,
+		"the map and the three the body asked for, got %d", mod.layout.bindings.len());
+
+	three::ShaderBinding* noise = mod.layout.binding_of("noise_map");
+	test::@check(noise != null, "the first is there by name");
+	if (noise == null) return;
+	test::@check(noise.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		"as a combined image sampler, got %d", (uint)noise.type);
+	test::@check(noise.set == 0 && noise.binding == three::TEXTURE_BINDING_FIRST,
+		"at 0,%d — got %d,%d", three::TEXTURE_BINDING_FIRST, noise.set, noise.binding);
+	test::@check(noise.count == 1, "one descriptor, not an array: %d", noise.count);
+
+	// Binding 0 is still the template's own and is untouched by any of this.
+	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
+	test::@check(map != null && map.binding == 0, "and the base colour map is still binding 0");
+}
+
+<*
+ The binding indices come from the order the textures were declared in, not from
+ anything about their names.
+
+ The claim that makes "you never write a binding number" safe: a script reorders
+ its `textures` object and every sampler moves, which is fine precisely because
+ nothing on either side remembers a number — the assembler numbers them and
+ `sampler_binding_of` reads the numbers back by name.
+
+ Asserted with the *same three names in a different order*, so a walk that
+ happened to sort, or one that keyed on the name, produces the same answer twice
+ and fails.
+*>
+fn void binding_indices_follow_the_declaration_order() @test
+{
+	three::MaterialTexture[3] forwards = { { "noise_map" }, { "ramp_map" }, { "mask_map" } };
+	three::MaterialTexture[3] backwards = { { "mask_map" }, { "ramp_map" }, { "noise_map" } };
+
+	String first = three::material_source(SAMPLING_BODY, {}, mem, forwards[..])!!;
+	defer first.free(mem);
+	String second = three::material_source(SAMPLING_BODY, {}, mem, backwards[..])!!;
+	defer second.free(mem);
+
+	three::ShaderModule a = three::compile_slang(first, "material.slang", both_stages())!!;
+	defer a.free();
+	three::ShaderModule b = three::compile_slang(second, "material.slang", both_stages())!!;
+	defer b.free();
+	test::@check(a.ok && b.ok, "both compiled: %s%s", a.diagnostic, b.diagnostic);
+
+	test::@check(a.layout.binding_of("noise_map").binding == 1, "declared first, bound at 1");
+	test::@check(a.layout.binding_of("mask_map").binding == 3, "declared last, bound at 3");
+
+	test::@check(b.layout.binding_of("mask_map").binding == 1, "and the other way round it is 1");
+	test::@check(b.layout.binding_of("noise_map").binding == 3, "with the other at 3");
+}
+
+<*
+ A texture the body declares and never samples still reflects.
+
+ **This is a test of Slang rather than of three.c3**, and it is here because the
+ whole `textures:` path depends on the answer. Every name a script passes is
+ resolved back through the compiled module's reflection, so a Slang that dropped
+ unused parameters would turn `textures: { noise_map }` on a body that has not
+ started sampling it yet into "this material's shader has no sampler called
+ noise_map" — a message about a name that is right there in the source.
+
+ It holds today. If a Slang upgrade changes it, this fails and says so, and the
+ fix is a decision (accept the name silently, or refuse it with the reason) that
+ should be made deliberately rather than discovered.
+*>
+fn void a_texture_the_body_never_samples_still_reflects() @test
+{
+	three::MaterialTexture[1] textures = { { "unused_map" } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`, {}, mem, textures[..]
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
+
+	test::@check(mod.layout.binding_of("unused_map") != null,
+		"a declared-but-unsampled texture is still in the reflected layout — see this test's note if it is not");
+}
+
+<*
+ Textures cost the push block nothing.
+
+ A sampler is a descriptor and a uniform is bytes, and the budget that is nearly
+ full is the bytes one: 52 of 128, with the mesh contract holding the rest. If
+ declaring a texture moved a uniform's offset by so much as four bytes, every
+ `material.uniforms.x = ...` on that material would write into the wrong field —
+ and the symptom would be a wrong colour rather than an error.
+
+ Asserted as *the same offsets with and without*, rather than against a constant,
+ so it keeps meaning something when the contract next grows.
+*>
+fn void textures_cost_the_push_block_nothing() @test
+{
+	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "gain", 1, 1 } };
+	three::MaterialTexture[2] textures = { { "noise_map" }, { "ramp_map" } };
+	String body = `
+	float3 shade(Surface s)
+	{
+	    return s.albedo * tint * gain * noise_map.Sample(s.uv).rgb * ramp_map.Sample(s.uv).rgb;
+	}`;
+
+	String bare = three::material_source(body, uniforms[..], mem, {})!!;
+	defer bare.free(mem);
+	String with_textures = three::material_source(body, uniforms[..], mem, textures[..])!!;
+	defer with_textures.free(mem);
+
+	three::ShaderModule a = three::compile_slang(bare, "material.slang", both_stages())!!;
+	defer a.free();
+	three::ShaderModule b = three::compile_slang(with_textures, "material.slang", both_stages())!!;
+	defer b.free();
+	// The bare one does not compile a body that samples two textures it does not
+	// declare, so only the offsets of the one that does are asserted against it.
+	test::@check(b.ok, "the textured one compiled: %s", b.diagnostic);
+
+	three::ShaderField* tint = b.layout.field_of("tint");
+	three::ShaderField* gain = b.layout.field_of("gain");
+	test::@check(tint != null && gain != null, "both uniforms reflect");
+	if (tint == null || gain == null) return;
+
+	test::@check(tint.offset == three::MATERIAL_PUSH_START,
+		"the first uniform is still at %d, got %d", three::MATERIAL_PUSH_START, tint.offset);
+	test::@check(gain.offset == three::MATERIAL_PUSH_START + 12,
+		"and the second still follows it, got %d", gain.offset);
+	test::@check(b.layout.push_size == three::MATERIAL_PUSH_START + 16,
+		"with a push block of exactly the uniforms, got %d", b.layout.push_size);
+}
+
+<*
+ A name that is both a uniform and a texture is refused.
+
+ The collision that has no other symptom worth reading. A uniform is a `#define`
+ live across the agent's lines, so a sampler of the same name is rewritten to
+ `push.<name>` at every use — and Slang then reports a push field being called
+ like a function, at the agent's own line, about a name they used correctly.
+*>
+fn void a_texture_name_that_is_also_a_uniform_is_refused() @test
+{
+	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
+	three::MaterialTexture[1] textures = { { "tint" } };
+
+	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..], mem, textures[..]);
+	fault refused = @catch(assembled);
+
+	test::@check(refused == three::MATERIAL_NAME_INVALID, "refused, got %s", refused);
+	test::@check(
+		three::material_diagnostic().contains("tint") && three::material_diagnostic().contains("both"),
+		"saying it is both: %s",
+		three::material_diagnostic()
+	);
+}
+
+<*
+ A texture name the template already uses is refused, and so is a repeat.
+
+ `base_color_map` is the one that matters: it is a real declaration in
+ `material.slang`, so a second one is a redefinition a hundred lines from
+ anything the agent wrote — and it is also the binding a script is *meant* to
+ reach through `material.map`, so taking the name would be shadowing the property
+ that already does the job.
+*>
+fn void a_texture_name_the_template_already_uses_is_refused() @test
+{
+	three::MaterialTexture[1] theirs = { { "base_color_map" } };
+	fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, theirs[..]));
+	test::@check(refused == three::MATERIAL_NAME_INVALID, "'base_color_map' is refused, got %s", refused);
+	test::@check(
+		three::material_diagnostic().contains("base_color_map")
+			&& three::material_diagnostic().contains("reserved"),
+		"as reserved, by name: %s",
+		three::material_diagnostic()
+	);
+
+	three::MaterialTexture[2] twice = { { "noise_map" }, { "noise_map" } };
+	fault again = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, twice[..]));
+	test::@check(again == three::MATERIAL_NAME_INVALID, "and a duplicate is refused, got %s", again);
+	test::@check(
+		three::material_diagnostic().contains("twice"),
+		"as a duplicate: %s",
+		three::material_diagnostic()
+	);
+
+	three::MaterialTexture[1] punctuated = { { "noise-map" } };
+	fault third = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, punctuated[..]));
+	test::@check(third == three::MATERIAL_NAME_INVALID, "and so is a name that is not an identifier, got %s", third);
+}
+
+<*
+ More textures than a material may have is its own refusal, with the count in it.
+
+ A separate fault from the name ones because it is fixed differently: every other
+ refusal here is answered by renaming something, and this one is answered by
+ asking for fewer images. The message says how many were declared as well as how
+ many are allowed, which is the difference between counting your own object and
+ being told what it added up to.
+*>
+fn void more_textures_than_a_material_may_have_are_refused() @test
+{
+	three::MaterialTexture[5] too_many = {
+		{ "a_map" }, { "b_map" }, { "c_map" }, { "d_map" }, { "e_map" },
+	};
+
+	fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, too_many[..]));
+	test::@check(refused == three::MATERIAL_TOO_MANY_TEXTURES, "refused as too many, got %s", refused);
+	test::@check(
+		three::material_diagnostic().contains("5") && three::material_diagnostic().contains("4"),
+		"with both counts in it: %s",
+		three::material_diagnostic()
+	);
+
+	// The limit itself is accepted, which is the half that says the check is
+	// `>` and not `>=`.
+	three::MaterialTexture[4] exactly = { { "a_map" }, { "b_map" }, { "c_map" }, { "d_map" } };
+	String source = three::material_source(PLAN_EXAMPLE, {}, mem, exactly[..])!!;
+	defer source.free(mem);
+	test::@check(source.len > 0, "and the limit itself is allowed");
+}
