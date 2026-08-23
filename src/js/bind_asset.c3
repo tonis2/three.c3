@@ -63,7 +63,7 @@ fn void js_load(
 		String? opening = self.resolve_asset(path, tmem);
 		if (catch err = opening)
 		{
-			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
 				*out = js.raise(string::tformat(
 					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
@@ -133,7 +133,7 @@ fn void js_texture(
 		String? opening = self.resolve_asset(path, tmem);
 		if (catch err = opening)
 		{
-			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
 				*out = js.raise(string::tformat(
 					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
@@ -725,7 +725,7 @@ fn void js_export(
 		String? writing = self.resolve_asset(path, tmem);
 		if (catch err = writing)
 		{
-			if (err == MODULE_ESCAPES_ASSETS_ROOT)
+			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
 				*out = js.raise(string::tformat(
 					"cannot export to '%s': it climbs out of the assets directory, and a game may only "
@@ -970,17 +970,17 @@ fn void js_inventory(
 	qjs::Context js = qjs::wrap(ctx);
 
 	qjs::Value listed = js.array();
-	if (self.assets_root.len == 0)
+	if (self.modules.root.len == 0)
 	{
 		*out = listed;
 		return;
 	}
 
-	Inventory? found = take_inventory(self.assets_root);
+	Inventory? found = take_inventory(self.modules.root);
 	if (catch err = found)
 	{
 		js.release(listed);
-		*out = js.raise(string::tformat("could not read %s: %s", self.assets_root, err));
+		*out = js.raise(string::tformat("could not read %s: %s", self.modules.root, err));
 		return;
 	}
 	defer found.free_entries();

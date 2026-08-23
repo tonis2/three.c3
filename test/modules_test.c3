@@ -10,6 +10,7 @@ module three_tests::modules;
 
 import std::io;
 import three;
+import qjs;
 
 <*
  Resolve, or say what it faulted with. Both are one line at the call site, which
@@ -17,7 +18,7 @@ import three;
 *>
 macro String @resolved(#base, #name)
 {
-	String? answer = three::resolve_module(#base, #name, tmem);
+	String? answer = qjs::resolve_module(#base, #name, tmem);
 	if (catch err = answer) return string::tformat("<%s>", err);
 	return answer;
 }
@@ -40,7 +41,7 @@ fn void dot_dot_climbs_and_stops_at_the_root() @test
 		"one level up (%s)", @resolved("enemies/orc.js", "../shared/hp.js"));
 	test::@check(@resolved("a/b/c/deep.js", "../../top.js") == "a/top.js",
 		"two levels up (%s)", @resolved("a/b/c/deep.js", "../../top.js"));
-	test::@check(@resolved("main.js", "../secrets.js") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@resolved("main.js", "../secrets.js") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"and climbing past the root is refused (%s)",
 		@resolved("main.js", "../secrets.js"));
 }
@@ -56,13 +57,13 @@ fn void dot_dot_climbs_and_stops_at_the_root() @test
 *>
 fn void an_escape_is_refused_rather_than_clamped() @test
 {
-	test::@check(@resolved("main.js", "../../../../etc/passwd") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@resolved("main.js", "../../../../etc/passwd") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"a long climb is refused (%s)", @resolved("main.js", "../../../../etc/passwd"));
-	test::@check(@resolved("a/b.js", "../../..") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@resolved("a/b.js", "../../..") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"and so is one that only just overshoots (%s)",
 		@resolved("a/b.js", "../../.."));
 	// The one that would slip past a check written as "does it start with ..".
-	test::@check(@resolved("main.js", "a/../../out.js") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@resolved("main.js", "a/../../out.js") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"including one that climbs out only halfway through (%s)",
 		@resolved("main.js", "a/../../out.js"));
 }
@@ -87,7 +88,7 @@ fn void the_noise_in_a_path_is_dropped() @test
 		"a bare dot (%s)", @resolved("main.js", "./a/./b.js"));
 	test::@check(@resolved("main.js", "a//b.js") == "a/b.js",
 		"a doubled slash (%s)", @resolved("main.js", "a//b.js"));
-	test::@check(@resolved("main.js", "") == "<three::MODULE_SPECIFIER_IS_EMPTY>",
+	test::@check(@resolved("main.js", "") == "<qjs::MODULE_SPECIFIER_IS_EMPTY>",
 		"and an empty import is not a path at all (%s)", @resolved("main.js", ""));
 }
 
@@ -116,7 +117,7 @@ fn void a_path_deeper_than_the_walker_is_refused() @test
 	for (usz i = 0; i < 70; i++) deep.append_string("d/");
 	deep.append_string("x.js");
 
-	test::@check(@resolved("main.js", deep.str_view()) == "<three::MODULE_PATH_TOO_DEEP>",
+	test::@check(@resolved("main.js", deep.str_view()) == "<qjs::MODULE_PATH_TOO_DEEP>",
 		"seventy-one components is too many (%s)", @resolved("main.js", deep.str_view()));
 }
 
@@ -164,11 +165,59 @@ fn void an_asset_path_is_relative_to_the_assets_directory() @test
 
 fn void an_asset_path_cannot_climb_out_of_the_game() @test
 {
-	test::@check(@asset_path("game", "../secrets.glb") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@asset_path("game", "../secrets.glb") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"one level up is refused (%s)", @asset_path("game", "../secrets.glb"));
-	test::@check(@asset_path("game", "../../../../etc/passwd") == "<three::MODULE_ESCAPES_ASSETS_ROOT>",
+	test::@check(@asset_path("game", "../../../../etc/passwd") == "<qjs::MODULE_ESCAPES_ROOT>",
 		"and so is a long climb, rather than being clamped to etc/passwd (%s)",
 		@asset_path("game", "../../../../etc/passwd"));
+}
+
+// ============================================================================
+// A game of many files, end to end
+// ============================================================================
+
+<*
+ The whole point of the loader, driven for real: a `main.js` whose imports
+ reach a sibling directory relatively and the root absolutely, both landing on
+ the same module. No device — the fixture computes rather than draws, because
+ what is under test is the resolution, not the renderer.
+*>
+fn void a_game_boots_from_many_files() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("test/fixtures/game");
+
+	three::RunResult booted = runtime.run_module("main.js");
+	defer booted.free();
+	test::@check(booted.ok, "main.js and its imports evaluate (%s)", booted.error);
+	test::@check(booted.log.contains("grid: 9"), "the imported parts computed (%s)", booted.log);
+
+	// A module's globals are the same globals a later run reads — `game.md`'s
+	// claim that an agent can attach to a booted game and look around.
+	three::RunResult read = runtime.run("return globalThis.__game.size * globalThis.__game.grid;");
+	defer read.free();
+	test::@check(read.value == "27", "state the modules set survives into a run (%s)", read.value);
+}
+
+<*
+ The `three:` space is closed from the outside. The refusal has to name the
+ import, because "could not load" would send an author looking for a missing
+ file rather than at a door that is shut.
+*>
+fn void a_game_may_not_import_the_preludes_internals() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("test/fixtures/game");
+
+	three::RunResult refused = runtime.run_module("forbidden.js");
+	defer refused.free();
+	test::@check(!refused.ok, "the import is refused");
+	test::@check(refused.error.contains("cannot import 'three:math.js'"),
+		"and the refusal names it (%s)", refused.error);
 }
 
 <*

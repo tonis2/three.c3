@@ -1,0 +1,139 @@
+// three.c3 — Asset and MeshRef: a loaded file and the pieces inside it.
+
+import { refBounds } from './math.js';
+import { Object3D } from './object3d.js';
+import { Mesh } from './mesh.js';
+
+const H = globalThis.__three;
+
+// A plain object would do for the handle — `Mesh` only checks that `asset`,
+// `mesh` and `assetGeneration` are numbers, and a generated `Geometry`
+// satisfies the same check. This is a class so that `bounds` can be a getter
+// rather than a field: measuring is a crossing into the host, and paying for
+// it on every `asset.mesh(...)` when most callers only want to place the
+// piece would tax the common path to serve the rarer one.
+export class MeshRef {
+	constructor(asset, assetGeneration, mesh, name) {
+		this.asset = asset;
+		this.assetGeneration = assetGeneration;
+		this.mesh = mesh;
+		this.name = name;
+	}
+
+	get bounds() { return refBounds(this, `asset.mesh(${JSON.stringify(this.name)}).bounds`); }
+
+	toJSON() { return { name: this.name, mesh: this.mesh }; }
+	toString() { return `MeshRef(${this.name})`; }
+}
+
+export class Asset {
+	constructor([index, generation]) {
+		this._a = index;
+		this._g = generation;
+		this.path = H.assetPath(index, generation);
+		// In load order, which is the order `mesh(name)` resolves in and the
+		// order the host's own `find_mesh` walks.
+		this.meshes = H.meshNames(index, generation);
+		// Names and durations are read out of the JSON chunk at load, so
+		// this costs nothing and "does this character have a walk cycle" is
+		// a question worth asking before deciding to place it.
+		this.animations = H.assetClips(index, generation);
+	}
+
+	mesh(name) {
+		const at = this.meshes.indexOf(name);
+		if (at < 0) {
+			const have = this.meshes.length ? this.meshes.join(', ') : '(none)';
+			throw new Error(`no mesh named "${name}" in ${this.path} — it has: ${have}`);
+		}
+		return new MeshRef(this._a, this._g, at, name);
+	}
+
+	meshAt(i) {
+		if (!(i >= 0 && i < this.meshes.length)) {
+			throw new RangeError(`mesh index ${i} is outside 0..${this.meshes.length - 1}`);
+		}
+		return new MeshRef(this._a, this._g, i, this.meshes[i]);
+	}
+
+	// The file's node hierarchy as an Object3D tree — Three.js's
+	// `gltf.scene`. A group, with the file's own nodes under it carrying the
+	// transforms the file gave them.
+	//
+	// Nothing here is special: what comes back is ordinary Object3Ds and
+	// Meshes that have not been added to anything yet, so a script can move
+	// them, hide them, recolour them or pull one out and add it on its own,
+	// and `scene.add()` materializes them by the same path as everything
+	// else. That is the reason the host answers with a description instead
+	// of building host nodes itself.
+	//
+	// Call it twice for two copies. They share the upload — the host counts
+	// one reference per drawing node, so two trees over one asset is two
+	// sets of transforms and nothing else.
+	instantiate(name) {
+		const rows = H.assetNodes(this._a, this._g);
+		const root = new Object3D();
+		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
+		// The root is what carries the animations: a clip drives the whole
+		// subtree, so root.play('Walk') is the only sensible place to say it.
+		root._clips = this.animations;
+		root._asset = [this._a, this._g];
+
+		const built = [];
+		for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a] of rows) {
+			const node = mesh < 0
+				? new Object3D()
+				: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
+			if (label) node.name = label;
+			node.position.set(px, py, pz);
+			// The Euler triple is what `node.rotation` reads back as; the
+			// quaternion beside it is what the host is actually given,
+			// because the two are not the same rotation at gimbal lock.
+			// Setting `rotation` clears `_q`, so this order matters.
+			node.rotation.set(ex, ey, ez);
+			node._q = [qx, qy, qz, qw];
+			node.scale.set(sx, sy, sz);
+			// Which glTF node this was, so `play` can tell the host what an
+			// animation channel's target index became. -1 for the entries
+			// the host synthesized, which no channel can name.
+			node._gltfNode = gltfNode;
+			// Only a copy an instanced node placed has anything but white
+			// here, and only a Mesh has anywhere to put it — a group's row
+			// carries the identity and setting it would define a channel on
+			// an object that has none.
+			if (mesh >= 0 && !(r === 1 && g === 1 && b === 1 && a === 1)) node.color = [r, g, b, a];
+			// Parents always precede their children in the host's walk, so
+			// `built[parent]` is there by the time it is asked for.
+			(parent < 0 ? root : built[parent]).add(node);
+			built.push(node);
+		}
+		return root;
+	}
+
+	toJSON() { return { path: this.path, meshes: this.meshes, animations: this.animations }; }
+}
+
+// -----------------------------------------------------------------------
+// Geometry
+//
+// The shapes Three.js has, with Three.js's constructor signatures, its
+// defaults and its orientations: a plane faces +Z, a cylinder's axis is Y, a
+// torus lies in the XY plane, a cone points up. `scene/primitive.c3` builds
+// them, and says there why the formulas are copied rather than re-derived —
+// the winding and the UV layout come along with the positions, and a face
+// wound the wrong way is a hole rather than a dark patch.
+//
+// ## A geometry *is* an asset reference
+//
+// `new three.BoxGeometry(1, 1, 1)` answers with something carrying `asset`
+// and `mesh`, which is exactly what `asset.mesh("wall_corner_02")` answers
+// with. `new three.Mesh(...)` takes either and cannot tell them apart, and
+// the thesis is intact either way: a script named a shape and got a handle,
+// never a vertex.
+//
+// ## The same numbers are the same asset
+//
+// A fresh geometry per mesh is the Three.js habit, and here it is free — the
+// host keys the built mesh by its parameters, so a thousand identical
+// `BoxGeometry`s are one upload and one instanced draw call.
+//

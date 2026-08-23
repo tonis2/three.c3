@@ -93,17 +93,62 @@ const long JS_BUDGET_CEILING_MS = 600_000;
 const uint JS_MAX_JOBS = 100_000;
 
 <*
- The API surface an agent writes against, as JavaScript.
+ The API surface an agent writes against, as JavaScript — ES modules under
+ `src/js/prelude/`, embedded whole.
 
  **`$embed`, and that is not a contradiction of `shader/load.c3`.** The trap that
  file documents is a *generated* artifact — `c3c build shaders` without
  `--trust=full` skips the exec, reports success, and `$embed` picks up the
- previous SPIR-V. `prelude.js` is hand-written source with no build step to skip,
+ previous SPIR-V. The prelude is hand-written source with no build step to skip,
  so it is exactly as stale as the `.c3` files beside it and no more. Embedding it
- means the API surface cannot be missing at runtime, which for the file that
- *defines* the API is worth more than editing it without a rebuild.
+ means the API surface cannot be missing at runtime, which for the files that
+ *define* the API is worth more than editing them without a rebuild.
 *>
-const char[*] PRELUDE = $embed("prelude.js");
+const char[*] PRELUDE = $embed("prelude/prelude.js");
+const char[*] PRELUDE_MATH = $embed("prelude/math.js");
+const char[*] PRELUDE_OBJECT3D = $embed("prelude/object3d.js");
+const char[*] PRELUDE_TEXTURE = $embed("prelude/texture.js");
+const char[*] PRELUDE_MATERIAL = $embed("prelude/material.js");
+const char[*] PRELUDE_SHADER = $embed("prelude/shader.js");
+const char[*] PRELUDE_POST = $embed("prelude/post.js");
+const char[*] PRELUDE_MESH = $embed("prelude/mesh.js");
+const char[*] PRELUDE_SCENE = $embed("prelude/scene.js");
+const char[*] PRELUDE_ASSET = $embed("prelude/asset.js");
+const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
+const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
+const char[*] PRELUDE_API = $embed("prelude/api.js");
+const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
+
+<*
+ The prelude's modules, by their `three:` specifiers.
+
+ This table is the registry: a part is added here and nowhere else, and a
+ specifier it does not know is a load that fails with the engine's own "could
+ not load module" naming it — which is the right message for a typo in an
+ import inside the prelude, the only place these can be written. The entry is
+ not in it, deliberately: it is evaluated directly by `open`, and a part that
+ imported it back would re-run nothing and read half-assigned globals.
+*>
+fn qjs::EmbeddedModule[] prelude_parts()
+{
+	static qjs::EmbeddedModule[13] parts;
+	parts = {
+		{ "three:math.js", (char[])PRELUDE_MATH[..] },
+		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
+		{ "three:texture.js", (char[])PRELUDE_TEXTURE[..] },
+		{ "three:material.js", (char[])PRELUDE_MATERIAL[..] },
+		{ "three:shader.js", (char[])PRELUDE_SHADER[..] },
+		{ "three:post.js", (char[])PRELUDE_POST[..] },
+		{ "three:mesh.js", (char[])PRELUDE_MESH[..] },
+		{ "three:scene.js", (char[])PRELUDE_SCENE[..] },
+		{ "three:asset.js", (char[])PRELUDE_ASSET[..] },
+		{ "three:geometry.js", (char[])PRELUDE_GEOMETRY[..] },
+		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },
+		{ "three:api.js", (char[])PRELUDE_API[..] },
+		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
+	};
+	return parts[..];
+}
 
 <*
  What one script run answers with. Owns all four strings; `free` releases them.
@@ -257,15 +302,12 @@ struct JsRuntime
 	qjs::Value contact_fn;
 	bool contact_active;
 
-	// `import`, owned by `js/modules.c3`. Empty root means no `--assets` boot
-	// and no module resolution at all, which is what a plain `--mcp` run wants.
-	// **`module_hooks` is addressed by the engine and must not move** while the
-	// context is open — the same requirement `main.c3` meets for the `Renderer`
-	// the server holds. `module_source` is the one buffer every load is answered
-	// out of; see `read_module` for why one is enough.
-	String assets_root;
-	qjs::ModuleHooks module_hooks;
-	char[] module_source;
+	// `import`, wired up by `js/modules.c3` over `quickjs.c3l`'s loader. Empty
+	// root means no `--assets` boot and no disk imports at all, which is what a
+	// plain `--mcp` run wants; the `three:` space works regardless.
+	// **Addressed by the engine and must not move** while the context is open —
+	// the same requirement `main.c3` meets for the `Renderer` the server holds.
+	qjs::ModuleLoader modules;
 
 	bool ready;
 }
@@ -299,18 +341,22 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 
 	self.install_console();
 	self.install_bindings();
+	// Before the prelude: its own imports are the first thing the loader answers.
+	self.install_module_hooks();
 
-	// Evaluated bare rather than through `run`: it declares the API, so wrapping
-	// it in a function body would scope every class to that body.
-	qjs::Value? loaded = self.js.eval((String)PRELUDE[..], "<prelude>");
-	if (catch err = loaded)
+	// Evaluated as the entry of the `three:` module space rather than through
+	// `run`: it declares the API, so an async function body would scope every
+	// class to that body, and its `import`s must sit at a module's top level.
+	// Module evaluation answers with a promise even when nothing awaits, so the
+	// result goes through the same settling `run_module` uses — a throw during
+	// evaluation is a rejection there, not a synchronous exception here.
+	RunResult booted = self.run_source((String)PRELUDE[..], "three:prelude.js", drain_frame: false, as_module: true);
+	defer booted.free();
+	if (!booted.ok)
 	{
-		String message = self.js.exception();
-		defer message.free(mem);
-		io::printfn("three: prelude.js failed to evaluate: %s", message);
+		io::printfn("three: prelude.js failed to evaluate: %s", booted.error);
 		return JS_PRELUDE_FAILED~;
 	}
-	self.js.release(loaded);
 
 	self.js.on_interrupt(&on_interrupt, self);
 }
@@ -332,8 +378,7 @@ fn void JsRuntime.close(&self)
 	self.frame_log.free();
 	self.frame_error.free();
 	self.input_text.free();
-	if (self.assets_root.len > 0) self.assets_root.free(mem);
-	if (self.module_source.len > 0) free(self.module_source);
+	self.modules.free();
 	*self = {};
 }
 
@@ -364,11 +409,11 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
  module named for it. See `js/modules.c3`.
 
  @param specifier : `Root-relative, and also what a stack trace calls it and what its own imports resolve against.`
- @require self.assets_root.len > 0 : "a module needs an assets root to resolve against"
+ @require self.modules.root.len > 0 : "a module needs an assets root to resolve against"
 *>
 fn RunResult JsRuntime.run_module(&self, String specifier)
 {
-	String? source = self.read_module(specifier);
+	String? source = self.modules.read(specifier);
 	if (catch err = source)
 	{
 		self.log.clear();
