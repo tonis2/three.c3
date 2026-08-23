@@ -16,15 +16,19 @@ const H = globalThis.__three;
 // tables to keep in step; naming them only here means a mode added to the
 // extension shows up as `undefined` at this line rather than as a wrong blend
 // three layers deep in a generated shader.
-const BLEND_BY_ORDINAL = [
+// Exported because `layers.js` reads them the other way round — a stack a script
+// wrote crosses back to the host as ordinals, so a generated material can be
+// exported as the extension it describes. Two readers, still one table.
+export const BLEND_BY_ORDINAL = [
 	'mix', 'multiply', 'add', 'subtract', 'screen', 'overlay', 'softLight',
 	'difference', 'darken', 'lighten',
 ];
-const CHANNEL_BY_ORDINAL = ['r', 'g', 'b', 'a'];
+export const CHANNEL_BY_ORDINAL = ['r', 'g', 'b', 'a'];
 
 // `LayerMaskSource`: 0 NONE, 1 TEXTURE, 2 VERTEX_COLOR.
-const MASK_NONE = 0;
-const MASK_VERTEX_COLOR = 2;
+export const MASK_NONE = 0;
+export const MASK_TEXTURE = 1;
+export const MASK_VERTEX_COLOR = 2;
 
 // A texture slot the host handed back, wrapped so a script holds it the way it
 // holds any other image.

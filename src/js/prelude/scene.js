@@ -149,7 +149,14 @@ export class Scene extends Object3D {
 	// file a person will open; turn it on for a file that is a payload.
 	//
 	// Answers with { path, meshes, entries, materials, images, nodes,
-	// instances, batches, skipped, shaded, bytes }.
+	// instances, batches, skipped, shaded, layers, bytes }.
+	//
+	// `layers` counts CUSTOM_materials_layers records written. Both
+	// kinds of stack go back into one: an imported stack is read from
+	// the .glb it came from, a LayeredMaterial from the description it
+	// was built with. The material is still a generated shader either
+	// way, so it is still counted in `shaded` — the two numbers answer
+	// different questions.
 	export(path, options) {
 		this._check();
 		if (typeof path !== 'string' || path.length === 0) {

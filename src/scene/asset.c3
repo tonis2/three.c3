@@ -1721,12 +1721,16 @@ fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale
  An orthonormal basis as a quaternion, by Shepperd's method: pick the largest of
  the four possible denominators and divide by that one.
 
+ Module-visible rather than file-local for `decompose`'s reason, one function up:
+ `scene/export.c3` builds a basis of its own when it aims the camera and the
+ light, and there is one right way to turn one into a quaternion.
+
  The naive form takes `w = sqrt(1 + trace) / 2` and divides by it, which is
  fine until the trace approaches -1 — a rotation near 180° — where the
  denominator goes to zero and the result is noise. Choosing among the four
  keeps the divisor above 0.5 for every possible input.
 *>
-fn Quaternionf quat_from_basis(Vec3 x, Vec3 y, Vec3 z) @local
+fn Quaternionf quat_from_basis(Vec3 x, Vec3 y, Vec3 z)
 {
 	float trace = x[0] + y[1] + z[2];
 

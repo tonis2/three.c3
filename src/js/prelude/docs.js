@@ -628,7 +628,7 @@ export const DOCS = {
 			+ 'Empty when three was not started with --assets, since there is then no directory to describe.',
 		'scene.export(path)':
 			'Write the scene to a .glb, and answer with { path, meshes, entries, materials, images, '
-			+ 'nodes, instances, batches, skipped, shaded, bytes }. One mesh per unique (asset, mesh), '
+			+ 'nodes, instances, batches, skipped, shaded, layers, bytes }. One mesh per unique (asset, mesh), '
 			+ 'so a thousand walls from one kit are one mesh in the file exactly as they are one draw '
 			+ 'call in the frame. Sibling copies of one shape are written as a single node carrying an '
 			+ 'array of transforms — EXT_mesh_gpu_instancing, which any glTF reader can place — with a '
@@ -644,7 +644,25 @@ export const DOCS = {
 			+ 'directory and cannot climb out of it, as three.load\'s is. Helpers and hidden subtrees '
 			+ 'are not in the file (skipped counts them) and a ShaderMaterial is not either, because it '
 			+ 'is a Slang pipeline and glTF describes surfaces rather than programs — those meshes are '
-			+ 'exported with the base colour and texture their geometry carries, and shaded counts them.',
+			+ 'exported with the base colour and texture their geometry carries, and shaded counts them. '
+			+ 'A material layer stack is the exception to that last part, whichever way it was built. '
+			+ 'A mesh loaded from a .glb carrying CUSTOM_materials_layers is written back with the stack '
+			+ 'it came in with, read out of the source document; a three.LayeredMaterial built in a '
+			+ 'script is written from the description it was constructed with, with its images read back '
+			+ 'off the device. Either way the stack survives even though the material drawing it is a '
+			+ 'generated shader, and layers counts the records written. The COLOR_0 a VERTEX_COLOR mask '
+			+ 'reads goes into the file beside them. A script stack takes precedence when a mesh has '
+			+ 'both, because that is what the frame drew with. Changing a layer\'s map or its animated '
+			+ 'tint after construction is picked up: the export reads the material\'s live samplers and '
+			+ 'uniforms rather than a copy of what was first passed in. '
+			+ 'The scene around the meshes goes too: the camera as a glTF camera and the light as a '
+			+ 'KHR_lights_punctual directional light, each on a node of its own, so the file opens '
+			+ 'framed and lit the way three had it — both are counted in nodes like any other node. '
+			+ 'The light\'s ambient floor has no glTF equivalent and is the one thing lost there. '
+			+ 'Materials carry side as doubleSided, repeat and offset as KHR_texture_transform, and a '
+			+ 'source material\'s normal, occlusion and emissive maps. Metalness and roughness are not '
+			+ 'written, because this renderer has no specular term to have shown them, and lines are '
+			+ 'not written yet.',
 		'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 		'three.getApiDocs()': 'This.',
 		'three.input.isDown(key)':

@@ -320,6 +320,15 @@ struct GeometryBuilder
 	List{Vec3} positions;
 	List{Vec3} normals;
 	List{Vec2} uvs;
+	// glTF's COLOR_0, and only ever filled by the path that re-reads a mesh out
+	// of the file it came from — a generated shape has no colour attribute and a
+	// hull never had one. Left empty by `vertex`, so a builder assembled shape by
+	// shape has none and every existing caller is unchanged.
+	//
+	// Here rather than on the upload path because the reader is the exporter:
+	// a layer whose mask reads a vertex colour needs the attribute written beside
+	// it, or the mask it names is one the file does not carry. `scene/export.c3`.
+	List{Vec4} colors;
 	List{uint} indices;
 }
 
@@ -333,6 +342,7 @@ fn void GeometryBuilder.init(&self)
 	self.positions.init(mem, 256);
 	self.normals.init(mem, 256);
 	self.uvs.init(mem, 256);
+	self.colors.init(mem, 0);
 	self.indices.init(mem, 512);
 }
 
@@ -341,6 +351,7 @@ fn void GeometryBuilder.free(&self)
 	self.positions.free();
 	self.normals.free();
 	self.uvs.free();
+	self.colors.free();
 	self.indices.free();
 }
 
