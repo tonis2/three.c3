@@ -129,21 +129,26 @@ const uint MATERIAL_UNIFORM_BUDGET = 52;
 
  A budget rather than a device limit, the same way `PUSH_BUDGET` is. The real
  ceiling is `maxPushDescriptors`, which every implementation that offers the
- extension must report as at least 32 — so four plus the base colour map cannot
+ extension must report as at least 32 — so eight plus the base colour map cannot
  be refused by a device, and nothing here has to query anything or have a
  fallback path for a machine that says a smaller number.
 
- Four because of what the fifth would cost rather than what it would gain: the
- descriptors are pushed **per bucket**, so every sampler is per-draw command
- traffic on every material that declares one, and a material wanting more images
- than this is usually wanting an atlas or a texture array — both of which are one
- binding and neither of which exists here yet.
+ **This was four and is now eight, and the thing that moved it is a layer
+ stack.** Four was chosen against what a hand-written effect uses — a pattern, a
+ ramp and a mask, with the fourth there so three was not a cap anybody hit on
+ their first attempt. A `LayeredMaterial` is not hand-written: `js/prelude/layers.js`
+ generates one sampler per layer plus one for the packed mask, so four bought
+ three layers over the base and no room for a normal map on any of them. Eight
+ buys a mask, up to seven detail maps, or a mix of maps and normals — which is
+ the difference between the extension being representable and being *usable*.
 
- Three is what the effects this was built for actually use: a pattern, a ramp and
- a mask. The fourth is the one that stops that from being a cap somebody has to
- work around on their first attempt.
+ What it costs is real and is per draw: the descriptors are pushed **per
+ bucket**, so every declared sampler is command traffic on every material that
+ declares one. Eight is still short of the 32 floor, and a material wanting more
+ images than this wants an atlas or a texture array — both of which are one
+ binding, and neither of which exists here yet.
 *>
-const uint MATERIAL_TEXTURE_LIMIT = 4;
+const uint MATERIAL_TEXTURE_LIMIT = 8;
 
 // The template, looked up the same way `mesh.slang` is — `shaders/` first, then
 // `build/shaders/`, both relative to the working directory.

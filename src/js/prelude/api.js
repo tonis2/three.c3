@@ -13,6 +13,7 @@ import {
 } from './texture.js';
 import { FrontSide, BackSide, DoubleSide, NoBlending, NormalBlending, AdditiveBlending, Material, MeshLambertMaterial } from './material.js';
 import { ShaderMaterial } from './shader.js';
+import { LayeredMaterial } from './layers.js';
 import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
 import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
@@ -286,9 +287,16 @@ export const three = {
 	// Reach for MeshLambertMaterial to put an image or a side on a shape — it
 	// compiles nothing. Reach for ShaderMaterial when you want to write the
 	// shading itself.
+	//
+	// LayeredMaterial is a ShaderMaterial whose body is generated: an ordered
+	// stack of materials blended over a base one, which is the renderer's half
+	// of glTF's `CUSTOM_materials_layers`. It is what a terrain splat map or a
+	// weathering pass wants, and `asset.mesh(name).layers` hands one straight
+	// out of a file that was authored with the extension.
 	Material,
 	MeshLambertMaterial,
 	ShaderMaterial,
+	LayeredMaterial,
 
 	// `material.side`. Numbers rather than an enum object because that is
 	// what Three.js exports and what a script written from memory of it will
