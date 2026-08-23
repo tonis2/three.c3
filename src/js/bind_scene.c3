@@ -49,8 +49,8 @@ fn void JsRuntime.install_bindings(&self)
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
-	self.bind(host, "texture", &js_texture, 1);
-	self.bind(host, "dataTexture", &js_data_texture, 3);
+	self.bind(host, "texture", &js_texture, 3);
+	self.bind(host, "dataTexture", &js_data_texture, 5);
 	self.bind(host, "textureDispose", &js_texture_dispose, 1);
 	self.bind(host, "textureRead", &js_texture_read, 2);
 	self.bind(host, "primitive", &js_primitive, 8);
@@ -155,6 +155,22 @@ fn String arg_text(qjs::Context* js, int argc, qjs::Value* args, int at, Allocat
 fn bool arg_truth(qjs::Context* js, int argc, qjs::Value* args, int at)
 {
 	if (at >= argc) return false;
+	return js.truth(args[at]);
+}
+
+<*
+ A flag whose absence means something other than false.
+
+ `arg_truth` answers false for an argument that is not there, which is right for
+ a flag that switches something on and exactly wrong for one that switches
+ something off. `generateMipmaps` defaults to true, so reading it with
+ `arg_truth` would build no chain for every caller that did not mention it —
+ which is every caller written before the argument existed, and a regression that
+ looks like nothing at all until a floor is seen at a distance.
+*>
+fn bool arg_truth_or(qjs::Context* js, int argc, qjs::Value* args, int at, bool fallback)
+{
+	if (at >= argc) return fallback;
 	return js.truth(args[at]);
 }
 

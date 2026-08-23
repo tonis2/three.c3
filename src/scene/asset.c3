@@ -602,13 +602,28 @@ fn uint Assets.texture_count(&self)
  Counted off the deduplicated list, so two kit pieces sharing an image are
  counted once — which is the number worth showing an agent, because it is the
  one that changes when the sharing breaks.
+
+ **The mip chain is counted too**, by summing the levels rather than by
+ multiplying the top one by four thirds. The closed form is only right for a
+ square power of two: a 1024x16 has eleven levels of which seven are 16 pixels
+ tall or less, and the ratio is nothing like 1.33. Reporting a texture budget a
+ third smaller than it is would be the kind of wrong that only shows up as an
+ out-of-memory on someone else's device.
 *>
 fn usz Assets.texture_bytes(&self)
 {
 	usz total = 0;
 	foreach (&shared : self.textures)
 	{
-		if (shared.alive) total += (usz)shared.texture.width * shared.texture.height * 4;
+		if (!shared.alive) continue;
+		uint width = shared.texture.width;
+		uint height = shared.texture.height;
+		for (uint level = 0; level < shared.texture.levels; level++)
+		{
+			total += (usz)width * height * 4;
+			if (width > 1) width /= 2;
+			if (height > 1) height /= 2;
+		}
 	}
 	return total;
 }
@@ -1913,29 +1928,47 @@ fn int? Assets.decode_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream
 
  The new slot starts at one reference and it belongs to the caller.
 
+ **The colourspace is part of a texture's identity, not a setting on it.** The
+ same PNG asked for as `SRGB` and as `LINEAR` is two images in two formats, and
+ sharing a slot between them would hand whichever caller came second the other
+ one's format — silently, since the picture is right and only the decode is
+ wrong. So it joins the hash and the extents in what has to match. A file used
+ as a colour map in one material and as a height map in another costs two
+ uploads, which is the honest price of it being two different things.
+
  @param decoded : `8-bit. A 16-bit source must be refused before here, since to_rgba cannot narrow one.`
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
+ @param mips : `False for pixels meant to be indexed exactly rather than sampled at a distance.`
  @require decoded.bit_depth != 16
  @return `An index into Assets.textures.`
 *>
-fn int? Assets.claim_texture(&self, Gpu* gpu, image::Image decoded)
+fn int? Assets.claim_texture(
+	&self, Gpu* gpu, image::Image decoded, ColorSpace space = ColorSpace.SRGB, bool mips = true
+)
 {
 	char[] rgba = decoded.to_rgba();
 	defer free(rgba);
 
 	ulong hash = content_hash(rgba);
+	// Asked once, before the loop, and compared as a number: a chain the caller
+	// declined and one it asked for are different images too, and the difference
+	// is invisible in every other field.
+	uint levels = gpu.levels_for(decoded.width, decoded.height, space, mips);
 	foreach (i, &existing : self.textures)
 	{
 		if (!existing.alive) continue;
 		if (existing.texture.hash == hash
 			&& existing.texture.width == decoded.width
-			&& existing.texture.height == decoded.height)
+			&& existing.texture.height == decoded.height
+			&& existing.texture.space == space
+			&& existing.texture.levels == levels)
 		{
 			existing.refs++;
 			return (int)i;
 		}
 	}
 
-	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height)!;
+	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips)!;
 
 	// A freed slot before a fresh one, for `Assets`'s reason: the table should
 	// be as large as the largest level, not as large as every level added up.
@@ -2002,18 +2035,22 @@ fn image::Image? decode_by_signature(char[] encoded)
  script is holding, and it is released by `dispose()` and by nothing else.
  A material naming the texture takes a reference of its own.
 
- **No mip chain and no colourspace argument.** `Gpu.create_texture` uploads one
- level as `R8G8B8A8_SRGB`, which is right for the base colour map this is for
- and wrong for a normal or roughness map — those want UNORM and would come back
- gamma-decoded. There is no verb that can ask for one yet, so nothing can hit
- that today; the day one arrives it is a parameter here, not a second path.
+ **`space` is what makes a normal or roughness map possible**, and it defaults to
+ the wrong thing for one on purpose: a texture named by a path is overwhelmingly
+ a picture, and `SRGB` is what every call meant before the argument existed. A
+ map whose channels are numbers has to say so, and `ColorSpace` says what each
+ mistake looks like on screen.
 
+ @param space : `SRGB for a colour map, LINEAR for a normal, roughness, height or lookup map.`
+ @param mips : `False for pixels meant to be indexed exactly. A full chain otherwise.`
  @return `An index into Assets.textures, at one reference.`
  @return? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
  @return? TEXTURE_FORMAT_UNKNOWN : `Not a PNG or a JPEG, by its first bytes.`
  @return? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
 *>
-fn int? Assets.load_texture_file(&self, Gpu* gpu, String path)
+fn int? Assets.load_texture_file(
+	&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true
+)
 {
 	if (!file::is_file(path)) return TEXTURE_UNREADABLE~;
 
@@ -2029,7 +2066,7 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path)
 	defer decoded.free();
 
 	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
-	return self.claim_texture(gpu, decoded);
+	return self.claim_texture(gpu, decoded, space, mips);
 }
 
 <*

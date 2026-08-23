@@ -90,12 +90,44 @@ fn void js_load(
 }
 
 <*
- `texture(path)` — decode a PNG or JPEG and upload it, as `[index, width, height]`.
+ Which `ColorSpace` a wire code names.
 
- Three numbers rather than a bare index because the prelude's `Texture` wants the
- extents and there is no second verb to ask for them: an agent sizing a plane to
- an image's aspect ratio would otherwise have to guess, and a texture that loaded
- at half the resolution it expected is exactly the thing worth being able to see.
+ The code is the enum's own ordinal and the prelude derives it from Three.js's
+ colourspace strings, so this is the one place the two spellings meet. Anything
+ unrecognised is `SRGB`: the prelude has already refused a string it does not
+ know, so a code arriving here that is neither 0 nor 1 is a host bug, and the
+ forgiving answer is the one that renders a picture correctly.
+*>
+fn ColorSpace color_space_of(int code) @local
+{
+	return code == 1 ? ColorSpace.LINEAR : ColorSpace.SRGB;
+}
+
+<*
+ A texture as JavaScript sees it: `[index, width, height, levels]`.
+
+ The extents are here because the prelude's `Texture` wants them and there is no
+ second verb to ask for them: an agent sizing a plane to an image's aspect ratio
+ would otherwise have to guess, and a texture that loaded at half the resolution
+ it expected is exactly the thing worth being able to see.
+
+ **`levels` is what the image really got, not what was asked for.** A device that
+ cannot blit the format gives one level whatever `generateMipmaps` said, and a
+ handle reporting the request rather than the result would make `tex.levels` a
+ restatement of the caller's own argument.
+*>
+fn qjs::Value texture_value(qjs::Context* js, int index, Texture* uploaded) @local
+{
+	qjs::Value fields = js.array();
+	js.set_index(fields, 0, qjs::int_value(index));
+	js.set_index(fields, 1, qjs::int_value((int)uploaded.width));
+	js.set_index(fields, 2, qjs::int_value((int)uploaded.height));
+	js.set_index(fields, 3, qjs::int_value((int)uploaded.levels));
+	return fields;
+}
+
+<*
+ `texture(path, space, mips)` — decode a PNG or JPEG and upload it.
 
  **The path goes through `resolve_asset`, the same door `three.load` uses**, so
  under `--assets` a texture may only come from inside the game — a script cannot
@@ -145,24 +177,22 @@ fn void js_texture(
 			return;
 		}
 
-		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening);
+		ColorSpace space = color_space_of(arg_int(&js, argc, args, 1));
+		bool mips = arg_truth_or(&js, argc, args, 2, true);
+
+		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips);
 		if (catch err = index)
 		{
 			*out = js.raise(texture_failure(err, path));
 			return;
 		}
 
-		Texture* uploaded = self.pass.assets.texture_at(index);
-		qjs::Value triple = js.array();
-		js.set_index(triple, 0, qjs::int_value(index));
-		js.set_index(triple, 1, qjs::int_value((int)uploaded.width));
-		js.set_index(triple, 2, qjs::int_value((int)uploaded.height));
-		*out = triple;
+		*out = texture_value(&js, index, self.pass.assets.texture_at(index));
 	};
 }
 
 <*
- `dataTexture(bytes, width, height)` — pixels a script built, as `[index, w, h]`.
+ `dataTexture(bytes, width, height, space, mips)` — pixels a script built.
 
  **The bytes are borrowed and are copied before this returns.** `js.bytes` points
  into the engine's own storage for the `Uint8Array` the script is holding, which
@@ -249,7 +279,14 @@ fn void js_data_texture(
 		.allocator = (Allocator)null,
 	};
 
-	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed);
+	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
+	// **`generateMipmaps` is worth reaching for here more than on a file.** Pixels
+	// a script generated are as often a table as a picture — a palette, a ramp, a
+	// noise field indexed exactly — and a blurred level of a table is not a
+	// cheaper approximation of anything.
+	bool mips = arg_truth_or(&js, argc, args, 4, true);
+
+	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips);
 	if (catch err = index)
 	{
 		*out = js.raise(string::tformat("could not upload the texture: %s", err));
@@ -263,12 +300,7 @@ fn void js_data_texture(
 	// anywhere between here and the device is invisible from JavaScript. Written
 	// as an echo first, and a `.width`/`.height` swap injected into the `Image`
 	// above passed the whole suite.
-	Texture* uploaded = self.pass.assets.texture_at(index);
-	qjs::Value triple = js.array();
-	js.set_index(triple, 0, qjs::int_value(index));
-	js.set_index(triple, 1, qjs::int_value((int)uploaded.width));
-	js.set_index(triple, 2, qjs::int_value((int)uploaded.height));
-	*out = triple;
+	*out = texture_value(&js, index, self.pass.assets.texture_at(index));
 }
 
 <*

@@ -2,6 +2,70 @@
 
 const H = globalThis.__three;
 
+// Which space a texture's bytes are in. Three.js's strings, because a script
+// written from memory of Three.js will spell them this way and comparing
+// `tex.colorSpace === THREE.SRGBColorSpace` has to mean something.
+//
+// `NoColorSpace` and `LinearSRGBColorSpace` are one format here — RGBA8 read
+// back as stored. They are separate names in Three.js because it also carries
+// float textures, where the distinction is real; both are accepted so that a
+// line copied from either idiom works.
+export const NoColorSpace = '';
+export const SRGBColorSpace = 'srgb';
+export const LinearSRGBColorSpace = 'srgb-linear';
+
+// **Which one to reach for.** SRGB for a picture of something: a base colour
+// map, an albedo, anything an artist looked at while making it. Linear for a
+// map whose channels are numbers rather than colours — a normal map's xyz, a
+// roughness or metalness or occlusion map, a height field, a lookup table.
+//
+// Neither mistake announces itself. A colour map loaded linear is washed out
+// and reads as a lighting bug; a normal map loaded sRGB has its "no tilt" 0.5
+// decoded to 0.21, so every surface leans the same way and the detail goes
+// soft — it reads as a bad bake, and the file is fine.
+const SPACES = new Map([
+	[SRGBColorSpace, 0],
+	[LinearSRGBColorSpace, 1],
+	[NoColorSpace, 1],
+]);
+
+// The options both texture verbs take, checked here so the message can name
+// the key that was wrong.
+//
+// **Unknown keys are refused rather than ignored**, which is the opposite of
+// what Three.js does and is deliberate. Three.js's Texture has two dozen
+// settable fields and this has two; a script that writes
+// `{ magFilter: THREE.NearestFilter }` and is quietly given linear filtering
+// has no way to find that out, and the symptom — a blurry sprite — looks like
+// the wrong asset rather than an unsupported option.
+export function uploadOptions(options, what) {
+	if (options === null || options === undefined) return { space: SRGBColorSpace, code: 0, mips: true };
+	if (typeof options !== 'object') {
+		throw new TypeError(
+			`${what} wants an options object like { colorSpace: three.LinearSRGBColorSpace }, `
+			+ `not ${typeof options}`);
+	}
+
+	for (const key of Object.keys(options)) {
+		if (key !== 'colorSpace' && key !== 'generateMipmaps') {
+			throw new TypeError(
+				`${what} has no option called '${key}' — it takes colorSpace and generateMipmaps`);
+		}
+	}
+
+	const { colorSpace = SRGBColorSpace, generateMipmaps = true } = options;
+	if (!SPACES.has(colorSpace)) {
+		throw new TypeError(
+			`colorSpace '${colorSpace}' is not one this reads — use three.SRGBColorSpace for a colour map `
+			+ 'or three.LinearSRGBColorSpace for a normal, roughness or height map');
+	}
+	if (typeof generateMipmaps !== 'boolean') {
+		throw new TypeError(`generateMipmaps wants true or false, not ${typeof generateMipmaps}`);
+	}
+
+	return { space: colorSpace, code: SPACES.get(colorSpace), mips: generateMipmaps };
+}
+
 // An image on the device, and the handle a script holds it by.
 //
 // Three.js's TextureLoader is asynchronous and hands back a Texture that
@@ -16,8 +80,8 @@ const H = globalThis.__three;
 // answers with its own Texture holding its own reference, so disposing one
 // does not disturb the other.
 export class Texture {
-	constructor(handle, path = null) {
-		const [index, width, height] = handle;
+	constructor(handle, path = null, colorSpace = SRGBColorSpace) {
+		const [index, width, height, levels] = handle;
 		this._t = index;
 		// Null for a DataTexture, which came from no file. Reported as null
 		// rather than as a made-up name like '<data>', so a script can ask
@@ -26,11 +90,31 @@ export class Texture {
 		this._path = path;
 		this._width = width;
 		this._height = height;
+		this._levels = levels;
+		this._colorSpace = colorSpace;
 	}
 
 	get width() { return this._width; }
 	get height() { return this._height; }
 	get path() { return this._path; }
+
+	// Which space this image's bytes are read in. Fixed at upload: it is the
+	// image's Vulkan format and there is nothing to change afterwards, which
+	// is why this is a getter and not a settable field as it is in Three.js.
+	// Load the file again with the other colourspace to get the other image.
+	get colorSpace() { return this._colorSpace; }
+
+	// How many mip levels the image has. 1 means the top level and nothing
+	// below it, so the sampler has nothing to fall back on as the surface
+	// shrinks — which is what asking for `generateMipmaps: false` buys, and
+	// what a device that cannot filter this format gives regardless.
+	get levels() { return this._levels; }
+
+	// **Whether it got a chain, not whether one was asked for.** Three.js's
+	// name for the request; this is the answer, so a script that asked for
+	// mips on a device that cannot make them sees false here rather than the
+	// true it passed in.
+	get generateMipmaps() { return this._levels > 1; }
 
 	// Whether this handle still names an image. False after dispose(), and
 	// the reason a disposed Texture throws rather than quietly texturing
@@ -44,7 +128,12 @@ export class Texture {
 	// converts nothing, so a texture made from a DataTexture reads back
 	// byte-for-byte identical to the array it was built from, and a PNG
 	// reads back as the PNG's own pixels. The sampler's sRGB-to-linear
-	// decode happens at sample time and is not in here.
+	// decode happens at sample time and is not in here — which is also why
+	// `colorSpace` makes no difference to what this returns.
+	//
+	// Level 0. The generated mip levels are approximations this engine made
+	// up rather than anything a script handed over, and there is no verb to
+	// ask for one.
 	//
 	// `into` is optional and exists because this is not free: it copies the
 	// image off the device and waits for the queue, so a caller doing it
@@ -100,7 +189,14 @@ export class Texture {
 	}
 
 	toJSON() {
-		return { path: this._path, width: this._width, height: this._height, alive: this.alive };
+		return {
+			path: this._path,
+			width: this._width,
+			height: this._height,
+			colorSpace: this._colorSpace,
+			levels: this._levels,
+			alive: this.alive,
+		};
 	}
 
 	toString() {
@@ -114,7 +210,12 @@ export class Texture {
 // `new THREE.DataTexture(data, width, height, format)` there takes a format
 // argument and needs `.needsUpdate = true` before it does anything. This one
 // is RGBA8 only and is on the device by the time the constructor returns, so
-// there is nothing to flag and nothing to schedule.
+// there is nothing to flag and nothing to schedule. The fourth argument is
+// the same options object `three.texture` takes rather than a format, and
+// `{ generateMipmaps: false }` is worth reaching for here more than there:
+// generated pixels are as often a table indexed exactly — a palette, a ramp,
+// a noise field — as a picture, and a blurred level of a table approximates
+// nothing.
 //
 // **Deduplicated against every other texture**, which is worth knowing before
 // building one in a loop: generated pixels and the identical image loaded
@@ -127,7 +228,7 @@ export class Texture {
 // over a detail of which container was used would be refusing the obvious
 // thing for no reason the author can see. A Uint8Array skips the copy.
 export class DataTexture extends Texture {
-	constructor(data, width, height) {
+	constructor(data, width, height, options = null) {
 		if (!Number.isInteger(width) || !Number.isInteger(height)) {
 			throw new TypeError(
 				'new three.DataTexture(data, width, height) wants whole-number dimensions'
@@ -160,6 +261,7 @@ export class DataTexture extends Texture {
 				+ '— four per pixel, in r, g, b, a order'
 			);
 		}
-		super(H.dataTexture(bytes, width, height), null);
+		const chosen = uploadOptions(options, 'new three.DataTexture(data, width, height, options)');
+		super(H.dataTexture(bytes, width, height, chosen.code, chosen.mips), null, chosen.space);
 	}
 }
