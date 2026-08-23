@@ -412,3 +412,157 @@ fn void the_depth_range_covers_the_box() @test
 		}
 	}
 }
+
+// ============================================================================
+// A boom of zero length, and what follows something (plan.md §17)
+// ============================================================================
+
+<*
+ First person is `distance` at zero, and the view matrix survives it.
+
+ `look_at`'s forward vector is `target - eye`, which at distance zero is the zero
+ vector and a matrix of NaN — the same failure the pitch clamp exists to avoid at
+ the pole, and it fails the same silent way: an empty frame, which reads as "the
+ scene is gone" rather than as "the camera is degenerate". So the direction comes
+ from the orbit angles instead.
+
+ Asserted on where a probe lands rather than on the matrix, because "not NaN" is
+ satisfied by a great many matrices that point the wrong way.
+*>
+fn void a_zero_boom_looks_along_the_orbit_angles() @test
+{
+	three::Camera camera = three::default_camera();
+	camera.target = { 0, 0, 0 };
+	camera.distance = 0;
+	// Straight down -Z, level: yaw 0 puts the eye on +Z looking back at the
+	// origin, so at zero distance the eye is *at* the origin looking down -Z.
+	camera.yaw = 0;
+	camera.pitch = 0;
+	camera.derive_planes(100.0f);
+
+	Matrix4f vp = camera.view_projection(WIDE);
+
+	float[<4>] ahead = vp * (float[<4>]) { 0, 0, -10, 1 };
+	test::@check(ahead[3] > 0.0f, "something ten units ahead is in front of the eye, w = %f", ahead[3]);
+	test::@check(
+		math::abs(ahead[0] / ahead[3]) < 0.01f && math::abs(ahead[1] / ahead[3]) < 0.01f,
+		"and lands in the middle of the frame, at %f, %f", ahead[0] / ahead[3], ahead[1] / ahead[3]
+	);
+
+	float[<4>] behind = vp * (float[<4>]) { 0, 0, 10, 1 };
+	test::@check(behind[3] < 0.0f, "and something ten units behind is behind, w = %f", behind[3]);
+}
+
+<*
+ The planes do not collapse when the boom does.
+
+ Both rules are multiples of `distance`, so at zero the old ones gave a near of
+ 0.0001 and a far of whatever `reach` happened to be — a depth ratio in the
+ millions, which spends the buffer on the first centimetre and z-fights the rest
+ of the scene. The failure is a picture that looks *nearly* right, which is why
+ it is worth a check rather than a comment.
+*>
+fn void the_planes_do_not_collapse_when_the_boom_does() @test
+{
+	three::Camera camera = three::default_camera();
+	camera.distance = 0;
+
+	camera.derive_planes(400.0f);
+	test::@check(camera.near_plane == three::FIRST_PERSON_NEAR, "the near plane is a statement about eyes, got %f", camera.near_plane);
+	test::@check(camera.far_plane == 400.0f, "and the far plane is still the scene's reach, got %f", camera.far_plane);
+
+	// An empty scene has not been walked yet and answers zero.
+	camera.derive_planes(0.0f);
+	test::@check(
+		camera.far_plane > camera.near_plane,
+		"a scene with no bounds is still projectable: %f to %f", camera.near_plane, camera.far_plane
+	);
+}
+
+<*
+ A rigid follow puts the orbit point on the thing, offset and all.
+*>
+fn void a_rigid_follow_lands_on_the_anchor() @test
+{
+	three::Camera camera = three::default_camera();
+	three::CameraFollow follow = { .active = true, .offset = { 0, 1.5, 0 } };
+
+	follow.apply(&camera, (Vec3) { 10, 2, -5 }, 16.0f);
+
+	test::@check(camera.target.x == 10.0f, "x, got %f", camera.target.x);
+	test::@check(camera.target.y == 3.5f, "y is the anchor plus the offset, got %f", camera.target.y);
+	test::@check(camera.target.z == -5.0f, "z, got %f", camera.target.z);
+}
+
+<*
+ A lagged follow is late by a time, not by a number of frames.
+
+ The claim worth pinning: the same `lag_ms` has to leave the camera in the same
+ place after the same *wall time*, whatever the frame rate — which is what an
+ exponential buys and what a fixed fraction per frame does not. A camera tuned on
+ a 60 Hz display would otherwise be twice as eager on a 144 Hz one, which reads
+ as the lag setting not working rather than as the arithmetic being wrong.
+*>
+fn void a_lagged_follow_is_late_by_a_time_not_by_frames() @test
+{
+	Vec3 anchor = { 100, 0, 0 };
+
+	three::Camera slow = three::default_camera();
+	three::Camera fast = three::default_camera();
+	slow.target = { 0, 0, 0 };
+	fast.target = { 0, 0, 0 };
+
+	three::CameraFollow follow = { .active = true, .lag_ms = 100.0f };
+
+	// 96 ms of catching up, as six frames and as twelve.
+	for (int i = 0; i < 6; i++) follow.apply(&slow, anchor, 16.0f);
+	for (int i = 0; i < 12; i++) follow.apply(&fast, anchor, 8.0f);
+
+	test::@check(slow.target.x > 5.0f, "the camera actually moved, got %f", slow.target.x);
+	test::@check(slow.target.x < 95.0f, "and has not arrived, got %f", slow.target.x);
+	test::@check(
+		math::abs(slow.target.x - fast.target.x) < 0.5f,
+		"both frame rates are in the same place after the same time: %f vs %f",
+		slow.target.x, fast.target.x
+	);
+}
+
+<*
+ A frame that took a second does not teleport the camera.
+
+ The same clamp `Controls` puts on its coast and for the same reason: a tool call
+ that ran to completion on the frame loop hands the next tick a delta that is not
+ a frame, and an unclamped exponential closes the whole gap for it — which reads
+ as the camera cutting rather than as the frame having been slow.
+*>
+fn void a_long_frame_does_not_teleport_the_camera() @test
+{
+	three::Camera camera = three::default_camera();
+	camera.target = { 0, 0, 0 };
+
+	three::CameraFollow follow = { .active = true, .lag_ms = 100.0f };
+	follow.apply(&camera, (Vec3) { 100, 0, 0 }, 5_000.0f);
+
+	// 100 ms of a 100 ms time constant closes 1 - 1/e, about 63%.
+	test::@check(
+		camera.target.x < 70.0f,
+		"five seconds of stall is spent as one clamped step, got %f", camera.target.x
+	);
+}
+
+<*
+ No time is no lag, because there is nothing for a lag to be a lag over.
+
+ The first tick after an attach is the case: `follow_camera` is called with a
+ zero delta so the camera starts on the thing rather than a frame behind it.
+*>
+fn void a_follow_with_no_elapsed_time_snaps() @test
+{
+	three::Camera camera = three::default_camera();
+	camera.target = { 0, 0, 0 };
+
+	three::CameraFollow follow = { .active = true, .lag_ms = 250.0f };
+	follow.apply(&camera, (Vec3) { 7, 0, 0 }, 0);
+
+	test::@check(camera.target.x == 7.0f, "snapped, got %f", camera.target.x);
+}

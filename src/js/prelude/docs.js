@@ -42,6 +42,8 @@ export const DOCS = {
 		'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 		'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
+		'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back.',
+		'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
 		'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
 		'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light and no colour per light — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
 		'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
@@ -633,6 +635,21 @@ export const DOCS = {
 			'The numbers below, for the whole scene, with culling off. gpuMs is the one exception: it is '
 			+ 'not a fact about the scene but a measurement of the last frame drawn, so it moves when '
 			+ 'nothing about the scene has.',
+		'three.camera.attach(object, options)':
+			'Follow an object with the camera. { offset: [x, y, z] } is added to its world position and '
+			+ 'becomes the orbit point every frame; { distance } is how far behind the eye sits, and 0 '
+			+ 'puts the eye ON the point, which is first person; { lag } is milliseconds of catch-up, 0 '
+			+ 'for rigid, ~120 for a camera that trails. The follow runs LAST in the frame, after the '
+			+ 'animation, the solver and your callback, so the camera is never a frame behind what it is '
+			+ 'watching. It owns the orbit point and nothing else: a drag still orbits, the wheel still '
+			+ 'zooms, orbit() still aims, and a PAN stops working because a pan writes the orbit point. '
+			+ 'The offset is world space, so a camera bolted into something that rolls is not expressible. '
+			+ 'frameAll() throws while attached rather than being undone a frame later.',
+		'three.camera.detach() / three.camera.attached':
+			'detach() stops following and answers whether it was, leaving the camera exactly where the '
+			+ 'last frame put it. attached is the object being followed, or null — and null is also how '
+			+ 'you find out that what you were following was destroyed, because the host drops the '
+			+ 'attachment silently rather than throwing from inside a frame nobody called.',
 		'three.unloadUnused()':
 			'Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and '
 			+ 'every texture that goes with them. Answers with { assets, meshes, textures, bytes } — '

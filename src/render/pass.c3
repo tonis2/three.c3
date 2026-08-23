@@ -82,6 +82,11 @@ struct MeshPass
 	Assets assets;
 	Scene scene;
 	Camera camera;
+	// What the camera is tracking, if anything — `scene/camera.c3`. Beside the
+	// camera rather than on the runtime, because it names a `NodeId` and the
+	// scene those are indices into is the one on this struct; a follow held
+	// somewhere else would be a handle into a graph it could not see get reset.
+	CameraFollow follow;
 	// The render target's width over its height, kept current by `record`.
 	// `frame_camera` needs it and has no target to ask — it is reached from a
 	// script, between frames — and fitting a 16:9 frame as though it were square

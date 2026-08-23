@@ -5066,3 +5066,168 @@ fn void a_replaced_post_handle_is_refused() @test
 			"and an undeclared name is refused by the same Proxy a material uses: %s", result.value);
 	};
 }
+
+// ============================================================================
+// The camera, following something (plan.md §17)
+// ============================================================================
+
+<*
+ A script attaches the camera to an object and the orbit point goes there.
+
+ A `Group` rather than a mesh because a group is a node and nothing else — no
+ geometry, no upload, no device — which is what keeps this check in the
+ microsecond suite with the rest of the graph work.
+*>
+fn void a_script_can_attach_the_camera_to_an_object() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			g.position.set(10, 2, -5);
+			three.camera.attach(g, { offset: [0, 1.5, 0], distance: 4 });
+			globalThis.g = g;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		Vec3 target = run.pass.camera.target;
+		test::@check(target.x == 10.0f, "attaching lands the orbit point at once, x = %f", target.x);
+		test::@check(target.y == 3.5f, "with the offset added, y = %f", target.y);
+		test::@check(run.pass.camera.distance == 4.0f, "and the boom is what was asked for, %f", run.pass.camera.distance);
+
+		three::RunResult moved = run.run("globalThis.g.position.set(-3, 0, 7);");
+		defer moved.free();
+		run.tick(16);
+
+		target = run.pass.camera.target;
+		test::@check(target.x == -3.0f, "and the next frame follows, x = %f", target.x);
+		test::@check(target.z == 7.0f, "z = %f", target.z);
+	};
+}
+
+<*
+ The camera keeps up inside the frame that moved the thing, not the frame after.
+
+ This is the ordering claim `tick`'s `defer` exists for, and it is the one that
+ matters: a camera one frame behind does not look like a camera problem, it looks
+ like the character sliding, and the bug gets filed against the physics.
+*>
+fn void the_camera_keeps_up_within_the_frame_that_moved_the_thing() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			three.camera.attach(g, { distance: 5 });
+			three.setAnimationLoop(() => { g.position.x += 10; });
+		`);
+		defer setup.free();
+		test::@check(setup.ok, "the script succeeded: %s", setup.error);
+
+		run.tick(16);
+		test::@check(
+			run.pass.camera.target.x == 10.0f,
+			"the callback moved it to 10 and the camera is at 10, not 0: %f", run.pass.camera.target.x
+		);
+
+		run.tick(32);
+		test::@check(
+			run.pass.camera.target.x == 20.0f,
+			"and again the frame after, %f", run.pass.camera.target.x
+		);
+	};
+}
+
+<*
+ First person is the boom at zero, and it is not a mode.
+
+ The eye is on the orbit point rather than away from it, so `camera.eye()` is the
+ head. What makes it worth checking here rather than only in `framing_test` is
+ that the boom has to survive the round trip through `cameraSet`'s clamp, which
+ used to floor it at 0.0001 and would have quietly put the eye a tenth of a
+ millimetre outside the character's head.
+*>
+fn void first_person_is_a_boom_of_zero() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			g.position.set(4, 0, 0);
+			three.camera.attach(g, { offset: [0, 1.7, 0], distance: 0 });
+			// The turntable's own verb, with the distance left alone — this is
+			// what a mouse look calls every frame.
+			three.camera.orbit(90, 0);
+			return three.camera.distance;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "0", "the boom stays zero through orbit(), got '%s'", result.value);
+
+		Vec3 eye = run.pass.camera.eye();
+		test::@check(eye.x == 4.0f, "the eye is at the head, x = %f", eye.x);
+		test::@check(eye.y == 1.7f, "y = %f", eye.y);
+	};
+}
+
+<*
+ Following something that is destroyed drops the attachment and stays put.
+
+ Throwing would raise from inside a tick no script called; keeping the handle
+ would follow whatever reused the slot. So the camera stops where it was and
+ `three.camera.attached` answers null, which is the only way a script can find
+ out — and the only thing that can produce this is a script destroying what it
+ was following.
+*>
+fn void following_something_destroyed_detaches_and_stays_put() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			g.position.set(6, 0, 0);
+			three.camera.attach(g, { distance: 3 });
+			scene.remove(g);
+		`);
+		defer setup.free();
+		test::@check(setup.ok, "the script succeeded: %s", setup.error);
+
+		run.tick(16);
+
+		test::@check(run.pass.camera.target.x == 6.0f, "the camera stayed where it was, %f", run.pass.camera.target.x);
+
+		three::RunResult after = run.run("return three.camera.attached;");
+		defer after.free();
+		test::@check(after.value == "null", "and reports that it is following nothing, got '%s'", after.value);
+	};
+}
+
+<*
+ `frameAll` refuses while attached rather than being undone a frame later.
+*>
+fn void framing_the_scene_refuses_while_the_camera_is_attached() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			three.camera.attach(g, { distance: 2 });
+			three.camera.frameAll();
+		`);
+		defer result.free();
+
+		test::@check(!result.ok, "it refused");
+		test::@check(result.error.contains("detach"), "and said what to do about it: '%s'", result.error);
+	};
+}

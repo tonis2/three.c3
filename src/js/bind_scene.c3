@@ -120,6 +120,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "shadowSet", &js_shadow_set, 4);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
+	self.bind(host, "cameraAttach", &js_camera_attach, 7);
+	self.bind(host, "cameraDetach", &js_camera_detach, 0);
+	self.bind(host, "cameraAttached", &js_camera_attached, 0);
 	self.bind(host, "frameAll", &js_frame_all, 0);
 
 	self.js.set_property(global, "__three", host);
@@ -1359,7 +1362,14 @@ fn void js_camera_set(
 	camera.target = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
 	camera.yaw = arg_float(&js, argc, args, 3);
 	camera.pitch = arg_float(&js, argc, args, 4);
-	camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0001f);
+	// **Zero is allowed and is what first person is** — the eye sits on the point
+	// it orbits, which is a character's head once `three.camera.attach` is
+	// writing that point. The floor used to be 0.0001 to keep `look_at` from
+	// dividing by a zero-length forward vector; `Camera.view` handles the
+	// degenerate boom directly now, and the old floor would have made
+	// `orbit(yaw, pitch)` — which passes the current distance straight back —
+	// quietly leave first person for a value no script asked for.
+	camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0f);
 	camera.fov = math::clamp(arg_float(&js, argc, args, 6), 1.0f, 179.0f);
 
 	camera.clamp_angles();
@@ -1377,4 +1387,99 @@ fn void js_frame_all(
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	self.pass.frame_camera();
+}
+
+<*
+ `cameraAttach(index, generation, ox, oy, oz, distance, lag)` — follow a node.
+
+ `plan.md` §17. Everything about what this does is in `CameraFollow`; what is
+ here is the two things the boundary has to decide.
+
+ **The distance is applied once, not held.** It is written straight onto the
+ camera and the follow never looks at it again, so the wheel, a drag and
+ `three.camera.orbit()` all go on working while attached — and a script that
+ scrolls out of `distance: 0` has left first person, with no mode anywhere to
+ keep in step. What the follow owns is the orbit *point*; what it deliberately
+ does not own is where the eye stands relative to it.
+
+ **A negative lag is refused rather than clamped.** Zero already means rigid, so
+ a negative one cannot be a shorthand for anything — it is a sign error in the
+ caller's arithmetic, and clamping it to zero would hide that behind a camera
+ that merely feels wrong.
+*>
+fn void js_camera_attach(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId node = arg_handle(self, &js, argc, args, 0, out);
+	if (node == NO_NODE) return;
+
+	float lag = arg_float(&js, argc, args, 6);
+	if (lag < 0.0f)
+	{
+		*out = js.raise("three.camera.attach(object, { lag }) wants milliseconds — 0 for rigid, and never a negative");
+		return;
+	}
+
+	self.pass.follow = {
+		.active = true,
+		.node = node,
+		.offset = {
+			arg_float(&js, argc, args, 2),
+			arg_float(&js, argc, args, 3),
+			arg_float(&js, argc, args, 4),
+		},
+		.lag_ms = lag,
+	};
+
+	self.pass.camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0f);
+
+	// Where the thing already is, before a frame has ticked. Without it a script
+	// that attaches and screenshots in the same run pictures the camera at
+	// whatever it was looking at before — and a rigid follow that is one frame
+	// late on its very first frame is the bug this whole feature exists to avoid,
+	// arriving at the one moment nobody would look for it.
+	self.follow_camera(0);
+}
+
+<*
+ `cameraDetach()` — stop following, and answer whether anything was.
+
+ The camera is left exactly where the last frame put it, which is the only
+ answer that does not move the picture at the moment a script says "stop moving
+ the picture".
+*>
+fn void js_camera_detach(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	bool was = self.pass.follow.active;
+	self.pass.follow = {};
+	*out = qjs::bool_value(was);
+}
+
+<*
+ `cameraAttached()` — the followed node as a handle, or null.
+
+ Null is also how a script learns that what it was following has been destroyed:
+ `follow_camera` drops the attachment silently when the node goes, because the
+ alternative is raising from inside a tick nobody called.
+*>
+fn void js_camera_attached(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (!self.pass.follow.active || self.pass.scene.node(self.pass.follow.node) == null)
+	{
+		*out = qjs::null_value();
+		return;
+	}
+	*out = handle_value(&js, self.pass.follow.node);
 }
