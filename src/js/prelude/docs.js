@@ -65,6 +65,7 @@ export const DOCS = {
 		'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
 		'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
 		'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is where the cursor is. There is no mouseDown and no drag events — the left button orbits the camera, and a press that travels or is held is a drag rather than a click.',
+		'The camera\'s hand on the window can be taken away: three.controls.enabled = false stops the mouse orbiting, panning and zooming, and is what a scene that drives its own camera every frame needs — otherwise the turntable writes yaw and pitch again underneath it and the two fight over one matrix sixty times a second. It does not stop three.camera.orbit(), which is a script moving the camera on purpose. Turn it back on when the mode ends: a window nobody can move the camera in is a bad way to leave one, and there is no gesture that undoes it.',
 		'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
 		'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
 		'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
@@ -705,6 +706,18 @@ export const DOCS = {
 			+ 'counted from its top-left corner, which is what scene.pick(x, y) takes. `inside` is '
 			+ 'false when the cursor has left the window, and everything is zero when there is no '
 			+ 'window at all. Read it in the animation callback.',
+		'three.controls.enabled':
+			'Whether the mouse still reaches the camera. True by default; false stops the drag, the '
+			+ 'right-drag pan and the wheel zoom, and stops the coast a flick leaves behind. What it is '
+			+ 'for is a scene that drives the camera itself — a follow camera, a first-person look — '
+			+ 'which writes yaw, pitch and target every frame and would otherwise have the turntable '
+			+ 'writing them again from whatever the hand did. three.camera.orbit() and three.camera.'
+			+ 'frameAll() are unaffected, because a script writing the camera on purpose is the thing '
+			+ 'being enabled rather than the thing being stopped. A drag in progress is dropped rather '
+			+ 'than finished, and turning it back on waits for a fresh press instead of resuming the '
+			+ 'old one. It reads back what was written to it with no window open, where it does nothing, '
+			+ 'and it survives new three.Scene() — following the camera rather than the background, '
+			+ 'because a game that took the mouse for its own camera should not lose it at every level.',
 		'three.onClick(fn)':
 			'Call fn(hit, x, y) once when the window is clicked, from inside the frame. `hit` is what '
 			+ 'is under the cursor — the same intersection scene.pick(x, y) answers with, or null for '

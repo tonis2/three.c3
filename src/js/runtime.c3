@@ -293,6 +293,23 @@ struct JsRuntime
 	qjs::Value click_fn;
 	bool click_active;
 
+	// The turntable's hand on the window — `scene/controls.c3`.
+	//
+	// **It lives here because `enabled` has to survive having no window.** A
+	// script says `three.controls.enabled = false` under `--mcp --headless` as
+	// readily as it does with a window open, and a flag stored in the window's
+	// loop would have nowhere to be written to and would read back as whatever
+	// it was — the property that reads back what you did not write, which is the
+	// trap `api.js` throws on assignment to avoid three times over.
+	//
+	// So the runtime owns the whole struct and `main.c3`'s loop drives *this*
+	// one rather than a local of its own. The drag anchor coming along for the
+	// ride is the price of there being exactly one of these; two would be two
+	// answers to `three.controls.enabled`, which is the thing being prevented.
+	// `run()` — a window with no JavaScript in it — keeps its own, and the type
+	// stays independent of both.
+	Controls controls;
+
 	// The physics world, owned by `scene/physics.c3` and stepped by `tick`.
 	// On the runtime rather than on the scene because it is the frame that
 	// advances it, and `new three.Scene()` empties it for the same reason it
@@ -327,6 +344,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.js = qjs::open(JS_MEMORY_LIMIT, JS_STACK_LIMIT)!;
 	self.pass = pass;
 	self.renderer = renderer;
+	self.controls = DEFAULT_CONTROLS;
 
 	self.log.init(mem, 1024);
 	self.value.init(mem, 256);

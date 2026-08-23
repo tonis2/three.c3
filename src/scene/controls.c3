@@ -12,10 +12,12 @@
  runs headless, and a control scheme that could only be exercised by a person
  dragging a mouse would be verified by nobody, ever.
 
- **It is not a JS API.** A script reaches the camera through `three.camera`,
- which writes the same fields; last writer wins, frame by frame, and neither
- side needs to know about the other. Driving the camera *from* a script per
- frame is the next milestone — see `event_loop.md`.
+ **It is not a JS API, and one field of it is.** A script reaches the camera
+ through `three.camera`, which writes the same fields; last writer wins, frame
+ by frame, and neither side needs to know about the other. The exception is
+ `enabled`, reached as `three.controls.enabled`, and it exists because
+ last-writer-wins is not a scheme two things can share sixty times a second
+ when one of them means to hold the camera *still*. See `plan.md` §17.
 *>
 module three;
 
@@ -57,6 +59,22 @@ struct PointerState
 *>
 struct Controls
 {
+	// Whether the hand on the window reaches the camera at all.
+	//
+	// **A script that drives its own camera has to be able to say so.** A follow
+	// camera or a first-person look writes yaw, pitch and target every frame,
+	// and the turntable writes them again from whatever the mouse did — two
+	// things fighting over one matrix at sixty hertz, which reads as a camera
+	// that shudders rather than as a control scheme that is wrong. `plan.md` §9
+	// asked whether a script should be allowed to turn this off and §17 answered
+	// yes, because the camera work it gates cannot be designed around an
+	// undecided one.
+	//
+	// **It takes the mouse away and nothing else.** `three.camera.orbit()` still
+	// moves the camera, because a script writing the camera on purpose was never
+	// what this is protecting anything from.
+	bool enabled;
+
 	// Whether a button was down *last* frame, and where the cursor was when it
 	// was. Together they are the entire state machine, and `dragging` is the
 	// load-bearing half: without it the first frame of a drag applies the
@@ -89,6 +107,10 @@ struct Controls
 }
 
 const Controls DEFAULT_CONTROLS = {
+	// On, and on is the only sane default: a window nobody can move the camera
+	// in is a bad way for a script to leave one, so the bad state has to be the
+	// one somebody asked for rather than the one they got by not asking.
+	.enabled = true,
 	.orbit_degrees_per_point = 0.4,
 	.zoom_per_scroll_point = 0.01,
 	.min_distance = 0.01,
@@ -139,12 +161,36 @@ const float MIN_SPIN_DEGREES_PER_MS = 0.002;
  average would throw it past that; a hand that stops dead and then releases sets
  it to zero, which is the same statement made more firmly.
 
+ ## Disabled
+
+ Every gesture is off, and the state a gesture leaves behind goes with them.
+ The anchor would otherwise hold the cursor's position from before the script
+ took the mouse — the one-frame jump `dragging` exists to prevent, arriving at
+ whatever moment the controls came back — and the spin would be a flick the
+ scene had already stopped acknowledging. `released` is cleared for the reason
+ the latch guard below gives: a button held across the moment the controls
+ return is a button whose press this scheme never saw.
+
+ It is cleared on every disabled frame rather than on the transition to one.
+ Detecting the edge would need a second bit remembering the last answer, and the
+ whole state here is four fields that are already zero by the second frame — a
+ transition nobody has to notice is a transition nobody can get wrong.
+
  @param viewport_height : `Viewport height in the pointer's own units. Pan is skipped when it is not yet known.`
  @param dt_ms : `Milliseconds since the last call. Zero means the caller keeps no clock, and then there is no coast — which is every check that predates one.`
  @return `true when the camera moved, so an idle frame can be told from a moved one.`
 *>
 fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewport_height, float dt_ms = 0)
 {
+	if (!self.enabled)
+	{
+		self.dragging = false;
+		self.released = false;
+		self.yaw_velocity = 0.0f;
+		self.pitch_velocity = 0.0f;
+		return false;
+	}
+
 	bool held = pointer.orbit || pointer.pan;
 
 	// **A held button is only believed once it has been seen released.**

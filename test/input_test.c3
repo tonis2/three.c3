@@ -1776,3 +1776,103 @@ fn void a_raised_script_budget_does_not_reach_the_frame_callback() @test
 			"and be named as the frame budget: '%s'", after.frame_error);
 	};
 }
+
+// ============================================================================
+// The controls, from a script (plan.md §17)
+// ============================================================================
+
+<*
+ What a script writes is what the window's own control scheme reads.
+
+ The check is on the struct rather than on the round trip, because a flag that
+ reads back correctly out of a variable the loop never consults is exactly the
+ failure this is meant to make impossible — and the loop consults *this* struct:
+ `main.c3`'s `live` hands `&runtime.controls` to `drive_camera` rather than
+ keeping one of its own.
+*>
+fn void a_script_can_take_the_mouse_and_give_it_back() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		test::@check(run.controls.enabled, "the mouse starts connected");
+
+		@ok(run, "three.controls.enabled = false;");
+		test::@check(!run.controls.enabled, "and a script can take it");
+
+		@ok(run, "three.controls.enabled = true;");
+		test::@check(run.controls.enabled, "and give it back");
+	};
+}
+
+<*
+ It reads back as a boolean, whatever shape the truth arrived in.
+
+ `enabled = 1` is what somebody writes who has not read anything, and a property
+ that answered `1` to it would be a second type for one flag. The host takes the
+ truthiness and the getter answers with the boolean it stored.
+*>
+fn void the_mouse_flag_reads_back_as_a_boolean() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		String fresh = @answer(run, "return three.controls.enabled;");
+		defer fresh.free(mem);
+		test::@check(fresh == "true", "true by default, got '%s'", fresh);
+
+		@ok(run, "three.controls.enabled = 0;");
+		String zero = @answer(run, "return three.controls.enabled;");
+		defer zero.free(mem);
+		test::@check(zero == "false", "zero is off and reads back as false, got '%s'", zero);
+
+		@ok(run, "three.controls.enabled = 'yes';");
+		String word = @answer(run, "return three.controls.enabled;");
+		defer word.free(mem);
+		test::@check(word == "true", "a non-empty string is on and reads back as true, got '%s'", word);
+	};
+}
+
+<*
+ Taking the mouse away does not take the camera away.
+
+ The whole point of the flag is a script driving the camera itself, so a version
+ of it that also stopped `three.camera.orbit()` would turn off the thing it
+ exists to enable. Stated as a test because it is the one sentence of the
+ feature that a reasonable implementation could get backwards.
+*>
+fn void taking_the_mouse_leaves_the_camera_verbs_alone() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, "three.controls.enabled = false;");
+		@ok(run, "three.camera.orbit(45, 20, 10);");
+
+		test::@check(pass.camera.yaw == 45.0f, "yaw followed the script, got %f", pass.camera.yaw);
+		test::@check(pass.camera.pitch == 20.0f, "pitch followed the script, got %f", pass.camera.pitch);
+		test::@check(
+			pass.camera.distance == 10.0f,
+			"and so did the distance, got %f", pass.camera.distance
+		);
+	};
+}
+
+<*
+ The mouse stays where a script put it across a scene rebuild.
+
+ It follows the camera rather than the background. The three things `js_reset`
+ puts back — background, light, shadow — are put back so that a script which
+ sets one and a script which does not render the same first frame; this changes
+ no pixel at all. What resetting it would change is a game that took the mouse
+ for its own camera losing it at every level boundary, which is the opposite of
+ what a rebuild means.
+*>
+fn void the_mouse_stays_taken_across_a_new_scene() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, "three.controls.enabled = false; new three.Scene();");
+		test::@check(!run.controls.enabled, "a rebuilt scene did not hand the mouse back");
+
+		@ok(run, "three.controls.enabled = true; new three.Scene();");
+		test::@check(run.controls.enabled, "and does not take it away either");
+	};
+}

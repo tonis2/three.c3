@@ -46,9 +46,12 @@ contract and a material's uniforms have stopped competing for the same 128 bytes
 vertex colours are carried and a material has 104 bytes of uniforms rather than 52.
 And the light casts a shadow — `three.light.shadow = true` for one directional
 depth map, fitted around the scene, sampled with a nine-tap comparison, and off
-until something asks for it.
+until something asks for it. And the mouse can be taken away from the camera:
+`three.controls.enabled = false` stops the turntable reading the window at all,
+which is what a scene driving its own camera every frame needs and is §17's
+first phase.
 
-	c3c test --trust=full       663 passed, 0 failed, leak-clean
+	c3c test --trust=full       671 passed, 0 failed, leak-clean
 
 **What follows was found by using the engine, not by reading it looking for
 holes.** Each one stopped the work, and where it forced a workaround the
@@ -440,6 +443,14 @@ shoot the gun. The UI gets the pointer first and marks the event consumed;
 in `scene/input.c3` is where the flag belongs — it is already the thing that
 decides what a click *is*.
 
+**The coarse half of that landed first and does not answer it.**
+`three.controls.enabled = false` takes the mouse away from the camera wholesale
+(§17), which is what a script driving its own camera needs and is no use at all
+to a HUD: a button and the world behind it both want the same click, and turning
+the camera off decides nothing about which of them gets it. The consume flag is
+still this milestone's, unbuilt, and still the thing that has to be designed
+rather than switched.
+
 **It has been hit rather than anticipated.** A scene binding seven keys to a
 character has no way to say so — the controls had to be delivered in a chat
 message, because the window has no way to mention them. That is the smallest
@@ -520,28 +531,9 @@ Decisions nobody has made. Each one is cheap to decide and expensive to discover
   reference to? Probably nothing good, and probably acceptable, but it should be
   a known answer rather than a discovered one.
 
-- **Should a script be able to turn the mouse controls off?** `onClick` gave a
-  script half the mouse, and the half it did not give — the drag — is the half
-  the camera owns. A scene wanting its own drag behaviour has no way to ask.
-  `three.controls.enabled = false` is cheap, but it is one more piece of state a
-  script can leave in a bad way, and a window nobody can move the camera in is a
-  bad way.
-
-- **Should a click be able to say it was handled?** A handler returning `false`
-  could suppress the orbit for that gesture — the browser's `preventDefault`, and
-  the natural answer to the question above. It is also a rule that has to be
-  explained, for a conflict a four-pixel click barely has. **§5's input
-  arbitration forces this one**, so decide it there if not before.
-
-- **Does the camera belong to the scene?** The camera survives
-  `new three.Scene()` today, so a script that rebuilds the scene keeps whatever
-  the user dragged it to. That is almost certainly right for a person watching the
-  window, and it is worth writing down before something changes it by accident.
-  The animation callback survives a rebuild too, and *that* one is decided and
-  tested: the loop belongs to the host as Three.js's belongs to the renderer, so a
-  rebuild does not silently lose the animation — what it loses is every handle the
-  callback captured, and the stale-handle throw stops it with a sentence rather
-  than leaving it running against nothing.
+*(Three of these were answered by §17's first phase and have moved there —
+`three.controls.enabled`, whether a click can be consumed, and who owns the
+camera across a scene rebuild. What is left is the two that gate hot reload.)*
 
 ---
 
@@ -1573,7 +1565,320 @@ two fields in one shader and each fails, naming the field and both offsets.
 
 ---
 
-## What is deliberately absent, and stays absent
+## 17. Gameplay — what a game needs that a scene does not
+
+**Nothing below is a rendering problem**, which is the reason for putting it in
+one section. The engine draws a village, a crowd, a shadow and a post chain; what
+no script can do is let somebody *play* in one, and every gap between those two
+sentences is in the same three places — the camera, the mouse, and the clock.
+
+**This section was found by reading, not by using**, and that is a weaker warrant
+than the rest of this file has. Every other entry earned its place by stopping a
+piece of work; this one came from going down the JS surface asking what a game
+would reach for and not find. The measurements below are real. The ordering is an
+argument, and the first thing actually built against it should be allowed to
+rearrange it.
+
+### The boundary, measured
+
+The premise worth killing first is the obvious one: *arithmetic is slow in
+JavaScript, so move it into C3.* Measured, QuickJS, 200k iterations each, on the
+`--safe=no -O3` binary:
+
+	JS inline vec3 normalize (locals)           70 ns
+	JS vec3 normalize allocating {x,y,z}       210 ns
+	host call -> bool                           55 ns   (H.inputDown)
+	host call -> number[9]                     185 ns   (H.cameraGet)
+	prelude getter -> host -> index            135 ns   (three.camera.yaw)
+	live Vector3 read (allocates + a closure)  530 ns   (three.light.direction)
+
+**The crossing is not the cost. The answer is.** A host call that hands back a
+boolean is *cheaper than the arithmetic it would replace* — 55 ns against 70 —
+and the same crossing handing back nine numbers costs three and a half times as
+much. The difference is QuickJS allocating the result, and it is the whole
+finding.
+
+So the test for what belongs on the host is not "is it maths":
+
+- **A verb returning a scalar, a boolean or nothing is free.** Cheaper than doing
+  the work in JavaScript, in the cases measured above.
+- **A verb returning a vector should write into a `Float32Array` the caller
+  owns.** That is the only shape whose cost stays flat as the count grows, and it
+  is the shape every item in the next two subsections should be built in.
+- **A verb that allocates in order to answer arithmetic is a loss.** A native
+  `Vector3.add` measures 185 ns against the 70 ns of the JavaScript it replaced,
+  and it is slower *on every call, forever*. `math.js` stays where it is, and
+  this entry exists so that nobody moves it later on the strength of the
+  intuition rather than the number.
+- **A verb that allocates once and does real work is fine.** A path, a query
+  result, a bake — one allocation amortised over a thousand cells is nothing.
+
+**And the build is part of the measurement.** The same boolean-returning crossing
+is **265 ns with contracts on and 55 ns at `--safe=no -O3`** — a five-fold
+difference on precisely the path a per-frame script hammers. A number taken on
+the default build says nothing about what a game runs at, and any future
+measurement of this boundary that does not name its build is not a measurement.
+
+### What a per-frame script costs today
+
+Five hundred instanced boxes, one mesh, one material, 1280×720, same binary,
+against the 8 ms soft budget §5 measures a HUD against:
+
+	500 x mesh.position.set(x, y, z)          0.245 ms/frame
+	500 x mesh.position.y = v                 0.160 ms/frame
+	500 x read mesh.position.x                0.040 ms/frame
+	scene.raycast(origin, direction)          0.021 ms      (500-node scene)
+	scene.pick(x, y)                          0.037 ms
+
+**Batched transforms are not urgent, and that corrects a guess.** Moving five
+hundred objects every frame costs three per cent of the budget. A
+`Float32Array`-shaped bulk write is the right *eventual* shape by the rule above,
+but it buys nothing anybody can see until the count is in the thousands.
+**Trigger:** a scene moving more than about two thousand nodes a frame, which is
+0.6 ms and starting to matter.
+
+**Raycasting is the one that is already a constraint.** `Scene.raycast`
+(`scene/pick.c3:63`) walks **every node in the scene** with an AABB test apiece
+before it reaches any BVH — 42 ns per node, linear in node count and independent
+of what the ray could possibly hit. So the 21 µs above is a property of the scene
+being 500 nodes, not of the ray. A hundred agents each casting one ground ray is
+2.1 ms, a quarter of the frame, in a scene small enough to be a demo. The
+broadphase to fix it exists and is unbound — see the queries entry below.
+
+### What blocks a game, and none of it is an algorithm
+
+- **The camera cannot be a game camera.** `three.camera` is a turntable, and
+  `yaw`, `pitch` and `distance` *throw* on assignment (`js/prelude/api.js`) —
+  deliberately, and §4's half-match rule is right that a name Three.js does not
+  have is the honest way to describe a turntable. But there is no third-person
+  follow and no first person, so the genre list this engine can express is
+  "things you look at". What it wants is a second mode rather than a loosened
+  turntable: `camera.attach(object, { offset, lag })`, or a free camera whose
+  position and orientation a script owns outright, with the turntable as the
+  default nobody has to opt out of. **What gated this is built**: a follow camera
+  the user can still drag is two things fighting over one matrix, and
+  `three.controls.enabled = false` is how a script says which of the two is the
+  author. Nothing else is in the way.
+
+- **The mouse has a position and no motion.** `three.input.pointer` is already
+  `{ x, y, inside, down, clicked }` in the rendered image's pixels, polled off
+  the frame's input state — so hover highlighting is `pointer` plus `scene.pick`
+  and has been all along. **This entry said the opposite in its first draft**,
+  which is what reading a surface instead of using it buys you, and it is left
+  here as the section's own worked example.
+
+  What is actually missing is the half a first-person game is built on. **No
+  relative delta and no pointer lock**, so a look that keeps turning past the
+  edge of the window cannot be expressed at all — this is the one that blocks a
+  genre. **No wheel**: `drive_camera` reads `window.get_scroll()` straight into
+  the zoom and passes none of it on. **Only the left button**: `pointer.down` is
+  `LEFT_MOUSE`, and right and middle reach nothing but the pan gesture. The
+  window reports all three already — `PointerState` carries `pan` and `scroll`
+  beside the position — so every one of them is a binding rather than plumbing.
+
+- **No character controller.** §7 already names this and its ingredients are all
+  in `collision.c3l`: swept CCD, GJK/EPA, a capsule, and `Physics.transformed`.
+  Sweep the capsule, slide along the contact normal, step up ledges under a
+  threshold, and report `grounded`, the slope, and what was hit. It is the same
+  120 lines in every game that does not have one, written in JavaScript, at
+  60 Hz, against a physics world it can only see through bindings.
+
+- **Animation cannot blend, and the reason is structural.** `AnimationPlayer`
+  holds one `int clip` (`scene/animation.c3:340`) and switching is a hard cut.
+  `scene/skin.c3` says the quiet part already — the baked path gives up
+  "quantised time, no blending between clips, and no way to move a bone" —
+  so a crossfade is not a missing feature of the player, it is a thing the baked
+  pose table cannot express. Two different answers, and they should not be
+  confused:
+
+  - **On the live path (`skeleton: true`) it is ordinary work.** Sample two
+    clips, blend per target with a weight, and the existing per-frame palette
+    write carries it. That is where the hero character lives and where a
+    crossfade belongs.
+  - **On the baked path it is a shader change with a named lie.** `Instance.pose`
+    would carry a second frame index and a weight, and the skin would lerp two
+    baked matrices. A matrix lerp is not a rotation blend and it visibly shears
+    at large angles — which is fine for the 0.15 s fade that is what a crossfade
+    actually is, and wrong for anything held. If it is built, the doc comment
+    says that sentence, because somebody will eventually hold one.
+
+  Clip **events** — "footstep at t=0.3", "the hit frame" — are the other half and
+  are cheap on both paths: a sorted time list per clip, compared against the
+  player's clock as it advances, fired into a JS callback.
+
+### The algorithms, and how much is already written
+
+- **Navigation, which is the one that was asked for.** Both halves have their
+  inputs sitting in the repo already.
+
+  The **bake** has its geometry: every uploaded mesh keeps `hull_positions`,
+  `hull_triangles` and a `TriBVHNode` on the CPU (`scene/asset.c3:230`), which is
+  what picking and export are built on. Transform the static ones into one soup,
+  build one tree over it — `create_voxel_grid` already takes a
+  `shared_bvh` — and voxelize.
+
+  The **solve** is written and unused. `lib/collision.c3l/src/voxel.c3` is a
+  distance-field solver over a voxel set: multi-pass sweeps to convergence
+  (`solve_field`), sampling with interpolation (`sample`), nearest reachable cell
+  (`nearest_solved`), and a **multi-source** variant (`solve_sources`,
+  `nearest_sourced`, `sample_sources`) that answers "which of these N goals is
+  nearest, through the geometry" — which is a crowd flow field by another name.
+  Its own header says so: it exists to keep "a flow field from routing through a
+  wall". **Nothing in `src/` imports it.**
+
+  The one piece genuinely missing is the *complement*: `create_voxel_grid`
+  voxelizes the **inside** of a closed mesh, and navigation wants free space
+  above a floor. That is Recast's rule in a sentence — a cell is walkable if it
+  is empty, the cell below it is solid, and the agent's height of cells above it
+  are empty — and it is a sibling of the existing voxelizer rather than a new
+  one.
+
+  **Two verbs, not one, and the split is the whole design.** `nav.path(from, to)`
+  for one agent going somewhere; `nav.field(goals)` returning a handle a script
+  samples per agent, for a crowd. Sampling a solved field is a lookup; running a
+  search per agent per frame is the thing that kills a JavaScript game, and an
+  API that only offers `path()` guarantees somebody writes the second one badly.
+  Extract a path by descending the field, then shorten it against the same BVH
+  the raycast uses — the corridor of cell centres is not the path, and a game
+  that walks cell centres looks like it is walking cell centres.
+
+  **What to measure before building it.** Resolution is set on the longest side
+  (48 by default), so a 100 m town at a 0.5 m cell is 200 cells across and the
+  solve is over *interior* volume rather than the box. The bake cost at that
+  size is the number that decides whether this is a level-boundary operation or a
+  loading-screen one. The alternative bake — a grid of downward `scene.raycast`
+  calls — is 21 µs each and therefore 344 ms for a 128², which answers itself.
+
+- **Bulk spatial queries.** "Which enemies are within eight metres" is a full
+  scene walk plus a host crossing per object today. `SpatialHash3D`
+  (`lib/collision.c3l/src/spatial_hash.c3`) is a broadphase with insert, update
+  and `@get_nearby_objects`, used by the solver and exposed to nobody. What a
+  game wants over it: `overlapSphere(p, r)`, `queryBox(box)`, `raycastAll`, and
+  `sweep(shape, from, to)` — each returning node ids into a caller-owned typed
+  array, per the boundary rule. This is also the fix for the linear
+  `Scene.raycast` above, which means one binding pays for two entries.
+
+- **Steering.** Seek, arrive, separation — or RVO if avoidance has to be real.
+  Per-agent per-frame, trivially vectorised over a typed array, and the textbook
+  case for the third bullet of the boundary rule. Small enough to arrive with
+  navigation and pointless without it.
+
+- **Inverse kinematics.** `collision::ik::solve_chain` (`lib/collision.c3l/src/ik.c3`)
+  exists, with a `shortest_arc` beside it, and nothing in `src/` calls either.
+  Live skinning already lets a script write a bone, which `skin.c3` names as the
+  whole point of the expensive path — so foot planting on a slope, a look-at, and
+  a weapon aim are a binding away rather than a feature away.
+
+- **Curves and damping.** Catmull-Rom through a set of points, and
+  `damp`/`smoothDamp` with the frame-rate-independent exponential rather than the
+  naive lerp everybody writes first. By the measurements above these belong in
+  **`math.js`, not in C3** — they are arithmetic on a handful of numbers and
+  crossing for them would cost more than doing them. Listed here because they are
+  wanted every frame by everything, not because they are a binding.
+
+### The clock, and the rest of the plumbing
+
+- **There is no game clock.** §2 already records that `p.time` is a wall clock
+  that keeps running while a simulation is paused; the general version of that is
+  that nothing in the engine has a notion of game time at all. A script gets
+  elapsed milliseconds and owns everything else. What is missing is small and
+  load-bearing: `dt`, a `timeScale` that zero means paused, a fixed-step
+  accumulator so gameplay does not vary with frame rate, and the single source
+  the post chain's `p.time` should have been reading. **Nothing can pause today**,
+  which is also why the screenshot-reproducibility trigger in §2 is still open.
+
+- **Timers, seeded RNG, saving** — all three are §6's last bullet, and the RNG one
+  is worth more than it looks. `collision.c3l` advertises deterministic lockstep
+  and `PhysicsWorld.state_hash` exists to prove it; `Math.random()` in the
+  gameplay layer throws that away for free. A seeded generator is twenty lines
+  and it is the difference between a replay that works and one that nearly does.
+
+- **Joints and snapshots are written and unbound.** `add_constraint`
+  (`solver/resolver.c3:441`), `GenericJoint3D`, and `snapshot`/`restore`
+  (`solver/lockstep.c3:125`) — doors, ropes, ragdolls, vehicles, and "what if" as
+  a tool call. §7 lists them; they are repeated here only because a gameplay
+  reader looking for them would not think to read a section about physics
+  bindings.
+
+- **UI and audio are §5 and §6** and neither moves because of this section. §5's
+  observation that a scene binding seven keys has no way to say so is a gameplay
+  complaint in a rendering section, and it stays there.
+
+### What §9 answered — built
+
+**`three.controls.enabled`.** A script can take the mouse away from the
+turntable and give it back. Off, no drag, pan, wheel or coast reaches the camera,
+and `Controls.apply` reports the frame as still — which is also what lets the
+window go on sleeping through a hand it is ignoring. `three.camera.orbit()` and
+`frameAll()` are untouched, because a script writing the camera on purpose is the
+thing this enables rather than the thing it stops.
+
+Three details that were decisions rather than code:
+
+- **The flag lives on `JsRuntime`, not in the window's loop**, and `main.c3`'s
+  `live` drives `runtime.controls` rather than a local of its own. A headless
+  `--mcp` script has to be able to write it and read back what it wrote, and a
+  flag stored where there is no window would answer with whatever it already was
+  — the reads-back-wrong trap `api.js` throws on assignment three separate times
+  to avoid. One struct, one answer, and the window's loop drives that one.
+- **The gesture is dropped, not paused.** A drag under way when the mouse is
+  taken loses its anchor and its spin on the first disabled frame. Keeping them
+  would hand the returning frame the cursor position from *before* the script
+  took over — the whole distance the hand travelled in between, applied at once,
+  which is the one-frame lurch `Controls.dragging` exists to prevent, arriving
+  through a door that did not exist when it was written. A button still held when
+  the controls come back has to be released first, for the reason the stuck-latch
+  guard already gives: this scheme never saw the press.
+- **On is the default and no gesture restores it.** A window nobody can move the
+  camera in is a bad state to leave one in, so it has to be a state somebody
+  asked for rather than one they arrived at. The doc says to give the mouse back
+  when the mode ends, because nothing else will.
+
+**A click still cannot say it was handled, and that is now a decision rather
+than a question.** The suppression it would buy does not exist: a click *is* a
+press and a release that did not travel, so by the time one is recognised no
+orbit has happened and there is nothing for a `false` to suppress. The real
+conflict is a UI layer wanting the *press*, which is §5's arbitration on
+`MouseTracker`'s edge machinery, against a HUD that does not exist yet. Building
+a `preventDefault` here would be a rule to explain in every doc, for a conflict
+that cannot arise until the thing causing it is built.
+
+**The camera belongs to the host, not to the scene.** It survives
+`new three.Scene()`, and that is now written down rather than merely true: a
+person watching a window has dragged the camera somewhere, and a script
+rebuilding the world is not a reason to throw that away. It is the rule the
+animation callback already follows and is tested on — the loop belongs to the
+host as Three.js's belongs to the renderer. What a rebuild costs is every handle
+the callback captured, and the stale-handle throw is what stops it with a
+sentence rather than leaving it running against nothing.
+
+### The order of work, and what it is gated on
+
+1. ~~**§9's open questions.**~~ Answered above. The camera work below is no
+   longer waiting on anything.
+2. **The mouse's missing half** — delta, wheel, and the other two buttons —
+   because the window already reports all three and nothing carries them across.
+3. **The camera**, because it is what makes the other two visible.
+4. **The clock**, because everything after it is written against `dt`.
+5. **The character controller**, then **animation blending** — the point at which
+   there is a thing to move and it looks like it is moving.
+6. **Navigation**, then the **queries** and **steering** that make it a crowd
+   rather than one agent.
+
+### What this does not cover
+
+**No ECS, and no gameplay framework.** That stays where the closing section puts
+it: the scene graph is the entity list. Everything above is a *primitive* a
+script calls, and the moment one of them starts owning a game's update order it
+has become the wrong thing.
+
+**No claim about which of these a game actually needs.** Reading found them;
+using would rank them. The first real game built on this engine is the
+measurement this section does not have.
+
+---
+
+## What is deliberately absent
 
 - **No `BufferGeometry` and no attribute access.** That is the thesis. Nothing in
   eight milestones has needed one, and a game is the workload that would be worst

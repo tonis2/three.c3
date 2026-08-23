@@ -241,6 +241,43 @@ const camera = {
 };
 
 // -----------------------------------------------------------------------
+// The mouse's other end
+//
+// `three.controls` is the hand on the window, and it has one property:
+// whether it reaches the camera. Three.js spells it the same way on
+// `OrbitControls`, which is why it is not a name this project invented —
+// §4's rule the other way round, for once. What it is *not* is a
+// constructor: there is one turntable, made by the host, and nobody adds a
+// second set of controls to it.
+//
+// **Turn it off to drive the camera yourself.** A follow camera or a
+// first-person look writes yaw, pitch and target every frame, and the
+// turntable writes them again from whatever the mouse did; the two fight
+// over one matrix sixty times a second and the result reads as a camera
+// that shudders. Off, the window stops writing and the script is the only
+// author.
+//
+// **It does not touch `three.camera.orbit()`** — that is a script moving
+// the camera on purpose, which is the thing being made possible rather than
+// the thing being prevented.
+//
+// **Leaving it off is a bad way to leave a window.** Nobody can move the
+// camera in one, and there is no gesture that turns it back on; a script
+// that takes the mouse for a mode is the script that gives it back when the
+// mode ends.
+//
+// **It survives `new three.Scene()`,** following the camera rather than the
+// background. The three things a rebuild resets — background, light,
+// shadow — are reset so that two scripts render the same first frame, and
+// this changes no pixel; what it would change is a game that took the mouse
+// for its own camera losing it at every level boundary.
+
+const controls = {
+	get enabled() { return H.controlsGet(); },
+	set enabled(v) { H.controlsSet(!!v); },
+};
+
+// -----------------------------------------------------------------------
 // The keyboard
 //
 // Not a Three.js API — Three.js has no input layer at all, and this is in
@@ -335,6 +372,7 @@ export const three = {
 	DataTexture,
 	camera,
 	light,
+	controls,
 
 	// How long this script may run before the interrupt stops it, in
 	// milliseconds. 5,000 by default, and raisable to ten minutes.

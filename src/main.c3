@@ -623,7 +623,9 @@ fn void? live(
 		io::printn("     drag to orbit, right-drag to pan, scroll to zoom");
 	}
 
-	Controls controls = DEFAULT_CONTROLS;
+	// No `Controls` of its own: the runtime holds the one this loop drives, so
+	// that `three.controls.enabled` writes the same struct `apply` reads. See
+	// the field's comment in `js/runtime.c3` for why it lives there.
 	InputTracker keyboard;
 	InputState input;
 	c3w::CursorShape shown;
@@ -676,11 +678,12 @@ fn void? live(
 			// iteration resolve in the order they happened rather than the
 			// script's camera being overwritten by a stale anchor.
 			camera_moved = drive_camera(
-				renderer: renderer, window: window, controls: &controls,
+				renderer: renderer, window: window, controls: &runtime.controls,
 				events: events, at: at, dt_ms: dt_ms
 			);
 			show_cursor(window, &shown, cursor_shape(
-				cursor.inside, controls.dragging, ask_hover(renderer, &hover, cursor, controls.dragging)
+				cursor.inside, runtime.controls.dragging,
+				ask_hover(renderer, &hover, cursor, runtime.controls.dragging)
 			));
 
 			// Sampled here rather than at the tick, because this is where the
