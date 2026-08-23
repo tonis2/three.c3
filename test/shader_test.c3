@@ -373,15 +373,39 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// One descriptor, and it is the texture. Derived, not declared — until M4
-	// this was a literal in `MeshPipeline.init`.
-	test::@check(mod.layout.bindings.len() == 1, "one descriptor, got %d", mod.layout.bindings.len());
+	// Two descriptors, and both are reserved by the template: the material's map
+	// at 0 and the shadow map at 1. Derived, not declared — until M4 this was a
+	// literal in `MeshPipeline.init`, and it was one binding until the shadow pass
+	// claimed the second.
+	//
+	// **The count is checked as well as the two names**, and that is the half that
+	// earns its keep: `MATERIAL_BINDING_FIRST` is 2 because this template reserves
+	// exactly these two, so a third reserved sampler appearing here without that
+	// constant moving is a material's first texture landing on top of it.
+	test::@check(mod.layout.bindings.len() == 2, "two descriptors, got %d", mod.layout.bindings.len());
+	test::@check(
+		three::MATERIAL_BINDING_FIRST == mod.layout.bindings.len(),
+		"and a material's own samplers start past them, at %d",
+		three::MATERIAL_BINDING_FIRST
+	);
+
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
-	test::@check(map != null, "and it is base_color_map");
+	test::@check(map != null, "and one is base_color_map");
 	if (map != null)
 	{
 		test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
 		test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
+	}
+
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
+	test::@check(shadow != null, "and the other is shadow_map");
+	if (shadow != null)
+	{
+		test::@check(shadow.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler too");
+		test::@check(
+			shadow.set == 0 && shadow.binding == three::SHADOW_BINDING,
+			"at 0,%d — got %d,%d", three::SHADOW_BINDING, shadow.set, shadow.binding
+		);
 	}
 }
 
@@ -465,59 +489,136 @@ fn void the_draw_record_matches_the_shader() @test
 		mod.layout.push_fields.len()
 	);
 
-	// The C3 side of the same table, measured off a real one. Every byte is used
-	// since skinning landed: `skin_stride` sits in what used to be the tail
-	// padding after `flags`, which is why the record grew by 32 bytes for four
-	// fields rather than by 40.
-	three::DrawRecord record;
-	char* base = (char*)&record;
-	test::@check((sz)((char*)&record.positions - base) == 0, "positions is at 0");
-	test::@check((sz)((char*)&record.normals - base) == 8, "normals is at 8");
-	test::@check((sz)((char*)&record.uvs - base) == 16, "uvs is at 16");
-	test::@check((sz)((char*)&record.colors - base) == 24, "colors is at 24");
-	test::@check((sz)((char*)&record.joints - base) == 32, "joints is at 32");
-	test::@check((sz)((char*)&record.weights - base) == 40, "weights is at 40");
-	test::@check((sz)((char*)&record.palette - base) == 48, "palette is at 48");
-	test::@check((sz)((char*)&record.posed - base) == 56, "posed is at 56");
-	test::@check((sz)((char*)&record.base_color - base) == 64, "base_color is at 64");
-	test::@check((sz)((char*)&record.flags - base) == 80, "flags is at 80");
-	test::@check((sz)((char*)&record.skin_stride - base) == 84, "skin_stride is at 84");
-	test::@check((sz)((char*)&record.uv_transform - base) == 88, "uv_transform is at 88");
+	// **The C3 side of the same table is not checked here and used to be.** It
+	// measured the addresses of a real `DrawRecord`'s fields, because the comment
+	// on `DRAW_RECORD_FIELDS` said a `$assert` was impossible without `offsetof` —
+	// which was wrong: `Type::members` reports name, offset and size at compile
+	// time, and `@layout_matches` in `gpu/pipeline.c3` is that half now. A struct
+	// that stops matching its table no longer builds, so there is nothing left for
+	// a test to discover about it.
+	//
+	// What stays here is the half a `$assert` genuinely cannot do: comparing this
+	// side against **Slang's** answer for the same declaration.
 	test::@check(three::DrawRecord::size == 104, "and the record is 104 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
- The material template's record is the mesh shader's, byte for byte.
+ The frame block is exactly what `FrameBlock` says it is — on both sides.
 
- The two files declare it separately — `material.slang` is a copy of `mesh.slang`
- with the shading lifted out, which its own header argues for — and one of them
- growing a field is a wire format that disagrees with itself. Nothing above would
- catch it: each shader would compile, and only the one whose C3 side no longer
- matches would read geometry from the wrong address.
+ **The same check as the one above, on the struct the shadow pass made a third
+ reader of.** `FrameBlock` is behind a pointer, so Slang reflects it no more than
+ it reflects `Draw`, and until shadows arrived it had two declarations that were
+ always edited together. It now has three, and `shaders/shadow.slang` reads
+ `light_view_projection` at offset 88 — so a field inserted above that in two
+ files and not the third is a depth map rendered with sixteen floats that are not
+ a matrix, which draws something and is not an error anywhere.
 
- Text rather than reflection, because the property is that the *declarations* are
- the same. Comments differ between the two and are stripped before comparing;
- anything else that differs is the thing being looked for.
+ Cut out of `mesh.slang` and compiled *as* a push block, exactly as the record
+ is, and the entry points touch every field so that nothing is dropped from the
+ layout for being unread.
 *>
-fn void both_shaders_declare_the_same_record() @test
+fn void the_frame_block_matches_the_shader() @test
 {
-	String mesh = three::load_source(MESH_PATH)!!;
-	defer mesh.free(mem);
+	String source = three::load_source(MESH_PATH)!!;
+	defer source.free(mem);
+
+	sz? start = source.index_of("struct FrameBlock");
+	test::@check(@ok(start), "mesh.slang declares a `struct FrameBlock`");
+	if (catch start) return;
+	sz? end = source[start..].index_of("};");
+	test::@check(@ok(end), "and it is closed");
+	if (catch end) return;
+
+	String probe = string::tformat(
+		"%s};\n"
+		"[vk_push_constant] const FrameBlock push;\n"
+		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
+		"{ return mul(push.view_projection, push.light) + push.live_poses[0][0]; }\n"
+		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
+		"{ return mul(push.light_view_projection, push.shadow); }\n",
+		source[start : end]
+	);
+
+	three::ShaderModule mod = three::compile_slang(probe, "frame.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "the block compiles: %s", mod.diagnostic);
+
+	foreach (expected : three::FRAME_BLOCK_FIELDS)
+	{
+		three::ShaderField* found = mod.layout.field_of(expected.name);
+		test::@check(found != null, "the block has a '%s' field", expected.name);
+		if (found == null) continue;
+		test::@check(
+			found.offset == expected.offset && found.size == expected.size,
+			"'%s' is at %d+%d in the shader and %d+%d in FrameBlock",
+			expected.name, found.offset, found.size, expected.offset, expected.size
+		);
+	}
+	test::@check(
+		mod.layout.push_fields.len() == three::FRAME_BLOCK_FIELDS.len,
+		"and has %d fields, got %d",
+		three::FRAME_BLOCK_FIELDS.len,
+		mod.layout.push_fields.len()
+	);
+
+	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
+	// `gpu/pipeline.c3` and does not need running — see the record's test above.
+	test::@check(three::FrameBlock::size == 168, "and the block is 168 bytes, got %d", three::FrameBlock::size);
+}
+
+<*
+ Every shader that reads the geometry declares the same structs, character for
+ character once the comments are gone.
+
+ **The one that keeps three files honest**, and it was two files until the shadow
+ pass. `mesh.slang`, `material.slang` and `shadow.slang` each declare `Instance`,
+ `FrameBlock`, `SkinnedVertex` and `Draw` — a wire format shared with
+ `scene/scene.c3`, `gpu/pipeline.c3` and each other — and a field added to one and
+ not the others is geometry read at the wrong address in whichever was missed.
+ That is not a compile error and not a validation message: it is a picture that is
+ subtly or spectacularly wrong, with nothing anywhere naming the cause.
+
+ `the_draw_record_matches_the_shader` and `the_frame_block_matches_the_shader`
+ hold `mesh.slang`'s two against the C3 side through reflection; this holds the
+ other files against `mesh.slang`. Between them each declaration is checked
+ against something that is not a copy of itself.
+*>
+fn void every_shader_declares_the_same_contract() @test
+{
+	String[3] paths = { MESH_PATH, "", "" };
 	String material_path = three::find_shader("material.slang", mem)!!;
 	defer material_path.free(mem);
-	String material = three::load_source(material_path)!!;
-	defer material.free(mem);
+	String shadow_path = three::find_shader("shadow.slang", mem)!!;
+	defer shadow_path.free(mem);
+	paths[1] = material_path;
+	paths[2] = shadow_path;
 
-	String from_mesh = declaration_of(mesh, "struct Draw");
-	String from_material = declaration_of(material, "struct Draw");
+	String mesh = three::load_source(paths[0])!!;
+	defer mesh.free(mem);
 
-	test::@check(from_mesh.len > 0 && from_material.len > 0, "both files declare a record");
-	test::@check(
-		from_mesh == from_material,
-		"and they declare the same one:\n  mesh.slang:     %s\n  material.slang: %s",
-		from_mesh,
-		from_material
-	);
+	String[4] structs = { "struct Instance", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
+
+	for (uint file = 1; file < 3; file++)
+	{
+		String other = three::load_source(paths[file])!!;
+		defer other.free(mem);
+
+		foreach (header : structs)
+		{
+			String from_mesh = declaration_of(mesh, header);
+			String from_other = declaration_of(other, header);
+
+			test::@check(
+				from_mesh.len > 0 && from_other.len > 0,
+				"%s and %s both declare `%s`", paths[0], paths[file], header
+			);
+			test::@check(
+				from_mesh == from_other,
+				"and they declare the same one:\n  %s: %s\n  %s: %s",
+				paths[0], from_mesh, paths[file], from_other
+			);
+		}
+	}
 }
 
 <*
@@ -712,8 +813,9 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 1, "from one reflected binding");
+		test::@check(pipeline.shader.bindings.len() == 2, "from two reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
+		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
 		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
 			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
 	};

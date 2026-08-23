@@ -321,6 +321,18 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// of thing that can be drawn.
 	self.pass.prepare(&self.gpu, cmd, &self.target, self.frames.slot)!;
 
+	// **The shadow map, and it is a line rather than a branch** — which is what
+	// this function was rewritten as a sequence to make possible, and `plan.md`
+	// §13 predicted in those words. It begins and ends a rendering of its own, so
+	// it has to be here and not inside the block below; it records nothing at all
+	// in a frame with shadows off, so an unshadowed frame is byte-identical to one
+	// from before this existed.
+	//
+	// It does not touch `target.color` and so does not touch the invariant the
+	// rest of this function holds: exactly one stage writes it, and the close
+	// happens once, at the bottom.
+	self.pass.record_shadow(cmd);
+
 	if (posted)
 	{
 		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear);

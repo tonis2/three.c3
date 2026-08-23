@@ -210,6 +210,11 @@ const String[*] MATERIAL_RESERVED @local = {
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
 	"srgb_to_linear",
+	// The shadow lookup: the reserved sampler at binding 1, the function that
+	// reads it, and the one global in the template. `g_shadow` is the one worth
+	// naming out loud — a uniform of that name would shadow the value `lambert`
+	// folds into the direct light, and the body would compile and come out lit.
+	"shadow_map", "shadow_factor", "g_shadow",
 	// The vertex half of the same contract. `v` and `displace` are the body's own
 	// parameter and function, exactly as `s` and `shade` are the fragment body's;
 	// `Vertex` is the struct both of them name.
@@ -258,8 +263,10 @@ const String[*] MATERIAL_RESERVED @local = {
  touches most of them.
 *>
 const String[*] MATERIAL_CONTRACT_FIELDS @local = {
-	// Surface.
-	"albedo", "normal", "uv", "position", "color", "vertex_color", "variant",
+	// Surface. `shadow` is here rather than in `MATERIAL_RESERVED` because it
+	// fails the way this list's header describes: a uniform of that name rewrites
+	// the `s.shadow` in the body that declared it into `s.(push.shadow)`.
+	"albedo", "normal", "uv", "position", "color", "vertex_color", "variant", "shadow",
 	// Vertex adds these two; the rest it shares with Surface.
 	"local", "index",
 };

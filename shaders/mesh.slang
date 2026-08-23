@@ -84,6 +84,30 @@ struct FrameBlock
     // palette pointer would have forced them apart into two draws. Null in a frame
     // where nothing is live, which is every frame of a scene with no skeletons.
     float4x4* live_poses;
+    // Where the light is looking from, as one matrix: the orthographic
+    // view-projection `render/shadow.c3` fitted around the scene this frame.
+    // `shaders/shadow.slang` renders the depth map with it and `shadow_factor`
+    // below reads the map back with the same matrix, which is what makes the two
+    // agree — one fit, written once per frame, used by both ends.
+    //
+    // Identity, and unread, in a frame with no shadow pass: `shadow.w` is what
+    // says which, and it is zero then.
+    float4x4 light_view_projection;
+    // The four numbers the lookup needs, and `shadow.w` is the switch.
+    //
+    //   x  one shadow texel in uv, so the PCF taps are a texel apart whatever
+    //      size the map was created at
+    //   y  the depth bias, in the light's ndc depth units — what a script sets
+    //      as `three.light.shadow.bias`
+    //   z  how far along the surface normal a sample is nudged before it is
+    //      projected, in world units. Derived from the fitted extent rather than
+    //      set by anybody, so it scales with the scene — see `render/shadow.c3`
+    //   w  how dark a shadow is, 0 to 1, and **0 is also how "no shadow pass ran
+    //      this frame" is spelled**. One number for both because the shader's
+    //      answer is the same either way: an intensity of zero and no map are
+    //      both "nothing is occluded", and a second flag would be a second thing
+    //      to keep in step with the first.
+    float4 shadow;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -104,8 +128,8 @@ struct FrameBlock
 // not the type behind a pointer, so the two are held together by a test rather
 // than by the pipeline build: `the_draw_record_matches_the_shader` compiles this
 // declaration *as* a push block to get its offsets, and
-// `both_shaders_declare_the_same_record` checks this text against the copy in
-// `material.slang`.
+// `every_shader_declares_the_same_contract` checks this text against the copies
+// in `material.slang` and `shadow.slang`.
 // One vertex as the compute pass leaves it: posed, in the character's own space,
 // one copy per instance.
 //
@@ -225,6 +249,21 @@ static const uint POSE_MASK = 0x7fffffffu;
 // rather than a permutation per material.
 [vk::binding(0, 0)] Sampler2D base_color_map;
 
+// **Binding 1 is the shadow map, in every shader that shades a surface.** It is
+// reserved the way `base_color_map` is — declared by the template rather than by
+// anything a script writes — which is why `MATERIAL_BINDING_FIRST` is 2 and an
+// agent's first sampler is numbered from there. `shader/assemble.c3` has the
+// argument for why reserving a binding is a constant and never a shared bump.
+//
+// **Always bound and always valid, exactly like binding 0.** With no shadow pass
+// this carries the same 1x1 opaque white image an untextured material samples,
+// and white is the right answer by construction: a depth of 1.0 is the far plane,
+// nothing is in front of anything, and the comparison below comes out lit. So
+// there is one pipeline and one descriptor layout whether shadows are on or off,
+// and turning them on is a different image in the same slot rather than a
+// recompile.
+[vk::binding(1, 0)] Sampler2D shadow_map;
+
 // The four influences of one vertex, blended into the matrix that poses it.
 //
 // **Which buffer the palette lives in is a property of the instance, not of the
@@ -259,6 +298,17 @@ struct VertexOutput
 {
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    // Where this fragment is in the world.
+    //
+    // **This shader had no such varying until shadows existed**, and its absence
+    // was documented as a positive statement: `material.slang`'s copy still says
+    // "mesh.slang carries no world position because nothing it computes needs
+    // one". A shadow lookup is exactly a thing that needs one — the light's
+    // matrix has to be applied to a world position and there is nowhere else to
+    // get it — so the sentence stopped being true and the varying arrived. Same
+    // semantic and same slot as `material.slang`'s, which is what keeps the two
+    // sets of varyings the parallel pair its header claims they are.
+    float3 world : TEXCOORD1;
     // The instance's own colour, carried to the fragment stage because that is
     // where albedo is assembled. Interpolating it is a no-op — it is constant
     // across every vertex of an instance — and it is not marked
@@ -309,6 +359,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 
     float4 world = mul(instance.model, float4(position, 1.0));
     output.sv_position = mul(push.frame[0].view_projection, world);
+    output.world = world.xyz;
     output.normal = mul((float3x3)instance.normal, normal);
 
     output.uv = float2(0.0, 0.0);
@@ -373,6 +424,86 @@ float3 srgb_to_linear(float3 c)
     return lerp(hi, lo, step(c, 0.04045));
 }
 
+// How much of the light reaches this point: 1 fully lit, 0 fully shadowed.
+//
+// **The same function, character for character, in `material.slang`** — for the
+// reason `srgb_to_linear` and `lambert` are duplicated there, which is that a
+// material is a change of *shading* and not a second renderer. A material whose
+// body is the default `s.albedo * lambert(s.normal)` has to land in the same
+// shadow the built-in shading does, or "no material at all" and "the default
+// material" stop being the same picture.
+//
+// ## The four early exits, and why each one answers "lit"
+//
+//  - **`params.w <= 0`** — no shadow pass ran this frame, or a script set the
+//    intensity to zero. The map is the 1x1 white image and the nine taps below
+//    would all answer the same thing; this is the branch that does not pay for
+//    them.
+//  - **`ndc.z` outside [0, 1]** — the point is nearer the light than the fitted
+//    box, or beyond it. Nothing was rendered there to occlude it.
+//  - **`uv` outside the map** — the point is off to the side of the fitted box.
+//    The sampler clamps to the edge, so **without this test a surface outside the
+//    map would inherit the shadow of whatever sits on the nearest edge of it**,
+//    smeared out to the horizon. That is the classic failure and it looks like a
+//    bug in the geometry rather than in the lookup.
+//
+// The first is a branch this shader takes on every fragment of every frame that
+// has no shadows, and the other three are the boundary of the one map. All four
+// answer "lit" because a shadow map only ever knows about occluders it was shown,
+// and an unlit default would darken everything it was not shown.
+//
+// ## The bias is two numbers and they do different jobs
+//
+// `params.z` moves the *sample point* along the surface normal before projecting
+// it, in world units, which is what fixes acne on a surface nearly edge-on to the
+// light: the point being asked about is lifted off the surface it is on, so its
+// own depth stops competing with the texel that recorded it. It is derived from
+// the fitted extent in `render/shadow.c3`, so it scales with the scene and there
+// is no world size at which it is the wrong magnitude.
+//
+// `params.y` moves the *comparison* instead, in ndc depth units, and it is the
+// one a script can set. Zero by default: the normal offset does the work, and a
+// depth bias large enough to matter on its own is a shadow visibly detached from
+// its caster.
+float shadow_factor(float3 position, float3 normal)
+{
+    float4 params = push.frame[0].shadow;
+    if (params.w <= 0.0) return 1.0;
+
+    float3 offset = position + normalize(normal) * params.z;
+    float4 clip = mul(push.frame[0].light_view_projection, float4(offset, 1.0));
+    // The fit is orthographic, so `clip.w` is 1 and this divide is free. Written
+    // anyway, because a perspective fit — a spot light — would need it and a
+    // divide that was silently missing is a shadow that is subtly in the wrong
+    // place rather than an error.
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return 1.0;
+
+    // ndc to uv, and the y is flipped because `gpu/target.c3`'s negative-height
+    // viewport is what the shadow pass rasterises with too. Undoing that here is
+    // not optional bookkeeping: get it wrong and every shadow is mirrored about
+    // the middle of the map, which on a symmetric scene looks *almost* right.
+    float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+
+    // Nine taps a texel apart — the cheapest thing that turns a hard stair-step
+    // edge into something that reads as a shadow. `SampleLevel` rather than
+    // `Sample`: the map has one level and asking for a derivative-chosen one
+    // inside a loop is work for a mip chain that does not exist.
+    float reference = ndc.z - params.y;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            float depth = shadow_map.SampleLevel(uv + float2(x, y) * params.x, 0.0).r;
+            lit += reference <= depth ? 1.0 : 0.0;
+        }
+    }
+
+    return 1.0 - params.w * (1.0 - lit / 9.0);
+}
+
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
@@ -392,7 +523,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // M5; anything more here is scope creep dressed as polish.
     float4 light = push.frame[0].light;
     float3 normal = normalize(input.normal);
-    float lambert = max(dot(normal, normalize(light.xyz)), 0.0);
+    // **The shadow multiplies the direct term and not the ambient one.** A
+    // surface in shadow still gets the ambient floor, which is what keeps a
+    // shadowed face readable rather than black — the same argument the floor
+    // exists for at all. Multiplying the whole result instead would make
+    // `three.light.ambient` mean nothing wherever a shadow fell.
+    float lambert = max(dot(normal, normalize(light.xyz)), 0.0) * shadow_factor(input.world, normal);
     float ambient = light.w;
 
     // The material's alpha times this copy's own, exactly as the rgb above

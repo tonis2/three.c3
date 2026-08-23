@@ -73,6 +73,84 @@ const light = {
 		H.lightSet(x, y, z, +ambient);
 		return light;
 	},
+
+	// The shadow this light casts. `three.light.shadow.bias` and
+	// `.intensity` are Three.js's own names on Three.js's own object —
+	// `DirectionalLight.shadow` — and they mean here what they mean there.
+	//
+	// Two divergences and both are deliberate. `enabled` lives here rather
+	// than as `castShadow` on the light or `shadowMap.enabled` on a
+	// renderer, because there is neither a light object nor a renderer
+	// object to hang it on. And `size` is one number where Three.js has
+	// `mapSize`, a Vector2: this map is square, and a name Three.js does
+	// not have is `plan.md` §4's rule for saying so.
+	//
+	// A fresh object each read, like `direction` above, so the four
+	// properties always answer with what the host holds rather than with
+	// what a captured copy remembered.
+	get shadow() {
+		return {
+			// Off by default. Turning it on allocates a depth image and
+			// compiles a shader the first frame after, and never before
+			// — a project that does not ask pays for none of it.
+			get enabled() { return H.shadowGet()[0] !== 0; },
+			set enabled(v) {
+				const [, size, bias, intensity] = H.shadowGet();
+				H.shadowSet(v ? 1 : 0, size, bias, intensity);
+			},
+
+			// Texels per side. Clamped to 256..8192 and rounded down to a
+			// power of two, so it reads back as what will actually be
+			// allocated rather than as what was typed.
+			get size() { return H.shadowGet()[1]; },
+			set size(v) {
+				const [enabled, , bias, intensity] = H.shadowGet();
+				H.shadowSet(enabled, +v, bias, intensity);
+			},
+
+			// Extra depth offset in the light's clip space, 0 by default.
+			// The renderer already offsets each sample along the surface
+			// normal by two texels, which is what actually removes the
+			// self-shadowing stripes, so this is the knob for the scene
+			// that still shows them rather than the one everybody has to
+			// tune.
+			get bias() { return H.shadowGet()[2]; },
+			set bias(v) {
+				const [enabled, size, , intensity] = H.shadowGet();
+				H.shadowSet(enabled, size, +v, intensity);
+			},
+
+			// How dark a shadow is, 0 to 1. 1 takes the whole directional
+			// term away and leaves `three.light.ambient`, which is why a
+			// shadow is never black unless the ambient floor is zero.
+			get intensity() { return H.shadowGet()[3]; },
+			set intensity(v) {
+				const [enabled, size, bias] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, +v);
+			},
+		};
+	},
+
+	// `three.light.shadow = true` and `= { size: 4096 }` both work, because
+	// the first is what somebody writes without reading anything and the
+	// second is what they write after. An object sets only the keys it
+	// names; a boolean is `{ enabled: it }`.
+	set shadow(v) {
+		const [enabled, size, bias, intensity] = H.shadowGet();
+		if (typeof v === 'boolean' || v == null) {
+			H.shadowSet(v ? 1 : 0, size, bias, intensity);
+			return;
+		}
+		if (typeof v !== 'object') {
+			throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias or intensity');
+		}
+		H.shadowSet(
+			('enabled' in v ? (v.enabled ? 1 : 0) : enabled),
+			('size' in v ? +v.size : size),
+			('bias' in v ? +v.bias : bias),
+			('intensity' in v ? +v.intensity : intensity),
+		);
+	},
 };
 
 const camera = {

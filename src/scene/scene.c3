@@ -175,6 +175,19 @@ struct SceneStats
 	uint skinned_instances;
 	uint preskinned_instances;
 	usz pose_bytes;
+
+	<*
+	 How many draw calls the last shadow pass made, and 0 in a frame that had
+	 none.
+
+	 **The one number in here that is about the frame rather than about the
+	 scene**, and it has to be: whether a bucket casts is a property of its
+	 material and of the pass, not of the graph, so `Scene` cannot work it out and
+	 `MeshPass.stats` fills it in afterwards. It is also the only way a script can
+	 see that turning shadows on roughly doubled its draw calls — `draw_calls`
+	 counts the scene pass alone and always has.
+	*>
+	uint shadow_draws;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
@@ -1345,12 +1358,29 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 
  @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
  @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes; see MeshPass.record for why this crosses as a flat slice.`
+ @param casters : `Whether a shadow pass will read this draw list. Set, the camera frustum is not applied — a caster the camera cannot see still throws a shadow into the frame, so the list has to hold every drawable rather than every visible one. render/shadow.c3 carries what that costs and the trigger for a second draw list instead.`
 *>
-fn void Scene.update(&self, Assets* assets, Matrix4f view_projection, bool[] transparent = {}, float[] margins = {})
+fn void Scene.update(
+	&self,
+	Assets* assets,
+	Matrix4f view_projection,
+	bool[] transparent = {},
+	float[] margins = {},
+	bool casters = false
+)
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	self.build_draw_list(assets, self.cull ? &frustum : null, transparent, &frustum.planes[4], margins);
+	// `casters` overrides `cull` rather than the other way round, and neither
+	// turns the *sort* off: `frustum.planes[4]` is the near plane and a
+	// transparent draw is ordered by it whether or not anything was culled.
+	self.build_draw_list(
+		assets,
+		(self.cull && !casters) ? &frustum : null,
+		transparent,
+		&frustum.planes[4],
+		margins
+	);
 	// Promoted here rather than inside `build_draw_list`, because this call is
 	// what "a frame happened" means and the other caller is a query. Assigned
 	// unconditionally: with `cull` off nothing was dropped and zero is the honest

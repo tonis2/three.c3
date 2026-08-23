@@ -44,8 +44,11 @@ imported from a file or written in a script, generating its own shading body.
 Per-draw data is a record in a buffer rather than push constants, so the geometry
 contract and a material's uniforms have stopped competing for the same 128 bytes:
 vertex colours are carried and a material has 104 bytes of uniforms rather than 52.
+And the light casts a shadow — `three.light.shadow = true` for one directional
+depth map, fitted around the scene, sampled with a nine-tap comparison, and off
+until something asks for it.
 
-	c3c test --trust=full       617 passed, 0 failed, leak-clean
+	c3c test --trust=full       663 passed, 0 failed, leak-clean
 
 **What follows was found by using the engine, not by reading it looking for
 holes.** Each one stopped the work, and where it forced a workaround the
@@ -295,10 +298,21 @@ modeller drew.
 **On the compute path, honestly.** It does the same arithmetic the vertex shader
 does, plus 24 bytes a vertex written, read back, a dispatch and a barrier — and a
 posed copy of the mesh per instance per frame in flight. Under one pass it is
-strictly more work, and it was built anyway for two reasons that are not
-speculative: shadows are a known coming pass (§13) and it is the only way to
+strictly more work, and it was built anyway for two reasons that were not
+speculative: shadows were a known coming pass (§13) and it is the only way to
 raycast against the pose rather than the box. It is opt-in per character and it
 splits the bucket. **Do not route a crowd through it.**
+
+**The first of those two arrived, and the arithmetic is now what it predicted.**
+`shaders/shadow.slang` reads `Draw.posed` exactly as `mesh.slang` does, so a
+compute-routed character blends once and two passes read the result while a
+vertex-skinned one blends twice. That is break-even at two passes, as costed —
+and it does not make compute the default, because the extra draw call the split
+bucket costs is paid whether or not shadows are on.
+`three_tests::shadow::the_two_skinning_paths_cast_the_same_shadow` is what holds
+the two to the same picture through the second pass, which is a stronger claim
+than the colour pass alone could make: it is the first thing that reads the
+dispatch's output through a *different* pipeline.
 
 **What is still absent.** No blending or crossfade between clips — G3/S7's
 argument is unchanged and the live palette is where it would land. No morph
@@ -497,12 +511,6 @@ answered.
 ## 9. Open questions
 
 Decisions nobody has made. Each one is cheap to decide and expensive to discover.
-
-- **Shadows.** Not on the list and not obviously wrong to omit, but a game
-  without them looks flat in a way no amount of material work fixes. A single
-  directional shadow map is the cheapest thing that would change how every
-  screenshot in this project looks. **Worth a decision before §3 or §4**, because
-  it touches the same shader either way.
 
 - **Hot reload semantics.** What happens to a running `setAnimationLoop`, to live
   physics bodies, to the camera. See §8.
@@ -866,15 +874,32 @@ promise adding, removing, colouring and duplicating, and this renderer can do no
 of them. Whatever comes next has to keep that honesty rather than inherit the
 Three.js name and disappoint it.
 
-What is next, in the order they stop being optional: a second light, or a list;
-a colour per light rather than white; and shadows, which are a depth pass, a
-matrix and a comparison sampler, and are the largest single visual gap left after
-the sky in §4. Now that the binding exists, which of them anybody actually misses
-is a question that can be answered rather than guessed — which was the argument
-for doing the binding first.
+**It casts a shadow now, and that was the largest of the three things this
+section said were missing.** `three.light.shadow` — `enabled`, `size`, `bias`,
+`intensity` — over one directional depth map fitted around the scene each frame.
+It is off until a script asks, which is the same rule the post chain follows and
+for the same reason: nothing is allocated and no shader is compiled for a project
+that never wants it. `render/shadow.c3` carries the design, the three costs and
+the trigger that would change each of them; the two worth repeating here are that
+**the camera frustum stops culling while the pass is on** (a caster the camera
+cannot see still throws a shadow into the frame) and that **there is no
+`castShadow` per object**, because a third per-copy channel splits buckets and
+that is the trade the whole renderer refuses.
 
-**A specular term belongs on that list and is what a roughness map is waiting
-for.** §4 can now load one in the right colourspace and has nowhere to send it:
+It also settled §9's open question, which had asked for a decision "before §3 or
+§4" on the grounds that it touches the same shader either way. It did touch the
+same shader: `FrameBlock` grew a matrix and a `float4`, both shading templates
+grew a reserved sampler at binding 1, and `MATERIAL_BINDING_FIRST` moved from 1 to
+2. All of that was cheap precisely because §15's draw record had already taken the
+geometry contract out of the push block.
+
+What is left of the list, in the order they stop being optional: a second light,
+or a list; a colour per light rather than white; and a specular term. Now that the
+binding exists, which of them anybody actually misses is a question that can be
+answered rather than guessed — which was the argument for doing the binding
+first.
+
+**A specular term is what a roughness map is waiting for.** §4 can now load one in the right colourspace and has nowhere to send it:
 `lambert()` is the whole of the built-in light, so roughness and metalness are
 inputs to an equation this renderer does not evaluate. That makes them one
 decision and not two — do not add a roughness field anywhere before the term
@@ -899,9 +924,10 @@ is a small and honest write.
 
 ## 13. The pass system, and what it is not
 
-The chain is built (`render/chain.c3`). What is left of this section is the part
-that constrains what lands on top of it — shadows, a UI layer, PBR — and the one
-trigger that would turn the frame's list into a graph.
+The chain is built (`render/chain.c3`) and the shadow pass is built on top of it
+(`render/shadow.c3`). What is left of this section is the part that constrains
+what lands on top of *those* — a UI layer, PBR — and the one trigger that would
+turn the frame's list into a graph.
 
 ### The counting the no-graph answer rests on
 
@@ -910,17 +936,24 @@ A frame is `scene ─► target.color ─► blit` with no post pass and
 images and `3 + N` barrier call sites, every one of them coming out of
 `color_attachment_barrier` or `shader_read_barrier`. What the named features add:
 
-	shadows        +1 site   the shadow map's attachment transition. The read-side
-	                         transition folds into begin_render_to's existing
-	                         two-element array. Cascades are layers of one image:
+	shadows        +2 sites  built, and the estimate was +1. The read-side
+	                         transition was expected to fold into
+	                         begin_render_to's two-element array and does not:
+	                         the map is its own image at its own extent rather
+	                         than the target's depth buffer, so the pass owns
+	                         both ends of it. Cascades are layers of one image:
 	                         more draw calls, the same two transitions.
 	UI             +1 site   or zero. Same target.color, LOAD_OP_LOAD, a different
 	                         pipeline, no attachment of its own.
 	depth in post  +0 sites  two more elements in arrays that already exist.
 	               ────────
-	               ~7 total
+	               ~8 total
 
-Seven is not a number that buys a dependency solver. **UI is the one that looks
+Eight is not a number that buys a dependency solver, and neither was seven. **The
+estimate being one out is worth leaving visible**: it was wrong for a reason that
+only shows up once the image exists, which is the ordinary way a costing of this
+kind goes wrong, and being out by one on a number whose whole job is to be far
+below the threshold changed nothing. **UI is the one that looks
 expensive and is not:** it draws into the colour attachment everything else
 already writes, so it costs a pipeline, a vertex buffer and a glyph atlas, and
 nothing whatever in scheduling — `pushDescriptor` means the atlas is one more
@@ -964,6 +997,18 @@ deleting `shader_read_barrier` from the post pass produces
 under GENERAL. Synchronization validation does not fill the hole on this driver —
 enabled three ways, including the layer's current `VK_LAYER_VALIDATE_SYNC=1`, the
 missing barrier still reports nothing.
+
+**The instrument does not reach a depth image, and that was measured when the
+shadow pass was built.** Deleting either of `ShadowMap`'s two barriers — the
+attachment transition or the read-side one — leaves every check in
+`three_tests::shadow` green, pictures included, with the ordinary layer and with
+synchronization validation. The same injection on the post chain's *colour* image
+still produces `VUID-vkCmdDraw-imageLayout-00344`, naming the image, the binding
+and both layouts, and fails `three_tests::post`. So the mechanism is present, it
+works through a push descriptor, and it is silent for a depth attachment sampled
+the same way. Both injections were run; the contrast is the finding, and it is
+recorded in `render/shadow.c3` beside the barriers it applies to. **Nothing about
+a depth attachment should lean on "the layer would have told us".**
 
 That inverts the trade for **this** project specifically, and `test/post_test.c3`'s
 own header says why: a missing barrier renders correctly on this driver and is a
@@ -1049,7 +1094,8 @@ IBL bake, decided once rather than twice.
 
 ### Three kinds of pass, and they do not unify
 
-	1. geometry     scene, shadow. Driven by the scene graph, write attachments.
+	1. geometry     scene, shadow — both built. Driven by the scene graph, write
+	                attachments.
 	                gpu, cmd, target, frame slot, instance buffer.
 	2. full-screen  the post chain, tonemap. Driven by a list.
 	                cmd, target, source view, destination view, assets.
@@ -1080,12 +1126,19 @@ shadow pass and a UI layer slot into it as lines rather than as nested ifs — t
 "window shows something the screenshot does not" family of bug is what that
 function exists to prevent:
 
-	if (self.shadows.active) self.shadows.record(cmd, &self.scene)!;
+	self.pass.prepare(cmd, slot)!;          // scene update, buffers, compute skinning
+	self.pass.record_shadow(cmd);           // built: a line, and a no-op when off
 	self.target.begin_render_to(cmd, scene_destination);
 	self.draw(cmd)!;
 	if (posted)  self.post.record_chain(cmd, &self.target, final_color)!;
 	if (overlay) self.ui.record(cmd, &self.target);
 	self.target.close(cmd);
+
+**The shadow line landed as a line**, which is what this section predicted and is
+the payoff for `record_scene` having been rewritten as a sequence. It is not even
+an `if`: `record_shadow` returns immediately when the pass is not live, so the
+frame path has one more statement and no more branches. It does not touch
+`target.color`, so the invariant below is untouched by it.
 
 **The invariant a third stage would break: exactly one stage writes
 `target.color`, and the close happens exactly once, here.** It is enforced rather
@@ -1094,7 +1147,9 @@ COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in TRANSFER_SRC, so
 `the_post_pass_is_silent_under_validation` and `a_chain_is_silent_under_validation`
 both fail on it with `VUID-VkImageMemoryBarrier2-oldLayout-01197` — verified by
 injecting a second `self.target.close(cmd)`, not by reasoning about it. That is
-the thing to know before a shadow pass and a UI layer are added on top of it.
+the thing to know before a UI layer is added on top of it. The shadow pass, which
+was the other half of that sentence, went in without touching it: it writes its
+own image and closes nothing.
 
 Each stage keeps its own honest signature. A common `record(PassContext*)` across
 all three kinds would need a context carrying gpu, cmd, target, slot, assets,
@@ -1533,7 +1588,8 @@ two fields in one shader and each fails, naming the field and both offsets.
   builds it.
 - **No render graph and no deferred path.** Both are answers to a pass count this
   project does not have. A frame is five images and `3 + N` barrier call sites;
-  shadows, a UI layer and depth-in-post together take that to about seven. A graph
+  the shadow pass took that to `5 + N` and a UI layer and depth-in-post would take
+  it to about eight — §13 has the counting and the one place it was out by. A graph
   that schedules four passes is a scheduler with nothing to schedule. **§13 is the
   counting and the shape the alternative takes** — a stage list, a chain whose
   adjacency is its own edge set, and the one trigger that would change the answer,

@@ -296,12 +296,27 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 1, "one descriptor, got %d", mod.layout.bindings.len());
+	// The template's two reserved samplers and nothing else, the same two
+	// `mesh.slang` declares. `MATERIAL_BINDING_FIRST` rather than a literal 2,
+	// because the claim is "a material reserves exactly what the mesh pass
+	// reserves" and that constant is the other half of it.
+	test::@check(
+		mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST,
+		"%d descriptors, got %d", three::MATERIAL_BINDING_FIRST, mod.layout.bindings.len()
+	);
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
-	test::@check(map != null, "and it is base_color_map");
+	test::@check(map != null, "and one is base_color_map");
 	if (map == null) return;
 	test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
 	test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
+
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
+	test::@check(shadow != null, "and the other is shadow_map");
+	if (shadow == null) return;
+	test::@check(
+		shadow.set == 0 && shadow.binding == three::SHADOW_BINDING,
+		"at 0,%d — got %d,%d", three::SHADOW_BINDING, shadow.set, shadow.binding
+	);
 }
 
 // ============================================================================
@@ -952,8 +967,8 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 4,
-		"the map and the three the body asked for, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST + 3,
+		"the template's two and the three the body asked for, got %d", mod.layout.bindings.len());
 
 	three::ShaderBinding* noise = mod.layout.binding_of("noise_map");
 	test::@check(noise != null, "the first is there by name");
@@ -964,9 +979,15 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 		"at 0,%d — got %d,%d", three::MATERIAL_BINDING_FIRST, noise.set, noise.binding);
 	test::@check(noise.count == 1, "one descriptor, not an array: %d", noise.count);
 
-	// Binding 0 is still the template's own and is untouched by any of this.
+	// The reserved bindings are still the template's own and are untouched by any
+	// of this — a declared texture is numbered *past* them and never into them.
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
 	test::@check(map != null && map.binding == 0, "and the base colour map is still binding 0");
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
+	test::@check(
+		shadow != null && shadow.binding == three::SHADOW_BINDING,
+		"and the shadow map is still binding %d", three::SHADOW_BINDING
+	);
 }
 
 <*
@@ -998,11 +1019,17 @@ fn void binding_indices_follow_the_declaration_order() @test
 	defer b.free();
 	test::@check(a.ok && b.ok, "both compiled: %s%s", a.diagnostic, b.diagnostic);
 
-	test::@check(a.layout.binding_of("noise_map").binding == 1, "declared first, bound at 1");
-	test::@check(a.layout.binding_of("mask_map").binding == 3, "declared last, bound at 3");
+	// Spelled against `MATERIAL_BINDING_FIRST` rather than as literals, because the
+	// claim here is about *order* and not about where the run starts — and the
+	// start has moved once already, when the shadow map claimed binding 1.
+	uint lowest = three::MATERIAL_BINDING_FIRST;
+	uint highest = lowest + 2;
 
-	test::@check(b.layout.binding_of("mask_map").binding == 1, "and the other way round it is 1");
-	test::@check(b.layout.binding_of("noise_map").binding == 3, "with the other at 3");
+	test::@check(a.layout.binding_of("noise_map").binding == lowest, "declared first, bound at %d", lowest);
+	test::@check(a.layout.binding_of("mask_map").binding == highest, "declared last, bound at %d", highest);
+
+	test::@check(b.layout.binding_of("mask_map").binding == lowest, "and the other way round it is %d", lowest);
+	test::@check(b.layout.binding_of("noise_map").binding == highest, "with the other at %d", highest);
 }
 
 <*
@@ -1263,7 +1290,10 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 	test::@check(mod.ok, "and it compiles: %s", mod.diagnostic);
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
 		"with the push block it always had, got %d", mod.layout.push_size);
-	test::@check(mod.layout.bindings.len() == 1, "and the one binding, got %d", mod.layout.bindings.len());
+	test::@check(
+		mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST,
+		"and the template's own bindings, got %d", mod.layout.bindings.len()
+	);
 }
 
 <*
