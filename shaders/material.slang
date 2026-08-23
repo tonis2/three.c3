@@ -216,6 +216,71 @@ float lambert(float3 normal)
     return ambient + (1.0 - ambient) * n_dot_l;
 }
 
+// A tangent-space normal map applied to a surface that carries no tangents.
+//
+// **The meshes here have positions, normals and uvs and nothing else.** There is
+// no `TANGENT` stream, `mesh.slang` has nowhere to put one, and a generated
+// primitive never had one to lose — so the frame is rebuilt per pixel from the
+// screen-space derivatives of the world position and the uv. That is the
+// standard cotangent-frame construction; it costs four derivatives and two cross
+// products, and what it buys is that a normal map works on *any* textured mesh
+// here rather than only on the ones whose exporter wrote tangents.
+//
+// `texel` is the map's rgb exactly as sampled. The decode from [0,1] to a
+// direction happens in here, which is the half worth reading twice: **the map
+// has to be loaded `LinearSRGBColorSpace`**. Through an sRGB view the stored
+// 0.5 that means "no tilt" arrives as 0.21, so every surface leans the same way
+// and the detail goes soft — it reads as a bad bake and the file is fine.
+//
+//     const bumps = three.texture('brick_n.png', { colorSpace: three.LinearSRGBColorSpace });
+//     // ... in the material's fragment body:
+//     float3 n = mapped_normal(s, brick_normal.Sample(s.uv).rgb);
+//     return s.albedo * lambert(n);
+//
+// Two things it cannot do, both inherited from having no baked tangents:
+// mirrored uv islands come out mirrored rather than flipped, because a
+// derivative cannot see the seam a tangent would have recorded; and a face with
+// degenerate uvs has no frame at all, which is the interpolated normal returned
+// unchanged rather than a NaN.
+//
+// **Fragment stage only.** `ddx`/`ddy` do not exist in a vertex shader, so
+// calling this from a `vertex:` body is a compile error rather than a wrong
+// picture — which is the good outcome, and the reason it takes a `Surface`.
+float3 mapped_normal(Surface s, float3 texel)
+{
+    float3 n = normalize(s.normal);
+
+    float3 dp_dx = ddx(s.position);
+    float3 dp_dy = ddy(s.position);
+    float2 duv_dx = ddx(s.uv);
+    float2 duv_dy = ddy(s.uv);
+
+    // The tangent and bitangent that carry those uv derivatives, solved in the
+    // plane perpendicular to the interpolated normal — so the frame agrees with
+    // the normal the mesh already has rather than replacing it.
+    float3 dp_dy_perp = cross(dp_dy, n);
+    float3 dp_dx_perp = cross(n, dp_dx);
+    float3 tangent = dp_dy_perp * duv_dx.x + dp_dx_perp * duv_dy.x;
+    float3 bitangent = dp_dy_perp * duv_dx.y + dp_dx_perp * duv_dy.y;
+
+    float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    // No uv gradient, so there is no frame to build and nothing sensible to
+    // return but the normal that was already there. `rsqrt(0)` is an infinity
+    // and the pixel after it is a NaN, which the rasteriser is entitled to draw
+    // as anything at all.
+    if (longest <= 0.0) return n;
+
+    // One scale for both axes rather than normalizing each: the two are the same
+    // skew seen along two directions, and scaling them apart squares it.
+    float scale = rsqrt(longest);
+    float3 direction = texel * 2.0 - 1.0;
+    return normalize(
+        tangent * (direction.x * scale)
+        + bitangent * (direction.y * scale)
+        + n * direction.z
+    );
+}
+
 // The agent's vertex body, bracketed by `#line` exactly as the fragment one is
 // and preceded by its own copy of the uniform `#define`s — which are `#undef`ed
 // again immediately after it. **Two scoped copies rather than one block covering

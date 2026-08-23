@@ -126,7 +126,7 @@ export const DOCS = {
 			methods: ['dispose()', 'toJSON()'],
 		},
 		DataTexture: {
-			construct: 'new three.DataTexture(data, width, height)',
+			construct: 'new three.DataTexture(data, width, height, { colorSpace, generateMipmaps })',
 			note:
 				'Pixels a script built, uploaded as a texture. data is a Uint8Array (or a plain '
 				+ 'Array, which is copied) of width*height*4 bytes in r, g, b, a order, row-major '
@@ -136,23 +136,48 @@ export const DOCS = {
 				+ 'texture by content, so generated pixels and the identical .png are one upload. '
 				+ 'It is a Texture in every other way — map, dispose, width, height. Generating '
 				+ '256x256 in JavaScript costs about 16ms before any of this, so build at load '
-				+ 'rather than per frame. path is null; the side limit is 8192.',
-			properties: ['width', 'height', 'path (null)', 'alive'],
+				+ 'rather than per frame. path is null; the side limit is 8192. The fourth '
+				+ 'argument is the same options object three.texture takes rather than a format, '
+				+ 'and both options matter more here than there: generated pixels are as often a '
+				+ 'TABLE indexed exactly — a palette, a ramp, a lookup a shader reads — as a '
+				+ 'picture, and a table wants { colorSpace: three.LinearSRGBColorSpace, '
+				+ 'generateMipmaps: false }, because its channels are numbers and a blurred mip '
+				+ 'level of a lookup approximates nothing.',
+			properties: [
+				'width', 'height', 'path (null)', 'alive',
+				'colorSpace (\'srgb\' or \'srgb-linear\'; fixed at upload)',
+				'levels (how many mip levels it got)',
+				'generateMipmaps (whether it got a chain — the answer, not the request)',
+			],
 			methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 		},
 		Texture: {
-			construct: 'three.texture(path)',
+			construct: 'three.texture(path, { colorSpace, generateMipmaps })',
 			note:
 				'A PNG or JPEG on the device. Synchronous — it is uploaded by the time the call '
 				+ 'returns, so width and height are readable immediately and there is no onLoad. '
 				+ 'The format is read from the file\'s first bytes, not its extension. Images are '
-				+ 'deduplicated by content: two paths holding the same picture, or a .png and the '
-				+ 'identical image inside a .glb, are one upload — each call still answers with its '
-				+ 'own handle. Under --assets the path is inside the game directory and cannot climb '
-				+ 'out of it. Put it on something with new three.MeshLambertMaterial({ map }). '
-				+ '16-bit PNGs are refused by name; save as 8-bit. read() copies the pixels back '
-				+ 'off the device.',
-			properties: ['width', 'height', 'path', 'alive'],
+				+ 'deduplicated by content AND by colourspace: two paths holding the same picture, '
+				+ 'or a .png and the identical image inside a .glb, are one upload — each call '
+				+ 'still answers with its own handle. Under --assets the path is inside the game '
+				+ 'directory and cannot climb out of it. Put it on something with new '
+				+ 'three.MeshLambertMaterial({ map }). 16-bit PNGs are refused by name; save as '
+				+ '8-bit. read() copies the pixels back off the device. '
+				+ 'THE OPTION WORTH KNOWING ABOUT IS colorSpace. It defaults to sRGB, which is '
+				+ 'right for a picture of something and wrong for a map whose channels are numbers '
+				+ '— a normal map, a roughness or metalness or occlusion map, a height field. '
+				+ 'Those want three.LinearSRGBColorSpace, and getting it wrong has no error and no '
+				+ 'obvious symptom: a normal map read as sRGB has its "no tilt" 0.5 decoded to '
+				+ '0.21, so every surface leans the same way and the detail goes soft. '
+				+ 'A full mip chain is built unless you say otherwise, so a textured floor stops '
+				+ 'shimmering at grazing angles. An option this does not have is refused rather '
+				+ 'than ignored — there is no magFilter or wrapS here.',
+			properties: [
+				'width', 'height', 'path', 'alive',
+				'colorSpace (\'srgb\' or \'srgb-linear\'; fixed at upload, so load again to change it)',
+				'levels (how many mip levels it got)',
+				'generateMipmaps (whether it got a chain — the answer, not the request)',
+			],
 			methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 		},
 		MeshLambertMaterial: {
@@ -191,6 +216,18 @@ export const DOCS = {
 				+ 'own reflection. Sample with any uv you like, which is the point — s.uv + float2(t, 0) '
 				+ 'scrolls, s.uv * 4 tiles, float2(k, 0.5) reads a gradient as a lookup table. A sampler '
 				+ 'left null, or one you never fill, reads as 1x1 opaque white rather than as nothing. '
+				+ 'Three helpers are already in scope in a body. lambert(normal) is the built-in '
+				+ 'directional light as a single factor, so `return s.albedo * lambert(s.normal)` '
+				+ 'IS the default look. srgb_to_linear(c) decodes a colour you wrote down yourself. '
+				+ 'And mapped_normal(s, texel) applies a tangent-space NORMAL MAP: hand it the '
+				+ 'map\'s rgb exactly as sampled and it answers with a world-space normal to give '
+				+ 'lambert — `float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb); return s.albedo '
+				+ '* lambert(n);`. The meshes here carry no tangents, so the frame is rebuilt per '
+				+ 'pixel from screen-space derivatives: it works on any textured mesh including a '
+				+ 'generated primitive, it is fragment-stage only, and it cannot see the seam of a '
+				+ 'mirrored uv island. LOAD THE MAP WITH { colorSpace: three.LinearSRGBColorSpace } '
+				+ '— through the default sRGB the stored 0.5 that means "no tilt" arrives as 0.21, '
+				+ 'every surface leans the same way and the bumps go soft. '
 				+ 'Compiles on construction, so a bad shader throws here, carrying the '
 				+ 'Slang diagnostic with the line number you wrote. Needs a GPU device. '
 				+ 'shade() returns rgb and never alpha: how much of the surface shows is the '
@@ -647,16 +684,56 @@ export const DOCS = {
 			'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
 			+ 'return an object from a script. Objects report their name, transform and children; a '
 			+ 'Vector3 reports [x, y, z]; a ShaderMaterial reports its fragment and uniforms.',
-		'three.texture(path)':
+		'three.texture(path, options)':
 			'Decode a PNG or JPEG and upload it, answering with a Texture. Synchronous. The format '
 			+ 'comes from the file\'s first bytes rather than its name. Deduplicated by the decoded '
 			+ 'image, so the same picture reached by two paths — or by a path and a .glb — is one '
-			+ 'upload, and three.stats().textures counts it once.',
-		'new three.DataTexture(data, width, height)':
+			+ 'upload, and three.stats().textures counts it once. options is '
+			+ '{ colorSpace, generateMipmaps } and nothing else; an unknown key throws rather than '
+			+ 'being ignored, so a Three.js line carrying magFilter or wrapS is told so instead of '
+			+ 'quietly doing something different.',
+		'three.SRGBColorSpace / three.LinearSRGBColorSpace / three.NoColorSpace':
+			'Which space a texture\'s bytes are in, passed as three.texture(path, { colorSpace }). '
+			+ 'THIS IS THE DIFFERENCE BETWEEN A COLOUR MAP AND A NORMAL MAP. SRGBColorSpace is the '
+			+ 'default and is right for anything an artist looked at while making it — a base '
+			+ 'colour, an albedo, a photograph. LinearSRGBColorSpace is for a map whose channels '
+			+ 'are numbers rather than colours: a normal map\'s xyz, a roughness or metalness or '
+			+ 'occlusion map, a height field, a lookup table. NoColorSpace is Three.js\'s other '
+			+ 'spelling of linear and is the same image here. Neither mistake reports an error: a '
+			+ 'colour map loaded linear is washed out and reads as a lighting bug, and a normal map '
+			+ 'loaded sRGB goes soft and reads as a bad bake. The colourspace is part of a '
+			+ 'texture\'s identity, so the same file loaded both ways is two uploads on purpose.',
+		'new three.DataTexture(data, width, height, options)':
 			'Upload pixels a script generated. Rows run bottom-to-top, four bytes per pixel. '
 			+ 'The bytes are read and copied inside the call, so the array is yours again '
 			+ 'immediately. Wrong byte counts are refused with the arithmetic in the message '
-			+ 'rather than uploaded skewed.',
+			+ 'rather than uploaded skewed. options is three.texture\'s; a generated lookup table '
+			+ 'wants { colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false }.',
+		'mapped_normal(s, texel) — normal maps in a ShaderMaterial':
+			'A tangent-space normal map applied to a surface that carries no tangents. In a '
+			+ 'fragment body: `float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb); return '
+			+ 's.albedo * lambert(n);` where bumps is one of the material\'s declared textures. '
+			+ 'texel is the map\'s rgb exactly as sampled — the decode from [0,1] to a direction '
+			+ 'happens inside, which is why the map has to be loaded with '
+			+ '{ colorSpace: three.LinearSRGBColorSpace }. No mesh here has a TANGENT stream and '
+			+ 'there is nowhere to put one, so the frame is rebuilt per pixel from screen-space '
+			+ 'derivatives of the world position and the uv. That is what makes it work on any '
+			+ 'textured mesh, including a generated PlaneGeometry, and it is also its two limits: '
+			+ 'a mirrored uv island comes out mirrored rather than flipped, and a face with '
+			+ 'degenerate uvs gets the interpolated normal back unchanged. Fragment stage only — '
+			+ 'calling it from a vertex body is a compile error, because there are no derivatives '
+			+ 'there. A ROUGHNESS map has no equivalent yet: the built-in light is lambert with no '
+			+ 'specular term, so a roughness or metalness map loads correctly and in the right '
+			+ 'colourspace but there is nothing built in to feed it — a body is free to use one '
+			+ 'for whatever it likes.',
+		'texture.levels and texture.generateMipmaps':
+			'How many mip levels the image got, and whether that is more than one. A full chain is '
+			+ 'built by default, which is what stops a textured floor shimmering as the camera '
+			+ 'moves — without one every sample comes from the full-resolution image however few '
+			+ 'pixels the surface covers. Both are read back off the upload rather than echoed from '
+			+ 'what you asked for, so a device that cannot filter the format reports false here '
+			+ 'having been passed true. Pass { generateMipmaps: false } for pixels meant to be '
+			+ 'indexed exactly rather than sampled at a distance.',
 		'texture.dispose()':
 			'Give back the reference this handle holds. Not a free: the image goes only when nothing '
 			+ 'names it, so disposing while a material still draws with it leaves that material '

@@ -3,7 +3,14 @@
 
 import { Vector3, Box3, readVector, asTriple } from './math.js';
 import { Group } from './object3d.js';
-import { Texture, DataTexture } from './texture.js';
+import {
+	Texture,
+	DataTexture,
+	uploadOptions,
+	NoColorSpace,
+	SRGBColorSpace,
+	LinearSRGBColorSpace,
+} from './texture.js';
 import { FrontSide, BackSide, DoubleSide, NoBlending, NormalBlending, AdditiveBlending, Material, MeshLambertMaterial } from './material.js';
 import { ShaderMaterial } from './shader.js';
 import { postSpec, postFinish, bumpPostEpoch } from './post.js';
@@ -300,6 +307,19 @@ export const three = {
 	NormalBlending,
 	AdditiveBlending,
 
+	// `three.texture(path, { colorSpace })`. Three.js's strings, so that
+	// `tex.colorSpace === three.SRGBColorSpace` means what a script written
+	// from memory of Three.js expects it to.
+	//
+	// **This is the difference between a colour map and a normal map.** sRGB
+	// is the default and is right for anything an artist looked at while
+	// making it; linear is for a map whose channels are numbers rather than
+	// colours — normal, roughness, metalness, occlusion, height. NoColorSpace
+	// is Three.js's other spelling of linear and is accepted as one.
+	NoColorSpace,
+	SRGBColorSpace,
+	LinearSRGBColorSpace,
+
 	// Exported for `instanceof` and for building one by hand, which a script
 	// wants when it is describing a volume the scene does not hold yet — a
 	// plot to fill, a gap to check. Neither is constructed by the host.
@@ -350,11 +370,21 @@ export const three = {
 	// The format is read from the file's first bytes rather than from its
 	// extension, so a JPEG somebody named .png loads correctly instead of
 	// being reported as corrupt.
-	texture(path) {
+	//
+	// The second argument is `{ colorSpace, generateMipmaps }`, and the one
+	// worth knowing about is colorSpace. It defaults to sRGB, which is right
+	// for a picture of something and wrong for a map whose channels are
+	// numbers:
+	//
+	//     const bricks = three.texture('brick.png');
+	//     const bumps  = three.texture('brick_normal.png',
+	//                                  { colorSpace: three.LinearSRGBColorSpace });
+	texture(path, options = null) {
 		if (typeof path !== 'string' || path.length === 0) {
 			throw new TypeError('three.texture(path) wants a path to a .png or .jpg');
 		}
-		return new Texture(H.texture(path), path);
+		const chosen = uploadOptions(options, 'three.texture(path, options)');
+		return new Texture(H.texture(path, chosen.code, chosen.mips), path, chosen.space);
 	},
 
 	// Draws one frame into the offscreen target. The PNG that `run_script`

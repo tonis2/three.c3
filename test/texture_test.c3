@@ -1178,3 +1178,570 @@ fn void a_repeat_of_zero_is_refused() @test
 			"a zero repeat should be refused and say why: %s", result.value);
 	};
 }
+
+// ============================================================================
+// The mip chain
+//
+// Before this there was one level and `maxLod` was zero, so every sample came
+// from the full-resolution image however few pixels the surface covered. That
+// is invisible in a screenshot of a scene viewed head-on, which is how it
+// lasted: the symptom is a floor that shimmers as the camera moves, and a still
+// frame has no motion in it to show.
+// ============================================================================
+
+<*
+ An image of any size and any colour, uploaded, for the checks that care about
+ the extents rather than the picture.
+
+ A generated image rather than a fixture because the interesting sizes here are
+ the awkward ones — a long thin rectangle, a single pixel — and checking in a
+ PNG for each would put the arithmetic this tests in a file nobody reads.
+*>
+fn int upload_solid(
+	three::Renderer* renderer,
+	uint width,
+	uint height,
+	char r,
+	char g,
+	char b,
+	three::ColorSpace space = three::ColorSpace.SRGB,
+	bool mips = true
+)
+{
+	char[] pixels = mem::new_array(char, (usz)width * height * 4);
+	defer free(pixels);
+	for (usz i = 0; i < pixels.len; i += 4)
+	{
+		pixels[i] = r;
+		pixels[i + 1] = g;
+		pixels[i + 2] = b;
+		pixels[i + 3] = 255;
+	}
+
+	image::Image made = {
+		.width = width,
+		.height = height,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		// No allocator, as `solid_texture` in `three_tests::unload` does: with
+		// none, `Image.free` frees nothing, which is what makes it safe to hand
+		// over storage this function owns and frees itself.
+		.pixels = pixels,
+	};
+	return renderer.pass.assets.claim_texture(&renderer.gpu, made, space, mips)!!;
+}
+
+<*
+ A texture arrives with a full chain, counted from its longest side.
+
+ Asserted on the level count rather than on a rendered frame, because there is no
+ frame that distinguishes four levels from three: the sampler picks a level from
+ the derivative and a test would have to place the camera at the exact distance
+ where the missing one would have been chosen. The count is the thing the
+ sampler's `maxLod` was built from, so it is the thing worth pinning.
+
+ 8x8 is four levels and 32x32 is six — `1 + floor(log2(side))`, which is Vulkan's
+ own rule and not this file's.
+
+ The chain is asserted unconditionally and not behind `can_generate_mips`,
+ because the two features it needs are **required** of `R8G8B8A8_SRGB` and
+ `R8G8B8A8_UNORM` in optimal tiling: blit source, blit destination and linear
+ filtering are all in the mandatory format table. The runtime check exists for
+ the compressed formats KTX2 will bring, where it is a real question and the
+ answer is no — a BC7 image carries its own levels and must never be blitted.
+*>
+fn void a_texture_uploads_a_full_mip_chain() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		test::@check(renderer.gpu.can_generate_mips(three::ColorSpace.SRGB.format()),
+			"this device reports it cannot blit RGBA8, which the Vulkan mandatory format table requires");
+
+		int checker = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		int green = assets.load_texture_file(&renderer.gpu, GREEN)!!;
+
+		test::@check(assets.texture_at(checker).levels == 4,
+			"the 8x8 checkerboard uploaded with %d levels, not 4", assets.texture_at(checker).levels);
+		test::@check(assets.texture_at(green).levels == 6,
+			"the 32x32 JPEG uploaded with %d levels, not 6", assets.texture_at(green).levels);
+	};
+}
+
+<*
+ A rectangle counts levels from its longest side, and a single pixel has one.
+
+ The half a square texture cannot catch. Halving both sides together stops when
+ the *short* one reaches 1, so a 16x2 would get two levels instead of five and
+ the last three would be a 4x1, a 2x1 and a 1x1 that never existed — an image
+ whose bottom levels are undefined rather than blurred. Every UI atlas and every
+ strip texture is this shape.
+*>
+fn void a_rectangle_counts_levels_from_its_longest_side() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		int strip = upload_solid(renderer, 16, 2, 200, 30, 30);
+		test::@check(assets.texture_at(strip).levels == 5,
+			"a 16x2 uploaded with %d levels, not the 5 its long side asks for", assets.texture_at(strip).levels);
+
+		int dot = upload_solid(renderer, 1, 1, 255, 255, 255);
+		test::@check(assets.texture_at(dot).levels == 1,
+			"a 1x1 uploaded with %d levels, and there is nothing below it to make", assets.texture_at(dot).levels);
+	};
+}
+
+<*
+ A caller that declines the chain gets one level, and it is a different image.
+
+ Both halves matter. `mips: false` is for pixels meant to be indexed exactly
+ rather than sampled at a distance — a palette, a ramp, a noise field — where a
+ blurred level approximates nothing. And a chain declined has to be part of what
+ makes two uploads the same upload: sharing a slot between a caller who wanted
+ one and a caller who did not would hand the second whatever the first asked for,
+ silently, with the picture right either way.
+*>
+fn void declining_the_chain_uploads_one_level_and_a_slot_of_its_own() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		int sampled = upload_solid(renderer, 8, 8, 60, 120, 180);
+		int indexed = upload_solid(renderer, 8, 8, 60, 120, 180, mips: false);
+
+		test::@check(assets.texture_at(sampled).levels == 4,
+			"the sampled copy has %d levels", assets.texture_at(sampled).levels);
+		test::@check(assets.texture_at(indexed).levels == 1,
+			"the indexed copy has %d levels, and asked for one", assets.texture_at(indexed).levels);
+		test::@check(sampled != indexed,
+			"the same bytes with and without a chain shared slot %d, so one of them has the other's image", sampled);
+	};
+}
+
+<*
+ The reported texture budget counts the chain.
+
+ An 8x8 with four levels is 256 + 64 + 16 + 4 bytes of RGBA — not the 256 the top
+ level costs. `stats().textureBytes` exists to be the number an agent watches
+ while loading a level, and one that was a third short of the truth would be
+ worse than none: the failure it is meant to predict is an out-of-memory, and it
+ would predict it late.
+
+ The exact total rather than a ratio, because the closed form is only right for a
+ square power of two and this file is where that would be discovered.
+*>
+fn void the_texture_budget_counts_the_whole_chain() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		usz counted = assets.texture_bytes();
+		usz expected = 256 + 64 + 16 + 4;
+
+		test::@check(counted == expected,
+			"an 8x8 with four levels is %d bytes of image and was reported as %d", expected, counted);
+	};
+}
+
+// ============================================================================
+// Colourspace
+//
+// The gap this closes: every texture uploaded as `R8G8B8A8_SRGB`, so a normal
+// or roughness map — whose channels are numbers rather than colours — came back
+// gamma-decoded and there was no verb that could ask for anything else.
+// ============================================================================
+
+<*
+ The same bytes in two colourspaces are two images.
+
+ **The dedup table keys on it**, which is the whole of what makes the feature
+ safe. The hash is over the decoded RGBA and knows nothing about format, so
+ without this a file used as a colour map in one material and as a height map in
+ another would share a slot — and whichever call came second would get the
+ other's format, with the picture right and only the decode wrong. That is a bug
+ whose symptom is "this material looks a bit off", on a line that is correct.
+
+ The second linear load asserts the other direction: sharing still happens when
+ the request really is the same, so this is a narrower key rather than a broken
+ one.
+*>
+fn void the_colourspace_is_part_of_a_textures_identity() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		int picture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+		int numbers = assets.load_texture_file(&renderer.gpu, CHECKER, three::ColorSpace.LINEAR)!!;
+
+		test::@check(picture != numbers,
+			"the same file in two colourspaces shared slot %d, so one of them is being decoded wrong", picture);
+		test::@check(assets.texture_count() == 2,
+			"%d textures resident for two colourspaces of one file", assets.texture_count());
+		test::@check(assets.texture_at(picture).space == three::ColorSpace.SRGB,
+			"the default load is not sRGB, so every texture that predates this argument changed meaning");
+		test::@check(assets.texture_at(numbers).space == three::ColorSpace.LINEAR,
+			"the linear load did not get a linear format");
+
+		int again = assets.load_texture_file(&renderer.gpu, CHECKER, three::ColorSpace.LINEAR)!!;
+		test::@check(again == numbers,
+			"two identical linear loads made slots %d and %d — the key is now too narrow", numbers, again);
+		test::@check(assets.texture_count() == 2, "%d textures resident", assets.texture_count());
+	};
+}
+
+<*
+ **The headline.** A linear texture is not gamma-decoded on the way in, asserted
+ on the pixels.
+
+ Not on the format field, which is what a binding that stored the enum and passed
+ `FORMAT_R8G8B8A8_SRGB` to `vkCreateImage` anyway would pass. Mid grey is the
+ fixture that cannot be faked: 128 through an sRGB view is 0.216 linear and
+ through a UNORM one it is 0.502, so the same bytes on the same plane under the
+ same light have to come back visibly brighter. Nothing else in the frame moves —
+ it is one material with its map re-pointed, so the light, the camera and the
+ geometry are the same objects and not merely the same values.
+
+ A normal map is this arithmetic applied to a direction: the stored 0.5 that
+ means "no tilt" arriving as 0.21 is why one loaded sRGB flattens a surface, and
+ it is the same 128 as here.
+*>
+fn void a_linear_texture_is_not_gamma_decoded_on_the_way_in() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		int as_picture = upload_solid(renderer, 4, 4, 128, 128, 128);
+		int as_numbers = upload_solid(renderer, 4, 4, 128, 128, 128, three::ColorSpace.LINEAR);
+
+		uint material = renderer.pass.create_texture_material(as_picture)!!;
+		three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		three::NodeId node = scene.add_mesh(plane, 0);
+		scene.set_material(node, material);
+		renderer.pass.frame_camera();
+
+		image::Image decoded = renderer.capture()!!;
+		defer decoded.free();
+		char[3] darker = centre_of(&decoded);
+
+		renderer.pass.set_material_map(&renderer.gpu, material, as_numbers)!!;
+
+		image::Image stored = renderer.capture()!!;
+		defer stored.free();
+		char[3] brighter = centre_of(&stored);
+
+		test::@check(darker[0] > 5,
+			"the sRGB grey came back at %d, which is not a lit surface — this test is measuring nothing", darker[0]);
+		test::@check((int)brighter[0] > (int)darker[0] + 20,
+			"the same grey came back at %d as sRGB and %d as linear; a linear texture that is still being "
+			"gamma-decoded gives the same number twice",
+			darker[0], brighter[0]
+		);
+	};
+}
+
+// ============================================================================
+// What a script can ask for
+// ============================================================================
+
+<*
+ A script names a colourspace and gets one, and the handle reports what happened.
+
+ `levels` and `generateMipmaps` are read back off the *upload* rather than echoed
+ from the request, which is what makes them worth having: a device that cannot
+ filter the format gives one level whatever was asked for, and a handle that
+ repeated the argument would say a chain was built on a machine where none was.
+*>
+fn void a_script_can_ask_for_a_linear_texture() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const picture = three.texture("test/fixtures/checker.png");
+			const numbers = three.texture("test/fixtures/checker.png",
+				{ colorSpace: three.LinearSRGBColorSpace });
+			return [
+				picture.colorSpace,
+				numbers.colorSpace,
+				picture.levels,
+				picture.generateMipmaps,
+				three.stats().textures,
+			];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `["srgb","srgb-linear",4,true,2]`,
+			"an sRGB and a linear load of one 8x8 file, four levels, two textures; got %s", result.value);
+	};
+}
+
+<*
+ `NoColorSpace` is Three.js's other spelling of linear and is accepted as one.
+
+ It is a separate name there because Three.js also carries float textures, where
+ the two differ. Here they are one format, and refusing the spelling a script
+ happened to remember would be refusing the right thing for a reason its author
+ cannot see — asserted on the slot, so this is the same image and not a third.
+*>
+fn void the_two_spellings_of_linear_are_one_texture() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			three.texture("test/fixtures/checker.png", { colorSpace: three.LinearSRGBColorSpace });
+			three.texture("test/fixtures/checker.png", { colorSpace: three.NoColorSpace });
+			return three.stats().textures;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "1",
+			"the two spellings of linear made %s textures, so one of them is not linear", result.value);
+	};
+}
+
+<*
+ An option this does not have is refused rather than ignored.
+
+ The opposite of what Three.js does, and deliberate: Three.js's Texture has two
+ dozen settable fields and this has two. A script that writes
+ `{ magFilter: THREE.NearestFilter }` and is quietly given linear filtering has
+ no way at all to find that out — the symptom is a blurry sprite, which reads as
+ the wrong asset having been exported rather than as an unsupported option.
+
+ The colourspace refusal is the same argument one level down: a misspelt space
+ that fell back to sRGB would be a normal map silently gamma-decoded, which is
+ the exact defect this feature exists to remove.
+*>
+fn void an_option_this_does_not_have_is_refused() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const said = [];
+			const refuse = (f) => { try { f(); said.push("accepted"); } catch (e) { said.push(e.message); } };
+			refuse(() => three.texture("test/fixtures/checker.png", { magFilter: 1 }));
+			refuse(() => three.texture("test/fixtures/checker.png", { colorSpace: "linear" }));
+			refuse(() => three.texture("test/fixtures/checker.png", { generateMipmaps: "yes" }));
+			return said.join(" | ");
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("no option called 'magFilter'"),
+			"an unsupported option should be named: %s", result.value);
+		test::@check(result.value.contains("is not one this reads"),
+			"a colourspace that is not one of the three should be refused: %s", result.value);
+		test::@check(result.value.contains("generateMipmaps wants true or false"),
+			"a non-boolean generateMipmaps should be refused: %s", result.value);
+		test::@check(!result.value.contains("accepted"),
+			"one of the three was accepted: %s", result.value);
+	};
+}
+
+<*
+ A DataTexture takes the same options, and declining the chain is what it is for.
+
+ Pixels a script generated are as often a table as a picture — a palette, a ramp,
+ a lookup a shader indexes exactly — and for a table both options point the same
+ way: linear, because the channels are numbers, and no chain, because a blurred
+ level of a lookup is not a cheaper version of it.
+*>
+fn void a_data_texture_takes_the_same_options() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const bytes = new Uint8Array(4 * 4 * 4).fill(128);
+			const lut = new three.DataTexture(bytes, 4, 4,
+				{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+			const picture = new three.DataTexture(bytes, 4, 4);
+			return [lut.colorSpace, lut.levels, lut.generateMipmaps, picture.levels, three.stats().textures];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `["srgb-linear",1,false,3,2]`,
+			"a linear 4x4 table with no chain and an sRGB 4x4 picture with one; got %s", result.value);
+	};
+}
+
+// ============================================================================
+// Normal maps
+//
+// What the two gaps above were in the way of. There are no tangents on any mesh
+// here and nowhere to put them, so the frame is rebuilt per pixel from
+// derivatives — `mapped_normal` in `shaders/material.slang` — and what has to be
+// proved is that the whole path works, not that the function compiles.
+// ============================================================================
+
+<*
+ **The headline for the colourspace half.** A normal map tilts the lighting, and
+ a flat one does not.
+
+ Three things are under test at once and no weaker check separates them: that a
+ material can declare a sampler and be given a linear texture for it, that
+ `mapped_normal` builds a usable frame from derivatives on a mesh with no
+ tangents, and that the decode is right way round.
+
+ The two maps are the same size, the same material and the same geometry — only
+ the texels differ. `128,128,255` is "no tilt", so the flat map has to render as
+ plain `lambert` and the tilted one has to render as something else. Asserting
+ the flat map matches the *default* shading is what rules out the frame being
+ built out of nothing: a `mapped_normal` that returned a constant would also make
+ the two maps differ, and would fail here.
+*>
+fn void a_normal_map_tilts_the_lighting_and_a_flat_one_does_not() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			// 2x2, linear, no chain: a normal map read exactly. The left column
+			// leans hard one way and the right column the other, so the two
+			// halves of the plane cannot light the same however the frame comes
+			// out — as long as there is a frame at all.
+			const tilted = new three.DataTexture(new Uint8Array([
+				 20, 128, 255, 255,   235, 128, 255, 255,
+				 20, 128, 255, 255,   235, 128, 255, 255,
+			]), 2, 2, { colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+			const flat = new three.DataTexture(new Uint8Array([
+				128, 128, 255, 255,   128, 128, 255, 255,
+				128, 128, 255, 255,   128, 128, 255, 255,
+			]), 2, 2, { colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+
+			globalThis.scene = new three.Scene();
+			globalThis.bumped = new three.ShaderMaterial({
+				textures: { surface_normal: flat },
+				fragment: 'float3 shade(Surface s) {'
+					+ '  float3 n = mapped_normal(s, surface_normal.Sample(s.uv).rgb);'
+					+ '  return float3(1.0, 1.0, 1.0) * lambert(n);'
+					+ '}',
+			});
+			globalThis.plain = new three.ShaderMaterial({
+				fragment: 'float3 shade(Surface s) { return float3(1.0, 1.0, 1.0) * lambert(s.normal); }',
+			});
+			globalThis.tilted = tilted;
+
+			const quad = new three.Mesh(new three.PlaneGeometry(2, 2), globalThis.bumped);
+			globalThis.scene.add(quad);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0.6, 0.4, 3);
+			three.render(globalThis.scene);
+			return "ok";
+		`);
+		defer built.free();
+		test::@check(built.ok, "the material compiled and drew: %s", built.error);
+
+		image::Image with_flat = run.renderer.capture()!!;
+		defer with_flat.free();
+
+		three::RunResult plain = run.run(`
+			globalThis.scene.children[0].material = globalThis.plain;
+			three.render(globalThis.scene);
+			return "ok";
+		`);
+		defer plain.free();
+		test::@check(plain.ok, "the plain material drew: %s", plain.error);
+
+		image::Image without_map = run.renderer.capture()!!;
+		defer without_map.free();
+
+		three::RunResult bumped = run.run(`
+			globalThis.scene.children[0].material = globalThis.bumped;
+			globalThis.bumped.textures.surface_normal = globalThis.tilted;
+			three.render(globalThis.scene);
+			return "ok";
+		`);
+		defer bumped.free();
+		test::@check(bumped.ok, "the tilted map drew: %s", bumped.error);
+
+		image::Image with_tilt = run.renderer.capture()!!;
+		defer with_tilt.free();
+
+		uint flat_vs_none = pixels_that_differ(&with_flat, &without_map);
+		uint tilt_vs_flat = pixels_that_differ(&with_tilt, &with_flat);
+
+		test::@check(flat_vs_none < 100,
+			"a flat normal map should light exactly like no normal map, and %d pixels differ — so the frame is "
+			"not being built from the surface", flat_vs_none
+		);
+		test::@check(tilt_vs_flat > 500,
+			"only %d pixels changed when the map was tilted, so the normal map is reaching nothing", tilt_vs_flat);
+	};
+}
+
+<*
+ Building a mip chain leaves no level in a layout the next thing does not expect.
+
+ **The barriers are the whole of the mip work and no picture asserts them.** A
+ level is a subresource with a layout of its own, so generating a chain moves
+ each level from `TRANSFER_DST` to `TRANSFER_SRC` to be read, and every one of
+ them to `SHADER_READ_ONLY` at the end. Miss the last transition on a single
+ level and the image still samples correctly on this driver — the only mechanism
+ core validation has for a missing barrier is noticing an image in the wrong
+ layout, which is `plan.md` §13's finding, and it is also the only mechanism
+ *this* has.
+
+ So the capture is armed before the upload rather than after it, which is what
+ distinguishes this from `reading_a_texture_leaves_it_in_the_layout_it_was_found_in`
+ next door: that one arms the sink after a texture is already resident, so the
+ chain is built outside its window and nothing it does could report a mistake in
+ one.
+
+ The rectangle is here for the extents rather than the layouts. A 16x2 chain
+ reaches a level whose short side has floored at 1 while the long one is still
+ halving, and a blit given a zero extent is not a small blit — it is
+ `VUID-vkCmdBlitImage-dstOffset-00248` and nothing drawn.
+*>
+fn void building_a_mip_chain_leaves_no_level_in_the_wrong_layout() @test
+{
+	vk::Instance instance = three::create_instance(true, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
+	defer renderer.free();
+
+	if (!renderer.gpu.validation)
+	{
+		io::printn("  (skipped: no validation layer in this build or on this machine)");
+		return;
+	}
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Assets* assets = &renderer.pass.assets;
+	three::Scene* scene = &renderer.pass.scene;
+
+	// Armed before anything is uploaded, so the chain is built inside the window.
+	renderer.gpu.begin_capture();
+
+	int checker = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
+	upload_solid(&renderer, 16, 2, 40, 200, 40);
+	upload_solid(&renderer, 8, 8, 40, 40, 200, three::ColorSpace.LINEAR);
+
+	uint material = renderer.pass.create_texture_material(checker)!!;
+	three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::NodeId node = scene.add_mesh(plane, 0);
+	scene.set_material(node, material);
+	renderer.pass.frame_camera();
+
+	image::Image shot = renderer.capture()!!;
+	defer shot.free();
+
+	String errors = renderer.gpu.sink.errors.str_view();
+	renderer.gpu.end_capture();
+
+	test::@check(errors.len == 0,
+		"uploading textures with mip chains and drawing with one produced validation errors: %s", errors);
+	test::@check(count_magenta(&shot) > 100,
+		"and the mipped checkerboard still draws, got %d magenta pixels", count_magenta(&shot));
+}
