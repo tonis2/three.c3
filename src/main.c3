@@ -13,7 +13,6 @@
 	--no-validate         turn them off — --mcp turns them on by default
 	--script <file.js>    boot one script, then keep the window running
 	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
-	--grid <n>            n instances of the model, to see M2's claim hold
 
  The window is a viewer and now also a control: drag to orbit, right-drag to
  pan, scroll to zoom. It writes the same `pass.camera` a script writes through
@@ -23,7 +22,7 @@
 
  **`--mcp` is the driving surface M3 exists for**; everything else here is the
  CLI the base stage was driven by, kept because it is how a human looks at a
- file and how `--stress-resize` and `--grid` stay runnable.
+ file.
 
  **`--mcp` implies `--validate`, in a debug build.** `plan.md` §4: "run the
  validation layers whenever a script is executing". Serving is when scripts
@@ -68,9 +67,6 @@ struct Options
 	// stay distinguishable while --mcp is deciding the default.
 	bool no_validate;
 	String shader;
-	bool system_driver;
-	bool stress_resize;
-	uint grid;
 	// 0 for "do not serve". The port is only ever bound on 127.0.0.1 — and under
 	// `--mcp-stdio` it is the port *connected to* rather than bound, which is
 	// what makes `--mcp 9000 --mcp-stdio` relay to 9000.
@@ -83,7 +79,7 @@ struct Options
 
 const int DEFAULT_MCP_PORT = 8808;
 
-faultdef BAD_ARGUMENT, MISSING_VALUE, RESIZE_HAD_NO_EFFECT, SCRIPT_NOT_READABLE;
+faultdef BAD_ARGUMENT, MISSING_VALUE, SCRIPT_NOT_READABLE;
 
 fn Options? parse_args(String[] args)
 {
@@ -103,10 +99,6 @@ fn Options? parse_args(String[] args)
 				opts.validate = true;
 			case "--no-validate":
 				opts.no_validate = true;
-			case "--system-driver":
-				opts.system_driver = true;
-			case "--stress-resize":
-				opts.stress_resize = true;
 			case "--assets":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.assets = args[++i];
@@ -125,9 +117,6 @@ fn Options? parse_args(String[] args)
 			case "--height":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.height = args[++i].to_uint()!;
-			case "--grid":
-				if (i + 1 >= args.len) return MISSING_VALUE~;
-				opts.grid = args[++i].to_uint()!;
 			case "--mcp":
 				// The port is optional, so a following argument is consumed only
 				// when it actually looks like one — otherwise `three --mcp
@@ -169,8 +158,6 @@ fn Options? parse_args(String[] args)
 	// one without --headless is the common case, so imply it rather than
 	// opening a window that flashes for a frame.
 	if (opts.screenshot.len > 0) opts.headless = true;
-	// The probe drives a real window; there is nothing to resize without one.
-	if (opts.stress_resize) opts.headless = false;
 	// A server that rendered one frame and exited would be no server at all.
 	if (opts.mcp_port > 0) opts.screenshot = "";
 	// Serving is when scripts run, and a script's validation errors are part of
@@ -209,9 +196,6 @@ fn void usage()
 	{
 		io::printn("                        (this binary has neither: build with -D DEBUG)");
 	}
-	io::printn("  --system-driver       use an installed KosmicKrisp, not the bundled one");
-	io::printn("  --grid <n>            place n instances of the model in a grid");
-	io::printn("  --stress-resize       walk the window through sizes and exit (dev)");
 	io::printn("  --shader <path>       a mesh.slang other than the one on the search path");
 	io::printn("  -h, --help            this");
 }
@@ -273,7 +257,6 @@ fn int main(String[] args)
 		{
 			io::printn("  No supported Vulkan driver. three.c3 renders through KosmicKrisp,");
 			io::printn("  which vulkan.c3l bundles; MoltenVK is not supported.");
-			if (opts.system_driver) io::printn("  Drop --system-driver to use the bundled one.");
 		}
 		return 1;
 	}
@@ -296,11 +279,7 @@ fn void? run(Options opts)
 	}
 	defer if (windowed) window.free();
 
-	vk::Instance instance = create_instance(
-		opts.validate,
-		headless: opts.headless,
-		bundled_driver: !opts.system_driver
-	)!;
+	vk::Instance instance = create_instance(opts.validate, headless: opts.headless)!;
 	defer instance.free();
 
 	vk::SurfaceKHR surface;
@@ -324,11 +303,7 @@ fn void? run(Options opts)
 	// M4 no build step for the shader either.
 	renderer.pass.init(&renderer.gpu, &renderer.target, opts.shader)!;
 
-	if (opts.grid > 0)
-	{
-		renderer.pass.instance_grid(&renderer.gpu, opts.model, opts.grid)!;
-	}
-	else if (opts.model.len > 0)
+	if (opts.model.len > 0)
 	{
 		renderer.pass.load(&renderer.gpu, opts.model)!;
 	}
@@ -381,13 +356,6 @@ fn void? run(Options opts)
 		image::Image frame = renderer.capture()!;
 		defer frame.free();
 		io::printfn("rendered %dx%d headless", frame.width, frame.height);
-		return;
-	}
-
-	if (opts.stress_resize)
-	{
-		stress_resize(&renderer, &window)!;
-		io::printn("resize stress complete");
 		return;
 	}
 
@@ -902,64 +870,6 @@ fn int serve_relay(int port)
 	mcp::Server catalog = new_mcp_server(&catalog_host);
 	mcp::relay("127.0.0.1", port, &catalog);
 	return 0;
-}
-
-<*
- Walk the window through a spread of sizes, then a minimise and a restore,
- rendering the whole way. Run it under `--validate`: the pass condition is that
- nothing is printed.
-
- The sizes are deliberately awkward — a near-square, a very wide one, a very
- tall one, one small enough to be mostly title bar — because the bugs here are
- in the blit's destination rect and in swapchain images being destroyed while a
- presentation still refers to them, and both hide at comfortable aspect ratios.
-*>
-fn void? stress_resize(Renderer* renderer, c3w::Window* window)
-{
-	int[2][*] sizes = {
-		{ 900, 500 }, { 1600, 1000 }, { 320, 240 }, { 1440, 200 }, { 240, 900 }, { 1024, 768 },
-	};
-
-	// Checked, not assumed: a `set_size` that silently did nothing would leave
-	// every frame below rendering at one extent, and "no validation errors"
-	// would still hold. The test would pass by never testing anything.
-	uint changes = 0;
-	vk::Extent2D previous = renderer.viewer.extent;
-
-	foreach (size : sizes)
-	{
-		window.set_size(size[0], size[1]);
-		pump(renderer, window, 20)!;
-
-		vk::Extent2D now = renderer.viewer.extent;
-		if (now.width != previous.width || now.height != previous.height) changes++;
-		io::printfn("  %d x %d requested -> surface %d x %d", size[0], size[1], now.width, now.height);
-		previous = now;
-	}
-
-	if (changes == 0) return RESIZE_HAD_NO_EFFECT~;
-
-	// Minimised, the surface reports a zero extent and there is nothing to
-	// build a swapchain for. The frame path has to notice and skip rather than
-	// spin on an acquire that keeps failing.
-	//
-	// `set_minimized(false)` restores on macOS, X11 and Win32 but is a no-op on
-	// Wayland, where xdg-shell has no un-minimise request — so on Wayland the
-	// frames after this are the minimised case running twice, which is a
-	// weaker check rather than a broken one.
-	window.set_minimized(true);
-	pump(renderer, window, 30)!;
-	window.set_minimized(false);
-	pump(renderer, window, 30)!;
-}
-
-fn void? pump(Renderer* renderer, c3w::Window* window, uint frames)
-{
-	for (uint i = 0; i < frames; i++)
-	{
-		window.getEvent();
-		renderer.frame()!;
-	}
 }
 
 <*

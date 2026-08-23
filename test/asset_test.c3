@@ -522,7 +522,7 @@ fn void instantiating_twice_is_two_subtrees_over_one_upload() @test
  each with its name, its vertex count and its bounds — because a POSITION
  accessor carries `count` and is *required* to carry `min`/`max`. `Asset.bounds`
  is therefore correct on a file that has never uploaded a byte, which is what
- `--grid`'s spacing and `camera.frameAll()` read.
+ `camera.frameAll()` reads.
 *>
 fn void loading_a_file_uploads_nothing() @test
 {

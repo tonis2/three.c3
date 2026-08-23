@@ -16,10 +16,10 @@
  So `-force-glsl-scalar-layout` is legal here and the `float4`-never-`float3`
  tax does not apply. It is still **queried, not assumed**
  (`Gpu.limits.scalar_block_layout`) and printed by `--validate`. Narrowing to one
- driver is not a licence to assume: versions differ, `--system-driver` picks an
- installed KosmicKrisp rather than this one, and a driver that gained
- `fillModeNonSolid` would still have to be asked. Nothing in this project may
- read any of these at compile time.
+ driver is not a licence to assume: versions differ, a checkout without the
+ bundled driver runs on whatever ICD the loader discovers, and a driver that
+ gained `fillModeNonSolid` would still have to be asked. Nothing in this project
+ may read any of these at compile time.
 
  ## KosmicKrisp only — MoltenVK is not supported
 
@@ -33,8 +33,8 @@
  - `select_device` skips any device advertising `VK_KHR_portability_subset`, and
    says so through `PORTABILITY_DRIVER_ONLY` when that leaves nothing.
 
- On macOS this means `--system-driver` needs an installed KosmicKrisp; an
- installed MoltenVK is not a fallback.
+ On macOS this means a checkout without the bundled driver needs an installed
+ KosmicKrisp; an installed MoltenVK is not a fallback.
 
  ## Frames in flight
 
@@ -261,11 +261,14 @@ fn void push_surface_extensions(vk::ZStringList* out)
  skipped with a line on stdout rather than failing the instance. See
  `validation_layer_present`.
 
+ The driver vulkan.c3l ships is preferred over whatever the loader discovers —
+ deterministic, which is what makes screenshots reproducible across machines.
+ A checkout without one falls back to loader discovery, and says so.
+
  @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed.`
  @param headless : `Skip the surface extensions entirely — nothing will present.`
- @param bundled_driver : `Prefer the driver vulkan.c3l ships over whatever the loader discovers. Deterministic, which is what makes screenshots reproducible across machines.`
 *>
-fn vk::Instance? create_instance(bool validate, bool headless = false, bool bundled_driver = true)
+fn vk::Instance? create_instance(bool validate, bool headless = false)
 {
 	vk::init()!;
 
@@ -304,32 +307,29 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool bund
 	vk::DirectDriverLoadingListLUNARG driver_list;
 	bool direct_driver = false;
 
-	if (bundled_driver)
+	if (try icd = vk::findBundledDriver())
 	{
-		if (try icd = vk::findBundledDriver())
+		if (vk::supportsDirectDriverLoading())
 		{
-			if (vk::supportsDirectDriverLoading())
-			{
-				driver_info = vk::directDriverInfo(icd);
-				driver_list = vk::directDriverList(&driver_info, 1);
-				extensions.push(vk::DIRECT_DRIVER_LOADING_EXTENSION_NAME);
-				direct_driver = true;
-				@debug_log("driver: bundled, handed to the loader directly");
-			}
-			else
-			{
-				@debug_log("driver: bundled one found, but this loader cannot be handed one");
-			}
+			driver_info = vk::directDriverInfo(icd);
+			driver_list = vk::directDriverList(&driver_info, 1);
+			extensions.push(vk::DIRECT_DRIVER_LOADING_EXTENSION_NAME);
+			direct_driver = true;
+			@debug_log("driver: bundled, handed to the loader directly");
 		}
 		else
 		{
-			// The `./setup.sh driver` case, and the one worth a line: a missing
-			// bundled driver is not an error — the loader falls back to whatever
-			// ICD it discovers — so nothing else anywhere says which driver drew
-			// the picture. `project.json` has the argument for why it can be
-			// absent from a plain checkout.
-			@debug_log("driver: no bundled one; using whatever the loader discovers");
+			@debug_log("driver: bundled one found, but this loader cannot be handed one");
 		}
+	}
+	else
+	{
+		// The `./setup.sh driver` case, and the one worth a line: a missing
+		// bundled driver is not an error — the loader falls back to whatever
+		// ICD it discovers — so nothing else anywhere says which driver drew
+		// the picture. `project.json` has the argument for why it can be
+		// absent from a plain checkout.
+		@debug_log("driver: no bundled one; using whatever the loader discovers");
 	}
 
 	// Only meaningful against drivers the loader already discovered: instance

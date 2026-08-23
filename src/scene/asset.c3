@@ -1141,8 +1141,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
  POSITION accessor carries its `count`, and its `min`/`max` are *required*, which
  is the same reading `inventory.c3` relies on and the reason bounds are free
  before anything is loaded. `Asset.bounds` is therefore correct on a file that
- has never uploaded a byte — which the CLI's `--grid` spacing and
- `camera.frameAll()` both depend on.
+ has never uploaded a byte — which `camera.frameAll()` depends on.
 
  A vertex count of zero is the caller's signal to skip the slot entirely: it
  means the primitive names no POSITION accessor, which is a primitive that could
