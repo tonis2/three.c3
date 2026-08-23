@@ -4,19 +4,6 @@ This file is the whole plan. Everything it used to contain about work that is
 finished has been deleted, because a plan that describes what already happened
 is a document nobody can tell the live parts out of.
 
-**The removed records are in git, not gone.** `plan.md` §1–§4 (the load-bearing
-decisions, the scene model, the Slang binding, the JS API), `game.md`,
-`event_loop.md`, and `m2`–`m6_stage.md` are all at `e4a70bf` and every commit
-before it:
-
-	git show e4a70bf:game.md
-	git show e4a70bf:m6_stage.md        # and m2, m3, m4, m5, m5a, m5b
-	git show e4a70bf:event_loop.md
-	git show e4a70bf:plan.md            # §1-§4 are the architecture argument
-
-Reach for them when you want to know *why* something is the way it is. What is
-below is only what has not been done.
-
 **That deletion is a habit, not a one-off event.** This file has been swept again
 since — the milestone-by-milestone account of the texture work, the light binding,
 the physics bindings and the whole record of building the post chain came out,
@@ -488,18 +475,6 @@ Live, all of them. Each cost real time and none is visible in a diff.
   passed against a deliberately broken material collector, and only started
   failing when it was rewritten to count red pixels. **Anything about whether a
   material reached the screen has to be asserted on the screen.**
-
-- **`c3c build` does not rebuild the test binary, and `c3c test` does not rebuild
-  the app.** `build` produces `./build/three`; `test` produces and runs
-  `./build/testrun`. So `c3c build && ./build/testrun` runs whatever the *last*
-  `c3c test` compiled, and a source change appears to have no effect — which
-  reads exactly like "the injected bug was not caught" and exactly like "the fix
-  did not work". Both misreadings happened in one sitting: an injection appeared
-  to pass, and a live check against a stale `./build/three` reported the bug the
-  edit had just removed. **`c3c test [<target>]` is the build-and-run verb**;
-  `c3c run test` is not, because `run` takes a build target and there is no
-  target named `test`. When a result is surprising, check what you actually ran
-  before believing what it says.
 
 - **A failing check does not run your `defer`s, and what leaks can be a thread.**
   `test::@check` failing `longjmp`s to the runner, which unwinds past every
