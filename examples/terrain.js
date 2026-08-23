@@ -190,6 +190,11 @@ console.log('generated shading body:\n' + ground.material.fragment);
 const A = {
 	tide: true,
 	t: 0,
+	// Radians a second, written as a period because that is the number anyone
+	// reading it wants. It was 0.6 — ten and a half seconds in and out again —
+	// and a tide that slow is not visibly a tide: a glance at the window shows a
+	// still picture, and the one animated thing in the file reads as broken.
+	tideRate: (2 * Math.PI) / 4,
 	// Which blend mode the snow is on. Rebuilding the material is what changes
 	// it, because a blend mode is compiled in — that is the trade the feature
 	// makes, and cycling it here is the honest way to show the cost.
@@ -241,5 +246,5 @@ three.setAnimationLoop((ms) => {
 	// are literals in the compiled body and could not be written from here even
 	// if something wanted to — which is the trade, stated as a property.
 	const water = ground.material.layers[ground.material.layers.length - 1];
-	water.opacity = 0.5 + 0.5 * Math.sin(A.t * 0.6);
+	water.opacity = 0.5 + 0.5 * Math.sin(A.t * A.tideRate);
 });
