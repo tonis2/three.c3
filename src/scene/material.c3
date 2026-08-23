@@ -194,14 +194,15 @@ const uint LINE_MATERIAL = 1;
  Where a material's uniforms begin in the push block.
 
  The mesh contract owns everything below this: `MESH_PUSH_FIELDS` ends with
- `uv_transform` at 60+16, and `shaders/material.slang` declares those eight
- fields first and in that order so `check_push_block` passes on a generated
- module exactly as it does on `mesh.slang`. The `$assert` is what makes this a
- derived number rather than a copied one — and it earned that when
- `uv_transform` was added and this moved from 60 to 76 without anyone having to
- remember it existed.
+ `draw` at 16+8, and `shaders/material.slang` declares those three fields first
+ and in that order so `check_push_block` passes on a generated module exactly as
+ it does on `mesh.slang`. The `$assert` is what makes this a derived number
+ rather than a copied one — and it earned that twice: when `uv_transform` was
+ added and this moved from 60 to 76, and when the whole mesh contract moved into
+ `DrawRecord` and it fell to 24, both times without anyone having to remember it
+ existed.
 *>
-const uint MATERIAL_PUSH_START = 76;
+const uint MATERIAL_PUSH_START = 24;
 
 $assert MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].offset + MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].size == MATERIAL_PUSH_START :
 	"the mesh push block moved; material uniforms no longer start where the template puts them";

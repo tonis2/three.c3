@@ -18,10 +18,12 @@
    so image 0 is decoded once as sRGB and once as linear. That is the only thing
    in the suite that fails when `ImageMemo.space` is deleted, and it fails as two
    slots collapsing into one rather than as an error.
- - **One layer's mask is `VERTEX_COLOR`**, which this renderer cannot read at all.
-   It has to survive the import intact so the JS side can refuse it by name; a
-   loader that dropped it would leave a layer with no mask, which covers
-   everything and reads as the blend modes being broken.
+ - **One layer's mask is `VERTEX_COLOR`**, reading a channel of a COLOR_0 the mesh
+   carries. Both halves have to survive the import — the source and the channel —
+   and a loader that dropped either leaves a layer with no mask, which covers
+   everything and reads as the blend modes being broken. The two meshes that carry
+   the attribute store it at two different widths, because the reader has a branch
+   per width and only one of them is what an exporter writes.
 
  The JS half is asserted on the *generated source* rather than on pixels, which is
  the opposite of `three_tests::texture`'s rule and is deliberate: a layer stack's
@@ -34,8 +36,10 @@ module three_tests::layers;
 
 import three;
 import vk;
+import image;
 import std::core::test;
 import std::io;
+import std::math;
 
 const String FIXTURE = "test/fixtures/layered.glb";
 
@@ -77,6 +81,38 @@ macro String? script(three::JsRuntime* run, String what, String source)
 		return "";
 	}
 	return result.value.copy(mem);
+}
+
+<*
+ How many pixels are close to a colour — `js_test`'s `count_near`, which is in
+ another module and is the same three subtractions.
+
+ The tolerance is wide for the same reason it is there: what is asserted is which
+ value reached the shader, not what the encode did to its last few bits.
+*>
+fn uint near(image::Image* shot, int r, int g, int b, int tolerance = 24)
+{
+	uint found = 0;
+	for (sz i = 0; i < shot.pixels.len; i += 4)
+	{
+		int dr = (int)shot.pixels[i] - r;
+		int dg = (int)shot.pixels[i + 1] - g;
+		int db = (int)shot.pixels[i + 2] - b;
+		if (math::abs(dr) <= tolerance && math::abs(dg) <= tolerance && math::abs(db) <= tolerance) found++;
+	}
+	return found;
+}
+
+// How many times `needle` occurs in `haystack`. `String.contains` answers whether
+// a line was emitted; the checks below need to know that it was emitted *once*.
+fn uint count_of(String haystack, String needle)
+{
+	uint found = 0;
+	for (sz i = 0; i + needle.len <= haystack.len; i++)
+	{
+		if (haystack[i:needle.len] == needle) found++;
+	}
+	return found;
 }
 
 // ============================================================================
@@ -144,6 +180,7 @@ fn void one_mask_read_by_three_layers_is_one_texture() @test
 				space: stack.mask.colorSpace,
 				own: stack.layers.map(l => l.maskTexture === null),
 				channels: stack.layers.map(l => l.mask),
+				sources: stack.layers.map(l => l.maskSource),
 				inverted: stack.layers.map(l => l.invert),
 			});
 		`)!!;
@@ -163,8 +200,17 @@ fn void one_mask_read_by_three_layers_is_one_texture() @test
 			answer
 		);
 		test::@check(
-			answer.contains(`"channels":["r","g","b","a","vertexColor"]`),
+			answer.contains(`"channels":["r","g","b","a","g"]`),
 			"each layer keeps the channel it read: %s",
+			answer
+		);
+		// The channel and the source are two fields, so the last layer's `g` is the
+		// green of the mesh's colour attribute and the second layer's is the green
+		// of the shared image. A translation that folded them into one would have to
+		// pick, and the picture is wrong either way it picks.
+		test::@check(
+			answer.contains(`"sources":["texture","texture","texture","texture","vertexColor"]`),
+			"and where it read it from: %s",
 			answer
 		);
 		test::@check(answer.contains(`"inverted":[false,false,true,false,false]`), "and its invert: %s", answer);
@@ -280,9 +326,8 @@ fn void the_parts_with_no_equation_behind_them_do_not_cross() @test
 <*
  A stack imported from a file compiles, and the body says what it did.
 
- The vertex-colour layer has to go first, which is itself the point of the check
- beside this one. What is left is the three-layer terrain, and every assertion here
- is on a line of Slang that is only there if one specific thing was carried across
+ The whole five-layer stack, as the file wrote it. Every assertion here is on a
+ line of Slang that is only there if one specific thing was carried across
  correctly.
 *>
 fn void an_imported_stack_generates_the_shader_it_describes() @test
@@ -291,7 +336,6 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 	{
 		String answer = script(run, "an imported stack compiles", `
 			const stack = three.load("test/fixtures/layered.glb").mesh("terrain").layers;
-			stack.layers = stack.layers.filter(l => l.mask !== "vertexColor");
 			const mat = new three.LayeredMaterial(stack);
 			return mat.fragment;
 		`)!!;
@@ -321,6 +365,170 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 }
 
 <*
+ A vertex-colour mask reads the attribute, and costs no binding to do it.
+
+ This was a refusal until the draw buffer, and the refusal was honest: the meshes
+ here carried positions, normals and uvs, and the fourth stream could not be added
+ because the geometry contract was pushed per draw against the 128 bytes every
+ material's uniforms were also spending. Moving the contract into a `DrawRecord`
+ is what paid for it.
+
+ Two things are checked and the second is the one that would rot: the weight comes
+ from `s.vertex_color`, and the layer declares **no sampler** for it. A mask that
+ quietly took a binding would work, look right, and cost one of the eight a
+ material has — which is exactly the failure `hoist_shared_mask` exists to prevent
+ one field along.
+*>
+fn void a_vertex_colour_mask_reads_the_attribute() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the vertex mask generates", `
+			const stack = three.load("test/fixtures/layered.glb").mesh("terrain").layers;
+			const fromFile = new three.LayeredMaterial(stack);
+			const byHand = new three.LayeredMaterial({
+				layers: [{ tint: [1, 0, 0], maskSource: "vertexColor", invert: true }],
+			});
+			return ({
+				file: fromFile.fragment,
+				samplers: Object.keys(fromFile.textures),
+				hand: byHand.fragment,
+				handSamplers: Object.keys(byHand.textures),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		// The file's own `painted` layer, which named channel G.
+		test::@check(
+			answer.contains(`float w4 = s.vertex_color.g;`),
+			"the file's vertex mask reads the channel it named: %s",
+			answer
+		);
+		test::@check(
+			!answer.contains("layer4_mask"),
+			"and declares no sampler to do it: %s",
+			answer
+		);
+		// By hand, with no channel given: red, and inverted.
+		test::@check(
+			answer.contains(`float w0 = 1.0 - s.vertex_color.r;`),
+			"a source with no channel reads red, and invert still applies: %s",
+			answer
+		);
+		test::@check(
+			answer.contains(`"handSamplers":[]`),
+			"a stack masked only by the attribute binds nothing at all: %s",
+			answer
+		);
+	};
+}
+
+<*
+ The attribute reaches the pixels, at both widths a file may store it in.
+
+ The one check here that is not about generated text, because the thing under test
+ is not the generator: it is a stream uploaded per mesh, a flag bit, a pointer in
+ the draw record and a varying. Every one of those can be wrong in a way that
+ still compiles, and three of them produce a plausible picture.
+
+ Three quads, one material, `return s.vertex_color.rgb`. `terrain` stores its
+ colours as normalized unsigned bytes and `weathered` as floats — the two branches
+ of `read_colors` — and `plain` carries no attribute at all, so the white it comes
+ back as is the default the vertex stage writes rather than anything the file said.
+ A stream read at the wrong width does not produce another flat colour; it
+ produces noise, or nothing.
+*>
+fn void the_colour_attribute_reaches_the_pixels() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "three quads render", `
+			const asset = three.load("test/fixtures/layered.glb");
+			const scene = new three.Scene();
+			const paint = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return s.vertex_color.rgb; }",
+			});
+			for (const name of ["terrain", "weathered", "plain"]) {
+				const mesh = new three.Mesh(asset.mesh(name));
+				mesh.material = paint;
+				scene.add(mesh);
+			}
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(scene);
+			return ({ drawn: three.stats().drawCalls });
+		`)!!;
+		defer answer.free(mem);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		// The target encodes on write, so a linear 0.251 arrives as 137 rather than
+		// as 64. That is the same rule `s.albedo` follows and the reason COLOR_0 is
+		// not decoded on the way in: glTF defines it linear.
+		uint bytes = near(&shot, 0, 255, 137);
+		uint floats = near(&shot, 255, 0, 0);
+		uint absent = near(&shot, 255, 255, 255);
+
+		test::@check(bytes > 200, "the byte-stored attribute is on screen, got %d pixels", bytes);
+		test::@check(floats > 200, "the float-stored one too, got %d pixels", floats);
+		test::@check(absent > 200, "and a mesh without one is white, got %d pixels", absent);
+	};
+}
+
+<*
+ A layer that states no colour leaves what is under it alone.
+
+ White is what `baseColorFactor` defaults to in the file and what a script leaves
+ out, so it is the *absence* of a statement about colour rather than a request for
+ white paint. Emitting `lerp(c, white, w)` for it — which is what this did until
+ the rule was written down — is wrong in two directions at once: a layer that only
+ glows bleaches whatever is beneath it, and a layer that only adds surface detail
+ does the same while looking like its mask is inverted.
+
+ Four layers, one property each, and the assertion is on which lines exist.
+*>
+fn void a_layer_with_nothing_to_paint_paints_nothing() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the colourless layers generate", `
+			const tex = new three.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+			const one = (layer) => new three.LayeredMaterial({ layers: [layer] }).fragment;
+			return ({
+				glow: one({ emissive: tex }),
+				bumpy: one({ normal: tex }),
+				silent: one({ opacity: 0.5 }),
+				tinted: one({ tint: [1, 0, 0] }),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains("e = lerp(e,"), "an emissive-only layer glows: %s", answer);
+		test::@check(answer.contains("nt = lerp(nt,"), "a normal-only layer tilts the surface: %s", answer);
+		// The one line none of the three may have emitted. `tinted` is the control:
+		// it says something about colour, so it blends, and a rule that dropped it
+		// too would pass every check above.
+		test::@check(
+			answer.contains("float3 b0 = float3(1.0, 0.0, 0.0);") && answer.contains("c = lerp(c, b0, w0);"),
+			"a layer that states a colour still blends it: %s",
+			answer
+		);
+		test::@check(
+			count_of(answer, "c = lerp") == 1,
+			"and it is the only one that does, got %d: %s",
+			count_of(answer, "c = lerp"),
+			answer
+		);
+		test::@check(
+			answer.contains("nothing to apply"),
+			"a layer with nothing at all says so in the source: %s",
+			answer
+		);
+	};
+}
+
+<*
  The float literals are the shortest spelling that survives the round trip.
 
  A `baseColorFactor` read out of a glTF is a float widened to a double, so an
@@ -336,7 +544,6 @@ fn void the_generated_numbers_are_readable() @test
 	{
 		String answer = script(run, "the literals are short", `
 			const stack = three.load("test/fixtures/layered.glb").mesh("terrain").layers;
-			stack.layers = stack.layers.filter(l => l.mask !== "vertexColor");
 			return new three.LayeredMaterial(stack).fragment;
 		`)!!;
 		defer answer.free(mem);
@@ -351,34 +558,36 @@ fn void the_generated_numbers_are_readable() @test
  Everything the renderer cannot evaluate is refused by name.
 
  Each of these is a sentence somebody reads instead of spending an hour on the
- wrong file. The vertex-colour one is the only refusal that is about the *mesh*
- rather than the shader, and it is the one a file can cause rather than a script —
- which is why the fixture has a layer that triggers it.
+ wrong file. The list was one longer until the draw buffer: a vertex-colour mask
+ was refused for want of a COLOR_0 stream, and is now drawn — see
+ `a_vertex_colour_mask_reads_the_attribute`. What is left are the parts of the
+ extension this renderer genuinely has no equation for, and the ordinary mistakes.
 *>
 fn void a_stack_refuses_what_this_renderer_cannot_shade() @test
 {
 	@with_js_gpu(; three::JsRuntime* run)
 	{
 		String answer = script(run, "the refusals fire", `
-			const asset = three.load("test/fixtures/layered.glb");
 			const refuse = (fn) => { try { fn(); return "NOT REFUSED"; } catch (e) { return e.message; } };
 			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
 			return ({
-				fromFile: refuse(() => new three.LayeredMaterial(asset.mesh("terrain").layers)),
 				roughness: refuse(() => new three.LayeredMaterial({ layers: [{ roughness: 0.5 }] })),
 				metalness: refuse(() => new three.LayeredMaterial({ metalness: 1, layers: [] })),
 				height: refuse(() => new three.LayeredMaterial({ layers: [{ height: tex }] })),
 				typo: refuse(() => new three.LayeredMaterial({ layers: [{ uvscale: 4 }] })),
 				blend: refuse(() => new three.LayeredMaterial({ layers: [{ blend: "burn" }] })),
 				noMask: refuse(() => new three.LayeredMaterial({ layers: [{ mask: "r" }] })),
+				source: refuse(() => new three.LayeredMaterial({ layers: [{ maskSource: "vertex" }] })),
+				both: refuse(() => new three.LayeredMaterial({
+					layers: [{ maskSource: "vertexColor", maskTexture: tex }]
+				})),
 			});
 		`)!!;
 		defer answer.free(mem);
 
-		// The file's own vertex-colour layer, which is the case a script cannot
-		// avoid by writing better JavaScript.
-		test::@check(answer.contains("COLOR_0"), "a vertex-colour mask says what is missing: %s", answer);
-		test::@check(answer.contains("painted"), "and names the layer the file called it: %s", answer);
+		// The two ways of naming a weight that cannot both be meant.
+		test::@check(answer.contains("'texture' or from 'vertexColor'"), "a misspelled source lists both: %s", answer);
+		test::@check(answer.contains("drop whichever is not meant"), "and naming both is refused: %s", answer);
 		// The two that point at the lighting rather than at the caller.
 		test::@check(answer.contains("no specular term"), "roughness and metalness name the gap: %s", answer);
 		test::@check(answer.contains("12"), "and where the decision is written down: %s", answer);
@@ -422,8 +631,8 @@ fn void the_sampler_and_uniform_budgets_are_refused_by_layer() @test
 			const off = many(8);
 			off.layers[7].enabled = false;
 			const recovered = new three.LayeredMaterial(off);
-			// A float4 each, against 52 bytes: three fit and a fourth does not.
-			const animated = refuse(() => new three.LayeredMaterial(many(4, { animated: true })));
+			// A float4 each, against 104 bytes: six fit and a seventh does not.
+			const animated = refuse(() => new three.LayeredMaterial(many(7, { animated: true })));
 			return ({ full: full.layers.length, over, recovered: recovered.layers.length, animated });
 		`)!!;
 		defer answer.free(mem);
@@ -432,7 +641,7 @@ fn void the_sampler_and_uniform_budgets_are_refused_by_layer() @test
 		test::@check(answer.contains("needs 9 samplers"), "the ninth is refused with the count: %s", answer);
 		test::@check(answer.contains("8 layers"), "in layers rather than only in textures: %s", answer);
 		test::@check(answer.contains(`"recovered":7`), "and a disabled layer gives its binding back: %s", answer);
-		test::@check(answer.contains("room for 3"), "four animated layers do not fit in 52 bytes: %s", answer);
+		test::@check(answer.contains("room for 6"), "seven animated layers do not fit in 104 bytes: %s", answer);
 		test::@check(!answer.contains("NOT REFUSED"), "both budgets refused: %s", answer);
 	};
 }

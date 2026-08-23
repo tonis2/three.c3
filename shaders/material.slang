@@ -43,28 +43,39 @@ struct FrameBlock
     float4 light;           // xyz: surface-to-light, world space. w: ambient floor.
 };
 
-// **The seven mesh fields come first, in this order, and material uniforms only
-// ever go after them.** `check_push_block` requires each one at the offset
-// `MeshPush` puts it at, so a uniform inserted anywhere but the end moves
-// `base_color` and the pipeline refuses the shader — which is the good outcome;
-// the bad one is a layout that reflects differently and reads pointers out of
-// the middle of a float4. The seven occupy 60 bytes of the 128 every device must
-// offer, which is where `MATERIAL_UNIFORM_BUDGET`'s 68 comes from.
-struct PushData
+// One bucket's geometry and surface, byte for byte what `mesh.slang` and
+// `gpu/pipeline.c3`'s `DrawRecord` declare. See `mesh.slang` for what it is and
+// why it is a buffer rather than push constants; the short version is that these
+// seven fields used to be pushed, they took 76 of the 128 bytes every device must
+// offer, and the material uniforms below had to live in what was left.
+struct Draw
 {
-    FrameBlock* frame;
-    Instance* instances;
     float3* positions;
     float3* normals;
     float2* uvs;
+    // glTF's COLOR_0. Read into `Vertex.vertex_color` and carried to the body;
+    // see `Surface.vertex_color` for what it is and what it deliberately is not.
+    float4* colors;
     // rgb: albedo factor. a: the material's opacity, folded into the mesh's own
     // alpha on the C3 side. `fragmentMain` multiplies it by the instance's.
     float4 base_color;
     uint flags;
-    // xy repeat, zw offset. See `mesh.slang`. It is one of the **eight** fields
-    // the mesh contract pins now, so material uniforms still only ever go after
-    // it — and there are 52 bytes left for them rather than 68.
+    // xy repeat, zw offset. See `mesh.slang`.
     float4 uv_transform;
+};
+
+// **The three mesh fields come first, in this order, and material uniforms only
+// ever go after them.** `check_push_block` requires each one at the offset
+// `MeshPush` puts it at, so a uniform inserted anywhere but the end moves `draw`
+// and the pipeline refuses the shader — which is the good outcome; the bad one is
+// a layout that reflects differently and reads a record out of the middle of a
+// float4. The three occupy 24 bytes of the 128 every device must offer, which is
+// where `MATERIAL_UNIFORM_BUDGET`'s 104 comes from.
+struct PushData
+{
+    FrameBlock* frame;
+    Instance* instances;
+    Draw* draw;
     //@uniforms
 };
 [vk_push_constant] const PushData push;
@@ -74,6 +85,7 @@ struct PushData
 // streams are really there and the reads are guarded by them.
 static const uint FLAG_HAS_NORMALS = 1u;
 static const uint FLAG_HAS_UVS     = 2u;
+static const uint FLAG_HAS_COLORS  = 4u;
 
 // Always bound, always valid — a 1x1 opaque white image when the material has no
 // texture, so an untextured material and a textured one are the same descriptor
@@ -109,6 +121,20 @@ struct Surface
     // that wants it as something other than a tint: an emissive amount, a
     // per-instance parameter, a selection highlight.
     float4 color;
+    // The mesh's own COLOR_0 attribute, interpolated across the triangle, or
+    // white where the file carried none. **This is the one that varies across a
+    // surface**; `color` above is one value for a whole copy and cannot paint
+    // anything.
+    //
+    // **Not folded into `albedo`, unlike `color`.** glTF says COLOR_0 multiplies
+    // the base colour and a body that wants that writes `s.albedo *
+    // s.vertex_color.rgb`, which is one line. Doing it here instead would change
+    // how every file already loaded renders, and the thing that made this stream
+    // exist reads the attribute as a *weight* rather than as a tint — a layer
+    // mask, painted per vertex, whose channels are three unrelated numbers and
+    // whose product with the albedo is meaningless. So the shader carries the
+    // attribute and the body decides what it means.
+    float4 vertex_color;
     // Which row of this material's table this copy selected, **already clamped**
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
@@ -149,6 +175,12 @@ struct Vertex
     // stage decodes it. Writable, which is how a vertex body tints per copy
     // without a second material.
     float4 color;
+    // The mesh's COLOR_0, or white without one. Writable for the same reason the
+    // line above is, and worth having here rather than only in `shade` because a
+    // displacement driven by a painted weight — grass height, a wind mask — is a
+    // vertex-stage question and this is the only per-vertex value in the struct
+    // that an artist can author.
+    float4 vertex_color;
     // Already clamped to the rows the material declared, so `palette[v.variant]`
     // is in bounds here for the same reason it is in `shade`.
     uint variant;
@@ -184,6 +216,12 @@ struct VertexOutput
     // as the struct is.
     float4 color : COLOR0;
     nointerpolation uint variant : TEXCOORD2;
+    // COLOR1, and **`mesh.slang` has no counterpart** — it is the third varying
+    // this shader carries and that one does not, after `world` and `variant`. A
+    // colour attribute changes no pixel without a body to read it, so paying for
+    // the interpolation in the shader that has no body would be paying for
+    // nothing on every draw in the frame.
+    float4 vertex_color : COLOR1;
     float4 sv_position : SV_Position;
 };
 
@@ -305,15 +343,16 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
     VertexOutput output;
 
+    Draw draw = push.draw[0];
     Instance instance = push.instances[iid];
 
-    float3 position = push.positions[vid];
+    float3 position = draw.positions[vid];
     float4 world = mul(instance.model, float4(position, 1.0));
 
     // An `if` rather than a ternary: a ternary lets the compiler evaluate both
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
-    if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
+    if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
 
     // Everything the fragment stage is going to receive, gathered into one struct
     // *before* the agent's body runs and read back out of it afterwards. The
@@ -323,8 +362,13 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     v.position = world.xyz;
     v.normal = mul((float3x3)instance.normal, normal);
     v.uv = float2(0.0, 0.0);
-    if ((push.flags & FLAG_HAS_UVS) != 0) v.uv = push.uvs[vid];
+    if ((draw.flags & FLAG_HAS_UVS) != 0) v.uv = draw.uvs[vid];
     v.color = instance.color;
+    // White is the identity for every use a body has for this, so a mesh without
+    // the attribute and a mesh painted white are the same surface — which is what
+    // makes `s.vertex_color` safe to multiply by unconditionally.
+    v.vertex_color = float4(1.0, 1.0, 1.0, 1.0);
+    if ((draw.flags & FLAG_HAS_COLORS) != 0) v.vertex_color = draw.colors[vid];
     // Clamped **here**, before the body sees it, so that `palette[v.variant]` in
     // a vertex body is in bounds for the same reason it is in a fragment one.
     // `fragmentMain` clamps again rather than trusting this, because a body may
@@ -344,6 +388,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     output.uv = v.uv;
     output.color = v.color;
     output.variant = v.variant;
+    output.vertex_color = v.vertex_color;
 
     return output;
 }
@@ -364,6 +409,8 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
+    Draw draw = push.draw[0];
+
     Surface s;
     // The instance colour is folded into albedo here, exactly as `mesh.slang`
     // folds it: a body that writes `return s.albedo * lambert(s.normal)` — the
@@ -373,9 +420,9 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // samples its own texture with `s.uv` has to land on the same texel the
     // default shading does, or `material.repeat` would mean one thing without a
     // custom body and nothing at all with one.
-    float2 uv = input.uv * push.uv_transform.xy + push.uv_transform.zw;
-    s.albedo = push.base_color.rgb * srgb_to_linear(input.color.rgb);
-    if ((push.flags & FLAG_HAS_UVS) != 0)
+    float2 uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+    s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+    if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
         s.albedo *= base_color_map.Sample(uv).rgb;
     }
@@ -383,6 +430,10 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.uv = uv;
     s.position = input.world;
     s.color = float4(srgb_to_linear(input.color.rgb), input.color.a);
+    // No decode, unlike `color` above. glTF defines COLOR_0 linear — it is the
+    // same rule `base_color` follows and for the same reason: this came out of a
+    // file rather than out of a colour picker in a script.
+    s.vertex_color = input.vertex_color;
     // Clamped once, here, rather than at each use: an out-of-range index into a
     // push-constant array is undefined behaviour that reads whatever is next in
     // the block — a wrong colour with no error anywhere, which is precisely the
@@ -400,5 +451,5 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     //
     // It also does nothing unless the material was built transparent: an opaque
     // pipeline writes no alpha. See `BlendMode`.
-    return float4(shade(s), push.base_color.a * input.color.a);
+    return float4(shade(s), draw.base_color.a * input.color.a);
 }

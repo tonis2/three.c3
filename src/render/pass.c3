@@ -102,6 +102,12 @@ struct MeshPass
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] instance_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] instance_capacity;
+	// One `DrawRecord` per bucket, for the same reason and with the same lifetime
+	// as the instance array beside it: written by the CPU during recording, read
+	// by the GPU when the frame runs, and safe to overwrite only once this slot's
+	// fence has been waited on.
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] draw_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] draw_capacity;
 
 	bool ready;
 }
@@ -342,7 +348,7 @@ fn void MeshPass.derive_camera_planes(&self)
 <*
  Record the draws.
 
- @param slot : `Which frame in flight this is. Selects the instance array to write, and must be one whose fence has already been waited on.`
+ @param slot : `Which frame in flight this is. Selects the instance array and the draw records to write, and must be one whose fence has already been waited on.`
 *>
 fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
 {
@@ -394,6 +400,23 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	FrameBlock frame = { .view_projection = view_projection, .light = self.light };
 	ulong frame_address = self.write_frame_block(gpu, slot, &frame)!;
 	ulong instance_address = self.write_instances(gpu, slot)!;
+
+	// The draw records are written *into* the loop below rather than in a pass of
+	// their own: a record is exactly the fields the push block used to carry, so
+	// building it needs the mesh, the material and the base colour that the draw
+	// already resolves, and a second loop would be a second copy of that
+	// resolution to keep in step. The buffer is host-visible and coherent and the
+	// frame is not submitted until recording ends, so writing it as the commands
+	// are recorded is the same thing as writing it beforehand.
+	//
+	// Sized against every bucket, including the ones the loop skips. Their records
+	// are stale bytes nothing points at — the counter below only advances for a
+	// bucket that draws — and the alternative is a count that has to predict which
+	// buckets those are.
+	self.reserve_draws(gpu, slot, self.scene.buckets.len())!;
+	ulong draw_address = self.draw_buffers[slot].address;
+	DrawRecord* records = (DrawRecord*)self.draw_buffers[slot].data();
+	uint recorded = 0;
 
 	// Bound per bucket since M5, because a bucket is now (asset, mesh, material)
 	// and the material chooses the pipeline. `build_draw_list` sorts
@@ -465,23 +488,33 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		float[4] base_color = mesh.base_color;
 		base_color[3] *= material.opacity();
 
+		records[recorded] = {
+			.positions = mesh.positions.address,
+			.normals = mesh.has_normals ? mesh.normals.address : 0,
+			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
+			.colors = mesh.has_colors ? mesh.colors.address : 0,
+			.base_color = base_color,
+			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
+				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
+				| (mesh.has_colors ? FLAG_HAS_COLORS : 0),
+			.uv_transform = material.uv_transform_or_identity(),
+		};
+
 		MeshPush push = {
 			.frame = frame_address,
 			// Offset on the CPU rather than passed as a base index: the shader
 			// then reads instance zero of its own slice and never has to know
 			// whether SV_InstanceID includes firstInstance.
 			.instances = instance_address + (ulong)bucket.first * Instance::size,
-			.positions = mesh.positions.address,
-			.normals = mesh.has_normals ? mesh.normals.address : 0,
-			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
-			.base_color = base_color,
-			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | (mesh.has_uvs ? FLAG_HAS_UVS : 0),
-			.uv_transform = material.uv_transform_or_identity(),
+			// And the record just written, for the same reason — `push.draw[0]`
+			// is this bucket's, whatever else is in the buffer.
+			.draw = draw_address + (ulong)recorded * DrawRecord::size,
 		};
-		// **The reflected size, not `MeshPush::size`.** They are not the same
-		// number: Slang reports the 60 bytes the shader uses and the C3 struct
-		// occupies 64 with its tail padding, and pushing 64 into a 60-byte range
-		// is a validation error.
+		recorded++;
+		// **The reflected size, not `MeshPush::size`.** The two agree at 24 today
+		// and have not always: the block used to end in a `uint` that C3 followed
+		// with four bytes of tail padding, so Slang reported 76 where the struct
+		// occupied 80, and pushing 80 into a 76-byte range is a validation error.
 		//
 		// Worth knowing how it fails, because it is not how it sounds: the
 		// picture is **pixel-identical** either way on this driver, so no test
@@ -558,6 +591,32 @@ fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
 
 	self.instance_buffers[slot].upload(self.scene.instances.entries, (sz)(needed * Instance::size));
 	return self.instance_buffers[slot].address;
+}
+
+<*
+ Make sure this slot's draw buffer holds `count` records, growing it if not.
+
+ The twin of `write_instances` and deliberately shaped like it — doubling rather
+ than fitting, freeing the old buffer only after the slot's fence has been waited
+ on — with one difference: this reserves and does not write. The records are
+ filled through the mapped pointer as `record` walks the buckets, because what
+ goes in one is what the draw itself has just resolved.
+
+ A count of zero still allocates, so `record` can take `.data()` without a null
+ check; `INITIAL_INSTANCES` is the floor for both buffers and a frame with no
+ buckets has already returned by the time this is called.
+*>
+fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
+{
+	if (self.draw_capacity[slot] >= count) return;
+
+	sz capacity = self.draw_capacity[slot] > 0 ? self.draw_capacity[slot] : INITIAL_INSTANCES;
+	while (capacity < count) capacity *= 2;
+
+	if (self.draw_buffers[slot].buffer != null) self.draw_buffers[slot].free();
+
+	self.draw_buffers[slot] = gpu.create_dynamic((sz)(capacity * DrawRecord::size))!;
+	self.draw_capacity[slot] = capacity;
 }
 
 <*
@@ -1075,6 +1134,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.frame_blocks[i].buffer != null) self.frame_blocks[i].free();
 		if (self.instance_buffers[i].buffer != null) self.instance_buffers[i].free();
 		self.instance_capacity[i] = 0;
+		if (self.draw_buffers[i].buffer != null) self.draw_buffers[i].free();
+		self.draw_capacity[i] = 0;
 	}
 	self.scene.free();
 	// Before `assets.free`, which frees every texture slot outright: releasing

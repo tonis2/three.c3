@@ -20,10 +20,15 @@ What it contains, and why each piece is there:
     the two are folded together has something to measure.
   * A layer with `enabled: false`, so the "a disabled layer uploads nothing"
     path is covered.
-  * A layer whose mask `source` is `VERTEX_COLOR`, which this renderer cannot
-    read at all. It is in the file on purpose: the importer must carry it across
-    intact so the JS side can refuse it by name, and a fixture without one would
-    let a loader that silently dropped it pass.
+  * A layer whose mask `source` is `VERTEX_COLOR`, reading the G channel of a
+    COLOR_0 attribute this mesh carries. It reads G rather than R so that a
+    channel dropped in translation is a layer that vanishes rather than a layer
+    that looks the same.
+  * COLOR_0 in two of the three spellings glTF allows, because the reader has a
+    branch per width: `terrain` stores it as **normalized unsigned bytes, VEC4**,
+    which is what Blender's exporter writes, and `weathered` as **floats, VEC3**,
+    which is the spelling with no alpha to read. `plain` carries none, so "a mesh
+    without the attribute" is in the same file as the meshes with it.
   * `weathered` — a second mesh whose one layer reads its mask from THE IMAGE
     `terrain` USES AS ITS BASE COLOUR. That is the colourspace check: image 0 is
     decoded once as sRGB for the base colour map and once as linear for the
@@ -104,7 +109,7 @@ def main() -> None:
         blob.extend(data)
         return len(views) - 1
 
-    def add_accessor(values, component_type, kind, pack_fmt, minmax=False) -> int:
+    def add_accessor(values, component_type, kind, pack_fmt, minmax=False, normalized=False) -> int:
         flat = []
         for v in values:
             flat.extend(v if isinstance(v, tuple) else [v])
@@ -116,6 +121,8 @@ def main() -> None:
             "count": len(values),
             "type": kind,
         }
+        if normalized:
+            acc["normalized"] = True
         if minmax:
             cols = list(zip(*values))
             acc["min"] = [min(c) for c in cols]
@@ -123,15 +130,34 @@ def main() -> None:
         accessors.append(acc)
         return len(accessors) - 1
 
+    # One flat colour per quad rather than a gradient: a constant is a colour a
+    # test can count pixels of, and the thing worth proving is that each mesh gets
+    # *its own* stream at the right width — a gradient would prove interpolation,
+    # which is the hardware's job and not this project's.
     primitives = []
-    for x in (-1.6, 0.0, 1.6):
+    colors = [
+        # terrain: normalized unsigned bytes. G is 255, which is what the
+        # `painted` layer's mask reads, so that layer covers the whole quad.
+        (5121, "VEC4", "B", True, [(0, 255, 64, 255)] * 4),
+        # weathered: floats, VEC3 — no alpha in the file, opaque in the shader.
+        (5126, "VEC3", "f", False, [(1.0, 0.0, 0.0)] * 4),
+        # plain: none at all.
+        None,
+    ]
+    for x, color in zip((-1.6, 0.0, 1.6), colors):
         positions, normals, uvs, indices = quad(x)
+        attributes = {
+            "POSITION": add_accessor(positions, 5126, "VEC3", "f", minmax=True),
+            "NORMAL": add_accessor(normals, 5126, "VEC3", "f"),
+            "TEXCOORD_0": add_accessor(uvs, 5126, "VEC2", "f"),
+        }
+        if color is not None:
+            component, kind, fmt, normalized, values = color
+            attributes["COLOR_0"] = add_accessor(
+                values, component, kind, fmt, normalized=normalized
+            )
         primitives.append({
-            "attributes": {
-                "POSITION": add_accessor(positions, 5126, "VEC3", "f", minmax=True),
-                "NORMAL": add_accessor(normals, 5126, "VEC3", "f"),
-                "TEXCOORD_0": add_accessor(uvs, 5126, "VEC2", "f"),
-            },
+            "attributes": attributes,
             "indices": add_accessor(indices, 5123, "SCALAR", "H"),
         })
 
@@ -196,11 +222,10 @@ def main() -> None:
         },
         {
             "name": "painted",
-            # A mask this renderer cannot read. It must survive the import so the
-            # JS side can refuse it by name rather than silently covering
-            # everything.
+            # Masked by the mesh's own colour attribute rather than by an image.
+            # The channel is G, which this quad paints at full strength.
             "pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.0, 1.0]},
-            "mask": {"source": "VERTEX_COLOR", "attribute": "COLOR_0", "channel": "R"},
+            "mask": {"source": "VERTEX_COLOR", "attribute": "COLOR_0", "channel": "G"},
             "blendMode": "OVERLAY",
             "enabled": True,
         },

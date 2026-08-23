@@ -184,11 +184,19 @@ struct GpuMesh
 	vk::Memory positions;
 	vk::Memory normals;
 	vk::Memory uvs;
+	// glTF's COLOR_0, as float4 per vertex whatever width the file stored it at.
+	// Uploaded only for a file that carries the attribute, which is a small
+	// minority of them — and read only by a material body, since no built-in
+	// shading here has a use for it. `layers.js` is what asked for it: the
+	// extension lets a layer take its mask from a colour attribute, and until this
+	// stream existed that was refused rather than drawn.
+	vk::Memory colors;
 	vk::Memory indices;
 	uint vertex_count;
 	uint index_count;
 	bool has_normals;
 	bool has_uvs;
+	bool has_colors;
 	float[4] base_color;
 	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
@@ -1119,6 +1127,7 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 			mesh.texture = -1;
 			mesh.has_normals = false;
 			mesh.has_uvs = false;
+			mesh.has_colors = false;
 			mesh.index_count = 0;
 			mesh.base_color = { 1, 1, 1, 1 };
 			report.meshes++;
@@ -1773,16 +1782,22 @@ fn GpuMesh? Assets.upload_primitive(
 	List{Vec3} positions;
 	List{Vec3} normals;
 	List{Vec2} uvs;
+	List{Vec4} colors;
 	List{uint} indices;
 	positions.init(mem, 256);
 	normals.init(mem, 256);
 	uvs.init(mem, 256);
+	// Unlike the three above, most files never fill this one — the initial
+	// capacity is the smallest a `List` will take rather than 256, so a scene of
+	// meshes without the attribute pays a pointer per primitive and nothing else.
+	colors.init(mem, 1);
 	indices.init(mem, 512);
 	defer
 	{
 		positions.free();
 		normals.free();
 		uvs.free();
+		colors.free();
 		indices.free();
 	}
 
@@ -1791,6 +1806,7 @@ fn GpuMesh? Assets.upload_primitive(
 
 	stream.@each_normal(primitive; Vec3 normal, sz i) { normals.push(normal); };
 	stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { uvs.push(uv); };
+	read_colors(stream, primitive, &colors);
 
 	read_indices(stream, primitive, &indices);
 	// A primitive with no index accessor is a plain vertex list; give it the
@@ -1818,6 +1834,9 @@ fn GpuMesh? Assets.upload_primitive(
 
 	out.has_uvs = uvs.len() == positions.len();
 	if (out.has_uvs) out.uvs = gpu.upload_stream(uvs.entries, Vec2::size * uvs.len())!;
+
+	out.has_colors = colors.len() == positions.len();
+	if (out.has_colors) out.colors = gpu.upload_stream(colors.entries, Vec4::size * colors.len())!;
 
 	out.build_bvh(positions.array_view(), indices.array_view());
 
@@ -1906,6 +1925,78 @@ fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{u
 				out.push((uint)stream.@cast_buffer(accessor, i, short));
 			default:
 				out.push(stream.@cast_buffer(accessor, i, uint));
+		}
+	}
+}
+
+<*
+ COLOR_0, read at whatever width and shape the file stored it in.
+
+ **Local rather than `GltfStream.@each_color`, for `read_indices`'s reason one
+ attribute along.** That macro casts every element to `Vec4`, which is right for
+ the one spelling glTF calls optional and wrong for the two it calls normal: a
+ colour attribute may be `VEC3` or `VEC4`, and its components may be float,
+ unsigned byte or unsigned short. Blender's exporter writes unsigned short, and
+ read as four floats that is sixteen bytes taken from a record that holds eight —
+ garbage colours for the first half of the mesh and a read past the end of the
+ view for the second.
+
+ So the accessor's own type decides, and everything is widened to a float4 on the
+ way to the GPU: one stream type to bind, exactly as indices are widened to uint.
+ An integer component is normalized on the way — 255 becomes 1.0 — which the
+ specification requires of colour attributes and which is what makes the shader's
+ `s.vertex_color` mean the same thing whatever the exporter chose. A `VEC3`
+ accessor gets an opaque alpha, per the specification's own default.
+
+ Set 0 only. glTF allows COLOR_1 and beyond and nothing here can name one: the
+ extension's `LayerMask.attribute` defaults to COLOR_0, a material body reads one
+ `s.vertex_color`, and a second stream would be another `DrawRecord` field and
+ another flag bit for something no API here asks for.
+*>
+fn void read_colors(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out)
+{
+	sz? attr = primitive.attributes.get("COLOR_0");
+	if (catch attr) return;
+
+	gltf::Accessor accessor = stream.gltf.accessors[attr];
+	bool three = accessor.type == gltf::AccessorType.VEC3;
+
+	for (sz i = 0; i < accessor.count; i++)
+	{
+		switch (accessor.data_type)
+		{
+			case gltf::DataType.CHAR:
+				if (three)
+				{
+					char[<3>] c = stream.@cast_buffer(accessor, i, char[<3>]);
+					out.push({ c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1 });
+				}
+				else
+				{
+					char[<4>] c = stream.@cast_buffer(accessor, i, char[<4>]);
+					out.push({ c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, c[3] / 255.0f });
+				}
+			case gltf::DataType.USHORT:
+				if (three)
+				{
+					ushort[<3>] c = stream.@cast_buffer(accessor, i, ushort[<3>]);
+					out.push({ c[0] / 65535.0f, c[1] / 65535.0f, c[2] / 65535.0f, 1 });
+				}
+				else
+				{
+					ushort[<4>] c = stream.@cast_buffer(accessor, i, ushort[<4>]);
+					out.push({ c[0] / 65535.0f, c[1] / 65535.0f, c[2] / 65535.0f, c[3] / 65535.0f });
+				}
+			default:
+				if (three)
+				{
+					Vec3 c = stream.@cast_buffer(accessor, i, Vec3);
+					out.push({ c.x, c.y, c.z, 1 });
+				}
+				else
+				{
+					out.push(stream.@cast_buffer(accessor, i, Vec4));
+				}
 		}
 	}
 }
@@ -2557,10 +2648,12 @@ fn void GpuMesh.release_device(&self)
 	if (self.indices.buffer != null) self.indices.free();
 	if (self.normals.buffer != null) self.normals.free();
 	if (self.uvs.buffer != null) self.uvs.free();
+	if (self.colors.buffer != null) self.colors.free();
 	self.positions = {};
 	self.indices = {};
 	self.normals = {};
 	self.uvs = {};
+	self.colors = {};
 
 	// `free_indexed` rather than `free`: the root owns the sorted-index array
 	// that every node below it points into, and the plain `free` leaves it.

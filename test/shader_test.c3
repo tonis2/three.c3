@@ -364,14 +364,11 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		);
 	}
 
-	// 76 used of the 80 the C3 struct occupies. The difference is tail padding
-	// and is the reason `record` pushes the reflected size rather than
-	// `MeshPush::size` — see the comment there.
-	//
 	// Against `MATERIAL_PUSH_START` rather than a literal: that constant is
-	// derived from the last entry of `MESH_PUSH_FIELDS`, so adding a ninth
-	// pinned field moves both together and this check keeps meaning what it
-	// says. It was a literal 60 until `uv_transform` arrived and made it a 76.
+	// derived from the last entry of `MESH_PUSH_FIELDS`, so a fourth pinned field
+	// moves both together and this check keeps meaning what it says. It was a
+	// literal 60 until `uv_transform` arrived and made it 76, and 76 until the
+	// geometry contract moved into `DrawRecord` and left 24.
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START,
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
@@ -386,6 +383,152 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
 		test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
 	}
+}
+
+<*
+ The draw record is exactly what `DrawRecord` says it is — on both sides.
+
+ **The check `the_mesh_push_block_matches_the_struct` stopped making** when the
+ geometry contract moved out of the push block. Slang reflects a push block and
+ does not reflect the type behind a pointer, so `struct Draw` in the shader and
+ `DrawRecord` in C3 became two declarations of one wire format with nothing
+ comparing them — and the failure that follows is not a compile error, it is
+ `base_color` read out of the middle of a pointer.
+
+ So the declaration is cut out of `shaders/mesh.slang` and compiled *as* a push
+ block, which is a layout Slang does reflect. Both are scalar-layout structs under
+ `-force-glsl-scalar-layout` — the same flag decides both — so the offsets that
+ come back are the record's own.
+
+ The C3 half is measured rather than declared, for the reason the whole file
+ exists: a table in a comment is worth what `project.json`'s `slangc` line was
+ worth in M2.
+*>
+fn void the_draw_record_matches_the_shader() @test
+{
+	String source = three::load_source(MESH_PATH)!!;
+	defer source.free(mem);
+
+	sz? start = source.index_of("struct Draw");
+	test::@check(@ok(start), "mesh.slang declares a `struct Draw`");
+	if (catch start) return;
+	sz? end = source[start..].index_of("};");
+	test::@check(@ok(end), "and it is closed");
+	if (catch end) return;
+
+	// A push block and two entry points that touch every field, so nothing can be
+	// dropped from the layout for being unread.
+	String probe = string::tformat(
+		"%s};\n"
+		"[vk_push_constant] const Draw push;\n"
+		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
+		"{ return push.base_color + float4(push.positions[0] + push.normals[0], push.uvs[0].x); }\n"
+		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
+		"{ return push.uv_transform * push.colors[0] * float(push.flags); }\n",
+		source[start : end]
+	);
+
+	three::ShaderModule mod = three::compile_slang(probe, "draw.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "the record compiles as a block: %s", mod.diagnostic);
+
+	foreach (expected : three::DRAW_RECORD_FIELDS)
+	{
+		three::ShaderField* found = mod.layout.field_of(expected.name);
+		test::@check(found != null, "the record has a '%s' field", expected.name);
+		if (found == null) continue;
+		test::@check(
+			found.offset == expected.offset && found.size == expected.size,
+			"'%s' is at %d+%d in the shader and %d+%d in DrawRecord",
+			expected.name, found.offset, found.size, expected.offset, expected.size
+		);
+	}
+	test::@check(
+		mod.layout.push_fields.len() == three::DRAW_RECORD_FIELDS.len,
+		"and has %d fields, got %d",
+		three::DRAW_RECORD_FIELDS.len,
+		mod.layout.push_fields.len()
+	);
+
+	// The C3 side of the same table, measured off a real one. 68 used of the 72
+	// the struct occupies; the difference is tail padding, and unlike the push
+	// block's it costs nothing — the stride is this side's own decision and the
+	// shader is handed one record at a time.
+	three::DrawRecord record;
+	char* base = (char*)&record;
+	test::@check((sz)((char*)&record.positions - base) == 0, "positions is at 0");
+	test::@check((sz)((char*)&record.normals - base) == 8, "normals is at 8");
+	test::@check((sz)((char*)&record.uvs - base) == 16, "uvs is at 16");
+	test::@check((sz)((char*)&record.colors - base) == 24, "colors is at 24");
+	test::@check((sz)((char*)&record.base_color - base) == 32, "base_color is at 32");
+	test::@check((sz)((char*)&record.flags - base) == 48, "flags is at 48");
+	test::@check((sz)((char*)&record.uv_transform - base) == 52, "uv_transform is at 52");
+	test::@check(three::DrawRecord::size == 72, "and the record is 72 bytes, got %d", three::DrawRecord::size);
+}
+
+<*
+ The material template's record is the mesh shader's, byte for byte.
+
+ The two files declare it separately — `material.slang` is a copy of `mesh.slang`
+ with the shading lifted out, which its own header argues for — and one of them
+ growing a field is a wire format that disagrees with itself. Nothing above would
+ catch it: each shader would compile, and only the one whose C3 side no longer
+ matches would read geometry from the wrong address.
+
+ Text rather than reflection, because the property is that the *declarations* are
+ the same. Comments differ between the two and are stripped before comparing;
+ anything else that differs is the thing being looked for.
+*>
+fn void both_shaders_declare_the_same_record() @test
+{
+	String mesh = three::load_source(MESH_PATH)!!;
+	defer mesh.free(mem);
+	String material_path = three::find_shader("material.slang", mem)!!;
+	defer material_path.free(mem);
+	String material = three::load_source(material_path)!!;
+	defer material.free(mem);
+
+	String from_mesh = declaration_of(mesh, "struct Draw");
+	String from_material = declaration_of(material, "struct Draw");
+
+	test::@check(from_mesh.len > 0 && from_material.len > 0, "both files declare a record");
+	test::@check(
+		from_mesh == from_material,
+		"and they declare the same one:\n  mesh.slang:     %s\n  material.slang: %s",
+		from_mesh,
+		from_material
+	);
+}
+
+<*
+ One struct declaration, with its comments and whitespace taken out.
+
+ The temp arena, so the caller has nothing to free — every use is inside one
+ check.
+*>
+fn String declaration_of(String source, String header)
+{
+	sz? start = source.index_of(header);
+	if (catch start) return "";
+	sz? end = source[start..].index_of("};");
+	if (catch end) return "";
+
+	DString out;
+	out.tinit();
+	String body = source[start : end];
+	sz i = 0;
+	while (i < body.len)
+	{
+		if (i + 1 < body.len && body[i] == '/' && body[i + 1] == '/')
+		{
+			while (i < body.len && body[i] != '\n') i++;
+			continue;
+		}
+		char c = body[i++];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+		out.append_char(c);
+	}
+	return out.str_view();
 }
 
 // ============================================================================

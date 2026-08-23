@@ -670,15 +670,15 @@ fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
  The uniform budget is exactly what the mesh contract leaves, and the boundary
  is asserted from both sides.
 
- 68 bytes is 128 minus the 60 the seven mesh fields occupy. The test spends every
+ 104 bytes is 128 minus the 24 the three mesh fields occupy. The test spends every
  one of them, and requires the result not merely to assemble but to *compile* and
  to reflect a push block of exactly 128 — because a budget that is one byte
  optimistic is a shader Vulkan refuses on a device that offers the guaranteed
  minimum, which is every device.
 
- **69 bytes is not reachable and that is not a gap in the test.** A uniform is
+ **105 bytes is not reachable and that is not a gap in the test.** A uniform is
  one to four floats, so the total is always a multiple of four; the first size
- that does not fit is 56, and that is the one asserted. The message has to carry
+ that does not fit is 108, and that is the one asserted. The message has to carry
  both numbers, because "too many uniforms" leaves the agent to guess which one to
  drop.
 *>
@@ -690,20 +690,21 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		three::MATERIAL_UNIFORM_BUDGET
 	);
 
-	// Thirteen floats, which is the whole 52 the mesh contract leaves. It was
-	// seventeen until `uv_transform` became a pinned field and took 16 bytes off
-	// the top — the trade is argued at `MATERIAL_UNIFORM_BUDGET`.
-	three::MaterialUniform[4] exact = {
-		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 1, 1 },
+	// Twenty-six floats, which is the whole 104 the mesh contract leaves. It was
+	// thirteen until the contract moved into a `DrawRecord` and gave back the 52
+	// bytes it was pushing — the trade is argued at `MATERIAL_UNIFORM_BUDGET`.
+	three::MaterialUniform[7] exact = {
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 },
+		{ "a4", 4, 1 }, { "a5", 4, 1 }, { "a6", 2, 1 },
 	};
 	test::@check(
 		three::material_uniform_bytes(exact[..]) == three::MATERIAL_UNIFORM_BUDGET,
-		"thirteen floats is the whole budget, got %d",
+		"twenty-six floats is the whole budget, got %d",
 		three::material_uniform_bytes(exact[..])
 	);
 
 	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * a0.rgb * a1.rgb * a2.rgb * a3; }`,
+		`float3 shade(Surface s) { return s.albedo * a0.rgb * a1.rgb * a2.rgb * a3.rgb * a4.rgb * a5.rgb * a6.x; }`,
 		exact[..]
 	)!!;
 	defer source.free(mem);
@@ -718,15 +719,16 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		three::PUSH_BUDGET
 	);
 
-	three::MaterialUniform[5] over = {
-		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 1, 1 }, { "a4", 1, 1 },
+	three::MaterialUniform[8] over = {
+		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 },
+		{ "a4", 4, 1 }, { "a5", 4, 1 }, { "a6", 2, 1 }, { "a7", 1, 1 },
 	};
 	String? refused_source = three::material_source(PLAN_EXAMPLE, over[..]);
 	fault refused = @catch(refused_source);
 
 	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "one float more is refused, got %s", refused);
 	test::@check(
-		three::material_diagnostic().contains("56") && three::material_diagnostic().contains("52"),
+		three::material_diagnostic().contains("108") && three::material_diagnostic().contains("104"),
 		"saying how many bytes were asked for and how many exist: %s",
 		three::material_diagnostic()
 	);
@@ -823,13 +825,18 @@ fn void columns_of_different_heights_are_refused() @test
 }
 
 <*
- A table costs its rows of the budget, and the budget is the same 68 bytes.
+ A table costs its rows of the budget, whatever the budget currently is.
 
  The failure this pins is an implementation that charges a column once rather
  than once per row: four rows of four floats is 64 bytes, and counting it as 16
  would let a material declare four times the push block it has and be refused by
  Vulkan at pipeline creation instead of here, with a message about ranges rather
  than about uniforms.
+
+ Seven rows is what does not fit now that the mesh contract lives in a
+ `DrawRecord` and the budget is 104 — it was five when the contract was pushed and
+ the budget was 52. The count is derived rather than written down for that reason:
+ the property is "a row is charged", not "five rows is too many".
 *>
 fn void a_table_costs_a_row_at_a_time() @test
 {
@@ -840,14 +847,15 @@ fn void a_table_costs_a_row_at_a_time() @test
 		three::material_uniform_bytes(four_rows[..])
 	);
 
-	three::MaterialUniform[1] too_many = { { "palette", 4, 5 } };
+	uint rows = three::MATERIAL_UNIFORM_BUDGET / 16 + 1;
+	three::MaterialUniform[1] too_many = { { "palette", 4, rows } };
 	String? refused_source = three::material_source(
 		`float3 shade(Surface s) { return palette[s.variant].rgb; }`, too_many[..]
 	);
 	fault refused = @catch(refused_source);
-	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "a fifth row does not fit, got %s", refused);
+	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "one row past the budget does not fit, got %s", refused);
 	test::@check(
-		three::material_diagnostic().contains("80"),
+		three::material_diagnostic().contains(string::tformat("%d", rows * 16)),
 		"saying what it asked for: %s", three::material_diagnostic()
 	);
 }

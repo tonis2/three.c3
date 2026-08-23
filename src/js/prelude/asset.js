@@ -98,14 +98,12 @@ export class MeshRef {
 				name,
 				enabled,
 				blend: BLEND_BY_ORDINAL[blend] ?? 'mix',
-				// A vertex-colour mask crosses as itself rather than being dropped
-				// on this side. `LayeredMaterial` refuses it by name and can only do
-				// that if it is told — and being told "this file wants a mask this
-				// renderer cannot read" is a better thing to learn than silently
-				// getting a layer that covers everything.
-				mask: maskSource === MASK_VERTEX_COLOR ? 'vertexColor'
-					: maskSource === MASK_NONE ? null
-					: CHANNEL_BY_ORDINAL[channel] ?? 'r',
+				// The channel and the thing it is a channel *of* stay two fields, as
+				// they are in `LayerMask` and in `LayeredMaterial`. A stack that
+				// masks itself with a painted colour attribute therefore imports as
+				// what it is, rather than as a shape this side had to invent.
+				mask: maskSource === MASK_NONE ? null : CHANNEL_BY_ORDINAL[channel] ?? 'r',
+				maskSource: maskSource === MASK_VERTEX_COLOR ? 'vertexColor' : 'texture',
 				maskTexture: layerTexture(maskTexture),
 				invert,
 				// The extension carries a layer's alpha in baseColorFactor.a and its
