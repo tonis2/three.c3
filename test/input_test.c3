@@ -983,10 +983,14 @@ fn void a_stuck_button_never_clicks_and_heals_at_the_next_one() @test
 
 // One frame of mouse and nothing else held.
 fn three::InputState pointer_frame(
-	three::InputTracker* tracker, float x, float y, bool down, double at_ms, bool inside = true
+	three::InputTracker* tracker, float x, float y, bool down, double at_ms, bool inside = true,
+	bool right = false, bool middle = false, float scroll = 0, float scroll_x = 0
 )
 {
-	three::Cursor cursor = { .inside = inside, .down = down, .x = x, .y = y };
+	three::Cursor cursor = {
+		.inside = inside, .down = down, .x = x, .y = y,
+		.right = right, .middle = middle, .scroll = scroll, .scroll_x = scroll_x,
+	};
 	return tracker.step({}, "", cursor, at_ms);
 }
 
@@ -1874,5 +1878,206 @@ fn void the_mouse_stays_taken_across_a_new_scene() @test
 
 		@ok(run, "three.controls.enabled = true; new three.Scene();");
 		test::@check(run.controls.enabled, "and does not take it away either");
+	};
+}
+
+// ============================================================================
+// The pointer — what the mouse did (plan.md §17)
+// ============================================================================
+
+<*
+ The first reading of a session is a position and not a movement.
+
+ There is nothing to difference it against, and the tempting answer — difference
+ against the zero the tracker starts on — reports a jump from the top-left
+ corner to wherever the cursor actually was, on the first frame, every time.
+*>
+fn void the_first_reading_is_not_a_movement() @test
+{
+	three::MouseTracker mouse;
+
+	three::MouseState first = @moved(&mouse, 400, 300, false, 0);
+	test::@check(first.x == 400 && first.y == 300, "the position is known immediately");
+	test::@check(first.dx == 0 && first.dy == 0, "and the movement is zero, got %f, %f", first.dx, first.dy);
+}
+
+<*
+ The movement is this frame's position minus the previous frame's.
+
+ In image pixels, like the position, and signed the way the image is: `dy` is
+ positive downward, because `WindowView.cursor` has already done the one flip
+ and everything after it counts rows from the top.
+*>
+fn void the_movement_is_the_difference_between_two_frames() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 100, 100, false, 0);
+	three::MouseState then = @moved(&mouse, 130, 90, false, 16);
+	test::@check(then.dx == 30.0f, "thirty pixels right, got %f", then.dx);
+	test::@check(then.dy == -10.0f, "ten up, which is negative in image rows, got %f", then.dy);
+
+	three::MouseState still = @moved(&mouse, 130, 90, false, 32);
+	test::@check(still.dx == 0 && still.dy == 0, "a hand that stopped is no movement at all");
+}
+
+<*
+ A hand that has left the picture is still a hand that is moving.
+
+ `inside` says whether the cursor is over the image, which is what a click and a
+ pick need; the movement is not that question. A look that stopped turning
+ because the pointer crossed the window edge would be unusable in a window
+ smaller than the screen, which is every window.
+*>
+fn void the_movement_carries_on_outside_the_window() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 400, 300, false, 0);
+	three::MouseState out = @moved(&mouse, 900, 300, false, 16, inside: false);
+
+	test::@check(!out.inside, "the cursor has left the picture");
+	test::@check(out.dx == 500.0f, "and the movement is reported anyway, got %f", out.dx);
+}
+
+<*
+ A frame the window could not place the cursor on breaks the chain both ways.
+
+ Minimising is the ordinary way to get one. Without the flag the trip to the
+ origin and the trip back are two movements of most of the image, half a second
+ apart, in a scene where nobody touched the mouse — and a mouse look would spin
+ twice for it.
+*>
+fn void a_cursor_the_window_cannot_place_is_not_a_movement() @test
+{
+	three::MouseTracker mouse;
+
+	@moved(&mouse, 400, 300, false, 0);
+
+	three::MouseState lost = mouse.step({ .nowhere = true }, 16);
+	test::@check(lost.dx == 0 && lost.dy == 0, "the frame that lost it reports nothing, got %f", lost.dx);
+
+	three::MouseState found = @moved(&mouse, 100, 100, false, 32);
+	test::@check(
+		found.dx == 0 && found.dy == 0,
+		"and neither does the first frame that finds it again, got %f, %f", found.dx, found.dy
+	);
+
+	three::MouseState after = @moved(&mouse, 110, 100, false, 48);
+	test::@check(after.dx == 10.0f, "the frame after that is an ordinary movement, got %f", after.dx);
+}
+
+<*
+ All three buttons come through, as latches.
+
+ The left one has always been here; the other two reached nothing but the pan
+ gesture, so a script could not tell a right-click from no click at all.
+*>
+fn void all_three_buttons_are_reported() @test
+{
+	three::MouseTracker mouse;
+
+	three::MouseState held = mouse.step(
+		{ .inside = true, .x = 10, .y = 10, .down = true, .right = true, .middle = true }, 0
+	);
+	test::@check(held.down, "left");
+	test::@check(held.right, "right");
+	test::@check(held.middle, "middle");
+
+	three::MouseState let_go = mouse.step({ .inside = true, .x = 10, .y = 10 }, 500);
+	test::@check(!let_go.down && !let_go.right && !let_go.middle, "and all three come back up");
+}
+
+<*
+ The wheel belongs to the frame it turned on and to no other.
+
+ `c3w` zeroes the accumulator at the top of every `getEvent`, so a frame's
+ scroll is that frame's alone; a script reading it a frame late reads zero,
+ which is the honest answer rather than a stale one.
+*>
+fn void the_wheel_is_reported_for_the_frame_it_turned_on() @test
+{
+	three::MouseTracker mouse;
+
+	three::MouseState turned = mouse.step(
+		{ .inside = true, .x = 10, .y = 10, .scroll = 2.5, .scroll_x = -1 }, 0
+	);
+	test::@check(turned.scroll == 2.5f, "the wheel, positive away from the user, got %f", turned.scroll);
+	test::@check(turned.scroll_x == -1.0f, "and its horizontal half, got %f", turned.scroll_x);
+
+	three::MouseState after = mouse.step({ .inside = true, .x = 10, .y = 10 }, 16);
+	test::@check(after.scroll == 0 && after.scroll_x == 0, "and nothing on the frame after");
+}
+
+<*
+ One reading of the window carries the buttons and the wheel with the position.
+
+ `WindowView.cursor` converts the position and passes the rest through
+ untouched, which is what keeps the camera's zoom and the script's `scroll`
+ describing the same instant: `main.c3` reads the wheel once and hands it to
+ both.
+*>
+fn void the_cursor_reading_carries_the_buttons_and_the_wheel() @test
+{
+	three::WindowView view = {
+		.width = 800, .height = 600, .scale = 1, .image_width = 800, .image_height = 600
+	};
+
+	three::Cursor at = view.cursor(
+		{ 400, 300 }, true, right: true, middle: true, scroll: 3, scroll_x: -2
+	);
+	test::@check(at.down && at.right && at.middle, "all three buttons crossed");
+	test::@check(at.scroll == 3.0f && at.scroll_x == -2.0f, "and both wheel axes");
+	test::@check(!at.nowhere, "a cursor over a sized window is somewhere");
+
+	three::WindowView none = {
+		.width = 0, .height = 0, .scale = 1, .image_width = 800, .image_height = 600
+	};
+	test::@check(
+		none.cursor({ 400, 300 }, false).nowhere,
+		"and a window with no extent cannot place one at all"
+	);
+}
+
+<*
+ A script is told what the mouse did, not only where it is.
+
+ The whole point of differencing on this side: the two `tick`s below are the two
+ frames, and the script sees the movement between them. A script differencing
+ `pointer.x` itself would be comparing the moments it happened to ask, which
+ straddle the frame rather than bound it.
+*>
+fn void a_script_can_ask_what_the_mouse_did() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(&tracker, 100, 100, false, 0));
+		run.tick(16, pointer_frame(&tracker, 130, 80, false, 16));
+
+		String moved = @answer(run, `
+			const p = three.input.pointer;
+			return [p.dx, p.dy];
+		`);
+		defer moved.free(mem);
+		test::@check(moved == "[30,-20]", "the movement between the two frames, got '%s'", moved);
+	};
+}
+
+fn void a_script_can_ask_about_the_other_buttons_and_the_wheel() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::InputTracker tracker;
+		run.tick(0, pointer_frame(
+			&tracker, 50, 50, false, 0, right: true, middle: true, scroll: 2, scroll_x: -1
+		));
+
+		String all = @answer(run, `
+			const p = three.input.pointer;
+			return [p.right, p.middle, p.scroll, p.scrollX];
+		`);
+		defer all.free(mem);
+		test::@check(all == "[true,true,2,-1]", "all four, got '%s'", all);
 	};
 }

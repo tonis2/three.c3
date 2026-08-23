@@ -48,10 +48,12 @@ And the light casts a shadow — `three.light.shadow = true` for one directional
 depth map, fitted around the scene, sampled with a nine-tap comparison, and off
 until something asks for it. And the mouse can be taken away from the camera:
 `three.controls.enabled = false` stops the turntable reading the window at all,
-which is what a scene driving its own camera every frame needs and is §17's
-first phase.
+which is what a scene driving its own camera every frame needs. And a script is
+told what the mouse *did* as well as where it is — `three.input.pointer` carries
+the frame's movement, all three buttons and both wheel axes, which is §17's
+second phase and everything a look needs short of pointer lock.
 
-	c3c test --trust=full       671 passed, 0 failed, leak-clean
+	c3c test --trust=full       680 passed, 0 failed, leak-clean
 
 **What follows was found by using the engine, not by reading it looking for
 holes.** Each one stopped the work, and where it forced a workaround the
@@ -1660,21 +1662,38 @@ broadphase to fix it exists and is unbound — see the queries entry below.
   `three.controls.enabled = false` is how a script says which of the two is the
   author. Nothing else is in the way.
 
-- **The mouse has a position and no motion.** `three.input.pointer` is already
-  `{ x, y, inside, down, clicked }` in the rendered image's pixels, polled off
-  the frame's input state — so hover highlighting is `pointer` plus `scene.pick`
-  and has been all along. **This entry said the opposite in its first draft**,
-  which is what reading a surface instead of using it buys you, and it is left
-  here as the section's own worked example.
+- **The mouse.** *(Built, except the last piece — see below.)*
+  `three.input.pointer` is now the whole reading:
+  `{ x, y, dx, dy, inside, down, right, middle, clicked, scroll, scrollX }`.
 
-  What is actually missing is the half a first-person game is built on. **No
-  relative delta and no pointer lock**, so a look that keeps turning past the
-  edge of the window cannot be expressed at all — this is the one that blocks a
-  genre. **No wheel**: `drive_camera` reads `window.get_scroll()` straight into
-  the zoom and passes none of it on. **Only the left button**: `pointer.down` is
-  `LEFT_MOUSE`, and right and middle reach nothing but the pan gesture. The
-  window reports all three already — `PointerState` carries `pan` and `scroll`
-  beside the position — so every one of them is a binding rather than plumbing.
+  **This entry claimed there was no polled cursor in its first draft**, which is
+  what reading a surface instead of using it buys you: `{ x, y, inside, down,
+  clicked }` had been there all along, so hover highlighting was always `pointer`
+  plus `scene.pick`. It is left here as the section's own worked example of its
+  own warning.
+
+  What was actually missing was three things, and two of them are now bound.
+  **The movement** — `dx`/`dy`, differenced by `MouseTracker` against the
+  previous frame's reading rather than by the script against the last moment it
+  asked, which is a different pair of instants and straddles the frame instead of
+  bounding it. **The wheel** — `drive_camera` used to read `window.get_scroll()`
+  itself; the loop now reads it once and hands it to the camera and the script
+  both, so the zoom and `pointer.scroll` can never describe different frames.
+  **The other two buttons** — `right` and `middle`, which previously reached
+  nothing but the pan gesture.
+
+  **What is left is pointer lock, and it is not a binding.** `dx`/`dy` keep
+  reporting while the cursor is outside the window, because the window goes on
+  saying where it is; where they genuinely stop is the edge of the *screen*,
+  where the platform stops the cursor. A look that must keep turning needs the
+  cursor recentred and hidden every frame, and `window.c3l` exposes no cursor
+  warp and no associate-mouse call on any of its four backends — so this is work
+  in the window library first (`CGWarpMouseCursorPosition` and
+  `CGAssociateMouseAndCursorPosition` on darwin, `XWarpPointer` or the pointer
+  constraints protocol on linux, `SetCursorPos`/`ClipCursor` on win32), and a
+  binding afterwards. **Trigger:** the first first-person camera, which is the
+  next entry. Until then a look works and cannot turn more than a screen's
+  width without the hand being lifted, which is playable and is not shippable.
 
 - **No character controller.** §7 already names this and its ingredients are all
   in `collision.c3l`: swept CCD, GJK/EPA, a capsule, and `Physics.transformed`.
@@ -1856,8 +1875,9 @@ sentence rather than leaving it running against nothing.
 
 1. ~~**§9's open questions.**~~ Answered above. The camera work below is no
    longer waiting on anything.
-2. **The mouse's missing half** — delta, wheel, and the other two buttons —
-   because the window already reports all three and nothing carries them across.
+2. ~~**The mouse's missing half.**~~ Delta, wheel and the other two buttons are
+   bound. Pointer lock is left, and it is window-library work rather than a
+   binding — see the entry above.
 3. **The camera**, because it is what makes the other two visible.
 4. **The clock**, because everything after it is written against `dt`.
 5. **The character controller**, then **animation blending** — the point at which

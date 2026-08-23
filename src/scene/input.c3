@@ -564,6 +564,31 @@ struct Cursor
 	bool down;
 	float x;
 	float y;
+
+	// The other two buttons, latched exactly as `down` is. Middle is beside
+	// right because a trackpad has no third button and a three-button mouse has
+	// no natural second drag — `drive_camera` treats them as one gesture for
+	// that reason, and a script is told which of them it actually was.
+	bool right;
+	bool middle;
+
+	// The wheel, accumulated over the frame's `getEvent` and positive *away*
+	// from the user. Not a position and not in pixels: it is notches, or
+	// fractions of one from a trackpad.
+	//
+	// **The browser's `deltaY` has the opposite sign.** This is `c3w`'s
+	// convention and it is the one the camera's zoom is already written
+	// against; flipping it here would leave two conventions in one process.
+	float scroll;
+	float scroll_x;
+
+	// True when the window could not say where the cursor is — minimised, or
+	// before the first frame has sized anything. The position is then zero
+	// rather than unknown, and zero is a real place, so the flag is what stops
+	// `MouseTracker` reporting the trip to the origin and back as two enormous
+	// mouse movements. Everything built by hand is a known reading, which is
+	// what makes the flag safe to add to a struct tests construct literally.
+	bool nowhere;
 }
 
 <*
@@ -596,15 +621,27 @@ struct WindowView
 <*
  Turn one reading of the cursor into image pixels.
 
+ The position is converted and everything else is carried through unchanged —
+ `down` always was, and the buttons and the wheel join it for the same reason:
+ one reading of one instant, in one struct, so that nothing downstream has to
+ ask the window a second question and get a different answer.
+
  @param at : `The window's own answer: window-relative, bottom-left origin, in the platform's units.`
  @param down : `The left button's latch, as the window reports it.`
+ @param right : `The right button's latch.`
+ @param middle : `The middle button's latch.`
+ @param scroll : `The wheel over this frame, positive away from the user.`
+ @param scroll_x : `The horizontal wheel over this frame, positive to the right.`
 *>
-fn Cursor WindowView.cursor(&self, float[<2>] at, bool down)
+fn Cursor WindowView.cursor(
+	&self, float[<2>] at, bool down,
+	bool right = false, bool middle = false, float scroll = 0, float scroll_x = 0
+)
 {
 	// Minimised, or before the first frame. The fallback is a cursor that is
 	// nowhere and the alternative is a division by zero in the one function the
 	// whole gesture path runs through.
-	if (self.width == 0 || self.height == 0 || self.scale <= 0.0f) return {};
+	if (self.width == 0 || self.height == 0 || self.scale <= 0.0f) return { .nowhere = true };
 
 	// The scale is what makes the pointer's unit and the extent's unit the same
 	// one; after this line neither of them exists any more, only the fraction.
@@ -616,6 +653,10 @@ fn Cursor WindowView.cursor(&self, float[<2>] at, bool down)
 	return {
 		.inside = inside,
 		.down = down,
+		.right = right,
+		.middle = middle,
+		.scroll = scroll,
+		.scroll_x = scroll_x,
 		.x = across * (float)self.image_width,
 		// The one flip, and the only place it happens. `screen_ray` counts rows
 		// from the top because that is how an image is stored and how every
@@ -634,11 +675,36 @@ struct MouseState
 {
 	bool inside;
 	bool down;
+	bool right;
+	bool middle;
 	// True for exactly the one frame a press and its release resolved to a
 	// click. `x` and `y` are then where the release landed.
 	bool clicked;
 	float x;
 	float y;
+
+	// How far the cursor travelled since the previous frame, in the same image
+	// pixels `x` and `y` are in.
+	//
+	// **This is what a look is made of**, and it is not the same question as
+	// where the cursor is: a script turning a character by the mouse wants the
+	// movement, and differencing `x` across frames in JavaScript would answer it
+	// with the frame *before* the one being drawn, because a script only ever
+	// sees the position at the moment it asked.
+	//
+	// It keeps reporting while the cursor is outside the window, because the
+	// window goes on saying where it is and a hand that has left the frame is
+	// still moving. What it cannot do is keep reporting past the *screen*,
+	// where the platform stops the cursor and the movement genuinely ends —
+	// that is what pointer lock buys and nothing here has it. See `plan.md` §17.
+	float dx;
+	float dy;
+
+	// The wheel over this frame, positive away from the user, and the
+	// horizontal half of it. Zero on the frames nobody turned it, which is
+	// almost all of them.
+	float scroll;
+	float scroll_x;
 }
 
 <*
@@ -651,6 +717,15 @@ struct MouseTracker
 	float press_x;
 	float press_y;
 	double press_ms;
+
+	// The previous frame's position, and whether there was one. Both halves are
+	// needed: the first frame of a session has nothing to difference against
+	// and neither has the first frame after the window could not say where the
+	// cursor was, and a delta measured from a remembered zero is a jump across
+	// the whole image reported as a hand movement.
+	bool has_last;
+	float last_x;
+	float last_y;
 }
 
 <*
@@ -670,6 +745,14 @@ struct MouseTracker
  It heals the same way and for the same reason. The first real click after a
  stuck latch is swallowed, because that click's release is what finally clears
  the latch and there was no press edge to match it; the click after that works.
+
+ ## The movement is differenced here, not by whoever asks
+
+ `dx` and `dy` are this reading minus the previous one, which is the only place
+ the difference can be taken honestly: a script asking twice gets two answers
+ from two different moments, and the frame it is drawing is neither of them.
+ It costs two floats and a bool of state and is the whole of what a mouse look
+ needs from this file.
 
  ## A drag is not a click
 
@@ -708,12 +791,40 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 
 	self.was_down = cursor.down;
 
+	// The movement, and the two frames that have none: the first of a session,
+	// and any frame the window could not place the cursor on. Both would
+	// otherwise difference against a remembered zero and report a jump across
+	// the whole image as a hand movement.
+	float dx = 0.0f;
+	float dy = 0.0f;
+	if (!cursor.nowhere)
+	{
+		if (self.has_last)
+		{
+			dx = cursor.x - self.last_x;
+			dy = cursor.y - self.last_y;
+		}
+		self.has_last = true;
+		self.last_x = cursor.x;
+		self.last_y = cursor.y;
+	}
+	else
+	{
+		self.has_last = false;
+	}
+
 	return {
 		.inside = cursor.inside,
 		.down = cursor.down,
+		.right = cursor.right,
+		.middle = cursor.middle,
 		.clicked = clicked,
 		.x = cursor.x,
 		.y = cursor.y,
+		.dx = dx,
+		.dy = dy,
+		.scroll = cursor.scroll,
+		.scroll_x = cursor.scroll_x,
 	};
 }
 

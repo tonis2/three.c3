@@ -330,11 +330,39 @@ const input = {
 	// searches. Aliases are included: ctrl, cmd and esc.
 	keys() { return H.keyNames(); },
 
-	// Where the cursor is: { x, y, inside, down, clicked }, in the rendered
-	// image's pixels — the same coordinates scene.pick(x, y) takes and the
-	// same corner the PNG starts at, whatever size the window has been
-	// dragged to. Everything is zero and `inside` is false when there is no
-	// window.
+	// The whole mouse for this frame, as one reading of one instant:
+	//
+	//     { x, y, dx, dy, inside, down, right, middle, clicked,
+	//       scroll, scrollX }
+	//
+	// `x` and `y` are in the rendered image's pixels — the same coordinates
+	// scene.pick(x, y) takes and the same corner the PNG starts at, whatever
+	// size the window has been dragged to. Everything is zero and `inside`
+	// is false when there is no window.
+	//
+	// **`dx`/`dy` are the movement, and they are not the same question as
+	// the position.** A look is built out of the movement, and
+	// differencing `x` across two calls answers it with the frame before
+	// the one being drawn — a script only ever sees where the cursor was at
+	// the moment it asked, while the host differences the reading the frame
+	// is actually using. The browser calls these `movementX`/`movementY`.
+	//
+	// They keep coming while the cursor is outside the window, because the
+	// window goes on saying where it is; they stop at the edge of the
+	// *screen*, where the platform stops the cursor. Getting past that is
+	// pointer lock and there is none — see the note in `plan.md` §17.
+	//
+	// **`scroll` is positive away from the user**, which is the opposite of
+	// the browser's `deltaY` and the same direction the camera's zoom
+	// already reads it in. It is notches, or fractions of one from a
+	// trackpad, accumulated over the frame and zero on the frames nobody
+	// turned it — which is nearly all of them.
+	//
+	// **`down`, `right` and `middle` are latches, not edges.** The left
+	// button orbits and the other two pan unless three.controls.enabled is
+	// false, so a script polling them while the camera still has the mouse
+	// is reading a gesture it does not own. `clicked` is the one edge, and
+	// three.onClick is the one thing dispatched from it.
 	get pointer() { return H.pointer(); },
 
 	// True for the one frame a click finished on. A press that travelled or
