@@ -101,6 +101,70 @@ fn bool AssetId.equals(self, AssetId other) @operator(==) => self.index == other
 	&& self.generation == other.generation;
 
 <*
+ One layer of `CUSTOM_materials_layers`, resolved to texture slots.
+
+ The extension's `MaterialLayer` as this renderer can actually use it, which is
+ deliberately less than the file carries: the PBR half — metallic, roughness,
+ subsurface — is dropped here rather than stored, because `lambert()` is the whole
+ of the built-in light and `plan.md` §12 is explicit that a field nothing evaluates
+ is worse than an absence. Height and bump go the same way and for the same reason.
+ What is left is what the generated shading body reads.
+
+ The texture fields are indices into `Assets.textures`, or -1, and **each holds one
+ reference for as long as this record does** — released by `GpuMesh.release_layers`
+ beside the base colour map's own release. `mask_texture` is -1 when the layer reads
+ a channel of the material's shared mask instead of carrying one of its own.
+*>
+struct GpuLayer
+{
+	String name; // owned
+	float[4] base_color;
+	float[3] emissive_factor;
+	int texture;
+	int normal_texture;
+	int emissive_texture;
+	int mask_texture;
+	// The extension's `LayerBlendMode` and `LayerMaskChannel` ordinals, passed
+	// through to the JS side as numbers and turned into names there. Kept as the
+	// enum's own numbering rather than re-spelled, so the two ends cannot drift.
+	uint blend_mode;
+	uint mask_channel;
+	// `LayerMaskSource.NONE` for a layer with no mask, which is visible everywhere.
+	// A `VERTEX_COLOR` mask survives to here as itself rather than being dropped:
+	// the JS side refuses it by name, and it can only do that if it is told.
+	uint mask_source;
+	float opacity;
+	bool invert;
+	bool enabled;
+}
+
+<*
+ A material's whole layer stack, as one mesh resolved it.
+
+ `present` is false for the overwhelming majority of meshes — every primitive whose
+ material never carried the extension — and everything else is then empty, so this
+ costs a bool on a struct that already has fifteen fields.
+
+ **Resolved per `GpuMesh` rather than per glTF material**, which is the decision
+ worth stating. Several primitives may share one material, and resolving once per
+ material would be fewer walks; it would also mean a stack outliving the meshes that
+ named it, a second refcount to say when it may go, and a lifetime that is not the
+ one `GpuMesh.texture` already has. Per mesh, each primitive holds its own
+ references to the same slots exactly as it already does for the base colour map,
+ and `ImageMemo` still collapses the *uploads* — which is where the cost actually
+ was.
+*>
+struct GpuLayers
+{
+	bool present;
+	// The material's shared mask, sampled once and read by channel. -1 when every
+	// layer carries its own or none of them has one. Holds a reference like the
+	// per-layer textures do.
+	int mask_texture;
+	List{GpuLayer} layers;
+}
+
+<*
  One glTF primitive, uploaded.
 
  A glTF *mesh* is a list of primitives, each with its own material, and the
@@ -129,6 +193,17 @@ struct GpuMesh
 	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
 	int texture;
+	// `CUSTOM_materials_layers`, if this primitive's material carried it. Empty
+	// and `present == false` otherwise, which is every mesh in every file that
+	// was not authored with the extension — see `GpuLayers`.
+	//
+	// **Unlike `texture`, the zero fill is correct here**, because the field that
+	// decides whether anything is read is a bool rather than an index: a
+	// construction site that forgets this gets `present == false` and a mesh with
+	// no stack, which is exactly what a mesh with no stack should be. That is the
+	// second of the three strategies `scene/material.c3`'s header lays out —
+	// encode "unset" as a value that cannot be confused with a real one.
+	GpuLayers layers;
 	collision::Aabb3 bounds;
 
 	// Picking, in mesh-local space. The tree holds raw pointers into the two
@@ -326,10 +401,24 @@ struct SharedTexture
  `texture` is -1 for an image the decoder refused, and that is worth memoising
  too — a file whose ninety materials all name one KTX2 image should attempt the
  decode once, not ninety times.
+
+ ## The colourspace is part of the key, and it has to be
+
+ `claim_texture` says it plainly: the same PNG asked for as `SRGB` and as `LINEAR`
+ is two images in two Vulkan formats, because the space is the format rather than
+ a setting on it. So the same glTF image used as a base colour map by one material
+ and as a layer's *mask* by another is genuinely two uploads.
+
+ A memo keyed on the image index alone would answer the second caller with the
+ first one's slot — and the picture would be right, so nothing would look wrong
+ until a weight read 0.21 where the file stored 0.5 and every layer came out
+ faint. That is the same failure `mapped_normal`'s header warns about for normal
+ maps, arriving through a cache instead of through a script.
 *>
 struct ImageMemo
 {
 	int image;
+	ColorSpace space;
 	int texture;
 }
 
@@ -748,8 +837,10 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	foreach (&mesh : asset.meshes)
 	{
 		// Before the buffers, because after `free_buffers` the mesh no longer
-		// says which texture it was holding.
+		// says which texture it was holding. The layer stack holds references of
+		// its own and goes the same way, for the same reason.
 		self.release_texture(gpu, mesh.texture);
+		mesh.release_layers(self, gpu);
 		mesh.free_buffers();
 	}
 	asset.meshes.free();
@@ -1019,6 +1110,10 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 		{
 			if (!mesh.uploaded || mesh.refs > 0) continue;
 			self.release_texture(gpu, mesh.texture);
+			// The stack is re-resolved when the mesh uploads again, exactly as the
+			// base colour map is, so giving it back here is what keeps a sweep of an
+			// unused piece of a kit from holding that piece's images forever.
+			mesh.release_layers(self, gpu);
 			mesh.release_device();
 			mesh.uploaded = false;
 			mesh.texture = -1;
@@ -1742,7 +1837,14 @@ fn GpuMesh? Assets.upload_primitive(
 				material.baseColorFactor[2],
 				material.baseColorFactor[3],
 			};
-			if (out.has_uvs) out.texture = self.load_material_texture(gpu, stream, images, material)!;
+			if (out.has_uvs)
+			{
+				out.texture = self.load_material_texture(gpu, stream, images, material.baseColorTexture)!;
+				// **Gated on uvs for the same reason the base colour map is.** Every
+				// image in a stack is sampled by uv, so a mesh without them would
+				// hold references to pictures nothing can read.
+				self.load_material_layers(gpu, stream, images, material, &out.layers)!;
+			}
 		}
 	}
 
@@ -1825,17 +1927,33 @@ fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{u
  all — which is why it was doing all of that once per primitive until the memo
  went in front of it.
 
- @return `An index into Assets.textures, or -1 when the material has no usable base colour texture.`
+ ## It takes a `TextureInfo` rather than a `Material`
+
+ It used to take the whole material and reach into `baseColorTexture` itself,
+ which was exact while the base colour map was the only image this renderer read.
+ A layer stack reads several — an albedo per layer, a packed mask, a normal map —
+ and each of them is the same walk from a `textureInfo` to a slot, differing only
+ in *which* info and in what colourspace it wants.
+
+ So the info and the space are parameters. Passing the material and a "which
+ field" selector was the other option and is the worse one: the selector would be
+ a second vocabulary for something `TextureInfo` already names, and the caller
+ that passed the wrong one would silently upload the wrong picture.
+
+ @param info : `The glTF textureInfo to resolve. A source of -1 answers -1.`
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers — a mask, a normal map.`
+ @return `An index into Assets.textures, or -1 when there is no usable texture there.`
 *>
 fn int? Assets.load_material_texture(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
 	List{ImageMemo}* images,
-	gltf::Material material
+	gltf::TextureInfo info,
+	ColorSpace space = ColorSpace.SRGB
 )
 {
-	int texture_index = material.baseColorTexture.source;
+	int texture_index = info.source;
 	if (texture_index < 0) return -1;
 	if (texture_index >= stream.gltf.textures.len()) return -1;
 
@@ -1844,7 +1962,7 @@ fn int? Assets.load_material_texture(
 
 	foreach (memo : *images)
 	{
-		if (memo.image != image_index) continue;
+		if (memo.image != image_index || memo.space != space) continue;
 		// The retain the decode path would have done, either by pushing a fresh
 		// slot at one reference or by incrementing on a hash hit. Every
 		// `GpuMesh` naming this texture has to count, or the first mesh to
@@ -1853,9 +1971,212 @@ fn int? Assets.load_material_texture(
 		return memo.texture;
 	}
 
-	int resolved = self.decode_material_texture(gpu, stream, image_index)!;
-	images.push({ .image = image_index, .texture = resolved });
+	int resolved = self.decode_material_texture(gpu, stream, image_index, space)!;
+	images.push({ .image = image_index, .space = space, .texture = resolved });
 	return resolved;
+}
+
+<*
+ Resolve a material's `CUSTOM_materials_layers` stack to texture slots.
+
+ Does nothing at all — not even an allocation — for a material without the
+ extension, which is every material in every file that was not authored for it.
+ `gltf.c3l` has already parsed the JSON by the time this runs; what is left is the
+ half it cannot do, which is turning texture indices into uploads.
+
+ ## Which images get which colourspace, and why it is the whole point
+
+ A base colour map is a picture somebody looked at, so it is `SRGB`. **A mask and a
+ normal map are not pictures, they are numbers** — a weight and a direction — and
+ loading either through an sRGB view puts every value through a transfer function
+ it was never encoded with. `mapped_normal`'s header measures what that does to a
+ normal map: the stored 0.5 meaning "no tilt" arrives as 0.21 and every surface
+ leans the same way. A mask fares the same, and worse, because the result reads as
+ the blend modes being wrong rather than as the image being misread.
+
+ Getting this right is most of what this function is for. `ImageMemo` carrying the
+ space is what makes it possible for one glTF image to be both.
+
+ ## The PBR half is dropped here rather than stored
+
+ `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`, `subsurface`,
+ `heightTexture` and `bump` are all parsed by `gltf.c3l` and none of them is copied
+ out. `plan.md` §12: `lambert()` is the whole of the built-in light, so these are
+ inputs to an equation nothing evaluates, and a field carried to the JS side would
+ be an API surface that provably changes no pixel. The images they name are not
+ uploaded either, which is the part that costs something — a file with a roughness
+ map per layer pays nothing for it here.
+
+ Fails with whatever an upload failed with. A material without the extension
+ cannot fail, because it does nothing.
+*>
+fn void? Assets.load_material_layers(
+	&self,
+	Gpu* gpu,
+	gltf::GltfStream* stream,
+	List{ImageMemo}* images,
+	gltf::Material material,
+	GpuLayers* out
+)
+{
+	if (!material.has_layers()) return;
+
+	out.present = true;
+	out.mask_texture = -1;
+	out.layers.init(mem, material.layers_ext.layers.len());
+
+	foreach (source : material.layers_ext.layers)
+	{
+		GpuLayer layer = {
+			.base_color = {
+				source.baseColorFactor.x,
+				source.baseColorFactor.y,
+				source.baseColorFactor.z,
+				source.baseColorFactor.w,
+			},
+			.emissive_factor = { source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z },
+			.texture = -1,
+			.normal_texture = -1,
+			.emissive_texture = -1,
+			.mask_texture = -1,
+			.blend_mode = (uint)source.blend_mode.ordinal,
+			.mask_channel = (uint)source.mask.channel.ordinal,
+			.mask_source = (uint)source.mask.source.ordinal,
+			.opacity = source.opacity,
+			.invert = source.mask.invert,
+			.enabled = source.enabled,
+		};
+		if (source.name.len > 0) layer.name = source.name.copy(mem);
+
+		// **A disabled layer resolves nothing.** It reaches the JS side as a
+		// description with `enabled: false` on it, which the generator drops
+		// before it emits a sampler for it — so uploading its images here would be
+		// bytes on the device that no shader can name.
+		if (source.enabled)
+		{
+			layer.texture = self.load_material_texture(gpu, stream, images, source.baseColorTexture)!;
+			layer.normal_texture =
+				self.load_material_texture(gpu, stream, images, source.normalTexture, ColorSpace.LINEAR)!;
+			layer.emissive_texture = self.load_material_texture(gpu, stream, images, source.emissiveTexture)!;
+			if (source.mask.source == gltf::LayerMaskSource.TEXTURE)
+			{
+				layer.mask_texture =
+					self.load_material_texture(gpu, stream, images, source.mask.texture, ColorSpace.LINEAR)!;
+			}
+		}
+
+		out.layers.push(layer);
+	}
+
+	self.hoist_shared_mask(gpu, out);
+}
+
+<*
+ Move a mask every layer reads into the stack's own slot.
+
+ **The extension has no "shared mask" object — the sharing is implicit**, and this
+ is what makes it explicit. Each layer's mask names a `textureInfo` of its own, and
+ a splat map authored the way the extension intends has all of them naming *one*
+ RGBA image and differing only in `channel`. Left as it arrives, that is one
+ sampler per layer holding the same picture: four bindings for a four-layer terrain
+ where one would do, against a budget of eight (`MATERIAL_TEXTURE_LIMIT`). Hoisted,
+ the generated shader samples it once into a `float4` and reads a component per
+ layer — which is the arrangement the per-layer `channel` field exists for.
+
+ The references move with it. Every masked layer resolved the slot and so took a
+ reference; the first becomes the stack's and the rest are given back, so the count
+ matches the one slot that now names it.
+
+ **All or nothing.** A file whose layers name two different mask images keeps them
+ per layer rather than getting a partial hoist, because the budget arithmetic is
+ the same either way and "some layers share and some do not" is a shape no exporter
+ produces — Blender's writes one image. If one ever does, the worst case is that it
+ spends the bindings it would have spent anyway.
+*>
+fn void Assets.hoist_shared_mask(&self, Gpu* gpu, GpuLayers* out)
+{
+	int shared = -1;
+	foreach (layer : out.layers)
+	{
+		if (layer.mask_texture < 0) continue;
+		if (shared < 0)
+		{
+			shared = layer.mask_texture;
+			continue;
+		}
+		if (layer.mask_texture != shared) return;
+	}
+	if (shared < 0) return;
+
+	out.mask_texture = shared;
+	bool kept = false;
+	foreach (&layer : out.layers)
+	{
+		if (layer.mask_texture < 0) continue;
+		// The first layer's reference is the one the stack keeps; every other is a
+		// duplicate of it and is given back here. Releasing all of them and then
+		// retaining once would be the same count and one more chance to get the
+		// order wrong on a slot whose last reference had just gone.
+		if (kept) self.release_texture(gpu, layer.mask_texture);
+		kept = true;
+		layer.mask_texture = -1;
+	}
+}
+
+<*
+ Free a layer stack's own memory: the layer names and the list holding them.
+
+ **Host memory only, and split from `release_layers` for one reason** — the two
+ jobs have different sets of callers. Every path that destroys a mesh has to free
+ this, including `Assets.free` at teardown, which deliberately gives *no*
+ references back because it destroys the whole texture table a few lines later.
+ Only the paths that unload a mesh while the table lives have references to
+ return.
+
+ Folding the two together is what the first attempt did, and the leak it produced
+ is instructive: `free_slot` and `unload_unused` both called it and both were
+ right, `Assets.free` called neither, and every layer name in every fixture leaked
+ at process teardown. `free_buffers` is where "this mesh's host memory goes away"
+ already lives, so this belongs to it.
+
+ Safe on a stack that was never present and on one already freed — which is what
+ lets `release_layers` call it and `free_buffers` call it again after.
+*>
+fn void GpuMesh.free_layers(&self)
+{
+	if (!self.layers.present) return;
+	foreach (layer : self.layers.layers)
+	{
+		if (layer.name.len > 0) layer.name.free(mem);
+	}
+	self.layers.layers.free();
+	// Zeroed rather than left holding a freed list, so `present` is false and a
+	// second call — which `free_buffers` makes on the `free_slot` path — does
+	// nothing rather than freeing twice.
+	self.layers = { };
+}
+
+<*
+ Give back every texture slot a layer stack holds, then free the stack.
+
+ Called beside the release of `GpuMesh.texture` at each of the two sites that
+ unload a mesh *while the texture table is still live*, because the references
+ were taken beside that one. A stack that was never present gives nothing back
+ and is safe to call on, which is what lets both call sites be unconditional.
+*>
+fn void GpuMesh.release_layers(&self, Assets* assets, Gpu* gpu)
+{
+	if (!self.layers.present) return;
+
+	assets.release_texture(gpu, self.layers.mask_texture);
+	foreach (layer : self.layers.layers)
+	{
+		assets.release_texture(gpu, layer.texture);
+		assets.release_texture(gpu, layer.normal_texture);
+		assets.release_texture(gpu, layer.emissive_texture);
+		assets.release_texture(gpu, layer.mask_texture);
+	}
+	self.free_layers();
 }
 
 <*
@@ -1867,10 +2188,15 @@ fn int? Assets.load_material_texture(
  compared too — a hash match with different extents would be a collision, and
  sharing on one would corrupt both.
 
- Reached at most once per image per file. Split out from the lookup above so
+ Reached at most once per image per file **per colourspace** — see `ImageMemo`
+ for why the space belongs in that sentence. Split out from the lookup above so
  that the memo has something whose cost is obvious to be standing in front of.
+
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
 *>
-fn int? Assets.decode_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream, int image_index)
+fn int? Assets.decode_material_texture(
+	&self, Gpu* gpu, gltf::GltfStream* stream, int image_index, ColorSpace space = ColorSpace.SRGB
+)
 {
 	char[]? encoded = stream.get_image_data((uint)image_index);
 	if (catch encoded) return -1;
@@ -1913,7 +2239,7 @@ fn int? Assets.decode_material_texture(&self, Gpu* gpu, gltf::GltfStream* stream
 		return -1;
 	}
 
-	return self.claim_texture(gpu, decoded);
+	return self.claim_texture(gpu, decoded, space);
 }
 
 <*
@@ -2260,6 +2586,12 @@ fn void GpuMesh.release_device(&self)
 fn void GpuMesh.free_buffers(&self)
 {
 	self.release_device();
+	// The layer stack's names and list, which are this mesh's memory exactly as
+	// `name` is. The references it held are given back by `release_layers` on the
+	// paths that have a live texture table to give them back to; this is the half
+	// every path owes, including `Assets.free`, which has already decided to
+	// destroy the table wholesale.
+	self.free_layers();
 	if (self.name.len > 0) self.name.free(mem);
 	self.name = "";
 }

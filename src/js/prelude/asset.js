@@ -3,8 +3,47 @@
 import { refBounds } from './math.js';
 import { Object3D } from './object3d.js';
 import { Mesh } from './mesh.js';
+import { Texture } from './texture.js';
+import { LinearSRGBColorSpace, SRGBColorSpace } from './texture.js';
 
 const H = globalThis.__three;
+
+// The extension's `LayerBlendMode` and `LayerMaskChannel`, by ordinal.
+//
+// **The host sends numbers and this names them**, which puts the authority for
+// what an ordinal means in exactly one place — `gltf.c3l`'s own enums, which the
+// host passes through untranslated. Naming them there and here would be two
+// tables to keep in step; naming them only here means a mode added to the
+// extension shows up as `undefined` at this line rather than as a wrong blend
+// three layers deep in a generated shader.
+const BLEND_BY_ORDINAL = [
+	'mix', 'multiply', 'add', 'subtract', 'screen', 'overlay', 'softLight',
+	'difference', 'darken', 'lighten',
+];
+const CHANNEL_BY_ORDINAL = ['r', 'g', 'b', 'a'];
+
+// `LayerMaskSource`: 0 NONE, 1 TEXTURE, 2 VERTEX_COLOR.
+const MASK_NONE = 0;
+const MASK_VERTEX_COLOR = 2;
+
+// A texture slot the host handed back, wrapped so a script holds it the way it
+// holds any other image.
+//
+// The host already retained on the way out, so the Texture built here owns that
+// reference and `dispose()` on it means what it means everywhere else. `path` is
+// null because these came from inside a `.glb` rather than from a file anyone can
+// name — the same answer a DataTexture gives, and for the same reason.
+//
+// **The colourspace comes off the slot rather than from a rule here.** Every
+// other Texture in this API knows its space because the script asked for one;
+// nothing asks for these, so the importer decided and the host reports what it
+// decided. Assuming "a mask is linear" on this side would make `tex.colorSpace`
+// a restatement of an assumption instead of a fact about the image — and would
+// make an importer that got it wrong report that it got it right.
+function layerTexture(handle) {
+	if (handle === null) return null;
+	return new Texture(handle, null, handle[4] === 1 ? LinearSRGBColorSpace : SRGBColorSpace);
+}
 
 // A plain object would do for the handle — `Mesh` only checks that `asset`,
 // `mesh` and `assetGeneration` are numbers, and a generated `Geometry`
@@ -21,6 +60,68 @@ export class MeshRef {
 	}
 
 	get bounds() { return refBounds(this, `asset.mesh(${JSON.stringify(this.name)}).bounds`); }
+
+	// This mesh's `CUSTOM_materials_layers` stack as a `LayeredMaterial`
+	// description, or `null` when its material never carried the extension.
+	//
+	// `new three.LayeredMaterial(ref.layers)` is the whole import path, and that
+	// is the point of handing back a description rather than a material: an
+	// imported stack goes through the same constructor, the same validation and
+	// the same generator a hand-written one does, so there is one implementation
+	// of what a layer means. It also means a script can edit the description
+	// before building it — drop a layer, retune an opacity, mark one animated —
+	// which is not something a finished material would allow.
+	//
+	// **Reading this uploads the mesh, and every read holds new references.** A
+	// stack is texture slots, slots exist only once the primitive is on the
+	// device (see `js_mesh_layers`), and each `Texture` handed back holds a
+	// reference of its own exactly as `three.texture()` does — two reads is two
+	// sets of handles over the same images. Everything else on a MeshRef is
+	// free; read this one once and keep the description.
+	//
+	// A `null` here and a stack of zero layers are different answers: the first
+	// means the file was not authored with the extension, the second means it was
+	// and every layer in it is off.
+	get layers() {
+		const stack = H.meshLayers(this.asset, this.assetGeneration, this.mesh);
+		if (stack === null) return null;
+		const [mask, rows] = stack;
+		return {
+			// Masks are weights rather than colours, so `load_material_layers`
+			// uploaded this linear. What comes back says which space it really
+			// got rather than which one it should have — see `layerTexture`.
+			mask: layerTexture(mask),
+			layers: rows.map(([
+				name, enabled, blend, maskSource, channel, invert, opacity,
+				r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture,
+			]) => ({
+				name,
+				enabled,
+				blend: BLEND_BY_ORDINAL[blend] ?? 'mix',
+				// A vertex-colour mask crosses as itself rather than being dropped
+				// on this side. `LayeredMaterial` refuses it by name and can only do
+				// that if it is told — and being told "this file wants a mask this
+				// renderer cannot read" is a better thing to learn than silently
+				// getting a layer that covers everything.
+				mask: maskSource === MASK_VERTEX_COLOR ? 'vertexColor'
+					: maskSource === MASK_NONE ? null
+					: CHANNEL_BY_ORDINAL[channel] ?? 'r',
+				maskTexture: layerTexture(maskTexture),
+				invert,
+				// The extension carries a layer's alpha in baseColorFactor.a and its
+				// own `opacity` beside it. They multiply — one is the material's
+				// transparency and the other is how much of the layer is applied —
+				// and folding them here means the generated shader has one number
+				// rather than two that always appear together.
+				opacity: opacity * a,
+				tint: [r, g, b],
+				emissiveFactor: [er, eg, eb],
+				map: layerTexture(map),
+				normal: layerTexture(normal),
+				emissive: layerTexture(emissive),
+			})),
+		};
+	}
 
 	toJSON() { return { name: this.name, mesh: this.mesh }; }
 	toString() { return `MeshRef(${this.name})`; }

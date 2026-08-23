@@ -871,6 +871,119 @@ fn void js_mesh_bounds(
 }
 
 <*
+ `meshLayers(index, generation, mesh)` — one mesh's `CUSTOM_materials_layers`
+ stack, or `null` when its material never carried the extension.
+
+ **This uploads the mesh, unlike `meshBounds` beside it.** A stack is texture
+ slots, and texture slots exist only once the primitive has been through
+ `upload_primitive` — so a verb that answered without uploading would answer
+ `null` for a mesh that has layers and has simply not been drawn yet, which is a
+ wrong answer that looks like a file without the extension. Paying an upload to
+ ask the question is the honest price; a script asking this is about to build a
+ material for the mesh anyway.
+
+ What crosses is a *description* rather than a material, for `assetNodes`'s
+ reason: the JS side turns it into an ordinary `LayeredMaterial` through the
+ ordinary constructor, so an imported stack and a hand-written one are the same
+ object and there is one generator rather than two.
+
+ The blend mode and the mask channel cross as the extension's own ordinals and
+ are named on the far side. Numbering them here and naming them there is what
+ keeps `gltf.c3l`'s enum the single authority for what the ordinals mean.
+
+ @return `[maskTexture, [layer...]] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture], or null.`
+*>
+fn void js_mesh_layers(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	uint index = (uint)arg_int(&js, argc, args, 2);
+	self.pass.assets.ensure_uploaded(id, index);
+
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null || !mesh.layers.present)
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	qjs::Value layers = js.array();
+	foreach (i, &layer : mesh.layers.layers)
+	{
+		qjs::Value row = js.array();
+		js.set_index(row, 0, js.string(layer.name));
+		js.set_index(row, 1, qjs::bool_value(layer.enabled));
+		js.set_index(row, 2, qjs::int_value((int)layer.blend_mode));
+		js.set_index(row, 3, qjs::int_value((int)layer.mask_source));
+		js.set_index(row, 4, qjs::int_value((int)layer.mask_channel));
+		js.set_index(row, 5, qjs::bool_value(layer.invert));
+		js.set_index(row, 6, qjs::number_value(layer.opacity));
+		js.set_index(row, 7, qjs::number_value(layer.base_color[0]));
+		js.set_index(row, 8, qjs::number_value(layer.base_color[1]));
+		js.set_index(row, 9, qjs::number_value(layer.base_color[2]));
+		js.set_index(row, 10, qjs::number_value(layer.base_color[3]));
+		js.set_index(row, 11, qjs::number_value(layer.emissive_factor[0]));
+		js.set_index(row, 12, qjs::number_value(layer.emissive_factor[1]));
+		js.set_index(row, 13, qjs::number_value(layer.emissive_factor[2]));
+		js.set_index(row, 14, layer_texture_value(&js, &self.pass.assets, layer.texture));
+		js.set_index(row, 15, layer_texture_value(&js, &self.pass.assets, layer.normal_texture));
+		js.set_index(row, 16, layer_texture_value(&js, &self.pass.assets, layer.emissive_texture));
+		js.set_index(row, 17, layer_texture_value(&js, &self.pass.assets, layer.mask_texture));
+		js.set_index(layers, (uint)i, row);
+	}
+
+	qjs::Value stack = js.array();
+	js.set_index(stack, 0, layer_texture_value(&js, &self.pass.assets, mesh.layers.mask_texture));
+	js.set_index(stack, 1, layers);
+	*out = stack;
+}
+
+<*
+ One of a layer's texture slots, as `[index, width, height, levels, colourspace]`
+ — or `null` for a slot the layer does not use.
+
+ **It retains.** The `GpuMesh` holds one reference per slot and the `Texture` the
+ prelude wraps this in holds another, exactly as `three.texture()` of a file
+ already in the table does: two handles naming one image is two references, and
+ the alternative is a script disposing its material and taking the image out from
+ under the mesh that is still drawing with it.
+
+ `null` rather than an index of -1, because the far side puts these straight into
+ a layer description where the absence of an image is spelled `null` — the same
+ spelling `material.map` uses.
+
+ ## The fifth field is the colourspace, and it is not decoration
+
+ Everywhere else in this file the prelude knows the space because it *asked* for
+ it — `three.texture(path, { colorSpace })` passes one in and hands the same value
+ to the `Texture` it builds. Nothing asks here: the importer decides, per image,
+ from what the layer uses it for, so the only honest source is the slot itself.
+
+ The alternative was tried and is worse in a way that hides exactly the bug it
+ would cause. Having the prelude assume "a mask is linear" makes `tex.colorSpace`
+ a restatement of the prelude's own rule rather than a fact about the image — so
+ an importer that uploaded a mask as sRGB by mistake would still *report* linear,
+ and the one test aimed at that class of bug would pass. Reading it back off the
+ `Texture` is what makes the report worth having.
+*>
+fn qjs::Value layer_texture_value(qjs::Context* js, Assets* assets, int index) @local
+{
+	if (index < 0) return qjs::null_value();
+	Texture* uploaded = assets.texture_at(index);
+	if (uploaded == null) return qjs::null_value();
+	assets.retain_texture(index);
+	qjs::Value fields = texture_value(js, index, uploaded);
+	js.set_index(fields, 4, qjs::int_value(uploaded.space == ColorSpace.LINEAR ? 1 : 0));
+	return fields;
+}
+
+<*
  `assetNodes(index, generation)` — the asset's node tree, flattened into the
  objects `asset.instantiate()` builds.
 

@@ -39,9 +39,10 @@ one content hash. Colour management end to end. One directional light. Keys a
 script can hold down and a budget it can raise. `stats().gpuMs` measured by the
 GPU rather than guessed at. And a post chain — `three.setPost` and
 `three.addPass`, linear float between passes, an engine-owned tonemap doing the
-display encode last.
+display encode last. And material layers — glTF's `CUSTOM_materials_layers`
+imported from a file or written in a script, generating its own shading body.
 
-	c3c test --trust=full       589 passed, 0 failed, leak-clean
+	c3c test --trust=full       612 passed, 0 failed, leak-clean
 
 **What follows was found by using the engine, not by reading it looking for
 holes.** Each one stopped the work, and where it forced a workaround the
@@ -285,7 +286,13 @@ lambert factor with no specular, so the map loads correctly and only a custom
 `shade` body can do anything with it. **Do not add a roughness input to
 `mesh.slang` before deciding what §12 does about lighting** — a specular term
 and the light that drives it are the same decision, and a roughness map wired
-into lambert would be a field that changes nothing.
+into lambert would be a field that changes nothing. §14 is where that rule was
+tested against a feature that wanted the fields and did not get them.
+
+**The sampler budget is 8 rather than 4** since §14: a generated layer stack
+needs one binding per layer plus one for the packed mask, and four bought three
+layers with no room for a normal map on any of them. `MATERIAL_TEXTURE_LIMIT` has
+what the extra four cost.
 
 **What a script still cannot reach is a mesh's *own* image.** A mesh loaded from
 a `.glb` carries its texture on the `GpuMesh` and exposes no `Texture` handle, so
@@ -822,6 +829,14 @@ decision and not two — do not add a roughness field anywhere before the term
 that reads it exists, or it is a material property that provably changes no
 pixel.
 
+**§14 held that line under pressure and is the precedent.** Material layers
+landed with the extension's metallic, roughness and subsurface fields *parsed,
+dropped at the importer and refused by name at the JS boundary* — the first time
+this rule cost a feature something visible rather than merely deferring one. The
+images those fields name are not even uploaded. When the specular term arrives,
+`GpuLayer` in `scene/asset.c3` is where the three fields go back in, and the
+refusals in `js/prelude/layers.js` are what get deleted.
+
 **And the exporter still writes no light.** Not writing one used to be the right
 answer, because a hardcoded directional term is an implementation detail rather
 than content; binding it changed that and nothing followed. One directional light
@@ -1222,6 +1237,73 @@ without declaring order) to manufacture one.
 pass reads, where the answer is not its predecessor. That is the point at which no
 human is left in the loop to reason about the dependency and a solver is the
 honest answer. Pass count is not the trigger and never was.
+
+---
+
+## 14. Material layers
+
+**Built.** `three.LayeredMaterial`, `asset.mesh(name).layers`, and the importer
+behind them — glTF's `CUSTOM_materials_layers` as far as this renderer can
+honestly take it. `lib/gltf.c3l` had parsed the whole extension for a while and
+nothing read a field of it; `rtk grep layers_ext src/` was empty.
+
+**It is a generated `ShaderMaterial` and not a new tier.** A layer stack is a
+fragment function that samples several images and mixes them, which is exactly
+what §4's tier 2 is, so `js/prelude/layers.js` writes the Slang and hands it to
+the same `createMaterial` a hand-written body goes through. No pipeline kind, no
+descriptor layout and no push contract is new. `mat.fragment` is the generated
+source, which is the thing to read first when a stack looks wrong.
+
+**Most of a layer is a compile-time constant, and that is the whole economy.**
+The obvious implementation pushes per-layer parameters as uniforms and loops;
+that one cannot exist here, because 52 bytes is three float4s and a stack of four
+would be out of room before its first texture. It is also unnecessary: the
+generator knows the description, so a blend mode picks which expression is
+emitted, a mask channel becomes `.g`, `invert` becomes a `1.0 -`, and
+`enabled: false` omits the layer *and its samplers*. Only `animated: true` spends
+push bytes — one float4 for a layer's tint and opacity, three of them at most.
+
+So the ceiling is samplers rather than uniforms, which is the right way round.
+**`MATERIAL_TEXTURE_LIMIT` went 4 → 8** for this: four bought three layers over
+the base with no room for a normal map on any of them. It is a budget rather than
+a device limit — `maxPushDescriptors` must be at least 32 — and what it costs is
+per-bucket descriptor traffic on every material that declares a sampler.
+
+**The masks pack into one image's four channels**, which is what the extension's
+per-layer `channel` field exists for and what makes a four-layer terrain one
+binding instead of four. The extension has no shared-mask object, though — the
+sharing is implicit in several layers naming one `textureInfo` — so
+`hoist_shared_mask` in `scene/asset.c3` makes it explicit at import. Without the
+hoist a file renders identically and spends bindings it did not need, which stays
+invisible until a layer is refused against a budget that was never really full.
+
+**A mask is a weight and not a colour**, so it uploads `LINEAR`. That forced
+`ImageMemo` to carry the colourspace: `claim_texture` already treated the space as
+part of a texture's identity, and the memo standing in front of it did not, so one
+glTF image used as a base colour by one material and as a mask by another was
+answered with whichever format arrived first. The picture is right either way and
+every weight is wrong by the sRGB curve — `three_tests::layers` has the check that
+fails when the field is removed.
+
+### What it refuses, and why refusing is the feature
+
+- **`metalness`, `roughness`, `metallicRoughnessTexture`, `subsurface`** — §12's
+  decision, held. `lambert()` is the whole of the built-in light, so these feed an
+  equation nothing evaluates. They are dropped by the importer rather than carried
+  to JS, and named by the JS API rather than ignored: a material property that
+  provably changes no pixel costs more to discover than an error does.
+- **A `VERTEX_COLOR` mask** — there is no COLOR_0 stream. The loader reads
+  positions, normals and uv0, and `mesh.color` is per *instance*, which is not a
+  thing that can vary across a surface. It survives the import intact so that the
+  JS side can refuse it by name; a loader that dropped it would leave a layer with
+  no mask, covering everything, reading as the blend modes being broken.
+- **`heightTexture` and `bump`** — no tessellation and no parallax.
+
+**What is next, in the order it stops being optional:** a COLOR_0 stream, which
+is a fourth vertex buffer, a flag bit and a varying, and which unlocks
+vertex-colour masks and per-vertex tinting together; parallax from the height data
+the extension already carries and this already ignores; and the PBR half, which is
+§12's specular term and not this section's.
 
 ---
 

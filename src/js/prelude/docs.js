@@ -211,7 +211,7 @@ export const DOCS = {
 				+ 'its own name; a uniform written as an array of arrays is a table column, read as '
 				+ 'name[s.variant]. textures is the same idea for images: { noise_map: tex } declares a '
 				+ 'Sampler2D called noise_map that the body samples by that name — noise_map.Sample(uv) — '
-				+ 'and up to four of them. You never write a binding number: the shader is generated with '
+				+ 'and up to eight of them. You never write a binding number: the shader is generated with '
 				+ 'the bindings in it and the host resolves each name back through the compiled module\'s '
 				+ 'own reflection. Sample with any uv you like, which is the point — s.uv + float2(t, 0) '
 				+ 'scrolls, s.uv * 4 tiles, float2(k, 0.5) reads a gradient as a lookup table. A sampler '
@@ -269,6 +269,55 @@ export const DOCS = {
 			],
 			methods: ['dispose()', 'toJSON()'],
 		},
+		LayeredMaterial: {
+			construct: 'new three.LayeredMaterial({ map, normal, mask, layers, side, transparent, blending, opacity })',
+			note:
+				'An ordered stack of materials blended over a base one — terrain splatting, weathering, '
+				+ 'decals. It is a ShaderMaterial whose shade() body is GENERATED from the description, so '
+				+ 'everything a ShaderMaterial has it has, and mat.fragment is the Slang that was written '
+				+ 'for you — read it when a stack looks wrong. '
+				+ 'The base material is map plus the mesh\'s own base colour, exactly as without this: '
+				+ 'the layers are extra, and a stack with none of them shades as a MeshLambertMaterial. '
+				+ 'layers is an array, OUTERMOST LAST — each is blended over everything under it as '
+				+ 'lerp(below, blend(below, layer), mask). '
+				+ 'A layer takes: map (its albedo), normal, emissive, emissiveFactor, tint, opacity, '
+				+ 'blend, mask, maskTexture, invert, uvScale, uvOffset, enabled, animated, name. '
+				+ 'mask is WHICH CHANNEL of the shared mask texture this layer\'s weight is read from — '
+				+ '\'r\', \'g\', \'b\' or \'a\' — which is the economy that makes a four-layer terrain one '
+				+ 'mask image instead of four. Pass that image as the top-level mask. A layer with no mask '
+				+ 'covers everything; maskTexture gives one layer a mask of its own; invert flips it. '
+				+ 'blend is \'mix\' (the default), \'multiply\', \'add\', \'subtract\', \'screen\', \'overlay\', '
+				+ '\'softLight\', \'difference\', \'darken\' or \'lighten\' — Blender\'s Mix node modes, because '
+				+ 'that is where the glTF extension this implements comes from. '
+				+ 'uvScale is per layer and TILES THE DETAIL WITHOUT TILING THE MASK, which is the whole '
+				+ 'trick of a splat map: the mask describes one specific surface, the detail maps repeat '
+				+ 'across it. It composes with material.repeat rather than replacing it. '
+				+ 'EVERYTHING IS BAKED INTO THE SHADER AS A LITERAL unless you say animated: true on a '
+				+ 'layer, which promotes its tint and opacity to a uniform you can write every frame — '
+				+ 'mat.layers[2].opacity = 0.25. That costs 16 of the material\'s 52 uniform bytes, so at '
+				+ 'most three layers may be animated; the rest are free and cost the push block nothing. '
+				+ 'The real ceiling is SAMPLERS: eight, counting one per layer map, normal, emissive and '
+				+ 'own mask, plus one for the shared mask. The base map does not count. { enabled: false } '
+				+ 'drops a layer and its samplers entirely, which is how you get back under it. '
+				+ 'LOAD MASKS AND NORMAL MAPS WITH { colorSpace: three.LinearSRGBColorSpace } — their '
+				+ 'channels are numbers rather than colours, and through the default sRGB every weight '
+				+ 'comes out wrong. '
+				+ 'metalness, roughness, subsurface, height and bump are REFUSED rather than ignored: '
+				+ 'lambert() is the whole of the built-in light, so there is no equation for them to feed, '
+				+ 'and a material property that provably changes no pixel is worse than an error. '
+				+ 'A vertex-colour mask is refused too — the meshes here carry positions, normals and uvs '
+				+ 'only, so bake the mask to a texture and read a channel of it. '
+				+ 'asset.mesh(name).layers hands you a description straight out of a glTF authored with '
+				+ 'CUSTOM_materials_layers, so new three.LayeredMaterial(ref.layers) is the whole import.',
+			properties: [
+				'layers (a view per enabled layer: layers[i].map = tex swaps an image, and '
+				+ 'layers[i].tint / layers[i].opacity read and write the ones declared animated)',
+				'fragment (the generated Slang — read-only, and the thing to look at first)',
+				'uniforms, textures (the ShaderMaterial proxies, under the generated names)',
+				'map, side, transparent, blending, opacity, repeat, offset, alive (as ShaderMaterial)',
+			],
+			methods: ['dispose()', 'toJSON()'],
+		},
 		Group: {
 			construct: 'new three.Group(), or asset.instantiate()',
 			note:
@@ -310,7 +359,17 @@ export const DOCS = {
 				+ 'hundred kit pieces are before placing twelve of them still uploads twelve. It is not '
 				+ 'cached: a reference that outlives its asset throws rather than answering with the size '
 				+ 'the mesh used to be.',
-			properties: ['asset', 'assetGeneration', 'mesh', 'name', 'bounds (a Box3 in the mesh\'s own space)'],
+			properties: [
+				'asset', 'assetGeneration', 'mesh', 'name', 'bounds (a Box3 in the mesh\'s own space)',
+				'layers (this mesh\'s CUSTOM_materials_layers stack as a three.LayeredMaterial '
+				+ 'description, or null when its material never carried the extension. '
+				+ 'new three.LayeredMaterial(ref.layers) is the whole import, and what you get first is a '
+				+ 'plain object you may edit — drop a layer, retune an opacity, mark one animated. '
+				+ 'UNLIKE EVERYTHING ELSE ON A MeshRef THIS UPLOADS THE MESH, because a stack is texture '
+				+ 'slots and slots exist only once the primitive is on the device — and every read hands '
+				+ 'back fresh Texture handles each holding a reference, so read it once and keep what it '
+				+ 'gave you)',
+			],
 			methods: ['toJSON()', 'toString()'],
 		},
 		Vector3: {

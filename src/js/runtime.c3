@@ -110,6 +110,7 @@ const char[*] PRELUDE_OBJECT3D = $embed("prelude/object3d.js");
 const char[*] PRELUDE_TEXTURE = $embed("prelude/texture.js");
 const char[*] PRELUDE_MATERIAL = $embed("prelude/material.js");
 const char[*] PRELUDE_SHADER = $embed("prelude/shader.js");
+const char[*] PRELUDE_LAYERS = $embed("prelude/layers.js");
 const char[*] PRELUDE_POST = $embed("prelude/post.js");
 const char[*] PRELUDE_MESH = $embed("prelude/mesh.js");
 const char[*] PRELUDE_SCENE = $embed("prelude/scene.js");
@@ -131,13 +132,14 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[13] parts;
+	static qjs::EmbeddedModule[14] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
 		{ "three:texture.js", (char[])PRELUDE_TEXTURE[..] },
 		{ "three:material.js", (char[])PRELUDE_MATERIAL[..] },
 		{ "three:shader.js", (char[])PRELUDE_SHADER[..] },
+		{ "three:layers.js", (char[])PRELUDE_LAYERS[..] },
 		{ "three:post.js", (char[])PRELUDE_POST[..] },
 		{ "three:mesh.js", (char[])PRELUDE_MESH[..] },
 		{ "three:scene.js", (char[])PRELUDE_SCENE[..] },

@@ -1146,24 +1146,36 @@ fn void a_texture_name_the_template_already_uses_is_refused() @test
 *>
 fn void more_textures_than_a_material_may_have_are_refused() @test
 {
-	three::MaterialTexture[5] too_many = {
-		{ "a_map" }, { "b_map" }, { "c_map" }, { "d_map" }, { "e_map" },
+	// **Sized from the constant rather than spelled.** This was written as a
+	// literal five-against-four, and the numbers went stale the moment the budget
+	// moved from four to eight for `LayeredMaterial` — a test asserting that the
+	// diagnostic says "4" while the code says 8 fails for a reason that has
+	// nothing to do with what it is checking, which is that the count reaches the
+	// message at all.
+	const uint LIMIT = three::MATERIAL_TEXTURE_LIMIT;
+
+	@pool()
+	{
+		three::MaterialTexture[LIMIT + 1] too_many;
+		for (uint i = 0; i <= LIMIT; i++) too_many[i] = { string::tformat("t%d_map", i) };
+
+		fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, too_many[..]));
+		test::@check(refused == three::MATERIAL_TOO_MANY_TEXTURES, "refused as too many, got %s", refused);
+		test::@check(
+			three::material_diagnostic().contains(string::tformat("%d", LIMIT + 1))
+				&& three::material_diagnostic().contains(string::tformat("%d", LIMIT)),
+			"with both counts in it: %s",
+			three::material_diagnostic()
+		);
+
+		// The limit itself is accepted, which is the half that says the check is
+		// `>` and not `>=`.
+		three::MaterialTexture[LIMIT] exactly;
+		for (uint i = 0; i < LIMIT; i++) exactly[i] = { string::tformat("t%d_map", i) };
+		String source = three::material_source(PLAN_EXAMPLE, {}, mem, exactly[..])!!;
+		defer source.free(mem);
+		test::@check(source.len > 0, "and the limit itself is allowed");
 	};
-
-	fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, too_many[..]));
-	test::@check(refused == three::MATERIAL_TOO_MANY_TEXTURES, "refused as too many, got %s", refused);
-	test::@check(
-		three::material_diagnostic().contains("5") && three::material_diagnostic().contains("4"),
-		"with both counts in it: %s",
-		three::material_diagnostic()
-	);
-
-	// The limit itself is accepted, which is the half that says the check is
-	// `>` and not `>=`.
-	three::MaterialTexture[4] exactly = { { "a_map" }, { "b_map" }, { "c_map" }, { "d_map" } };
-	String source = three::material_source(PLAN_EXAMPLE, {}, mem, exactly[..])!!;
-	defer source.free(mem);
-	test::@check(source.len > 0, "and the limit itself is allowed");
 }
 
 // ============================================================================
