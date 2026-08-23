@@ -34,6 +34,11 @@
 import { Texture } from './texture.js';
 import { FrontSide } from './material.js';
 import { ShaderMaterial } from './shader.js';
+import {
+	BLEND_BY_ORDINAL, CHANNEL_BY_ORDINAL, MASK_NONE, MASK_TEXTURE, MASK_VERTEX_COLOR,
+} from './asset.js';
+
+const H = globalThis.__three;
 
 // How many samplers a material may declare on top of `map`, and how many bytes
 // its uniforms may take.
@@ -692,6 +697,41 @@ export class LayeredMaterial extends ShaderMaterial {
 
 		this._layers = layers;
 		this.layers = layers.map(l => new LayerView(this, l));
+
+		// **The stack crosses a second time, as a description.** The first
+		// crossing was the shader, and a shader cannot be read back: "this layer
+		// multiplies" is a choice of expression by the time `emit` is done, and
+		// `scene.export` needs the word to write `CUSTOM_materials_layers`. Until
+		// this existed a stack loaded from a .glb exported intact and an identical
+		// one written here exported as a flat colour, which is a difference no
+		// script could see and none should have had to.
+		//
+		// Sampler *names* rather than the images behind them: the host resolves
+		// them to bindings once and reads whatever is bound at export time, so
+		// `mat.layers[1].map = moss` needs no second crossing to stay true.
+		// `js/bind_shader.c3` and `ScriptLayer` carry that argument.
+		H.beginMaterialLayers(
+			this._index(),
+			textures.layer_mask !== undefined ? 'layer_mask' : '',
+			textures.base_normal_map !== undefined ? 'base_normal_map' : '',
+		);
+		for (const l of layers) {
+			H.addMaterialLayer(
+				this._index(),
+				l.name,
+				[
+					l.samplers.map ?? '', l.samplers.normal ?? '', l.samplers.emissive ?? '',
+					l.samplers.mask ?? '', l.samplers.params ?? '',
+				].join(','),
+				BLEND_BY_ORDINAL.indexOf(l.blend),
+				l.vertexMask ? MASK_VERTEX_COLOR : (l.channel !== null ? MASK_TEXTURE : MASK_NONE),
+				Math.max(0, CHANNEL_BY_ORDINAL.indexOf(l.channel ?? 'r')),
+				l.invert,
+				l.opacity,
+				l.tint[0], l.tint[1], l.tint[2],
+				l.emissiveFactor[0], l.emissiveFactor[1], l.emissiveFactor[2],
+			);
+		}
 	}
 
 	toJSON() {

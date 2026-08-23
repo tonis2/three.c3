@@ -1326,9 +1326,109 @@ channel beside it exactly as `LayerMask` has them. The refusal is what dated
 first, which is the argument for refusing by name: the sentence said what was
 missing, so it was obvious what to build.
 
+**A stack now goes back out again.** `lib/gltf.c3l` had only ever parsed the
+extension, so `scene.export` flattened a layered material to its base colour and
+`report.shaded` said "you lost a shader" — true, and not the loss that mattered.
+The library writes it now (`add_material_layers`/`add_layer` in
+`materials_layers.c3`, beside the parser, with write structs of its own because a
+parsed `textureInfo` holds an *image* index where a written one holds a *texture*
+index), and `scene/export.c3` fills it from the **source document rather than
+from `GpuLayers`**. That direction is the whole decision: the renderer's copy is
+deliberately lossy — the PBR half dropped, the masks rearranged by
+`hoist_shared_mask`, and nothing at all before an upload the exporter never does
+— so writing it back would state a document the file never contained. The parsed
+one is complete, needs no device, and is the same source `read_stream_geometry`
+already re-reads the vertices from. `COLOR_0` is written beside it so a
+`VERTEX_COLOR` mask still has an attribute to name, and `report.layers` counts
+the records, because `shaded` cannot: a layered material is a generated shader
+whether or not its stack survived.
+
+**A stack a script built goes out too, by the other door.** The first version of
+this left `LayeredMaterial` behind — there is no structured stack behind one,
+only generated Slang — and the result was a difference no script could see: a
+terrain loaded from a `.glb` exported layered, and an identical one written with
+`new three.LayeredMaterial(...)` exported as a flat colour. So the stack now
+crosses **twice**: once as a shader through `createMaterial`, and once as a
+description through `beginMaterialLayers`/`addMaterialLayer` into
+`Material.script_layers`. A shader cannot be read back — "this layer multiplies"
+is a choice of expression by the time `emit` is done, and the extension wants the
+word.
+
+That path is lossless for the opposite reason to the imported one. There the
+source document is complete and `GpuLayers` is not; here the *description* is
+complete, because a script stack has no PBR half and no height data to lose —
+`layers.js` refuses both by name (§12). What it does not have is a file behind
+its images, so those are read off the device and encoded, which is the exporter's
+second image source used on its own.
+
+**The record stores bindings and push offsets, not values.** `mat.layers[1].map =
+moss` writes through to the material's sampler and an animated tint writes
+through to its push block, so keeping copies here would mean a second thing every
+setter had to update and a stale image in the file when one forgot. Storing where
+to look means there is nothing to keep in step, and it retains nothing: every
+image a layer names is already held by the material for its whole life. A script
+stack wins over an imported one on the same mesh, which is the rule
+`texture_slot` already follows — the material is what the frame drew with.
+
 **What is next, in the order it stops being optional:** parallax from the height
 data the extension already carries and this already ignores, and the PBR half,
 which is §12's specular term and not this section's.
+
+---
+
+## 16. What an exported scene keeps
+
+**Built.** §5's writer answered "is the geometry right"; this answers "does the
+file look like the scene". Going looking after the layer work turned up five
+things core glTF or a ratified extension could hold and the exporter simply
+never wrote:
+
+- **`material.side`** — `add_material` had taken `double_sided` all along and the
+  exporter never passed it, so a `DoubleSide` plane exported invisible from
+  behind.
+- **`material.repeat` / `material.offset`** — dropped, with
+  `KHR_texture_transform` sitting there for exactly this. A tiling floor is the
+  most ordinary thing an agent builds and its texture arrived stretched once
+  across the whole surface.
+- **`normalTexture` / `occlusionTexture` / `emissiveTexture`** — `WriteMaterial`
+  said they were absent "because nothing in this writer produces them yet".
+  Something did: a mesh from a `.glb` carries them on its source material, in the
+  document the exporter already reads for the layer stack. A normal-mapped kit
+  round-tripped flat.
+- **The camera and the light** — never written at all, so an exported scene
+  opened pointing wherever the viewer decided, lit by whatever it supplied.
+
+**No flag, and that is the decision worth recording.** `flatten` is a parameter
+because it genuinely costs the hierarchy. None of these costs anything, and
+fidelity that has to be opted into is fidelity agents do not find.
+
+**The dedup key is what gets written, not where it came from.** The first attempt
+put the source material's *index* in `ExportSurface` and made the export worse:
+`textured.glb`'s two materials name two images whose bytes are identical,
+`ExportImage` collapses those to one texture, and keying on the index then kept
+two glTF materials that were byte-for-byte the same — materials went 6 → 12 on a
+test that had been green for two milestones. The maps are resolved to output
+texture indices *before* the dedup check instead, which costs nothing (the memo
+answers the second call) and stays in step with the image dedup underneath it.
+The layer stack is the one exception, kept as an identity: comparing two stacks
+field by field is a deep compare to answer what two integers already answer.
+
+**Two things do not cross.** The light's **ambient floor** has no punctual
+equivalent — ambient was removed from `KHR_lights_punctual` before ratification —
+so a scene with a high floor reloads darker; folding it into the directional
+intensity would be a different picture rather than the same one. And **metalness
+and roughness** are not written, §12's rule held: no specular term means a number
+in the file that never affected a pixel.
+
+**Lines are the one item deferred.** A line mesh has no CPU copy of its vertices
+(`upload_built` skips `build_bvh`, which is what keeps one) and a script's
+`three.lines()` is indistinguishable from a helper — both draw with
+`LINE_MATERIAL`, which is the test the exporter drops helpers by. Two structural
+changes for the least valuable of the six; `mode: LINES` is waiting in the writer
+when it is worth paying for.
+
+The camera and light are nodes, so `report.nodes` grew by two and four tests that
+asserted a count moved with it. That is the whole ripple.
 
 ---
 

@@ -49,6 +49,69 @@
  render it with. Nothing is silently dropped that a script cannot see: the report
  names the count.
 
+ **Lines are not in it yet.** A line mesh has no CPU copy of its vertices —
+ `upload_built` skips `build_bvh` for one, and `build_bvh` is what keeps the
+ copy — and a script's `three.lines()` is indistinguishable from a helper, since
+ both draw with `LINE_MATERIAL`, which is the test above. Both are fixable and
+ neither is fixed; the format has `mode: LINES` waiting.
+
+ ## The scene around the meshes
+
+ A file holding the right geometry still opens wrong if it opens pointing
+ somewhere else, unlit. So the camera and the light go in too, as one glTF camera
+ and one `KHR_lights_punctual` directional light, each on a node of its own —
+ `write_camera` and `write_light`, which carry the aiming arithmetic and the one
+ thing that cannot cross, the ambient floor.
+
+ The materials carry what they always could and the writer previously could not
+ state: `doubleSided` from `material.side`, `KHR_texture_transform` from
+ `material.repeat` and `material.offset` — a tiling floor is the most ordinary
+ thing a script builds and its texture used to arrive stretched once across the
+ whole surface — and the normal, occlusion and emissive maps of the source
+ material, which were being dropped for no reason at all beyond nothing having
+ produced them when the writer was written.
+
+ **Not the metallic-roughness half.** `plan.md` §12: there is no specular term
+ here, so those describe an equation nothing evaluates, and a number in the file
+ that never affected a pixel is worse than its absence.
+
+ ## Material layers, the one thing recovered from the file rather than the frame
+
+ `CUSTOM_materials_layers` is the exception to "the export is what the frame
+ shows", and it has to be. A layer stack reaches the frame as a *generated*
+ `ShaderMaterial` — `plan.md` §14 — so under the rule above it would be lost like
+ any other program, and a terrain would come back as a flat quad in its base
+ colour.
+
+ It is written from the source document instead: `Assets.load` keeps the stream
+ open, so the material's parsed `layers_ext` is still there, complete and in the
+ file's own arrangement. That is lossless where the renderer's own copy is not.
+ `GpuLayers` drops the PBR half and the height data, rearranges the masks through
+ `hoist_shared_mask`, and exists only after an upload this path never performs —
+ `Exporter.source_material_of` has the argument in full.
+
+ So a stack that came from a `.glb` goes back into one, PBR half and all.
+
+ **A `LayeredMaterial` a script built goes back too**, by the other door.
+ `js/prelude/layers.js` sends the description across at construction beside the
+ shader it generates — `Material.script_layers` — because a shader cannot be read
+ back: "this layer multiplies" is a choice of expression by the time the Slang
+ exists. That path is lossless for its own reason rather than the source
+ document's: a script stack has no PBR half and no height data to lose, because
+ the JS API refuses both by name (`plan.md` §12). Its images have no file behind
+ them, so they are read off the device and encoded, which is `texture_for`'s
+ second source used on its own.
+
+ The script's stack wins when a node has both — `script_material_index` argues
+ it — and either kind leaves the material counted in `shaded`, because it is
+ still a program glTF cannot hold. `layers` is what says the stack itself
+ survived.
+
+ One consequence for the vertices: a layer may take its mask from a vertex colour
+ rather than an image, so `COLOR_0` is written whenever the source mesh carried
+ one. Without it such a layer would come back naming an attribute the file does
+ not have — a mask reading zero, which is a layer that silently vanishes.
+
  ## Per-copy colour, and the instanced nodes that carry it
 
  **`mesh.color` is per instance and free in the frame** — it rides in the
@@ -165,6 +228,12 @@ struct ExportReport
 	// Nodes drawn under a ShaderMaterial, which was not written. They are in the
 	// file with their glTF material; this is how many lost a custom shader.
 	uint shaded;
+	// `CUSTOM_materials_layers` records written, summed over every material that
+	// carried a stack. Zero for a scene whose materials are all plain, which is
+	// how a script tells "this file had no layers" from "the layers were lost" —
+	// the distinction `shaded` alone could not make, since a layered material
+	// reaches the frame as a generated `ShaderMaterial` and is counted there too.
+	uint layers;
 	usz bytes;
 }
 
@@ -177,29 +246,100 @@ struct ExportGeometry @local
 	int positions;
 	int normals;
 	int uvs;
+	// COLOR_0, or -1. Only a mesh re-read out of a file can have one.
+	int colors;
 	int indices;
 }
 
-// A material by content: the colour it resolves to, the image it samples, and
-// whether it blends. Two nodes agreeing on all three share one, which is what
-// "deduplicated by content" means once the image itself is already deduplicated.
-struct ExportMaterial @local
+<*
+ Everything about a node that decides which glTF material it needs.
+
+ **The whole of it is the dedup key**, which is why it is one struct rather than
+ eight arguments to `material_for`. Every field here is something two nodes can
+ disagree about while agreeing on all the others, and each one that were left out
+ of the key would collapse two materials into one and give both whichever was
+ walked first. `transparent` is the oldest example — an opaque wall that comes
+ back see-through, or glass that comes back solid, depending on walk order — and
+ `double_sided`, `uv_transform` and the two stack identities fail exactly the
+ same way.
+
+ The identities are indices rather than resolved contents deliberately: two nodes
+ naming one material of one asset have the same maps and the same layers by
+ construction, so comparing them field by field would be a deep compare to answer
+ a question two integers already answer.
+*>
+struct ExportSurface @local
 {
 	float[4] base_color;
 	// The document's texture index, or -1. Named for what it identifies rather
 	// than for the array it indexes, because the image and the texture are
 	// one-to-one here — see `ExportImage`.
-	int image;
-	// Whether this one was written with `alphaMode: BLEND`.
-	//
-	// **Part of the key, not a property hung off it.** Two materials of the same
-	// colour and the same image that disagree about blending are two glTF
-	// materials, and a dedup that ignored this would collapse them into one —
-	// whose `alphaMode` would then be whichever of the two happened to be written
-	// first. The failure is silent in both directions: an opaque wall that comes
-	// back see-through, or glass that comes back solid, depending on the order the
-	// scene was walked in.
+	int texture;
+	// `material.repeat` and `material.offset`, as `Material.uv_transform` holds
+	// them: xy is the repeat, zw the offset. `UV_IDENTITY` for a material that
+	// never set one, which writes no `KHR_texture_transform` at all.
+	float[4] uv_transform;
 	bool transparent;
+	// `material.side` — `DoubleSide` is the only one glTF has a word for, and the
+	// two single-sided values differ in which face they keep, which glTF cannot
+	// say at all. `FrontSide` and `BackSide` therefore both write `false`.
+	bool double_sided;
+	// The three core maps, **already resolved to this document's texture indices**
+	// rather than named by where they came from.
+	//
+	// That is the difference between a key that dedups and one that does not. Two
+	// source materials of two different files can name two different images whose
+	// bytes are identical; `ExportImage` collapses those to one exported texture,
+	// and a key holding the source material's *index* would then keep two glTF
+	// materials that are byte-for-byte the same. Keying on what is written is the
+	// only thing that stays in step with the image dedup underneath it.
+	gltf::WriteTextureRef normal;
+	gltf::WriteTextureRef occlusion;
+	gltf::WriteTextureRef emissive;
+	float[3] emissive_factor;
+	// The `CUSTOM_materials_layers` stack, named by where it was read from: the
+	// asset, and the index of the material inside that asset's own document.
+	// `NO_ASSET`/-1 for a material with no layers.
+	//
+	// The one thing here that is an identity rather than a resolved value, because
+	// a stack is a list of eighteen-field records and comparing two field by field
+	// would be a deep compare to answer a question two integers already answer:
+	// two nodes naming one material of one asset have the same layers by
+	// construction.
+	AssetId layers_asset;
+	int layers_material;
+	// The `MeshPass.materials` index of the `three.LayeredMaterial` this draws
+	// with, or -1. Its stack and its base normal map win over the source
+	// document's — `script_material_index` argues why.
+	int script_material;
+}
+
+fn bool ExportSurface.equals(self, ExportSurface other)
+{
+	if (self.texture != other.texture) return false;
+	if (self.transparent != other.transparent || self.double_sided != other.double_sided) return false;
+	if (!self.normal.same_as(other.normal)) return false;
+	if (!self.occlusion.same_as(other.occlusion)) return false;
+	if (!self.emissive.same_as(other.emissive)) return false;
+	if (self.layers_material != other.layers_material) return false;
+	if (self.script_material != other.script_material) return false;
+	if (self.layers_material >= 0 && !(self.layers_asset == other.layers_asset)) return false;
+	for (usz i = 0; i < 3; i++)
+	{
+		if (self.emissive_factor[i] != other.emissive_factor[i]) return false;
+	}
+	for (usz i = 0; i < 4; i++)
+	{
+		if (self.base_color[i] != other.base_color[i]) return false;
+		if (self.uv_transform[i] != other.uv_transform[i]) return false;
+	}
+	return true;
+}
+
+// One written material, and the surface it was written for.
+struct ExportMaterial @local
+{
+	ExportSurface key;
 	uint material;
 }
 
@@ -236,6 +376,30 @@ struct ExportImage @local
 	uint texture;
 }
 
+<*
+ An image a material *layer* named, keyed on where it sits in the source document
+ rather than on a device slot.
+
+ **A second key beside `ExportImage.device`, and it has to be.** A layer's images
+ are read straight out of the file the layer was read out of — see
+ `Exporter.layer_texture_for` — so on this path there is no device slot to key
+ on: a layer that was never uploaded has none, and one that was has a slot the
+ exporter cannot walk back to an image index.
+
+ The consequence is that an image named both as a mesh's base colour map and as a
+ layer's mask is written into the file twice. That is the answer the renderer
+ gives too — `Assets` uploads it twice, once as `SRGB` and once as `LINEAR`,
+ because a picture and a weight are not the same image even when they are the
+ same bytes. `layers_test.c3`'s `one_image_used_as_a_colour_and_as_a_mask_is_two_uploads`
+ is that claim on the loading side.
+*>
+struct ExportLayerImage @local
+{
+	AssetId asset;
+	int image;
+	uint texture;
+}
+
 // Everything one export is part-way through, so the walk can be a plain
 // recursive function rather than a closure over nine locals.
 struct Exporter @local
@@ -246,6 +410,7 @@ struct Exporter @local
 	List{ExportMaterial} materials;
 	List{ExportEntry} entries;
 	List{ExportImage} images;
+	List{ExportLayerImage} layer_images;
 	ExportReport report;
 }
 
@@ -270,12 +435,14 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 	state.materials.init(mem, 8);
 	state.entries.init(mem, 16);
 	state.images.init(mem, 8);
+	state.layer_images.init(mem, 8);
 	defer
 	{
 		state.geometry.free();
 		state.materials.free();
 		state.entries.free();
 		state.images.free();
+		state.layer_images.free();
 	}
 
 	// The root goes in as a node of its own rather than having its children
@@ -288,6 +455,12 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 	builder.add_root((uint)root);
 
 	if (state.report.instances == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+
+	// After the scene and only when there was one to write: a file with nothing
+	// in it should be refused above rather than come back holding a camera and a
+	// light pointed at nothing.
+	state.write_camera();
+	state.write_light();
 
 	builder.save_glb(path)!;
 	// The file's size rather than the blob's, so the number reported is the one a
@@ -710,14 +883,12 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 		mesh.base_color[2] * linear_tint[2],
 		mesh.base_color[3] * linear_tint[3] * opacity,
 	};
-	int texture = self.texture_for(node)!;
 	// A null material is one whose slot was collected while a node still named it,
-	// which `MeshPass.record` draws as nothing at all. Opaque is the honest answer
-	// for it: `BlendMode.NONE` is what every material meant before blending
-	// existed and is what the zero fill spells.
-	int material = self.material_for(
-		color, texture, material_of != null && material_of.blend != BlendMode.NONE
-	);
+	// which `MeshPass.record` draws as nothing at all. Every answer below has the
+	// same shape for it: opaque, single-sided, the identity transform — which is
+	// what every material meant before any of those existed, and what the zero
+	// fill spells.
+	int material = self.material_for(self.surface_for(node, material_of, color)!);
 
 	foreach (&known : self.entries)
 	{
@@ -727,11 +898,16 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	uint written = self.out.add_mesh(mesh.name);
 	ExportGeometry* streams = &self.geometry[(usz)geometry];
 
-	gltf::WriteAttribute[3] attributes;
+	gltf::WriteAttribute[4] attributes;
 	usz count = 0;
 	attributes[count++] = { .name = "POSITION", .accessor = (uint)streams.positions };
 	if (streams.normals >= 0) attributes[count++] = { .name = "NORMAL", .accessor = (uint)streams.normals };
 	if (streams.uvs >= 0) attributes[count++] = { .name = "TEXCOORD_0", .accessor = (uint)streams.uvs };
+	// Written whenever the source carried one, not only when a layer reads it.
+	// That is the condition the renderer uploads it on, and it is the attribute a
+	// `VERTEX_COLOR` mask names — without it such a layer would come back naming
+	// something the file does not have.
+	if (streams.colors >= 0) attributes[count++] = { .name = "COLOR_0", .accessor = (uint)streams.colors };
 
 	self.out.add_primitive(written, attributes[:count], streams.indices, material);
 	self.entries.push({ .geometry = (uint)geometry, .material = material, .entry = written });
@@ -764,6 +940,7 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 		.positions = (int)self.out.add_positions(streams.positions.array_view()),
 		.normals = -1,
 		.uvs = -1,
+		.colors = -1,
 		.indices = (int)self.out.add_indices(streams.indices.array_view()),
 	};
 	// Short is absent, which is the same test `upload_primitive` applies: a
@@ -776,6 +953,15 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 	if (streams.uvs.len() == streams.positions.len())
 	{
 		written.uvs = (int)self.out.add_vec2(streams.uvs.array_view());
+	}
+	// **Float VEC4, whatever width the file stored it at.** glTF allows COLOR_0
+	// as normalized bytes or shorts as well, and `@each_color` has already
+	// widened whichever it was; narrowing it again to guess at the original
+	// spelling would be a lossy step taken for the sake of matching a detail
+	// nothing reads back. `Assets` uploads it as float4 for the same reason.
+	if (streams.colors.len() == streams.positions.len())
+	{
+		written.colors = (int)self.out.add_vec4(streams.colors.array_view());
 	}
 
 	self.geometry.push(written);
@@ -948,13 +1134,17 @@ fn char[]? Exporter.encode_from_device(&self, int slot)
 }
 
 <*
- Which of the source file's images a mesh's base colour texture came from.
+ Which material of the source file a mesh was drawn with, or -1.
 
- Walked from the primitive rather than remembered, because `GpuMesh.texture` is
- an index into the *shared* table and deliberately says nothing about which file
- or which image it was — that is what makes it the dedup key.
+ Walked from the primitive rather than remembered, because nothing the renderer
+ keeps per mesh points back at the document: `GpuMesh.texture` is an index into
+ the *shared* table and deliberately says nothing about which file or which
+ material it came from — that is what makes it the dedup key.
+
+ Two callers want this walk: the image lookup below, and the layer stack, which
+ lives on the material and nowhere else.
 *>
-fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
+fn int source_material_index(Asset* asset, GpuMesh* mesh) @local
 {
 	if (mesh.gltf_mesh >= asset.stream.gltf.meshes.len()) return -1;
 	gltf::Mesh source = asset.stream.gltf.meshes[mesh.gltf_mesh];
@@ -963,6 +1153,16 @@ fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
 	sz? material_index = source.primitives[mesh.gltf_primitive].attributes.get("material");
 	if (catch material_index) return -1;
 	if (material_index >= asset.stream.gltf.materials.len()) return -1;
+	return (int)material_index;
+}
+
+<*
+ Which of the source file's images a mesh's base colour texture came from.
+*>
+fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
+{
+	int material_index = source_material_index(asset, mesh);
+	if (material_index < 0) return -1;
 
 	int texture = asset.stream.gltf.materials[material_index].baseColorTexture.source;
 	if (texture < 0 || texture >= asset.stream.gltf.textures.len()) return -1;
@@ -972,19 +1172,292 @@ fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
 }
 
 <*
- The material for a colour, a texture and a blend mode, written once per distinct
- triple.
+ The material of the *source document* a node's mesh was drawn with, or -1.
 
- @param transparent : `Whether the material this node draws with blends. Part of the dedup key — ExportMaterial says why.`
+ Where the normal, occlusion and emissive maps come from, and where an imported
+ `CUSTOM_materials_layers` stack lives.
+
+ ## Read out of the source document, not off the device
+
+ For the layer stack, `GpuMesh.layers` is the other candidate and it is the wrong
+ one, three times over. It is deliberately lossy — `Assets.load_material_layers`
+ drops `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`,
+ `subsurface`, `heightTexture` and `bump`, because `lambert()` is the whole of
+ the built-in light and a field nothing evaluates is worse than an absence — so
+ writing it back would state a document the file never contained. It is
+ rearranged: `hoist_shared_mask` moves a mask every layer reads into a slot of
+ the stack's own, which is right for the bindings budget and wrong for a file,
+ where the sharing is spelled by each layer naming the same texture. And it
+ exists only after `ensure_uploaded`, which this path deliberately never calls —
+ an export needs no device, and a mesh that has been added but not yet drawn
+ would otherwise export as a mesh with no layers, which is a wrong answer that
+ looks like a file without the extension.
+
+ The parsed document has none of those problems. `Assets.load` keeps the stream
+ open for as long as the asset lives, so the whole material is sitting there
+ already parsed, complete, and in the file's own arrangement. The maps are there
+ for the same reason and were being thrown away for no reason at all: a
+ normal-mapped kit used to round-trip flat.
+
+ @return `The index of the material inside the asset's own document, or -1 for a mesh with no file behind it. The index rather than the material, because it is also part of the dedup key — see ExportSurface.`
 *>
-fn int Exporter.material_for(&self, float[4] color, int texture, bool transparent)
+fn int Exporter.source_material_of(&self, Node* node)
+{
+	Asset* asset = self.pass.assets.slot(node.asset);
+	if (asset == null || !asset.has_stream) return -1;
+
+	GpuMesh* mesh = self.pass.assets.mesh(node.asset, node.mesh);
+	if (mesh == null || mesh.gltf_mesh < 0) return -1;
+
+	return source_material_index(asset, mesh);
+}
+
+<*
+ The exported texture for one image of one source document, or -1.
+
+ The layer half of `texture_for`, and it has only that function's *first* source:
+ the bytes come out of the file the layer was read out of, with whatever
+ compression the artist chose. There is no fallback to a device readback,
+ because there is nothing to read back — a layer's images reach the device
+ through slots this path cannot walk back to, and a generated layer stack does
+ not exist (see `source_material_of`).
+
+ @param image : `Index into the source document's images array.`
+*>
+fn int Exporter.layer_texture_for(&self, AssetId id, int image)
+{
+	if (image < 0) return -1;
+
+	foreach (&known : self.layer_images)
+	{
+		if (known.asset == id && known.image == image) return (int)known.texture;
+	}
+
+	Asset* asset = self.pass.assets.slot(id);
+	if (asset == null || !asset.has_stream) return -1;
+	if (image >= asset.stream.gltf.images.len()) return -1;
+
+	char[]? encoded = asset.stream.get_image_data((uint)image);
+	if (catch encoded) return -1;
+	if (encoded.len == 0) return -1;
+
+	uint written = self.out.add_image("", encoded, asset.stream.gltf.images[image].mimeType);
+	// No sampler, for the reason `texture_for` gives: a texture that names none
+	// takes the viewer's default, which is what `Assets` uploads with.
+	uint texture = self.out.add_texture(written);
+	self.layer_images.push({ .asset = id, .image = image, .texture = texture });
+	self.report.images++;
+	return (int)texture;
+}
+
+<*
+ Turn one parsed stack back into a written one, image indices and all.
+
+ The one place the two vocabularies meet. A parsed `TextureInfo.source` is an
+ *image* index — `layer_texture` resolved it through the textures array on the
+ way in — while a written one is a *texture* index, so every slot goes through
+ `layer_texture_for`, which is what allocates the texture in the output document.
+ `gltf.c3l`'s writer has structs of its own precisely so this conversion cannot
+ be skipped by accident.
+
+ The transform rides along unchanged: it is `KHR_texture_transform`, which the
+ parser reads off the same object and neither side interprets.
+*>
+fn void Exporter.write_layers(&self, uint material, AssetId id, gltf::MaterialLayers* source)
+{
+	uint stack = self.out.add_material_layers(
+		material,
+		self.write_layer_texture(id, source.heightTexture),
+		source.bump
+	);
+
+	foreach (&layer : source.layers)
+	{
+		gltf::WriteMaterialLayer written = gltf::material_layer(layer.name);
+		written.baseColorFactor = layer.baseColorFactor;
+		written.metallicFactor = layer.metallicFactor;
+		written.roughnessFactor = layer.roughnessFactor;
+		written.baseColorTexture = self.write_layer_texture(id, layer.baseColorTexture);
+		written.metallicRoughnessTexture = self.write_layer_texture(id, layer.metallicRoughnessTexture);
+		written.normalTexture = self.write_layer_texture(id, layer.normalTexture);
+		written.heightTexture = self.write_layer_texture(id, layer.heightTexture);
+		written.bump = layer.bump;
+		written.emissiveFactor = layer.emissiveFactor;
+		written.emissiveTexture = self.write_layer_texture(id, layer.emissiveTexture);
+		written.subsurface = layer.subsurface;
+		written.mask = {
+			.source = layer.mask.source,
+			.channel = layer.mask.channel,
+			.texture = self.write_layer_texture(id, layer.mask.texture),
+			.attribute = layer.mask.attribute,
+			.invert = layer.mask.invert,
+		};
+		written.blend_mode = layer.blend_mode;
+		written.opacity = layer.opacity;
+		written.enabled = layer.enabled;
+
+		self.out.add_layer(stack, written);
+		self.report.layers++;
+	}
+}
+
+fn gltf::WriteTextureRef Exporter.write_layer_texture(&self, AssetId id, gltf::TextureInfo info)
+{
+	gltf::WriteTextureRef written = gltf::texture_ref(self.layer_texture_for(id, info.source));
+	written.rotation = info.rotation;
+	written.offset = info.offset;
+	written.scale = info.scale;
+	return written;
+}
+
+<*
+ Whether the material this node draws with is a `three.LayeredMaterial`, and its
+ index if it is.
+
+ The other half of `source_material_of`. A stack a *script* wrote has no
+ source document to be read out of — it never came from a file — so it is read
+ from `Material.script_layers`, the description `js/prelude/layers.js` sends
+ across at construction beside the shader it generated.
+
+ **This beats an imported stack when a node has both**, which is the rule
+ `texture_slot` already follows one function up: the material's map beats the
+ mesh's own image, because the material is what the frame drew with. A script
+ that loads a layered terrain and then puts its own `LayeredMaterial` on it has
+ replaced the stack, and writing the file's would export a picture the frame did
+ not show.
+
+ @return `The index into MeshPass.materials, or -1. The index rather than the stack, because it is also the dedup key — see ExportMaterial.`
+*>
+fn int Exporter.script_material_index(&self, Node* node)
+{
+	Material* material = self.pass.material(node.material);
+	if (material == null) return -1;
+	return material.script_layers.present && material.script_layers.layers.len() > 0
+		? (int)node.material
+		: -1;
+}
+
+<*
+ A script's stack, written out.
+
+ The mirror of `write_layers`, and the differences are all consequences of where
+ the description came from rather than choices made here.
+
+ **No height map and no bump**, because `LayeredMaterial` refuses both by name —
+ there is no parallax in this renderer, so a script cannot state one and there is
+ nothing to write. The same goes for the PBR half: `metalness` and `roughness`
+ are refused for `plan.md` §12's reason, so a script stack has no metallic factor
+ to lose. That is why this is lossless where writing `GpuLayers` back would not
+ be: the description is the whole of what the script said, not a reduction of a
+ file.
+
+ **The tint and the opacity are read now, not remembered.** `Material.layer_params`
+ answers with the shader's baked literals for a plain layer and with the live
+ push block for one that asked to be `animated`, so a tint a script has been
+ animating exports as whatever it is at the moment of the export.
+
+ The tint goes into `baseColorFactor.rgb` with an alpha of 1 and the opacity into
+ the extension's own `opacity` beside it. The importer multiplies the two, so
+ that round-trips to the numbers that went in — putting the opacity in the alpha
+ instead would come back the same in the product and wrong in both fields.
+
+ **Every layer here is enabled.** `LayeredMaterial` drops `enabled: false` before
+ it generates anything, so a disabled layer never reaches the host at all. What
+ is written is what the shader draws.
+*>
+fn void Exporter.write_script_layers(&self, uint material, Material* source)
+{
+	uint stack = self.out.add_material_layers(material);
+	int shared_mask = source.textures.at(source.script_layers.mask_binding);
+
+	foreach (&layer : source.script_layers.layers)
+	{
+		float[4] params = source.layer_params(layer);
+
+		gltf::WriteMaterialLayer written = gltf::material_layer(layer.name);
+		written.baseColorFactor = { params[0], params[1], params[2], 1.0 };
+		written.opacity = params[3];
+		written.baseColorTexture = self.script_layer_texture(source, layer.map_binding);
+		written.normalTexture = self.script_layer_texture(source, layer.normal_binding);
+		written.emissiveTexture = self.script_layer_texture(source, layer.emissive_binding);
+		written.emissiveFactor = {
+			layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2]
+		};
+		written.blend_mode = (gltf::LayerBlendMode)layer.blend_mode;
+		written.mask = {
+			.source = (gltf::LayerMaskSource)layer.mask_source,
+			.channel = (gltf::LayerMaskChannel)layer.mask_channel,
+			// A layer with no mask sampler of its own reads a channel of the
+			// stack's shared one, which is the arrangement the generator produces
+			// and the one the extension's per-layer `channel` field exists for.
+			// Written per layer because that is how the file spells the sharing —
+			// several layers naming one textureInfo — which is exactly what
+			// `hoist_shared_mask` undoes on the way back in.
+			.texture = layer.mask_binding != 0
+				? self.script_layer_texture(source, layer.mask_binding)
+				: gltf::texture_ref(self.device_texture_for(shared_mask)),
+			.attribute = "",
+			.invert = layer.invert,
+		};
+		written.enabled = true;
+
+		self.out.add_layer(stack, written);
+		self.report.layers++;
+	}
+}
+
+fn gltf::WriteTextureRef Exporter.script_layer_texture(&self, Material* source, uint binding)
+{
+	return gltf::texture_ref(self.device_texture_for(source.textures.at(binding)));
+}
+
+<*
+ The exported texture for a device slot, read back off the device.
+
+ `texture_for`'s second source, on its own, because a script's image has no
+ first: a `LayeredMaterial`'s maps are `three.texture(path)` and `DataTexture`
+ handles, which go straight into the shared table with no file behind them that
+ this could copy bytes out of.
+
+ It shares `texture_for`'s memo rather than the layer one, and that is the point:
+ the key is the device slot, which is already content-deduplicated across every
+ loaded file, so a stack whose base map and whose first layer sample one image
+ write it once. The layer memo exists for the *imported* path, where there is no
+ device slot to key on — `ExportLayerImage` says so there.
+
+ @return `The document's texture index, or -1 when there is no device, the slot is dead, or the readback failed.`
+*>
+fn int Exporter.device_texture_for(&self, int slot)
+{
+	if (slot < 0) return -1;
+
+	foreach (&known : self.images)
+	{
+		if (known.device == slot) return (int)known.texture;
+	}
+
+	char[]? encoded = self.encode_from_device(slot);
+	if (catch encoded) return -1;
+	defer free(encoded);
+
+	uint image = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
+	uint texture = self.out.add_texture(image);
+	self.images.push({ .device = slot, .texture = texture });
+	self.report.images++;
+	return (int)texture;
+}
+
+<*
+ The glTF material one surface needs, written once per distinct surface.
+
+ `ExportSurface` is both the argument and the dedup key, and says why it is the
+ whole of it.
+*>
+fn int Exporter.material_for(&self, ExportSurface surface)
 {
 	foreach (&known : self.materials)
 	{
-		if (known.image != texture || known.transparent != transparent) continue;
-		if (known.base_color[0] != color[0] || known.base_color[1] != color[1]) continue;
-		if (known.base_color[2] != color[2] || known.base_color[3] != color[3]) continue;
-		return (int)known.material;
+		if (known.key.equals(surface)) return (int)known.material;
 	}
 
 	// Fully rough and not metallic: `mesh.slang` is a Lambert term and a texture,
@@ -998,20 +1471,146 @@ fn int Exporter.material_for(&self, float[4] color, int texture, bool transparen
 	// the same and only one of them tells a viewer it may skip the sort.
 	uint written = self.out.add_material(
 		"",
-		{ color[0], color[1], color[2], color[3] },
+		{ surface.base_color[0], surface.base_color[1], surface.base_color[2], surface.base_color[3] },
 		metallic: 0.0,
 		roughness: 1.0,
-		base_color_texture: texture,
-		alpha_mode: transparent ? gltf::AlphaMode.BLEND : gltf::AlphaMode.OPAQUE,
+		base_color_texture: uv_texture_ref(surface.texture, surface.uv_transform),
+		double_sided: surface.double_sided,
+		alpha_mode: surface.transparent ? gltf::AlphaMode.BLEND : gltf::AlphaMode.OPAQUE,
 	);
-	self.materials.push({
-		.base_color = color,
-		.image = texture,
-		.transparent = transparent,
-		.material = written,
-	});
+	self.out.set_material_maps(
+		written,
+		normal: surface.normal,
+		occlusion: surface.occlusion,
+		emissive: surface.emissive,
+		emissive_factor: {
+			surface.emissive_factor[0], surface.emissive_factor[1], surface.emissive_factor[2]
+		}
+	);
+
+	// After `add_material`, because the stack hangs off the material that was
+	// just added and `add_material_layers` takes its index.
+	if (surface.script_material >= 0)
+	{
+		Material* source = self.pass.material((uint)surface.script_material);
+		if (source != null) self.write_script_layers(written, source);
+	}
+	else if (surface.layers_material >= 0)
+	{
+		Asset* asset = self.pass.assets.slot(surface.layers_asset);
+		if (asset != null && asset.has_stream && surface.layers_material < asset.stream.gltf.materials.len())
+		{
+			self.write_layers(
+				written, surface.layers_asset,
+				&asset.stream.gltf.materials.get_ref((usz)surface.layers_material).layers_ext
+			);
+		}
+	}
+
+	self.materials.push({ .key = surface, .material = written });
 	self.report.materials++;
 	return (int)written;
+}
+
+<*
+ Everything about a node that decides its glTF material, resolved.
+
+ **The maps are resolved here rather than in `material_for`**, which is what lets
+ the dedup key be what gets written. Resolving one writes its image into the
+ document on the first call and answers from the memo afterwards, so doing it
+ before the dedup check costs nothing: an image any material references has to be
+ in the file, and two materials that turn out to be one reference the same one.
+
+ **The script's material wins over the source document's.** A node drawing a
+ file's mesh under its own `LayeredMaterial` shows the script's stack and the
+ script's base normal; writing the file's would be a picture the frame did not
+ draw. Same rule as `texture_slot`'s, one level up.
+
+ **Not the metallic-roughness map, and not the two factors.** `plan.md` §12: this
+ renderer has no specular term, so those describe an equation nothing here
+ evaluates. Writing a roughness the renderer ignored would put a number in the
+ file that never affected a pixel.
+*>
+fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color)
+{
+	ExportSurface surface = {
+		.base_color = color,
+		.texture = self.texture_for(node)!,
+		// A null material is one whose slot was collected while a node still named
+		// it, which `MeshPass.record` draws as nothing at all. Every answer here
+		// has the same shape for it — opaque, single-sided, the identity transform
+		// — which is what every material meant before any of those existed.
+		.uv_transform = material_of == null ? UV_IDENTITY : material_of.uv_transform_or_identity(),
+		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
+		.double_sided = material_of != null && material_of.cull == CULL_MODE_NONE,
+		.normal = gltf::NO_TEXTURE_REF,
+		.occlusion = gltf::NO_TEXTURE_REF,
+		.emissive = gltf::NO_TEXTURE_REF,
+		.layers_asset = NO_ASSET,
+		.layers_material = -1,
+		.script_material = self.script_material_index(node),
+	};
+
+	if (surface.script_material >= 0)
+	{
+		Material* script = self.pass.material((uint)surface.script_material);
+		if (script != null)
+		{
+			surface.normal = gltf::texture_ref(
+				self.device_texture_for(script.textures.at(script.script_layers.base_normal_binding))
+			);
+		}
+		return surface;
+	}
+
+	int source_material = self.source_material_of(node);
+	if (source_material < 0) return surface;
+
+	Asset* asset = self.pass.assets.slot(node.asset);
+	gltf::Material* source = asset.stream.gltf.materials.get_ref((usz)source_material);
+	surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
+	surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
+	surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
+	surface.emissive_factor = {
+		source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z
+	};
+	if (source.has_layers())
+	{
+		surface.layers_asset = node.asset;
+		surface.layers_material = source_material;
+	}
+	return surface;
+}
+
+// A source document's textureInfo as a written one: its image resolved to an
+// output texture, its `KHR_texture_transform` carried across untouched.
+fn gltf::WriteTextureRef Exporter.source_texture_ref(&self, AssetId id, gltf::TextureInfo info)
+{
+	gltf::WriteTextureRef written = gltf::texture_ref(self.layer_texture_for(id, info.source));
+	written.rotation = info.rotation;
+	written.offset = info.offset;
+	written.scale = info.scale;
+	return written;
+}
+
+<*
+ A base colour map carrying `material.repeat` and `material.offset`.
+
+ The renderer applies these in the fragment stage before a material body runs
+ (`shaders/material.slang`), so they are part of what the frame showed and belong
+ in the file. `KHR_texture_transform` is the only place core glTF has for them —
+ without it a tiling floor exports with its texture stretched once across the
+ whole surface, which is not a subtle difference.
+
+ `Material.uv_transform_or_identity` has already turned the all-zero "unset" into
+ the identity, and the identity writes no extension.
+*>
+fn gltf::WriteTextureRef uv_texture_ref(int texture, float[4] uv_transform) @local
+{
+	gltf::WriteTextureRef written = gltf::texture_ref(texture);
+	written.scale = { uv_transform[0], uv_transform[1] };
+	written.offset = { uv_transform[2], uv_transform[3] };
+	return written;
 }
 
 <*
@@ -1066,6 +1665,10 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 
 	asset.stream.@each_normal(primitive; Vec3 normal, sz i) { out.normals.push(normal); };
 	asset.stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { out.uvs.push(uv); };
+	// Set 0 only. `CUSTOM_materials_layers` lets a mask name an attribute, and
+	// every attribute it can name that this renderer reads is COLOR_0 —
+	// `Assets.load_material_layers` uploads one colour stream per mesh.
+	asset.stream.@each_color(primitive, 0; Vec4 color, sz i) { out.colors.push(color); };
 
 	read_indices(&asset.stream, primitive, &out.indices);
 	// A primitive with no index accessor is a plain vertex list, and glTF lets a
@@ -1119,4 +1722,95 @@ fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 		out.normals[i] = length > 0 ? normal / length : (Vec3){ 0, 0, 0 };
 	}
 	return out.indices.len() >= 3;
+}
+
+<*
+ The camera, as a glTF camera on a node of its own.
+
+ **Without this an exported scene opens wherever the viewer decides**, which for
+ most viewers is a framing of the bounding box — so a scene composed for a
+ particular angle arrives pointing somewhere else. glTF has a camera; three has
+ one; nothing was carrying it across.
+
+ The orbit camera reduces to a placement cleanly: `Camera.eye` is where it is and
+ `Camera.orbit_dir` is the direction from the target back to the eye, which is
+ the node's +Z — because a glTF camera looks down **-Z**, and -Z is therefore the
+ direction from the eye toward the target.
+
+ `fov` is degrees here and radians in the file; `aspectRatio` is deliberately not
+ written, which tells a viewer to use its own viewport rather than letterboxing
+ to whatever the offscreen target happened to be.
+*>
+fn void Exporter.write_camera(&self)
+{
+	Camera* camera = &self.pass.camera;
+
+	uint written = self.out.add_camera(
+		"camera",
+		math::deg_to_rad(camera.fov),
+		camera.near_plane,
+		zfar: camera.far_plane
+	);
+	uint node = self.out.add_node(
+		"camera",
+		translation: camera.eye(),
+		rotation: rotation_towards(camera.orbit_dir())
+	);
+	self.out.set_node_camera(node, written);
+	self.out.add_root(node);
+	self.report.nodes++;
+}
+
+<*
+ The light, as a directional `KHR_lights_punctual` on a node of its own.
+
+ `MeshPass.light` is `float[4]`: xyz is the **surface-to-light** direction and w
+ is the ambient floor. A glTF directional light shines along its node's -Z, and
+ the direction light *travels* is the negation of surface-to-light — so the
+ node's +Z is the vector as stored, and no negation appears here at all. Getting
+ that backwards lights the far side of everything, which reads as the exporter
+ having the normals wrong.
+
+ **The ambient floor cannot be written.** `KHR_lights_punctual` has no ambient
+ light — it was removed from the extension before ratification, and there is no
+ other standard slot for one. A scene with a high floor therefore reloads darker
+ in a viewer than it looked here. That is a real loss and there is nowhere
+ standard to put it; the alternative was to fold it into the directional light's
+ intensity, which would be a different picture rather than the same one.
+
+ White at intensity 1 because three's light has neither a colour nor a strength
+ of its own — the direction is the whole of it.
+*>
+fn void Exporter.write_light(&self)
+{
+	Vec3 to_light = { self.pass.light[0], self.pass.light[1], self.pass.light[2] };
+	// A light of zero length points nowhere, and normalising it would put NaNs
+	// into the node's rotation. Nothing is written rather than something wrong.
+	if (to_light.length() < 1e-6f) return;
+
+	uint written = self.out.add_light("light", gltf::LightType.DIRECTIONAL);
+	uint node = self.out.add_node("light", rotation: rotation_towards(to_light.normalize()));
+	self.out.set_node_light(node, written);
+	self.out.add_root(node);
+	self.report.nodes++;
+}
+
+<*
+ The rotation that puts a node's +Z along `forward`.
+
+ Both callers want the same thing and neither wants a full look-at: a camera and
+ a directional light are aimed by their -Z, so the vector handed in is already
+ the +Z and the basis is completed around it.
+
+ The up axis flips near the pole for `Camera.pitch`'s reason, one file over: with
+ `up` parallel to `forward` the cross product is zero, the basis is degenerate
+ and the quaternion comes back full of NaN. Nothing errors — the camera simply
+ renders nothing — so the case is handled rather than asserted.
+*>
+fn Quaternionf rotation_towards(Vec3 forward) @local
+{
+	Vec3 up = math::abs(forward.y) > 0.999f ? (Vec3) { 0, 0, 1 } : (Vec3) { 0, 1, 0 };
+	Vec3 x = up.cross(forward).normalize();
+	Vec3 y = forward.cross(x);
+	return quat_from_basis(x, y, forward);
 }

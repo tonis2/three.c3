@@ -46,6 +46,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 	self.bind(host, "disposeMaterial", &js_dispose_material, 1);
+	self.bind(host, "beginMaterialLayers", &js_begin_material_layers, 3);
+	self.bind(host, "addMaterialLayer", &js_add_material_layer, 14);
 }
 
 <*
@@ -752,4 +754,149 @@ fn void js_set_material(
 	}
 
 	self.pass.scene.set_material(id, material);
+}
+
+<*
+ `beginMaterialLayers(material, sharedMask)` — start recording what a
+ `LayeredMaterial` *is*.
+
+ ## Why a shader has to be told what it means
+
+ Everything else on this file's surface crosses in one direction: a description
+ goes in and a compiled pipeline comes out, and the description is not needed
+ again. A layer stack is the exception, because `scene.export` has to write the
+ stack back into a `.glb` and cannot get it out of the Slang the generator
+ emitted — "this layer multiplies" is a choice of expression by then, and
+ `CUSTOM_materials_layers` wants the word.
+
+ So the stack crosses twice: once as a shader, through `createMaterial`, and once
+ as a description, through this and `addMaterialLayer`. `ScriptLayer` in
+ `scene/material.c3` is what the second crossing builds and why it stores
+ bindings rather than images.
+
+ **Only `LayeredMaterial` calls this**, and it calls it for every stack including
+ an empty one. A hand-written `ShaderMaterial` that happens to sample four
+ textures is not a layer stack and does not claim to be one.
+
+ `sharedMask` is the sampler several layers read a channel of, or `""` for a
+ stack where no two share one. `baseNormal` is the stack's base normal map, which
+ becomes the glTF material's own `normalTexture` rather than any layer's — it is
+ the one under all of them, and the only normal map anything in this renderer
+ has, since the core materials carry no such property.
+*>
+fn void js_begin_material_layers(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		Material* material = self.pass.material((uint)arg_int(&js, argc, args, 0));
+		if (material == null)
+		{
+			*out = js.raise("that material is not in this context");
+			return;
+		}
+
+		String shared = arg_text(&js, argc, args, 1, tmem);
+		String base_normal = arg_text(&js, argc, args, 2, tmem);
+		material.begin_script_layers(
+			shared.len == 0 ? 0 : material.binding_of_texture(shared),
+			base_normal.len == 0 ? 0 : material.binding_of_texture(base_normal)
+		);
+	};
+}
+
+<*
+ `addMaterialLayer(material, name, samplers, blend, maskSource, maskChannel,
+ invert, opacity, r, g, b, er, eg, eb)` — one layer of the stack.
+
+ ## The samplers cross as one joined string
+
+ `samplers` is `"map,normal,emissive,mask,params"`, each field a sampler name the
+ generator chose or empty for a slot the layer does not use — the same shape the
+ uniforms take two functions up, and safe for the same reason: these are names
+ `js/prelude/layers.js` generates as `layer3_map`, so a comma cannot appear in
+ one. The layer's own `name` is a separate argument precisely because it *is*
+ free text, and joining it with the rest is how a layer called "rock, wet" would
+ have become two fields.
+
+ **Names rather than binding numbers**, because the resolution belongs on this
+ side: `Material.binding_of_texture` asks the material's own reflected pipeline,
+ which is the only thing that actually knows, and `MATERIAL_BINDING_FIRST` stays
+ a number the prelude never has to spell.
+
+ `params` is the uniform holding an `animated` layer's tint and opacity, resolved
+ to a push offset once here and read live at export — `ScriptLayer` argues both.
+
+ The blend mode, mask source and mask channel arrive as `gltf.c3l`'s own
+ ordinals, untranslated, exactly as `meshLayers` hands them the other way.
+*>
+fn void js_add_material_layer(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		Material* material = self.pass.material((uint)arg_int(&js, argc, args, 0));
+		if (material == null)
+		{
+			*out = js.raise("that material is not in this context");
+			return;
+		}
+
+		List{String} samplers;
+		samplers.init(tmem, 5);
+		split_commas(arg_text(&js, argc, args, 2, tmem), &samplers);
+
+		ScriptLayer layer = {
+			.name = arg_text(&js, argc, args, 1, tmem),
+			.map_binding = binding_at(material, &samplers, 0),
+			.normal_binding = binding_at(material, &samplers, 1),
+			.emissive_binding = binding_at(material, &samplers, 2),
+			.mask_binding = binding_at(material, &samplers, 3),
+			.params_offset = samplers.len() > 4 && samplers[4].len > 0
+				? material.uniform_offset(samplers[4])
+				: -1,
+			.blend_mode = (uint)arg_int(&js, argc, args, 3),
+			.mask_source = (uint)arg_int(&js, argc, args, 4),
+			.mask_channel = (uint)arg_int(&js, argc, args, 5),
+			.invert = arg_truth(&js, argc, args, 6),
+			.opacity = (float)arg_number(&js, argc, args, 7),
+			.tint = {
+				(float)arg_number(&js, argc, args, 8),
+				(float)arg_number(&js, argc, args, 9),
+				(float)arg_number(&js, argc, args, 10),
+			},
+			.emissive_factor = {
+				(float)arg_number(&js, argc, args, 11),
+				(float)arg_number(&js, argc, args, 12),
+				(float)arg_number(&js, argc, args, 13),
+			},
+		};
+		material.add_script_layer(layer);
+	};
+}
+
+// One sampler name of the joined list, as a binding. Zero for a field that is
+// absent or empty, which is what `TextureSlots.at` reads as "no such sampler".
+fn uint binding_at(Material* material, List{String}* names, sz at) @local
+{
+	if (at >= (sz)names.len() || names.get(at).len == 0) return 0;
+	return material.binding_of_texture(names.get(at));
 }

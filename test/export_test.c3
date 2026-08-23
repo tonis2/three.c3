@@ -94,6 +94,25 @@ fn String json_chunk(String path)
 	return (String)bytes[20:(usz)length];
 }
 
+// How many times a key appears in the chunk. `contains` answers "at least one",
+// and the questions about a *per-mesh* attribute need "exactly one".
+fn usz occurrences(String haystack, String needle)
+{
+	usz found = 0;
+	usz at = 0;
+	while (at + needle.len <= haystack.len)
+	{
+		if (haystack[at:needle.len] == needle)
+		{
+			found++;
+			at += needle.len;
+			continue;
+		}
+		at++;
+	}
+	return found;
+}
+
 // ============================================================================
 // The acceptance check
 // ============================================================================
@@ -678,8 +697,10 @@ fn void the_file_declares_the_extension_it_uses() @test
 		test::@check(result.value == "[1,0]", "three copies batch and one does not; got %s", result.value);
 
 		String declared = json_chunk(batched);
+		// Named in the array rather than being the whole of it: every export
+		// declares KHR_lights_punctual too, for the light it writes.
 		test::@check(
-			declared.contains(`"extensionsUsed":["EXT_mesh_gpu_instancing"]`),
+			declared.contains(`"extensionsUsed":[`) && declared.contains(`"EXT_mesh_gpu_instancing"`),
 			"the batched file declares it: %s", declared
 		);
 		test::@check(
@@ -978,9 +999,10 @@ fn void a_flattened_export_bakes_the_hierarchy_into_world_space() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(
-			// Two nodes: the root, and the one instanced node under it. Nine nodes
-			// went in — a yard, four shelves and four boxes.
-			result.value == `{"batches":1,"nodes":2,"placed":true,"yard":true}`,
+			// Four nodes: the root, the one instanced node under it, and the
+			// camera and the light, which every export writes. Nine nodes went in
+			// — a yard, four shelves and four boxes.
+			result.value == `{"batches":1,"nodes":4,"placed":true,"yard":true}`,
 			"one batch, four copies in world space, and the yard gone with it; got %s",
 			result.value
 		);
@@ -1040,7 +1062,9 @@ fn void flatten_is_off_unless_it_is_asked_for() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(
-			result.value == `{"same":[10,10,10],"batches":[0,0,0],"text":"scene.export options.flatten is true or false","object":"scene.export(path, options) wants an object for its options, like { flatten: true }"}`,
+			// Twelve rather than ten: the camera and the light are two of them, and
+			// they are written whichever way flatten was asked for.
+			result.value == `{"same":[12,12,12],"batches":[0,0,0],"text":"scene.export options.flatten is true or false","object":"scene.export(path, options) wants an object for its options, like { flatten: true }"}`,
 			"three ways of not asking agree, and two ways of asking wrong are sentences; got %s",
 			result.value
 		);
@@ -1399,5 +1423,403 @@ fn void a_transparent_material_exports_alpha_blend() @test
 			"and the opaque one leaves the default unstated: %s", json);
 		test::@check(json.contains(`,0.5]`),
 			"the opacity rode into baseColorFactor's alpha: %s", json);
+	};
+}
+
+// ============================================================================
+// Material layers
+// ============================================================================
+
+<*
+ A `CUSTOM_materials_layers` stack goes out and comes back.
+
+ The extension is the one thing here that is *not* recovered from the frame. A
+ layered material reaches the renderer as a generated `ShaderMaterial`, so by the
+ rule the rest of this file is built on — "the export is what the frame shows" —
+ it would be lost like any other shader, and until `gltf.c3l` could write the
+ extension there was nowhere for it to go anyway.
+
+ It is read out of the source document instead, which is both lossless and
+ available without a device; `Exporter.layered_material_index` argues the choice
+ against the two alternatives. What that buys is checked here in the only way
+ that can tell a written stack from a remembered one: the file is loaded back
+ through `three.load`, and the stack is read off the reloaded mesh through the
+ same `layers` accessor a script would use.
+
+ Five layers rather than one, because every field that crosses has a way of
+ crossing wrongly on its own: the blend mode, the mask channel, the inversion,
+ the disabled layer, the vertex-colour mask that names no image at all, and the
+ alpha-times-opacity fold that is one number here and two in the file.
+*>
+fn void a_layer_stack_survives_the_round_trip() @test
+{
+	String path = "build/export_layered.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const source = three.load("test/fixtures/layered.glb");
+			for (const name of ["terrain", "weathered", "plain"]) {
+				scene.add(new three.Mesh(source.mesh(name)));
+			}
+			const report = scene.export("build/export_layered.glb");
+
+			const back = three.load("build/export_layered.glb");
+			const stack = back.mesh("terrain").layers;
+			return {
+				written: report.layers,
+				names: stack.layers.map(l => l.name).join(","),
+				blends: stack.layers.map(l => l.blend).join(","),
+				channels: stack.layers.map(l => l.mask).join(","),
+				sources: stack.layers.map(l => l.maskSource).join(","),
+				off: stack.layers.filter(l => !l.enabled).map(l => l.name).join(","),
+				inverted: stack.layers.filter(l => l.invert).map(l => l.name).join(","),
+				moss: stack.layers[1].opacity,
+				shared: stack.mask !== null,
+				weathered: back.mesh("weathered").layers.layers.length,
+				plain: back.mesh("plain").layers,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		// Five on `ground` and one on `weathering`, which is every layer the
+		// fixture has. A stack partly written is the failure this catches.
+		test::@check(result.value.contains(`"written":6`),
+			"every layer in the file was written: %s", result.value);
+		test::@check(result.value.contains(`"names":"rock,moss,snow,off,painted"`),
+			"in order, by name: %s", result.value);
+		test::@check(result.value.contains(`"blends":"mix,multiply,screen,add,overlay"`),
+			"each with the blend mode it went in with: %s", result.value);
+		test::@check(result.value.contains(`"channels":"r,g,b,a,g"`),
+			"and the channel of the mask it reads: %s", result.value);
+
+		// The two that are not an image and a channel.
+		test::@check(result.value.contains(`"off":"off"`),
+			"the disabled layer came back disabled rather than absent: %s", result.value);
+		test::@check(result.value.contains(`"inverted":"snow"`),
+			"and the inverted mask is still inverted: %s", result.value);
+		test::@check(result.value.contains(`"sources":"texture,texture,texture,texture,vertexColor"`),
+			"the vertex-colour mask did not become a texture: %s", result.value);
+
+		// 0.5 opacity times an 0.6 alpha, which is a number neither field holds
+		// on its own — so it is only 0.3 here if both crossed.
+		test::@check(result.value.contains(`"moss":0.3`),
+			"the alpha and the opacity both survived: %s", result.value);
+		test::@check(result.value.contains(`"shared":true`),
+			"the mask three layers read is one texture on the way back in too: %s", result.value);
+
+		test::@check(result.value.contains(`"weathered":1`),
+			"the second material's single layer went too: %s", result.value);
+		test::@check(result.value.contains(`"plain":null`),
+			"and a material that never had the extension did not acquire one: %s", result.value);
+	};
+}
+
+<*
+ The attribute a vertex-colour mask reads is in the file beside it.
+
+ `painted` masks on `COLOR_0`, and until the exporter wrote that stream the
+ attribute went nowhere: the layer came back naming a channel of something the
+ file did not carry, which reloads as a mask reading zero — a layer that
+ silently vanishes rather than one that is visibly wrong.
+
+ Read out of the JSON chunk rather than off a reload, for the reason the header
+ gives: a loader that ignored `COLOR_0` would answer a reload exactly as one that
+ read it, and the point of writing the attribute under its standard name is that
+ a reader which is not this one can find it.
+*>
+fn void a_vertex_colour_mask_takes_its_attribute_with_it() @test
+{
+	String path = "build/export_colour_attribute.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const source = three.load("test/fixtures/layered.glb");
+			scene.add(new three.Mesh(source.mesh("terrain")));
+			scene.add(new three.Mesh(source.mesh("plain")));
+			return scene.export("build/export_colour_attribute.glb");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		// `"COLOR_0":` is the attribute dictionary's key; the layer names the same
+		// string as a *value*, `"attribute":"COLOR_0"`, so the colon is what tells
+		// the stream apart from the reference to it.
+		test::@check(json.contains(`"COLOR_0":`),
+			"the colour attribute the mask names is in the file: %s", json);
+		test::@check(json.contains(`"attribute":"COLOR_0"`),
+			"and the mask still names it: %s", json);
+		test::@check(json.contains(`"extensionsUsed":[`) && json.contains(`"CUSTOM_materials_layers"`),
+			"the extension is declared, so a reader knows to look: %s", json);
+		test::@check(json.contains(`"source":"VERTEX_COLOR"`),
+			"with the mask reading a colour rather than an image: %s", json);
+
+		// `plain` carries no COLOR_0 and must not acquire one — the attribute is
+		// written per mesh from what the source had, not per file.
+		test::@check(occurrences(json, `"COLOR_0":`) == 1,
+			"only the mesh that had one: %s", json);
+	};
+}
+
+<*
+ A stack a *script* built comes back too.
+
+ The companion to `a_layer_stack_survives_the_round_trip`, and the asymmetry it
+ closes. That test's stack came out of `layered.glb`, so the exporter could read
+ it from the source document; this one was never in a file, and until
+ `Material.script_layers` existed there was nothing on the host side to read at
+ all — the description lived in JavaScript and what crossed was Slang. Two stacks
+ that render identically exported as a layered file and as a flat colour, which
+ is a difference no script could see.
+
+ What is checked is the same thing in both directions: the blend mode, the
+ channel, the inversion, and the images. The images matter most here, because
+ they are the half that has no file behind it — a `DataTexture` is pixels on the
+ device, so `device_texture_for` has to read them back and encode them, where the
+ imported path copies bytes it already had.
+*>
+fn void a_stack_a_script_built_survives_the_round_trip() @test
+{
+	String path = "build/export_script_layers.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			const grass = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(60), 4, 4);
+			const gravel = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(200), 4, 4);
+			const splat = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(128), 4, 4);
+
+			const mat = new three.LayeredMaterial({
+				map: grass,
+				mask: splat,
+				layers: [
+					{ name: 'gravel', map: gravel, mask: 'r', blend: 'multiply', opacity: 0.5 },
+					{ name: 'snow', tint: [0.9, 0.95, 1], mask: 'g', invert: true, blend: 'screen' },
+				],
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+
+			const report = scene.export("build/export_script_layers.glb");
+
+			const back = three.load("build/export_script_layers.glb");
+			const stack = back.meshAt(0).layers;
+			return {
+				written: report.layers,
+				shaded: report.shaded,
+				names: stack.layers.map(l => l.name).join(","),
+				blends: stack.layers.map(l => l.blend).join(","),
+				channels: stack.layers.map(l => l.mask).join(","),
+				inverted: stack.layers.filter(l => l.invert).map(l => l.name).join(","),
+				gravelOpacity: stack.layers[0].opacity,
+				gravelHasMap: stack.layers[0].map !== null,
+				snowHasMap: stack.layers[1].map === null,
+				shared: stack.mask !== null,
+				tint: stack.layers[1].tint.map(c => Math.round(c * 100)).join(","),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"written":2`),
+			"both layers of the script's stack were written: %s", result.value);
+		test::@check(result.value.contains(`"names":"gravel,snow"`),
+			"under the names the script gave them: %s", result.value);
+		test::@check(result.value.contains(`"blends":"multiply,screen"`),
+			"with their blend modes: %s", result.value);
+		test::@check(result.value.contains(`"channels":"r,g"`),
+			"and the channel of the shared mask each reads: %s", result.value);
+		test::@check(result.value.contains(`"inverted":"snow"`),
+			"the inverted one is still inverted: %s", result.value);
+		test::@check(result.value.contains(`"gravelOpacity":0.5`),
+			"the opacity crossed as the extension's own field: %s", result.value);
+		test::@check(result.value.contains(`"tint":"90,95,100"`),
+			"and a tint with no map behind it went into baseColorFactor: %s", result.value);
+
+		// The images are the half with no file behind them: three DataTextures,
+		// read off the device and encoded on the way out.
+		test::@check(result.value.contains(`"gravelHasMap":true`),
+			"the layer's own map was written and came back: %s", result.value);
+		test::@check(result.value.contains(`"snowHasMap":true`),
+			"and a layer with no map did not acquire one: %s", result.value);
+		test::@check(result.value.contains(`"shared":true`),
+			"the mask both layers read is one texture: %s", result.value);
+
+		// Still a generated shader, so still counted as one. The two numbers
+		// answer different questions and this is the scene where that shows.
+		test::@check(result.value.contains(`"shaded":1`),
+			"the material is still a program the file cannot hold: %s", result.value);
+	};
+}
+
+// ============================================================================
+// What makes an exported scene look like the scene
+// ============================================================================
+
+<*
+ A side and a tiling both survive the crossing.
+
+ Two ordinary things an agent building a scene does, and neither used to be in
+ the file. `material.side` had a glTF word waiting for it — `doubleSided` — and
+ the exporter simply never passed it, so a `DoubleSide` plane came back invisible
+ from behind. `material.repeat` had nowhere in *core* glTF to go, and
+ `KHR_texture_transform` is the ratified extension that is exactly this; without
+ it a floor tiled four times exports with its texture stretched once across the
+ whole surface, which is not a subtle difference.
+
+ Both go through the reload rather than the bytes, because both are things a
+ loader has to act on rather than merely carry.
+*>
+fn void a_side_and_a_tiling_survive_the_round_trip() @test
+{
+	String path = "build/export_side_and_tiling.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			const tex = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(180), 4, 4);
+			const floor = new three.MeshLambertMaterial({ map: tex });
+			floor.repeat = [4, 4];
+			floor.offset = [0.25, 0.5];
+			floor.side = three.DoubleSide;
+			scene.add(new three.Mesh(new three.PlaneGeometry(10, 10), floor));
+
+			// A second material differing only in its side, to hold the dedup to
+			// treating that as two materials rather than one.
+			const wall = new three.MeshLambertMaterial({ map: tex });
+			const m = new three.Mesh(new three.PlaneGeometry(2, 2), wall);
+			m.position.x = 8;
+			scene.add(m);
+
+			const report = scene.export("build/export_side_and_tiling.glb");
+
+			const back = three.load("build/export_side_and_tiling.glb");
+			return { materials: report.materials, images: report.images };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		// One image, because both materials sample the same device slot — and two
+		// materials, because they disagree about the side and the tiling.
+		test::@check(result.value.contains(`"images":1`),
+			"one image between them: %s", result.value);
+		test::@check(result.value.contains(`"materials":2`),
+			"but two materials, since side and repeat are part of what a material is: %s", result.value);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"doubleSided":true`),
+			"the double-sided one says so in the format's own words: %s", json);
+		test::@check(occurrences(json, `"doubleSided":true`) == 1,
+			"and the single-sided one leaves the default unstated: %s", json);
+		test::@check(json.contains(`"KHR_texture_transform"`),
+			"the tiling is declared: %s", json);
+		test::@check(json.contains(`"scale":[4,4]`) && json.contains(`"offset":[0.25,0.5]`),
+			"with the repeat and the offset the material had: %s", json);
+	};
+}
+
+<*
+ A source material's normal map is written across.
+
+ `WriteMaterial` used to say normal, occlusion and emissive were absent "because
+ nothing in this writer produces them yet". A mesh loaded from a `.glb` produces
+ them: they are on its own material, in a document the exporter already reads for
+ the layer stack. Until this they were dropped, so a normal-mapped kit
+ round-tripped flat — the geometry right and the surface detail gone.
+
+ Read out of the JSON chunk rather than off a reload, for the header's reason: a
+ loader that ignored `normalTexture` would answer a reload exactly as one that
+ read it, and the point of writing it under its standard name is that a reader
+ which is not this one can use it.
+*>
+fn void a_source_materials_normal_map_is_written_across() @test
+{
+	String path = "build/export_normal_map.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			// layered.glb's rock layer carries a normal map, and its ground
+			// material carries the base one - the fixture with a normal in it.
+			const source = three.load("test/fixtures/layered.glb");
+			scene.add(new three.Mesh(source.mesh("terrain")));
+			return scene.export("build/export_normal_map.glb");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"normalTexture"`),
+			"a normal map crossed: %s", json);
+	};
+}
+
+<*
+ The camera and the light are in the file.
+
+ An exported scene used to open pointing wherever the viewer decided and lit by
+ whatever the viewer supplied — so a scene composed for an angle and lit from a
+ direction arrived as neither. Both are things glTF has and three had, with
+ nothing carrying them across.
+
+ The light's aiming is the half worth checking rather than assuming.
+ `MeshPass.light` is *surface-to-light* and a glTF directional light shines along
+ its node's -Z, so the node's +Z is the vector as stored — a negation either way
+ lights the far side of everything, which reads as the exporter having the
+ normals wrong rather than the light backwards.
+*>
+fn void the_camera_and_the_light_are_in_the_file() @test
+{
+	String path = "build/export_camera_light.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			three.camera.fov = 60;
+			three.light.direction = [0, 0, 1];
+
+			const report = scene.export("build/export_camera_light.glb");
+			return { nodes: report.nodes, fov: three.camera.fov };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"type":"perspective"`), "there is a camera: %s", json);
+		// 60 degrees is 1.0471975 radians, and glTF's unit is radians.
+		test::@check(json.contains(`"yfov":1.04719`),
+			"with the scene's own field of view, in the format's unit: %s", json);
+		test::@check(!json.contains(`"aspectRatio"`),
+			"and no aspect, so a viewer frames it in its own viewport: %s", json);
+
+		test::@check(json.contains(`"type":"directional"`), "there is a light: %s", json);
+		test::@check(json.contains(`"KHR_lights_punctual":{"light":0}`),
+			"on a node that names it: %s", json);
+		// Surface-to-light is +z, so the node is unrotated: its +Z is already the
+		// vector, and the light travels along -Z from there.
+		test::@check(json.contains(`{"name":"light","extensions"`),
+			"whose rotation is the identity for a light straight down +z: %s", json);
+
+		// Four nodes: the scene root, the box under it, the camera and the light.
+		test::@check(result.value.contains(`"nodes":4`),
+			"the camera and the light are nodes like any other: %s", result.value);
 	};
 }

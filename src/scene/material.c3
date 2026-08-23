@@ -209,6 +209,10 @@ $assert MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].offset + MESH_PUSH_FIELDS[MES
 $assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
 	"the material uniform budget and the push budget disagree";
 
+// One `float4` — the width of an `animated` layer's tint-and-opacity uniform,
+// which `Material.layer_params` reads out of the push block.
+const uint LAYER_PARAMS_BYTES = 4 * (uint)float::size;
+
 <*
  One material: a pipeline to bind, and the bytes to push with it.
 
@@ -355,6 +359,103 @@ struct Material
 	// that is still drawing with the material is not wrong for doing so.
 	// `MeshPass.collect_materials` is where the two halves meet.
 	bool released;
+	// What a `three.LayeredMaterial` *is*, beside what it compiled to.
+	//
+	// Empty for every other material, including a hand-written `ShaderMaterial`.
+	// `ScriptLayers` says what it is for and why it is stored here rather than
+	// recovered from the shader.
+	ScriptLayers script_layers;
+}
+
+<*
+ One layer of a stack a script described, as the host can still read it.
+
+ ## Why a shader's own source is not enough
+
+ `js/prelude/layers.js` turns a layer stack into a fragment body and a set of
+ samplers, and until this record existed that was all that crossed: `fragment`
+ holds "the blend was a multiply" as Slang text, and no reader on this side can
+ get it back out. So a scene built with `new three.LayeredMaterial(...)` exported
+ as a flat material — the base colour and its map, with the layers gone — while
+ the *same stack loaded from a `.glb`* exported intact, because `scene/export.c3`
+ could read that one out of the source document.
+
+ This is the missing half of that asymmetry: the description crosses at
+ construction, and the exporter has a stack for a script's material exactly as it
+ has one for a file's.
+
+ ## Bindings and offsets rather than values
+
+ A layer's images are named by **sampler binding**, not by device slot, and its
+ animated tint by **push offset**, not by number. Both are live: `mat.layers[1].map
+ = moss` writes through `setMaterialTexture` into `Material.textures`, and an
+ animated tint writes through `setUniform` into `Material.block`. Storing the
+ values here would mean a second copy that every setter had to remember to
+ update, and the one that forgot would export the image the material used to
+ have. Storing where to look means there is nothing to keep in step.
+
+ **Nothing here retains anything.** Every image a layer names is either
+ `Material.texture` or one of `Material.textures`, both of which the material
+ already holds a reference to for its whole life — that is what makes a binding
+ safe to keep and a device slot not.
+
+ A disabled layer never arrives: `LayeredMaterial` drops `enabled: false` before
+ it generates anything, so a layer that is here is one the shader draws.
+*>
+struct ScriptLayer
+{
+	// Owned. Empty for a layer the script did not name.
+	String name;
+	float[3] tint;
+	float[3] emissive_factor;
+	float opacity;
+	// Bindings in this material's own pipeline, or 0 for "the layer has none".
+	// Zero can mean that because binding 0 is the template's own `base_color_map`
+	// and is never a declared sampler — `TextureSlots.at` refuses it for the same
+	// reason.
+	uint map_binding;
+	uint normal_binding;
+	uint emissive_binding;
+	// The layer's *own* mask. Zero for a layer reading a channel of the stack's
+	// shared mask, which is the ordinary case and the economy the extension's
+	// per-layer channel field exists for.
+	uint mask_binding;
+	// Push-block offset of the `float4` holding this layer's tint and opacity for
+	// a layer that asked to be `animated`, or -1 for one whose tint and opacity
+	// were baked into the shader as literals. `Material.layer_params` reads it.
+	int params_offset;
+	// `gltf::LayerBlendMode`, `LayerMaskChannel` and `LayerMaskSource` ordinals,
+	// passed through untranslated for `GpuLayer`'s reason: naming them on both
+	// sides would be two tables to keep in step with the extension's enum.
+	uint blend_mode;
+	uint mask_channel;
+	uint mask_source;
+	bool invert;
+}
+
+<*
+ A script's whole layer stack.
+
+ `present` is false for every material that is not a `LayeredMaterial`, which is
+ almost all of them, so this costs a bool and an empty list on the rest.
+*>
+struct ScriptLayers
+{
+	bool present;
+	// The mask several layers read a channel of, as a binding. Zero when no two
+	// layers shared one — the mirror of `GpuLayers.mask_texture`, which the
+	// importer arrives at by hoisting and the generator arrives at by declaring
+	// one sampler for the whole stack.
+	uint mask_binding;
+	// The *base* material's normal map, as a binding, or zero.
+	//
+	// Not a layer's — it is the one under all of them, and it is here rather than
+	// on `Material` beside `texture` because a `LayeredMaterial` is the only thing
+	// in this renderer that has one: the core materials have no normal map
+	// property at all. `scene/export.c3` writes it as the glTF material's own
+	// `normalTexture`, which is where a base normal belongs.
+	uint base_normal_binding;
+	List{ScriptLayer} layers;
 }
 
 <*
@@ -554,10 +655,89 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
 	}
 }
 
+<*
+ Start a script's layer stack, discarding whatever it had.
+
+ Called by `setMaterialLayers`, once, before the layers themselves — the shape
+ `add_material_layers`/`add_layer` has on the writing side and `add_mesh`/
+ `add_primitive` has in `gltf.c3l`.
+
+ @param mask_binding : `The sampler several layers read a channel of, or 0 for a stack where no two share one.`
+ @param base_normal_binding : `The base material's normal map, or 0. Written as the glTF material's own normalTexture rather than as any layer's.`
+*>
+fn void Material.begin_script_layers(&self, uint mask_binding, uint base_normal_binding = 0)
+{
+	self.free_script_layers();
+	self.script_layers.present = true;
+	self.script_layers.mask_binding = mask_binding;
+	self.script_layers.base_normal_binding = base_normal_binding;
+	self.script_layers.layers.init(mem, 4);
+}
+
+<*
+ Append one layer. `layer.name` is copied.
+*>
+fn void Material.add_script_layer(&self, ScriptLayer layer)
+{
+	if (!self.script_layers.present) return;
+	ScriptLayer copy = layer;
+	copy.name = layer.name.copy(mem);
+	self.script_layers.layers.push(copy);
+}
+
+fn void Material.free_script_layers(&self)
+{
+	if (!self.script_layers.present) return;
+	foreach (layer : self.script_layers.layers) layer.name.free(mem);
+	self.script_layers.layers.free();
+	self.script_layers = { };
+}
+
+<*
+ A layer's tint and opacity, as they are *now*.
+
+ The literal ones the generator baked in for a plain layer, and the live contents
+ of the push block for one that asked to be `animated` — `ScriptLayer` says why
+ the second is read here rather than remembered when it was set.
+
+ @return `[r, g, b, opacity].`
+*>
+fn float[4] Material.layer_params(&self, ScriptLayer* layer)
+{
+	float[4] baked = { layer.tint[0], layer.tint[1], layer.tint[2], layer.opacity };
+	if (layer.params_offset < 0) return baked;
+
+	uint at = (uint)layer.params_offset;
+	if (at + LAYER_PARAMS_BYTES > PUSH_BUDGET) return baked;
+
+	float[4] live;
+	mem::copy(&live, &self.block[at], LAYER_PARAMS_BYTES);
+	return live;
+}
+
+<*
+ Where a uniform's bytes sit in the push block, or -1.
+
+ The read half of the resolution `set_uniform` does on every write, split out
+ because a layer resolves its `animated` float4 once at construction and reads it
+ many times afterwards. The same two refusals apply: a name the shader never
+ declared, and one below `MATERIAL_PUSH_START` — which is a real field and is
+ refused anyway, because it belongs to the mesh contract rather than to the
+ material.
+*>
+fn int Material.uniform_offset(&self, String name)
+{
+	ShaderField* field = self.pipeline.shader.field_of(name);
+	if (field == null || field.offset < MATERIAL_PUSH_START) return -1;
+	if (field.size != LAYER_PARAMS_BYTES) return -1;
+	return (int)field.offset;
+}
+
 fn void Material.free(&self)
 {
 	if (self.fragment.len > 0) self.fragment.free(mem);
 	if (self.vertex.len > 0) self.vertex.free(mem);
+	self.free_script_layers();
 	*self = { };
 	// **Not left at the zero fill.** Zero is a perfectly ordinary texture index —
 	// the hazard `Material.texture` spends a paragraph on — and a collected slot

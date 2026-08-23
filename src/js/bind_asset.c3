@@ -728,6 +728,13 @@ fn void js_wireframe(
  one number that has no counterpart in `stats()` — it says how much of the scene
  the file managed to keep as repetition rather than as a thousand named copies.
 
+ `layers` is `CUSTOM_materials_layers` records written, from a stack a file
+ brought and from one a script built alike. It exists because `shaded` cannot
+ answer for them: a layered material reaches the frame as a generated
+ `ShaderMaterial` either way, so it is counted as a lost shader whether or not
+ its stack survived — and "the stack went into the file" and "the file had no
+ stack" are the two things a script actually needs to tell apart.
+
  The second argument is `flatten`, which gives up the hierarchy to batch copies
  that are not siblings — the ones `asset.instantiate()` produces, each in a group
  of its own. `scene/export.c3` argues when that is the trade to make.
@@ -799,6 +806,7 @@ fn void js_export(
 		js.set_property(described, "batches", qjs::int_value((int)report.batches));
 		js.set_property(described, "skipped", qjs::int_value((int)report.skipped));
 		js.set_property(described, "shaded", qjs::int_value((int)report.shaded));
+		js.set_property(described, "layers", qjs::int_value((int)report.layers));
 		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
 		*out = described;
 	};
