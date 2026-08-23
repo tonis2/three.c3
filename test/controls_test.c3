@@ -809,3 +809,126 @@ fn void leaving_and_returning_asks_the_picker_again() @test
 	test::@check(hover.stale(at), "the same pixel is a new question after a drag");
 	test::@check(!hover.over, "and nothing is claimed in the meantime");
 }
+
+// ============================================================================
+// The controls a script can turn off (plan.md §17)
+// ============================================================================
+
+<*
+ On by default, and that is the load-bearing half of the decision.
+
+ A window nobody can move the camera in is a bad state to leave one in, so it
+ has to be a state somebody asked for rather than one they arrived at by not
+ asking. `plan.md` §9 spent four milestones undecided on whether this flag should
+ exist at all; what settled it is that the camera work in §17 cannot be designed
+ around a control scheme that might or might not be writing the same fields.
+*>
+fn void the_hand_reaches_the_camera_until_a_script_says_otherwise() @test
+{
+	test::@check(three::DEFAULT_CONTROLS.enabled, "the mouse starts connected");
+}
+
+<*
+ Disabled, no gesture reaches the camera and none of them claims to have.
+
+ The return value matters as much as the camera does: it is what tells the loop
+ whether the window may go back to sleep, so a disabled scheme reporting `true`
+ would keep a window awake for a hand it is ignoring.
+*>
+fn void a_disabled_control_scheme_moves_nothing() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Camera before = camera;
+	three::Controls controls = three::DEFAULT_CONTROLS;
+	controls.enabled = false;
+
+	test::@check(!hover(&controls, &camera, 400, 300), "a hover moves nothing, as it never did");
+	test::@check(!orbit(&controls, &camera, 400, 300), "the press frame of an orbit moves nothing");
+	test::@check(!orbit(&controls, &camera, 460, 300), "and neither does the drag frame after it");
+	test::@check(!pan(&controls, &camera, 500, 340), "a pan moves nothing");
+	test::@check(!wheel(&controls, &camera, 3.0f), "and the wheel does not zoom");
+
+	test::@check(camera.yaw == before.yaw, "yaw is where it was, %f -> %f", before.yaw, camera.yaw);
+	test::@check(camera.pitch == before.pitch, "pitch is where it was, %f -> %f", before.pitch, camera.pitch);
+	test::@check(
+		camera.distance == before.distance,
+		"distance is where it was, %f -> %f", before.distance, camera.distance
+	);
+	test::@check(
+		camera.target.x == before.target.x && camera.target.y == before.target.y
+			&& camera.target.z == before.target.z,
+		"and the pan did not move the target"
+	);
+}
+
+<*
+ A script taking the mouse mid-drag does not leave the camera a jump to make.
+
+ The anchor is the whole reason this check exists. Dropping the gesture without
+ dropping `last_x` would leave the position the cursor had *before* the script
+ took over, and the hand goes on travelling in the meantime — so the frame the
+ controls came back on would apply the entire distance at once. That is the
+ one-frame lurch `Controls.dragging` was introduced to prevent, arriving through
+ a door that did not exist when it was written.
+
+ A button still held when the controls return has to be let go of first, for the
+ reason the stuck-latch guard gives: this scheme never saw the press.
+*>
+fn void taking_the_mouse_mid_drag_drops_the_anchor() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::DEFAULT_CONTROLS;
+
+	hover(&controls, &camera, 400, 300);
+	orbit(&controls, &camera, 400, 300);
+	test::@check(orbit(&controls, &camera, 440, 300), "the drag was moving the camera");
+	float turned = camera.yaw;
+
+	// The hand keeps going while the script has the mouse.
+	controls.enabled = false;
+	orbit(&controls, &camera, 700, 300);
+	controls.enabled = true;
+
+	test::@check(
+		!orbit(&controls, &camera, 900, 300),
+		"a button held across the gap is not a drag this scheme ever saw begin"
+	);
+	test::@check(
+		camera.yaw == turned,
+		"and the camera did not jump by where the hand went, %f -> %f", turned, camera.yaw
+	);
+
+	// Let go, press again, and it is an ordinary drag from here.
+	hover(&controls, &camera, 900, 300);
+	orbit(&controls, &camera, 900, 300);
+	test::@check(orbit(&controls, &camera, 940, 300), "a fresh press drags again");
+}
+
+<*
+ The coast is spent, not parked, so coming back does not resume an old flick.
+
+ A velocity kept across a disabled stretch would restart the scene turning at
+ whatever speed the hand left it at — after a mode that lasted a minute, from a
+ gesture nobody remembers making.
+*>
+fn void taking_the_mouse_stops_the_coast() @test
+{
+	three::Camera camera = three::default_camera();
+	three::Controls controls = three::DEFAULT_CONTROLS;
+
+	flick(&controls, &camera);
+	test::@check(controls.spinning(), "the flick left the scene turning");
+	float at_release = camera.yaw;
+
+	controls.enabled = false;
+	test::@check(!idle_for(&controls, &camera, 16), "a disabled frame is not a moving one");
+	test::@check(!controls.spinning(), "and the spin is gone rather than held");
+	test::@check(
+		camera.yaw == at_release,
+		"the scene stopped where the hand left it, %f -> %f", at_release, camera.yaw
+	);
+
+	controls.enabled = true;
+	test::@check(!idle_for(&controls, &camera, 16), "coming back resumes nothing");
+	test::@check(camera.yaw == at_release, "and the camera is still where it stopped");
+}

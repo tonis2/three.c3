@@ -41,6 +41,14 @@
  fabricate — so the click is the whole of the mouse's edge API, and it comes
  with what is under it already raycast.
 
+ ## And the mouse can be taken away from the camera
+
+ `three.controls.enabled = false` stops the turntable reading the window at all
+ — `scene/controls.c3` has the argument, and it is the one thing in this file
+ that writes *out* rather than reporting in. It lives here rather than beside
+ the camera verbs because what it turns off is a hand on a window, and the
+ camera is only where the hand was going.
+
  ## One handler per key per edge
 
  Registering `'space'` twice replaces the first, exactly as `setAnimationLoop`
@@ -83,6 +91,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "onKey", &js_on_key, 3);
 	self.bind(host, "pointer", &js_pointer, 0);
 	self.bind(host, "onClick", &js_on_click, 1);
+	self.bind(host, "controlsGet", &js_controls_get, 0);
+	self.bind(host, "controlsSet", &js_controls_set, 1);
 }
 
 <*
@@ -513,6 +523,49 @@ fn void js_pointer(
 	js.set_property(object, "down", qjs::bool_value(mouse.down));
 	js.set_property(object, "clicked", qjs::bool_value(mouse.clicked));
 	*out = object;
+}
+
+<*
+ `controlsGet()` — whether the mouse still reaches the camera.
+
+ A real boolean rather than the number-in-an-array shape `shadowGet` and
+ `lightGet` use: those pack four fields so that assigning one of them is a
+ single crossing, and there is only one field here to pack.
+*>
+fn void js_controls_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::bool_value(self.controls.enabled);
+}
+
+<*
+ `controlsSet(enabled)` — hand the mouse to the script, or give it back.
+
+ ## It reads back, with or without a window
+
+ The flag is on the runtime and not on the window's loop, so a headless `--mcp`
+ script sets it and reads it back unchanged. That is the point: a property that
+ quietly reports something other than what was written to it is the failure
+ `api.js` throws on assignment three separate times to avoid, and "there is no
+ window today" is not a reason to reintroduce it. What it *does* with no window
+ is nothing, because there was no hand on it either.
+
+ ## Nothing is stopped mid-gesture
+
+ A drag in progress when this is turned off does not finish; `Controls.apply`
+ drops the anchor and the coast on the first disabled frame, and turning the
+ controls back on begins from wherever the camera was left, waiting for a fresh
+ press. `scene/controls.c3` has the reasoning under "Disabled".
+*>
+fn void js_controls_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	self.controls.enabled = arg_truth(&js, argc, args, 0);
 }
 
 <*
