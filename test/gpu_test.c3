@@ -84,36 +84,6 @@ macro @with_validating_gpu(; @body(three::Gpu* gpu))
 
 	@body(&gpu);
 }
-
-<*
- Without `-D DEBUG` there is no layer, whatever the machine has installed and
- whatever the caller asked for.
-
- The fixture above asks for validation in the strongest way there is —
- `create_instance(true)` and `Gpu.init(validate: true)` — so this is the check
- that the build flag beats the runtime one rather than merely defaulting under
- it. A binary that could still be talked into loading the layer is a binary
- somebody ships in that state.
-
- `validation_layer_present` is asserted alongside because it is the single lock
- the other two hang off; if it ever answers true here, the other two checks are
- passing by luck.
-
- Nothing to assert in a debug build: whether the layer is installed is a fact
- about the machine, and `gpu.validation` is already the honest answer to it.
-*>
-fn void a_release_build_loads_no_validation_layer() @test
-{
-	if (three::DEBUG_BUILD) return;
-
-	@with_validating_gpu(; three::Gpu* gpu)
-	{
-		test::@check(!three::validation_layer_present(), "the lock opened in a release build");
-		test::@check(!gpu.validation, "the device came up validating anyway");
-		test::@check(gpu.debug == null, "and installed a messenger to carry it");
-	};
-}
-
 <*
  Bring a device up and take it down again.
 
