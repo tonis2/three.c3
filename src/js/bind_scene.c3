@@ -61,10 +61,11 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
 	self.bind(host, "meshLayers", &js_mesh_layers, 3);
-	self.bind(host, "assetNodes", &js_asset_nodes, 2);
+	self.bind(host, "assetNodes", &js_asset_nodes, 3);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
-	self.bind(host, "bindAnimation", &js_bind_animation, 5);
-	self.bind(host, "playAnimation", &js_play_animation, 5);
+	self.bind(host, "bindAnimation", &js_bind_animation, 6);
+	self.bind(host, "bindSkin", &js_bind_skin, 4);
+	self.bind(host, "playAnimation", &js_play_animation, 6);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "exportScene", &js_export, 1);
@@ -547,11 +548,15 @@ fn void js_bind_animation(
 		});
 	}
 
-	self.pass.scene.bind_player(asset, root, sources.array_view(), nodes.array_view());
+	// Whether this character is posed from its bone nodes. The script asked for a
+	// skeleton, and a skeleton that drives nothing would be the read-only version
+	// of the flag rather than the useful one. See `AnimationPlayer.live_skin`.
+	bool live_skin = argc > 5 ? arg_truth(&js, argc, args, 5) : false;
+	self.pass.scene.bind_player(asset, root, sources.array_view(), nodes.array_view(), live_skin);
 }
 
 <*
- `playAnimation(index, generation, name, loop, speed)` — start a clip on an
+ `playAnimation(index, generation, name, loop, speed, time)` — start a clip on an
  instantiated subtree.
 
  Answers with a boolean rather than throwing on an unknown clip: `mesh.animations`
@@ -574,8 +579,41 @@ fn void js_play_animation(
 		String name = arg_text(&js, argc, args, 2, tmem);
 		bool loop = argc > 3 ? arg_truth(&js, argc, args, 3) : true;
 		float speed = argc > 4 ? arg_float(&js, argc, args, 4) : 1.0f;
-		*out = qjs::bool_value(self.pass.scene.play(root, name, loop, speed));
+		// The start phase. What a crowd needs and the only new argument since the
+		// binding was written: a hundred characters on one walk cycle at a hundred
+		// phases are a hundred values of this over one baked clip.
+		float time = argc > 5 ? arg_float(&js, argc, args, 5) : 0;
+		*out = qjs::bool_value(self.pass.scene.play(root, name, loop, speed, time));
 	};
+}
+
+<*
+ `bindSkin(index, generation, skin, compute)` — tell a node which skin poses it.
+
+ **The JavaScript path needs this and the host path does not.** `Scene.instantiate`
+ creates every node itself and sets the skin as it goes; `asset.instantiate()` in
+ a script hands back `Object3D`s that materialize later through the ordinary
+ `add`, so by the time a host node exists nothing remembers that it came from a
+ skinned entry. `Object3D._materialize` calls this straight after `H.add`, which
+ is the first moment there is a node to tell.
+
+ A skin of -1 clears it, which is what every ordinary mesh is.
+*>
+fn void js_bind_skin(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	int skin = argc > 2 ? (int)arg_float(&js, argc, args, 2) : -1;
+	self.pass.scene.set_skin(id, skin);
+
+	Node* node = self.pass.scene.node(id);
+	if (node != null) node.preskinned = skin >= 0 && argc > 3 && arg_truth(&js, argc, args, 3);
 }
 
 <*
@@ -891,6 +929,13 @@ fn void js_stats(
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
 	js.set_property(object, "culledLastFrame", qjs::int_value((int)stats.culled_last_frame));
+	// What skinning costs, apart from everything else — see `SceneStats`. A scene
+	// with no character in it reports four zeroes, which is the honest answer and
+	// costs four properties nobody reads.
+	js.set_property(object, "skinnedDraws", qjs::int_value((int)stats.skinned_draws));
+	js.set_property(object, "skinnedInstances", qjs::int_value((int)stats.skinned_instances));
+	js.set_property(object, "preskinnedInstances", qjs::int_value((int)stats.preskinned_instances));
+	js.set_property(object, "poseBytes", qjs::number_value((double)stats.pose_bytes));
 	js.set_property(object, "gpuMs", qjs::number_value(self.renderer != null ? self.renderer.gpu_ms() : 0.0));
 	*out = object;
 }

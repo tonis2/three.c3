@@ -108,9 +108,59 @@ struct MeshPass
 	// fence has been waited on.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] draw_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] draw_capacity;
+	// This frame's joint matrices for the characters posed from their bone nodes
+	// rather than from a baked clip — `skeleton: true`. Per frame in flight for
+	// the same reason as the two above, and this is the one the rule was written
+	// about: `gpu/buffer.c3` records that "crig's pose palette tore for exactly
+	// this reason".
+	//
+	// Empty in every scene with no live character in it, which is every scene
+	// until a script asks for one.
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] pose_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] pose_capacity;
+
+	// ---- Compute skinning, which is opt-in per character ---------------------
+	//
+	// Built on the first frame that has a compute-routed character in it, and not
+	// at all in a project that never asks for one — the shader is compiled at that
+	// moment, like every other shader here.
+
+	SkinPipeline skin_pipeline;
+	// One posed copy of the mesh per instance, per frame in flight. **The memory
+	// the compute path costs and the vertex path does not**, and the reason
+	// routing a crowd through it would be the wrong trade: it is
+	// `vertices * copies * 24` bytes times the frames in flight.
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] posed_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] posed_capacity;
+	// Where each bucket's posed vertices start, in vertices, filled by `prepare`
+	// and read by `record`. Parallel to `Scene.buckets`; `NOT_PRESKINNED` for
+	// every bucket the dispatch did not cover, which is most of them.
+	List{uint} posed_offsets;
+
+	<*
+	 What `prepare` resolved and `record` needs, for the one frame between them.
+
+	 **The frame path grew a second phase and not a second branch.** A compute
+	 dispatch cannot be recorded inside a render pass, so the work that used to sit
+	 at the top of `record` — updating the scene, writing the frame's buffers,
+	 skinning — now happens before `begin_render`, and `record` is the commands
+	 that draw. These are the handful of numbers that cross between them.
+	*>
+	Matrix4f frame_view_projection;
+	ulong frame_address;
+	ulong instance_address;
+	ulong draw_address;
+	ulong live_address;
+	// False when `prepare` found nothing to draw, which is what `record` returns
+	// on rather than repeating the emptiness checks.
+	bool prepared;
 
 	bool ready;
 }
+
+// A bucket the compute pass did not skin. Not zero, because zero is a legitimate
+// offset for the first bucket that it did.
+const uint NOT_PRESKINNED = uint::max;
 
 <*
  Compile the mesh shader and build the pipeline from it.
@@ -124,6 +174,10 @@ struct MeshPass
 fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path = "")
 {
 	self.pipelines.init();
+	// One entry per bucket, rewritten every frame. Sized like the instance array
+	// and for the same reason: small enough to cost nothing, large enough that a
+	// normal scene never grows it.
+	self.posed_offsets.init(mem, INITIAL_INSTANCES);
 
 	String path = shader_path;
 	@pool()
@@ -350,8 +404,9 @@ fn void MeshPass.derive_camera_planes(&self)
 
  @param slot : `Which frame in flight this is. Selects the instance array and the draw records to write, and must be one whose fence has already been waited on.`
 *>
-fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
 {
+	self.prepared = false;
 	if (!self.ready) return;
 
 	// Before the draw list is built, so a material whose last node died in the
@@ -380,6 +435,19 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	// reading a blend mode off one would be reading a material that is not there.
 	// `Material.free` happens to zero the field, so this guard changes no answer
 	// today; it is here so that it never has to.
+	// **The bones settle before the draw list is built**, and the order is
+	// load-bearing: `write_live_poses` reads every bone's world matrix and writes
+	// each live character's slice offset back into its node, and `build_draw_list`
+	// then copies that offset into the instance array. Run the other way round and
+	// a live character is drawn with last frame's offset — which is invisible
+	// while nothing is moving and a frame of lag the moment something is.
+	//
+	// `update_world_matrices` runs again inside `scene.update` below and costs
+	// almost nothing the second time: it clears `dirty` as it descends, so the
+	// repeat is a walk with no matrix arithmetic in it.
+	self.scene.update_world_matrices();
+	ulong live_address = self.write_live_poses(gpu, slot)!;
+
 	@pool()
 	{
 		bool[] transparent = alloc::new_array(tmem, bool, self.materials.len());
@@ -397,9 +465,15 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	};
 	if (self.scene.buckets.len() == 0) return;
 
-	FrameBlock frame = { .view_projection = view_projection, .light = self.light };
-	ulong frame_address = self.write_frame_block(gpu, slot, &frame)!;
-	ulong instance_address = self.write_instances(gpu, slot)!;
+	FrameBlock frame = {
+		.view_projection = view_projection,
+		.light = self.light,
+		.live_poses = live_address,
+	};
+	self.frame_view_projection = view_projection;
+	self.live_address = live_address;
+	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
+	self.instance_address = self.write_instances(gpu, slot)!;
 
 	// The draw records are written *into* the loop below rather than in a pass of
 	// their own: a record is exactly the fields the push block used to carry, so
@@ -414,7 +488,32 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	// bucket that draws — and the alternative is a count that has to predict which
 	// buckets those are.
 	self.reserve_draws(gpu, slot, self.scene.buckets.len())!;
-	ulong draw_address = self.draw_buffers[slot].address;
+	self.draw_address = self.draw_buffers[slot].address;
+
+	// **Outside the render pass, which is the whole reason this phase exists.**
+	// `vkCmdDispatch` is illegal between `vkCmdBeginRendering` and
+	// `vkCmdEndRendering`, so a compute-skinned bucket has to be posed here, one
+	// barrier before the first draw reads the result.
+	self.skin(gpu, cmd, slot)!;
+
+	self.prepared = true;
+}
+
+<*
+ The draw commands, recorded inside the render pass.
+
+ Everything this needs was resolved by `prepare` a moment ago and is on `self` —
+ see the block of addresses there for why the split exists at all.
+
+ @param cmd : `A command buffer inside a render pass, on a frame prepare has run for.`
+*>
+fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+{
+	if (!self.prepared) return;
+
+	ulong frame_address = self.frame_address;
+	ulong instance_address = self.instance_address;
+	ulong draw_address = self.draw_address;
 	DrawRecord* records = (DrawRecord*)self.draw_buffers[slot].data();
 	uint recorded = 0;
 
@@ -424,7 +523,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 	// one per bucket — `bound` is what turns that ordering into skipped calls.
 	vk::Pipeline bound = (vk::Pipeline)null;
 
-	foreach (bucket : self.scene.buckets)
+	foreach (i, bucket : self.scene.buckets)
 	{
 		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
 		if (mesh == null) continue;
@@ -488,15 +587,41 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		float[4] base_color = mesh.base_color;
 		base_color[3] *= material.opacity();
 
+		// **Both halves or neither.** A mesh carries influences and an asset carries
+		// the table they index; either one without the other is a palette read
+		// through a null pointer, which is a device-lost rather than a bad picture.
+		// The instances in this bucket have already been given offsets into that
+		// table by `Scene.set_skin` and `AnimationPlayer.advance`.
+		Asset* owner = self.assets.slot(bucket.asset);
+		bool skinned = mesh.has_skin && owner != null && owner.poses.buffer != null;
+
+		// **The two skinning paths are exclusive**, and the record says which one
+		// this bucket took. A pre-skinned bucket's vertices were posed before the
+		// render pass began, so the vertex shader must read them and blend nothing;
+		// `skin_stride` is how it finds this copy's own posed vertices inside the
+		// shared output buffer.
+		uint posed_offset = i < self.posed_offsets.len() ? self.posed_offsets[i] : NOT_PRESKINNED;
+		bool preskinned = skinned && posed_offset != NOT_PRESKINNED;
+		if (preskinned) skinned = false;
+
 		records[recorded] = {
 			.positions = mesh.positions.address,
 			.normals = mesh.has_normals ? mesh.normals.address : 0,
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
 			.colors = mesh.has_colors ? mesh.colors.address : 0,
+			.joints = skinned ? mesh.joints.address : 0,
+			.weights = skinned ? mesh.weights.address : 0,
+			.palette = skinned ? owner.poses.address : 0,
+			.posed = preskinned
+				? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size
+				: 0,
 			.base_color = base_color,
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
 				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
-				| (mesh.has_colors ? FLAG_HAS_COLORS : 0),
+				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
+				| (skinned ? FLAG_HAS_SKIN : 0)
+				| (preskinned ? FLAG_PRESKINNED : 0),
+			.skin_stride = preskinned ? mesh.vertex_count : 0,
 			.uv_transform = material.uv_transform_or_identity(),
 		};
 
@@ -617,6 +742,255 @@ fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
 
 	self.draw_buffers[slot] = gpu.create_dynamic((sz)(capacity * DrawRecord::size))!;
 	self.draw_capacity[slot] = capacity;
+}
+
+<*
+ Compute this frame's joint matrices for every character posed from its bone
+ nodes, and hand back the buffer's address.
+
+ The third of the three pose paths and the expensive one, which is what
+ `skeleton: true` buys: the palette is `bone.world * inverse_bind` per joint, read
+ off nodes a script may have written between frames — so a look-at, an aim offset
+ or a foot planted on a slope moves the skin, none of which a baked table can
+ express.
+
+ **The CPU computes it rather than a compute shader, and that is not an
+ oversight.** `Scene.update_world_matrices` has already produced every bone's
+ world matrix by the time this runs, so the work here is one 4x4 multiply per
+ joint. Doing it on the GPU would mean uploading sixty matrices so that the device
+ could turn them into sixty matrices — strictly more traffic than uploading the
+ sixty results, plus a dispatch and a barrier. `shaders/skin.slang` is where
+ compute genuinely earns its place, and it is a different question: *where the
+ vertex blend runs*, not *who writes the palette*.
+
+ Returns zero when nothing is live, which leaves `FrameBlock.live_poses` null —
+ and no instance points at it, because `POSE_LIVE` is only set here.
+*>
+fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
+{
+	// Two passes over the players: one to size the buffer, one to fill it. The
+	// alternative is growing while writing, and the addresses handed to instances
+	// would be into a buffer that then moved.
+	sz needed = 0;
+	foreach (&player : self.scene.players)
+	{
+		if (!player.live_skin) continue;
+		Asset* owner = self.assets.slot(player.asset);
+		if (owner == null) continue;
+
+		foreach (&target : player.skinned)
+		{
+			if (target.skin >= owner.skins.len()) continue;
+			needed += owner.skins[target.skin].joints.len();
+		}
+	}
+	if (needed == 0) return 0;
+
+	if (self.pose_capacity[slot] < needed)
+	{
+		sz capacity = self.pose_capacity[slot] > 0 ? self.pose_capacity[slot] : INITIAL_INSTANCES;
+		while (capacity < needed) capacity *= 2;
+
+		// Safe only because this slot's fence has been waited on — the same rule
+		// the instance and draw buffers are freed under.
+		if (self.pose_buffers[slot].buffer != null) self.pose_buffers[slot].free();
+
+		self.pose_buffers[slot] = gpu.create_dynamic((sz)(capacity * Matrix4f::size))!;
+		self.pose_capacity[slot] = capacity;
+	}
+
+	Matrix4f* palette = (Matrix4f*)self.pose_buffers[slot].data();
+	uint at = 0;
+
+	foreach (&player : self.scene.players)
+	{
+		if (!player.live_skin) continue;
+		Asset* owner = self.assets.slot(player.asset);
+		if (owner == null) continue;
+
+		foreach (&target : player.skinned)
+		{
+			if (target.skin >= owner.skins.len()) continue;
+			AssetSkin* skin = &owner.skins[target.skin];
+
+			Node* mesh_node = self.scene.node(target.node);
+			if (mesh_node == null) continue;
+
+			// The joints are glTF node indices and `targets` is the map from those
+			// to this instance's own nodes — built at instantiation, which is the
+			// only moment anything knows the correspondence.
+			foreach (j, joint : skin.joints)
+			{
+				Matrix4f pose = matrix::IDENTITY4{float};
+				if (joint < player.targets.len())
+				{
+					Node* bone = self.scene.node(player.targets[joint]);
+					// A joint whose node was pruned poses nothing rather than
+					// reading a stale matrix: the vertices riding it stay where the
+					// bind pose left them, which is local and visible.
+					if (bone != null) pose = bone.world.mul(skin.inverse_bind[j]);
+				}
+				palette[at + j] = pose;
+			}
+
+			// **Live, and where.** The top bit is what the shader selects the buffer
+			// on; the rest is this character's slice. Written every frame because
+			// the slice moves when the number of live characters does.
+			mesh_node.pose = POSE_LIVE | at;
+			at += (uint)skin.joints.len();
+		}
+	}
+
+	return self.pose_buffers[slot].address;
+}
+
+<*
+ Pose every compute-routed bucket into this frame's output buffer, and barrier
+ the result so the vertex stage can read it.
+
+ **Recorded before the render pass begins** — `MeshPass.prepare` is the phase that
+ exists for this, because `vkCmdDispatch` between `vkCmdBeginRendering` and
+ `vkCmdEndRendering` is illegal.
+
+ One dispatch per bucket rather than one per character: a bucket already is
+ "these copies of this mesh", which is exactly the unit the shader indexes with
+ `iid * vertex_count + vid`. A bucket mixing baked and live copies is still one
+ dispatch, because which palette a copy reads is decided per instance inside the
+ shader.
+
+ **One barrier for the whole frame, not one per dispatch.** Every dispatch writes
+ a disjoint slice of one buffer and no dispatch reads another's, so there is
+ nothing to order between them; what has to be ordered is all of them against the
+ first vertex shader that reads the buffer, and that is one
+ `COMPUTE_SHADER -> VERTEX_SHADER` barrier at the end.
+
+ Does nothing at all — no pipeline compiled, no buffer allocated, no command
+ recorded — in a frame with no compute-routed bucket in it, which is every frame
+ until a script asks for one.
+*>
+fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
+{
+	self.posed_offsets.clear();
+
+	// Sized first, so the buffer cannot move under an address already pushed.
+	// `NOT_PRESKINNED` for every bucket that is not routed here, which keeps this
+	// list parallel to `Scene.buckets` and lets `record` index it directly.
+	sz needed = 0;
+	foreach (bucket : self.scene.buckets)
+	{
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		if (!bucket.preskinned || mesh == null || !mesh.has_skin)
+		{
+			self.posed_offsets.push(NOT_PRESKINNED);
+			continue;
+		}
+		self.posed_offsets.push((uint)needed);
+		needed += (sz)mesh.vertex_count * (sz)bucket.count;
+	}
+	if (needed == 0) return;
+
+	// Compiled the first time anything asks. A project that never routes a
+	// character through compute never reads `shaders/skin.slang` off disk.
+	if (!self.skin_pipeline.ready) self.build_skin_pipeline(gpu)!;
+
+	if (self.posed_capacity[slot] < needed)
+	{
+		sz capacity = self.posed_capacity[slot] > 0 ? self.posed_capacity[slot] : INITIAL_INSTANCES;
+		while (capacity < needed) capacity *= 2;
+
+		// This slot's fence has been waited on, so the GPU is not still reading it
+		// — the same rule the instance, draw and pose buffers are grown under.
+		if (self.posed_buffers[slot].buffer != null) self.posed_buffers[slot].free();
+
+		// Device-local: written by the GPU and read by the GPU in the same frame,
+		// so there is nothing for the CPU to map and no reason to pay for a
+		// host-visible heap.
+		self.posed_buffers[slot] = gpu.create_device_storage((sz)(capacity * SkinnedVertex::size))!;
+		self.posed_capacity[slot] = capacity;
+	}
+
+	ulong output_address = self.posed_buffers[slot].address;
+	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_COMPUTE, self.skin_pipeline.handle);
+
+	foreach (i, bucket : self.scene.buckets)
+	{
+		if (self.posed_offsets[i] == NOT_PRESKINNED) continue;
+
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		if (mesh == null) continue;
+		Asset* owner = self.assets.slot(bucket.asset);
+		if (owner == null) continue;
+
+		SkinPush push = {
+			.positions = mesh.positions.address,
+			.normals = mesh.has_normals ? mesh.normals.address : 0,
+			.joints = mesh.joints.address,
+			.weights = mesh.weights.address,
+			// Offset to this bucket's first copy, exactly as the draw path offsets
+			// it, so `iid` starts at zero in the shader either way.
+			.instances = self.instance_address + (ulong)bucket.first * Instance::size,
+			.baked = owner.poses.address,
+			.live = self.live_address,
+			.output = output_address + (ulong)self.posed_offsets[i] * SkinnedVertex::size,
+			.vertex_count = mesh.vertex_count,
+			.instance_count = bucket.count,
+			.flags = mesh.has_normals ? FLAG_HAS_NORMALS : 0,
+		};
+
+		vk::cmdPushConstants(
+			cmd,
+			self.skin_pipeline.layout,
+			SHADER_STAGE_COMPUTE_BIT,
+			0,
+			self.skin_pipeline.shader.push_size,
+			&push
+		);
+
+		uint threads = mesh.vertex_count * bucket.count;
+		vk::cmdDispatch(cmd, (threads + SKIN_WORKGROUP - 1) / SKIN_WORKGROUP, 1, 1);
+	}
+
+	// Everything written above, against everything that reads it below.
+	vk::MemoryBarrier2 barrier = {
+		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
+		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
+	};
+	vk::DependencyInfo dependency = {
+		.sType = STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.memoryBarrierCount = 1,
+		.pMemoryBarriers = &barrier,
+	};
+	vk::cmdPipelineBarrier2(cmd, &dependency);
+}
+
+<*
+ Compile `shaders/skin.slang` and build the compute pipeline, once.
+
+ Late rather than in `init` for the reason the whole path is opt-in: this is a
+ Slang compile and a `VkPipeline` that a project which never asks for compute
+ skinning should not pay for. Every other shader here is compiled on demand for
+ the same reason.
+*>
+fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
+{
+	String path = find_shader("skin.slang", mem)!;
+	defer path.free(mem);
+
+	String source = load_source(path)!;
+	defer source.free(mem);
+
+	ShaderModule mod = compile_slang(source, "skin.slang", SKIN_ENTRIES[..])!;
+	defer mod.free();
+	if (!mod.ok)
+	{
+		io::eprintfn("three: the skinning shader would not compile: %s", mod.diagnostic);
+		return SHADER_MISSING_ENTRY_POINT~;
+	}
+
+	self.skin_pipeline.init(gpu, &mod)!;
 }
 
 <*
@@ -1135,8 +1509,14 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.instance_buffers[i].buffer != null) self.instance_buffers[i].free();
 		self.instance_capacity[i] = 0;
 		if (self.draw_buffers[i].buffer != null) self.draw_buffers[i].free();
+		if (self.pose_buffers[i].buffer != null) self.pose_buffers[i].free();
+		if (self.posed_buffers[i].buffer != null) self.posed_buffers[i].free();
 		self.draw_capacity[i] = 0;
+		self.pose_capacity[i] = 0;
+		self.posed_capacity[i] = 0;
 	}
+	self.skin_pipeline.free(gpu);
+	self.posed_offsets.free();
 	self.scene.free();
 	// Before `assets.free`, which frees every texture slot outright: releasing
 	// afterwards would decrement counts in a freed list. The device is idle by

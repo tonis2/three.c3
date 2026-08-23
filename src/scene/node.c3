@@ -133,6 +133,34 @@ struct Node
 	float[4] color;
 	uint variant;
 
+	// Which of the asset's skins poses this node's mesh, or -1. The marker that
+	// this is a character rather than a prop: it decides which box the node is
+	// culled against and whether the draw sets a skin flag at all.
+	int skin;
+
+	// Where this node's joint matrices start, in matrices, with `POSE_LIVE` in the
+	// top bit for a character posed from its bone nodes rather than from a baked
+	// clip. Copied straight into `Instance.pose`.
+	//
+	// Seeded to the skin's rest offset, so a character that has never played
+	// anything draws its bind pose — there is no "nothing is playing" case in the
+	// shader or in the draw loop, because rest is a baked frame like any other.
+	// `AnimationPlayer.advance` is what moves it afterwards.
+	uint pose;
+
+	<*
+	 Whether the compute pass poses this node's vertices instead of the vertex
+	 shader — `instantiate({ skinning: 'compute' })`.
+
+	 **It splits the bucket**, which is the cost to know about before setting it:
+	 pre-skinned vertices come out of a buffer the compute pass wrote, so a copy
+	 with this set cannot share a `DrawRecord` with one that has not, and cannot
+	 share a draw call either. It buys the blend being paid once per frame rather
+	 than once per draw, which is worth nothing until the same character is drawn
+	 in a second pass — see `shaders/skin.slang`, which says so at length.
+	*>
+	bool preskinned;
+
 	// `visible` is this node's own flag; `world_visible` is it AND every
 	// ancestor's, resolved in the same walk that builds the world matrices.
 	// Three.js hides a whole subtree by hiding its root, and a flat scan of the

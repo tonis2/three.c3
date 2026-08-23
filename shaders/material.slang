@@ -25,29 +25,46 @@
 // `the_material_push_block_keeps_the_mesh_contract`, which reflects an assembled
 // material and checks it field by field against `MESH_PUSH_FIELDS`.
 
-// One instance: where a copy of the mesh is, how its normals rotate, and the two
-// things copies of one mesh may disagree about without costing a draw call. Byte
-// for byte what `mesh.slang` and `scene/scene.c3` declare; 148 bytes.
+// One instance: where a copy of the mesh is, how its normals rotate, and the
+// three things copies of one mesh may disagree about without costing a draw call.
+// Byte for byte what `mesh.slang` and `scene/scene.c3` declare; 152 bytes.
 struct Instance
 {
     float4x4 model;
     float4x4 normal;
     float4 color;
     uint variant;
+    // This copy's joint matrices: an offset in matrices, with POSE_LIVE in the top
+    // bit saying which buffer they are in. See `mesh.slang`.
+    uint pose;
 };
 
-// What every draw in the frame shares, written once per frame. 80 bytes.
+// What every draw in the frame shares, written once per frame. 88 bytes.
 struct FrameBlock
 {
     float4x4 view_projection;
     float4 light;           // xyz: surface-to-light, world space. w: ambient floor.
+    // This frame's live joint matrices, for characters posed from their bone nodes
+    // rather than from a baked clip. One buffer per frame rather than per bucket,
+    // which is what keeps a live character and a baked one in the same draw call.
+    float4x4* live_poses;
+};
+
+// One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
+// `shaders/skin.slang` declare. 24 bytes.
+struct SkinnedVertex
+{
+    float3 position;
+    float3 normal;
 };
 
 // One bucket's geometry and surface, byte for byte what `mesh.slang` and
 // `gpu/pipeline.c3`'s `DrawRecord` declare. See `mesh.slang` for what it is and
 // why it is a buffer rather than push constants; the short version is that these
-// seven fields used to be pushed, they took 76 of the 128 bytes every device must
-// offer, and the material uniforms below had to live in what was left.
+// fields used to be pushed, they took 76 of the 128 bytes every device must
+// offer, and the material uniforms below had to live in what was left. Skinning
+// is what that bought: three of the fields below are streams and a palette that
+// could not have been afforded under the old contract at any price.
 struct Draw
 {
     float3* positions;
@@ -56,10 +73,23 @@ struct Draw
     // glTF's COLOR_0. Read into `Vertex.vertex_color` and carried to the body;
     // see `Surface.vertex_color` for what it is and what it deliberately is not.
     float4* colors;
+    // glTF's JOINTS_0 and WEIGHTS_0. Widened and renormalised on upload; see
+    // `mesh.slang`.
+    uint4* joints;
+    float4* weights;
+    // This asset's baked joint matrices, every clip of every skin. See
+    // `mesh.slang` and `skin_matrix`.
+    float4x4* palette;
+    // Where the compute pass wrote this bucket's posed vertices. Separate from
+    // `positions` so that `Vertex.local` stays the bind pose whichever path posed
+    // the mesh — see `mesh.slang` for why that mattered.
+    SkinnedVertex* posed;
     // rgb: albedo factor. a: the material's opacity, folded into the mesh's own
     // alpha on the C3 side. `fragmentMain` multiplies it by the instance's.
     float4 base_color;
     uint flags;
+    // The mesh's vertex count, read only under FLAG_PRESKINNED. See `mesh.slang`.
+    uint skin_stride;
     // xy repeat, zw offset. See `mesh.slang`.
     float4 uv_transform;
 };
@@ -86,6 +116,38 @@ struct PushData
 static const uint FLAG_HAS_NORMALS = 1u;
 static const uint FLAG_HAS_UVS     = 2u;
 static const uint FLAG_HAS_COLORS  = 4u;
+// This bucket is skinned here, in `vertexMain`, before the body sees the vertex.
+static const uint FLAG_HAS_SKIN    = 8u;
+// This bucket was skinned by the compute pass before the render pass began, so
+// the streams are already posed. Mutually exclusive with FLAG_HAS_SKIN.
+static const uint FLAG_PRESKINNED  = 16u;
+
+// `Instance.pose` is an offset in matrices with a selector in its top bit: set
+// means this frame's live palette, clear means the asset's baked table.
+static const uint POSE_LIVE = 0x80000000u;
+static const uint POSE_MASK = 0x7fffffffu;
+
+// The four influences of one vertex, blended into the matrix that poses it. Byte
+// for byte the function `mesh.slang` carries, and for the same reason the record
+// is duplicated: this file is that one with the shading lifted out.
+//
+// A vertex body runs on the *posed* surface — `Vertex.position` is skinned before
+// `displace` is called — so a material that ripples a flag ripples the flag the
+// skeleton is holding, rather than fighting it.
+float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
+{
+    float4x4* palette = draw.palette;
+    if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
+    uint base = instance.pose & POSE_MASK;
+
+    uint4 joints = draw.joints[vid];
+    float4 weights = draw.weights[vid];
+
+    return weights.x * palette[base + joints.x]
+         + weights.y * palette[base + joints.y]
+         + weights.z * palette[base + joints.z]
+         + weights.w * palette[base + joints.w];
+}
 
 // Always bound, always valid — a 1x1 opaque white image when the material has no
 // texture, so an untextured material and a textured one are the same descriptor
@@ -347,12 +409,35 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     Instance instance = push.instances[iid];
 
     float3 position = draw.positions[vid];
-    float4 world = mul(instance.model, float4(position, 1.0));
 
     // An `if` rather than a ternary: a ternary lets the compiler evaluate both
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
+
+    // The bind pose, kept before either skinning path runs: this is what
+    // `Vertex.local` hands a body, and it has to be the pose the mesh was authored
+    // in or a displacement sized by the mesh's own length slides across the
+    // surface every time the character moves.
+    float3 local = position;
+
+    // Before the model matrix, and before `displace`: a joint matrix is in the
+    // character's own space, and a body that moves a vertex is moving one the
+    // skeleton has already placed.
+    if ((draw.flags & FLAG_HAS_SKIN) != 0)
+    {
+        float4x4 pose = skin_matrix(draw, instance, vid);
+        position = mul(pose, float4(position, 1.0)).xyz;
+        normal = mul((float3x3)pose, normal);
+    }
+    else if ((draw.flags & FLAG_PRESKINNED) != 0)
+    {
+        SkinnedVertex skinned = draw.posed[iid * draw.skin_stride + vid];
+        position = skinned.position;
+        normal = skinned.normal;
+    }
+
+    float4 world = mul(instance.model, float4(position, 1.0));
 
     // Everything the fragment stage is going to receive, gathered into one struct
     // *before* the agent's body runs and read back out of it afterwards. The
@@ -374,7 +459,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // `fragmentMain` clamps again rather than trusting this, because a body may
     // write the field.
     v.variant = min(instance.variant, MATERIAL_ROWS - 1u);
-    v.local = position;
+    v.local = local;
     v.index = vid;
 
     displace(v);

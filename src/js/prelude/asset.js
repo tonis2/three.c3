@@ -173,17 +173,33 @@ export class Asset {
 	// Call it twice for two copies. They share the upload — the host counts
 	// one reference per drawing node, so two trees over one asset is two
 	// sets of transforms and nothing else.
-	instantiate(name) {
-		const rows = H.assetNodes(this._a, this._g);
+	// `skeleton: true` keeps the file's bone nodes as objects. By default they
+	// are dropped: a baked character's pose comes out of a table the host
+	// uploaded once, so the bones would be sixty objects driving nothing — and
+	// dropping them is what makes a hundred characters a hundred nodes instead
+	// of six thousand. Keeping them switches the character onto a palette
+	// computed from those very nodes every frame, so writing one moves the skin.
+	//
+	// `skinning: 'compute'` poses the vertices in a compute pass before the
+	// frame's first draw instead of in the vertex shader. It splits the character
+	// off into a draw call of its own and costs a posed copy of the mesh per
+	// instance, and it pays for itself only when the same character is drawn more
+	// than once a frame. Not a switch to flip on a crowd.
+	instantiate(name, { skeleton = false, skinning = 'vertex' } = {}) {
+		const compute = skinning === 'compute';
+		const rows = H.assetNodes(this._a, this._g, !!skeleton);
 		const root = new Object3D();
 		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
 		// The root is what carries the animations: a clip drives the whole
 		// subtree, so root.play('Walk') is the only sensible place to say it.
 		root._clips = this.animations;
 		root._asset = [this._a, this._g];
+		// Carried on the root because `_bindAnimation` is what tells the host, and
+		// that runs on the root.
+		root._liveSkin = !!skeleton;
 
 		const built = [];
-		for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a] of rows) {
+		for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] of rows) {
 			const node = mesh < 0
 				? new Object3D()
 				: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
@@ -200,6 +216,11 @@ export class Asset {
 			// animation channel's target index became. -1 for the entries
 			// the host synthesized, which no channel can name.
 			node._gltfNode = gltfNode;
+			// Which skin poses it, and how. Replayed by `_materialize`, because a
+			// host node does not exist yet and this is the only thing that will
+			// remember.
+			node._skin = skin;
+			node._preskinned = compute && skin >= 0;
 			// Only a copy an instanced node placed has anything but white
 			// here, and only a Mesh has anywhere to put it — a group's row
 			// carries the identity and setting it would define a channel on

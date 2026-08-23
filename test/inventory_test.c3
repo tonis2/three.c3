@@ -43,7 +43,7 @@ fn void a_directory_is_described_without_being_loaded() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 4, "every glTF in test/fixtures (%d)", found.len());
+	test::@check(found.len() == 5, "every glTF in test/fixtures (%d)", found.len());
 
 	three::InventoryEntry* entry = named(&found, "textured.glb");
 	if (entry == null) return;
@@ -53,6 +53,14 @@ fn void a_directory_is_described_without_being_loaded() @test
 	test::@check(entry.nodes == 2, "and two nodes (%d)", entry.nodes);
 	test::@check(entry.animations.len() == 0 && entry.skins == 0,
 		"and nothing animated, which this fixture is not");
+
+	// The other side of that: `skins` had no fixture that reported anything until
+	// skinning landed, so the field was only ever checked against zero.
+	three::InventoryEntry* rigged = named(&found, "skinned.glb");
+	if (rigged == null) return;
+
+	test::@check(rigged.skins == 1, "skinned.glb reports its skin (%d)", rigged.skins);
+	test::@check(rigged.animations.len() == 2, "and both its clips (%d)", rigged.animations.len());
 
 	// The path is what `three.load` is handed straight back, so it is relative
 	// to the root that was scanned and not to the process's directory.

@@ -78,7 +78,7 @@ export const DOCS = {
 				'add(...objects)', 'remove(...objects)', 'traverse(fn)', 'getObjectByName(name)', 'stats()',
 				'unload()', 'export(path)', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, { loop, speed, time })', 'stop()', 'toJSON()',
 			],
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
@@ -391,14 +391,23 @@ export const DOCS = {
 		Asset: {
 			construct: 'three.load(path)',
 			properties: ['path', 'meshes (names, in load order)', 'animations (clip names)'],
-			methods: ['mesh(name)', 'meshAt(index)', 'instantiate(name?)', 'toJSON()'],
+			methods: ['mesh(name)', 'meshAt(index)', 'instantiate(name?, opts?)', 'toJSON()'],
 			note:
 				'instantiate() is Three.js\'s gltf.scene: the file\'s own node hierarchy as Object3Ds, '
 				+ 'with the transforms the file gave them. Use it for anything whose pieces are '
 				+ 'positioned by nodes rather than baked into the vertices — a rig, a prop with parts, '
 				+ 'a level laid out in Blender. asset.mesh(name) is the other door and is what you want '
 				+ 'when you are placing pieces yourself. Instantiating twice gives two independent trees '
-				+ 'over one upload.',
+				+ 'over one upload. '
+				+ 'A RIGGED file: the skeleton is left out by default and the character is posed from a '
+				+ 'table baked once at load, so a hundred of them is a hundred nodes, one draw call and '
+				+ 'one uint per copy per frame — give each a phase with play(name, { time }). '
+				+ '{ skeleton: true } keeps the bones as objects and switches that copy onto a palette '
+				+ 'computed from them every frame, so writing bone.rotation moves the skin — a look-at, '
+				+ 'an aim, a foot on a slope. That is the hero-character option and it costs per copy. '
+				+ '{ skinning: \'compute\' } poses the vertices in a compute pass instead of in the vertex '
+				+ 'shader; it splits the character into its own draw call and holds a posed copy of the '
+				+ 'mesh, and only pays off when the same character is drawn more than once a frame.',
 		},
 		Geometry: {
 			construct: 'not constructible — use one of the seven shapes below',
@@ -985,6 +994,13 @@ export const DOCS = {
 		textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 		textureBytes: 'What those cost.',
 		culledLastFrame: 'Instances the frustum dropped in the last render().',
+		skinnedDraws: 'Draw calls whose geometry is posed by a skeleton.',
+		skinnedInstances: 'Characters in those draws. A hundred here with skinnedDraws at 1 is the crowd working as intended.',
+		preskinnedInstances: 'Of those, the ones routed through the compute pass — instantiate({ skinning: \'compute\' }). '
+			+ 'The expensive kind: each holds a posed copy of its mesh per frame in flight, and each is a draw call of its own.',
+		poseBytes: 'Device memory holding baked animation poses, uploaded once per rigged file and shared by every '
+			+ 'copy of it. This is what a rigged file costs that an unrigged one does not — there is no per-frame '
+			+ 'palette upload behind a baked character, which is why a hundred of them is affordable.',
 		gpuMs: 'Milliseconds the GPU spent on the frame you just asked for, measured on the GPU\'s own '
 			+ 'clock rather than timed from here. three.render() and a screenshot each leave their own '
 			+ 'measurement behind, so render first and read this after. 0 before anything has been drawn, '

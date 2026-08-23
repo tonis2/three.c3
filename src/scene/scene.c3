@@ -77,6 +77,14 @@ struct Instance
 	// count the material declared, so a variant past the end is the last row
 	// rather than a read off the end of the push block.
 	uint variant;
+	// Where this copy's joint matrices start, in matrices, with `POSE_LIVE` in the
+	// top bit saying which buffer they are in.
+	//
+	// **The field a crowd is affordable because of.** A hundred characters mid-
+	// stride at a hundred different phases disagree about this one uint and about
+	// nothing else, so they key a hundred different frames out of one baked table
+	// and stay a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
+	uint pose;
 }
 
 <*
@@ -94,6 +102,21 @@ struct Bucket
 	uint material;
 	uint first;
 	uint count;
+
+	<*
+	 Whether the compute pass poses these copies before the render pass reads them.
+
+	 **Part of what makes two draws two draws.** Everything else a bucket keys on
+	 is about *what* is drawn; this is about where the vertices are read from, and
+	 a pre-skinned copy reads a buffer the compute pass wrote while its neighbour
+	 reads the mesh's own stream. They cannot share a `DrawRecord`, so they cannot
+	 share a bucket.
+
+	 That is the honest cost of the flag and it is worth stating plainly: routing
+	 one character of a crowd through compute splits it off into a draw call of its
+	 own. It is not a switch to flip on a hundred copies of a zombie.
+	*>
+	bool preskinned;
 }
 
 <*
@@ -130,6 +153,28 @@ struct SceneStats
 	// nothing was dropped, and reporting the frame before it would be a stale
 	// number wearing a live one's name.
 	uint culled_last_frame;
+
+	<*
+	 What skinning costs, reported apart from everything else.
+
+	 `plan.md` §3/S3 asked for this and asked for it in the opposite direction: it
+	 assumed a live palette and warned that reporting a skinned bucket like an
+	 instanced one would hide a per-frame upload. This design has no per-frame
+	 upload for a baked character — the whole point of it — so the lie would now be
+	 the other way round, and hiding it would tell an agent that a rigged file
+	 costs what an unrigged one does.
+
+	 What it actually costs is here: how many draws are skinned, how many copies
+	 those cover, and the pose memory that was uploaded once and is held for as long
+	 as the assets are. `preskinned_instances` is called out separately because it
+	 is the expensive one — a compute-routed copy holds a posed mesh of its own,
+	 per frame in flight, and it is the only one of the three paths whose cost
+	 grows with the vertex count rather than with the joint count.
+	*>
+	uint skinned_draws;
+	uint skinned_instances;
+	uint preskinned_instances;
+	usz pose_bytes;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
@@ -159,6 +204,12 @@ struct Draw @local
 	// blended pipelines write no depth, so ordering is what stands in for the
 	// depth buffer, and only the draws that lost the depth buffer need it.
 	float depth;
+	// Whether the compute pass poses this copy. **A field beside the key rather
+	// than a bit inside it**, for `material`'s reason one line up: `bucket_key`
+	// spends all 64 bits on two full-range uints, and stealing one would be a
+	// silent wrap rather than an error. It is a tiebreaker in the sort so that
+	// copies routed the same way stay adjacent and coalesce.
+	bool preskinned;
 }
 
 struct Scene
@@ -364,7 +415,7 @@ fn NodeId Scene.add_mesh(&self, AssetId asset, uint mesh, NodeId parent = NO_NOD
 
  @return `The group everything was placed under, or NO_NODE if the handle names no asset.`
 *>
-fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, String name = "")
+fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, String name = "", bool skeleton = false, bool compute_skin = false)
 {
 	if (self.assets == null) return NO_NODE;
 	Asset* loaded = self.assets.slot(asset);
@@ -375,7 +426,7 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 	List{PlacedNode} placed;
 	placed.init(mem, 16);
 	defer placed.free();
-	self.assets.flatten(asset, &placed);
+	self.assets.flatten(asset, &placed, skeleton);
 
 	// Parents precede their children in the walk, so `created` always has the
 	// entry a child needs by the time the child is reached. One pass, no fixups.
@@ -399,13 +450,79 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 		// already left it white, so the branch would save an assignment and cost
 		// a comparison.
 		node.color = entry.color;
+		// The rest pose, which is a baked frame like any other — so this node
+		// draws correctly before anything is played and needs no branch to.
+		self.set_skin(id, entry.skin);
+		// Routed per character, and it splits this copy off into a draw call of
+		// its own — `Node.preskinned` has the argument.
+		node.preskinned = compute_skin && entry.skin >= 0;
 		node.dirty = true;
 
 		created.push(id);
 	}
 
-	self.start_player(asset, group, placed.array_view(), created.array_view());
+	// A character whose skeleton was materialised is posed *from* that skeleton —
+	// which is what makes the flag worth having, and what it costs. See
+	// `AnimationPlayer.live_skin`.
+	self.start_player(asset, group, placed.array_view(), created.array_view(), skeleton);
 	return group;
+}
+
+<*
+ Tell a node which skin poses it, and point it at that skin's rest pose.
+
+ **The one place `Node.skin` and `Node.pose` are set together**, because they are
+ one fact: a node with a skin and no offset reads matrix zero of whatever buffer
+ it finds, and a node with an offset and no skin is culled against the wrong box.
+ Two callers set them — `instantiate` here and `bindSkin` from JavaScript — and
+ both go through this rather than writing the fields.
+
+ `-1` clears both, which is what a node that is not a character wants and what a
+ recycled slot is reset to.
+
+ The rest offset is only known once the poses are baked, and the bake happens at
+ upload — which has already run by the time a node exists, because creating a
+ drawing node retains the asset and retaining is what uploads. A skin that failed
+ to bake leaves the offset at zero, and zero of a buffer that is not there reads
+ as no skin at all.
+*>
+fn void Scene.set_skin(&self, NodeId id, int skin)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	node.skin = -1;
+	node.pose = 0;
+	if (skin < 0 || self.assets == null) return;
+
+	Asset* owner = self.assets.slot(node.asset);
+	if (owner == null || skin >= owner.skins.len()) return;
+
+	node.skin = skin;
+	node.pose = owner.skins[skin].rest_offset;
+}
+
+<*
+ Every skinned node in a subtree, for the player that will pose them.
+
+ Recursive over a freshly instantiated character, which is two nodes deep in the
+ pruned case and a rig deep in the other — the same depth argument
+ `Assets.flatten_node` makes, and the same reason a cycle cannot be reached.
+*>
+fn void Scene.collect_skinned(&self, NodeId id, List{SkinnedTarget}* out)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	if (node.skin >= 0) out.push({ .node = id, .skin = (uint)node.skin });
+
+	// By index: `out.push` cannot move the node pool, but the recursion re-reads
+	// `self.node`, and holding a `Node*` across it is the habit worth not having.
+	sz children = node.children.len();
+	for (sz i = 0; i < children; i++)
+	{
+		self.collect_skinned(self.node(id).children[i], out);
+	}
 }
 
 <*
@@ -425,7 +542,7 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
  Nothing happens for an asset with no clips, so a scene of ten thousand crates
  holds no players at all.
 *>
-fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] placed, NodeId[] created)
+fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] placed, NodeId[] created, bool live_skin = false)
 {
 	List{uint} sources;
 	List{NodeId} nodes;
@@ -441,7 +558,7 @@ fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] place
 		nodes.push(created[i]);
 	}
 
-	self.bind_player(asset, root, sources.array_view(), nodes.array_view());
+	self.bind_player(asset, root, sources.array_view(), nodes.array_view(), live_skin);
 }
 
 <*
@@ -464,15 +581,26 @@ fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] place
 
  @param gltf_nodes : `The glTF node index each node came from, one per entry and the same length as the node array.`
 *>
-fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes)
+fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes, bool live_skin = false)
 {
 	if (self.assets == null) return;
 	Asset* loaded = self.assets.slot(asset);
-	if (loaded == null || loaded.clips.len() == 0) return;
+	// **Skins count as something to play.** A rigged character with no clips still
+	// needs a player, because a player is what holds the map from the file's joint
+	// nodes to this instance's — which is what the live palette is computed
+	// through. Without this a `skeleton: true` character with no animation would
+	// have bones a script could move and nothing that read them.
+	if (loaded == null || (loaded.clips.len() == 0 && loaded.skins.len() == 0)) return;
 
 	self.drop_player(root);
 
-	AnimationPlayer player = { .root = root, .asset = asset, .clip = -1, .speed = 1 };
+	AnimationPlayer player = {
+		.root = root,
+		.asset = asset,
+		.clip = -1,
+		.speed = 1,
+		.live_skin = live_skin && loaded.skins.len() > 0,
+	};
 	player.targets.init(mem, loaded.nodes.len());
 	for (sz i = 0; i < loaded.nodes.len(); i++) player.targets.push(NO_NODE);
 
@@ -482,6 +610,17 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 		if (source >= player.targets.len()) continue;
 		player.targets[source] = nodes[i];
 	}
+
+	// The skinned meshes, found once here rather than searched for per frame.
+	//
+	// **A walk of the subtree rather than of `nodes`**, because `nodes` is the
+	// channel map and only covers entries that came from a glTF node. A mesh with
+	// several primitives becomes one child per primitive with no glTF node of its
+	// own — `PlacedNode.gltf_node` is -1 for exactly those — and every one of them
+	// is skinned. Scanning the map would pose the first primitive of a character
+	// and leave the rest in their bind pose.
+	player.skinned.init(mem, 1);
+	self.collect_skinned(root, &player.skinned);
 
 	self.players.push(player);
 }
@@ -498,9 +637,10 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
  its rest pose for one frame.
 
  @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
+ @param time : `Seconds into the clip to start at, measured from its own start. What a crowd needs: a hundred characters playing one walk cycle at a hundred phases is a hundred different values of this and one baked clip.`
  @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
 *>
-fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f)
+fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f, float time = 0)
 {
 	if (self.assets == null) return false;
 	AnimationPlayer* player = self.player(root);
@@ -522,9 +662,16 @@ fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float spee
 	player.speed = speed;
 	player.loop = loop;
 	player.playing = true;
-	player.time = self.assets.slot(player.asset).clips[found].start;
+	player.time = self.assets.slot(player.asset).clips[found].start + time;
+	// A phase past the end wraps rather than being refused, so a crowd can be
+	// spread with `i / count * duration` and not have to know the duration.
+	if (loop) player.time = (float)clip_loop_time(&self.assets.slot(player.asset).clips[found], player.time);
 
 	player.apply(self, &self.assets.slot(player.asset).clips[found]);
+	// And the skin, for `apply`'s own reason one level down: a character placed
+	// and played in the same breath should be posed at the frame it asked for
+	// rather than sitting in its bind pose until something steps the clock.
+	player.key_pose(self, self.assets.slot(player.asset), &self.assets.slot(player.asset).clips[found]);
 	return true;
 }
 
@@ -658,6 +805,13 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// one's colour.
 	node.color = { 1, 1, 1, 1 };
 	node.variant = 0;
+	// Unskinned until somebody says otherwise, and reset for `material`'s reason:
+	// a recycled slot that kept a skin would pose a new node's mesh by a
+	// stranger's skeleton, reading joint matrices out of an asset it does not
+	// name. `Scene.set_skin` is the one thing that sets these.
+	node.skin = -1;
+	node.pose = 0;
+	node.preskinned = false;
 	node.visible = true;
 	node.world_visible = true;
 	node.dirty = true;
@@ -1315,7 +1469,20 @@ fn void Scene.build_draw_list(
 		bool sorted = is_transparent && near != null;
 		if (frustum != null || sorted)
 		{
-			collision::Aabb3 box = transform_aabb(node.world, mesh.bounds);
+			// **A skinned node is measured by the poses it can reach, not by the
+			// pose it was authored in.** The bake unioned every joint matrix of
+			// every frame over the bind box (`scene/skin.c3`), and using
+			// `mesh.bounds` instead would cull a character the moment an animation
+			// took a limb outside the box the modeller drew around the rest pose —
+			// which looks like a character that vanishes at certain camera angles
+			// during certain frames, and is very hard to attribute.
+			collision::Aabb3 local = mesh.bounds;
+			if (node.skin >= 0)
+			{
+				Asset* owner = assets.slot(node.asset);
+				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
+			}
+			collision::Aabb3 box = transform_aabb(node.world, local);
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
 			// material says how far it moves things and the box grows by that
@@ -1348,6 +1515,7 @@ fn void Scene.build_draw_list(
 			.slot = (uint)slot,
 			.order = draw_order(node.material, is_transparent),
 			.depth = depth,
+			.preskinned = node.preskinned && node.skin >= 0,
 		});
 	}
 
@@ -1382,6 +1550,10 @@ fn void Scene.build_draw_list(
 		}
 		if (a.key < b.key) return -1;
 		if (a.key > b.key) return 1;
+		// Last, and only so that copies routed through compute sit beside each
+		// other: they cannot share a bucket with copies that are not, and
+		// interleaving them would make four draws out of two.
+		if (a.preskinned != b.preskinned) return a.preskinned ? 1 : -1;
 		return 0;
 	});
 
@@ -1390,13 +1562,15 @@ fn void Scene.build_draw_list(
 	// materials over one mesh are adjacent in the sort and share a key.
 	ulong open = self.draws[0].key + 1;
 	uint open_material = self.draws[0].material;
+	bool open_preskinned = self.draws[0].preskinned;
 	foreach (draw : self.draws)
 	{
 		Node* node = &self.nodes[draw.slot];
-		if (draw.key != open || draw.material != open_material)
+		if (draw.key != open || draw.material != open_material || draw.preskinned != open_preskinned)
 		{
 			open = draw.key;
 			open_material = draw.material;
+			open_preskinned = draw.preskinned;
 			// Read off the node rather than unpacked from the key, which only
 			// carries the slot index. Every node in a bucket names the same
 			// live asset, so any of them supplies the generation.
@@ -1406,6 +1580,7 @@ fn void Scene.build_draw_list(
 				.material = draw.material,
 				.first = (uint)self.instances.len(),
 				.count = 0,
+				.preskinned = draw.preskinned,
 			});
 		}
 
@@ -1414,6 +1589,10 @@ fn void Scene.build_draw_list(
 			.normal = node.normal,
 			.color = node.color,
 			.variant = node.variant,
+			// The whole of what a hundred characters at a hundred phases disagree
+			// about. Zero on everything that is not skinned, which the shader reads
+			// as nothing because the bucket's flags say there is no skin.
+			.pose = node.pose,
 		});
 		self.buckets[self.buckets.len() - 1].count++;
 	}
@@ -1508,7 +1687,14 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		if (mesh == null) continue;
 		stats.triangles += (mesh.index_count / 3) * bucket.count;
 		stats.vertices += mesh.vertex_count * bucket.count;
+
+		if (!mesh.has_skin) continue;
+		stats.skinned_draws++;
+		stats.skinned_instances += bucket.count;
+		if (bucket.preskinned) stats.preskinned_instances += bucket.count;
 	}
+
+	stats.pose_bytes = assets.pose_bytes();
 
 	return stats;
 }
