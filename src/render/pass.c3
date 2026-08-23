@@ -290,7 +290,7 @@ fn void? MeshPass.load_triangle(&self, Gpu* gpu)
  Was "one node per mesh, all at the origin" until G3, which is the same thing
  for a file that bakes its transforms into its vertices and visibly wrong for one
  that does not. `Scene.instantiate` is where that is fixed and where the reasons
- are written down; this stays as the verb the CLI and `load` reach for.
+ are written down; this stays as the verb `load` and `load_triangle` reach for.
 
  @return `The group the asset was instantiated into, or the parent it was given if the handle names nothing.`
 *>
@@ -298,52 +298,6 @@ fn NodeId MeshPass.place(&self, AssetId asset, NodeId parent)
 {
 	NodeId group = self.scene.instantiate(asset, parent);
 	return group.is_set() ? group : parent;
-}
-
-<*
- Place `count` copies of an already-loaded asset in a square grid.
-
- This is `--grid` and it exists to make the M2 claim visible rather than only
- asserted: a thousand copies of a model, one draw call, and `stats()` saying so.
- Each copy is a group with the asset's meshes under it, so it also exercises the
- world-matrix propagation the flat placement above never touches.
-
- The spacing comes from the asset's own bounds, because a kit piece is a metre
- across and a terrain tile is a kilometre, and a fixed spacing produces either a
- pile or a smear.
-*>
-fn void? MeshPass.instance_grid(&self, Gpu* gpu, String path, uint count)
-{
-	if (count == 0) return;
-
-	AssetId asset = path.len > 0
-		? self.assets.load(gpu, path)!
-		: self.assets.load_triangle(gpu)!;
-
-	// Clear whatever `load` put there; the grid is the whole scene.
-	self.scene.remove(self.scene.root);
-
-	Vec3 size = self.assets.slot(asset).bounds.size();
-	float span = math::max(math::max(size.x, size.z), 0.001f) * 1.25f;
-
-	uint side = 1;
-	while (side * side < count) side++;
-
-	for (uint i = 0; i < count; i++)
-	{
-		uint column = i % side;
-		uint row = i / side;
-
-		NodeId group = self.scene.add_group(NO_NODE, "instance");
-		self.scene.set_position(group, {
-			((float)column - (float)(side - 1) * 0.5f) * span,
-			0,
-			((float)row - (float)(side - 1) * 0.5f) * span,
-		});
-		self.place(asset, group);
-	}
-
-	self.frame_camera();
 }
 
 <*
