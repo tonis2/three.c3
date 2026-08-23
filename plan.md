@@ -4,13 +4,25 @@ This file is the whole plan. Everything it used to contain about work that is
 finished has been deleted, because a plan that describes what already happened
 is a document nobody can tell the live parts out of.
 
-**That deletion is a habit, not a one-off event.** This file has been swept again
-since — the milestone-by-milestone account of the texture work, the light binding,
-the physics bindings and the whole record of building the post chain came out,
-because each had turned into a description of the code rather than a claim about
-it. `git log -p -- plan.md` is where those went, and the rule going in is the same
-as the rule that made this file: **when an entry stops being a decision anybody
-still has to make, it belongs in history.**
+**That deletion is a habit, not a one-off event.** The rule is: **when an entry
+stops being a decision anybody still has to make, it belongs in history.**
+`git log -p -- plan.md` is where every swept entry went.
+
+Three sweeps so far. The first took out the milestone-by-milestone account of
+the texture work, the light binding, the physics bindings and the post chain.
+The most recent took out everything that had become a description of *built*
+code — the skinning design, the pass system's counting and driver measurements,
+the material-layer and export and draw-buffer accounts, and the record of what
+§9's answered questions cost to answer. What survives a sweep is exactly three
+kinds of thing: **work that is not done**, **a decision that constrains work
+that is not done**, and **a trap that will cost somebody a session**. A section
+whose whole content is "this was built and here is how" is a section that has
+moved into the source and into git.
+
+**So a section may be one line long, and several are.** The number is kept even
+when the content is nearly gone, because source comments cite these by number —
+§4's half-match rule, §12's specular decision, §15's draw record — and
+renumbering would break fifty citations to tidy a table of contents.
 
 **The source still cites them by name, and that is on purpose.** Fifty-odd doc
 comments carry references like `game.md` G5/S3, `event_loop.md`, `m3_stage.md`
@@ -25,39 +37,19 @@ the pattern predates the deletion rather than being introduced by it.
 
 ## Where this stands
 
-A window, a Vulkan device, an offscreen target the swapchain blits, and an exact
-screenshot. A scene graph with world-matrix propagation, asset and texture dedup,
-frustum culling, and **one instanced draw per unique `(asset, mesh, material)`**.
-QuickJS with a Three.js-shaped API in `src/js/prelude/` and three MCP tools over
-it. Slang compiled at runtime and cached to disk, with the descriptor layout and
-push block read out of the module. Picking, parametric shapes, per-copy colour
-and variant, transparent and additive materials. The window as a control, and a
-frame a script can drive. Measuring, debug draw, and glTF export that round-trips
-per-copy colour. A game boot, unloading, node animation, and an XPBD physics
-world. Textures from a file, from a script and from a `.glb`, all three sharing
-one content hash. Colour management end to end. One directional light. Keys a
-script can hold down and a budget it can raise. `stats().gpuMs` measured by the
-GPU rather than guessed at. And a post chain — `three.setPost` and
-`three.addPass`, linear float between passes, an engine-owned tonemap doing the
-display encode last. And material layers — glTF's `CUSTOM_materials_layers`
-imported from a file or written in a script, generating its own shading body.
-Per-draw data is a record in a buffer rather than push constants, so the geometry
-contract and a material's uniforms have stopped competing for the same 128 bytes:
-vertex colours are carried and a material has 104 bytes of uniforms rather than 52.
-And the light casts a shadow — `three.light.shadow = true` for one directional
-depth map, fitted around the scene, sampled with a nine-tap comparison, and off
-until something asks for it. And the mouse can be taken away from the camera:
-`three.controls.enabled = false` stops the turntable reading the window at all,
-which is what a scene driving its own camera every frame needs. And a script is
-told what the mouse *did* as well as where it is — `three.input.pointer` carries
-the frame's movement, all three buttons and both wheel axes, which is §17's
-second phase and everything a look needs short of pointer lock.
+A window, a Vulkan device, an offscreen target and an exact screenshot. A scene
+graph with one instanced draw per unique `(asset, mesh, material)`. QuickJS with
+a Three.js-shaped API in `src/js/prelude/` and three MCP tools over it. Slang
+compiled at runtime and cached. Picking, parametric shapes, glTF in and out,
+physics, animation, skinning, one directional light with a shadow, a post chain,
+material layers, and a mouse and keyboard a script can read and a scene can take
+away from the camera.
+
+**That paragraph is as much inventory as this file keeps.** What each of those
+does is in its own source file, and `git log -p -- plan.md` has the milestone
+accounts that used to be here.
 
 	c3c test --trust=full       680 passed, 0 failed, leak-clean
-
-**What follows was found by using the engine, not by reading it looking for
-holes.** Each one stopped the work, and where it forced a workaround the
-workaround is named, because that is the honest measure of what a gap costs.
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -78,6 +70,9 @@ every one of them is something a person will trust and be wrong about.
   and DPI work. That catches the failure a blind port actually has — a missing
   symbol — and it catches none of the ones that matter: a wrong sign, an event
   that never arrives, a DPI declaration fighting something else in the process.
+  §17 added two more readings to that blind surface — `get_scroll_x`, and the
+  right and middle latches — and a wrong sign in either is exactly the class of
+  fault this entry says compiling cannot find.
 
 - **`WM_DPICHANGED` is not handled** (win32). The awareness context requested is
   per-monitor, so a window dragged between displays of different densities keeps
@@ -89,6 +84,30 @@ every one of them is something a person will trust and be wrong about.
   reports a cursor offset vertically by however much it grew. The win32 backend
   reads `GetClientRect` for exactly this; x11 and wayland could ask their own
   equivalents. Not fixed because it cannot be seen from this machine.
+
+  **`pointer.dy` is almost immune to it, which is worth knowing before somebody
+  "fixes" the delta instead.** The offset is constant for a given window size and
+  a difference cancels it, so a look is straight even while every reported
+  position is wrong. What does not cancel is the frame the resize lands on: the
+  offset changes between two readings and the delta carries the whole change as
+  one enormous mouse movement. The same is true on every platform for the
+  window→image mapping: `WindowView` divides by the swapchain extent, which
+  tracks a live resize, so a still cursor maps to a moving image pixel for as
+  long as the drag lasts — a spurious movement *every frame of the drag*, not
+  one per resize. A mouse-look script polling `dx` turns the camera while
+  somebody resizes the window. Derived from the mapping rather than seen on
+  screen, and the arithmetic is short enough to check: a cursor at window x=400
+  is image x=400 in an 800-wide window and image x=320 once the window is 1000
+  wide, so eighty pixels of movement are reported for a hand that did not move.
+
+  **Not fixed, and the fix has a cost worth naming.** `MouseTracker` would have
+  to be told that the mapping changed, and it deliberately knows nothing about
+  extents — which is what makes it testable with six numbers and no window. So
+  either the tracker grows a dependency on `WindowView`, or `main.c3` grows the
+  comparison, and `main.c3` is the one file with no checks in it. **Trigger:**
+  the first first-person camera, which is what pointer lock is waiting on too.
+  Both are about a look that stays honest, and they should be answered together
+  rather than one at a time.
 
 - **`ExportBatch` keys on `(asset, mesh)` alone**, so sibling nodes drawing one
   shape with different materials collapse into a single instanced glTF node
@@ -254,84 +273,28 @@ the decision can be revisited on evidence rather than on somebody's mood.
 
 ## 3. Skinning
 
-**Built, and not the design this section described.** S1–S4 assumed a **live
-palette**: joint matrices recomputed per instance per frame and uploaded, costed
-here at ~192 KB a frame for fifty characters. What was built instead is a **baked
-pose buffer** — every clip of every skin sampled once at 30 fps into a
-device-local table, and an instance names a frame with one `uint`. Both exist
-now; the live palette is the second of three paths rather than the only one.
+*(Built: three paths over one shader contract — a baked pose table, a live
+palette under `skeleton: true`, and an opt-in compute path. `src/scene/skin.c3`
+carries the design and the costs.)*
 
-**The three paths, and one shader contract.** `Instance.pose` is an offset in
-matrices with a selector in its top bit, so which buffer a copy reads is a
-property of the *instance* and not of the bucket — which is what lets a hero
-character and the crowd behind him share a `vkCmdDrawIndexed`:
-
-| | pose from | blend in | for |
-|---|---|---|---|
-| default | the baked table, keyed by frame | vertex shader | crowds |
-| `skeleton: true` | bone nodes, per frame | vertex shader | IK, look-at, a bone a script writes |
-| `skinning: 'compute'` | either | a compute dispatch | a mesh drawn in more than one pass |
-
-**What the baked path costs and buys.** A hundred characters mid-stride at a
-hundred phases differ by one `uint` each, so the per-frame cost of the crowd is a
-hundred integers and the palette upload the old S2 costed does not exist. It also
-cannot tear — `gpu/buffer.c3` records that crig's pose palette did, and an
-immutable table has nothing to tear. The price is memory (60 joints × 30 fps ≈
-115 KB per second of clip, reported as `stats().poseBytes`), time quantised to
-the bake rate, and no blending between clips.
-
-**A character is two nodes, not sixty-two.** Joint-only nodes are pruned at
-instantiation — kept only when something hangs off them, so a prop in a hand keeps
-its chain — and a skinned mesh becomes a child of the group with an identity
-transform, because glTF says its own node transform is ignored and the scene graph
-is the honest place to say that. `Instance.model` needs no special case as a
-result.
-
-**S3 was right and pointed the wrong way.** It warned that reporting a skinned
-bucket like an instanced one would hide a per-frame upload. There is no per-frame
-upload behind a baked character, so the hidden cost is the pose memory instead,
-and `stats()` reports `skinnedDraws`, `skinnedInstances`, `preskinnedInstances`
-and `poseBytes` separately for that reason. The check was written before the code,
-as S3 asked.
-
-**S4 stands.** A skinned mesh's `TriBVH` is its bind pose and picking still
-answers against a box — but the box is now the union of every baked frame rather
-than the bind pose's own, which the same bake computes for free and which culling
-uses too. A character with its arms up is no longer culled by the box its
-modeller drew.
-
-**On the compute path, honestly.** It does the same arithmetic the vertex shader
-does, plus 24 bytes a vertex written, read back, a dispatch and a barrier — and a
-posed copy of the mesh per instance per frame in flight. Under one pass it is
-strictly more work, and it was built anyway for two reasons that were not
-speculative: shadows were a known coming pass (§13) and it is the only way to
-raycast against the pose rather than the box. It is opt-in per character and it
-splits the bucket. **Do not route a crowd through it.**
-
-**The first of those two arrived, and the arithmetic is now what it predicted.**
-`shaders/shadow.slang` reads `Draw.posed` exactly as `mesh.slang` does, so a
-compute-routed character blends once and two passes read the result while a
-vertex-skinned one blends twice. That is break-even at two passes, as costed —
-and it does not make compute the default, because the extra draw call the split
-bucket costs is paid whether or not shadows are on.
-`three_tests::shadow::the_two_skinning_paths_cast_the_same_shadow` is what holds
-the two to the same picture through the second pass, which is a stronger claim
-than the colour pass alone could make: it is the first thing that reads the
-dispatch's output through a *different* pipeline.
-
-**What is still absent.** No blending or crossfade between clips — G3/S7's
-argument is unchanged and the live palette is where it would land. No morph
-targets. No sockets: a bone's world transform is recoverable from the baked table
-as `pose * bind` and `AssetSkin.bind` is kept for it, but nothing reads it yet.
-
-**One check does less than its name suggests, and says so.**
-`the_skinning_paths_are_silent_under_validation` covers the dispatch's arguments
-and the buffer lifetimes; it does **not** cover the compute→vertex barrier.
-Deleting that barrier leaves the test green, with the ordinary layer and with
-synchronization validation requested through `create_instance(sync: true)`. This
-machine's layer does not report the hazard. The barrier rests on the spec and on
-review — measured, not assumed, and worth repeating the injection anywhere the
-layer is fuller.
+- **No blending or crossfade between clips.** The baked path cannot express one:
+  the pose is a table lookup, so nothing can influence it that was not sampled at
+  bake time. The live path is where it would land, and §17 has what a crossfade
+  would cost on each.
+- **No morph targets.**
+- **No sockets.** A bone's world transform is recoverable from the baked table as
+  `pose * bind` and `AssetSkin.bind` is kept for it; nothing reads it yet.
+- **Do not route a crowd through `skinning: 'compute'`.** It does the vertex
+  shader's arithmetic *plus* 24 bytes a vertex written and read back, a dispatch,
+  a barrier, and a posed copy per instance per frame in flight. Break-even at two
+  passes, and it splits the bucket whether or not a second pass exists.
+- **A validation gap, measured rather than assumed.**
+  `the_skinning_paths_are_silent_under_validation` covers the dispatch's
+  arguments and the buffer lifetimes and does **not** cover the compute→vertex
+  barrier: deleting that barrier leaves the test green, under the ordinary layer
+  and under synchronization validation both. This machine's layer does not report
+  the hazard, so the barrier rests on the spec and on review — worth repeating
+  the injection anywhere the layer is fuller.
 
 ---
 
@@ -341,29 +304,14 @@ layer is fuller.
 the parts.** `lib/ktx.c3l` is already in, ahead of the milestone that uses it.
 
 **A roughness map has nowhere to go, and that is a lighting decision rather than
-a texture one.** Mips and colourspace are closed — `three.texture(path, {
-colorSpace })` uploads UNORM, the chain is generated by blit, and
-`mapped_normal` in `shaders/material.slang` rebuilds a tangent frame from
-derivatives so a normal map works on a mesh with no tangents. What a roughness
-or metalness map still lacks is a term to feed: the built-in light is one
-lambert factor with no specular, so the map loads correctly and only a custom
-`shade` body can do anything with it. **Do not add a roughness input to
-`mesh.slang` before deciding what §12 does about lighting** — a specular term
-and the light that drives it are the same decision, and a roughness map wired
-into lambert would be a field that changes nothing. §14 is where that rule was
-tested against a feature that wanted the fields and did not get them.
-
-**The sampler budget is 8 rather than 4** since §14: a generated layer stack
-needs one binding per layer plus one for the packed mask, and four bought three
-layers with no room for a normal map on any of them. `MATERIAL_TEXTURE_LIMIT` has
-what the extra four cost.
-
-**Meshes carry COLOR_0 as of §15**, read by a body as `s.vertex_color` and by a
-vertex body as `v.vertex_color`. It is deliberately *not* folded into `s.albedo`
-the way the per-instance colour is: applying it would change how every file
-already loaded renders, and the thing that made the stream exist reads the
-attribute as a painted weight rather than as a tint. A body that wants glTF's own
-rule writes `s.albedo * s.vertex_color.rgb`.
+a texture one.** Mips, colourspace and normal maps are closed; what a roughness
+or metalness map lacks is a term to feed, because the built-in light is one
+lambert factor with no specular. So it loads correctly and only a custom `shade`
+body can do anything with it. **Do not add a roughness input to `mesh.slang`
+before deciding what §12 does about lighting** — a specular term and the light
+that drives it are the same decision, and a roughness map wired into lambert
+would be a field that changes nothing. §14 is where that rule was tested against
+a feature that wanted the fields and did not get them.
 
 **What a script still cannot reach is a mesh's *own* image.** A mesh loaded from
 a `.glb` carries its texture on the `GpuMesh` and exposes no `Texture` handle, so
@@ -453,6 +401,12 @@ the camera off decides nothing about which of them gets it. The consume flag is
 still this milestone's, unbuilt, and still the thing that has to be designed
 rather than switched.
 
+**A click cannot say it was handled, and that is decided rather than pending.** A
+handler returning `false` was the obvious cheap version and it suppresses
+nothing: a click *is* a press and a release that did not travel, so by the time
+one is recognised no orbit has happened. The conflict is over the **press**, and
+the press is what this milestone has to arbitrate.
+
 **It has been hit rather than anticipated.** A scene binding seven keys to a
 character has no way to say so — the controls had to be delivered in a chat
 message, because the window has no way to mention them. That is the smallest
@@ -533,9 +487,9 @@ Decisions nobody has made. Each one is cheap to decide and expensive to discover
   reference to? Probably nothing good, and probably acceptable, but it should be
   a known answer rather than a discovered one.
 
-*(Three of these were answered by §17's first phase and have moved there —
-`three.controls.enabled`, whether a click can be consumed, and who owns the
-camera across a scene rebuild. What is left is the two that gate hot reload.)*
+*(Three of these are answered and gone: `three.controls.enabled` exists, a click
+cannot be consumed (§5), and the camera belongs to the host rather than the scene
+— the closing section has it. What is left is the two that gate hot reload.)*
 
 ---
 
@@ -766,6 +720,17 @@ Live, all of them. Each cost real time and none is visible in a diff.
   at the source on macOS with `+[NSEvent pressedMouseButtons]`, which only ever
   clears and never sets; the release gate in `Controls` is the belt to that
   braces.
+
+  **§17 widened who is exposed to it.** `three.input.pointer` now reports all
+  three latches, and a script polling `down` or `right` has no gate of any kind
+  in front of it — a stuck latch reads as a button held forever, sixty times a
+  second. That is deliberate rather than overlooked: a second release gate here
+  would be exactly the "mechanism that hides the failure of the first" that
+  `controls.c3` argues against, and it would make the camera's gate stop being
+  load-bearing without anybody noticing. `clicked` is still the only *edge*, and
+  an edge is the thing a stuck latch cannot fabricate. Said out loud in
+  `bind_input.c3` so a script author meets it in the doc rather than in a
+  session.
 - **A picking check whose fixture is symmetric about the probe cannot see a
   transposition**, and picking code is made almost entirely of transpositions.
   Four separate checks in this project passed for the wrong reason; three of them
@@ -850,9 +815,7 @@ failure rate that no amount of playing the scene by hand had surfaced.
 Checks worth writing *before* the code they check, because each one guards a
 number that is wrong rather than a picture that is:
 
-1. **Skinned buckets report distinctly in `stats()`** (§3/S3), asserted against a
-   scene containing both a skinned and an instanced bucket.
-2. **The physics world is deterministic** — two worlds given the same inputs
+1. **The physics world is deterministic** — two worlds given the same inputs
    produce the same `state_hash` after N steps, and a `snapshot`/`restore` round
    trip reproduces it. The library supplies the mechanism; the binding is what
    could break it, by stepping at a rate that depends on the frame.
@@ -861,440 +824,78 @@ number that is wrong rather than a picture that is:
 
 ## 12. Lighting
 
-**There is one directional light and it is four floats** — `three.light.direction`,
-`three.light.ambient`, and `three.light.set(direction, ambient)` for both. It is
-deliberately not `scene.add(new three.DirectionalLight(...))`: that name would
-promise adding, removing, colouring and duplicating, and this renderer can do none
-of them. Whatever comes next has to keep that honesty rather than inherit the
-Three.js name and disappoint it.
+**There is one directional light and it is four floats**, and it casts one
+shadow. The naming rule stands for whatever comes next: it is deliberately not
+`scene.add(new three.DirectionalLight(...))`, because that name promises adding,
+removing, colouring and duplicating and this renderer can do none of them.
 
-**It casts a shadow now, and that was the largest of the three things this
-section said were missing.** `three.light.shadow` — `enabled`, `size`, `bias`,
-`intensity` — over one directional depth map fitted around the scene each frame.
-It is off until a script asks, which is the same rule the post chain follows and
-for the same reason: nothing is allocated and no shader is compiled for a project
-that never wants it. `render/shadow.c3` carries the design, the three costs and
-the trigger that would change each of them; the two worth repeating here are that
-**the camera frustum stops culling while the pass is on** (a caster the camera
-cannot see still throws a shadow into the frame) and that **there is no
-`castShadow` per object**, because a third per-copy channel splits buckets and
-that is the trade the whole renderer refuses.
+What is left, in the order they stop being optional: **a second light, or a
+list; a colour per light rather than white; and a specular term.**
 
-It also settled §9's open question, which had asked for a decision "before §3 or
-§4" on the grounds that it touches the same shader either way. It did touch the
-same shader: `FrameBlock` grew a matrix and a `float4`, both shading templates
-grew a reserved sampler at binding 1, and `MATERIAL_BINDING_FIRST` moved from 1 to
-2. All of that was cheap precisely because §15's draw record had already taken the
-geometry contract out of the push block.
+**A specular term is what a roughness map is waiting for.** §4 can already load
+one in the right colourspace and has nowhere to send it: `lambert()` is the whole
+of the built-in light, so roughness and metalness are inputs to an equation this
+renderer does not evaluate. That makes them one decision and not two — **do not
+add a roughness field anywhere before the term that reads it exists**, or it is a
+material property that provably changes no pixel. §14 held that line under
+pressure and is the precedent: the layer extension's PBR fields are parsed,
+dropped at the importer and refused by name at the JS boundary.
 
-What is left of the list, in the order they stop being optional: a second light,
-or a list; a colour per light rather than white; and a specular term. Now that the
-binding exists, which of them anybody actually misses is a question that can be
-answered rather than guessed — which was the argument for doing the binding
-first.
+Two properties of the shadow worth knowing before building on it: **the camera
+frustum stops culling while the pass is on** (a caster the camera cannot see
+still throws a shadow into the frame, so `culledLastFrame` reads 0), and **there
+is no `castShadow` per object**, because a third per-copy channel splits buckets
+and that is the trade the whole renderer refuses.
 
-**A specular term is what a roughness map is waiting for.** §4 can now load one in the right colourspace and has nowhere to send it:
-`lambert()` is the whole of the built-in light, so roughness and metalness are
-inputs to an equation this renderer does not evaluate. That makes them one
-decision and not two — do not add a roughness field anywhere before the term
-that reads it exists, or it is a material property that provably changes no
-pixel.
-
-**§14 held that line under pressure and is the precedent.** Material layers
-landed with the extension's metallic, roughness and subsurface fields *parsed,
-dropped at the importer and refused by name at the JS boundary* — the first time
-this rule cost a feature something visible rather than merely deferring one. The
-images those fields name are not even uploaded. When the specular term arrives,
-`GpuLayer` in `scene/asset.c3` is where the three fields go back in, and the
-refusals in `js/prelude/layers.js` are what get deleted.
-
-**And the exporter still writes no light.** Not writing one used to be the right
-answer, because a hardcoded directional term is an implementation detail rather
-than content; binding it changed that and nothing followed. One directional light
-and an ambient floor map onto a glTF `directional` light and nothing else, which
-is a small and honest write.
+**The exporter still writes no light.** Not writing one used to be right, because
+a hardcoded directional term is an implementation detail rather than content;
+binding it changed that and nothing followed. One directional light and an
+ambient floor map onto a glTF `directional` light and nothing else, which is a
+small and honest write.
 
 ---
 
 ## 13. The pass system, and what it is not
 
-The chain is built (`render/chain.c3`) and the shadow pass is built on top of it
-(`render/shadow.c3`). What is left of this section is the part that constrains
-what lands on top of *those* — a UI layer, PBR — and the one trigger that would
-turn the frame's list into a graph.
+*(Built: a frame is a list of stages, the post chain is `three.setPost` plus
+`three.addPass`, and the shadow pass took the barrier count from `3 + N` to
+`5 + N`. The counting, the driver measurements and the interface argument that
+justified all of that are in `git log -p -- plan.md`.)*
 
-### The counting the no-graph answer rests on
-
-A frame is `scene ─► target.color ─► blit` with no post pass and
-`scene ─► A ─► P0 ─► … ─► tonemap ─► target.color ─► blit` with one: five owned
-images and `3 + N` barrier call sites, every one of them coming out of
-`color_attachment_barrier` or `shader_read_barrier`. What the named features add:
-
-	shadows        +2 sites  built, and the estimate was +1. The read-side
-	                         transition was expected to fold into
-	                         begin_render_to's two-element array and does not:
-	                         the map is its own image at its own extent rather
-	                         than the target's depth buffer, so the pass owns
-	                         both ends of it. Cascades are layers of one image:
-	                         more draw calls, the same two transitions.
-	UI             +1 site   or zero. Same target.color, LOAD_OP_LOAD, a different
-	                         pipeline, no attachment of its own.
-	depth in post  +0 sites  two more elements in arrays that already exist.
-	               ────────
-	               ~8 total
-
-Eight is not a number that buys a dependency solver, and neither was seven. **The
-estimate being one out is worth leaving visible**: it was wrong for a reason that
-only shows up once the image exists, which is the ordinary way a costing of this
-kind goes wrong, and being out by one on a number whose whole job is to be far
-below the threshold changed nothing. **UI is the one that looks
-expensive and is not:** it draws into the colour attachment everything else
-already writes, so it costs a pipeline, a vertex buffer and a glyph atlas, and
-nothing whatever in scheduling — `pushDescriptor` means the atlas is one more
-`SampledBindings.add`, exactly like a material texture. The expensive half of a UI
-layer is text layout and hit-testing, and no pass system touches either.
-
-### What the driver offers, measured
-
-Probed rather than assumed, by the method §10 insists on — a temporary test
-calling `vk::getDeviceExtensions` and one chained `getPhysicalDeviceFeatures2`,
-run once and deleted:
-
-	device               Apple M5, KosmicKrisp (lib/Vulkan.c3l/macos-aarch64)
-	apiVersion           1.4.359
-	device extensions    144
-	maxPushConstantsSize 256
-
-	dynamicRenderingLocalRead    true
-	unifiedImageLayouts          true
-	hostImageCopy                true
-	maintenance5, maintenance6   true
-	pushDescriptor (1.4 core)    true
-	VK_EXT_shader_object         absent
-
-§10 carries the `VK_EXT_extended_dynamic_state3` half of the same run: every
-colour-blend bit false, so **a blend mode stays a `PipelineState` field**.
-`VK_EXT_shader_object` being absent is the other half of that — it is the
-extension that would have removed pipeline objects outright, and with them the
-"am I last" variant problem the format rule below exists to solve.
-
-**`IMAGE_LAYOUT_GENERAL` was tried, measured and reverted — do not try it again
-without reading this.** It has been legal on every device since Vulkan 1.0, and
-`VK_KHR_unified_image_layouts` — the promise that it costs nothing — is present
-here because Metal has no layout concept at all. So the argument for adopting it
-is sound right up to the last step, and the last step is where it dies: **core
-validation catches a missing barrier by noticing an image is in the wrong
-*layout*, and that is the only mechanism it has for this.** With every image in
-GENERAL there is no layout left to be wrong. Measured rather than reasoned:
-deleting `shader_read_barrier` from the post pass produces
-`VUID-vkCmdDraw-imageLayout-00344` today and left **all 18 post checks green**
-under GENERAL. Synchronization validation does not fill the hole on this driver —
-enabled three ways, including the layer's current `VK_LAYER_VALIDATE_SYNC=1`, the
-missing barrier still reports nothing.
-
-**The instrument does not reach a depth image, and that was measured when the
-shadow pass was built.** Deleting either of `ShadowMap`'s two barriers — the
-attachment transition or the read-side one — leaves every check in
-`three_tests::shadow` green, pictures included, with the ordinary layer and with
-synchronization validation. The same injection on the post chain's *colour* image
-still produces `VUID-vkCmdDraw-imageLayout-00344`, naming the image, the binding
-and both layouts, and fails `three_tests::post`. So the mechanism is present, it
-works through a push descriptor, and it is silent for a depth attachment sampled
-the same way. Both injections were run; the contrast is the finding, and it is
-recorded in `render/shadow.c3` beside the barriers it applies to. **Nothing about
-a depth attachment should lean on "the layer would have told us".**
-
-That inverts the trade for **this** project specifically, and `test/post_test.c3`'s
-own header says why: a missing barrier renders correctly on this driver and is a
-race everywhere else, so the layout bookkeeping is the only instrument standing
-between the two. **A simplification that removes a mistake nobody is making, at
-the cost of an instrument that catches one they might, is not a simplification.**
-The bookkeeping reads like ceremony precisely because it has been working.
-Anything proposing to delete a safety mechanism should be asked to show what still
-catches the failure afterwards, and the way to ask is an injection rather than an
-argument.
-
-**`dynamic_rendering_local_read` is the live one, and it is step 7 below.** Within
-one `cmdBeginRendering` block it can read attachments
-written earlier in that block — the extension mobile deferred renderers live on,
-and an Apple tiler is its home. Fusing the tonemap into the scene's block would
-cost no image and no round trip: the HDR attachment is `STORE_OP_DONT_CARE` and
-on a tiler need never reach main memory, which is ~8 MB of write plus 8 MB of read
-a frame at 1080p that image A otherwise spends.
-
-**The hard limit is same-pixel only** — no neighbour sampling — and it splits post
-passes in two:
-
-	fusable      tonemap, exposure, colour grade, vignette, depth fog,
-	             soft particles. Same pixel. No image, no barrier.
-	not fusable  blur, bloom, depth of field, SSAO, edge detect.
-	             Neighbourhood reads. The ping-pong chain as designed.
-
-And **fusion and sampling want different images**: local read needs
-`INPUT_ATTACHMENT` usage and wants `TRANSIENT_ATTACHMENT` with lazily allocated
-memory to earn the memoryless win; the chain needs `SAMPLED`. One image cannot be
-both to any effect. So this is not a flag to flip — it is a second path, which is
-exactly why the chain was built first: it is correct on any driver, the fusion is
-identical output with less bandwidth, and designing the general case around the
-special one gets both wrong. **Trigger:** a measurement.
-
-It also nearly dissolves §2's depth-in-post entry for the pointwise half. Depth
-becomes an input attachment in the block that is already using it, so the
-transition to `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and back stops existing — for fog
-and soft particles, which want the same pixel. Depth of field and SSAO want
-neighbours and stay where that entry left them.
-
-**`PipelineState` keeps all four fields, and a fifth state is the next question.**
-`DYNAMIC_STATE_DEPTH_TEST_ENABLE` and `…WRITE_ENABLE` are free for the asking, and
-taking them would still buy nothing: every `PipelineState` in the program is one
-of four constants, and `state_for_blend` (`scene/material.c3:164`) is a pure
-function from `BlendMode` to one of them — there is no site anywhere that builds a
-state with an independent depth choice. Written out:
-
-	                topology       depth_test  depth_write  blend
-	SOLID_STATE     TRIANGLE_LIST  true        true         NONE
-	LINE_STATE      LINE_LIST      false       false        NONE
-	ALPHA_STATE     TRIANGLE_LIST  true        false        ALPHA
-	ADDITIVE_STATE  TRIANGLE_LIST  true        false        ADDITIVE
-
-`(depth_test, depth_write)` is a **function of `(topology, blend)`** — no two rows
-share the left pair and differ on the right. Dropping both fields therefore
-changes the pipeline count by exactly zero, today and for as long as those four
-are the only states.
-
-And the cost is not zero. Two commands per bucket is the small half. The real one
-is that `ALPHA_STATE`'s doc comment is where the argument lives for why a
-transparent instanced draw must not write depth — copies inside one bucket are not
-sortable against each other, so a depth write makes visibility depend on
-rasteriser order — and `material.c3:161` already records that writing
-`depth_write: true` by hand *looks* right in any scene where nothing overlaps
-itself. Moving that choice from a named constant to a call site turns a
-guarantee into something each bucket can get wrong, in exchange for nothing.
-
-**Trigger:** a pass that genuinely wants a depth combination the four states do
-not have. A UI layer is the likely first one — alpha blending with the depth test
-*off* is not among the rows above — and at that point the question is whether it
-is a fifth constant or a dynamic state, which is a question worth having a real
-case for.
-
-**Deferred: `hostImageCopy`.** `vkCopyImageToMemory` moves image data to host
-memory with no staging buffer, no command buffer and no submission, which is
-`Target.create_readback` + `record_readback` + `decode_readback` collapsing toward
-one call, and the same for `gpu/texture.c3`'s upload. It went core in 1.4, so
-every 1.4 device has it and desktop NVIDIA, AMD and Mesa all ship 1.4. Held back
-anyway: it is a readback convenience rather than a pass change, it blocks nothing,
-and it needs `HOST_TRANSFER` usage set at image creation — so it belongs with the
-IBL bake, decided once rather than twice.
-
-### Three kinds of pass, and they do not unify
-
-	1. geometry     scene, shadow — both built. Driven by the scene graph, write
-	                attachments.
-	                gpu, cmd, target, frame slot, instance buffer.
-	2. full-screen  the post chain, tonemap. Driven by a list.
-	                cmd, target, source view, destination view, assets.
-	3. one-shot     mip generation, an IBL bake. Run at load, write persistent
-	                textures. No per-frame command buffer at all — texture.c3's
-	                @single_time_command is already this, and is where a bake goes.
-
-Unifying all three under one abstraction is what a render graph attempts, and it
-is where a graph earns its complexity in an engine with fifteen passes. Here #3
-already has a working home, #1 is two stages, and #2 is a list. **Three small
-mechanisms that each fit cost less than one that fits all three approximately.**
-
-The line worth writing down, because it says what not to force: the chain is
-*full-screen 2D passes over the finished frame, at target extent*. An IBL bake
-fails every clause — cubemap, mip chain, wrong extent, runs once, writes a
-persistent texture rather than `target.color`.
-
-**PBR is not a pass and does not appear in this list.** It is a BRDF in
-`mesh.slang` plus material parameters with nowhere to live, which is §2's
-"per-material glTF loading has no unit to load into" — a data-model blocker, not
-a scheduling one. The only place PBR touches this section is the format decision
-below, and that touch is load-bearing.
-
-### The frame is a list, not a graph
-
-`record_scene` is a sequence with the destination decided once at the top, so a
-shadow pass and a UI layer slot into it as lines rather than as nested ifs — the
-"window shows something the screenshot does not" family of bug is what that
-function exists to prevent:
-
-	self.pass.prepare(cmd, slot)!;          // scene update, buffers, compute skinning
-	self.pass.record_shadow(cmd);           // built: a line, and a no-op when off
-	self.target.begin_render_to(cmd, scene_destination);
-	self.draw(cmd)!;
-	if (posted)  self.post.record_chain(cmd, &self.target, final_color)!;
-	if (overlay) self.ui.record(cmd, &self.target);
-	self.target.close(cmd);
-
-**The shadow line landed as a line**, which is what this section predicted and is
-the payoff for `record_scene` having been rewritten as a sequence. It is not even
-an `if`: `record_shadow` returns immediately when the pass is not live, so the
-frame path has one more statement and no more branches. It does not touch
-`target.color`, so the invariant below is untouched by it.
-
-**The invariant a third stage would break: exactly one stage writes
-`target.color`, and the close happens exactly once, here.** It is enforced rather
-than merely written down. A second close is a transition out of
-COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in TRANSFER_SRC, so
-`the_post_pass_is_silent_under_validation` and `a_chain_is_silent_under_validation`
-both fail on it with `VUID-VkImageMemoryBarrier2-oldLayout-01197` — verified by
-injecting a second `self.target.close(cmd)`, not by reasoning about it. That is
-the thing to know before a UI layer is added on top of it. The shadow pass, which
-was the other half of that sentence, went in without touching it: it writes its
-own image and closes nothing.
-
-Each stage keeps its own honest signature. A common `record(PassContext*)` across
-all three kinds would need a context carrying gpu, cmd, target, slot, assets,
-scene, src view, dst view and extent, with every pass reading three of the nine —
-and the specific loss is that you could no longer tell from a signature what a
-pass touches, in a file where every doc comment exists to say exactly that.
-
-### The chain: three images and two rules
-
-	pass i    reads  P[(i-1)&1] as `prev`, A as `scene`
-	          writes P[i&1]
-	tonemap   writes target.color
-
-Three images regardless of chain length: A, what the scene renders into, plus two
-ping-pong images allocated lazily, so a runtime that never sets a post shader pays
-for nothing. N = 1 allocates P0 and not P1, and is two draws rather than one —
-the price of user passes having no format to get wrong, paid only by frames that
-asked for a post pass.
-
-Each pass issues one `color_attachment_barrier` and the chain closes each
-destination with `shader_read_barrier`; `color_attachment_barrier` discards from
-`UNDEFINED`, which is already correct for reusing P0 on pass 2 after pass 1
-sampled it. **No new barrier code — the existing two functions called N times.**
-
-**Two bindings are reserved, and that is what covers the one non-adjacent read
-anybody actually wants.** Binding 0 is `prev`, binding 1 is `scene`, always
-available, because bloom is `blur(bright(scene)) + scene` and needs the original
-three passes later. *The edge people reach for a DAG to express is a binding, not
-a solver.*
-
-The cost is that the first free texture binding is not one number:
-`MATERIAL_BINDING_FIRST` is 1, `POST_BINDING_FIRST` is 2, and both are parameters
-of `assemble_shader`, `SampledBindings.collect` and `sampler_binding_of`. A shared
-bump instead would silently renumber every material sampler. `TextureSlots` is
-indexed by the **absolute** binding for the same class of reason: carrying a base
-into the accessors would mean a call site passing a material's base for a post
-pass read a real texture out of the wrong slot rather than faulting.
-
-**A reserved binding has to be checked against the reflected layout, not
-assumed.** Slang drops a parameter nothing reads, so a body that never touches
-`p.scene` gives it every reason to drop `scene` — and pushing a descriptor for a
-binding the layout does not declare is a validation error.
-`pipeline_declares_binding` asks by index what `sampler_binding_of` asks by name.
-
-### The format rule, and why the scene is not HDR yet
+### The rule a new pass has to hold
 
 > **Every script-authored pass reads float and writes float. A fixed,
 > engine-owned tonemap pass is the only thing that writes `target.color`.**
 
-That is the rule any new pass has to hold, and the reason is that without it *"am
-I last"* becomes a pipeline variant: the same body at slot 3 and at slot N would
-be two different `VkPipeline`s, output format would enter the cache key, and
-reordering the chain would be a recompile. With it there is one pipeline shape for
-every `addPass` body, one fixed pipeline for the encode, no format in the key, and
+Without it *"am I last"* becomes a pipeline variant: the same body at slot 3 and
+at slot N would be two different `VkPipeline`s, output format would enter the
+cache key, and reordering the chain would be a recompile. With it there is one
+pipeline shape for every `addPass` body, one fixed pipeline for the encode, and
 free reordering. `POST_CHAIN_FORMAT` is `R16G16B16A16_SFLOAT`; `TONEMAP_BODY` is
 the one caller that passes `target.color_format`.
 
-**Image A — what the *scene* renders into — is not part of that and stays
-`_SRGB`.** A scene pipeline's colour attachment format is fixed when the pipeline
-is built and dynamic rendering checks it against the attachment, so a float A
-makes every mesh pipeline wrong the moment a post pass is set. The two ways out
-are both large: a second variant of every mesh pipeline keyed on whether post is
-active, which puts a format in the pipeline cache key and makes `setPost` rebuild
-every material's pipeline — the precise thing the rule above exists to avoid, one
-layer down; or rendering the scene into A always and tonemapping every frame of
-every scene, which deletes the property that an unposted frame is *the code path
-it always was* rather than a new one that agrees with it.
-
-Neither buys anything today, and that is what settles it: **nothing in this
-renderer produces a value above 1.0.** What HDR is actually blocked on is physical
-light intensities — step 4's material unit — and when the scene becomes HDR, A
-joins the chain's format and the always-on path becomes the right answer for a
-reason that will exist by then. The chain itself already carries values above 1.0
-between passes, which is what a bright pass followed by a blur needs;
-`the_chain_carries_values_above_one_between_passes` pins it by injection — the
-chain's format set to `R8G8B8A8_SRGB` clamps a ×16 ÷16 round trip by 70 levels.
-
-**The lesson is the same shape as the GENERAL one:** "one line" was a claim about
-the *edit*, and the cost was in what the edit was declared against. A format that
-lives on a pipeline rather than on an image is not visible from the image, and the
-way that surfaces is writing the line and compiling it rather than counting the
-files it touches.
-
-### The interface, scoped to one kind
-
-C3 interfaces fit the full-screen chain and nothing else here, because that is the
-one kind whose contract is uniform across implementers: read one full-screen image,
-write another at the same extent. A user pass is one shader; an engine-provided
-bloom is internally a pyramid of twelve. Same contract, different types — which is
-what dynamic dispatch is for.
-
-	<*
-	 One full-screen pass over the frame.
-
-	 **The protocol, which the interface cannot express and every implementer
-	 must honour:** on entry `src` is in SHADER_READ_ONLY_OPTIMAL and `dst` is
-	 in whatever last frame left — open it with `color_attachment_barrier`,
-	 which discards from UNDEFINED. On exit `dst` is in
-	 COLOR_ATTACHMENT_OPTIMAL with rendering ended. `target.depth` is not yours.
-	*>
-	interface FullscreenPass
-	{
-		fn void? record(vk::CommandBuffer cmd, PassIo io);
-		fn void? resize(Gpu* gpu, vk::Extent2D extent) @optional;
-		fn void free(Gpu* gpu) @optional;
-	}
-
-Both halves of that protocol are real and neither is expressible in a signature.
-The layout half is at least *checked* — the GENERAL entry above is the whole story
-of finding out that it is the only half core validation can check, which is why it
-is still there to be got wrong.
-
-`PassIo` is seven fields and none beyond the obvious three is padding: `prev` and
-`scene` are two sources because the chain has two edges; the destination arrives
-as an image *and* a view because the pass opens it with a barrier and a barrier
-names an image; the sampler is the chain's; and the asset table is what a pass's
-own samplers resolve through. What stays absent is the list that matters — no
-`Gpu`, no `Target`, no frame slot, no scene, no instance buffer.
-
-**Why not across all three kinds.** An interface types the arguments; it cannot
-type the layout protocol. Applied to geometry and full-screen passes together it
-would grant compile-time substitutability the GPU does not honour — the compiler
-would accept a shadow pass in a full-screen slot, and the failure is a validation
-error in a debug build or a black frame in a release one, and since `-D DEBUG`
-(`src/debug.c3`) the release build is the one without the layer. The passes simply
-having different functions with different arguments prevents that outright, and
-that is the stronger guarantee.
-
-Two C3 facts that cost time to find, and that a second implementer will need:
-
-- **Interface values are pointers.** A `List` that grows invalidates every
-  interface value taken from it, and `addPass` mutates the list at arbitrary
-  times. Take them fresh from `&list[i]` each frame; never cache one.
-- **A struct must declare the interfaces it implements** — `struct PostStage
-  (FullscreenPass)`, not merely having the methods; `@dynamic` on the methods
-  alone gives "'PostStage*' cannot be implicitly cast to 'FullscreenPass'". The
-  receiver is implicit in the declaration and explicit in the implementation
-  (`fn void? PostStage.record(&self, …) @dynamic`).
-
-`FullscreenPass` is still the project's only interface, and `src/` has `@dynamic`
-nowhere else. That is the argument for having introduced exactly one, where it
-pays, rather than four.
+**The scene image is not part of that and stays `_SRGB`, and that is what makes
+the scene not HDR.** A scene pipeline's colour attachment format is fixed when
+the pipeline is built, so a float one makes every mesh pipeline wrong the moment
+a post pass is set. Both ways out are large — a second variant of every mesh
+pipeline keyed on whether post is active, which puts a format in the pipeline
+cache key; or rendering into the chain always and tonemapping every frame of
+every scene, which deletes the property that an unposted frame is the code path
+it always was. Neither buys anything while **nothing in this renderer produces a
+value above 1.0**. What HDR is actually blocked on is physical light intensities
+— the material unit below — and when the scene becomes HDR the always-on path
+becomes right for a reason that will exist by then.
 
 ### What this does not cover
 
 - **Downsampled intermediates.** A bloom pyramid at ½, ¼, ⅛ means per-pass
-  extents, so P0/P1 become a pool keyed by extent. Still not a solver, but not two
-  fields either. This is the piece that grows first.
+  extents, so P0/P1 become a pool keyed by extent. Still not a solver, but not
+  two fields either. This is the piece that grows first.
 - **Reading three passes back**, or a pass fanning out to two consumers. `prev`
   and `scene` are the only two edges.
 - **MRT** — a pass writing two attachments.
+- **Depth, normals or motion vectors in a post body.** §2 has the cost and the
+  instruction to hand over `p.depth` already linearized rather than raw.
 
 ### What is left of the order of work
 
@@ -1308,262 +909,81 @@ pays, rather than four.
 
 The numbering is kept because 1, 2, 3 and 6 — the driver batch, the format
 decision, the chain and `three.addPass` — are referred to by it elsewhere.
-**What doing them was worth beyond the code:** two of the driver batch's four
-items did not survive being written down against the actual source. One died on
-reading four constants, the other on an injection test, and both would have been
-far more expensive to discover with a post chain, a shadow pass and a UI layer
-already built on top of them. That is the argument for taking a cheap,
-independent, fully-tested batch first, and it is a better argument after the fact
-than it was before it.
 
 ### Why not a render graph, and what would change it
 
 A graph's executable form *is* a list — the topological sort is a preprocessing
-step that produces one. But the sort is not what a graph is for. The **edges** are,
-because barriers and resource lifetimes are derived from them. And that is the
-whole argument for the shape above:
+step that produces one. But the sort is not what a graph is for. The **edges**
+are, because barriers and resource lifetimes are derived from them. And that is
+the whole argument for the shape above:
 
 > **In a chain, adjacency is the edge set.**
 
-A general DAG needs explicit edges precisely because list position no longer tells
-you who reads whom. A chain does not have that problem, so constraining the
-topology buys the derived barriers back for nothing.
+A general DAG needs explicit edges precisely because list position no longer
+tells you who reads whom. A chain does not have that problem, so constraining the
+topology buys the derived barriers back for nothing. `three.addPass` does not
+undermine it: it makes the *order* script-authored, and insertion order is
+already the topological order.
 
-`three.addPass` does not undermine this. It makes the *order* script-authored, and
-insertion order is already the topological order — there is no ambiguity for a
-sort to resolve, and you would have to make the API worse (declare dependencies
-without declaring order) to manufacture one.
-
-**Trigger:** script-authored *edges* — a script naming which pass's output another
-pass reads, where the answer is not its predecessor. That is the point at which no
-human is left in the loop to reason about the dependency and a solver is the
-honest answer. Pass count is not the trigger and never was.
+**Trigger:** script-authored *edges* — a script naming which pass's output
+another pass reads, where the answer is not its predecessor. That is the point at
+which no human is left in the loop to reason about the dependency and a solver is
+the honest answer. Pass count is not the trigger and never was.
 
 ---
 
 ## 14. Material layers
 
-**Built.** `three.LayeredMaterial`, `asset.mesh(name).layers`, and the importer
-behind them — glTF's `CUSTOM_materials_layers` as far as this renderer can
-honestly take it. `lib/gltf.c3l` had parsed the whole extension for a while and
-nothing read a field of it; `rtk grep layers_ext src/` was empty.
+*(Built: `three.LayeredMaterial`, the glTF `CUSTOM_materials_layers` importer,
+and an exporter that writes a stack back out from the source document.)*
 
-**It is a generated `ShaderMaterial` and not a new tier.** A layer stack is a
-fragment function that samples several images and mixes them, which is exactly
-what §4's tier 2 is, so `js/prelude/layers.js` writes the Slang and hands it to
-the same `createMaterial` a hand-written body goes through. No pipeline kind, no
-descriptor layout and no push contract is new. `mat.fragment` is the generated
-source, which is the thing to read first when a stack looks wrong.
-
-**Most of a layer is a compile-time constant, and that is the whole economy.**
-The obvious implementation pushes per-layer parameters as uniforms and loops;
-that one could not exist when this was written, because 52 bytes is three float4s
-and a stack of four would have been out of room before its first texture. §15 has
-since made it 104, and the argument is unchanged: six float4s is still not a layer
-stack. It is also unnecessary: the
-generator knows the description, so a blend mode picks which expression is
-emitted, a mask channel becomes `.g`, `invert` becomes a `1.0 -`, and
-`enabled: false` omits the layer *and its samplers*. Only `animated: true` spends
-push bytes — one float4 for a layer's tint and opacity, six of them at most.
-
-**A layer states a colour only when it has one to state.** White is what
-`baseColorFactor` defaults to in the file and what a script leaves out, so it is
-the absence of a statement rather than a request for white paint — and a layer
-with no map and no tint emits no colour blend at all. That was not the first
-implementation, and the first one was wrong in two directions at once: a layer
-that only glowed bleached what was under it, and a layer that only added surface
-detail did the same while looking like its mask was inverted. Painting white
-deliberately is a white `map`, which is visible in the description.
-
-So the ceiling is samplers rather than uniforms, which is the right way round.
-**`MATERIAL_TEXTURE_LIMIT` went 4 → 8** for this: four bought three layers over
-the base with no room for a normal map on any of them. It is a budget rather than
-a device limit — `maxPushDescriptors` must be at least 32 — and what it costs is
-per-bucket descriptor traffic on every material that declares a sampler.
-
-**The masks pack into one image's four channels**, which is what the extension's
-per-layer `channel` field exists for and what makes a four-layer terrain one
-binding instead of four. The extension has no shared-mask object, though — the
-sharing is implicit in several layers naming one `textureInfo` — so
-`hoist_shared_mask` in `scene/asset.c3` makes it explicit at import. Without the
-hoist a file renders identically and spends bindings it did not need, which stays
-invisible until a layer is refused against a budget that was never really full.
-
-**A mask is a weight and not a colour**, so it uploads `LINEAR`. That forced
-`ImageMemo` to carry the colourspace: `claim_texture` already treated the space as
-part of a texture's identity, and the memo standing in front of it did not, so one
-glTF image used as a base colour by one material and as a mask by another was
-answered with whichever format arrived first. The picture is right either way and
-every weight is wrong by the sRGB curve — `three_tests::layers` has the check that
-fails when the field is removed.
-
-### What it refuses, and why refusing is the feature
-
-- **`metalness`, `roughness`, `metallicRoughnessTexture`, `subsurface`** — §12's
-  decision, held. `lambert()` is the whole of the built-in light, so these feed an
-  equation nothing evaluates. They are dropped by the importer rather than carried
-  to JS, and named by the JS API rather than ignored: a material property that
-  provably changes no pixel costs more to discover than an error does.
-- **`heightTexture` and `bump`** — no tessellation and no parallax.
-
-**A `VERTEX_COLOR` mask was the third refusal and is now drawn.** It was the only
-one that was about the *mesh* rather than the shading: there was no COLOR_0
-stream, because a fourth stream meant a ninth pinned push field and the push block
-was full. §15 emptied it, and the mask is now `s.vertex_color.g` with no sampler
-and no image behind it — `maskSource: 'vertexColor'` in a description, and the
-channel beside it exactly as `LayerMask` has them. The refusal is what dated
-first, which is the argument for refusing by name: the sentence said what was
-missing, so it was obvious what to build.
-
-**A stack now goes back out again.** `lib/gltf.c3l` had only ever parsed the
-extension, so `scene.export` flattened a layered material to its base colour and
-`report.shaded` said "you lost a shader" — true, and not the loss that mattered.
-The library writes it now (`add_material_layers`/`add_layer` in
-`materials_layers.c3`, beside the parser, with write structs of its own because a
-parsed `textureInfo` holds an *image* index where a written one holds a *texture*
-index), and `scene/export.c3` fills it from the **source document rather than
-from `GpuLayers`**. That direction is the whole decision: the renderer's copy is
-deliberately lossy — the PBR half dropped, the masks rearranged by
-`hoist_shared_mask`, and nothing at all before an upload the exporter never does
-— so writing it back would state a document the file never contained. The parsed
-one is complete, needs no device, and is the same source `read_stream_geometry`
-already re-reads the vertices from. `COLOR_0` is written beside it so a
-`VERTEX_COLOR` mask still has an attribute to name, and `report.layers` counts
-the records, because `shaded` cannot: a layered material is a generated shader
-whether or not its stack survived.
-
-**A stack a script built goes out too, by the other door.** The first version of
-this left `LayeredMaterial` behind — there is no structured stack behind one,
-only generated Slang — and the result was a difference no script could see: a
-terrain loaded from a `.glb` exported layered, and an identical one written with
-`new three.LayeredMaterial(...)` exported as a flat colour. So the stack now
-crosses **twice**: once as a shader through `createMaterial`, and once as a
-description through `beginMaterialLayers`/`addMaterialLayer` into
-`Material.script_layers`. A shader cannot be read back — "this layer multiplies"
-is a choice of expression by the time `emit` is done, and the extension wants the
-word.
-
-That path is lossless for the opposite reason to the imported one. There the
-source document is complete and `GpuLayers` is not; here the *description* is
-complete, because a script stack has no PBR half and no height data to lose —
-`layers.js` refuses both by name (§12). What it does not have is a file behind
-its images, so those are read off the device and encoded, which is the exporter's
-second image source used on its own.
-
-**The record stores bindings and push offsets, not values.** `mat.layers[1].map =
-moss` writes through to the material's sampler and an animated tint writes
-through to its push block, so keeping copies here would mean a second thing every
-setter had to update and a stale image in the file when one forgot. Storing where
-to look means there is nothing to keep in step, and it retains nothing: every
-image a layer names is already held by the material for its whole life. A script
-stack wins over an imported one on the same mesh, which is the rule
-`texture_slot` already follows — the material is what the frame drew with.
-
-**What is next, in the order it stops being optional:** parallax from the height
-data the extension already carries and this already ignores, and the PBR half,
-which is §12's specular term and not this section's.
+- **Parallax**, from the height data the extension already carries and the
+  importer already drops. `heightTexture` and `bump` are refused by name today.
+- **The PBR half is §12's, not this section's.** `metalness`, `roughness`,
+  `metallicRoughnessTexture` and `subsurface` are parsed, dropped at the importer
+  and refused at the JS boundary. When the specular term exists, `GpuLayer` in
+  `scene/asset.c3` is where the three fields go back in, and the refusals in
+  `js/prelude/layers.js` are what get deleted.
 
 ---
 
 ## 16. What an exported scene keeps
 
-**Built.** §5's writer answered "is the geometry right"; this answers "does the
-file look like the scene". Going looking after the layer work turned up five
-things core glTF or a ratified extension could hold and the exporter simply
-never wrote:
+*(Built: side, texture transform, the three extra maps, the camera and the light
+all cross now.)*
 
-- **`material.side`** — `add_material` had taken `double_sided` all along and the
-  exporter never passed it, so a `DoubleSide` plane exported invisible from
-  behind.
-- **`material.repeat` / `material.offset`** — dropped, with
-  `KHR_texture_transform` sitting there for exactly this. A tiling floor is the
-  most ordinary thing an agent builds and its texture arrived stretched once
-  across the whole surface.
-- **`normalTexture` / `occlusionTexture` / `emissiveTexture`** — `WriteMaterial`
-  said they were absent "because nothing in this writer produces them yet".
-  Something did: a mesh from a `.glb` carries them on its source material, in the
-  document the exporter already reads for the layer stack. A normal-mapped kit
-  round-tripped flat.
-- **The camera and the light** — never written at all, so an exported scene
-  opened pointing wherever the viewer decided, lit by whatever it supplied.
-
-**No flag, and that is the decision worth recording.** `flatten` is a parameter
-because it genuinely costs the hierarchy. None of these costs anything, and
-fidelity that has to be opted into is fidelity agents do not find.
-
-**The dedup key is what gets written, not where it came from.** The first attempt
-put the source material's *index* in `ExportSurface` and made the export worse:
-`textured.glb`'s two materials name two images whose bytes are identical,
-`ExportImage` collapses those to one texture, and keying on the index then kept
-two glTF materials that were byte-for-byte the same — materials went 6 → 12 on a
-test that had been green for two milestones. The maps are resolved to output
-texture indices *before* the dedup check instead, which costs nothing (the memo
-answers the second call) and stays in step with the image dedup underneath it.
-The layer stack is the one exception, kept as an identity: comparing two stacks
-field by field is a deep compare to answer what two integers already answer.
-
-**Two things do not cross.** The light's **ambient floor** has no punctual
-equivalent — ambient was removed from `KHR_lights_punctual` before ratification —
-so a scene with a high floor reloads darker; folding it into the directional
-intensity would be a different picture rather than the same one. And **metalness
-and roughness** are not written, §12's rule held: no specular term means a number
-in the file that never affected a pixel.
-
-**Lines are the one item deferred.** A line mesh has no CPU copy of its vertices
-(`upload_built` skips `build_bvh`, which is what keeps one) and a script's
-`three.lines()` is indistinguishable from a helper — both draw with
-`LINE_MATERIAL`, which is the test the exporter drops helpers by. Two structural
-changes for the least valuable of the six; `mode: LINES` is waiting in the writer
-when it is worth paying for.
-
-The camera and light are nodes, so `report.nodes` grew by two and four tests that
-asserted a count moved with it. That is the whole ripple.
+- **Lines are the one item deferred.** A line mesh has no CPU copy of its
+  vertices (`upload_built` skips `build_bvh`, which is what keeps one) and a
+  script's `three.lines()` is indistinguishable from a helper — both draw with
+  `LINE_MATERIAL`, which is the test the exporter drops helpers by. Two
+  structural changes for the least valuable of the six; `mode: LINES` is waiting
+  in the writer for when it is worth paying for.
+- **Two things do not cross, and both are deliberate.** The light's **ambient
+  floor** has no punctual equivalent — ambient was removed from
+  `KHR_lights_punctual` before ratification — so a scene with a high floor
+  reloads darker, and folding it into the directional intensity would be a
+  different picture rather than the same one. And **metalness and roughness** are
+  not written, because §12's rule holds: no specular term means a number in the
+  file that never affected a pixel.
 
 ---
 
 ## 15. The draw buffer
 
-**Built.** Per-draw data is a `DrawRecord` in a host-visible buffer, one per
-bucket per frame, and the push block carries its address. What is pushed is three
-pointers — `frame`, `instances`, `draw` — and 24 bytes, where it was eight fields
-and 76.
+*(Built: per-draw data is a `DrawRecord` in a host-visible buffer and the push
+block carries its address. The block is 24 bytes where it was 76, material
+uniforms went 52 → 104, and a new vertex stream now costs 8 bytes of a buffer
+rather than a trade against them.)*
 
-**The problem it solves is not performance.** The command count is the same, the
-draw call is the same `vkCmdDrawIndexed`, and nothing renders faster. What changed
-is that the 128 bytes every Vulkan implementation must offer had become a shared
-scarcity: the mesh contract wanted 76 of them and material uniforms had the other
-52, and *both* halves were blocked on it. §14's vertex-colour mask needed a fourth
-vertex stream and could not have one, because an 8-byte pointer would have come
-out of the uniforms; §2's uniform table wanted more rows and could not have them
-for the same reason from the other side. Neither was worth taking from the other,
-which is what an argument about a fixed budget looks like when both sides are
-right.
-
-So the geometry contract moved into memory, where a field costs what a field
-costs. `MATERIAL_UNIFORM_BUDGET` went 52 → 104 and the sampler-free vertex-colour
-mask landed in the same change. **A new vertex stream is now 8 bytes of a buffer
-sized by the frame's bucket count** — tangents, a second uv set and joints all
-become bookkeeping rather than a trade.
-
-**Why not `vkCmdDrawIndexedIndirect` as well.** The obvious next step, and it buys
-nothing here yet: geometry is one buffer per mesh, so `firstIndex` and
-`vertexOffset` are always zero and there is nothing to multi-draw across;
-textures are push descriptors written per bucket; and a `ShaderMaterial` is its
-own pipeline. Each of those independently forces one command per bucket, so an
-indirect draw would be the same commands plus a buffer read, minus the validation
-layer's ability to check the arguments — a bad record becomes a hang instead of an
-error. **Trigger:** a consolidated geometry arena and bindless textures, at which
-point the record is where the five `VkDrawIndexedIndirectCommand` fields go and
-the change is small. GPU culling wants the same two things first.
-
-**What it cost, and the one thing that had to be rebuilt.** Reflection covers a
-push block and not the type behind a pointer, so moving the contract out of the
-block moved it out of `check_push_block` — the check `MESH_PUSH_FIELDS` exists to
-be. Two tests replace it: one cuts `struct Draw` out of `shaders/mesh.slang` and
-compiles it *as* a push block to get Slang's own offsets for `DRAW_RECORD_FIELDS`,
-and one compares that declaration against the copy in `material.slang`, which the
-two files carry separately for §4's reason. Both were checked by mutation — swap
-two fields in one shader and each fails, naming the field and both offsets.
+- **Not `vkCmdDrawIndexedIndirect`, and not yet.** It buys nothing here:
+  geometry is one buffer per mesh so `firstIndex` and `vertexOffset` are always
+  zero, textures are push descriptors written per bucket, and a `ShaderMaterial`
+  is its own pipeline — each of those independently forces one command per
+  bucket. An indirect draw would be the same commands plus a buffer read, minus
+  the validation layer's ability to check the arguments: a bad record becomes a
+  hang instead of an error. **Trigger:** a consolidated geometry arena and
+  bindless textures, at which point the record is where the five
+  `VkDrawIndexedIndirectCommand` fields go. GPU culling wants the same two first.
 
 ---
 
@@ -1657,43 +1077,28 @@ broadphase to fix it exists and is unbound — see the queries entry below.
   "things you look at". What it wants is a second mode rather than a loosened
   turntable: `camera.attach(object, { offset, lag })`, or a free camera whose
   position and orientation a script owns outright, with the turntable as the
-  default nobody has to opt out of. **What gated this is built**: a follow camera
-  the user can still drag is two things fighting over one matrix, and
-  `three.controls.enabled = false` is how a script says which of the two is the
-  author. Nothing else is in the way.
+  default nobody has to opt out of. **Nothing gates it.** A follow camera the user
+  can still drag would be two things fighting over one matrix, and
+  `three.controls.enabled = false` already lets a script say which of the two is
+  the author.
 
-- **The mouse.** *(Built, except the last piece — see below.)*
-  `three.input.pointer` is now the whole reading:
-  `{ x, y, dx, dy, inside, down, right, middle, clicked, scroll, scrollX }`.
+- **Pointer lock, which is the last of the mouse.** `three.input.pointer` carries
+  the position, the movement, all three buttons and both wheel axes; `dx`/`dy`
+  keep reporting while the cursor is outside the window, because the window goes
+  on saying where it is. Where they genuinely stop is the edge of the *screen*,
+  where the platform stops the cursor — so a look works and cannot turn more than
+  a screen's width without the hand being lifted, which is playable and is not
+  shippable.
 
-  **This entry claimed there was no polled cursor in its first draft**, which is
-  what reading a surface instead of using it buys you: `{ x, y, inside, down,
-  clicked }` had been there all along, so hover highlighting was always `pointer`
-  plus `scene.pick`. It is left here as the section's own worked example of its
-  own warning.
-
-  What was actually missing was three things, and two of them are now bound.
-  **The movement** — `dx`/`dy`, differenced by `MouseTracker` against the
-  previous frame's reading rather than by the script against the last moment it
-  asked, which is a different pair of instants and straddles the frame instead of
-  bounding it. **The wheel** — `drive_camera` used to read `window.get_scroll()`
-  itself; the loop now reads it once and hands it to the camera and the script
-  both, so the zoom and `pointer.scroll` can never describe different frames.
-  **The other two buttons** — `right` and `middle`, which previously reached
-  nothing but the pan gesture.
-
-  **What is left is pointer lock, and it is not a binding.** `dx`/`dy` keep
-  reporting while the cursor is outside the window, because the window goes on
-  saying where it is; where they genuinely stop is the edge of the *screen*,
-  where the platform stops the cursor. A look that must keep turning needs the
-  cursor recentred and hidden every frame, and `window.c3l` exposes no cursor
-  warp and no associate-mouse call on any of its four backends — so this is work
-  in the window library first (`CGWarpMouseCursorPosition` and
-  `CGAssociateMouseAndCursorPosition` on darwin, `XWarpPointer` or the pointer
-  constraints protocol on linux, `SetCursorPos`/`ClipCursor` on win32), and a
-  binding afterwards. **Trigger:** the first first-person camera, which is the
-  next entry. Until then a look works and cannot turn more than a screen's
-  width without the hand being lifted, which is playable and is not shippable.
+  **It is not a binding.** A look that keeps turning needs the cursor recentred
+  and hidden every frame, and `window.c3l` exposes no cursor warp and no
+  associate-mouse call on any of its four backends: `CGWarpMouseCursorPosition`
+  and `CGAssociateMouseAndCursorPosition` on darwin, `XWarpPointer` or the
+  pointer-constraints protocol on linux, `SetCursorPos`/`ClipCursor` on win32.
+  Window-library work first, a binding afterwards. **Trigger:** the first
+  first-person camera, which is the entry above — and §1's live-resize delta
+  should be answered in the same pass, for the same reason: both are a look
+  telling the truth.
 
 - **No character controller.** §7 already names this and its ingredients are all
   in `collision.c3l`: swept CCD, GJK/EPA, a capsule, and `Physics.transformed`.
@@ -1823,66 +1228,16 @@ broadphase to fix it exists and is unbound — see the queries entry below.
   observation that a scene binding seven keys has no way to say so is a gameplay
   complaint in a rendering section, and it stays there.
 
-### What §9 answered — built
-
-**`three.controls.enabled`.** A script can take the mouse away from the
-turntable and give it back. Off, no drag, pan, wheel or coast reaches the camera,
-and `Controls.apply` reports the frame as still — which is also what lets the
-window go on sleeping through a hand it is ignoring. `three.camera.orbit()` and
-`frameAll()` are untouched, because a script writing the camera on purpose is the
-thing this enables rather than the thing it stops.
-
-Three details that were decisions rather than code:
-
-- **The flag lives on `JsRuntime`, not in the window's loop**, and `main.c3`'s
-  `live` drives `runtime.controls` rather than a local of its own. A headless
-  `--mcp` script has to be able to write it and read back what it wrote, and a
-  flag stored where there is no window would answer with whatever it already was
-  — the reads-back-wrong trap `api.js` throws on assignment three separate times
-  to avoid. One struct, one answer, and the window's loop drives that one.
-- **The gesture is dropped, not paused.** A drag under way when the mouse is
-  taken loses its anchor and its spin on the first disabled frame. Keeping them
-  would hand the returning frame the cursor position from *before* the script
-  took over — the whole distance the hand travelled in between, applied at once,
-  which is the one-frame lurch `Controls.dragging` exists to prevent, arriving
-  through a door that did not exist when it was written. A button still held when
-  the controls come back has to be released first, for the reason the stuck-latch
-  guard already gives: this scheme never saw the press.
-- **On is the default and no gesture restores it.** A window nobody can move the
-  camera in is a bad state to leave one in, so it has to be a state somebody
-  asked for rather than one they arrived at. The doc says to give the mouse back
-  when the mode ends, because nothing else will.
-
-**A click still cannot say it was handled, and that is now a decision rather
-than a question.** The suppression it would buy does not exist: a click *is* a
-press and a release that did not travel, so by the time one is recognised no
-orbit has happened and there is nothing for a `false` to suppress. The real
-conflict is a UI layer wanting the *press*, which is §5's arbitration on
-`MouseTracker`'s edge machinery, against a HUD that does not exist yet. Building
-a `preventDefault` here would be a rule to explain in every doc, for a conflict
-that cannot arise until the thing causing it is built.
-
-**The camera belongs to the host, not to the scene.** It survives
-`new three.Scene()`, and that is now written down rather than merely true: a
-person watching a window has dragged the camera somewhere, and a script
-rebuilding the world is not a reason to throw that away. It is the rule the
-animation callback already follows and is tested on — the loop belongs to the
-host as Three.js's belongs to the renderer. What a rebuild costs is every handle
-the callback captured, and the stale-handle throw is what stops it with a
-sentence rather than leaving it running against nothing.
-
 ### The order of work, and what it is gated on
 
-1. ~~**§9's open questions.**~~ Answered above. The camera work below is no
-   longer waiting on anything.
-2. ~~**The mouse's missing half.**~~ Delta, wheel and the other two buttons are
-   bound. Pointer lock is left, and it is window-library work rather than a
-   binding — see the entry above.
-3. **The camera**, because it is what makes the other two visible.
-4. **The clock**, because everything after it is written against `dt`.
-5. **The character controller**, then **animation blending** — the point at which
+1. **The camera** — a follow mode and a free mode. Nothing gates it, and it is
+   what makes the mouse work already done visible.
+2. **Pointer lock**, with §1's live-resize delta, once there is a first-person
+   camera to make either of them matter.
+3. **The clock**, because everything after it is written against `dt`.
+4. **The character controller**, then **animation blending** — the point at which
    there is a thing to move and it looks like it is moving.
-6. **Navigation**, then the **queries** and **steering** that make it a crowd
+5. **Navigation**, then the **queries** and **steering** that make it a crowd
    rather than one agent.
 
 ### What this does not cover
@@ -1907,6 +1262,15 @@ measurement this section does not have.
 - **No ECS.** The scene graph is the entity list and a game's components are
   JavaScript objects keyed by node id. Building an entity system in C3 would be
   building the part JavaScript is good at.
+- **The camera does not belong to the scene.** It survives `new three.Scene()`,
+  where the background, the light and the shadow are all put back to their
+  defaults so that two scripts render the same first frame. The camera is not
+  that kind of state: somebody watching a window has dragged it somewhere, and a
+  script rebuilding the world is not a reason to throw that away. The animation
+  callback and `three.controls.enabled` follow the same rule for the same reason
+  — what a rebuild costs is every handle the callback captured, and the
+  stale-handle throw is what stops it with a sentence rather than leaving it
+  running against nothing.
 - **No editor.** The MCP surface is the editor, and it is better than one.
 - **No networking.** The physics work makes lockstep *possible* — `state_hash`
   and `snapshot`/`restore` are the hard parts and they exist — and nothing here
@@ -1914,11 +1278,12 @@ measurement this section does not have.
 - **No render graph and no deferred path.** Both are answers to a pass count this
   project does not have. A frame is five images and `3 + N` barrier call sites;
   the shadow pass took that to `5 + N` and a UI layer and depth-in-post would take
-  it to about eight — §13 has the counting and the one place it was out by. A graph
-  that schedules four passes is a scheduler with nothing to schedule. **§13 is the
-  counting and the shape the alternative takes** — a stage list, a chain whose
-  adjacency is its own edge set, and the one trigger that would change the answer,
-  which is script-authored *edges* rather than pass count.
+  it to about eight. A graph that schedules four passes is a scheduler with
+  nothing to schedule. **§13 keeps the shape the alternative takes** — a stage
+  list, a chain whose adjacency is its own edge set, and the one trigger that
+  would change the answer, which is script-authored *edges* rather than pass
+  count. The counting itself was swept; `git log -p -- plan.md` has it, including
+  the one place it was out by.
 - **What stays absent from the chain: named passes, edges, removal from the
   middle, and downsampled intermediates.** A pass reads its predecessor and the
   original frame and nothing else, so a bloom pyramid at ½ and ¼ is the piece that
