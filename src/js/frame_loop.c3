@@ -47,6 +47,7 @@ module three;
 
 import std::io;
 import std::time;
+import std::math::vector;
 import qjs;
 
 // What one tick may take before the interrupt handler stops it. Two orders of
@@ -219,6 +220,22 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// for good rather than merely stutter.
 	self.physics.step(&self.pass.scene, delta_ms);
 	self.report_diverged_bodies();
+
+	// **Last of everything, on every path out of this function**, which is what
+	// the `defer` buys and why it is not simply a call at the bottom.
+	//
+	// Last, because every other step here can move the thing being followed: the
+	// clip advances a character, the solver drops it, and the callback below
+	// walks it. A follow that ran before any of those would put the camera where
+	// the character *was*, and one frame of lateness on a camera reads as the
+	// character sliding rather than as the camera trailing — the symptom gets
+	// blamed on the physics every time.
+	//
+	// Every path, because a scene with a falling body and no `setAnimationLoop`
+	// takes the early return below and still has a camera that has to keep up.
+	// That is the same argument the animation and physics steps make about
+	// sitting above it, one step further along.
+	defer self.follow_camera(delta_ms);
 
 	if (!self.is_animating())
 	{
@@ -571,4 +588,55 @@ fn void js_set_frame(
 
 	self.frame_fn = js.retain(args[0]);
 	self.frame_active = true;
+}
+
+<*
+ Move the camera to wherever the thing it is attached to got to this frame.
+
+ `plan.md` §17. A no-op — one boolean — for every scene that has not attached
+ anything, which is nearly all of them.
+
+ ## A node that has gone takes the attachment with it
+
+ The camera belongs to the host and survives `new three.Scene()`; the node it was
+ following does not, and neither does one that was `remove`d. So the attachment
+ is dropped and the camera is left exactly where it was, which is the only
+ answer that is not worse: throwing would raise from inside a tick that no script
+ called, and keeping a dead `NodeId` would either follow whatever reused the slot
+ — the generation check is what stops that — or quietly follow nothing for the
+ rest of the session.
+
+ It is dropped *silently*, and `three.camera.attached` reading `null` is how a
+ script finds out. A frame log line would be written sixty times a second by the
+ one thing that can produce this: a script that destroys what it was following.
+
+ @param dt_ms : `The frame's elapsed milliseconds, for the lag. The same delta the animation step was given.`
+*>
+fn void JsRuntime.follow_camera(&self, double dt_ms)
+{
+	if (!self.pass.follow.active) return;
+
+	Node* node = self.pass.scene.node(self.pass.follow.node);
+	if (node == null)
+	{
+		self.pass.follow = {};
+		return;
+	}
+
+	// The solver writes local transforms and marks nodes dirty; nothing has
+	// propagated them to world matrices yet this frame — `Scene.update` does that
+	// while building the draw list, which happens after this. Asking here is what
+	// makes the anchor this frame's rather than the last one's, and it is not a
+	// second walk in any meaningful sense: the propagation is dirty-flagged, so a
+	// scene where nothing moved costs the traversal and no arithmetic.
+	self.pass.scene.update_world_matrices();
+
+	// Column-major, so the translation is the last column — the same three
+	// elements `transform_point` adds for a point at the origin.
+	float[<16>] m = node.world.m;
+	self.pass.follow.apply(&self.pass.camera, (Vec3) { m[12], m[13], m[14] }, (float)dt_ms);
+
+	// The orbit point moved, so the reach the planes were derived against did
+	// too. `Controls` calls this after every gesture for the same reason.
+	self.pass.derive_camera_planes();
 }

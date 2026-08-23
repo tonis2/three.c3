@@ -43,13 +43,14 @@ a Three.js-shaped API in `src/js/prelude/` and three MCP tools over it. Slang
 compiled at runtime and cached. Picking, parametric shapes, glTF in and out,
 physics, animation, skinning, one directional light with a shadow, a post chain,
 material layers, and a mouse and keyboard a script can read and a scene can take
-away from the camera.
+away from the camera. The camera follows things now — third person, and first
+person as a boom of zero length.
 
 **That paragraph is as much inventory as this file keeps.** What each of those
 does is in its own source file, and `git log -p -- plan.md` has the milestone
 accounts that used to be here.
 
-	c3c test --trust=full       680 passed, 0 failed, leak-clean
+	c3c test --trust=full       691 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -1069,18 +1070,24 @@ broadphase to fix it exists and is unbound — see the queries entry below.
 
 ### What blocks a game, and none of it is an algorithm
 
-- **The camera cannot be a game camera.** `three.camera` is a turntable, and
-  `yaw`, `pitch` and `distance` *throw* on assignment (`js/prelude/api.js`) —
-  deliberately, and §4's half-match rule is right that a name Three.js does not
-  have is the honest way to describe a turntable. But there is no third-person
-  follow and no first person, so the genre list this engine can express is
-  "things you look at". What it wants is a second mode rather than a loosened
-  turntable: `camera.attach(object, { offset, lag })`, or a free camera whose
-  position and orientation a script owns outright, with the turntable as the
-  default nobody has to opt out of. **Nothing gates it.** A follow camera the user
-  can still drag would be two things fighting over one matrix, and
-  `three.controls.enabled = false` already lets a script say which of the two is
-  the author.
+- **A camera bolted into something that rolls.** *(The rest is built:
+  `three.camera.attach(object, { offset, distance, lag })`, and `distance: 0` is
+  first person.)* The offset is added in **world space**, which is right for a
+  head at `[0, 1.7, 0]` and for a shoulder camera, and cannot express a cockpit
+  or a turret. It looks like one 3×3 multiply by the node's world rotation and a
+  flag; what makes it bigger than it looks is that a rolled camera also wants the
+  view's up vector to roll, and `Camera.view` hardcodes +Y. **Trigger:** the
+  first vehicle.
+
+  Two decisions from building it, kept because they are what somebody would undo
+  by accident. **The follow writes `Camera.target` and nothing else** — which is
+  why a drag, the wheel and `orbit()` all still work while attached, and why
+  first person needed no mode: `distance` at zero puts the eye on the point it
+  orbits, so third person, first person and scrolling between them are one code
+  path. And **it runs last in the tick, on every path out**, because the clip,
+  the solver and the animation callback can each move the thing being followed; a
+  camera one frame late does not look like a camera problem, it looks like the
+  character sliding, and the bug gets filed against the physics.
 
 - **Pointer lock, which is the last of the mouse.** `three.input.pointer` carries
   the position, the movement, all three buttons and both wheel axes; `dx`/`dy`
@@ -1230,14 +1237,13 @@ broadphase to fix it exists and is unbound — see the queries entry below.
 
 ### The order of work, and what it is gated on
 
-1. **The camera** — a follow mode and a free mode. Nothing gates it, and it is
-   what makes the mouse work already done visible.
-2. **Pointer lock**, with §1's live-resize delta, once there is a first-person
-   camera to make either of them matter.
-3. **The clock**, because everything after it is written against `dt`.
-4. **The character controller**, then **animation blending** — the point at which
+1. **Pointer lock**, with §1's live-resize delta. There is a first-person camera
+   now, so both of them have something to be wrong for: a look that stops at the
+   screen edge, and one that spins while the window is resized.
+2. **The clock**, because everything after it is written against `dt`.
+3. **The character controller**, then **animation blending** — the point at which
    there is a thing to move and it looks like it is moving.
-5. **Navigation**, then the **queries** and **steering** that make it a crowd
+4. **Navigation**, then the **queries** and **steering** that make it a crowd
    rather than one agent.
 
 ### What this does not cover

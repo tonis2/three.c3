@@ -232,7 +232,80 @@ const camera = {
 	// Aim at everything in the scene and back off far enough to see it. What
 	// an agent that has just loaded an unfamiliar model wants, because the
 	// right distance depends on how big the model is.
-	frameAll() { H.frameAll(); return this; },
+	//
+	// It refuses while the camera is attached rather than fighting the
+	// follow for a frame and losing. Framing the scene means putting the
+	// orbit point in the middle of it, and the next tick puts it back on the
+	// character — so this would flicker once and change nothing, which is
+	// the silent kind of nothing the rest of this object throws to avoid.
+	frameAll() {
+		if (H.cameraAttached()) {
+			throw new Error(
+				'three.camera.frameAll() cannot frame the scene while the camera is following '
+				+ 'something — the next frame would put it back. three.camera.detach() first.'
+			);
+		}
+		H.frameAll();
+		return this;
+	},
+
+	// -------------------------------------------------------------------
+	// Following something
+	//
+	// **What `attach` owns is the orbit point, and nothing else.** The
+	// object's world position (plus `offset`) becomes `camera.target` every
+	// frame, after the animation, the solver and the animation callback have
+	// all had their turn at moving it — so the camera is never a frame
+	// behind the character, which reads as the character sliding rather than
+	// as the camera trailing.
+	//
+	// Everything else still works while attached: a drag orbits, the wheel
+	// zooms, `orbit()` aims. **A pan is the one that stops**, because a pan
+	// is the one gesture that writes the orbit point, and the next frame
+	// writes it back.
+	//
+	// **`distance: 0` is first person.** It is not a mode — the eye simply
+	// sits on the point it orbits, which is the head. Scroll out and it is a
+	// third-person camera again with nothing to switch. The offset is where
+	// the head is: `{ offset: [0, 1.7, 0], distance: 0 }` is a person, and
+	// `{ offset: [0, 1.5, 0], distance: 4 }` is a camera over their
+	// shoulder.
+	//
+	// `lag` is milliseconds, and it is a time constant rather than a
+	// fraction: 0 is rigid, 120 is a camera that takes about an eighth of a
+	// second to catch up, and the same number means the same lateness at 60
+	// and at 144 frames a second.
+	//
+	// The offset is in **world space**. A head is [0, 1.7, 0] whichever way
+	// a character faces, so this covers first person and a shoulder camera;
+	// what it does not cover is a camera bolted into something that pitches
+	// and rolls.
+	attach(object, { offset = [0, 0, 0], distance = null, lag = 0 } = {}) {
+		const target = liveObject(object, 'three.camera.attach');
+		const [ox, oy, oz] = asTriple(offset, 'three.camera.attach(object, { offset })');
+		const boom = distance === null ? H.cameraGet()[5] : +distance;
+		if (!Number.isFinite(boom) || boom < 0) {
+			throw new RangeError(
+				`three.camera.attach(object, { distance }) wants zero or more — ${distance} is not a boom length`
+			);
+		}
+		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, +lag);
+		return this;
+	},
+
+	// Stop following. Answers whether it was, and leaves the camera exactly
+	// where the last frame put it.
+	detach() { return H.cameraDetach(); },
+
+	// What the camera is following, or null. Also how a script finds out
+	// that what it was following has been destroyed: the host drops the
+	// attachment silently, because the alternative is throwing from inside a
+	// frame nobody called.
+	get attached() {
+		const handle = H.cameraAttached();
+		return handle === null ? null : objectForHandle(handle);
+	},
+	set attached(_) { throw new TypeError('the camera follows through three.camera.attach(object) and three.camera.detach()'); },
 
 	toJSON() {
 		const [x, y, z, yaw, pitch, distance, fov, near, far] = H.cameraGet();

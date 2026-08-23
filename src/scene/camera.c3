@@ -138,9 +138,29 @@ fn void Camera.clamp_angles(&self)
 *>
 fn void Camera.derive_planes(&self, float reach = 0.0f)
 {
+	// **First person cannot derive either plane from the boom, because there is
+	// no boom.** Both rules above are multiples of `distance`, so at zero they
+	// give a near of 0.0001 and a far of whatever `reach` happened to be — a
+	// depth ratio in the millions on a scene of any size, which spends the whole
+	// buffer on the first centimetre and z-fights everything else. Five
+	// centimetres is instead a statement about *eyes*: it is nearer than a head
+	// gets to a wall it is standing against, and it is the number the ratio
+	// wants. The far floor is what keeps an empty scene projectable at all —
+	// `reach` is zero before the bounds have been walked, and a far plane at the
+	// near plane is a projection matrix full of infinities.
+	if (self.distance <= 0.0f)
+	{
+		self.near_plane = FIRST_PERSON_NEAR;
+		self.far_plane = math::max(reach, FIRST_PERSON_NEAR * 1000.0f);
+		return;
+	}
+
 	self.near_plane = math::max(self.distance * 0.001f, 0.0001f);
 	self.far_plane = math::max(self.distance * 8.0f, reach);
 }
+
+// The near plane when the eye is the anchor. See `derive_planes`.
+const float FIRST_PERSON_NEAR = 0.05f;
 
 <*
  The camera's right and up axes in world space.
@@ -180,9 +200,34 @@ fn float Camera.world_per_point(&self, float viewport_height)
 	return visible / viewport_height;
 }
 
+<*
+ The view matrix, from either end of the boom.
+
+ **A boom of zero length is first person, and it is the whole of what first
+ person is here.** `distance` has always meant how far the eye is from the point
+ it orbits, so taking it to zero puts the eye *on* that point — which is a
+ character's head, once `CameraFollow` is writing the point every frame. Nothing
+ else about the camera changes: yaw and pitch still aim it, `orbit()` still turns
+ it, and a script that scrolls back out is in third person again with no mode to
+ switch.
+
+ What cannot survive it is `look_at`. Its forward vector is `target - eye`, which
+ at distance zero is the zero vector, and the matrix comes back full of NaN — the
+ same failure the pitch clamp exists to avoid at the pole, arriving the same
+ silent way: an empty frame that reads as "the scene is gone" rather than as "the
+ camera is degenerate". So the direction comes from the orbit angles instead,
+ which is what `orbit_dir` was split out for and what its own doc block already
+ warns about.
+*>
 fn Matrix4f Camera.view(&self)
 {
-	return matrix::look_at{float}(self.eye(), self.target, { 0.0, 1.0, 0.0 });
+	Vec3 eye = self.eye();
+	Vec3 at = self.distance > 0.0f
+		? self.target
+		// One unit along the way the camera is already pointing. The length is
+		// arbitrary and cancels: `look_at` normalizes.
+		: eye - self.orbit_dir();
+	return matrix::look_at{float}(eye, at, { 0.0, 1.0, 0.0 });
 }
 
 <*
@@ -308,4 +353,81 @@ fn void Camera.frame_bounds(&self, Vec3 min, Vec3 max, float aspect = 1.0f)
 
 	self.near_plane = math::max(self.distance * 0.001f, 0.0001f);
 	self.far_plane = self.distance + radius * 4.0f;
+}
+
+<*
+ A camera that tracks something instead of standing still.
+
+ `plan.md` §17. This is the whole of "attach": a node whose world position the
+ camera's orbit point follows, an offset from it, and how sluggishly.
+
+ ## It writes one field, and that is what makes it compose
+
+ The follow writes `Camera.target` and nothing else. So a drag still orbits, a
+ wheel still zooms, `three.camera.orbit()` still aims — none of them touch the
+ target — and **first person is not a mode here at all**: it is `distance` at
+ zero, which puts the eye on the point being followed. Third person, first
+ person, and scrolling between the two are one code path, and the camera has no
+ flag saying which it is in.
+
+ **A pan is the one gesture that stops working**, because a pan is the one that
+ writes the target: `Controls` moves it and the next tick moves it back. That is
+ not silence — the picture visibly refuses to slide — and the answer is
+ `three.camera.detach()`, or `three.controls.enabled = false` for a scene that
+ owns the camera outright.
+
+ ## The offset is in world space, deliberately
+
+ A head is `[0, 1.7, 0]` above a character's origin and that is the same vector
+ whichever way the character is facing, which covers first person and the
+ shoulder height a third-person boom orbits around. What world space cannot
+ express is a camera bolted *into* something that pitches and rolls — a cockpit,
+ a turret. **Trigger:** the first vehicle. It is one 3×3 multiply by the node's
+ world rotation and a flag saying to do it; what stops it being free is that a
+ rolled camera also wants the view's up vector to roll, and `view` hardcodes
+ +Y — so it is a bigger change than the offset it looks like.
+*>
+struct CameraFollow
+{
+	bool active;
+	NodeId node;
+	Vec3 offset;
+
+	<*
+	 The time constant of the catch-up, in milliseconds. Zero is rigid.
+
+	 Exponential rather than a fraction per frame: the same lag has to mean the
+	 same *lateness in seconds* at 60 Hz and at 144, and a fixed fraction per
+	 frame is twice as fast on the faster display. `Controls`' coast is the same
+	 arithmetic in the other direction and for the same reason.
+	*>
+	float lag_ms;
+}
+
+// The lag step is integrated over a clamped delta, for the reason `Controls`
+// clamps its coast: a frame that took a second — a tool call ran to completion
+// on the same loop — would otherwise snap the camera the whole way and read as a
+// teleport rather than as a catch-up.
+const float FOLLOW_MAX_STEP_MS = 100.0f;
+
+<*
+ Move the orbit point towards where the followed thing is now.
+
+ @param anchor : `The followed node's world position. The offset is added here, not by the caller.`
+ @param dt_ms : `Milliseconds since the last call. Zero or less snaps, because there is no time for a lag to be a lag over.`
+*>
+fn void CameraFollow.apply(&self, Camera* camera, Vec3 anchor, float dt_ms)
+{
+	Vec3 want = anchor + self.offset;
+
+	if (self.lag_ms <= 0.0f || dt_ms <= 0.0f)
+	{
+		camera.target = want;
+		return;
+	}
+
+	float step = math::min(dt_ms, FOLLOW_MAX_STEP_MS);
+	// 1 - e^(-t/τ): the fraction of the remaining distance to close this frame.
+	float t = 1.0f - math::exp(-step / self.lag_ms);
+	camera.target = camera.target + (want - camera.target) * t;
 }
