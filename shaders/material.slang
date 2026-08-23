@@ -48,6 +48,14 @@ struct FrameBlock
     // rather than from a baked clip. One buffer per frame rather than per bucket,
     // which is what keeps a live character and a baked one in the same draw call.
     float4x4* live_poses;
+    // The light's own orthographic view-projection, fitted around the scene this
+    // frame by `render/shadow.c3` and used at both ends: `shaders/shadow.slang`
+    // renders the depth map with it, `shadow_factor` below reads it back.
+    float4x4 light_view_projection;
+    // x texel, y depth bias, z normal offset, w intensity — and w is zero in a
+    // frame with no shadow pass. See `mesh.slang`, which carries the full
+    // account of what each of the four is for.
+    float4 shadow;
 };
 
 // One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
@@ -154,7 +162,14 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
 // layout and the same pipeline.
 [vk::binding(0, 0)] Sampler2D base_color_map;
 
-// The samplers the agent asked for, one line each, at bindings 1..N in the order
+// The shadow map, reserved exactly as binding 0 is — declared by the template
+// rather than by anything a script writes, and carrying the same 1x1 white image
+// in a frame with no shadow pass. **This is why `MATERIAL_BINDING_FIRST` is 2**:
+// a material's own samplers are numbered from the first binding the template does
+// not claim, and this file claims two.
+[vk::binding(1, 0)] Sampler2D shadow_map;
+
+// The samplers the agent asked for, one line each, at bindings 2..N in the order
 // they were declared. **The indices are generated** — `shader/assemble.c3` writes
 // them and `shader/reflect.c3` reads them back out of the compiled module, so
 // nothing above this file ever spells a binding number and inserting a texture at
@@ -197,6 +212,22 @@ struct Surface
     // whose product with the albedo is meaningless. So the shader carries the
     // attribute and the body decides what it means.
     float4 vertex_color;
+    // How much of the directional light reaches this point: 1 in the open, 0
+    // under something, and the values between are the nine PCF taps disagreeing
+    // at the edge of a shadow.
+    //
+    // **A body does not have to read this to be shadowed** — `lambert` already
+    // has it folded in, so the default `s.albedo * lambert(s.normal)` lands in
+    // the same shadow the built-in shading does. It is here for a body that
+    // shades the direct light itself and would otherwise have no way to ask, and
+    // for one that wants to use the shadow as something other than light: a
+    // wetness mask, a colour shift, moss on the north side.
+    //
+    // 1 everywhere in a frame with no shadow pass, which is the same value a
+    // fully lit surface has — the two are deliberately indistinguishable, because
+    // a body that behaved differently "when shadows are off" would be a body that
+    // renders differently for a reason it cannot see.
+    float shadow;
     // Which row of this material's table this copy selected, **already clamped**
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
@@ -304,16 +335,85 @@ float3 srgb_to_linear(float3 c)
     return lerp(hi, lo, step(c, 0.04045));
 }
 
+// How much of the light reaches this point: 1 fully lit, 0 fully shadowed.
+//
+// **Character for character what `mesh.slang` carries**, and the duplication is
+// the same duplication `srgb_to_linear` and `lambert` are: a material is a change
+// of shading and not a second renderer, so a body whose text is the default has
+// to land in the same shadow no material at all lands in. `mesh.slang` holds the
+// long account of the four early exits and the two biases; this copy is the
+// function and not the argument.
+float shadow_factor(float3 position, float3 normal)
+{
+    float4 params = push.frame[0].shadow;
+    if (params.w <= 0.0) return 1.0;
+
+    float3 offset = position + normalize(normal) * params.z;
+    float4 clip = mul(push.frame[0].light_view_projection, float4(offset, 1.0));
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return 1.0;
+
+    float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+
+    float reference = ndc.z - params.y;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            float depth = shadow_map.SampleLevel(uv + float2(x, y) * params.x, 0.0).r;
+            lit += reference <= depth ? 1.0 : 0.0;
+        }
+    }
+
+    return 1.0 - params.w * (1.0 - lit / 9.0);
+}
+
+// This fragment's shadow, looked up **once** and left where `lambert` can reach
+// it.
+//
+// ## Why this is a global and not a parameter
+//
+// `lambert(s.normal)` is written that way in every material in this project, in
+// `getApiDocs`, in `examples/vfx.js` and in the body `shader.js` generates when a
+// script gives a `vertex:` and no `fragment:`. Shadows had to reach all of them
+// or a `ShaderMaterial` would silently be the one thing in the scene that stands
+// in its own light — so the choices were to change that signature everywhere, or
+// to put the one value it is missing somewhere the function can find it.
+//
+// The signature change was the tempting one and it is worse. `lambert(s)` would
+// leave `lambert(s.normal)` compiling and unshadowed, which is a body that keeps
+// working and quietly stops matching the default look — exactly the class of
+// silent divergence this file's header says the duplication exists to prevent.
+//
+// **A `static` global in Slang is per invocation**, not shared across fragments,
+// so this is a local with a wider scope and not state. It is written in exactly
+// one place — `fragmentMain`, immediately before `shade` runs — and read in
+// exactly one, `lambert`.
+//
+// It is 1.0 in the vertex stage and stays 1.0 there: `shadow_factor` needs a
+// world position and a normal that the fragment stage has and `displace` does
+// not, and a vertex body calling `lambert` is asking about the light and not
+// about the shadow. That is documented rather than fixed, because moving the
+// lookup into the vertex stage would shadow a surface per vertex, which on a
+// ground plane of two triangles is no shadow at all.
+static float g_shadow = 1.0;
+
 // `mesh.slang`'s light as a single factor, so a body can ask for the default
 // look without reproducing it. `return s.albedo * lambert(s.normal);` is the
 // same arithmetic `mesh.slang`'s `fragmentMain` performs — which is the property
 // that makes a material a change of *shading* rather than a second renderer.
+//
+// **The shadow is in here**, folded into the direct term and not into the
+// ambient floor, exactly as `mesh.slang` folds it. A body that wants the two
+// apart has `s.shadow`.
 float lambert(float3 normal)
 {
     float4 light = push.frame[0].light;
     float n_dot_l = max(dot(normal, normalize(light.xyz)), 0.0);
     float ambient = light.w;
-    return ambient + (1.0 - ambient) * n_dot_l;
+    return ambient + (1.0 - ambient) * n_dot_l * g_shadow;
 }
 
 // A tangent-space normal map applied to a surface that carries no tangents.
@@ -524,6 +624,13 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // the block — a wrong colour with no error anywhere, which is precisely the
     // class of failure this project spends its comments on.
     s.variant = min(input.variant, MATERIAL_ROWS - 1u);
+    // Once, here, and then left in two places: on the surface for a body that
+    // wants it by name, and in `g_shadow` for `lambert` to fold into the direct
+    // term. Nine texture taps, so once is the number that matters — a body
+    // calling `lambert` three times pays for the lookup no more than a body that
+    // never calls it at all.
+    s.shadow = shadow_factor(s.position, s.normal);
+    g_shadow = s.shadow;
 
     // **Alpha is still not the agent's to return**, and blending did not change
     // that. `shade` answers with linear rgb; the alpha is the material's own

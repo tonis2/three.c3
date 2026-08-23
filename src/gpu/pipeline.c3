@@ -117,6 +117,20 @@ const ShaderEntry[*] SKIN_ENTRIES = {
 	{ "computeMain", slang::STAGE_COMPUTE },
 };
 
+<*
+ `shaders/shadow.slang`'s one entry point.
+
+ **One, and a vertex one.** A depth-only pipeline needs no fragment stage —
+ there is nothing to write but the depth the rasteriser already produced — so
+ this list has a single element and `MeshPipeline.init_shadow` builds a pipeline
+ with one `VkPipelineShaderStageCreateInfo`. That is also why the entry list is a
+ parameter of `build_layouts` rather than a constant inside it: `MESH_ENTRIES`
+ would fail this module for missing a `fragmentMain` it is right not to have.
+*>
+const ShaderEntry[*] SHADOW_ENTRIES = {
+	{ "vertexMain", slang::STAGE_VERTEX },
+};
+
 // The workgroup size `skin.slang` declares. Here so the dispatch and the shader
 // cannot drift: one thread per (instance, vertex), rounded up to whole groups,
 // and the shader drops the tail itself.
@@ -139,6 +153,26 @@ struct FrameBlock
 	// have split a live character away from the baked copies it shares a mesh and
 	// a material with. One buffer per frame keeps them in one draw.
 	ulong live_poses; // Matrix4f*
+	<*
+	 The light's own view-projection, as `render/shadow.c3` fitted it this frame.
+
+	 Identity in a frame with no shadow pass, and unread in one — `shadow[3]` is
+	 what says which. Written here rather than pushed because both ends need it
+	 and they are different pipelines: `shaders/shadow.slang` rasterises the map
+	 with it and both shading shaders read the map back with it, so one fit
+	 reaching one buffer is what keeps the two from disagreeing.
+	*>
+	Matrix4f light_view_projection;
+	<*
+	 x texel size in uv, y depth bias in ndc, z normal offset in world units,
+	 w intensity — and **w is zero when no shadow pass ran this frame**.
+
+	 One number for "off" and for "as dark as the shadows are" because the shader
+	 cannot tell the two apart and should not have to: an intensity of zero and a
+	 white 1x1 map are both "nothing is occluded". `shaders/mesh.slang` carries
+	 the full account of what each of the four does.
+	*>
+	float[4] shadow;
 }
 
 <*
@@ -268,12 +302,23 @@ const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
 };
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
+
+// **The C3 structs against their tables, at compile time.** `check_push_block`
+// holds the *shader* to these; `@layout_matches` holds this side to them, so
+// neither declaration is the definition of the other and a field added to one
+// alone does not build. `POST_PUSH_FIELDS` has no counterpart here — a post pass
+// pushes no struct this file declares — which is why there are four of these and
+// five tables.
+$assert @layout_matches(MeshPush, MESH_PUSH_FIELDS) : "MeshPush no longer lays out the way MESH_PUSH_FIELDS says";
+$assert @layout_matches(SkinPush, SKIN_PUSH_FIELDS) : "SkinPush no longer lays out the way SKIN_PUSH_FIELDS says";
+$assert @layout_matches(DrawRecord, DRAW_RECORD_FIELDS) : "DrawRecord no longer lays out the way DRAW_RECORD_FIELDS says";
+$assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer lays out the way FRAME_BLOCK_FIELDS says";
 // Not a bound but an equality, because these numbers are a wire format shared
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert DrawRecord::size == 104 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 88 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 168 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 
@@ -290,10 +335,68 @@ struct PushFieldLayout
 	uint size;
 }
 
+<*
+ Does this C3 struct lay out exactly the way this table says it does?
+
+ **The half of every contract below that used to be measured at runtime.**
+ `Type::members` reports each member's name, offset and size at compile time, so
+ the C3 side of a wire format is a `$assert` and not a test — which is strictly
+ better than a check that has to be run: a struct that stopped matching its table
+ no longer builds, and it names the field.
+
+ Order matters and is part of the claim. The table is walked against the members
+ in declaration order, so a field moved rather than resized still fails.
+
+ @param $Type : `The struct — DrawRecord, FrameBlock, MeshPush, SkinPush.`
+ @param $fields : `The table it must match, in declaration order.`
+*>
+macro bool @layout_matches($Type, $fields)
+{
+	$if $Type::members.len != $fields.len:
+		return false;
+	$endif
+	$foreach $i, $m : $Type::members:
+		$if $m.name != $fields[$i].name ||| $m.offset != $fields[$i].offset ||| $m.size != $fields[$i].size:
+			return false;
+		$endif
+	$endforeach
+	return true;
+}
+
 const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	{ "frame",      0,  8 },
 	{ "instances",  8,  8 },
 	{ "draw",      16,  8 },
+};
+
+<*
+ The frame block's own contract, in the same terms and for the same reason as
+ `DRAW_RECORD_FIELDS`.
+
+ **Added when the shadow pass doubled the number of readers.** `FrameBlock` is
+ reached through a pointer, so Slang does not reflect it and nothing compared it
+ against the C3 struct — which was survivable while `mesh.slang` and
+ `material.slang` were the only two files declaring it and both were edited
+ together. `shaders/shadow.slang` is a third, it reads `light_view_projection`
+ at offset 88, and a field inserted above that in two files out of three is a
+ shadow map rendered with whatever sixteen floats happen to sit there.
+
+ `the_frame_block_matches_the_shader` closes it exactly the way the draw record's
+ check does: the declaration is cut out of `shaders/mesh.slang` and compiled *as*
+ a push block, which is a layout Slang will report.
+
+	view_projection          0    64
+	light                   64    16
+	live_poses              80     8
+	light_view_projection   88    64
+	shadow                 152    16    = 168, and no tail padding
+*>
+const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
+	{ "view_projection",         0, 64 },
+	{ "light",                  64, 16 },
+	{ "live_poses",             80,  8 },
+	{ "light_view_projection",  88, 64 },
+	{ "shadow",                152, 16 },
 };
 
 <*
@@ -311,11 +414,11 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  is a layout Slang will reflect. Both are scalar-layout structs under
  `-force-glsl-scalar-layout`, so what comes back is what the record has.
 
- The same test holds this table against the C3 struct as well, by measuring the
- addresses of its own fields — so the two sides are checked independently and
- neither one is the definition of the other. That half wants to be a `$assert`
- here and cannot be: C3 0.8.3 has no `offsetof`, and a table of offsets computed
- by hand in a `$assert` would be a third derivation rather than a check.
+ **The C3 half is the `$assert` below**, not part of that test. It measured the
+ addresses of a real `DrawRecord`'s fields at runtime until it turned out that
+ `Type::members` reports name, offset and size at compile time — so the two sides
+ are still checked independently, and the side that can be checked without
+ running anything now is.
 *>
 const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "positions",     0,  8 },
@@ -659,12 +762,19 @@ fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTR
  which is exactly the parameter `check_push_block` takes.
 
  @param fields : `MESH_PUSH_FIELDS or POST_PUSH_FIELDS — see check_push_block.`
+ @param entries : `Which entry points the module must contain. Defaults to the two a shading pipeline has; the shadow pass passes SHADOW_ENTRIES, which is a vertex stage alone.`
  @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout.`
  @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs.`
  @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this creates one.`
  @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something no Vulkan descriptor type covers.`
 *>
-fn void? MeshPipeline.build_layouts(&self, Gpu* gpu, ShaderModule* mod, PushFieldLayout[] fields)
+fn void? MeshPipeline.build_layouts(
+	&self,
+	Gpu* gpu,
+	ShaderModule* mod,
+	PushFieldLayout[] fields,
+	ShaderEntry[] entries = MESH_ENTRIES[..]
+)
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
 	// The *shader's* block, not `MeshPush::size`. Since M5 a material appends its
@@ -673,7 +783,7 @@ fn void? MeshPipeline.build_layouts(&self, Gpu* gpu, ShaderModule* mod, PushFiel
 	// through on a device offering 64.
 	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
 
-	check_entry_points(mod)!;
+	check_entry_points(mod, entries)!;
 	check_push_block(&mod.layout, fields)!;
 
 	if (mod.layout.set_count > 1)
@@ -708,10 +818,19 @@ fn void? MeshPipeline.build_layouts(&self, Gpu* gpu, ShaderModule* mod, PushFiel
 		// Sets for it are specified inline by `cmdPushDescriptorSetKHR` at draw
 		// time, which is why `Assets` has no pool, no set list and — the part that
 		// mattered — no reason to know a pipeline exists. See `scene/asset.c3`.
-		self.descriptor_layout = vk::descriptorSetLayoutCreateInfo()
-			.setFlags(DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT)
-			.setBindings(bindings.array_view())
-			.build(gpu.handle)!;
+		//
+		// **A module with no bindings still gets a layout, and `setBindings` is
+		// what has to be skipped rather than the layout.** The builder takes the
+		// address of the slice's first element, so an empty slice faults inside the
+		// binding rather than producing the empty layout it looks like it would —
+		// which is how `shaders/shadow.slang`, the first module here to declare no
+		// samplers at all, found this. An empty descriptor set layout is legal and
+		// keeps the pipeline layout and `free` a single shape for all three
+		// constructors.
+		vk::DescriptorSetLayoutCreateInfo set_layout = vk::descriptorSetLayoutCreateInfo()
+			.setFlags(DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT);
+		if (bindings.len() > 0) set_layout = set_layout.setBindings(bindings.array_view());
+		self.descriptor_layout = set_layout.build(gpu.handle)!;
 	};
 
 	vk::PushConstantRange push_range = {
@@ -967,6 +1086,117 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
 		.setDepthTestEnable(vk::FALSE)
 		.setDepthWriteEnable(vk::FALSE);
+
+	// Two, not three: the cull mode is static here. See the header.
+	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };
+	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
+		.setDynamicStates(dynamic_states[..]);
+
+	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
+		.setScissorCount(1);
+
+	self.handle = vk::graphicsPipelineCreateInfo().setNext(&rendering).setStages(stages[..])
+		.setVertexInputState(&vertex_input)
+		.setInputAssemblyState(&input_assembly)
+		.setViewportState(&viewport)
+		.setRasterizationState(&rasterization)
+		.setMultisampleState(&multisample)
+		.setColorBlendState(&color_blend)
+		.setDepthStencilState(&depth)
+		.setDynamicState(&dynamic)
+		.setLayout(self.layout)
+		.build(gpu.handle)!;
+
+	self.shader = mod.layout.copy();
+
+	return *self;
+}
+
+<*
+ Build the shadow pass's pipeline from a compiled `shaders/shadow.slang`.
+
+ The third constructor on this type, and the one that draws no colour at all. It
+ shares `build_layouts` with the other two — the module's declarations turned
+ into Vulkan objects is the same job whatever the pass rasterises — and differs
+ in five places, each of which would be a validation error or a wrong picture if
+ it did not:
+
+ - **One shader stage.** A depth-only pipeline is allowed to have no fragment
+   shader, and this one does not have one. `SHADOW_ENTRIES` is what
+   `build_layouts` is held to instead of `MESH_ENTRIES`, so a module with a
+   `fragmentMain` is not required and a module without one is not refused.
+ - **No colour attachment, and a depth format that is not the target's.** The
+   shadow map is its own image at its own extent, created by `render/shadow.c3`,
+   and dynamic rendering checks the declared formats against the attachments the
+   pass actually begins with. Declaring `target.color_format` here and then
+   beginning a pass with depth alone is the error `init_post` describes pointing
+   the other way.
+ - **`CULL_MODE_NONE`, statically.** Two reasons, and they point the same way. A
+   closed mesh is unaffected — its back faces are further from the light and lose
+   the depth test to its front ones — while an open one, a plane or a leaf card,
+   casts nothing at all with either face culled from *some* light direction. And
+   `DYNAMIC_STATE_CULL_MODE` is deliberately absent for `init_post`'s reason: the
+   main pass sets the cull mode per bucket, and this pass runs before it, so a
+   dynamic value here would be one more thing that has to be set on a path where
+   getting it wrong is a shadow that silently is not there.
+ - **Depth tested and written, which is the whole output.** `SOLID_STATE`'s two
+   trues, spelled out here rather than taken from it, because `PipelineState`
+   also carries a topology and a blend mode and neither means anything to a pass
+   with no colour attachment.
+ - **`MESH_PUSH_FIELDS`, the same contract the shading pipelines are held to.**
+   That is not a coincidence to be tidied away: the shadow pass reads the same
+   instance array and the same draw record the main pass reads, out of the same
+   buffers, which is exactly what makes a skinned character's shadow the shadow
+   of the pose it is actually in.
+
+ @param mod : `A module from compile_slang containing vertexMain. Its layout is copied, not moved.`
+ @param depth_format : `The shadow map's format — see ShadowMap.ensure, which picks one the device will both render to and sample.`
+ @return? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
+ @return? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
+*>
+fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format)
+{
+	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], SHADOW_ENTRIES[..])!;
+
+	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
+	defer module_handle.free(gpu.handle);
+
+	vk::PipelineShaderStageCreateInfo[1] stages = {
+		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
+	};
+
+	// Depth alone. `setColorAttachmentFormats` is not called rather than being
+	// called with an empty slice, for the reason `init_post` leaves the depth
+	// format out: the zero the struct starts with already spells "there is none"
+	// and a reader should not have to work out that an empty array means the same.
+	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
+		.setDepthAttachmentFormat(depth_format);
+
+	// Empty, like every pipeline here: geometry arrives as buffer device
+	// addresses. `shaders/shadow.slang` reads the same three streams the main
+	// pass does, through the same record.
+	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
+
+	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
+		.setTopology(PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+		.setPrimitiveRestartEnable(vk::FALSE);
+
+	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
+		.setCullMode(CULL_MODE_NONE)
+		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
+		.setPolygonMode(POLYGON_MODE_FILL);
+
+	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
+
+	// Zero attachments, which is legal precisely because the rendering info above
+	// declares none. Passed rather than left null so that nothing has to reason
+	// about which of the two spellings a driver accepts.
+	vk::PipelineColorBlendStateCreateInfo color_blend = vk::pipelineColorBlendStateCreateInfo();
+
+	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
+		.setDepthTestEnable(vk::TRUE)
+		.setDepthWriteEnable(vk::TRUE)
+		.setDepthCompareOp(COMPARE_OP_LESS_OR_EQUAL);
 
 	// Two, not three: the cull mode is static here. See the header.
 	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };

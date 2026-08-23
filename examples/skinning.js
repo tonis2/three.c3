@@ -6,7 +6,8 @@
 //     ./build/three --script examples/skinning.js --mcp   # and attach an agent
 //
 // Once it is running: `space` pauses and resumes the clock, `1` `2` `3` isolate
-// one row at a time and `0` shows all of them, and `s` prints the frame's cost.
+// one row at a time and `0` shows all of them, `d` toggles the shadow map, and
+// `s` prints the frame's cost.
 //
 // What it is here to show
 // -----------------------
@@ -33,9 +34,19 @@
 // **The back row draws the same picture through a compute pass.** Same clip,
 // same phases, same arithmetic — done in a dispatch before the frame's first
 // draw instead of in the vertex shader. Under one render pass that is *more*
-// work, not less, and it is here so you can see that it is indistinguishable:
-// its payoff is drawing the same character in a second pass (a shadow map), and
-// it splits its own draw call in the meantime. `preskinnedInstances` counts it.
+// work, not less, and it is here so you can see that it is indistinguishable.
+// It splits its own draw call, which `preskinnedInstances` counts.
+//
+// **Its payoff is the second pass, and there is one now.** `d` toggles the
+// shadow map. With it on, every character is drawn twice — once into the depth
+// map from the light and once into the frame — and the back row blends its
+// vertices once for both while the other two rows blend twice. Press `s` with
+// shadows on and off and watch `shadowDraws` rather than `drawCalls`, which
+// counts the colour pass alone.
+//
+// The ground is here for the shadows to fall on. Everything opaque casts and
+// everything shaded receives; there is no per-object switch, because two copies
+// of one mesh disagreeing about casting would be two draw calls.
 //
 // The model is the test fixture — a two-bone bar, deliberately tiny, whose bend
 // is worked out by hand in test/fixtures/make_skinned.py. Point PATH at a real
@@ -56,6 +67,20 @@ if (!asset.animations.includes(CLIP)) {
 const COPIES = 12;
 const SPACING = 1.5;
 const left = -((COPIES - 1) * SPACING) / 2;
+
+// ---------------------------------------------------------------------------
+// Something for the shadows to land on.
+// ---------------------------------------------------------------------------
+
+const ground = new three.Mesh(
+	new three.PlaneGeometry(COPIES * SPACING + 14, 16),
+	new three.MeshLambertMaterial({ color: 0x9aa0a6 })
+);
+ground.rotation.x = -Math.PI / 2;
+// A hair below zero, so the characters' feet are not coplanar with it — two
+// surfaces at exactly the same depth is a speckle rather than a contact.
+ground.position.y = -0.01;
+scene.add(ground);
 
 // ---------------------------------------------------------------------------
 // Row 1 — the crowd. Baked, phased, one draw call.
@@ -113,6 +138,12 @@ three.camera.frameAll();
 // inside the frame rather than on its edge.
 three.camera.orbit(undefined, undefined, three.camera.toJSON().distance * 1.15);
 
+// On from the start, so the first frame shows what the back row is for. `d`
+// turns it off, and turning it off is free — no pass is recorded, the draw list
+// goes back to being camera-culled, and the map stays allocated for the next
+// press.
+three.light.shadow = true;
+
 // ---------------------------------------------------------------------------
 
 const rows = [crowd, heroes.map((h) => h.object), computed];
@@ -131,6 +162,7 @@ function report() {
 	console.log(
 		`draws ${s.drawCalls} (${s.skinnedDraws} skinned) · `
 		+ `${s.skinnedInstances} characters, ${s.preskinnedInstances} through compute · `
+		+ `shadow draws ${s.shadowDraws} · `
 		+ `poses ${(s.poseBytes / 1024).toFixed(1)} KiB · ${s.gpuMs.toFixed(2)} ms`
 	);
 }
@@ -145,9 +177,13 @@ three.onKeyDown('1', () => show(0));
 three.onKeyDown('2', () => show(1));
 three.onKeyDown('3', () => show(2));
 three.onKeyDown('s', () => report());
+three.onKeyDown('d', () => {
+	three.light.shadow.enabled = !three.light.shadow.enabled;
+	console.log(three.light.shadow.enabled ? 'shadows on' : 'shadows off');
+});
 
 console.log(`${COPIES} × 3 characters from ${PATH}`);
-console.log('space pauses · 1/2/3 isolate a row · 0 shows all · s prints the cost');
+console.log('space pauses · 1/2/3 isolate a row · 0 shows all · d toggles shadows · s prints the cost');
 report();
 
 // The clock. The two clip-driven rows advance themselves — a player is per

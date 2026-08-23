@@ -62,18 +62,16 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 <*
  The binding index the first agent-declared sampler gets, per kind of shader.
 
- **This used to be one number for both, and it stopped being one the moment a
- post pass reserved two bindings.** Its old comment said why it was 1 — "zero is
- always taken and always occupied: `base_color_map` in a material, `scene` in a
- post pass" — and that was a coincidence of both templates reserving exactly one,
- not a shared rule. A post pass now reserves `prev` at 0 and `scene` at 1
- (`shaders/post.slang` has what they are), so it starts at 2 and a material still
- starts at 1.
-
- Raising the shared constant instead would have been the quiet failure: every
- material sampler would have been renumbered by one, the reflection would have
- agreed with itself, and the only symptom would be textures arriving in the wrong
- slots of shaders nobody had touched.
+ **These are two numbers that happen to be equal, and writing them as one
+ constant is the mistake this comment exists to prevent.** They were 1 and 1
+ while both templates reserved one binding; they were 1 and 2 once a post pass
+ reserved `prev` and `scene`; they are 2 and 2 now that a material reserves
+ `base_color_map` and `shadow_map`. Each of those three states was arrived at by
+ a different template growing, and a shared constant would have meant every
+ material sampler in the project being silently renumbered by whichever *other*
+ template moved — the reflection agreeing with itself the whole way, and the only
+ symptom being textures arriving in the wrong slots of shaders nobody had
+ touched.
 
  **Nothing outside this file chooses a binding index.** The declaration order
  the caller passed is the binding order, generated here from whichever base the
@@ -83,11 +81,24 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  that could write `[vk::binding(3, 0)]` itself would be a script that can collide
  with the reserved names.
 *>
-const uint MATERIAL_BINDING_FIRST = 1;
+const uint MATERIAL_BINDING_FIRST = 2;
 
 // `prev` at 0 and `scene` at 1 — see `MATERIAL_BINDING_FIRST` and
 // `shaders/post.slang`.
 const uint POST_BINDING_FIRST = 2;
+
+<*
+ Where the shadow map is bound, in every shader that shades a surface.
+
+ A number rather than a name, unlike everything a material declares, and for the
+ reason `base_color_map` is reached at 0 by hand: only the pass knows what this
+ image *is*, and resolving it by name would mean a material could claim it by
+ declaring a texture called `shadow_map`. `pipeline_declares_binding` is what asks
+ the reflected layout whether it is there, because Slang is entitled to drop a
+ sampler a linked program never reads — and both templates do read it, which is
+ why the answer is yes today and why it is still asked.
+*>
+const uint SHADOW_BINDING = 1;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the

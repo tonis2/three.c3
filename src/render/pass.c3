@@ -137,6 +137,26 @@ struct MeshPass
 	// every bucket the dispatch did not cover, which is most of them.
 	List{uint} posed_offsets;
 
+	// ---- The shadow pass, which is opt-in for the same reason -----------------
+	//
+	// No image, no shader and no pipeline until a script sets
+	// `three.light.shadow.enabled`. `render/shadow.c3` is the whole of it; what
+	// lives here is the two lines of the frame that reach it.
+	ShadowMap shadows;
+	<*
+	 Which draw record each bucket got, or `NOT_DRAWN`.
+
+	 **Parallel to `Scene.buckets`, and it exists because the records now have two
+	 readers.** They used to be written inside `record`'s own loop — a record is
+	 exactly what a bucket resolves to, so building it there cost nothing extra.
+	 The shadow pass reads the same records and runs *before* that loop, so the
+	 resolution moved into `prepare` and this is what both passes index it by. A
+	 second resolution in the shadow pass would be a second place for "which mesh,
+	 which material, is this bucket skinned" to be answered, and the two answers
+	 disagreeing is a shadow of geometry that is not what was drawn.
+	*>
+	List{uint} draw_indices;
+
 	<*
 	 What `prepare` resolved and `record` needs, for the one frame between them.
 
@@ -162,6 +182,11 @@ struct MeshPass
 // offset for the first bucket that it did.
 const uint NOT_PRESKINNED = uint::max;
 
+// A bucket that resolved to nothing and is drawn by neither pass — see
+// `MeshPass.build_draw_records`. Not zero for `NOT_PRESKINNED`'s reason: zero is
+// the first record any frame writes.
+const uint NOT_DRAWN = uint::max;
+
 <*
  Compile the mesh shader and build the pipeline from it.
 
@@ -178,6 +203,13 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// and for the same reason: small enough to cost nothing, large enough that a
 	// normal scene never grows it.
 	self.posed_offsets.init(mem, INITIAL_INSTANCES);
+	// Beside it, sized the same and rewritten every frame for the same reason.
+	self.draw_indices.init(mem, INITIAL_INSTANCES);
+	// Off, at the default size, with the default bias and intensity. A function
+	// rather than four assignments here, because `new three.Scene()` restores the
+	// same four and two spellings of a default drift — `DEFAULT_LIGHT` above has
+	// the same argument.
+	self.shadows.defaults();
 
 	String path = shader_path;
 	@pool()
@@ -448,6 +480,48 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	self.scene.update_world_matrices();
 	ulong live_address = self.write_live_poses(gpu, slot)!;
 
+	// **Before the draw list, because the draw list depends on the answer.** A
+	// caster the camera cannot see still throws a shadow into the frame, so a
+	// frame with a shadow pass builds its list without the camera frustum —
+	// `render/shadow.c3` has the argument and the cost. Deciding this after
+	// `scene.update` would mean a shadow map missing exactly the casters that
+	// matter, and nothing anywhere saying so.
+	//
+	// The fit needs the image, because the texel size and the normal offset are
+	// derived from the size it was actually created at; and it needs the world
+	// bounds, which `update_world_matrices` above has just made current. The walk
+	// `Scene.bounds` costs is paid only by frames that have shadows on.
+	self.shadows.live = false;
+	if (self.shadows.enabled)
+	{
+		// **A shadow map that will not build turns shadows off rather than killing
+		// the frame.** Both of these can fail — an image allocation, a Slang
+		// compile — and propagating the fault would stop the renderer drawing
+		// anything at all, every frame, because `prepare` would retry and fail
+		// again. `ensure_poses` makes the same choice for the same reason: a
+		// feature that could not be built is a scene without it, and the
+		// diagnostic is already on stderr.
+		//
+		// `enabled` is cleared rather than only `live`, so it is one message and
+		// not one per frame, and so a script reading `three.light.shadow.enabled`
+		// back is told the truth.
+		if (catch self.shadows.ensure(gpu))
+		{
+			io::eprintn("three: the shadow map could not be created — shadows are off");
+			self.shadows.enabled = false;
+		}
+		else if (catch self.shadows.build_pipeline(gpu))
+		{
+			io::eprintn("three: the shadow shader could not be built — shadows are off");
+			self.shadows.enabled = false;
+		}
+		else
+		{
+			self.shadows.fit(self.light, self.scene.bounds(&self.assets));
+			self.shadows.live = true;
+		}
+	}
+
 	@pool()
 	{
 		bool[] transparent = alloc::new_array(tmem, bool, self.materials.len());
@@ -461,32 +535,34 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			transparent[i] = material.alive && material.blend != BlendMode.NONE;
 			margins[i] = material.alive ? material.bounds : 0;
 		}
-		self.scene.update(&self.assets, view_projection, transparent, margins);
+		self.scene.update(&self.assets, view_projection, transparent, margins, self.shadows.live);
 	};
-	if (self.scene.buckets.len() == 0) return;
+	if (self.scene.buckets.len() == 0)
+	{
+		// Nothing to cast and nothing to receive, so there is no pass — and saying
+		// so here rather than letting `record_shadow` discover it is what keeps
+		// the frame block, the draw list and the pass agreeing about one field.
+		self.shadows.live = false;
+		self.shadows.draws = 0;
+		return;
+	}
 
 	FrameBlock frame = {
 		.view_projection = view_projection,
 		.light = self.light,
 		.live_poses = live_address,
+		.light_view_projection = self.shadows.light_view_projection,
+		.shadow = self.shadows.params(),
 	};
 	self.frame_view_projection = view_projection;
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
 	self.instance_address = self.write_instances(gpu, slot)!;
 
-	// The draw records are written *into* the loop below rather than in a pass of
-	// their own: a record is exactly the fields the push block used to carry, so
-	// building it needs the mesh, the material and the base colour that the draw
-	// already resolves, and a second loop would be a second copy of that
-	// resolution to keep in step. The buffer is host-visible and coherent and the
-	// frame is not submitted until recording ends, so writing it as the commands
-	// are recorded is the same thing as writing it beforehand.
-	//
-	// Sized against every bucket, including the ones the loop skips. Their records
-	// are stale bytes nothing points at — the counter below only advances for a
-	// bucket that draws — and the alternative is a count that has to predict which
-	// buckets those are.
+	// Sized against every bucket, including the ones that resolve to nothing.
+	// Their records are stale bytes nothing points at — `build_draw_records` only
+	// advances the counter for a bucket that draws — and the alternative is a
+	// count that has to predict which buckets those are.
 	self.reserve_draws(gpu, slot, self.scene.buckets.len())!;
 	self.draw_address = self.draw_buffers[slot].address;
 
@@ -496,86 +572,65 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// barrier before the first draw reads the result.
 	self.skin(gpu, cmd, slot)!;
 
+	// **After the dispatch, not before it.** A pre-skinned bucket's record points
+	// into the output buffer `skin` just sized and may have just reallocated, and
+	// the offsets it writes are what `FLAG_PRESKINNED` means — so a record built
+	// first would name last frame's buffer.
+	self.build_draw_records(slot);
+
 	self.prepared = true;
 }
 
 <*
- The draw commands, recorded inside the render pass.
+ One `DrawRecord` per bucket that draws, and the index of each in
+ `self.draw_indices`.
 
- Everything this needs was resolved by `prepare` a moment ago and is on `self` —
- see the block of addresses there for why the split exists at all.
+ ## Why this is its own pass over the buckets
 
- @param cmd : `A command buffer inside a render pass, on a frame prepare has run for.`
+ It was inside `MeshPass.record`'s loop until the shadow pass existed, and the
+ argument for that was good: a record is exactly what resolving a bucket
+ produces, so building it where the bucket was already resolved cost nothing, and
+ a second loop would have been a second copy of the resolution to keep in step.
+
+ The shadow pass is what changed the sum. It reads the same records — the same
+ geometry, the same instances, the same skinning — and it records *before* the
+ render pass begins, so with the records still written inside the draw loop it
+ would have had to resolve every bucket itself. That is the second copy the old
+ arrangement was avoiding, arrived at from the other side. So the resolution
+ moved here, where both passes read it, and neither can disagree with the other
+ about which mesh a bucket is or which of the two skinning paths it took.
+
+ The buffer is host-visible and coherent and the frame is not submitted until
+ recording ends, so writing it here is the same thing as writing it during the
+ draw.
+
+ @param slot : `The frame in flight whose draw and posed buffers these records point into.`
 *>
-fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+fn void MeshPass.build_draw_records(&self, uint slot)
 {
-	if (!self.prepared) return;
+	self.draw_indices.clear();
 
-	ulong frame_address = self.frame_address;
-	ulong instance_address = self.instance_address;
-	ulong draw_address = self.draw_address;
 	DrawRecord* records = (DrawRecord*)self.draw_buffers[slot].data();
 	uint recorded = 0;
-
-	// Bound per bucket since M5, because a bucket is now (asset, mesh, material)
-	// and the material chooses the pipeline. `build_draw_list` sorts
-	// material-major precisely so this stays one bind per material rather than
-	// one per bucket — `bound` is what turns that ordering into skipped calls.
-	vk::Pipeline bound = (vk::Pipeline)null;
 
 	foreach (i, bucket : self.scene.buckets)
 	{
 		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
-		if (mesh == null) continue;
+		if (mesh == null)
+		{
+			self.draw_indices.push(NOT_DRAWN);
+			continue;
+		}
 
 		// A bucket whose material does not resolve is skipped rather than drawn
 		// with the default. Falling back would put the wrong shader on screen and
 		// look like a shader bug; drawing nothing looks like what it is.
 		Material* material = self.material(bucket.material);
-		if (material == null) continue;
-		MeshPipeline* pipeline = material.pipeline;
-
-		if (pipeline.handle != bound)
+		if (material == null)
 		{
-			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
-			bound = pipeline.handle;
+			self.draw_indices.push(NOT_DRAWN);
+			continue;
 		}
-
-		// Dynamic, so `material.side` costs a command rather than a pipeline —
-		// `PipelineState` has the argument and the measurement. Set per bucket
-		// rather than tracked like `bound`, because the draw list is material-major
-		// already: consecutive buckets usually share a material and the driver
-		// folds a repeated set, whereas a `last_cull` variable here would be a
-		// second thing to keep in step with the pipeline bind for no measured gain.
-		vk::cmdSetCullMode(cmd, material.cull);
-
-		// Pushed, not bound. There is no descriptor set anywhere in this project:
-		// the image and sampler are specified inline against this pipeline's own
-		// layout, so a material's shader gets its texture through its own layout
-		// rather than through one baked at load time against a different pipeline.
-		// `scene/asset.c3`'s header has the argument.
-		//
-		// **The material's own texture wins over the mesh's.** `material.map` is
-		// the explicit statement and the mesh's image is what a file happened to
-		// bring, so a script that sets one and gets the other would be overruled
-		// by an asset it did not write. This costs nothing to decide here: the
-		// descriptor is already written per bucket, and a bucket is
-		// `(asset, mesh, material)` — so two nodes over one mesh with different
-		// maps are already two buckets and stay two correct draws.
-		Texture* sampled = material.texture == NO_TEXTURE
-			? self.assets.texture_for(mesh)
-			: self.assets.texture_at(material.texture);
-
-		// Binding 0 by hand and everything above it from the shader's own
-		// reflection — `render/bind.c3` has the argument, and the short version is
-		// that only this line knows binding 0 is "the material's map or the mesh's
-		// image". A body that declared `noise_map` gets it at whatever index the
-		// assembler generated, resolved by name, with white in any sampler the
-		// script left empty.
-		SampledBindings samplers;
-		samplers.add(0, sampled.descriptor());
-		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
-		samplers.push(cmd, pipeline);
 
 		// The mesh's own factor, faded by the material's opacity. Multiplied rather
 		// than replaced so that a glTF's own alpha and a script's `opacity` compose
@@ -625,17 +680,121 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			.uv_transform = material.uv_transform_or_identity(),
 		};
 
+		self.draw_indices.push(recorded);
+		recorded++;
+	}
+}
+
+<*
+ The draw commands, recorded inside the render pass.
+
+ Everything this needs was resolved by `prepare` a moment ago and is on `self` —
+ see the block of addresses there for why the split exists at all.
+
+ @param cmd : `A command buffer inside a render pass, on a frame prepare has run for.`
+*>
+fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+{
+	if (!self.prepared) return;
+
+	ulong frame_address = self.frame_address;
+	ulong instance_address = self.instance_address;
+	ulong draw_address = self.draw_address;
+
+	// Bound per bucket since M5, because a bucket is now (asset, mesh, material)
+	// and the material chooses the pipeline. `build_draw_list` sorts
+	// material-major precisely so this stays one bind per material rather than
+	// one per bucket — `bound` is what turns that ordering into skipped calls.
+	vk::Pipeline bound = (vk::Pipeline)null;
+
+	foreach (i, bucket : self.scene.buckets)
+	{
+		// **The one skip, and `build_draw_records` already made the decision.** A
+		// bucket with no mesh or no material got `NOT_DRAWN` there rather than
+		// being skipped again here, so the two passes over the buckets cannot
+		// disagree about which ones draw.
+		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+		if (at == NOT_DRAWN) continue;
+
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		Material* material = self.material(bucket.material);
+		if (mesh == null || material == null) continue;
+		MeshPipeline* pipeline = material.pipeline;
+
+		if (pipeline.handle != bound)
+		{
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			bound = pipeline.handle;
+		}
+
+		// Dynamic, so `material.side` costs a command rather than a pipeline —
+		// `PipelineState` has the argument and the measurement. Set per bucket
+		// rather than tracked like `bound`, because the draw list is material-major
+		// already: consecutive buckets usually share a material and the driver
+		// folds a repeated set, whereas a `last_cull` variable here would be a
+		// second thing to keep in step with the pipeline bind for no measured gain.
+		vk::cmdSetCullMode(cmd, material.cull);
+
+		// Pushed, not bound. There is no descriptor set anywhere in this project:
+		// the image and sampler are specified inline against this pipeline's own
+		// layout, so a material's shader gets its texture through its own layout
+		// rather than through one baked at load time against a different pipeline.
+		// `scene/asset.c3`'s header has the argument.
+		//
+		// **The material's own texture wins over the mesh's.** `material.map` is
+		// the explicit statement and the mesh's image is what a file happened to
+		// bring, so a script that sets one and gets the other would be overruled
+		// by an asset it did not write. This costs nothing to decide here: the
+		// descriptor is already written per bucket, and a bucket is
+		// `(asset, mesh, material)` — so two nodes over one mesh with different
+		// maps are already two buckets and stay two correct draws.
+		Texture* sampled = material.texture == NO_TEXTURE
+			? self.assets.texture_for(mesh)
+			: self.assets.texture_at(material.texture);
+
+		// Binding 0 by hand and everything above it from the shader's own
+		// reflection — `render/bind.c3` has the argument, and the short version is
+		// that only this line knows binding 0 is "the material's map or the mesh's
+		// image". A body that declared `noise_map` gets it at whatever index the
+		// assembler generated, resolved by name, with white in any sampler the
+		// script left empty.
+		SampledBindings samplers;
+		samplers.add(0, sampled.descriptor());
+		// Binding 1, the other reserved one, and **asked for by index rather than
+		// assumed to be there**: Slang is entitled to drop a sampler the linked
+		// program never reads, and pushing a write for a binding the layout does
+		// not declare is a validation error. Both templates read it today, so the
+		// answer is yes today — `pipeline_declares_binding`'s header is where that
+		// distinction is argued.
+		//
+		// **The white 1x1 when there is no shadow pass**, which is not a fallback
+		// but the correct value: a depth of 1 is the far plane, nothing is in front
+		// of anything, and `shadow_factor` comes out lit. So shadows on and shadows
+		// off are the same pipeline and the same descriptor layout, differing by
+		// which image is in one slot.
+		if (pipeline_declares_binding(pipeline, SHADOW_BINDING))
+		{
+			samplers.add(
+				SHADOW_BINDING,
+				self.shadows.live
+					? self.shadows.descriptor()
+					: self.assets.texture_at(NO_TEXTURE).descriptor()
+			);
+		}
+		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
+		samplers.push(cmd, pipeline);
+
 		MeshPush push = {
 			.frame = frame_address,
 			// Offset on the CPU rather than passed as a base index: the shader
 			// then reads instance zero of its own slice and never has to know
 			// whether SV_InstanceID includes firstInstance.
 			.instances = instance_address + (ulong)bucket.first * Instance::size,
-			// And the record just written, for the same reason — `push.draw[0]`
-			// is this bucket's, whatever else is in the buffer.
-			.draw = draw_address + (ulong)recorded * DrawRecord::size,
+			// And this bucket's own record, for the same reason — `push.draw[0]`
+			// is always the right one, whatever else is in the buffer.
+			// `build_draw_records` wrote it and `draw_indices` is where it went.
+			.draw = draw_address + (ulong)at * DrawRecord::size,
 		};
-		recorded++;
 		// **The reflected size, not `MeshPush::size`.** The two agree at 24 today
 		// and have not always: the block used to end in a `uint` that C3 followed
 		// with four bytes of tail padding, so Slang reported 76 where the struct
@@ -676,6 +835,116 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.count, 0, 0, 0);
 	}
+}
+
+<*
+ Whether this material's geometry is written into the shadow map.
+
+ Two refusals, and both are about a pipeline rather than about the surface:
+
+ - **A blended material casts nothing.** A shadow map holds one depth per texel,
+   so a half-transparent surface can only be recorded as fully opaque or not at
+   all — and glass that throws a solid black shadow is a worse answer than glass
+   that throws none. It is the same reason `ALPHA_STATE` writes no depth in the
+   main pass, one buffer over.
+ - **A line casts nothing.** `LINE_STATE` has no depth test and no depth write
+   precisely so a debug helper is never hidden by the scene it was drawn to
+   explain; a helper that cast a shadow onto that scene would be the same mistake
+   from the other side. Asked by pipeline rather than by material index, because
+   `PipelineCache.acquire` hands the same pointer back for the same source and
+   state — so this covers any material drawn as lines, not only `LINE_MATERIAL`.
+
+ What is deliberately *not* here is a per-node `castShadow`. See
+ `render/shadow.c3`: a third per-copy channel splits buckets, which is the trade
+ the whole renderer exists to refuse.
+*>
+fn bool MeshPass.casts_shadow(&self, Material* material)
+{
+	if (material.blend != BlendMode.NONE) return false;
+	if (material.pipeline == self.line_pipeline) return false;
+	return true;
+}
+
+<*
+ The shadow map's draws — the frame's first pass, and the one that writes no
+ colour.
+
+ **Between `prepare` and `begin_render`**, which is the same window the compute
+ skinning dispatch uses and for a related reason: this begins and ends a
+ rendering of its own, and `vkCmdBeginRendering` cannot nest. `Renderer.
+ record_scene` is where the ordering is written down as a sequence rather than as
+ nested ifs.
+
+ It needs nothing `prepare` did not already resolve. The instance array, the draw
+ records and the posed vertices are the *same buffers the main pass reads*, which
+ is what makes a character's shadow the shadow of the pose it is actually in — and
+ for a compute-skinned character it is also where `plan.md` §3's break-even
+ argument finally lands: the blend happened once, in a dispatch, and both passes
+ read the result.
+
+ Records nothing at all — no barrier, no clear, no transition — in a frame with
+ no shadow pass, which is every frame until a script turns them on.
+
+ @param cmd : `A command buffer outside any rendering, on a frame prepare has run for.`
+*>
+fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
+{
+	self.shadows.draws = 0;
+	if (!self.prepared || !self.shadows.live) return;
+
+	self.shadows.begin(cmd);
+
+	// One bind for the whole pass. There is no material in a depth pass and so
+	// nothing to change pipelines for — the counterpart to `record`'s `bound`
+	// tracking, which exists because a bucket there chooses its own shader.
+	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.shadows.pipeline.handle);
+
+	// No `cmdSetCullMode`: `init_shadow` bakes CULL_MODE_NONE in and does not
+	// declare the dynamic state, so `material.side` is deliberately not honoured
+	// here. A single-sided wall still casts the shadow of both its faces, which is
+	// the same shadow.
+	uint recorded = 0;
+
+	foreach (i, bucket : self.scene.buckets)
+	{
+		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+		if (at == NOT_DRAWN) continue;
+
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		Material* material = self.material(bucket.material);
+		if (mesh == null || material == null) continue;
+		if (!self.casts_shadow(material)) continue;
+
+		// The mesh contract exactly as the main pass pushes it, and pointing at the
+		// same three buffers. The only field that means something different is the
+		// one that is not in here at all: `shaders/shadow.slang` reads
+		// `light_view_projection` out of the frame block where `mesh.slang` reads
+		// `view_projection`.
+		MeshPush push = {
+			.frame = self.frame_address,
+			.instances = self.instance_address + (ulong)bucket.first * Instance::size,
+			.draw = self.draw_address + (ulong)at * DrawRecord::size,
+		};
+
+		// The reflected size, for the reason `record` gives at length: the range
+		// declared at pipeline creation and the range pushed here read the same
+		// field, so they cannot drift without an edit that hardcodes one of them.
+		vk::cmdPushConstants(
+			cmd,
+			self.shadows.pipeline.layout,
+			self.shadows.pipeline.shader.stages,
+			0,
+			self.shadows.pipeline.shader.push_size,
+			&push
+		);
+
+		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.count, 0, 0, 0);
+		recorded++;
+	}
+
+	self.shadows.draws = recorded;
+	self.shadows.end(cmd);
 }
 
 fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* frame)
@@ -999,7 +1268,16 @@ fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
  `plan.md`'s second thesis is that the agent must be able to see what it made,
  and this is half of it. Computed with culling off — see `Scene.stats`.
 *>
-fn SceneStats MeshPass.stats(&self) => self.scene.stats(&self.assets);
+fn SceneStats MeshPass.stats(&self)
+{
+	SceneStats stats = self.scene.stats(&self.assets);
+	// Filled in here rather than by `Scene`, because whether a bucket casts is a
+	// property of its material and of the pass — see `casts_shadow`. It is last
+	// frame's number, like `culled_last_frame` beside it, and for the same reason:
+	// `stats()` is a query and does not record a pass to count.
+	stats.shadow_draws = self.shadows.draws;
+	return stats;
+}
 
 <*
  Compile a material from an agent's fragment body.
@@ -1516,7 +1794,11 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		self.posed_capacity[i] = 0;
 	}
 	self.skin_pipeline.free(gpu);
+	// The device is idle by the time a pass is torn down, so the shadow map's
+	// pipeline is destroyed outright rather than retired — see `ShadowMap.free`.
+	self.shadows.free(gpu);
 	self.posed_offsets.free();
+	self.draw_indices.free();
 	self.scene.free();
 	// Before `assets.free`, which frees every texture slot outright: releasing
 	// afterwards would decrement counts in a freed list. The device is idle by

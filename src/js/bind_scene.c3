@@ -116,6 +116,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "budgetSet", &js_budget_set, 1);
 	self.bind(host, "lightGet", &js_light_get, 0);
 	self.bind(host, "lightSet", &js_light_set, 4);
+	self.bind(host, "shadowGet", &js_shadow_get, 0);
+	self.bind(host, "shadowSet", &js_shadow_set, 4);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "frameAll", &js_frame_all, 0);
@@ -325,6 +327,14 @@ fn void js_reset(
 	// scene that does not have to render the same first frame, or "it looked
 	// right when I ran it alone" becomes a thing people say.
 	self.pass.light = DEFAULT_LIGHT;
+	// The shadow settings with it, and for the third time the same reason. Off is
+	// the default, so `new three.Scene()` turns shadows off — which is right for
+	// the "same first frame" rule and is worth knowing before a script rebuilds
+	// its scene and wonders where the shadows went. The image and the pipeline are
+	// **not** freed: they are the expensive half, they are correct for whatever
+	// comes next, and `ShadowMap.ensure` hands the same one back the moment
+	// anything turns shadows on again.
+	self.pass.shadows.defaults();
 
 	self.epoch += 1;
 	*out = qjs::number_value(self.epoch);
@@ -936,6 +946,11 @@ fn void js_stats(
 	js.set_property(object, "skinnedInstances", qjs::int_value((int)stats.skinned_instances));
 	js.set_property(object, "preskinnedInstances", qjs::int_value((int)stats.preskinned_instances));
 	js.set_property(object, "poseBytes", qjs::number_value((double)stats.pose_bytes));
+	// The draws the shadow pass made last frame, which is the only place a script
+	// can see that turning shadows on roughly doubled the frame's draw calls —
+	// `drawCalls` above counts the scene pass and always has. Zero with shadows
+	// off, which is the honest answer rather than an absent property.
+	js.set_property(object, "shadowDraws", qjs::int_value((int)stats.shadow_draws));
 	js.set_property(object, "gpuMs", qjs::number_value(self.renderer != null ? self.renderer.gpu_ms() : 0.0));
 	*out = object;
 }
@@ -1216,6 +1231,87 @@ fn void js_light_set(
 	self.pass.light[1] = y;
 	self.pass.light[2] = z;
 	self.pass.light[3] = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+}
+
+<*
+ `shadowGet()` — the shadow settings, as `[enabled, size, bias, intensity]`.
+
+ `enabled` comes back as 1 or 0 rather than as a boolean because this array is
+ the same shape `lightGet` uses and the JS side reads it positionally; `api.js`
+ turns it back into a boolean at the property.
+
+ **`size` is what a script asked for, already clamped**, and is not necessarily
+ the size of the image on the device: an image is only created or recreated at
+ the top of a frame, so reading this back immediately after setting it answers
+ with the request. That is the right answer — the request is the setting, and the
+ image is how it is honoured.
+*>
+fn void js_shadow_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	ShadowMap* shadows = &self.pass.shadows;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value(shadows.enabled ? 1.0 : 0.0));
+	js.set_index(list, 1, qjs::number_value((double)shadows.size));
+	js.set_index(list, 2, qjs::number_value((double)shadows.bias));
+	js.set_index(list, 3, qjs::number_value((double)shadows.intensity));
+	*out = list;
+}
+
+<*
+ `shadowSet(enabled, size, bias, intensity)` — all four at once.
+
+ ## Why all four rather than four setters
+
+ The same shape `lightSet` has, for the same reason: `api.js` presents four
+ independent properties and each one reads the other three back and writes the
+ lot, so there is one crossing per assignment instead of a getter and a setter per
+ field. It also makes the clamping happen in one place.
+
+ ## What is clamped and what is refused
+
+ Everything is clamped and nothing is refused, which is the opposite of
+ `lightSet`'s answer for a zero direction — and the difference is whether a bad
+ value has a sensible neighbour. A zero light direction does not: every reading of
+ it is a NaN, so the only honest response is to say so. A shadow map of 8 texels
+ has one, and it is 256; an intensity of 4 has one, and it is 1. Refusing those
+ would turn "I tried a number" into an exception in a script that is otherwise
+ working.
+
+ `size` is rounded to a power of two on the way down as well as clamped. Not
+ because the device requires it — nothing here does — but because a shadow map is
+ a memory footprint a script should be able to reason about in halvings, and
+ 2000 quietly costing what 2048 costs is a number that lies about itself.
+
+ **Turning shadows off does not free anything.** The image and the pipeline stay,
+ so a script toggling shadows in a menu pays the allocation once. What it does do
+ is stop the pass recording, which is the whole cost — see `MeshPass.prepare`.
+*>
+fn void js_shadow_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	ShadowMap* shadows = &self.pass.shadows;
+	shadows.enabled = arg_float(&js, argc, args, 0) != 0.0f;
+
+	uint wanted = (uint)math::clamp(arg_float(&js, argc, args, 1), (float)SHADOW_MIN_SIZE, (float)SHADOW_MAX_SIZE);
+	uint rounded = SHADOW_MIN_SIZE;
+	while (rounded * 2 <= wanted) rounded *= 2;
+	shadows.size = rounded;
+
+	// The bias has no upper bound worth inventing — past a certain size every
+	// shadow simply disappears, which is a visible answer to a value somebody
+	// typed. It is floored at zero because a negative one is acne on purpose.
+	float bias = arg_float(&js, argc, args, 2);
+	shadows.bias = bias > 0.0f ? bias : 0.0f;
+	shadows.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
 }
 
 fn void js_camera_get(

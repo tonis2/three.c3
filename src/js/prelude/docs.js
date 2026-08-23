@@ -43,7 +43,11 @@ export const DOCS = {
 		'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 		'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
 		'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
-		'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light, no colour per light and no shadow — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
+		'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light and no colour per light — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
+		'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
+		'Everything opaque casts and everything shaded receives — there is no castShadow or receiveShadow per object, because two copies of one mesh disagreeing about it would be two draw calls and this renderer is built to refuse that trade. A transparent material casts nothing (a shadow map holds one depth per texel, so glass would have to be either solid or absent, and absent is the better wrong answer) and neither does a debug helper. A ShaderMaterial receives shadows with no change to its body: lambert() already has the shadow folded into the direct term, and s.shadow is the raw factor for a body that wants it separately.',
+		'One map, fitted around the whole scene every frame, so its resolution is size divided by however wide the scene is. If shadows look blocky the scene is large, not the map small: raise three.light.shadow.size, or draw the part that matters and leave the rest out. There are no cascades. Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and if they do, three.light.shadow.bias is the knob, in small numbers like 0.0005.',
+		'A shadow pass costs a second draw call per opaque bucket — stats().shadowDraws is the count — and it turns frustum culling off for the frame, because a caster the camera cannot see still throws a shadow into the frame. So stats().culledLastFrame reads 0 while shadows are on. Neither costs draw calls: culling here drops instances from buckets, never buckets.',
 		'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
 		'Every colour you state is sRGB — the components a colour picker gives. mesh.color = 0xff8040 renders as 0xff8040 under a full light, scene.background = 0x2060a0 screenshots as 0x2060a0, and a texture\'s bytes come back out as the bytes that went in. The shading arithmetic in between is linear and the conversion is the renderer\'s job, so nothing in a script should ever apply a gamma of its own; a scene that pre-corrects its own textures will now be twice corrected.',
 		'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
@@ -209,7 +213,10 @@ export const DOCS = {
 				+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo), '
 				+ 'vertex_color (the mesh\'s own COLOR_0 attribute, interpolated across the triangle, '
 				+ 'white where the file carried none, and NOT already in albedo — it is the one value '
-				+ 'here that varies across a surface, so it is a painted weight as often as a tint) '
+				+ 'here that varies across a surface, so it is a painted weight as often as a tint), '
+				+ 'shadow (how much of the directional light reaches this point, 1 in the open and 0 '
+				+ 'under something; 1 everywhere with shadows off, and already folded into lambert() '
+				+ 'so a body does not have to read it to be shadowed) '
 				+ 'and variant (its row of the table, clamped). Each uniform is readable in the body by '
 				+ 'its own name; a uniform written as an array of arrays is a table column, read as '
 				+ 'name[s.variant]. textures is the same idea for images: { noise_map: tex } declares a '
@@ -221,7 +228,9 @@ export const DOCS = {
 				+ 'left null, or one you never fill, reads as 1x1 opaque white rather than as nothing. '
 				+ 'Three helpers are already in scope in a body. lambert(normal) is the built-in '
 				+ 'directional light as a single factor, so `return s.albedo * lambert(s.normal)` '
-				+ 'IS the default look. srgb_to_linear(c) decodes a colour you wrote down yourself. '
+				+ 'IS the default look — the shadow is inside it, on the direct term and not on the '
+				+ 'ambient floor, so a material written before shadows existed lands in the same '
+				+ 'shadow the default shading does. srgb_to_linear(c) decodes a colour you wrote down yourself. '
 				+ 'And mapped_normal(s, texel) applies a tangent-space NORMAL MAP: hand it the '
 				+ 'map\'s rgb exactly as sampled and it answers with a world-space normal to give '
 				+ 'lambert — `float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb); return s.albedo '
@@ -951,9 +960,29 @@ export const DOCS = {
 			+ 'right away from the light gets, 0 to 1: at 0 it is black, at 1 there is no shading at all '
 			+ 'and everything is its own flat colour. Defaults to [0.35, 0.8, 0.45] and 0.25.',
 		'three.light.set(direction, ambient)':
-			'Both at once. ambient may be omitted to leave it alone. There is no second light, no colour '
-			+ 'per light and no shadow, which is why this is not scene.add(new DirectionalLight(...)) — '
-			+ 'a name Three.js has would be read as a promise of the three things it cannot do.',
+			'Both at once. ambient may be omitted to leave it alone. There is no second light and no '
+			+ 'colour per light, which is why this is not scene.add(new DirectionalLight(...)) — '
+			+ 'a name Three.js has would be read as a promise of the two things it cannot do.',
+		'three.light.shadow':
+			'The shadow this light casts, off until you ask. three.light.shadow = true turns it on; '
+			+ 'three.light.shadow = { enabled: true, size: 4096 } sets several at once; and the four '
+			+ 'properties — enabled, size, bias, intensity — read and write one at a time. size is '
+			+ 'texels per side, clamped to 256..8192 and rounded DOWN to a power of two, so it reads '
+			+ 'back as what will be allocated rather than as what you typed. bias is an extra depth '
+			+ 'offset in the light\'s clip space and defaults to 0, because each sample is already '
+			+ 'lifted two texels along its own normal, which is what actually removes self-shadowing '
+			+ 'stripes; reach for it in small numbers like 0.0005 if a scene still shows them. '
+			+ 'intensity is how dark, 0 to 1, and 1 takes the whole directional term away and leaves '
+			+ 'three.light.ambient — so a shadow is never black unless the ambient floor is. '
+			+ 'Nothing is allocated and no shader compiled until the first frame with it on, turning '
+			+ 'it off costs nothing and keeps the map for next time, and new three.Scene() turns it '
+			+ 'off. Everything opaque casts and everything shaded receives: there is no castShadow or '
+			+ 'receiveShadow, because two copies of one mesh disagreeing about it would be two draw '
+			+ 'calls. Glass casts nothing and neither do debug helpers. There is ONE map, fitted '
+			+ 'around the whole scene every frame, so blocky shadows mean a large scene rather than a '
+			+ 'small map — and while the pass is on the camera frustum stops culling, because a '
+			+ 'caster you cannot see still throws a shadow into the frame, so stats().culledLastFrame '
+			+ 'reads 0 and stats().shadowDraws is what the pass cost.',
 		'three.NoBlending / three.NormalBlending / three.AdditiveBlending':
 			'The values material.blending takes — 0, 1 and 2, Three.js\'s numbers again. '
 			+ 'NormalBlending is what { transparent: true } means and is what glass, water and a '
@@ -993,7 +1022,8 @@ export const DOCS = {
 		vertices: 'Likewise.',
 		textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 		textureBytes: 'What those cost.',
-		culledLastFrame: 'Instances the frustum dropped in the last render().',
+		culledLastFrame: 'Instances the frustum dropped in the last render(). Always 0 while three.light.shadow.enabled is set — a shadow pass needs every caster, not every visible one.',
+		shadowDraws: 'Draw calls the last frame\'s shadow pass made, and 0 with shadows off. Roughly drawCalls minus the transparent buckets and the helpers, so this is what shadows cost in draws.',
 		skinnedDraws: 'Draw calls whose geometry is posed by a skeleton.',
 		skinnedInstances: 'Characters in those draws. A hundred here with skinnedDraws at 1 is the crowd working as intended.',
 		preskinnedInstances: 'Of those, the ones routed through the compute pass — instantiate({ skinning: \'compute\' }). '
