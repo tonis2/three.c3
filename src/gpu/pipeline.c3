@@ -16,11 +16,7 @@
 
 	frame        0     8      -> FrameBlock, one per frame in flight
 	instances    8     8      -> Instance[], already offset to this bucket
-	positions   16     8
-	normals     24     8
-	uvs         32     8
-	base_color  40    16
-	flags       56     4      = 60 used, 64 with tail padding
+	draw        16     8      -> DrawRecord*, this bucket's own = 24 bytes
 
  **That table is `MESH_PUSH_FIELDS` below, and it is checked against the shader
  on every pipeline build.** Until M4 it was only a comment, and a comment is
@@ -36,13 +32,20 @@
  `check_push_limit` that turns some machines away. When something new wants to
  ride in here, it goes in a buffer instead.
 
- M2 is the first time that rule had to be obeyed rather than merely stated. The
- old block spent 64 of its 128 bytes on a per-draw `mvp`, which left no room for
- the instance-array pointer instancing needs — 124 + 8 is 132. The two things in
- it that were never per-draw, the view-projection and the light, moved into a
- `FrameBlock` written once a frame and reached through one pointer. What is left
- is 60 bytes and genuinely per-draw, and the budget stopped being tight rather
- than being widened.
+ That rule has now been obeyed twice, and the second time is why the table above
+ is three lines rather than eight. M2 was the first: the old block spent 64 of
+ its 128 bytes on a per-draw `mvp`, which left no room for the instance-array
+ pointer instancing needs — 124 + 8 is 132 — so the view-projection and the light
+ moved into a `FrameBlock` written once a frame and reached through one pointer.
+
+ The second is `DrawRecord`. The mesh contract had grown to 76 bytes across eight
+ fields, every one of them per-draw and none of them able to move to a
+ per-*frame* block, which left material uniforms 52 bytes and made every future
+ vertex stream an argument about who pays for it. So the whole contract moved
+ into a buffer and the push block carries its address: what is pushed is 24 bytes
+ that never grow again, and what a stream costs is 8 bytes of a buffer sized by
+ the frame's bucket count. `plan.md` §2 names this as the way past the budget for
+ both halves; this is that, arrived at from the geometry side.
 
  ## The descriptor set layout is derived
 
@@ -72,6 +75,7 @@ faultdef
 
 const uint FLAG_HAS_NORMALS = 1;
 const uint FLAG_HAS_UVS     = 2;
+const uint FLAG_HAS_COLORS  = 4;
 
 // The size every implementation must offer. Treated as a budget, not a limit
 // to grow into.
@@ -94,29 +98,66 @@ struct FrameBlock
 	float[4] light; // xyz surface-to-light (world), w ambient floor
 }
 
+<*
+ One bucket's geometry and surface, as `shaders/mesh.slang`'s `Draw` declares it.
+
+ **Written per bucket per frame into a host-visible buffer**, which is the
+ difference between this and everything above it: `FrameBlock` is one per frame
+ and `Instance` is one per copy, and this is one per *draw*. `MeshPass.record`
+ fills it as it walks the buckets and pushes the address of the one it just
+ filled.
+
+ Scalar layout, so it packs the way the C3 struct does — 8-byte pointers, then
+ two float4s at 4-byte alignment, then the flags. Nothing here is padded except
+ the tail, and the tail is padding the shader never reads:
+
+	positions      0     8
+	normals        8     8
+	uvs           16     8
+	colors        24     8
+	base_color    32    16
+	flags         48     4
+	uv_transform  52    16    = 68 used, 72 with tail padding
+
+ The stride between records is this struct's size, decided on the C3 side alone:
+ the shader is handed a pointer to one record and never indexes past it, so
+ Slang's own array stride for `Draw` is not part of the wire format the way the
+ field offsets are.
+*>
+struct DrawRecord
+{
+	ulong positions;
+	ulong normals;
+	ulong uvs;
+	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`.
+	// **The first field added since the record replaced the push block**, and the
+	// whole of what it cost is this line and 8 bytes per bucket per frame. Under
+	// the old contract it was 8 bytes of the 128 every device offers, taken off
+	// what a material's uniforms could spend.
+	ulong colors;
+	float[4] base_color; // rgb albedo factor, a material alpha
+	uint flags;
+	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
+	// the uv before the sample. Added when it turned out that a surface mapping
+	// its texture exactly once makes texel density a function of how big the mesh
+	// is: `examples/village` covered its ground with 484 separate plane meshes
+	// purely so one 128px grass texture would not stretch across 132 units.
+	float[4] uv_transform;
+}
+
 struct MeshPush
 {
 	ulong frame; // FrameBlock*
 	ulong instances; // Instance*, offset to this bucket's first
-	ulong positions;
-	ulong normals;
-	ulong uvs;
-	float[4] base_color; // rgb albedo factor, a material alpha
-	uint flags;
-	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
-	// the uv before the sample. The eighth pinned field, added when it turned out
-	// that a surface mapping its texture exactly once makes texel density a
-	// function of how big the mesh is: `examples/village` covered its ground with
-	// 484 separate plane meshes purely so one 128px grass texture would not
-	// stretch across 132 units.
-	float[4] uv_transform;
+	ulong draw; // DrawRecord*, this bucket's own
 }
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
-// Not a bound but an equality, because these two numbers are a wire format
-// shared with `shaders/mesh.slang` and a silent change to either side is a
-// misread buffer rather than an error. `Instance` is in `scene/scene.c3`.
-$assert MeshPush::size == 80 : "the push block no longer matches the layout documented above";
+// Not a bound but an equality, because these numbers are a wire format shared
+// with `shaders/mesh.slang` and a silent change to either side is a misread
+// buffer rather than an error. `Instance` is in `scene/scene.c3`.
+$assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
+$assert DrawRecord::size == 72 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 80 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Instance::size == 148 : "Instance no longer matches shaders/mesh.slang";
 
@@ -136,12 +177,38 @@ struct PushFieldLayout
 const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	{ "frame",      0,  8 },
 	{ "instances",  8,  8 },
-	{ "positions", 16,  8 },
-	{ "normals",   24,  8 },
-	{ "uvs",       32,  8 },
-	{ "base_color", 40, 16 },
-	{ "flags",     56,  4 },
-	{ "uv_transform", 60, 16 },
+	{ "draw",      16,  8 },
+};
+
+<*
+ The draw record's own contract, in the same terms and for the same reason.
+
+ **This is what `MESH_PUSH_FIELDS` used to say.** When the geometry contract moved
+ out of the push block it took its reflection check with it: Slang reflects a push
+ block and does not reflect the type behind a pointer, so nothing would have
+ compared `Draw` against `DrawRecord` and a field added to one and not the other
+ would be geometry read at the wrong address — the exact failure the push table
+ exists to prevent, one indirection further down.
+
+ `the_draw_record_matches_the_shader` closes that by cutting the `struct Draw`
+ declaration out of `shaders/mesh.slang` and compiling it *as* a push block, which
+ is a layout Slang will reflect. Both are scalar-layout structs under
+ `-force-glsl-scalar-layout`, so what comes back is what the record has.
+
+ The same test holds this table against the C3 struct as well, by measuring the
+ addresses of its own fields — so the two sides are checked independently and
+ neither one is the definition of the other. That half wants to be a `$assert`
+ here and cannot be: C3 0.8.3 has no `offsetof`, and a table of offsets computed
+ by hand in a `$assert` would be a third derivation rather than a check.
+*>
+const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
+	{ "positions",     0,  8 },
+	{ "normals",       8,  8 },
+	{ "uvs",          16,  8 },
+	{ "colors",       24,  8 },
+	{ "base_color",   32, 16 },
+	{ "flags",        48,  4 },
+	{ "uv_transform", 52, 16 },
 };
 
 <*

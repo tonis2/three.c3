@@ -13,10 +13,12 @@
 // ## Most of a layer is a constant, and that is what makes it cheap
 //
 // The obvious implementation pushes every layer's parameters as uniforms and
-// loops over them in the shader. That implementation cannot exist here: the
-// material push block has 52 bytes for uniforms (`shader/material_source.c3`),
-// which is three float4s, and a stack of four would be out of room before it had
-// a single texture.
+// loops over them in the shader. That implementation could not exist when this
+// was written: the material push block had 52 bytes for uniforms, which is three
+// float4s, and a stack of four would have been out of room before it had a single
+// texture. It is 104 now (`shader/material_source.c3`) and the argument is
+// unchanged — six float4s is still not a layer stack, and a description the
+// generator can read is worth more than one the shader can loop over.
 //
 // It is also unnecessary, because the generator *knows* the description. A blend
 // mode picks which expression is emitted rather than being compared at runtime;
@@ -47,10 +49,10 @@ import { ShaderMaterial } from './shader.js';
 // If they drift, the host still refuses. That is the floor under this, the same
 // way `cull_for_side` is the floor under `Material._checkSide`.
 const TEXTURE_LIMIT = 8;
-const UNIFORM_BUDGET = 52;
+const UNIFORM_BUDGET = 104;
 
-// A `float4` per animated layer — tint in rgb, opacity in a. Three of them fit
-// and a fourth does not, which is the whole of the arithmetic.
+// A `float4` per animated layer — tint in rgb, opacity in a. Six of them fit and
+// a seventh does not, which is the whole of the arithmetic.
 const ANIMATED_LIMIT = Math.floor(UNIFORM_BUDGET / 16);
 
 // How a layer combines with everything under it, in the extension's own
@@ -99,9 +101,18 @@ const CHANNELS = { r: 'r', g: 'g', b: 'b', a: 'a' };
 // the same failure `uniformsProxy` exists to prevent, one level up.
 const LAYER_KEYS = new Set([
 	'name', 'map', 'normal', 'emissive', 'emissiveFactor', 'tint', 'opacity',
-	'blend', 'mask', 'maskTexture', 'invert', 'uvScale', 'uvOffset', 'enabled',
-	'animated',
+	'blend', 'mask', 'maskSource', 'maskTexture', 'invert', 'uvScale', 'uvOffset',
+	'enabled', 'animated',
 ]);
+
+// Where a layer's weight comes from, in the extension's own two words.
+//
+// `mask` says which channel and this says which *thing* — a texture, or the
+// mesh's own COLOR_0 attribute. It is a separate key rather than a magic value
+// of `mask` because that is the shape `LayerMask` has in the file, so the
+// importer translates rather than encodes, and because `mask: 'g'` means the
+// same thing under both.
+const MASK_SOURCES = new Set(['texture', 'vertexColor']);
 
 const TOP_KEYS = new Set([
 	'map', 'normal', 'mask', 'layers', 'side', 'transparent', 'blending', 'opacity',
@@ -209,20 +220,25 @@ function readLayer(raw, at) {
 		);
 	}
 
-	// **The one refusal that is about the mesh rather than about the shader.**
-	// The extension lets a mask come from a vertex colour attribute, and nothing
-	// here carries one: the loader reads positions, normals and uv0 and stops
-	// (`scene/asset.c3`), and `mesh.color` is per *instance* — one value for a
-	// whole copy, which is not a thing that can vary across a surface. Saying so
-	// is worth more than falling back to a mask of 1.0, which would paint the
-	// layer over everything and look like the blend mode was wrong.
-	const rawMask = raw.mask;
-	if (rawMask === 'vertexColor' || (rawMask !== null && typeof rawMask === 'object' && rawMask.source === 'vertexColor')) {
+	// Where the weight comes from, and then which channel of it.
+	//
+	// **A vertex-colour mask is drawn rather than refused as of the draw buffer.**
+	// It used to be the one refusal that was about the mesh rather than about the
+	// shader — the loader read positions, normals and uv0 and stopped, and
+	// `mesh.color` is per *instance*, one value for a whole copy and so not a thing
+	// that can vary across a surface. What changed is that the geometry contract
+	// moved out of the push block, so a fourth stream cost 8 bytes of a buffer
+	// instead of 8 of the 128 bytes every material's uniforms were competing over.
+	// `scene/asset.c3` uploads COLOR_0 and `s.vertex_color` is what this reads.
+	const source = raw.maskSource ?? 'texture';
+	if (typeof source !== 'string' || !MASK_SOURCES.has(source)) {
 		throw new TypeError(
-			`${label}: a vertex-colour mask needs a COLOR_0 stream and the meshes here carry `
-			+ 'positions, normals and uvs only — bake the mask to a texture and use a channel of it'
+			`${label}: maskSource is '${String(source)}' — it reads from a 'texture' or from 'vertexColor'`
 		);
 	}
+	const vertexMask = source === 'vertexColor';
+
+	const rawMask = raw.mask;
 	let channel = null;
 	if (rawMask !== null && rawMask !== undefined) {
 		if (typeof rawMask !== 'string' || CHANNELS[rawMask] === undefined) {
@@ -234,7 +250,18 @@ function readLayer(raw, at) {
 	}
 
 	const own = checkTexture(raw.maskTexture, `${label}: maskTexture`);
-	if (own !== null && channel === null) channel = 'r';
+	// Two sources named at once is a contradiction rather than a precedence
+	// question: whichever one this file picked, the other is a texture the caller
+	// meant to be read and a binding that would be spent on nothing.
+	if (own !== null && vertexMask) {
+		throw new TypeError(
+			`${label}: maskSource is 'vertexColor' and a maskTexture was given too — `
+			+ 'the weight comes from one of them, so drop whichever is not meant'
+		);
+	}
+	// A source named without a channel reads red, which is what a single-channel
+	// mask painted into a colour attribute or a greyscale image is.
+	if ((own !== null || vertexMask) && channel === null) channel = 'r';
 
 	const uvScale = raw.uvScale === undefined ? [1, 1]
 		: typeof raw.uvScale === 'number' ? [raw.uvScale, raw.uvScale]
@@ -279,6 +306,7 @@ function readLayer(raw, at) {
 		opacity,
 		blend,
 		channel,
+		vertexMask,
 		maskTexture: own,
 		invert: raw.invert === true,
 		uvScale,
@@ -328,7 +356,7 @@ function emit(base, layers) {
 	// That is the economy the extension's per-layer `channel` field is for: four
 	// layers over one RGBA image is one sampler, and four separate greyscale
 	// masks is four.
-	const sharing = layers.filter(l => l.channel !== null && l.maskTexture === null);
+	const sharing = layers.filter(l => l.channel !== null && l.maskTexture === null && !l.vertexMask);
 	const shared = sharing.length > 0;
 	if (shared) {
 		// **Refused rather than left to start white.** An undeclared sampler is
@@ -378,11 +406,41 @@ function emit(base, layers) {
 		body.push('');
 		body.push(`    // ${layer.label}${layer.blend === 'mix' ? '' : `, ${layer.blend}`}`);
 
+		// What this layer has to say, before anything is emitted for it.
+		//
+		// **A layer states a colour when it has one to state**, and white is not
+		// one: it is what `baseColorFactor` defaults to in the file and what a
+		// script leaves out, so a layer with no `map` and no tint is a layer that
+		// said nothing about colour rather than one that asked for white paint.
+		// Emitting `lerp(c, white, w)` for it was wrong in both directions — a
+		// glow-only layer bleached whatever was under it, and a detail-normal layer
+		// did the same while looking like the mask was inverted. A stack that
+		// really does want white paint says so with a texture; `blend: 'mix'` over
+		// a white `map` is the same thing and is visible in the description.
+		const paints = layer.animated || layer.map !== null || layer.tint.some(c => c !== 1);
+		const shapes = layer.normal !== null;
+		const glows = layer.emissive !== null || layer.emissiveFactor.some(c => c !== 0);
+		if (!paints && !shapes && !glows) {
+			// Left in the source rather than dropped silently. A stack imported from
+			// a file has one of these wherever a layer changed only roughness or
+			// metalness — real statements this renderer cannot evaluate (see
+			// `UNSUPPORTED`) — and reading "nothing to apply" in the generated body
+			// is what tells whoever is debugging it that the layer arrived and was
+			// understood, rather than that the importer lost it.
+			body.push(`    // nothing to apply — no map, tint, normal or emissive`);
+			continue;
+		}
+
 		// The weight. A layer with no mask at all is visible everywhere, which is
 		// the extension's own default and is what a full-coverage tint or a
 		// straight overlay wants.
 		let w = '1.0';
-		if (layer.maskTexture !== null) {
+		if (layer.vertexMask) {
+			// No sampler and no binding: the attribute is interpolated across the
+			// triangle and arrives in `Surface`. This is the one mask that costs
+			// nothing but the stream the mesh already carries.
+			w = `s.vertex_color.${layer.channel}`;
+		} else if (layer.maskTexture !== null) {
 			const name = `layer${i}_mask`;
 			textures[name] = layer.maskTexture;
 			layer.samplers.mask = name;
@@ -403,24 +461,26 @@ function emit(base, layers) {
 			w = `(${w}) * ${num(layer.opacity, `${layer.label}: opacity`)}`;
 		}
 
-		// This layer's own colour, before it is blended with what is below.
-		const parts = [];
-		if (layer.animated) {
-			parts.push(`layer${i}_params.rgb`);
-		} else if (layer.tint.some(c => c !== 1)) {
-			parts.push(vec3(layer.tint, `${layer.label}: tint`));
-		}
-		if (layer.map !== null) {
-			const name = `layer${i}_map`;
-			textures[name] = layer.map;
-			layer.samplers.map = name;
-			parts.push(`${name}.Sample(${uv}).rgb`);
-		}
-		if (parts.length === 0) parts.push('float3(1.0, 1.0, 1.0)');
-
 		body.push(`    float w${i} = ${w};`);
-		body.push(`    float3 b${i} = ${parts.join(' * ')};`);
-		body.push(`    c = lerp(c, ${BLEND[layer.blend](`c`, `b${i}`)}, w${i});`);
+
+		// This layer's own colour, before it is blended with what is below. Only
+		// emitted when the layer states one — see `paints` above.
+		if (paints) {
+			const parts = [];
+			if (layer.animated) {
+				parts.push(`layer${i}_params.rgb`);
+			} else if (layer.tint.some(c => c !== 1)) {
+				parts.push(vec3(layer.tint, `${layer.label}: tint`));
+			}
+			if (layer.map !== null) {
+				const name = `layer${i}_map`;
+				textures[name] = layer.map;
+				layer.samplers.map = name;
+				parts.push(`${name}.Sample(${uv}).rgb`);
+			}
+			body.push(`    float3 b${i} = ${parts.join(' * ')};`);
+			body.push(`    c = lerp(c, ${BLEND[layer.blend](`c`, `b${i}`)}, w${i});`);
+		}
 
 		if (layer.normal !== null) {
 			const name = `layer${i}_normal`;
@@ -541,6 +601,7 @@ class LayerView {
 			name: this._layer.name,
 			blend: this._layer.blend,
 			mask: this._layer.channel,
+			maskSource: this._layer.vertexMask ? 'vertexColor' : 'texture',
 			invert: this._layer.invert,
 			animated: this._layer.animated,
 			samplers: { ...this._layer.samplers },

@@ -41,8 +41,11 @@ GPU rather than guessed at. And a post chain — `three.setPost` and
 `three.addPass`, linear float between passes, an engine-owned tonemap doing the
 display encode last. And material layers — glTF's `CUSTOM_materials_layers`
 imported from a file or written in a script, generating its own shading body.
+Per-draw data is a record in a buffer rather than push constants, so the geometry
+contract and a material's uniforms have stopped competing for the same 128 bytes:
+vertex colours are carried and a material has 104 bytes of uniforms rather than 52.
 
-	c3c test --trust=full       612 passed, 0 failed, leak-clean
+	c3c test --trust=full       617 passed, 0 failed, leak-clean
 
 **What follows was found by using the engine, not by reading it looking for
 holes.** Each one stopped the work, and where it forced a workaround the
@@ -118,9 +121,11 @@ the decision can be revisited on evidence rather than on somebody's mood.
   evidence that scripts in practice do not dispose — at which point the answer
   is probably a warning naming the count, not a finalizer.
 
-- **A uniform table is capped by the 52-byte push budget** — three rows of four
-  floats, or four of three. A table of hundreds needs a device buffer behind a
-  BDA in the push block. **Trigger:** something wants more than four rows.
+- **A uniform table is capped by the 104-byte push budget** — six rows of four
+  floats, or eight of three. It was 52 until §15 moved the geometry contract into
+  a buffer and gave the block back; a table of hundreds still needs a device
+  buffer behind a BDA, which is now a thing this codebase does once and could do
+  twice. **Trigger:** something wants more rows than that.
 
 - **Mesh splitting.** Every AI-generated kit ships as one merged mesh; the town
   square needed an external tool to cut three packs into 23 pieces by connected
@@ -293,6 +298,13 @@ tested against a feature that wanted the fields and did not get them.
 needs one binding per layer plus one for the packed mask, and four bought three
 layers with no room for a normal map on any of them. `MATERIAL_TEXTURE_LIMIT` has
 what the extra four cost.
+
+**Meshes carry COLOR_0 as of §15**, read by a body as `s.vertex_color` and by a
+vertex body as `v.vertex_color`. It is deliberately *not* folded into `s.albedo`
+the way the per-instance colour is: applying it would change how every file
+already loaded renders, and the thing that made the stream exist reads the
+attribute as a painted weight rather than as a tint. A body that wants glTF's own
+rule writes `s.albedo * s.vertex_color.rgb`.
 
 **What a script still cannot reach is a mesh's *own* image.** A mesh loaded from
 a `.glb` carries its texture on the `GpuMesh` and exposes no `Texture` handle, so
@@ -1256,12 +1268,23 @@ source, which is the thing to read first when a stack looks wrong.
 
 **Most of a layer is a compile-time constant, and that is the whole economy.**
 The obvious implementation pushes per-layer parameters as uniforms and loops;
-that one cannot exist here, because 52 bytes is three float4s and a stack of four
-would be out of room before its first texture. It is also unnecessary: the
+that one could not exist when this was written, because 52 bytes is three float4s
+and a stack of four would have been out of room before its first texture. §15 has
+since made it 104, and the argument is unchanged: six float4s is still not a layer
+stack. It is also unnecessary: the
 generator knows the description, so a blend mode picks which expression is
 emitted, a mask channel becomes `.g`, `invert` becomes a `1.0 -`, and
 `enabled: false` omits the layer *and its samplers*. Only `animated: true` spends
-push bytes — one float4 for a layer's tint and opacity, three of them at most.
+push bytes — one float4 for a layer's tint and opacity, six of them at most.
+
+**A layer states a colour only when it has one to state.** White is what
+`baseColorFactor` defaults to in the file and what a script leaves out, so it is
+the absence of a statement rather than a request for white paint — and a layer
+with no map and no tint emits no colour blend at all. That was not the first
+implementation, and the first one was wrong in two directions at once: a layer
+that only glowed bleached what was under it, and a layer that only added surface
+detail did the same while looking like its mask was inverted. Painting white
+deliberately is a white `map`, which is visible in the description.
 
 So the ceiling is samplers rather than uniforms, which is the right way round.
 **`MATERIAL_TEXTURE_LIMIT` went 4 → 8** for this: four bought three layers over
@@ -1292,18 +1315,66 @@ fails when the field is removed.
   equation nothing evaluates. They are dropped by the importer rather than carried
   to JS, and named by the JS API rather than ignored: a material property that
   provably changes no pixel costs more to discover than an error does.
-- **A `VERTEX_COLOR` mask** — there is no COLOR_0 stream. The loader reads
-  positions, normals and uv0, and `mesh.color` is per *instance*, which is not a
-  thing that can vary across a surface. It survives the import intact so that the
-  JS side can refuse it by name; a loader that dropped it would leave a layer with
-  no mask, covering everything, reading as the blend modes being broken.
 - **`heightTexture` and `bump`** — no tessellation and no parallax.
 
-**What is next, in the order it stops being optional:** a COLOR_0 stream, which
-is a fourth vertex buffer, a flag bit and a varying, and which unlocks
-vertex-colour masks and per-vertex tinting together; parallax from the height data
-the extension already carries and this already ignores; and the PBR half, which is
-§12's specular term and not this section's.
+**A `VERTEX_COLOR` mask was the third refusal and is now drawn.** It was the only
+one that was about the *mesh* rather than the shading: there was no COLOR_0
+stream, because a fourth stream meant a ninth pinned push field and the push block
+was full. §15 emptied it, and the mask is now `s.vertex_color.g` with no sampler
+and no image behind it — `maskSource: 'vertexColor'` in a description, and the
+channel beside it exactly as `LayerMask` has them. The refusal is what dated
+first, which is the argument for refusing by name: the sentence said what was
+missing, so it was obvious what to build.
+
+**What is next, in the order it stops being optional:** parallax from the height
+data the extension already carries and this already ignores, and the PBR half,
+which is §12's specular term and not this section's.
+
+---
+
+## 15. The draw buffer
+
+**Built.** Per-draw data is a `DrawRecord` in a host-visible buffer, one per
+bucket per frame, and the push block carries its address. What is pushed is three
+pointers — `frame`, `instances`, `draw` — and 24 bytes, where it was eight fields
+and 76.
+
+**The problem it solves is not performance.** The command count is the same, the
+draw call is the same `vkCmdDrawIndexed`, and nothing renders faster. What changed
+is that the 128 bytes every Vulkan implementation must offer had become a shared
+scarcity: the mesh contract wanted 76 of them and material uniforms had the other
+52, and *both* halves were blocked on it. §14's vertex-colour mask needed a fourth
+vertex stream and could not have one, because an 8-byte pointer would have come
+out of the uniforms; §2's uniform table wanted more rows and could not have them
+for the same reason from the other side. Neither was worth taking from the other,
+which is what an argument about a fixed budget looks like when both sides are
+right.
+
+So the geometry contract moved into memory, where a field costs what a field
+costs. `MATERIAL_UNIFORM_BUDGET` went 52 → 104 and the sampler-free vertex-colour
+mask landed in the same change. **A new vertex stream is now 8 bytes of a buffer
+sized by the frame's bucket count** — tangents, a second uv set and joints all
+become bookkeeping rather than a trade.
+
+**Why not `vkCmdDrawIndexedIndirect` as well.** The obvious next step, and it buys
+nothing here yet: geometry is one buffer per mesh, so `firstIndex` and
+`vertexOffset` are always zero and there is nothing to multi-draw across;
+textures are push descriptors written per bucket; and a `ShaderMaterial` is its
+own pipeline. Each of those independently forces one command per bucket, so an
+indirect draw would be the same commands plus a buffer read, minus the validation
+layer's ability to check the arguments — a bad record becomes a hang instead of an
+error. **Trigger:** a consolidated geometry arena and bindless textures, at which
+point the record is where the five `VkDrawIndexedIndirectCommand` fields go and
+the change is small. GPU culling wants the same two things first.
+
+**What it cost, and the one thing that had to be rebuilt.** Reflection covers a
+push block and not the type behind a pointer, so moving the contract out of the
+block moved it out of `check_push_block` — the check `MESH_PUSH_FIELDS` exists to
+be. Two tests replace it: one cuts `struct Draw` out of `shaders/mesh.slang` and
+compiles it *as* a push block to get Slang's own offsets for `DRAW_RECORD_FIELDS`,
+and one compares that declaration against the copy in `material.slang`, which the
+two files carry separately for §4's reason. Both were checked by mutation — swap
+two fields in one shader and each fails, naming the field and both offsets.
 
 ---
 

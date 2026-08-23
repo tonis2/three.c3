@@ -14,8 +14,9 @@
 // to and the compile-request API does not. See SLANG_ARGUMENTS.
 //
 // **There is no vertex input state anywhere in this project.** Geometry arrives
-// as buffer device addresses in the push block and is indexed by SV_VertexID;
-// an index buffer is still bound the ordinary way with vkCmdBindIndexBuffer,
+// as buffer device addresses — in the draw record below, reached through the one
+// pointer the push block carries — and is indexed by SV_VertexID; an index
+// buffer is still bound the ordinary way with vkCmdBindIndexBuffer,
 // which is independent of vertex bindings, so SV_VertexID arrives already
 // resolved through it. Three.js's entire BufferGeometry attribute-binding layer
 // never gets written.
@@ -67,19 +68,42 @@ struct FrameBlock
     float4 light;           // xyz: surface-to-light, world space. w: ambient floor.
 };
 
-struct PushData
+// Everything about one bucket that is not the geometry itself: where to read the
+// streams, what colour the surface is and how its texture is laid on.
+//
+// **This is a record in a buffer, not a push constant, and that is the whole of
+// why anything new can be added to it.** Until the draw buffer existed these
+// seven fields were pushed per draw, which put them in permanent competition with
+// a material's uniforms over the 128 bytes every device must offer — 76 here left
+// 52 there, and a ninth field would have taken eight more. Now the push block
+// carries the *address* of this and the competition is over: one more stream
+// costs 8 bytes of a buffer sized by the frame's bucket count.
+//
+// `render/pass.c3` writes one of these per bucket into a host-visible buffer and
+// pushes the address of this bucket's own, so `push.draw[0]` is always the right
+// record and no index arithmetic reaches the shader. `gpu/pipeline.c3`'s
+// `DrawRecord` is the same struct on the C3 side. Slang reflects a push block and
+// not the type behind a pointer, so the two are held together by a test rather
+// than by the pipeline build: `the_draw_record_matches_the_shader` compiles this
+// declaration *as* a push block to get its offsets, and
+// `both_shaders_declare_the_same_record` checks this text against the copy in
+// `material.slang`.
+struct Draw
 {
-    FrameBlock* frame;
-    // Already offset to this bucket's first instance, so SV_InstanceID starts at
-    // zero in every draw. Doing the arithmetic on the CPU is what keeps the
-    // firstInstance-versus-InstanceIndex distinction from ever mattering here.
-    Instance* instances;
     // Three separate streams rather than one interleaved Vertex: that is how
     // glTF stores them, so uploading is a memcpy per accessor and the vertex
     // shader reads what the file contained.
     float3* positions;
     float3* normals;
     float2* uvs;
+    // glTF's COLOR_0, if the file carried one. **Nothing in this shader reads
+    // it**, and that is not an oversight: a colour attribute changes no pixel of
+    // a `MeshLambertMaterial` here, so the only stage that can see it is a
+    // material body — `material.slang` hands it over as `s.vertex_color`. It is
+    // declared here because the record is one struct shared by both shaders and
+    // an offset that differed between them would read geometry from the wrong
+    // address.
+    float4* colors;
     // rgb: albedo factor. a: the alpha this returns — the mesh's own alpha
     // times `material.opacity`, folded together on the C3 side so the shader
     // sees one number. Ignored by an opaque pipeline, which writes no alpha at
@@ -91,12 +115,25 @@ struct PushData
     // transform is given — `scene/material.c3` says why a zero repeat means
     // "unset" rather than meaning a texture collapsed onto one texel.
     //
-    // **Here rather than in a material's uniforms**, and it costs 16 of the 68
-    // bytes those had. The alternative was per-material uniforms, which only a
-    // ShaderMaterial has — and the surface that needed this most is a ground
-    // plane wearing a MeshLambertMaterial, which compiles nothing and has no
-    // uniform block at all.
+    // **Here rather than in a material's uniforms**, and when it was pushed it
+    // cost 16 of the 68 bytes those had. The alternative was per-material
+    // uniforms, which only a ShaderMaterial has — and the surface that needed
+    // this most is a ground plane wearing a MeshLambertMaterial, which compiles
+    // nothing and has no uniform block at all.
     float4 uv_transform;
+};
+
+struct PushData
+{
+    FrameBlock* frame;
+    // Already offset to this bucket's first instance, so SV_InstanceID starts at
+    // zero in every draw. Doing the arithmetic on the CPU is what keeps the
+    // firstInstance-versus-InstanceIndex distinction from ever mattering here.
+    Instance* instances;
+    // This bucket's record, offset on the CPU for the same reason `instances`
+    // is: the shader reads element zero of its own slice and never learns that
+    // the frame's other draws are in the same buffer.
+    Draw* draw;
 };
 [vk_push_constant] const PushData push;
 
@@ -105,6 +142,7 @@ struct PushData
 // flags say which streams are really there and the reads are guarded by them.
 static const uint FLAG_HAS_NORMALS = 1u;
 static const uint FLAG_HAS_UVS     = 2u;
+static const uint FLAG_HAS_COLORS  = 4u;
 
 // Always bound, always valid. With no material texture the binding carries a
 // 1x1 opaque white image, so there is one pipeline and one descriptor layout
@@ -130,20 +168,21 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
     VertexOutput output;
 
+    Draw draw = push.draw[0];
     Instance instance = push.instances[iid];
 
-    float3 position = push.positions[vid];
+    float3 position = draw.positions[vid];
     float4 world = mul(instance.model, float4(position, 1.0));
     output.sv_position = mul(push.frame[0].view_projection, world);
 
     // An `if` rather than a ternary: a ternary lets the compiler evaluate both
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
-    if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
+    if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
     output.normal = mul((float3x3)instance.normal, normal);
 
     output.uv = float2(0.0, 0.0);
-    if ((push.flags & FLAG_HAS_UVS) != 0) output.uv = push.uvs[vid];
+    if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[vid];
 
     output.color = instance.color;
 
@@ -211,10 +250,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // 0]` works with no material at all — which is the point of it being here
     // rather than only in `material.slang`. White is the identity and is what
     // every node starts at.
-    float3 albedo = push.base_color.rgb * srgb_to_linear(input.color.rgb);
-    if ((push.flags & FLAG_HAS_UVS) != 0)
+    Draw draw = push.draw[0];
+
+    float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+    if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
-        albedo *= base_color_map.Sample(input.uv * push.uv_transform.xy + push.uv_transform.zw).rgb;
+        albedo *= base_color_map.Sample(input.uv * draw.uv_transform.xy + draw.uv_transform.zw).rgb;
     }
 
     // One hardcoded directional light and an ambient floor. A material model is
@@ -229,5 +270,5 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // instance out of a thousand sharing a draw call — and does nothing at all
     // unless the material was built transparent, because an opaque pipeline
     // discards this channel. It read a hardcoded `1.0` until blending existed.
-    return float4(albedo * (ambient + (1.0 - ambient) * lambert), push.base_color.a * input.color.a);
+    return float4(albedo * (ambient + (1.0 - ambient) * lambert), draw.base_color.a * input.color.a);
 }

@@ -103,26 +103,29 @@ struct MaterialUniform
  Bytes of push block available to material uniforms, after the mesh contract.
 
  128 is the push size every Vulkan implementation must offer and `PUSH_BUDGET`
- treats it as a budget rather than a limit to grow into; the eight fields
- `MESH_PUSH_FIELDS` pins take 76 of it. What is left is what a material may
+ treats it as a budget rather than a limit to grow into; the three fields
+ `MESH_PUSH_FIELDS` pins take 24 of it. What is left is what a material may
  spend, and it is spelled here as a number rather than derived from
- `MeshPush::size` on purpose: `MeshPush` is 80 bytes and only 76 of them reflect,
- the difference being C3 tail padding, so deriving it would quietly hand out four
- bytes that the shader's layout does not contain.
+ `MeshPush::size` on purpose — the two agree today and have not always, `MeshPush`
+ having carried four bytes of C3 tail padding that the shader's layout did not
+ contain, and deriving it would have quietly handed those out.
 
- **This was 68 and is now 52**, because `uv_transform` was added to the mesh
- contract. That is four rows of four floats down to three, or five rows of three
- down to four, and it was not free — the trade was made deliberately. Material
- uniforms are a `ShaderMaterial` feature and nothing else; the uv transform is
- needed most by a ground plane wearing a `MeshLambertMaterial`, which has no
- uniform block to put it in. Spending a shared 16 bytes so that every material
- can tile is worth more than a fourth row for the ones that compile a body.
+ **This was 68, then 52, and is now 104.** It fell when `uv_transform` was pinned
+ into the mesh contract and it doubled when the contract left the push block
+ altogether: geometry, base colour, flags and the uv transform are a `DrawRecord`
+ in a buffer as of the draw buffer, so the only things still pushed are three
+ pointers. 104 bytes is six rows of four floats and two over, and the ceiling on
+ a material's uniforms is now a number nothing is competing for — a new vertex
+ stream costs 8 bytes of `DrawRecord` rather than 8 bytes of this.
 
- The way past this for either of them is the same and is written down in
- `plan.md` §2: a device buffer behind a BDA in the push block, at which point the
- budget stops being 128 bytes and starts being memory.
+ That is `plan.md` §2's way past the budget — a device buffer behind a BDA in the
+ push block — taken from the geometry side rather than the uniform side. Taking
+ it from this side as well would move these bytes into the record too and end the
+ idea of a budget; the reason not to yet is that reflection puts a material's
+ uniforms at offsets in *this* block, and a script writing one is a memcpy into
+ `Material.block` with nothing to invalidate.
 *>
-const uint MATERIAL_UNIFORM_BUDGET = 52;
+const uint MATERIAL_UNIFORM_BUDGET = 104;
 
 <*
  How many samplers of its own a material may declare, on top of `map`.
@@ -211,10 +214,14 @@ const String[*] MATERIAL_RESERVED @local = {
 	// parameter and function, exactly as `s` and `shade` are the fragment body's;
 	// `Vertex` is the struct both of them name.
 	"v", "displace", "Vertex",
-	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "MATERIAL_ROWS",
-	// The eight push fields the mesh contract pins.
-	"frame", "instances", "positions", "normals", "uvs", "base_color", "flags",
-	"uv_transform",
+	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "FLAG_HAS_COLORS", "MATERIAL_ROWS",
+	// The three push fields the mesh contract pins, and the record the third of
+	// them points at. `frame`, `instances` and `draw` would be a second field of
+	// the same name in `PushData`; the six after them are `Draw`'s members, which
+	// no longer share a scope with a uniform — they stay refused because the
+	// template still declares them and a name it declares is one this list covers.
+	"frame", "instances", "draw", "Draw",
+	"positions", "normals", "uvs", "colors", "base_color", "flags", "uv_transform",
 	// Types.
 	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
 	"int", "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4",
@@ -252,7 +259,7 @@ const String[*] MATERIAL_RESERVED @local = {
 *>
 const String[*] MATERIAL_CONTRACT_FIELDS @local = {
 	// Surface.
-	"albedo", "normal", "uv", "position", "color", "variant",
+	"albedo", "normal", "uv", "position", "color", "vertex_color", "variant",
 	// Vertex adds these two; the rest it shares with Surface.
 	"local", "index",
 };
