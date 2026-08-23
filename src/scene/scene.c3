@@ -1243,30 +1243,20 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
 <*
  A box in world space, given a local box and the matrix that places it.
 
- Transforms the centre and the half-extent rather than eight corners: the
- extent along each world axis is the absolute row of the linear part dotted with
- the local extent. Same answer, a third of the arithmetic, and it is the form
+ Transforms the centre and the half-extent rather than eight corners: the extent
+ along each world axis is the absolute row of the linear part dotted with the
+ local extent. Same answer, a fraction of the arithmetic, and it is the form
  that stays correct under a rotation *and* a non-uniform scale.
+
+ **The arithmetic lives in `collision`,** which is the same closed form its
+ `Aabb3.transform` uses for a translation/rotation/scale triple; this is only
+ the spelling the renderer wants, because a node's world matrix is already
+ composed and taking it apart to pass a quaternion would undo the saving. The
+ name stays because `pick.c3` and `render/shadow.c3` reach for it by name, and
+ because reading matrix-then-box left to right is the order the call sites are
+ written in.
 *>
-fn collision::Aabb3 transform_aabb(Matrix4f m, collision::Aabb3 box)
-{
-	float[<16>] v = m.m;
-	Vec3 centre = box.center();
-	Vec3 extent = box.extent();
-
-	Vec3 world_centre = {
-		v[0] * centre.x + v[4] * centre.y + v[8] * centre.z + v[12],
-		v[1] * centre.x + v[5] * centre.y + v[9] * centre.z + v[13],
-		v[2] * centre.x + v[6] * centre.y + v[10] * centre.z + v[14],
-	};
-	Vec3 world_extent = {
-		math::abs(v[0]) * extent.x + math::abs(v[4]) * extent.y + math::abs(v[8]) * extent.z,
-		math::abs(v[1]) * extent.x + math::abs(v[5]) * extent.y + math::abs(v[9]) * extent.z,
-		math::abs(v[2]) * extent.x + math::abs(v[6]) * extent.y + math::abs(v[10]) * extent.z,
-	};
-
-	return { .min = world_centre - world_extent, .max = world_centre + world_extent };
-}
+fn collision::Aabb3 transform_aabb(Matrix4f m, collision::Aabb3 box) => box.transform_matrix(m);
 
 <*
  The tight world-space box of one mesh under one transform.
