@@ -37,6 +37,15 @@ export class Object3D {
 		this._asset = null;
 		this._gltfNode = -1;
 		this._bound = false;
+		// Which of the asset's skins poses this mesh, and whether the compute pass
+		// does the posing. -1 on everything that is not a character, which is
+		// almost everything. See `_materialize`.
+		this._skin = -1;
+		this._preskinned = false;
+		// Whether this character's palette is computed from its bone nodes each
+		// frame rather than keyed out of the baked table — `instantiate({ skeleton: true })`.
+		// Carried on the root, because that is what `_bindAnimation` runs on.
+		this._liveSkin = false;
 		// The host node, or -1 for "not in a scene". See the header.
 		this._i = -1;
 		this._g = -1;
@@ -103,7 +112,7 @@ export class Object3D {
 
 	get animations() { return this._clips ? this._clips.slice() : []; }
 
-	play(name, { loop = true, speed = 1 } = {}) {
+	play(name, { loop = true, speed = 1, time = 0 } = {}) {
 		if (!this._clips) {
 			throw new Error(
 				'play() works on an object from asset.instantiate(), which is what carries a file\'s '
@@ -120,7 +129,7 @@ export class Object3D {
 		// The host learns the node map on the first play and not before: a
 		// prop that never animates never sends it.
 		this._bindAnimation();
-		H.playAnimation(this._i, this._g, String(name), !!loop, +speed);
+		H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time);
 		return this;
 	}
 
@@ -141,7 +150,7 @@ export class Object3D {
 			for (const c of o.children) walk(c);
 		};
 		walk(this);
-		H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs);
+		H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs, !!this._liveSkin);
 		this._bound = true;
 	}
 
@@ -173,7 +182,22 @@ export class Object3D {
 			H.setColor(i, g, ...this._color);
 		}
 		if (this._variant) H.setVariant(i, g, this._variant);
+		// A skinned mesh learns its skeleton here and nowhere else: this is the
+		// first moment there is a host node to tell, and the host's own
+		// `instantiate` — which sets it as it builds — is not the path a script
+		// takes. Without it a character from `asset.instantiate()` would draw its
+		// bind pose forever.
+		if (this._skin >= 0) H.bindSkin(i, g, this._skin, !!this._preskinned);
 		for (const child of this.children) child._materialize(this);
+		// **A live character needs its player before anything plays**, unlike every
+		// other use of the map: the palette is computed from the bone nodes each
+		// frame, and the player is what holds the map from the file's joints to
+		// this copy's nodes. A script that only wants to aim a head never calls
+		// `play`, and without this its bones would move nothing.
+		//
+		// After the children, because the map is of the whole subtree and they have
+		// only just been given host nodes.
+		if (this._liveSkin && this._asset) this._bindAnimation();
 	}
 
 	// The host node is gone; this object is a detached description again, and
@@ -182,6 +206,10 @@ export class Object3D {
 	_demote() {
 		this._i = -1;
 		this._g = -1;
+		// The host dropped the player along with the nodes, so the map has to be
+		// sent again if this subtree is re-added. Without this a character removed
+		// and put back would keep its clips and quietly stop being posed by them.
+		this._bound = false;
 		for (const child of this.children) child._demote();
 	}
 

@@ -81,3 +81,31 @@ fn vk::Memory? Gpu.create_dynamic(&self, sz size)
 		data_size: size,
 	);
 }
+
+<*
+ A buffer the GPU writes and the GPU reads, with no host mapping and nothing
+ uploaded into it.
+
+ The third kind, and the one compute skinning writes its posed vertices into. It
+ differs from `upload_stream` in having no initial contents — there is nothing to
+ stage, because the first thing that ever touches it is a dispatch — and from
+ `create_dynamic` in not being host-visible, because the CPU never reads or writes
+ a byte of it. A host-visible heap would cost bandwidth for a mapping nothing
+ uses.
+
+ **Still per frame in flight where it is used**, for `create_dynamic`'s reason
+ rather than for its own: the GPU may still be reading last frame's posed vertices
+ while this frame's dispatch wants to overwrite them, and a barrier inside one
+ frame says nothing about the frame before it.
+
+ @require size > 0
+*>
+fn vk::Memory? Gpu.create_device_storage(&self, sz size)
+{
+	return vk::new_buffer(
+		&self.allocator,
+		usage: BUFFER_USAGE_STORAGE_BUFFER_BIT | BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		properties: MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		data_size: size,
+	);
+}

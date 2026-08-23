@@ -1023,7 +1023,7 @@ fn qjs::Value layer_texture_value(qjs::Context* js, Assets* assets, int index) @
  Euler angle drops the quaternion. `scene/node.c3` has the general form of this
  argument; this is the one place it has a number attached.
 
- @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a].`
+ @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin].`
 *>
 fn void js_asset_nodes(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1035,10 +1035,15 @@ fn void js_asset_nodes(
 	AssetId id = arg_asset(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
+	// Whether the file's bone nodes become objects. False by default, which drops
+	// a character's skeleton — its pose comes out of the baked table and the nodes
+	// would drive nothing. See `Assets.flatten`.
+	bool skeleton = argc > 2 ? arg_truth(&js, argc, args, 2) : false;
+
 	List{PlacedNode} placed;
 	placed.init(mem, 16);
 	defer placed.free();
-	self.pass.assets.flatten(id, &placed);
+	self.pass.assets.flatten(id, &placed, skeleton);
 
 	qjs::Value nodes = js.array();
 	foreach (i, &entry : placed)
@@ -1070,6 +1075,11 @@ fn void js_asset_nodes(
 		js.set_index(row, 18, qjs::number_value(entry.color[1]));
 		js.set_index(row, 19, qjs::number_value(entry.color[2]));
 		js.set_index(row, 20, qjs::number_value(entry.color[3]));
+		// Which skin poses this node, or -1. The JS tree carries it to
+		// `_materialize`, which is where a host node learns it — the JavaScript
+		// path builds its nodes through the ordinary `add`, not through
+		// `Scene.instantiate`, so nothing else would ever set it.
+		js.set_index(row, 21, qjs::int_value(entry.skin));
 
 		js.set_index(nodes, (uint)i, row);
 	}

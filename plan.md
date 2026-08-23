@@ -246,33 +246,73 @@ the decision can be revisited on evidence rather than on somebody's mood.
 
 ## 3. Skinning
 
-*(was G4)* **The one milestone that changes the draw model.** Everything needed
-on the parse side is already in `gltf.c3l/src/skinning.c3`.
+**Built, and not the design this section described.** S1–S4 assumed a **live
+palette**: joint matrices recomputed per instance per frame and uploaded, costed
+here at ~192 KB a frame for fifty characters. What was built instead is a **baked
+pose buffer** — every clip of every skin sampled once at 30 fps into a
+device-local table, and an instance names a frame with one `uint`. Both exist
+now; the live palette is the second of three paths rather than the only one.
 
-**S1 — joints reach the shader.** Joint indices and weights are two more BDA
-streams; `has_skin` joins `has_normals` and `has_uvs` in the push block;
-`shaders/mesh.slang` gets the skinned branch.
+**The three paths, and one shader contract.** `Instance.pose` is an offset in
+matrices with a selector in its top bit, so which buffer a copy reads is a
+property of the *instance* and not of the bucket — which is what lets a hero
+character and the crowd behind him share a `vkCmdDrawIndexed`:
 
-**S2 — the palette keeps the instanced draw.** Fifty rocks share one instanced
-draw. Fifty skinned characters are fifty poses and cannot — *unless* the joint
-matrices live in a device buffer indexed by `SV_InstanceID`, which keeps them in
-one draw at the cost of uploading the palette every frame. A 60-joint rig across
-50 instances is 60 × 50 × 64 bytes ≈ **192 KB per frame**. That is affordable,
-and it is the option that keeps the thesis's shape rather than the one that
-quietly abandons it.
+| | pose from | blend in | for |
+|---|---|---|---|
+| default | the baked table, keyed by frame | vertex shader | crowds |
+| `skeleton: true` | bone nodes, per frame | vertex shader | IK, look-at, a bone a script writes |
+| `skinning: 'compute'` | either | a compute dispatch | a mesh drawn in more than one pass |
 
-**S3 — `stats()` must not lie.** A skinned bucket costs per-frame upload that an
-instanced bucket does not. Reporting them identically would tell an agent that
-fifty characters and fifty rocks cost the same, and it would then build the scene
-that proves otherwise. Skinned buckets are reported distinctly. **Write this
-check before the code:** the failure mode here is a number that is wrong rather
-than a picture that is, and nothing else notices.
+**What the baked path costs and buys.** A hundred characters mid-stride at a
+hundred phases differ by one `uint` each, so the per-frame cost of the crowd is a
+hundred integers and the palette upload the old S2 costed does not exist. It also
+cannot tear — `gpu/buffer.c3` records that crig's pose palette did, and an
+immutable table has nothing to tear. The price is memory (60 joints × 30 fps ≈
+115 KB per second of clip, reported as `stats().poseBytes`), time quantised to
+the bake rate, and no blending between clips.
 
-**S4 — picking hits the bind pose, and says so.** A skinned mesh's `TriBVH` is
-stale the moment it moves, and rebuilding a BVH per frame per character is not
-happening. Skinned meshes get an AABB proxy for picking, documented as such. A
-raycast that silently answers about a pose the character left two seconds ago is
-worse than one that answers about a box.
+**A character is two nodes, not sixty-two.** Joint-only nodes are pruned at
+instantiation — kept only when something hangs off them, so a prop in a hand keeps
+its chain — and a skinned mesh becomes a child of the group with an identity
+transform, because glTF says its own node transform is ignored and the scene graph
+is the honest place to say that. `Instance.model` needs no special case as a
+result.
+
+**S3 was right and pointed the wrong way.** It warned that reporting a skinned
+bucket like an instanced one would hide a per-frame upload. There is no per-frame
+upload behind a baked character, so the hidden cost is the pose memory instead,
+and `stats()` reports `skinnedDraws`, `skinnedInstances`, `preskinnedInstances`
+and `poseBytes` separately for that reason. The check was written before the code,
+as S3 asked.
+
+**S4 stands.** A skinned mesh's `TriBVH` is its bind pose and picking still
+answers against a box — but the box is now the union of every baked frame rather
+than the bind pose's own, which the same bake computes for free and which culling
+uses too. A character with its arms up is no longer culled by the box its
+modeller drew.
+
+**On the compute path, honestly.** It does the same arithmetic the vertex shader
+does, plus 24 bytes a vertex written, read back, a dispatch and a barrier — and a
+posed copy of the mesh per instance per frame in flight. Under one pass it is
+strictly more work, and it was built anyway for two reasons that are not
+speculative: shadows are a known coming pass (§13) and it is the only way to
+raycast against the pose rather than the box. It is opt-in per character and it
+splits the bucket. **Do not route a crowd through it.**
+
+**What is still absent.** No blending or crossfade between clips — G3/S7's
+argument is unchanged and the live palette is where it would land. No morph
+targets. No sockets: a bone's world transform is recoverable from the baked table
+as `pose * bind` and `AssetSkin.bind` is kept for it, but nothing reads it yet.
+
+**One check does less than its name suggests, and says so.**
+`the_skinning_paths_are_silent_under_validation` covers the dispatch's arguments
+and the buffer lifetimes; it does **not** cover the compute→vertex barrier.
+Deleting that barrier leaves the test green, with the ordinary layer and with
+synchronization validation requested through `create_instance(sync: true)`. This
+machine's layer does not report the hazard. The barrier rests on the spec and on
+review — measured, not assumed, and worth repeating the injection anywhere the
+layer is fuller.
 
 ---
 
@@ -1515,6 +1555,12 @@ two fields in one shader and each fails, naming the field and both offsets.
 - **No caching of `bounds`.** The numbers never change for a live asset, but a
   cached box would keep answering after `unloadUnused()` freed the thing it
   described. Every other handle in this API revalidates on use.
+- **No skin in the export.** `scene/export.c3` writes geometry, materials and
+  nodes; a rigged character round-trips as its bind pose with no `skins` and no
+  `JOINTS_0`/`WEIGHTS_0`. The reading side is built (§3) and the writing side is
+  work rather than a decision — `gltf.c3l`'s `add_skin_binding` and
+  `add_skeleton` are what it would go through. Listed here so that a round trip
+  through `scene.export()` is known to lose the rig rather than discovered to.
 - **No `.gltf` output and no external `.bin`.** A `.gltf` beside a `.bin` beside
   a folder of `.png`s is four things to copy and four things to lose.
 - **The export writes no camera.** glTF has one and this project has a turntable,

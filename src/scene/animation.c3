@@ -285,6 +285,21 @@ fn void normalize_into(float[] value) @local
 // ============================================================================
 
 <*
+ One skinned mesh this player poses, and which of the asset's skins poses it.
+
+ Kept beside `targets` rather than looked up per frame, because the alternative is
+ walking the subtree once a frame per character to ask which of its nodes are
+ characters — and the answer cannot change: a node's skin is set when it is
+ created and cleared when its slot is recycled.
+*>
+struct SkinnedTarget
+{
+	NodeId node;
+	uint skin;
+}
+
+
+<*
  One instantiated subtree's animation state.
 
  **Per instance, which is the point.** Two copies of the same character have one
@@ -311,6 +326,15 @@ struct AnimationPlayer
 	// By glTF node index. Owned.
 	List{NodeId} targets;
 
+	// The skinned meshes under `root`, which is usually one and never many. Owned.
+	//
+	// **What makes a crowd cost nothing.** Advancing a baked character is: step
+	// the clock, divide by the frame rate, write one `uint` per entry here. There
+	// is no palette to compute, nothing to upload, and no per-joint work at all —
+	// the sixty matrices this would otherwise produce were baked when the file
+	// first drew and are shared by every copy of the character in the scene.
+	List{SkinnedTarget} skinned;
+
 	// -1 when nothing is playing, which is the state a player spends most of its
 	// life in and is not the same as "no player".
 	int clip;
@@ -318,12 +342,30 @@ struct AnimationPlayer
 	float speed;
 	bool loop;
 	bool playing;
+
+	<*
+	 Whether this character's joint matrices are computed every frame from its bone
+	 nodes, rather than keyed out of the baked table.
+
+	 Set by `instantiate({ skeleton: true })`, and the whole of what that flag
+	 buys: the bones exist as scene nodes, so a script can write one and the skin
+	 follows — a look-at, an aim offset, a foot planted on a slope — and the time
+	 is exact rather than snapped to the bake rate.
+
+	 **It is a cost dial and the doc for it says so.** A live character pays a
+	 hierarchy walk over its own bones and a palette write every frame; a baked one
+	 pays one `uint`. That is the difference between a hero and a crowd, and it is
+	 why the default is the crowd.
+	*>
+	bool live_skin;
 }
 
 fn void AnimationPlayer.free(&self)
 {
 	self.targets.free();
 	self.targets = {};
+	self.skinned.free();
+	self.skinned = {};
 }
 
 <*
@@ -371,6 +413,48 @@ fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 	}
 
 	self.apply(scene, clip);
+	self.key_pose(scene, owner, clip);
+}
+
+<*
+ Point every skinned mesh under this player at the baked frame nearest the
+ player's current time.
+
+ The whole of what posing a baked character costs: a divide, a round, a clamp and
+ one store per skinned mesh. No matrices are touched and nothing is uploaded —
+ the sixty matrices this frame needs were computed when the file first drew and
+ are shared by every copy of the character in the scene.
+
+ **Snapped rather than interpolated**, which is the design's one visible
+ compromise: at thirty frames a second a walk cycle is a walk cycle, and a
+ performance slow enough to show the stepping is what the live palette is for.
+ `plan.md` §3 has the argument.
+
+ A skin the asset never baked — the buffer failed, or the file has clips and no
+ skeleton — leaves `pose` where `Scene.set_skin` put it, which is the rest pose.
+*>
+fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationClip* clip)
+{
+	if (self.skinned.len() == 0 || self.clip < 0) return;
+	// A live character's offset is written by `MeshPass.write_live_poses` from the
+	// bone nodes `apply` has just posed. Keying a baked frame on top would be two
+	// writers for one field, and which one won would depend on call order.
+	if (self.live_skin) return;
+
+	foreach (&target : self.skinned)
+	{
+		BakedPose* segment = owner.segment(target.skin, (uint)self.clip);
+		if (segment == null) continue;
+
+		Node* node = scene.node(target.node);
+		if (node == null) continue;
+
+		// Rounded, not truncated: truncation biases every pose half a frame early
+		// and makes a clip that ends exactly on its last key stop one frame short
+		// of it.
+		int frame = (int)((self.time - clip.start) * segment.fps + 0.5f);
+		node.pose = segment.frame_at(frame);
+	}
 }
 
 <*
@@ -415,8 +499,13 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
  `three::AnimationClip` is not a `gltf::Animation`, and it deliberately outlives
  the point at which one is available. Same arithmetic, kept honest by
  `a_loop_wraps_to_the_same_pose`.
+
+ Not `@local` since `Scene.play` gained a start phase: a crowd spread with
+ `i / count * duration` hands in a time past the end on its last copy, and the
+ wrap that makes that mean "the start again" is this one rather than a second
+ copy of it.
 *>
-fn double clip_loop_time(AnimationClip* clip, double time) @local
+fn double clip_loop_time(AnimationClip* clip, double time)
 {
 	if (clip.duration <= 0) return clip.start;
 	double t = time - clip.start;

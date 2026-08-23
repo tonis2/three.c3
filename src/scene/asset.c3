@@ -191,12 +191,23 @@ struct GpuMesh
 	// extension lets a layer take its mask from a colour attribute, and until this
 	// stream existed that was refused rather than drawn.
 	vk::Memory colors;
+	// glTF's JOINTS_0 and WEIGHTS_0: four influences per vertex, naming joints by
+	// their position in the skin's own array. Uploaded as `uint[4]` and `float[4]`
+	// whatever width the file stored them at — 32 bytes a vertex, on geometry every
+	// copy of the character shares, which is why widening is cheaper than the
+	// 16-bit device features reading them narrow would require.
+	vk::Memory joints;
+	vk::Memory weights;
 	vk::Memory indices;
 	uint vertex_count;
 	uint index_count;
 	bool has_normals;
 	bool has_uvs;
 	bool has_colors;
+	// Both skin streams are present and cover every vertex. The skin *itself* is
+	// on the node rather than here (`AssetNode.skin`), because that is where glTF
+	// puts it; this only says the geometry can be posed at all.
+	bool has_skin;
 	float[4] base_color;
 	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
@@ -306,8 +317,49 @@ struct AssetNode
 	uint first_mesh;
 	uint mesh_count;
 
+	// Which of `Asset.skins` poses this node's mesh, or -1 for the ordinary node
+	// that is placed by its own transform.
+	//
+	// **On the node and not on the mesh**, because that is where glTF puts it: the
+	// vertex attributes name joints by position in *this* skin's array, so the same
+	// primitive under two nodes with two skins is two different poses of one piece
+	// of geometry. Nothing downstream has to resolve that — the pose offset is per
+	// instance, so two skins can share a bucket and still draw correctly.
+	int skin;
+
 	// Indices into `Asset.nodes`. Owned.
 	List{uint} children;
+}
+
+<*
+ One glTF skin: which nodes are its joints, and how each one gets from the mesh's
+ bind pose into its own space.
+
+ **Read at `Assets.load` from the JSON chunk, except for the matrices.** The joint
+ list is JSON and costs nothing; `inverse_bind` is an accessor and has to be
+ paged in, which `Assets.ensure_poses` does at the same moment it bakes — a file
+ that describes a skeleton and never draws it reads no matrices.
+
+ `bind` is the inverse of `inverse_bind`, kept because recovering a *bone's* world
+ transform out of a baked pose needs it: the table holds `world * inverse_bind`,
+ so `pose * bind` is the bone. Nothing reads it yet; it is one matrix per joint
+ and it is the whole of what a socket API would need.
+*>
+struct AssetSkin
+{
+	// glTF node indices, in the skin's own order — which is what a vertex's
+	// JOINTS_0 indexes, and why this may not be sorted or contiguous.
+	List{uint} joints;
+	List{Matrix4f} inverse_bind;
+	List{Matrix4f} bind;
+
+	// Where this skin's rest pose sits in `Asset.poses`, in matrices. Valid from
+	// the moment the buffer is baked, and what a skinned node's `pose` starts at
+	// so that a character that has never played draws its bind pose.
+	uint rest_offset;
+
+	// Whether `inverse_bind` and `bind` have been read. False until the bake.
+	bool loaded;
 }
 
 struct Asset
@@ -315,6 +367,31 @@ struct Asset
 	String path; // owned
 	List{GpuMesh} meshes;
 	collision::Aabb3 bounds;
+
+	// The file's skins, or empty for the overwhelming majority of files that have
+	// none. `AssetNode.skin` indexes this.
+	List{AssetSkin} skins;
+
+	// ---- The baked poses, since skinning -------------------------------------
+	//
+	// Every clip of every skin, sampled at a fixed rate and folded through the
+	// inverse bind pose. **Device-local and immutable**, which is the whole reason
+	// a crowd is affordable: a hundred characters at a hundred phases read a
+	// hundred different offsets of this and nothing is written per frame. See
+	// `scene/skin.c3`, and `Assets.ensure_poses` for when it is filled.
+
+	vk::Memory poses;
+	List{BakedPose} baked;
+	// How many `Matrix4f` the buffer holds, which `stats()` reports as bytes and
+	// which bounds every offset written into an instance.
+	uint pose_matrices;
+
+	// The union, over every baked frame and joint, of the asset's bind-pose box
+	// transformed by that joint's matrix. What a skinned node is culled against,
+	// because a character with its arms up does not fit the box its bind pose
+	// drew — and computing it here costs a walk of numbers the bake already has,
+	// where computing it per frame would cost a pass over every vertex.
+	collision::Aabb3 skinned_bounds;
 
 	// The file's node hierarchy, and the indices into it that nothing is a child
 	// of. Empty for an asset with no nodes at all — a generated primitive, or a
@@ -489,6 +566,11 @@ struct PlacedNode
 	// else here, which is how a per-copy colour survives a round trip without
 	// becoming a material per copy.
 	float[4] color;
+
+	// Which of the asset's skins poses this entry, or -1. Carried so that the two
+	// consumers can seed `Node.pose` with the skin's rest offset without either of
+	// them having to look the node back up in the file.
+	int skin;
 }
 
 <*
@@ -694,6 +776,29 @@ fn uint Assets.texture_count(&self)
 }
 
 <*
+ How much device memory the baked poses hold, across every resident asset.
+
+ **The one number a rigged file costs that an unrigged one does not**, and the
+ trade the whole design is: a character's clips are sampled once into this and
+ nothing is uploaded per frame afterwards, so what would have been ~192 KB every
+ frame for fifty characters (`plan.md` §3/S2's costing of the design that was not
+ built) is instead a fixed number here, shared by every copy in the scene.
+
+ Exact rather than estimated: a segment's extent is decided by `plan_segments`
+ and `pose_matrices` is what was allocated.
+*>
+fn usz Assets.pose_bytes(&self)
+{
+	usz total = 0;
+	foreach (&asset : self.assets)
+	{
+		if (!asset.alive) continue;
+		total += (usz)asset.pose_matrices * Matrix4f::size;
+	}
+	return total;
+}
+
+<*
  What every unique texture costs on the device, as `stats()` reports it.
 
  Counted off the deduplicated list, so two kit pieces sharing an image are
@@ -891,7 +996,7 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 
  `out` is appended to and is not cleared.
 *>
-fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out)
+fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleton = false)
 {
 	Asset* loaded = self.slot(asset);
 	if (loaded == null) return;
@@ -909,15 +1014,91 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out)
 				.rotation = NO_ROTATION,
 				.scale = { 1, 1, 1 },
 				.color = NO_TINT,
+				// No nodes means no skins to name one: a file that declares meshes
+				// and no scene cannot have said which skin poses them.
+				.skin = -1,
 			});
 		}
 		return;
 	}
 
-	foreach (root : loaded.roots)
+	// Which nodes the walk below is allowed to drop. Empty for a file with no
+	// skins, which is every file that is not a character, and the walk then does
+	// exactly what it always did.
+	bool[] prunable;
+	@pool()
 	{
-		self.flatten_node(asset, root, -1, out);
+		prunable = skeleton ? (bool[]){} : prunable_joints(loaded);
+		foreach (root : loaded.roots)
+		{
+			self.flatten_node(asset, root, -1, out, prunable);
+		}
+	};
+}
+
+<*
+ Which joint nodes an instantiation may leave out, when nobody asked to keep the
+ skeleton.
+
+ A node is prunable when it is **named in some skin's joint list, draws no mesh,
+ and every one of its descendants is prunable too**. All three clauses earn their
+ place:
+
+ - *Named in a joint list*, because an ordinary node is the thing the scene graph
+   is for; only a bone is redundant, and only because the pose it would carry is
+   already baked into the buffer the shader reads.
+ - *Draws no mesh*, because a glTF may hang geometry off a bone directly.
+ - *Every descendant too*, because a prop parented into a hand — `skinned.glb` has
+   one, for this rule — needs the chain above it to exist or it is orphaned at the
+   character's root and follows nothing.
+
+ The payoff is the whole point of the baked design: a sixty-bone character
+ instantiates as **two nodes** rather than sixty-two, so a hundred of them is two
+ hundred nodes and a hundred `uint`s per frame rather than six thousand nodes and
+ six thousand channel samples.
+
+ Off the temp arena — the caller pools it, and it lives exactly as long as the
+ walk.
+*>
+fn bool[] prunable_joints(Asset* loaded) @local
+{
+	if (loaded.skins.len() == 0) return {};
+
+	sz count = loaded.nodes.len();
+	bool[] joint = alloc::new_array(tmem, bool, count);
+	foreach (&skin : loaded.skins)
+	{
+		foreach (node : skin.joints)
+		{
+			if (node < count) joint[node] = true;
+		}
 	}
+
+	bool[] prunable = alloc::new_array(tmem, bool, count);
+	foreach (root : loaded.roots) mark_prunable(loaded, root, joint, prunable);
+	return prunable;
+}
+
+<*
+ Whether this node and everything under it can go, marking as it descends.
+
+ Returns the answer for `index` so the parent can fold it into its own — one pass,
+ no second walk, and a subtree that keeps one prop keeps exactly the spine that
+ holds it and nothing else.
+*>
+fn bool mark_prunable(Asset* loaded, uint index, bool[] joint, bool[] prunable) @local
+{
+	if (index >= prunable.len) return false;
+	AssetNode* node = &loaded.nodes[index];
+
+	bool children_go = true;
+	foreach (child : node.children)
+	{
+		if (!mark_prunable(loaded, child, joint, prunable)) children_go = false;
+	}
+
+	prunable[index] = joint[index] && node.mesh_count == 0 && children_go;
+	return prunable[index];
 }
 
 <*
@@ -929,10 +1110,11 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out)
  `record_nodes` derives roots from "nothing claims it" and a cycle claims all of
  its own members, so a cyclic subtree has no root and is never reached.
 *>
-fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{PlacedNode}* out)
+fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{PlacedNode}* out, bool[] prunable = {})
 {
 	Asset* loaded = self.slot(asset);
 	if (loaded == null || index >= loaded.nodes.len()) return;
+	if (index < prunable.len && prunable[index]) return;
 	AssetNode* source = &loaded.nodes[index];
 
 	// An instanced node is a group over its copies, for the same reason a node
@@ -944,15 +1126,28 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	bool draws_itself = source.mesh_count == 1 && !instanced;
 	int here = (int)out.len();
 
+	// **A skinned mesh does not inherit its own node's transform, and glTF says
+	// so**: the joint matrices are already in the skin's space, so the node the
+	// mesh hangs off is a placeholder rather than a placement. Saying that in the
+	// scene graph — the entry becomes a child of the instantiation root with an
+	// identity transform — is worth more than saying it in the draw loop, because
+	// it makes `Node.world` the matrix the palette is actually relative to and
+	// leaves `Instance.model` with no special case in it at all.
+	//
+	// It also gives the character one node you can move: dragging it moves the
+	// whole posed mesh, which is the reading anybody would expect.
+	bool skinned = source.skin >= 0 && source.mesh_count > 0;
+
 	out.push({
 		.name = source.name,
-		.parent = parent,
+		.parent = skinned ? -1 : parent,
 		.mesh = draws_itself ? (int)source.first_mesh : -1,
 		.gltf_node = (int)index,
-		.position = source.position,
-		.rotation = source.rotation,
-		.scale = source.scale,
+		.position = skinned ? (Vec3){ 0, 0, 0 } : source.position,
+		.rotation = skinned ? NO_ROTATION : source.rotation,
+		.scale = skinned ? (Vec3){ 1, 1, 1 } : source.scale,
 		.color = NO_TINT,
+		.skin = source.skin,
 	});
 
 	if (instanced)
@@ -974,6 +1169,10 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 					.rotation = copy.rotation,
 					.scale = copy.scale,
 					.color = copy.color,
+					// A copy placed by transform is the one thing a skin cannot be:
+					// the extension positions each copy and a skin ignores the
+					// position. A file doing both is malformed and gets the copies.
+					.skin = -1,
 				});
 			}
 		}
@@ -991,6 +1190,10 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 				.rotation = NO_ROTATION,
 				.scale = { 1, 1, 1 },
 				.color = NO_TINT,
+				// The primitives of a skinned mesh are each skinned. Their parent
+				// is the entry above, which is already sitting at the root with an
+				// identity transform, so they inherit the right space.
+				.skin = source.skin,
 			});
 		}
 	}
@@ -1000,7 +1203,7 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	sz children = self.slot(asset).nodes[index].children.len();
 	for (sz i = 0; i < children; i++)
 	{
-		self.flatten_node(asset, self.slot(asset).nodes[index].children[i], here, out);
+		self.flatten_node(asset, self.slot(asset).nodes[index].children[i], here, out, prunable);
 	}
 }
 
@@ -1242,6 +1445,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 
 	if (asset.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
+	record_skins(&asset, &asset.stream);
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
 	record_clips(&asset);
 
@@ -1339,6 +1543,26 @@ fn void Assets.ensure_uploaded(&self, AssetId asset, uint mesh)
 		return;
 	}
 
+	// The poses, if this primitive is the first skinned one of the file to reach
+	// the device. Here rather than at load for G3/S3's reason, and here rather
+	// than at `play` because a skinned mesh needs its rest pose to draw at all —
+	// `Node.pose` points into this before anything has been played.
+	//
+	// Swallowed like the upload above: a bake that fails leaves every skinned node
+	// pointing at offset zero of a buffer that is not there, which the draw loop
+	// reads as "no skin" and renders as the bind pose.
+	if (built.has_skin)
+	{
+		if (catch self.ensure_poses(self.gpu, asset))
+		{
+			if (!self.warned_upload_failed)
+			{
+				io::printfn("three: a skeleton could not be baked; it will draw its bind pose");
+				self.warned_upload_failed = true;
+			}
+		}
+	}
+
 	// Re-read: `upload_primitive` takes `&self` and may have grown the texture
 	// table, and the asset pool is a `List` like any other.
 	Asset* filed = self.slot(asset);
@@ -1360,6 +1584,32 @@ fn void Assets.ensure_uploaded(&self, AssetId asset, uint mesh)
 	filed.meshes[mesh] = fresh;
 }
 
+
+<*
+ Name the file's skins and their joints, without reading a matrix.
+
+ The joint list is in the JSON chunk, so this is the same bargain `record_clips`
+ strikes one line below it: a file says what it contains for the cost of walking
+ what is already parsed, and pays for the contents when something draws them.
+ `inverse_bind` is an accessor, so it waits for `Assets.ensure_poses`.
+
+ Runs **before** `record_nodes`, because a node validates its own `skin` index
+ against this list.
+*>
+fn void record_skins(Asset* asset, gltf::GltfStream* stream) @local
+{
+	sz count = stream.gltf.skins.len();
+	if (count == 0) return;
+
+	asset.skins.init(mem, count);
+	foreach (&source : stream.gltf.skins)
+	{
+		AssetSkin skin;
+		skin.joints.init(mem, source.joints.len());
+		foreach (joint : source.joints) skin.joints.push(joint);
+		asset.skins.push(skin);
+	}
+}
 
 <*
  Copy the glTF node hierarchy onto the asset.
@@ -1388,10 +1638,13 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 
 	foreach (&source : stream.gltf.nodes)
 	{
-		AssetNode node = { .scale = { 1, 1, 1 }, .rotation = NO_ROTATION };
+		AssetNode node = { .scale = { 1, 1, 1 }, .rotation = NO_ROTATION, .skin = -1 };
 		if (source.name.len > 0) node.name = source.name.copy(mem);
 
 		decompose(source.local_matrix(), &node.position, &node.rotation, &node.scale);
+
+		// -1 in the file and -1 here, so the "no skin" case needs no translation.
+		if (source.skin >= 0 && source.skin < (int)asset.skins.len()) node.skin = source.skin;
 
 		if (source.mesh >= 0 && source.mesh < mesh_first.len)
 		{
@@ -1512,6 +1765,21 @@ fn void free_nodes(Asset* asset) @local
 	asset.roots.free();
 	asset.nodes = {};
 	asset.roots = {};
+
+	foreach (&skin : asset.skins)
+	{
+		skin.joints.free();
+		skin.inverse_bind.free();
+		skin.bind.free();
+	}
+	asset.skins.free();
+	asset.skins = {};
+
+	if (asset.poses.buffer != null) asset.poses.free();
+	asset.poses = {};
+	asset.baked.free();
+	asset.baked = {};
+	asset.pose_matrices = 0;
 }
 
 <*
@@ -1787,14 +2055,18 @@ fn GpuMesh? Assets.upload_primitive(
 	List{Vec3} normals;
 	List{Vec2} uvs;
 	List{Vec4} colors;
+	List{uint[4]} joints;
+	List{Vec4} weights;
 	List{uint} indices;
 	positions.init(mem, 256);
 	normals.init(mem, 256);
 	uvs.init(mem, 256);
-	// Unlike the three above, most files never fill this one — the initial
-	// capacity is the smallest a `List` will take rather than 256, so a scene of
-	// meshes without the attribute pays a pointer per primitive and nothing else.
+	// Unlike the three above, most files never fill these — the initial capacity
+	// is the smallest a `List` will take rather than 256, so a scene of meshes
+	// without the attribute pays a pointer per primitive and nothing else.
 	colors.init(mem, 1);
+	joints.init(mem, 1);
+	weights.init(mem, 1);
 	indices.init(mem, 512);
 	defer
 	{
@@ -1802,6 +2074,8 @@ fn GpuMesh? Assets.upload_primitive(
 		normals.free();
 		uvs.free();
 		colors.free();
+		joints.free();
+		weights.free();
 		indices.free();
 	}
 
@@ -1811,6 +2085,18 @@ fn GpuMesh? Assets.upload_primitive(
 	stream.@each_normal(primitive; Vec3 normal, sz i) { normals.push(normal); };
 	stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { uvs.push(uv); };
 	read_colors(stream, primitive, &colors);
+
+	// Widened from whatever the file stored — `@each_joint` already folds the
+	// ubyte and ushort encodings into one — because the shader reads `uint4` under
+	// scalar layout and 16-bit storage is a device feature this project does not
+	// require. Only JOINTS_0/WEIGHTS_0: a second set is 8 influences a vertex, and
+	// nothing here blends more than four.
+	stream.@each_joint(primitive, 0; ushort[<4>] j, sz i)
+	{
+		joints.push({ (uint)j[0], (uint)j[1], (uint)j[2], (uint)j[3] });
+	};
+	read_weights(stream, primitive, &weights);
+	normalize_weights(&weights);
 
 	read_indices(stream, primitive, &indices);
 	// A primitive with no index accessor is a plain vertex list; give it the
@@ -1841,6 +2127,17 @@ fn GpuMesh? Assets.upload_primitive(
 
 	out.has_colors = colors.len() == positions.len();
 	if (out.has_colors) out.colors = gpu.upload_stream(colors.entries, Vec4::size * colors.len())!;
+
+	// **Both or neither**, unlike the streams above, which stand alone. Joints
+	// without weights is four joint indices with no say in how much each pulls,
+	// and weights without joints is four numbers naming nothing; either one on its
+	// own would be a pose read out of whichever buffer happened to be there.
+	out.has_skin = joints.len() == positions.len() && weights.len() == positions.len();
+	if (out.has_skin)
+	{
+		out.joints = gpu.upload_stream(joints.entries, uint[4]::size * joints.len())!;
+		out.weights = gpu.upload_stream(weights.entries, Vec4::size * weights.len())!;
+	}
 
 	out.build_bvh(positions.array_view(), indices.array_view());
 
@@ -1929,6 +2226,73 @@ fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{u
 				out.push((uint)stream.@cast_buffer(accessor, i, short));
 			default:
 				out.push(stream.@cast_buffer(accessor, i, uint));
+		}
+	}
+}
+
+<*
+ Read a primitive's WEIGHTS_0 into four floats a vertex.
+
+ **By hand rather than through `@each_weight`**, which casts the accessor to a
+ `Vec4` and is therefore right only for the float encoding. glTF also allows
+ normalised `ubyte` and `ushort`, and reading four bytes *as* a float there is not
+ a wrong number — it is a denormal or a NaN, which poses the vertex to somewhere
+ no clipping recovers from. `read_colors` below makes the same distinction for the
+ same reason.
+
+ Normalisation is the caller's, not this function's: it needs every set read
+ first, and there is only ever one set here.
+*>
+fn void read_weights(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out) @local
+{
+	sz? attr = primitive.attributes.get("WEIGHTS_0");
+	if (catch attr) return;
+
+	gltf::Accessor accessor = stream.gltf.accessors[attr];
+
+	for (sz i = 0; i < accessor.count; i++)
+	{
+		switch (accessor.data_type)
+		{
+			case gltf::DataType.CHAR:
+				char[<4>] w = stream.@cast_buffer(accessor, i, char[<4>]);
+				out.push({ w[0] / 255.0f, w[1] / 255.0f, w[2] / 255.0f, w[3] / 255.0f });
+			case gltf::DataType.USHORT:
+				ushort[<4>] w = stream.@cast_buffer(accessor, i, ushort[<4>]);
+				out.push({ w[0] / 65535.0f, w[1] / 65535.0f, w[2] / 65535.0f, w[3] / 65535.0f });
+			default:
+				out.push(stream.@cast_buffer(accessor, i, Vec4));
+		}
+	}
+}
+
+<*
+ Make each vertex's four weights sum to one, in place.
+
+ **Not defensive and not optional.** glTF blends by weight without normalising, so
+ a vertex whose weights sum to 0.8 lands at 80% of the way from the origin to
+ where it belongs — the mesh deflates toward the origin wherever the sum is short,
+ which reads as a torn or shrunken character rather than as a data problem.
+ `gltf.c3l`'s own `sparsify_weights` argues the same point from the writing side.
+
+ A vertex with no weight at all is pinned to its first joint, for that reason
+ exactly: all-zero weights collapse it to the origin, and a vertex riding one bone
+ is wrong in a way that is visible and fixable where a vertex at the origin looks
+ like broken geometry.
+*>
+fn void normalize_weights(List{Vec4}* weights) @local
+{
+	foreach (&w : *weights)
+	{
+		float sum = w.x + w.y + w.z + w.w;
+		if (sum > 1e-6f)
+		{
+			float inv = 1.0f / sum;
+			*w = { w.x * inv, w.y * inv, w.z * inv, w.w * inv };
+		}
+		else
+		{
+			*w = { 1, 0, 0, 0 };
 		}
 	}
 }
@@ -2653,11 +3017,15 @@ fn void GpuMesh.release_device(&self)
 	if (self.normals.buffer != null) self.normals.free();
 	if (self.uvs.buffer != null) self.uvs.free();
 	if (self.colors.buffer != null) self.colors.free();
+	if (self.joints.buffer != null) self.joints.free();
+	if (self.weights.buffer != null) self.weights.free();
 	self.positions = {};
 	self.indices = {};
 	self.normals = {};
 	self.uvs = {};
 	self.colors = {};
+	self.joints = {};
+	self.weights = {};
 
 	// `free_indexed` rather than `free`: the root owns the sorted-index array
 	// that every node below it points into, and the plain `free` leaves it.

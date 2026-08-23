@@ -76,6 +76,28 @@ faultdef
 const uint FLAG_HAS_NORMALS = 1;
 const uint FLAG_HAS_UVS     = 2;
 const uint FLAG_HAS_COLORS  = 4;
+// The bucket carries joints and weights, and the vertex shader poses it.
+const uint FLAG_HAS_SKIN    = 8;
+// The compute pass posed it before the render pass began, so the vertex shader
+// reads `DrawRecord.posed` and blends nothing. Set by `render/pass.c3`, and never
+// together with `FLAG_HAS_SKIN` — the two are the two skinning paths, not two
+// halves of one.
+const uint FLAG_PRESKINNED  = 16;
+
+<*
+ `Instance.pose` is an offset in matrices with a selector in its top bit.
+
+ Set means this frame's live palette — a character posed from its bone nodes, so
+ that a script can drive a look-at or an IK chain. Clear means the asset's baked
+ table, which is every character that is just playing a clip.
+
+ **One bit rather than a second field or a second bucket.** The alternative was a
+ palette pointer per bucket, which would have forced a live character and a baked
+ one that share a mesh and a material into two draw calls — and the whole reason
+ the pose is a buffer is that they should not be.
+*>
+const uint POSE_LIVE = 0x80000000;
+const uint POSE_MASK = 0x7fffffff;
 
 // The size every implementation must offer. Treated as a budget, not a limit
 // to grow into.
@@ -88,6 +110,18 @@ const ShaderEntry[*] MESH_ENTRIES = {
 	{ "fragmentMain", slang::STAGE_FRAGMENT },
 };
 
+// `shaders/skin.slang`'s one entry point. A compute module has no fragment stage
+// and no attachment formats, which is most of why it gets its own pipeline type
+// rather than a flag on the mesh one.
+const ShaderEntry[*] SKIN_ENTRIES = {
+	{ "computeMain", slang::STAGE_COMPUTE },
+};
+
+// The workgroup size `skin.slang` declares. Here so the dispatch and the shader
+// cannot drift: one thread per (instance, vertex), rounded up to whole groups,
+// and the shader drops the tail itself.
+const uint SKIN_WORKGROUP = 64;
+
 <*
  What every draw in a frame shares. One per frame in flight, written before
  recording and read through `MeshPush.frame`.
@@ -96,6 +130,27 @@ struct FrameBlock
 {
 	Matrix4f view_projection;
 	float[4] light; // xyz surface-to-light (world), w ambient floor
+	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
+	// frame with no live character, which is every frame of a scene that has no
+	// skeletons in it.
+	//
+	// **Here rather than in the draw record**, and that is the field's whole
+	// argument: the record is per bucket, and a single palette pointer there would
+	// have split a live character away from the baked copies it shares a mesh and
+	// a material with. One buffer per frame keeps them in one draw.
+	ulong live_poses; // Matrix4f*
+}
+
+<*
+ One vertex as the compute pass leaves it: posed, in the character's own space.
+
+ Interleaved, unlike the geometry streams, because one thread writes both halves
+ and one thread reads them — see `shaders/mesh.slang`'s copy of this.
+*>
+struct SkinnedVertex
+{
+	Vec3 position;
+	Vec3 normal;
 }
 
 <*
@@ -115,9 +170,14 @@ struct FrameBlock
 	normals        8     8
 	uvs           16     8
 	colors        24     8
-	base_color    32    16
-	flags         48     4
-	uv_transform  52    16    = 68 used, 72 with tail padding
+	joints        32     8
+	weights       40     8
+	palette       48     8
+	posed         56     8
+	base_color    64    16
+	flags         80     4
+	skin_stride   84     4
+	uv_transform  88    16    = 104, and no tail padding
 
  The stride between records is this struct's size, decided on the C3 side alone:
  the shader is handed a pointer to one record and never indexes past it, so
@@ -135,8 +195,24 @@ struct DrawRecord
 	// the old contract it was 8 bytes of the 128 every device offers, taken off
 	// what a material's uniforms could spend.
 	ulong colors;
+	// glTF's JOINTS_0 and WEIGHTS_0, and the asset's baked joint matrices.
+	//
+	// **The three fields §15 said this record existed to make possible.** Its
+	// header predicted them by name — "tangents, a second uv set and joints all
+	// become bookkeeping rather than a trade" — and they cost exactly what it said
+	// they would: 24 bytes of a buffer sized by the frame's bucket count, and
+	// nothing at all from the 128 the material uniforms are still spending.
+	ulong joints;
+	ulong weights;
+	ulong palette;
+	// Where the compute pass wrote this bucket's posed vertices, or zero.
+	// `SkinnedVertex*`, one copy of the mesh per instance.
+	ulong posed;
 	float[4] base_color; // rgb albedo factor, a material alpha
 	uint flags;
+	// The mesh's vertex count, read only under `FLAG_PRESKINNED` — the stride
+	// between one instance's posed copy and the next. Zero otherwise.
+	uint skin_stride;
 	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
 	// the uv before the sample. Added when it turned out that a surface mapping
 	// its texture exactly once makes texel density a function of how big the mesh
@@ -152,14 +228,54 @@ struct MeshPush
 	ulong draw; // DrawRecord*, this bucket's own
 }
 
+<*
+ What one compute-skinning dispatch is handed, as `shaders/skin.slang`'s
+ `SkinPush` declares it.
+
+ **Its own 128 bytes.** A compute pass has no material and no uniforms appended to
+ the tail, so this can be eleven fields where the draw path had to move its
+ geometry contract into a buffer to make room. Nothing here competes with anything.
+*>
+struct SkinPush
+{
+	ulong positions;
+	ulong normals;
+	ulong joints;
+	ulong weights;
+	ulong instances; // Instance*, offset to this bucket's first
+	ulong baked; // Matrix4f*, the asset's table
+	ulong live; // Matrix4f*, this frame's live palette
+	ulong output; // SkinnedVertex*, this bucket's slice
+	uint vertex_count;
+	uint instance_count;
+	uint flags;
+}
+
+$assert SkinPush::size <= PUSH_BUDGET : "the skinning push block outgrew the 128 bytes every device must offer";
+
+const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
+	{ "positions",       0, 8 },
+	{ "normals",         8, 8 },
+	{ "joints",         16, 8 },
+	{ "weights",        24, 8 },
+	{ "instances",      32, 8 },
+	{ "baked",          40, 8 },
+	{ "live",           48, 8 },
+	{ "output",         56, 8 },
+	{ "vertex_count",   64, 4 },
+	{ "instance_count", 68, 4 },
+	{ "flags",          72, 4 },
+};
+
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
 // Not a bound but an equality, because these numbers are a wire format shared
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert DrawRecord::size == 72 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 80 : "FrameBlock no longer matches shaders/mesh.slang";
-$assert Instance::size == 148 : "Instance no longer matches shaders/mesh.slang";
+$assert DrawRecord::size == 104 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert FrameBlock::size == 88 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
+$assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 
 <*
  One field of the push block as this side lays it out.
@@ -206,9 +322,14 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "normals",       8,  8 },
 	{ "uvs",          16,  8 },
 	{ "colors",       24,  8 },
-	{ "base_color",   32, 16 },
-	{ "flags",        48,  4 },
-	{ "uv_transform", 52, 16 },
+	{ "joints",       32,  8 },
+	{ "weights",      40,  8 },
+	{ "palette",      48,  8 },
+	{ "posed",        56,  8 },
+	{ "base_color",   64, 16 },
+	{ "flags",        80,  4 },
+	{ "skin_stride",  84,  4 },
+	{ "uv_transform", 88, 16 },
 };
 
 <*
@@ -508,9 +629,9 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 
  @return? SHADER_MISSING_ENTRY_POINT : `The compiled module does not contain an entry point the pipeline names.`
 *>
-fn void? check_entry_points(ShaderModule* mod)
+fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTRIES[..])
 {
-	foreach (wanted : MESH_ENTRIES)
+	foreach (wanted : entries)
 	{
 		bool found = false;
 		foreach (entry : mod.entries)
@@ -877,6 +998,97 @@ fn void MeshPipeline.free(&self, Gpu* gpu)
 	if (self.handle != null) self.handle.free(gpu.handle);
 	if (self.layout != null) self.layout.free(gpu.handle);
 	if (self.descriptor_layout != null) self.descriptor_layout.free(gpu.handle);
+	self.shader.free();
+	*self = { };
+}
+
+// ============================================================================
+// Compute skinning
+// ============================================================================
+
+<*
+ The pipeline `shaders/skin.slang` becomes.
+
+ **The first compute pipeline in the project**, and the only thing it has in
+ common with `MeshPipeline` is the push-block check: there is no vertex input
+ state to leave empty, no attachment format to declare, no blend mode, no cull
+ mode, and no `PipelineState` to key a cache on. One shader, one pipeline, built
+ once when a character first asks to be skinned this way and kept for the life
+ of the pass.
+
+ No descriptor set layout either. The mesh path needs one for its texture; this
+ reads nothing but buffer device addresses, so its pipeline layout is a push
+ range and nothing else.
+*>
+struct SkinPipeline
+{
+	vk::Pipeline handle;
+	vk::PipelineLayout layout;
+	ShaderLayout shader;
+	bool ready;
+}
+
+<*
+ Compile the skinning shader and build the compute pipeline from it.
+
+ The same runtime compile every other shader here goes through — `compile_slang`
+ takes the entry points it wants by name and stage, and `slang::STAGE_COMPUTE` is
+ one of them, so nothing about the compile path needed to change for this.
+
+ @param mod : `A module from compile_slang containing computeMain.`
+ @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, and so does everything else here.`
+ @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push bytes than the block needs.`
+ @return? SHADER_MISSING_ENTRY_POINT : `The module has no computeMain.`
+ @return? PUSH_BLOCK_MISMATCH : `The shader's push block is not the one SKIN_PUSH_FIELDS describes.`
+*>
+fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
+{
+	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
+	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
+
+	check_entry_points(mod, SKIN_ENTRIES[..])!;
+	check_push_block(&mod.layout, SKIN_PUSH_FIELDS[..])!;
+
+	vk::PushConstantRange push_range = {
+		.stageFlags = SHADER_STAGE_COMPUTE_BIT,
+		.offset = 0,
+		.size = mod.layout.push_size,
+	};
+
+	// No set layouts at all: everything this shader reads it reaches by address.
+	self.layout = vk::pipelineLayoutCreateInfo()
+		.setPushConstantRanges({ push_range })
+		.build(gpu.handle)!;
+
+	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
+	defer module_handle.free(gpu.handle);
+
+	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
+		.setStage(
+			vk::pipelineShaderStageCreateInfo()
+				.setStage(SHADER_STAGE_COMPUTE_BIT)
+				.setMod(module_handle)
+				.setName("computeMain")
+		)
+		.setLayout(self.layout);
+
+	vk::Pipeline handle;
+	vk::createComputePipelines(gpu.handle, (vk::PipelineCache)null, 1, &info, null, &handle)!;
+	self.handle = handle;
+
+	// Moved, exactly as `MeshPipeline.init` moves it: the pipeline outlives the
+	// module it was built from.
+	self.shader = mod.layout;
+	mod.layout = {};
+	self.ready = true;
+
+	return *self;
+}
+
+fn void SkinPipeline.free(&self, Gpu* gpu)
+{
+	if (self.handle != null) self.handle.free(gpu.handle);
+	if (self.layout != null) self.layout.free(gpu.handle);
 	self.shader.free();
 	*self = { };
 }

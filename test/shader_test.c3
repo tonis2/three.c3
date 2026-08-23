@@ -416,15 +416,30 @@ fn void the_draw_record_matches_the_shader() @test
 	test::@check(@ok(end), "and it is closed");
 	if (catch end) return;
 
+	// `Draw.posed` points at one of these, so the record does not compile without
+	// it. Cut out of the same file rather than written here for the same reason
+	// the record is: a copy in this test would be a third declaration, and the one
+	// that never disagrees with anything because nothing reads it.
+	sz? vertex_start = source.index_of("struct SkinnedVertex");
+	test::@check(@ok(vertex_start), "mesh.slang declares a `struct SkinnedVertex`");
+	if (catch vertex_start) return;
+	sz? vertex_end = source[vertex_start..].index_of("};");
+	test::@check(@ok(vertex_end), "and it is closed");
+	if (catch vertex_end) return;
+
 	// A push block and two entry points that touch every field, so nothing can be
 	// dropped from the layout for being unread.
 	String probe = string::tformat(
 		"%s};\n"
+		"%s};\n"
 		"[vk_push_constant] const Draw push;\n"
 		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
-		"{ return push.base_color + float4(push.positions[0] + push.normals[0], push.uvs[0].x); }\n"
+		"{ return push.base_color + float4(push.positions[0] + push.normals[0], push.uvs[0].x)\n"
+		"    + float4(push.weights[0].xyz + push.posed[0].position + push.posed[0].normal, 0.0)\n"
+		"    + push.palette[0][0] + float(push.joints[0].x) + float(push.skin_stride); }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
 		"{ return push.uv_transform * push.colors[0] * float(push.flags); }\n",
+		source[vertex_start : vertex_end],
 		source[start : end]
 	);
 
@@ -450,20 +465,25 @@ fn void the_draw_record_matches_the_shader() @test
 		mod.layout.push_fields.len()
 	);
 
-	// The C3 side of the same table, measured off a real one. 68 used of the 72
-	// the struct occupies; the difference is tail padding, and unlike the push
-	// block's it costs nothing — the stride is this side's own decision and the
-	// shader is handed one record at a time.
+	// The C3 side of the same table, measured off a real one. Every byte is used
+	// since skinning landed: `skin_stride` sits in what used to be the tail
+	// padding after `flags`, which is why the record grew by 32 bytes for four
+	// fields rather than by 40.
 	three::DrawRecord record;
 	char* base = (char*)&record;
 	test::@check((sz)((char*)&record.positions - base) == 0, "positions is at 0");
 	test::@check((sz)((char*)&record.normals - base) == 8, "normals is at 8");
 	test::@check((sz)((char*)&record.uvs - base) == 16, "uvs is at 16");
 	test::@check((sz)((char*)&record.colors - base) == 24, "colors is at 24");
-	test::@check((sz)((char*)&record.base_color - base) == 32, "base_color is at 32");
-	test::@check((sz)((char*)&record.flags - base) == 48, "flags is at 48");
-	test::@check((sz)((char*)&record.uv_transform - base) == 52, "uv_transform is at 52");
-	test::@check(three::DrawRecord::size == 72, "and the record is 72 bytes, got %d", three::DrawRecord::size);
+	test::@check((sz)((char*)&record.joints - base) == 32, "joints is at 32");
+	test::@check((sz)((char*)&record.weights - base) == 40, "weights is at 40");
+	test::@check((sz)((char*)&record.palette - base) == 48, "palette is at 48");
+	test::@check((sz)((char*)&record.posed - base) == 56, "posed is at 56");
+	test::@check((sz)((char*)&record.base_color - base) == 64, "base_color is at 64");
+	test::@check((sz)((char*)&record.flags - base) == 80, "flags is at 80");
+	test::@check((sz)((char*)&record.skin_stride - base) == 84, "skin_stride is at 84");
+	test::@check((sz)((char*)&record.uv_transform - base) == 88, "uv_transform is at 88");
+	test::@check(three::DrawRecord::size == 104, "and the record is 104 bytes, got %d", three::DrawRecord::size);
 }
 
 <*

@@ -313,6 +313,14 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// possible.
 	bool posted = self.post.active;
 
+	// **Before the render pass, because a dispatch cannot be inside one.** This is
+	// the scene update, the frame's buffers, and the compute skinning for any
+	// character routed through it — everything that used to sit at the top of
+	// `MeshPass.record` and had to move out when compute skinning landed. It is a
+	// phase and not a branch: the frame path still does not grow a case per kind
+	// of thing that can be drawn.
+	self.pass.prepare(&self.gpu, cmd, &self.target, self.frames.slot)!;
+
 	if (posted)
 	{
 		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear);

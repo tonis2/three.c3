@@ -149,6 +149,9 @@ fn uint wanted_api_version()
 // installed and `Gpu.init` asks whether the second was enabled.
 const ZString VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
 const ZString DEBUG_UTILS_EXTENSION = "VK_EXT_debug_utils";
+// What lets `VkValidationFeaturesEXT` be chained onto the instance. Requested
+// only alongside `sync`, because that struct is the only thing here that uses it.
+const ZString VALIDATION_FEATURES_EXTENSION = "VK_EXT_validation_features";
 
 // Spelled out because vulkan.c3l declares the severity bits in a `constdef`,
 // whose members are only visible unqualified inside module vk. Every other use
@@ -268,7 +271,7 @@ fn void push_surface_extensions(vk::ZStringList* out)
  @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed.`
  @param headless : `Skip the surface extensions entirely — nothing will present.`
 *>
-fn vk::Instance? create_instance(bool validate, bool headless = false)
+fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync = false)
 {
 	vk::init()!;
 
@@ -294,6 +297,10 @@ fn vk::Instance? create_instance(bool validate, bool headless = false)
 	defer extensions.free();
 	if (!headless) push_surface_extensions(&extensions);
 	if (validating) extensions.push(DEBUG_UTILS_EXTENSION);
+	// The struct chained onto `pNext` below is only read if this is enabled —
+	// without it the request is silently ignored and the layer runs with its
+	// ordinary checks, which is a synchronization check that checks nothing.
+	if (validating && sync) extensions.push(VALIDATION_FEATURES_EXTENSION);
 
 	// VK_KHR_portability_enumeration is deliberately *not* requested, and its
 	// instance flag deliberately not set. That flag is the spec's own switch for
@@ -363,6 +370,38 @@ fn vk::Instance? create_instance(bool validate, bool headless = false)
 	{
 		driver_list.pNext = info.pNext;
 		info.pNext = &driver_list;
+	}
+
+	// **Synchronization validation — asked for, and it does not answer here.**
+	//
+	// The ordinary layer checks that every call is *well formed*: the right
+	// handles, the right layouts, arguments in range. It does not check that a
+	// write is ordered against the read that follows it, so a missing
+	// `vkCmdPipelineBarrier2` produces no message at all and a picture that is
+	// correct on whichever driver happened to finish first.
+	//
+	// **Measured, and the measurement is negative.** Deleting the barrier at the
+	// end of `MeshPass.skin` leaves `the_skinning_paths_are_silent_under_validation`
+	// green — with this off, *and with it on*, and with
+	// `VK_EXT_validation_features` enabled so the struct below is really read.
+	// Whatever this machine's layer and the bundled driver do between them, a
+	// read-after-write hazard on a storage buffer is not reported.
+	//
+	// It is kept for the reason `SLANG_ARGUMENTS` keeps `-fvk-use-entrypoint-name`
+	// after measuring it as a no-op: it is the documented way to ask, it costs
+	// nothing when nobody asks, and a layer that reports nothing today may report
+	// something tomorrow. What must not happen is a *check* claiming to rest on
+	// it — see that test's own doc block, which says what it actually covers.
+	//
+	// Function scope, like the two driver structs above: `vkCreateInstance` reads
+	// through `pNext` after this returns from the `if`.
+	vk::ValidationFeatureEnableEXT[1] sync_features = { VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT };
+	vk::ValidationFeaturesEXT features;
+	if (validating && sync)
+	{
+		features = vk::validationFeaturesEXT().setEnabledValidationFeatures(sync_features[..]);
+		features.pNext = info.pNext;
+		info.pNext = &features;
 	}
 
 	return info.build();

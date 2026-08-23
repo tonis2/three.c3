@@ -57,6 +57,15 @@ struct Instance
     float4x4 normal;
     float4 color;
     uint variant;
+    // Where this copy's joint matrices start, in matrices, and which buffer they
+    // are in — the top bit is POSE_LIVE and the rest is the offset.
+    //
+    // **The third thing two copies of a mesh may disagree about, and the one that
+    // makes a crowd affordable.** A hundred characters mid-stride at a hundred
+    // different phases differ by this one uint: they key different frames out of
+    // the same baked table and stay a single vkCmdDrawIndexed. Zero on a mesh with
+    // no skin, and pointing at the skin's rest pose on one that has never played.
+    uint pose;
 };
 
 // What every draw in the frame shares. Written once per frame rather than
@@ -66,6 +75,15 @@ struct FrameBlock
 {
     float4x4 view_projection;
     float4 light;           // xyz: surface-to-light, world space. w: ambient floor.
+    // This frame's live joint matrices — the characters whose pose is computed
+    // from their bone nodes rather than read out of a baked table.
+    //
+    // **Here rather than in the draw record**, because it is one buffer for the
+    // whole frame while a record is per bucket: a live character and a baked one
+    // sharing a mesh and a material are one bucket, and giving the record a single
+    // palette pointer would have forced them apart into two draws. Null in a frame
+    // where nothing is live, which is every frame of a scene with no skeletons.
+    float4x4* live_poses;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -88,6 +106,20 @@ struct FrameBlock
 // declaration *as* a push block to get its offsets, and
 // `both_shaders_declare_the_same_record` checks this text against the copy in
 // `material.slang`.
+// One vertex as the compute pass leaves it: posed, in the character's own space,
+// one copy per instance.
+//
+// Position and normal interleaved, unlike the geometry streams above, because
+// these two are written by one thread and read by one thread — the pair is the
+// unit of work, and splitting it would make two scattered writes per vertex out
+// of one. `shaders/skin.slang` writes it and `gpu/pipeline.c3` declares the same
+// 24 bytes.
+struct SkinnedVertex
+{
+    float3 position;
+    float3 normal;
+};
+
 struct Draw
 {
     // Three separate streams rather than one interleaved Vertex: that is how
@@ -104,12 +136,44 @@ struct Draw
     // an offset that differed between them would read geometry from the wrong
     // address.
     float4* colors;
+    // glTF's JOINTS_0 and WEIGHTS_0: which four joints move this vertex and how
+    // strongly. Widened to uint4 on upload from whatever width the file stored
+    // them at, and the weights renormalised — glTF blends without normalising, so
+    // a vertex whose weights sum to 0.8 sits at 80% of the way to the origin and
+    // the mesh visibly deflates.
+    uint4* joints;
+    float4* weights;
+    // This asset's baked joint matrices: every clip of every skin, sampled at a
+    // fixed rate and folded through the inverse bind pose once at load. Immutable
+    // for the life of the asset, which is the whole reason a crowd is free — there
+    // is nothing to upload per frame and nothing that can tear.
+    //
+    // Null on a bucket with no skin, and unread on one the compute pass already
+    // posed. A *live* character's matrices are not in here; see
+    // `FrameBlock.live_poses` and `skin_matrix`.
+    float4x4* palette;
+    // Where the compute pass wrote this bucket's posed vertices, one copy of the
+    // mesh per instance, or null on every bucket it did not run for.
+    //
+    // **A pointer of its own rather than swapping `positions` for it**, which was
+    // the first shape and was wrong: `positions` is also what a material body
+    // reads as `Vertex.local`, and a body that sizes a ripple by the mesh's own
+    // length wants the *bind* pose there. Overloaded, the ripple would slide
+    // across the surface as the character moved — an effect that looks like a
+    // material bug and is a record that changed meaning underneath it.
+    SkinnedVertex* posed;
     // rgb: albedo factor. a: the alpha this returns — the mesh's own alpha
     // times `material.opacity`, folded together on the C3 side so the shader
     // sees one number. Ignored by an opaque pipeline, which writes no alpha at
     // all; `BlendMode` says which pipelines read it.
     float4 base_color;
     uint flags;
+    // The mesh's vertex count, and only meaningful under FLAG_PRESKINNED: the
+    // compute pass writes one posed copy of the mesh per instance into a single
+    // buffer, so a vertex is found at `iid * skin_stride + vid`. Zero everywhere
+    // else, where the streams hold one shared copy and SV_VertexID indexes it
+    // directly.
+    uint skin_stride;
     // xy: how many times the texture repeats across the surface. zw: where it
     // starts. `{1, 1, 0, 0}` is the identity and is what a material with no
     // transform is given — `scene/material.c3` says why a zero repeat means
@@ -143,11 +207,53 @@ struct PushData
 static const uint FLAG_HAS_NORMALS = 1u;
 static const uint FLAG_HAS_UVS     = 2u;
 static const uint FLAG_HAS_COLORS  = 4u;
+// The bucket carries joints and weights and its vertices are posed here.
+static const uint FLAG_HAS_SKIN    = 8u;
+// The bucket's vertices were posed by the compute pass before the render pass
+// began, so `positions` and `normals` are already in the character's posed local
+// space and this shader must not blend them a second time. The two skin flags are
+// mutually exclusive by construction — `render/pass.c3` sets one or the other.
+static const uint FLAG_PRESKINNED  = 16u;
+
+// `Instance.pose` is an offset in matrices with a selector in its top bit: set
+// means this frame's live palette, clear means the asset's baked table.
+static const uint POSE_LIVE = 0x80000000u;
+static const uint POSE_MASK = 0x7fffffffu;
 
 // Always bound, always valid. With no material texture the binding carries a
 // 1x1 opaque white image, so there is one pipeline and one descriptor layout
 // rather than a permutation per material.
 [vk::binding(0, 0)] Sampler2D base_color_map;
+
+// The four influences of one vertex, blended into the matrix that poses it.
+//
+// **Which buffer the palette lives in is a property of the instance, not of the
+// bucket.** A baked copy reads the asset's immutable table through `draw.palette`;
+// a live one — a character whose bones a script can write, for IK or a look-at —
+// reads this frame's palette through the frame block. The selector is one bit of
+// `Instance.pose` and it is uniform across an instance, so this is a scalar
+// select and not divergence, and the two kinds of character stay in one bucket.
+//
+// An `if` rather than a ternary, for the reason `vertexMain` gives below: a
+// ternary invites the compiler to evaluate both sides, and one of these two
+// pointers is null on any given draw.
+float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
+{
+    float4x4* palette = draw.palette;
+    if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
+    uint base = instance.pose & POSE_MASK;
+
+    uint4 joints = draw.joints[vid];
+    float4 weights = draw.weights[vid];
+
+    // Summed rather than interpolated: linear blend skinning is a weighted sum of
+    // the joint matrices, and the weights are normalised on upload so the sum is
+    // affine. This is the one place the four influences per vertex are spent.
+    return weights.x * palette[base + joints.x]
+         + weights.y * palette[base + joints.y]
+         + weights.z * palette[base + joints.z]
+         + weights.w * palette[base + joints.w];
+}
 
 struct VertexOutput
 {
@@ -172,13 +278,37 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     Instance instance = push.instances[iid];
 
     float3 position = draw.positions[vid];
-    float4 world = mul(instance.model, float4(position, 1.0));
-    output.sv_position = mul(push.frame[0].view_projection, world);
 
     // An `if` rather than a ternary: a ternary lets the compiler evaluate both
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
+
+    // The two ways a vertex gets posed, and a bucket is at most one of them.
+    //
+    // **Before the model matrix either way**, because a joint matrix is in the
+    // character's own space and the model matrix is what puts the character in the
+    // world. Doing it the other way round poses the mesh around the world origin,
+    // which looks like a rig that explodes the moment the character walks away
+    // from it.
+    if ((draw.flags & FLAG_HAS_SKIN) != 0)
+    {
+        float4x4 pose = skin_matrix(draw, instance, vid);
+        position = mul(pose, float4(position, 1.0)).xyz;
+        normal = mul((float3x3)pose, normal);
+    }
+    else if ((draw.flags & FLAG_PRESKINNED) != 0)
+    {
+        // The compute pass already did the blend, once per vertex per frame rather
+        // than once per vertex per draw. It wrote one copy of the mesh per
+        // instance, so the index carries the instance as well as the vertex.
+        SkinnedVertex skinned = draw.posed[iid * draw.skin_stride + vid];
+        position = skinned.position;
+        normal = skinned.normal;
+    }
+
+    float4 world = mul(instance.model, float4(position, 1.0));
+    output.sv_position = mul(push.frame[0].view_projection, world);
     output.normal = mul((float3x3)instance.normal, normal);
 
     output.uv = float2(0.0, 0.0);
