@@ -64,7 +64,8 @@ export const DOCS = {
 		'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
 		'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
 		'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
-		'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is where the cursor is. There is no mouseDown and no drag events — the left button orbits the camera, and a press that travels or is held is a drag rather than a click.',
+		'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is everything else about it for this frame — position, movement, all three buttons and the wheel. There is no mouseDown and no drag events: the left button orbits the camera, a press that travels or is held is a drag rather than a click, and the buttons are latches a script polls rather than edges anything dispatches.',
+		'A mouse look is three.input.pointer.dx and .dy, not a difference you take yourself between frames — the host differences the reading the frame is actually drawing with, while two calls from a script straddle it. There is NO POINTER LOCK, so the movement stops at the edge of the screen where the platform stops the cursor: a look that must keep turning forever needs the cursor recentred, and nothing here can do that yet.',
 		'The camera\'s hand on the window can be taken away: three.controls.enabled = false stops the mouse orbiting, panning and zooming, and is what a scene that drives its own camera every frame needs — otherwise the turntable writes yaw and pitch again underneath it and the two fight over one matrix sixty times a second. It does not stop three.camera.orbit(), which is a script moving the camera on purpose. Turn it back on when the mode ends: a window nobody can move the camera in is a bad way to leave one, and there is no gesture that undoes it.',
 		'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
 		'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
@@ -702,10 +703,19 @@ export const DOCS = {
 			+ 'Synchronous only, and stopped for good if it throws, exactly as the animation callback is. '
 			+ 'Escape is the host\'s: it closes the window whatever a script binds.',
 		'three.input.pointer':
-			'{ x, y, inside, down, clicked } — where the cursor is, in the rendered image\'s pixels '
-			+ 'counted from its top-left corner, which is what scene.pick(x, y) takes. `inside` is '
-			+ 'false when the cursor has left the window, and everything is zero when there is no '
-			+ 'window at all. Read it in the animation callback.',
+			'{ x, y, dx, dy, inside, down, right, middle, clicked, scroll, scrollX } — the whole mouse '
+			+ 'for this frame, as one reading. x and y are in the rendered image\'s pixels counted from '
+			+ 'its top-left corner, which is what scene.pick(x, y) takes. dx and dy are how far the '
+			+ 'cursor moved since the previous frame, in those same pixels — what a mouse look is built '
+			+ 'out of, and NOT the same thing as differencing x yourself, which answers with the frame '
+			+ 'before the one being drawn; the browser calls them movementX/movementY. They keep '
+			+ 'reporting while the cursor is outside the window and stop at the edge of the screen, '
+			+ 'because there is no pointer lock. scroll is the wheel over this frame, positive AWAY from '
+			+ 'the user (the opposite of the browser\'s deltaY) in notches or fractions of one from a '
+			+ 'trackpad, with scrollX the horizontal half; both are zero on the frames nobody turned it. '
+			+ 'down, right and middle are the three buttons as latches rather than edges — clicked is '
+			+ 'the one edge. `inside` is false when the cursor has left the window, and everything is '
+			+ 'zero when there is no window at all. Read it in the animation callback.',
 		'three.controls.enabled':
 			'Whether the mouse still reaches the camera. True by default; false stops the drag, the '
 			+ 'right-drag pan and the wheel zoom, and stops the coast a flick leaves behind. What it is '

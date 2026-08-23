@@ -378,10 +378,15 @@ fn void? run(Options opts)
 		last_ns = now_ns;
 
 		float[<2>] at = window.getMousePos();
-		Cursor cursor = window_view(&renderer, &window).cursor(at, events.is_pressed(LEFT_MOUSE));
+		float scroll = window.get_scroll();
+		Cursor cursor = window_view(&renderer, &window).cursor(
+			at, events.is_pressed(LEFT_MOUSE),
+			right: events.is_pressed(RIGHT_MOUSE), middle: events.is_pressed(MIDDLE_MOUSE),
+			scroll: scroll, scroll_x: window.get_scroll_x()
+		);
 		bool moved = drive_camera(
 			renderer: &renderer, window: &window, controls: &controls,
-			events: events, at: at, dt_ms: dt_ms
+			events: events, at: at, dt_ms: dt_ms, scroll: scroll
 		);
 		show_cursor(&window, &shown, cursor_shape(
 			cursor.inside, controls.dragging, ask_hover(&renderer, &hover, cursor, controls.dragging)
@@ -453,15 +458,20 @@ fn bool ask_hover(Renderer* renderer, Hover* hover, Cursor cursor, bool dragging
  The cursor arrives as an argument rather than being read here, because the
  caller needs it too — in image pixels, for the click — and one reading answered
  two questions is one fewer way for the camera and the picker to disagree about
- where the mouse was.
+ where the mouse was. **The wheel arrives the same way and for the same reason.**
+ It used to be read here, which was safe only because `get_scroll` does not
+ consume what it reports; now that a script can be told the wheel as well, one
+ reading shared is what keeps the zoom and `three.input.pointer.scroll` from
+ describing different frames.
 
  @param at : `The window's own answer, in its own units. Read once by the caller and shared.`
  @param dt_ms : `Milliseconds since the last call, for the coast.`
+ @param scroll : `The wheel over this frame, read once by the caller and shared.`
  @return `true when the camera moved — a drag, a scroll, or a coast still running.`
 *>
 fn bool drive_camera(
 	Renderer* renderer, c3w::Window* window, Controls* controls, c3w::EventMap events,
-	float[<2>] at, float dt_ms
+	float[<2>] at, float dt_ms, float scroll = 0
 )
 {
 	PointerState pointer = {
@@ -472,7 +482,7 @@ fn bool drive_camera(
 		.pan = events.is_pressed(RIGHT_MOUSE) || events.is_pressed(MIDDLE_MOUSE),
 		.x = at[0],
 		.y = at[1],
-		.scroll = window.get_scroll(),
+		.scroll = scroll,
 	};
 
 	float scale = window.get_scale();
@@ -670,8 +680,11 @@ fn void? live(
 			// and the click wants a position in image pixels, and two readings
 			// of the same instant are two chances for them to disagree.
 			float[<2>] at = window.getMousePos();
+			float scroll = window.get_scroll();
 			Cursor cursor = window_view(renderer, window).cursor(
-				at, events.is_pressed(LEFT_MOUSE)
+				at, events.is_pressed(LEFT_MOUSE),
+				right: events.is_pressed(RIGHT_MOUSE), middle: events.is_pressed(MIDDLE_MOUSE),
+				scroll: scroll, scroll_x: window.get_scroll_x()
 			);
 
 			// Before `pump`, so a drag and a script that arrives in the same
@@ -679,7 +692,7 @@ fn void? live(
 			// script's camera being overwritten by a stale anchor.
 			camera_moved = drive_camera(
 				renderer: renderer, window: window, controls: &runtime.controls,
-				events: events, at: at, dt_ms: dt_ms
+				events: events, at: at, dt_ms: dt_ms, scroll: scroll
 			);
 			show_cursor(window, &shown, cursor_shape(
 				cursor.inside, runtime.controls.dragging,

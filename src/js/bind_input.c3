@@ -33,13 +33,24 @@
 
  ## The mouse is only ever told
 
- `three.input.pointer` is where the cursor is, and that is level state a script
- may want in the animation callback. There is no `mouseDown` beside it, and the
- omission is the same argument `scene/input.c3` makes about the key table: the
- latch that carries the button sticks, and a script polling it would be told the
- button is held forever. A click is an edge, and an edge a stuck latch cannot
- fabricate — so the click is the whole of the mouse's edge API, and it comes
- with what is under it already raycast.
+ `three.input.pointer` is where the cursor is, how far it moved this frame,
+ which of the three buttons are down and what the wheel did — level state a
+ script wants in the animation callback, all of it read once per frame from one
+ reading of one instant.
+
+ **The edge API is still one click and only one.** A press edge is a thing a
+ stuck latch cannot fabricate, and `scene/input.c3` makes the same argument
+ about the key table; a script polling `down` may be told the button is held
+ forever, and that is why the click — which needs an edge — is the whole of what
+ is *dispatched*, and comes with what is under it already raycast. Polling the
+ three latches is a script's business and its risk, exactly as polling a key is.
+
+ **`dx`/`dy` stop at the edge of the screen, not at the edge of the window.**
+ The window goes on reporting a position after the cursor has left it, so a look
+ keeps turning across the desktop; where it genuinely ends is where the platform
+ stops the cursor. Getting past *that* is pointer lock, which needs a cursor
+ warp or an associate-mouse call that `window.c3l` does not expose on any
+ platform — `plan.md` §17 has what it would take.
 
  ## And the mouse can be taken away from the camera
 
@@ -519,9 +530,15 @@ fn void js_pointer(
 	qjs::Value object = js.object();
 	js.set_property(object, "x", qjs::number_value((double)mouse.x));
 	js.set_property(object, "y", qjs::number_value((double)mouse.y));
+	js.set_property(object, "dx", qjs::number_value((double)mouse.dx));
+	js.set_property(object, "dy", qjs::number_value((double)mouse.dy));
 	js.set_property(object, "inside", qjs::bool_value(mouse.inside));
 	js.set_property(object, "down", qjs::bool_value(mouse.down));
+	js.set_property(object, "right", qjs::bool_value(mouse.right));
+	js.set_property(object, "middle", qjs::bool_value(mouse.middle));
 	js.set_property(object, "clicked", qjs::bool_value(mouse.clicked));
+	js.set_property(object, "scroll", qjs::number_value((double)mouse.scroll));
+	js.set_property(object, "scrollX", qjs::number_value((double)mouse.scroll_x));
 	*out = object;
 }
 
