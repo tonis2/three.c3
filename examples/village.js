@@ -6,9 +6,9 @@
 //     ./build/three --script examples/village.js
 //     ./build/three --script examples/village.js --mcp   # and attach an agent
 //
-// Once it is running: `space` holds the clock, `t` shows the swatch board,
-// `d` toggles the shadow map, `n` re-rolls every texture from a new seed, and
-// `s` prints what the frame costs.
+// Once it is running: `space` holds the clock and `.` steps a held one by a
+// single frame, `t` shows the swatch board, `d` toggles the shadow map, `n`
+// re-rolls every texture from a new seed, and `s` prints what the frame costs.
 //
 // What it is here to show
 // -----------------------
@@ -606,9 +606,6 @@ three.light.shadow = { enabled: true, size: 2048 };
 
 // ---------------------------------------------------------------------------
 
-let running = true;
-let last = 0;
-
 function report() {
 	const s = three.stats();
 	console.log(
@@ -643,8 +640,20 @@ function reroll() {
 }
 
 three.onKeyDown('space', () => {
-	running = !running;
-	console.log(running ? 'running' : 'held');
+	// One number holds the whole village: the crowd below stops because its
+	// step is zero, and so would a clip, a body and a post pass — none of which
+	// a flag in this file could ever have reached.
+	three.clock.timeScale = three.clock.paused ? 1 : 0;
+	console.log(three.clock.paused ? 'held' : 'running');
+});
+three.onKeyDown('.', () => {
+	// A held clock moved by hand, one sixtieth at a time. It is the same amount
+	// of world every press however long you wait between them, which is what
+	// makes a paused scene something to step through rather than only to look
+	// at — and what makes two screenshots of the same step the same picture.
+	if (!three.clock.paused) return;
+	three.clock.advance(three.clock.fixedDelta);
+	console.log(`stepped to ${three.clock.time.toFixed(3)}s`);
 });
 three.onKeyDown('t', () => {
 	board.visible = !board.visible;
@@ -657,11 +666,15 @@ three.onKeyDown('d', () => {
 three.onKeyDown('n', () => reroll());
 three.onKeyDown('s', () => report());
 
-three.setAnimationLoop((ms) => {
-	const dt = Math.min(0.05, (ms - last) / 1000);
-	last = ms;
-	if (!running) return;
-	const t = ms / 1000;
+// The crowd walks in the *fixed* loop rather than the animation one, which is
+// the shape a game wants and costs nothing to adopt here: it is called at
+// `three.clock.fixedRate` with the same `dt` every time, however fast the
+// frames happen to be arriving, so twelve walkers cover the same ground on a
+// machine drawing at 30 as on one drawing at 144. The animation callback is for
+// drawing the consequence; there is nothing to draw here that the scene graph
+// does not already hold, so this file has only the one loop.
+three.setFixedLoop((dt) => {
+	const t = three.clock.time;
 
 	for (const p of people) {
 		const s = Math.sin(t * p.cadence + p.phase);
@@ -682,7 +695,17 @@ three.setAnimationLoop((ms) => {
 });
 
 console.log(`${houses.length} houses, ${people.length} people, ${NAMES.length} generated images — seed ${seed}`);
-console.log('space holds · t swatch board · d shadows · n re-roll the textures · s the cost');
+console.log('space holds · . steps a held clock · t swatch board · d shadows · n re-roll · s the cost');
 report();
 
-return { keys: { space: 'hold', t: 'swatches', d: 'shadows', n: 're-roll textures', s: 'stats' }, stats: three.stats() };
+return {
+	keys: {
+		space: 'hold the clock',
+		'.': 'step a held clock one frame',
+		t: 'swatches',
+		d: 'shadows',
+		n: 're-roll textures',
+		s: 'stats',
+	},
+	stats: three.stats(),
+};

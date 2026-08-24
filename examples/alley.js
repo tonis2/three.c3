@@ -166,17 +166,21 @@ three.onKeyDown('r', () => A.rerack());
 three.onKeyDown('b', () => A.bomb());
 three.onKeyDown('a', () => { A.auto = !A.auto; A.mark = A.now; });
 
-three.setAnimationLoop((t) => {
+three.setAnimationLoop(() => {
+	// Seconds, from the game clock — so every interval below is written in the
+	// unit a person says them in, and `three.clock.timeScale = 0` holds the
+	// timer as well as the picture.
+	const t = three.clock.time;
 	A.now = t;
 	// The side wall's bricks slide while the mesh stands still — offset moving
 	// the tiling, not the geometry. Delete this line for a wall that holds
 	// still; `wallMatB.offset = [0.5, 0.25]` once, at build time, makes the
 	// same point more quietly — half a brick and a quarter row of shift, so
 	// the two walls do not show visibly the same seam in the same place.
-	A.wallMatB.offset = [(t / 9000) % 1, 0];
+	A.wallMatB.offset = [(t / 9) % 1, 0];
 	if (!A.auto) return;
-	if (A.phase === 'racked' && t - A.mark > 1200) A.roll();
-	else if (A.phase === 'rolling' && t - A.mark > 6500) A.rerack();
+	if (A.phase === 'racked' && t - A.mark > 1.2) A.roll();
+	else if (A.phase === 'rolling' && t - A.mark > 6.5) A.rerack();
 });
 
 A.rerack();

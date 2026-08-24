@@ -105,7 +105,6 @@ module three;
 
 import std::collections::list;
 import std::io;
-import std::time;
 import vk;
 
 <*
@@ -148,10 +147,13 @@ struct PostStage (FullscreenPass)
 	// texture into another shader's slot.
 	TextureSlots textures;
 
-	// When this stage was compiled. `info.z` is seconds since — wall clock, not a
-	// game clock, because nothing here knows about a simulation. `plan.md` §2 has
-	// the deferral.
-	Clock since_set;
+	// The game clock's reading when this stage was compiled, in seconds.
+	// `info.z` is the seconds since, so a body animating off `p.time` runs at the
+	// simulation's speed, stops when the simulation stops, and renders the same
+	// picture twice from the same clock — which is what `plan.md` §2 deferred
+	// and §17's clock answered. It was `clock::now()` and a wall clock until
+	// then, so a paused scene kept its post pass animating.
+	double set_at;
 }
 
 <*
@@ -197,6 +199,12 @@ struct PostPass
 	// the only pipeline here built with its format. Not in `stages` because it is
 	// not the script's and cannot be reordered, removed or replaced.
 	PostStage tonemap;
+
+	// The game clock as of the last frame recorded, in seconds. Written by
+	// `record_chain` and read by `build_stage`, which is the only reader: a
+	// stage has to be stamped with the time it was set at, and `set` is reached
+	// between frames from a script rather than from the frame loop.
+	double now;
 }
 
 <*
@@ -383,7 +391,7 @@ fn PostStage*? PostPass.build_stage(
 	PostStage* stage = mem::new(PostStage);
 	stage.pipeline = built;
 	stage.fragment = fragment.copy(mem);
-	stage.since_set = clock::now();
+	stage.set_at = self.now;
 	return stage;
 }
 
@@ -711,7 +719,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	float[4] info = {
 		width,
 		height,
-		(float)((double)self.since_set.to_now() / 1_000_000_000.0),
+		(float)(io.time - self.set_at),
 		0,
 	};
 	mem::copy(&self.block[0], &info[0], (sz)(4 * float::size));

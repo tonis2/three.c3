@@ -107,12 +107,19 @@ fn void a_runtime_with_no_callback_does_not_tick() @test
 }
 
 <*
- The callback is told the time, and told the host's time rather than its own.
+ The callback is told the time, and it is the **game** clock rather than the
+ host's.
 
  An animation that reads the elapsed milliseconds is the difference between one
  that runs at the same speed on every machine and one that runs at the frame
  rate — which is why `setAnimationLoop` passes it in Three.js and why it is
  passed here.
+
+ What it passes is `three.clock.time` in milliseconds, which is the host's
+ reading through `GameClock` — and the two differ by the whole boot on the first
+ tick, which is what this asserts. `plan.md` §17 has why the argument moved: most
+ of what moves in most of these scenes is a function of this number, so a pause
+ that did not reach it would not be a pause. `three_tests::clock` has the rest.
 *>
 fn void the_callback_is_told_what_time_it_is() @test
 {
@@ -120,10 +127,17 @@ fn void the_callback_is_told_what_time_it_is() @test
 	{
 		@ok(run, "three.setAnimationLoop((ms) => { globalThis.seen = ms; });");
 
+		// The host has been up for 1250.5 ms and the game has not started: the
+		// first tick carries the boot and is worth nothing.
 		run.tick(1250.5);
+		String first = @answer(run, "return globalThis.seen;");
+		defer first.free(mem);
+		test::@check(first == "0", "the game clock starts at zero, got '%s'", first);
+
+		run.tick(1270.5);
 		String seen = @answer(run, "return globalThis.seen;");
 		defer seen.free(mem);
-		test::@check(seen == "1250.5", "the callback got the host's clock, got '%s'", seen);
+		test::@check(seen == "20", "and then it is what the frames were worth, got '%s'", seen);
 	};
 }
 

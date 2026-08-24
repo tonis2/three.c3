@@ -224,11 +224,6 @@ struct JsRuntime
 	qjs::Context js;
 	MeshPass* pass;
 
-	// The last monotonic reading `tick` was given, and whether there has been
-	// one. Turning the host's clock into a per-frame delta is the whole of the
-	// runtime's timekeeping — see `JsRuntime.step_animations`.
-	double last_elapsed_ms;
-	bool clock_started;
 	Renderer* renderer;
 
 	DString log;
@@ -264,6 +259,12 @@ struct JsRuntime
 	// closes rather than after, which is why `close` below leads with it.
 	qjs::Value frame_fn;
 	bool frame_active;
+	// The fixed loop, the same way. Separate from `frame_fn` because they are
+	// called a different number of times with a different argument — the clock
+	// decides how many of these a frame owes, and `scene/clock.c3` has why the
+	// accumulator that decides it is here rather than in the script.
+	qjs::Value fixed_fn;
+	bool fixed_active;
 	bool in_frame;
 	long frame_ticks;
 	DString frame_log;
@@ -345,6 +346,15 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.pass = pass;
 	self.renderer = renderer;
 	self.controls = DEFAULT_CONTROLS;
+	// Started here as well as in `MeshPass.init`, because a `MeshPass` built by
+	// hand — which is every check in `test/` that needs no device — never runs
+	// that, and the zero value of a `GameClock` is a clock stopped at nought
+	// hertz. Both callers run once, before anything can have set a scale.
+	//
+	// Null is a real configuration: `open(null)` is a context with no scene at
+	// all, which is what the module-loader checks want and what nothing that
+	// boots does. It has no clock either, and the clock verbs say so.
+	if (pass != null) pass.clock.defaults();
 
 	self.log.init(mem, 1024);
 	self.value.init(mem, 256);
@@ -387,6 +397,7 @@ fn void JsRuntime.close(&self)
 	// Before the context goes, not after: every one of these releases a
 	// reference into an engine that would no longer be there to release it into.
 	self.clear_frame();
+	self.clear_fixed();
 	self.clear_key_handlers();
 	self.clear_click_handler();
 	self.clear_physics_handlers();

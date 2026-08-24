@@ -612,8 +612,13 @@ three.onKeyDown('1', () => {
 	V.shieldMat.uniforms.channel = V.channel;
 });
 
-three.setAnimationLoop((ms) => {
-	const t = ms / 1000;
+three.setAnimationLoop(() => {
+	// Both readings off the game clock: `t` is what the shader uniforms want and
+	// `dt` is what the decays below want. Every decay here used to be a constant
+	// per *frame*, which is a fade that is twice as fast on a machine drawing
+	// twice as often — the bug a clock exists to make unwritable.
+	const t = three.clock.time;
+	const dt = three.clock.dt;
 	V.now = t;
 
 	// Every one of these is a push-block write: no compile, no pipeline, and
@@ -625,18 +630,18 @@ three.setAnimationLoop((ms) => {
 	V.coreMat.uniforms.gain = 0.85 + 0.15 * Math.sin(t * 3.1);
 
 	// The impact decays over about half a second.
-	V.hit = Math.max(0, V.hit - 0.035);
+	V.hit = Math.max(0, V.hit - dt * 2.1);
 	V.shieldMat.uniforms.hit = V.hit;
 
 	if (V.pass) {
-		const shock = Math.max(0, (V.pass.uniforms.shock ?? 0) - 0.022);
+		const shock = Math.max(0, (V.pass.uniforms.shock ?? 0) - dt * 1.32);
 		V.pass.uniforms.shock = shock;
 	}
 
 	// The dissolve front sweeps up and back down, so the crates come back.
 	V.edge = V.dissolving
-		? Math.min(1.02, V.edge + 0.012)
-		: Math.max(0, V.edge - 0.02);
+		? Math.min(1.02, V.edge + dt * 0.72)
+		: Math.max(0, V.edge - dt * 1.2);
 	V.dissolveMat.uniforms.edge = V.edge;
 
 	// Embers, on two rings turning at different rates.

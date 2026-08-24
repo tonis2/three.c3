@@ -179,11 +179,12 @@ three.onKeyDown('space', () => {
 // ---------------------------------------------------------------------------
 // The frame
 
-let last = 0;
 
-three.setAnimationLoop((elapsed) => {
-	const dt = Math.min((elapsed - last) / 1000, 0.1);
-	last = elapsed;
+three.setAnimationLoop(() => {
+	// The frame's own seconds, clamped by the host rather than by a
+	// `Math.min` written out here — and zero while the clock is paused, which
+	// is what makes a pause stop the walker with no flag to test.
+	const dt = three.clock.dt;
 
 	// Turning, by key and — in first person — by the mouse.
 	if (three.input.isDown('a')) heading -= TURN * dt;
