@@ -167,10 +167,12 @@ function report() {
 	);
 }
 
-let running = true;
 three.onKeyDown('space', () => {
-	running = !running;
-	console.log(running ? 'running' : 'held');
+	// The clock rather than a flag of this scene's own, and the difference is
+	// visible: a flag here would hold the procedural bone below and leave the
+	// *clips* playing, because clips are advanced by the host. Zero holds both.
+	three.clock.timeScale = three.clock.paused ? 1 : 0;
+	console.log(three.clock.paused ? 'held' : 'running');
 });
 three.onKeyDown('0', () => show(-1));
 three.onKeyDown('1', () => show(0));
@@ -189,9 +191,8 @@ report();
 // The clock. The two clip-driven rows advance themselves — a player is per
 // instance and the host steps them — so the only thing this callback does is
 // the middle row, which has no clip and exists to be written to.
-three.setAnimationLoop((ms) => {
-	if (!running) return;
-	const t = ms / 1000;
+three.setAnimationLoop(() => {
+	const t = three.clock.time;
 	for (const h of heroes) {
 		if (!h.bone) continue;
 		// A procedural pose: the thing a baked table cannot express, because

@@ -351,6 +351,82 @@ const controls = {
 };
 
 // -----------------------------------------------------------------------
+// The clock
+//
+// Not a Three.js API in this shape — Three.js has a `Clock` you construct
+// and ask for a delta, and nothing that a pause would reach. This one is
+// the host's, there is one of it, and everything in a frame that moves is
+// downstream of it: the clips, the solver, the fixed loop below, the
+// follow camera, the argument the animation callback is handed, and
+// `p.time` in a post body.
+//
+// **That list is the whole feature.** `dt` on its own is a subtraction any
+// script could do — and every example here used to. What no subtraction
+// buys is `timeScale = 0`, because a script stopping its own arithmetic
+// still leaves a world running underneath it: a clip playing, a body
+// falling, a post pass animating.
+//
+// Seconds, everywhere, like Three.js's `Clock` and like `p.time`. The one
+// place milliseconds survive is the animation callback's argument, which
+// keeps Three.js's units because it keeps Three.js's name — it is this
+// same clock, times a thousand.
+
+const clock = {
+	// Game seconds since the first frame. Monotonic, and frozen while
+	// paused rather than merely ignored.
+	get time() { return H.clockTime(); },
+	set time(_) { throw new TypeError('three.clock.time is what the frames have added up to — three.clock.advance(seconds) moves it'); },
+
+	// What the frame being drawn is worth, in game seconds. Zero before
+	// the first frame and zero while paused, so `x += speed * three.clock.dt`
+	// needs no `if` to respect a pause.
+	//
+	// Clamped: a frame that took longer than 100 ms of wall time reports
+	// 100 ms of it and drops the rest, so a breakpoint or a long tool call
+	// stutters rather than teleporting everything a second forward.
+	get dt() { return H.clockDelta(); },
+	set dt(_) { throw new TypeError('three.clock.dt is what the last frame was worth — three.clock.timeScale is the knob'); },
+
+	// Wall time to game time. 1 is real time, 0.25 is slow motion, 3 is
+	// fast forward, 0 is paused. Negative throws: nothing downstream of
+	// this can run backwards.
+	get timeScale() { return H.clockScaleGet(); },
+	set timeScale(v) { H.clockScaleSet(+v); },
+
+	// Whether the clock is stopped. A getter and not a setter, because a
+	// `paused` that remembered the scale it interrupted would be a second
+	// place the scale comes from, and the next script to read `timeScale`
+	// would have to know which of the two was in play. Pause with
+	// `timeScale = 0` and resume by writing the scale you want.
+	get paused() { return H.clockScaleGet() === 0; },
+	set paused(_) { throw new TypeError('pause with three.clock.timeScale = 0, and resume by setting it back to 1'); },
+
+	// How many fixed steps a second of game time is worth. 60 by default,
+	// 1 to 240. It does not change the solver's rate, which is 60 Hz and
+	// is the solver's business.
+	get fixedRate() { return H.clockRateGet(); },
+	set fixedRate(hz) { H.clockRateSet(+hz); },
+
+	// One fixed step in seconds — the number `setFixedLoop`'s callback is
+	// handed, available outside it for a script that wants to size
+	// something against the step.
+	get fixedDelta() { return 1 / H.clockRateGet(); },
+	set fixedDelta(_) { throw new TypeError('three.clock.fixedDelta follows three.clock.fixedRate — set the rate'); },
+
+	// Move the clock by hand, whatever the scale is. What makes a pause
+	// steppable: `three.clock.timeScale = 0` and then `advance(1 / 60)` is
+	// exactly one frame of world — the clips, the bodies, the fixed steps
+	// and `p.time`, all of it, once.
+	//
+	// It lands on the next frame rather than immediately, because
+	// everything that consumes a delta is downstream of one conversion at
+	// the top of the frame. Under `--mcp` that means a run_script that
+	// advances is followed by a frame and then a screenshot; in a window
+	// the frames are already arriving.
+	advance(seconds) { H.clockAdvance(+seconds); },
+};
+
+// -----------------------------------------------------------------------
 // The keyboard
 //
 // Not a Three.js API — Three.js has no input layer at all, and this is in
@@ -474,6 +550,7 @@ export const three = {
 	camera,
 	light,
 	controls,
+	clock,
 
 	// How long this script may run before the interrupt stops it, in
 	// milliseconds. 5,000 by default, and raisable to ten minutes.
@@ -724,9 +801,17 @@ export const three = {
 	// no frame loop in core either.
 	//
 	// The callback runs on the host's loop, between the input and the draw,
-	// and is given the milliseconds since the host started counting — the
-	// same argument `WebGLRenderer.setAnimationLoop` passes. It must be
-	// synchronous: it has one frame to finish in, and there is no later.
+	// and is given milliseconds — the same argument
+	// `WebGLRenderer.setAnimationLoop` passes. It must be synchronous: it
+	// has one frame to finish in, and there is no later.
+	//
+	// **The milliseconds are the game clock's**, which is `three.clock.time`
+	// times a thousand and not the host's wall clock. On an ordinary frame
+	// of an unpaused game there is no difference; the difference is that
+	// `three.clock.timeScale = 0` stops it, and a pause that did not reach
+	// this argument would be a still world with the propellers still
+	// turning — most of what moves in most of these scenes is a function of
+	// this number.
 	setAnimationLoop(fn) {
 		if (fn === null || fn === undefined) { H.setFrame(null); return; }
 		if (typeof fn !== 'function') {
@@ -743,6 +828,40 @@ export const three = {
 			);
 		}
 		H.setFrame(fn);
+	},
+
+	// The other loop: gameplay, at a fixed rate, however fast the frames
+	// happen to be arriving.
+	//
+	// The callback is called zero or more times per frame — as many as the
+	// clock owes at `three.clock.fixedRate`, up to eight — and is handed the
+	// step in seconds, which is the *same number every call*. That constant
+	// is the whole point: an integration written against it produces the
+	// same trajectory on a slow machine as on a fast one, which a variable
+	// `dt` cannot promise however carefully it is clamped.
+	//
+	// **The accumulator is the host's**, not something to write in the
+	// animation callback. One in a script runs inside the script budget, so
+	// a frame that owes eight steps spends eight steps of it, and a spiral
+	// of death stops the callback for good rather than merely stuttering —
+	// the same reason the solver's accumulator is the host's.
+	//
+	// It runs before the animation callback and after the frame's physics,
+	// so what it writes this frame is drawn this frame and read by the
+	// solver on the next one. Stopped the same three ways the animation
+	// callback is, and with `three.setFixedLoop(null)`.
+	setFixedLoop(fn) {
+		if (fn === null || fn === undefined) { H.setFixed(null); return; }
+		if (typeof fn !== 'function') {
+			throw new TypeError('three.setFixedLoop(fn) wants a function, or null to stop');
+		}
+		if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+			throw new TypeError(
+				'the fixed loop must be synchronous — an async one returns before it has done '
+				+ 'anything, and the step does not wait. Do the awaiting in a run_script.'
+			);
+		}
+		H.setFixed(fn);
 	},
 
 	// Every .glb and .gltf in the assets directory, described without being

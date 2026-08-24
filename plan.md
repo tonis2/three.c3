@@ -44,7 +44,8 @@ compiled at runtime and cached. Picking, parametric shapes, glTF in and out,
 physics, animation, skinning, one directional light with a shadow, a post chain,
 material layers, and a mouse and keyboard a script can read and a scene can take
 away from the camera. The camera follows things now — third person, and first
-person as a boom of zero length.
+person as a boom of zero length. And there is a clock: game time, a scale that
+zero means paused, a step for a stopped one, and a fixed-rate loop under it.
 
 **That paragraph is as much inventory as this file keeps.** What each of those
 does is in its own source file, and `git log -p -- plan.md` has the milestone
@@ -251,18 +252,6 @@ the decision can be revisited on evidence rather than on somebody's mood.
   **Trigger:** a first request for depth-aware post. Do it with `p.depth` already
   linearized to world units, using the camera's derived near and far, rather than
   handing over the raw buffer.
-
-- **`p.time` is a wall clock, not a game clock.** `PostPass` reads
-  `clock::now()` at `set` and reports the seconds since, so a post pass animates
-  at real-time speed and keeps animating while the simulation is paused, stepped
-  or scrubbed. Nothing in `render/post.c3` knows a simulation exists — the frame
-  loop's elapsed milliseconds are a `frame_loop.c3` concept and the physics
-  world's step count is a third clock again — and picking one of them here would
-  be choosing on behalf of a caller that has not asked yet. The workaround is a
-  uniform: declare `t` and write it from the animation callback, which is one
-  line and gives the body exactly the clock the script means. **Trigger:** a
-  screenshot test that has to be reproducible with a post pass active, or a
-  pause that has to look paused.
 
 - **A stale asset handle is refused at `add()`, not at `new three.Mesh()`.** The
   constructor validates the shape of what it was handed and not the liveness of
@@ -994,6 +983,7 @@ rather than a trade against them.)*
 one section. The engine draws a village, a crowd, a shadow and a post chain; what
 no script can do is let somebody *play* in one, and every gap between those two
 sentences is in the same three places — the camera, the mouse, and the clock.
+Two of the three are answered below; the mouse is the one still open.
 
 **This section was found by reading, not by using**, and that is a weaker warrant
 than the rest of this file has. Every other entry earned its place by stopping a
@@ -1209,14 +1199,41 @@ broadphase to fix it exists and is unbound — see the queries entry below.
 
 ### The clock, and the rest of the plumbing
 
-- **There is no game clock.** §2 already records that `p.time` is a wall clock
-  that keeps running while a simulation is paused; the general version of that is
-  that nothing in the engine has a notion of game time at all. A script gets
-  elapsed milliseconds and owns everything else. What is missing is small and
-  load-bearing: `dt`, a `timeScale` that zero means paused, a fixed-step
-  accumulator so gameplay does not vary with frame rate, and the single source
-  the post chain's `p.time` should have been reading. **Nothing can pause today**,
-  which is also why the screenshot-reproducibility trigger in §2 is still open.
+- **The clock is built.** *(`three.clock.time` and `.dt` in seconds,
+  `.timeScale` where zero is paused, `.advance(seconds)` to step a stopped one,
+  `.fixedRate`, and `three.setFixedLoop(fn)` beside `setAnimationLoop`.
+  `src/scene/clock.c3` carries the design and `test/clock_test.c3` the twenty
+  checks.)* §2's `p.time` deferral went with it and has been swept.
+
+  Three decisions from building it, kept because they are the ones somebody
+  would undo by accident.
+
+  **There is one conversion and everything is handed its result.** `tick` calls
+  `GameClock.advance_frame` once, before anything asks what a frame is worth,
+  and passes the answer to the clip player, the solver, the fixed accumulator,
+  the follow camera and the callback. That is what makes the pause a pause:
+  there is no `if (paused)` in `scene/animation.c3`, `scene/physics.c3` or
+  `scene/camera.c3`, because a stopped clock hands all of them a zero. A second
+  consumer differencing the host's reading for itself would be a second clock
+  and would keep running, which is precisely the bug this replaced.
+
+  **The animation callback's argument is the game clock, not the host's.** It
+  keeps Three.js's name and units and stops being Three.js's number, and the
+  reason is that most of what moves in most of these scenes is a function of it
+  — every file in `examples/` computes a phase or a delta from that argument. A
+  pause that stopped the clips and the solver and left it climbing would be a
+  still world with the propellers still turning.
+
+  **The solver keeps its own accumulator**, fed the same game milliseconds and
+  running at its own 60 Hz. Two accumulators that agree by construction is worth
+  more than one shared one: a script setting `fixedRate = 30` must not quietly
+  halve the accuracy of every contact in the scene, and a physics rate is a
+  property of that solver's stability rather than of a game's taste.
+
+  What it did **not** answer, and both belong where they already are: a seeded
+  RNG, without which the determinism `state_hash` proves is thrown away by one
+  `Math.random()` in the gameplay layer (§6), and clip events, which are the
+  animation entry above.
 
 - **Timers, seeded RNG, saving** — all three are §6's last bullet, and the RNG one
   is worth more than it looks. `collision.c3l` advertises deterministic lockstep
@@ -1240,11 +1257,16 @@ broadphase to fix it exists and is unbound — see the queries entry below.
 1. **Pointer lock**, with §1's live-resize delta. There is a first-person camera
    now, so both of them have something to be wrong for: a look that stops at the
    screen edge, and one that spins while the window is resized.
-2. **The clock**, because everything after it is written against `dt`.
+2. ~~**The clock**~~ — built. Everything below is written against
+   `three.clock.dt` and belongs in `three.setFixedLoop`.
 3. **The character controller**, then **animation blending** — the point at which
    there is a thing to move and it looks like it is moving.
 4. **Navigation**, then the **queries** and **steering** that make it a crowd
    rather than one agent.
+
+The numbering is kept with the second entry struck rather than closed up,
+because the order was an argument and renumbering it would quietly claim the
+argument was different.
 
 ### What this does not cover
 
@@ -1342,3 +1364,26 @@ measurement this section does not have.
   benefit of a debug tool — and the failure it would prevent is visible in the
   picture the helper is being looked at in.
 
+TODO:
+
+  
+  - §1 defects — Linux/Windows never run; WM_DPICHANGED unhandled; Window.width/height stale on Linux; ExportBatch keys
+    on (asset, mesh) so sibling nodes collapse onto the first material.
+  - §2 — retire queue is pipelines-only; 104-byte uniform cap; mesh splitting; no material unit for glTF import
+    (metallic-roughness/normal/occlusion/emissive dropped, and alphaMode ignored on import for the same reason);
+    ConvexGeometry has no uvs; driver pipeline cache not persisted; Slang version not in the cache key; no third pass
+    source; no depth/normals in a post body.
+  - §3 — no crossfade, no morph targets, no sockets; a measured validation gap on the compute→vertex barrier.
+  - §4 — KTX2 decode is the big one: grep -rn ktx src test is empty, so every shipped .glb using KHR_texture_basisu
+    loads untextured. Plus asset.imageAt(i), async per-mesh load, and the sky.
+  - §5 — UI/text entirely unbuilt; input arbitration (the consume flag) is the hard part, and three.controls.enabled
+    doesn't answer it.
+  - §6 — audio, saving, timers/RNG/structuredClone.
+  - §7 — soft bodies, joints, snapshot/restore, character controller.
+  - §8/§9 — hot reload, gated on two undecided semantics questions (what happens to a live
+    setAnimationLoop/bodies/camera, and what main.js and run_script share).
+  - §12 — second light, per-light colour, specular term (which gates roughness/metalness everywhere: §4's maps, §14's
+    PBR fields, §16's export).
+  - §13 — the material unit, IBL bake, fusing pointwise passes; downsampled intermediates first.
+  - §14 — parallax; the PBR half is §12's.
+  - §16 — lines don't export.

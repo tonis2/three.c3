@@ -62,7 +62,9 @@ export const DOCS = {
 		'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 		'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
 		'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
-		'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. setAnimationLoop(null) stops the clock so a known state can be captured.',
+		'There is a GAME CLOCK, which Three.js has nothing quite like: three.clock.dt is what the frame being drawn is worth in seconds, three.clock.time is what the frames have added up to, and three.clock.timeScale is the multiplier — 0 is paused. It is not a convenience over differencing the callback\'s argument yourself. Everything in a frame that moves is downstream of it — the clips, the physics, the fixed loop, the follow camera, the argument setAnimationLoop is handed and p.time in a post body — so timeScale = 0 stops the WORLD, which no amount of a script stopping its own arithmetic can do.',
+		'Gameplay belongs in three.setFixedLoop(fn), which runs at three.clock.fixedRate (60 Hz) however fast frames arrive and hands the callback the same dt every call. Drawing the consequence belongs in setAnimationLoop. The accumulator is the host\'s: one written in the animation callback spends the script budget catching up and gets the callback stopped for good instead of merely stuttering.',
+		'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. three.clock.timeScale = 0 is the finer instrument: it freezes the world without unregistering anything, and three.clock.advance(seconds) then steps it by exactly as much as you ask, so two runs asking for the same amount draw the same frame. setAnimationLoop(null) still stops the callback outright.',
 		'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
 		'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
 		'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
@@ -73,7 +75,7 @@ export const DOCS = {
 		'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
 		'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
 		'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
-		'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral.',
+		'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
 		'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
 		'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
 		'Return a value from your script with `return`; it comes back as the `value` field.',
@@ -822,7 +824,45 @@ export const DOCS = {
 			+ 'run_script reports how many frames it ran, whether it is still running, and why it '
 			+ 'stopped if it did. Only one callback exists: registering a second replaces the first. '
 			+ 'It survives new three.Scene(), so a callback holding meshes from the old scene will '
-			+ 'throw on the next frame and be stopped — re-register it after rebuilding.',
+			+ 'throw on the next frame and be stopped — re-register it after rebuilding. The '
+			+ 'milliseconds are the GAME clock (three.clock.time * 1000), so they stop when '
+			+ 'three.clock.timeScale is 0 and start at 0 on the first frame rather than carrying '
+			+ 'the boot.',
+		'three.setFixedLoop(fn)':
+			'Run fn(dt) at a fixed rate — zero or more times per frame, as many as the clock owes at '
+			+ 'three.clock.fixedRate (60 Hz by default), capped at eight. dt is the SAME number every '
+			+ 'call, in seconds, which is what makes gameplay written against it produce the same '
+			+ 'result on a slow machine as on a fast one. This is where movement, timers and rules '
+			+ 'belong; setAnimationLoop is where drawing the consequence belongs. The accumulator is '
+			+ 'the host\'s, not yours: one written in the animation callback spends the script budget '
+			+ 'catching up and gets the callback stopped instead of stuttering. Runs after the '
+			+ 'frame\'s physics and before the animation callback. Same rules as setAnimationLoop — '
+			+ 'synchronous, one of them, null stops it.',
+		'three.clock.time / three.clock.dt':
+			'The game clock, in SECONDS. time is what the frames have added up to and dt is what the '
+			+ 'frame being drawn is worth — 0 before the first frame and 0 while paused, so '
+			+ 'x += speed * three.clock.dt needs no check for a pause. dt is clamped: a frame that '
+			+ 'took longer than 100 ms of wall time reports 100 ms, so a breakpoint or a long tool '
+			+ 'call stutters rather than teleporting the world a second forward. Both are read-only.',
+		'three.clock.timeScale / three.clock.paused':
+			'Wall time to game time: 1 is real time, 0.25 is slow motion, 3 is fast forward and 0 is '
+			+ 'PAUSED. It reaches everything — the clips, the physics, the fixed loop, the follow '
+			+ 'camera, the argument setAnimationLoop is handed and p.time in a post body — because '
+			+ 'all of them are handed one delta rather than reading a clock of their own. Negative '
+			+ 'throws: nothing downstream of it can run backwards. paused is a read-only '
+			+ 'timeScale === 0; pause by writing 0 and resume by writing the scale you want back.',
+		'three.clock.advance(seconds)':
+			'Move the clock by hand, whatever the scale is — which is how a pause is single-stepped: '
+			+ 'three.clock.timeScale = 0 and then advance(1 / 60) is exactly one frame of world, '
+			+ 'clips and bodies and fixed steps and p.time together. It lands on the NEXT frame '
+			+ 'rather than immediately, so under --mcp the order is run_script, a frame, screenshot. '
+			+ 'Two runs that ask for the same amount draw the same picture, which is what makes a '
+			+ 'screenshot with a post pass reproducible.',
+		'three.clock.fixedRate / three.clock.fixedDelta':
+			'How many fixed steps a second of game time is worth — 60 by default, 1 to 240 — and '
+			+ 'the step that follows from it, in seconds. It does NOT change the solver\'s rate, '
+			+ 'which is 60 Hz and is the solver\'s business: a script asking for 30 Hz gameplay must '
+			+ 'not quietly halve the accuracy of every contact in the scene.',
 		'toJSON() / toString()':
 			'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
 			+ 'return an object from a script. Objects report their name, transform and children; a '

@@ -87,6 +87,11 @@ struct MeshPass
 	// scene those are indices into is the one on this struct; a follow held
 	// somewhere else would be a handle into a graph it could not see get reset.
 	CameraFollow follow;
+	// The game clock — `scene/clock.c3`. Here rather than on the runtime for the
+	// reason the follow is: the runtime advances it, and the *renderer* reads it
+	// while recording a post chain, with no runtime to ask. One clock, one
+	// answer to what time it is.
+	GameClock clock;
 	// The render target's width over its height, kept current by `record`.
 	// `frame_camera` needs it and has no target to ask — it is reached from a
 	// script, between frames — and fitting a 16:9 frame as though it were square
@@ -215,6 +220,9 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// same four and two spellings of a default drift — `DEFAULT_LIGHT` above has
 	// the same argument.
 	self.shadows.defaults();
+	// Running, at ordinary speed. The zero value of a `GameClock` is a stopped
+	// one — see `GameClock.defaults`.
+	self.clock.defaults();
 
 	String path = shader_path;
 	@pool()

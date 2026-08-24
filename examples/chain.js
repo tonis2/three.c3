@@ -168,8 +168,11 @@ three.onKeyDown('-', () => { D.intensity = Math.max(0.0, D.intensity - 0.05); })
 three.onKeyDown('a', () => { D.animating = !D.animating; });
 three.onKeyDown('o', () => { D.orbiting = !D.orbiting; });
 
-three.setAnimationLoop(ms => {
-	const t = ms / 1000;
+three.setAnimationLoop(() => {
+	// The game clock, in seconds. Not the callback's argument divided by a
+	// thousand: it is the same number, and this is the one that stops when
+	// `three.clock.timeScale` does.
+	const t = three.clock.time;
 
 	// Four uniform writes across four passes, through the four handles the four
 	// calls returned. Nothing here re-fetches a handle and nothing recompiles.

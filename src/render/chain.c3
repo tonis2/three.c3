@@ -58,7 +58,6 @@
 module three;
 
 import std::collections::list;
-import std::time;
 import vk;
 
 <*
@@ -174,6 +173,11 @@ struct PassIo
 	vk::Extent2D extent;
 	vk::Sampler sampler;
 	Assets* assets;
+	// The game clock, in seconds — `scene/clock.c3`. An argument at record time
+	// rather than a field on the chain, for the same reason `extent` is one: it
+	// is a fact about the frame being recorded, and a pass that read it from
+	// somewhere else could be recorded with a time the frame does not have.
+	double time;
 }
 
 <*
@@ -365,7 +369,10 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
 		self.tonemap.pipeline.init_post(gpu, &mod, target.color_format)!;
 	};
-	self.tonemap.since_set = clock::now();
+	// Stamped against the clock like any other stage, though `TONEMAP_BODY` reads
+	// no time: leaving it at whatever the struct started with would be one stage
+	// out of N whose `p.time` meant something different.
+	self.tonemap.set_at = self.now;
 }
 
 // ============================================================================
@@ -402,11 +409,20 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
  `cmdPipelineBarrier2` — which is what the single-pass version did — is possible
  and is not done, because it would move the open back out of the pass and there is
  no measurement saying the extra call costs anything.
+
+ @param now : `The game clock in seconds. Every stage is told it, and a stage set from here on is stamped against it.`
 *>
-fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Assets* assets = null)
+fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Assets* assets = null, double now = 0)
 {
 	sz count = self.stages.len();
 	if (count == 0) return;
+
+	// Kept so that a stage compiled *between* frames has something to stamp
+	// itself against. It is at worst one frame stale, which is the difference
+	// between `p.time` starting at zero and starting at a sixtieth — and the
+	// alternative, threading the clock into every `set` call site, would put the
+	// same number in two places for that.
+	self.now = now;
 
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(self.scene.image) }));
 
@@ -430,6 +446,7 @@ fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Ass
 			.extent = self.extent,
 			.sampler = self.sampler,
 			.assets = assets,
+			.time = now,
 		})!;
 
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(dst.image) }));
@@ -446,5 +463,6 @@ fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Ass
 		.extent = self.extent,
 		.sampler = self.sampler,
 		.assets = assets,
+		.time = now,
 	})!;
 }

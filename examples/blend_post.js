@@ -350,8 +350,8 @@ three.onKeyDown('t', () => {
 	for (const m of D.panes) m.visible = D.glass;
 });
 
-three.setAnimationLoop((t) => {
-	const s = t / 1000;
+three.setAnimationLoop(() => {
+	const s = three.clock.time;
 	// Live uniform writes: no compile, no pipeline, once per frame.
 	D.glowMat.uniforms.clock = s;
 	D.domeMat.uniforms.clock = s;

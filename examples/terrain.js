@@ -8,8 +8,9 @@
 // or paste it into `run_script` against a `./build/three --mcp`.
 //
 // Once it is running: `1`, `2` and `3` toggle the three layers, `s` cycles the
-// snow's blend mode, and `space` stops and starts the tide that fades the water
-// in and out. Left alone the tide runs by itself.
+// snow's blend mode, and `space` holds the clock — which stops the tide that
+// fades the water in and out, because the tide is a function of it. Left alone
+// the tide runs by itself.
 //
 // What it is here to show
 // -----------------------
@@ -188,7 +189,9 @@ console.log('generated shading body:\n' + ground.material.fragment);
 // The controls
 
 const A = {
-	tide: true,
+	// The tide's phase. Not a `running` flag beside it any more — the clock is
+	// what holds this scene, and a second switch for the same thing would be a
+	// second answer to whether it is moving.
 	t: 0,
 	// Radians a second, written as a period because that is the number anyone
 	// reading it wants. It was 0.6 — ten and a half seconds in and out again —
@@ -232,15 +235,17 @@ three.onKeyDown('2', () => A.toggle(1));
 three.onKeyDown('3', () => A.toggle(2));
 three.onKeyDown('s', () => A.cycleSnow());
 three.onKeyDown('space', () => {
-	A.tide = !A.tide;
-	console.log('tide ' + (A.tide ? 'running' : 'held'));
+	// The clock, not a flag of this scene's own. Holding the tide by skipping
+	// the write below would leave the rest of the frame running; zero holds
+	// everything a frame advances, which is what "held" ought to mean.
+	three.clock.timeScale = three.clock.paused ? 1 : 0;
+	console.log('tide ' + (three.clock.paused ? 'held' : 'running'));
 });
 
 // Three.js's own name, and the argument is milliseconds since the host started
 // counting rather than a delta.
-three.setAnimationLoop((ms) => {
-	if (!A.tide) return;
-	A.t = ms / 1000;
+three.setAnimationLoop(() => {
+	A.t = three.clock.time;
 	// The water is the last layer and the only animated one, so this is one
 	// float4 written per frame and nothing rebuilt. Every other layer's numbers
 	// are literals in the compiled body and could not be written from here even

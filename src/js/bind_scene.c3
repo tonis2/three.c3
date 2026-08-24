@@ -114,6 +114,13 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "backgroundSet", &js_background_set, 3);
 	self.bind(host, "budgetGet", &js_budget_get, 0);
 	self.bind(host, "budgetSet", &js_budget_set, 1);
+	self.bind(host, "clockTime", &js_clock_time, 0);
+	self.bind(host, "clockDelta", &js_clock_delta, 0);
+	self.bind(host, "clockScaleGet", &js_clock_scale_get, 0);
+	self.bind(host, "clockScaleSet", &js_clock_scale_set, 1);
+	self.bind(host, "clockRateGet", &js_clock_rate_get, 0);
+	self.bind(host, "clockRateSet", &js_clock_rate_set, 1);
+	self.bind(host, "clockAdvance", &js_clock_advance, 1);
 	self.bind(host, "lightGet", &js_light_get, 0);
 	self.bind(host, "lightSet", &js_light_set, 4);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
@@ -1165,6 +1172,205 @@ fn void js_budget_set(
 
 	self.script_budget_ns = ms * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
+}
+
+// ============================================================================
+// The clock
+// ============================================================================
+
+<*
+ The clock this runtime drives, or null with the refusal already raised.
+
+ `open(null)` is a context with no `MeshPass` — the module-loader checks, and
+ nothing that boots. It has no scene, no camera and no frames, so it has no
+ clock; saying so is better than the alternative both ways round, because a
+ getter answering zero and a setter quietly dropping the write is the property
+ `api.js` throws on assignment three separate times to avoid.
+*>
+fn GameClock* JsRuntime.clock_or_raise(&self, qjs::Context* js, qjs::Value* out)
+{
+	if (self.pass == null)
+	{
+		*out = js.raise("there is no clock here — this runtime was opened with no scene");
+		return null;
+	}
+	return &self.pass.clock;
+}
+
+<*
+ `clockTime()` — the game clock, in seconds.
+
+ ## Seven scalar verbs and not one object
+
+ `pointer()` and `lightGet()` pack their fields into one JavaScript object so
+ that reading four of them is one crossing. This does the opposite, and
+ `plan.md` §17's measurements are why: a host call returning a number costs
+ 55 ns and one that allocates an object to answer costs 185, and unlike a light
+ direction these are read *per frame by gameplay* — `three.clock.dt` is the
+ argument to every integration in a script. The rule the measurements gave is
+ that a verb returning a scalar is cheaper than the arithmetic it replaces and a
+ verb that allocates to answer is a loss on every call forever, so the clock is
+ seven scalar verbs.
+*>
+fn void js_clock_time(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+	*out = qjs::number_value(clock.time);
+}
+
+<*
+ `clockDelta()` — what the frame being drawn is worth, in game seconds.
+
+ Zero before the first tick and zero while paused, which is the answer a script
+ wants in both cases: an integration multiplied by it does nothing, with no flag
+ to test and no branch to forget.
+*>
+fn void js_clock_delta(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+	*out = qjs::number_value(clock.dt);
+}
+
+<*
+ `clockScaleGet()` — the multiplier from wall time to game time.
+*>
+fn void js_clock_scale_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+	*out = qjs::number_value(clock.scale);
+}
+
+<*
+ `clockScaleSet(v)` — slow motion, fast forward, and zero for a pause.
+
+ ## Why negative is refused rather than clamped
+
+ A rewind is not a thing anything downstream of the clock can do. A clip would
+ have to be sampled backwards, the solver cannot run backwards at all, and a
+ fixed accumulator fed a negative delta would sit at a negative balance until
+ enough forward time arrived to clear it — three different wrong behaviours from
+ one assignment. Refusing by name is the only version of this that says which
+ one you get.
+
+ There is no ceiling, because the wall delta is clamped *before* the scale is
+ applied: a scale of a thousand is a thousand times a hundred milliseconds at
+ worst, which is a hundred seconds of clip in one frame — absurd, and absurd in
+ the direction the caller asked for rather than in a direction the engine chose.
+*>
+fn void js_clock_scale_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+
+	double asked = arg_number(&js, argc, args, 0);
+	if (!math::is_finite(asked) || asked < 0)
+	{
+		*out = js.raise(
+			"three.clock.timeScale wants zero or more — zero is paused, and there is no way to run time backwards"
+		);
+		return;
+	}
+	clock.scale = asked;
+}
+
+<*
+ `clockRateGet()` — how many fixed steps a second of game time is worth.
+*>
+fn void js_clock_rate_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+	*out = qjs::number_value(clock.fixed_hz);
+}
+
+<*
+ `clockRateSet(hz)` — change what a fixed step is.
+
+ **It does not change the solver's rate**, which stays at 60 Hz whatever this
+ says. The two are separate on purpose: a physics rate is a property of that
+ solver's stability rather than of a game's taste, and a script asking for 30 Hz
+ gameplay must not quietly halve the accuracy of every contact in the scene.
+
+ Refused outside `CLOCK_FIXED_HZ_MIN..CLOCK_FIXED_HZ_MAX` rather than clamped,
+ because both ends are mistakes rather than requests: below one, a "fixed step"
+ has stopped being a step of anything, and above the ceiling the answer is
+ always `CLOCK_MAX_FIXED_STEPS` steps a frame and a fixed loop that silently
+ runs slow.
+*>
+fn void js_clock_rate_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+
+	double asked = arg_number(&js, argc, args, 0);
+	if (!math::is_finite(asked) || asked < CLOCK_FIXED_HZ_MIN || asked > CLOCK_FIXED_HZ_MAX)
+	{
+		*out = js.raise(string::tformat(
+			"three.clock.fixedRate wants %d to %d steps a second — %g is not a rate a fixed loop can run at",
+			(int)CLOCK_FIXED_HZ_MIN, (int)CLOCK_FIXED_HZ_MAX, asked
+		));
+		return;
+	}
+	clock.fixed_hz = asked;
+}
+
+<*
+ `clockAdvance(seconds)` — move a stopped clock by hand.
+
+ What makes `timeScale = 0` a pause rather than a freezer, and what §2's
+ screenshot-reproducibility entry was waiting for: with the scale at zero the
+ only time that passes is time somebody asked for, so two runs that ask for the
+ same amount render the same frame — post pass included, because `p.time` is
+ this clock now.
+
+ It lands on the *next* tick rather than here, which is the property that makes
+ it honest: everything that consumes a delta is downstream of one call in
+ `tick`, so time moved on the spot would be time no clip, no body and no fixed
+ step ever saw.
+*>
+fn void js_clock_advance(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+
+	double asked = arg_number(&js, argc, args, 0);
+	if (!math::is_finite(asked) || asked < 0)
+	{
+		*out = js.raise("three.clock.advance(seconds) wants zero or more — a clock does not run backwards");
+		return;
+	}
+	clock.advance(asked);
 }
 
 <*

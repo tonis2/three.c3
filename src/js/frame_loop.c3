@@ -92,7 +92,19 @@ const usz JS_FRAME_LOG_BYTES = 8 * 1024;
 fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 {
 	self.bind(host, "setFrame", &js_set_frame, 1);
+	self.bind(host, "setFixed", &js_set_fixed, 1);
 }
+
+<*
+ What the two loop callbacks are called in the sentences that stop them.
+
+ Constants rather than literals at four call sites, because the frame's three
+ sentences are asserted on by name in `test/frame_test.c3` and a second loop
+ that phrased its own failures differently would be two vocabularies for one
+ mechanism.
+*>
+const String FRAME_CALLBACK = "the animation callback";
+const String FIXED_CALLBACK = "the fixed loop";
 
 <*
  Say that the frames belong to a program somebody is watching, not to an agent.
@@ -131,50 +143,29 @@ fn void JsRuntime.play_frames(&self)
 fn bool JsRuntime.is_animating(&self)
 {
 	if (self.pass != null && self.pass.scene.is_animating()) return true;
-	return self.frame_active || self.key_handler_count > 0 || self.click_active;
+	return self.frame_active || self.fixed_active || self.key_handler_count > 0 || self.click_active;
 }
 
 <*
- Turn the host's monotonic clock into a delta and advance every playing clip.
+ Advance every playing clip by what this frame is worth.
 
- **The runtime keeps no clock**, for `tick`'s reason: a step that read the wall
- clock could only be tested by waiting. What it keeps is the last reading it was
- given, which is the smallest possible amount of state for turning "milliseconds
- since the host started" into "seconds since the previous frame".
+ **The runtime still keeps no clock**, and now nothing else does either: the
+ wall-to-game conversion, the first-tick guard and the stall clamp all moved to
+ `GameClock.advance_frame`, which `tick` calls once and hands the result to
+ everything that needs a delta. What this used to do on its own is why they
+ moved — a second consumer differencing the host's reading after this one had
+ consumed it would be told that no time had passed.
 
- Two guards, both for the same class of problem — a delta that is not a frame:
+ Game milliseconds, so a paused clock stops the clips with no flag to test: the
+ delta is zero and the early return below is the pause.
 
- - **The first tick contributes nothing.** `elapsed_ms` is measured from process
-   start, so the first one carries the whole boot: window creation, device
-   selection, the script's own load. A clip played during boot would begin
-   half a second in.
- - **A delta is clamped to 100 ms.** A longer one means the process was stalled
-   — a breakpoint, a swap storm, a `run_script` that took its whole budget —
-   and no clip should teleport through a second of itself because of it. This
-   cannot mask a *sleeping* window, because a playing clip is precisely what
-   stops the window sleeping.
+ @param dt_ms : `This frame's game milliseconds, from GameClock.advance_frame.`
 *>
-fn double JsRuntime.step_animations(&self, double elapsed_ms)
+fn void JsRuntime.step_animations(&self, double dt_ms)
 {
-	if (self.pass == null) return 0;
-
-	double delta_ms = self.clock_started ? elapsed_ms - self.last_elapsed_ms : 0;
-	self.last_elapsed_ms = elapsed_ms;
-	self.clock_started = true;
-
-	if (delta_ms <= 0) return 0;
-	if (delta_ms > ANIMATION_MAX_STEP_MS) delta_ms = ANIMATION_MAX_STEP_MS;
-
-	self.pass.scene.step_animations((float)(delta_ms / 1000.0));
-	// Handed back rather than recomputed by the next caller: this function
-	// consumes `last_elapsed_ms`, so anything else asking the clock the same
-	// question after it would be told nothing happened. `tick` gives it to
-	// physics, which needs exactly this delta and the same clamp.
-	return delta_ms;
+	if (self.pass == null || dt_ms <= 0) return;
+	self.pass.scene.step_animations((float)(dt_ms / 1000.0));
 }
-
-// The longest single step any clip will take. See `step_animations`.
-const double ANIMATION_MAX_STEP_MS = 100.0;
 
 <*
  Run the callback once, if there is one.
@@ -190,7 +181,17 @@ const double ANIMATION_MAX_STEP_MS = 100.0;
  answers about the last frame the window drew, which is the only answer that
  could be right.
 
- @param elapsed_ms : `What the callback is told, as Three.js's setAnimationLoop tells it: milliseconds, monotonic, from whenever the host started counting.`
+ **What the host says and what the callback is told are no longer the same
+ number.** The host's reading is a wall clock; the callback is handed the *game*
+ clock, which is that reading through `GameClock.advance_frame` — scaled,
+ clamped and stoppable. They differ by nothing at all on an ordinary frame of an
+ unpaused game, which is why the argument keeps Three.js's name, its units and
+ its monotonicity; they differ by everything the moment somebody pauses, which
+ is the point. A callback computing a rotation from its argument is most of what
+ moves in most of these scenes, and a pause that did not reach it would be a
+ still world with the propeller still turning.
+
+ @param elapsed_ms : `Milliseconds, monotonic, from whenever the host started counting — a wall clock. What the callback is told is this through the game clock.`
  @param input : `This frame's keyboard and mouse. Default-empty, for a host that has no window and for the checks that only care about the callback.`
  @return `true when something ran, false when nothing is registered — so a caller can tell an idle loop from a running one without asking twice.`
 *>
@@ -202,12 +203,27 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// called `three.input.press`.
 	self.take_input(self.synthetic.merge(input));
 
-	// **Animation first, and above the early return.** `game.md` G3/S6: the step
+	// **The clock first, before anything asks what a frame is worth.** One
+	// conversion, one answer: the clip player, the solver, the fixed loop, the
+	// follow camera and the callback are all handed this number rather than
+	// differencing the host's reading themselves, which is what makes
+	// `three.clock.timeScale = 0` a pause instead of five separate ones.
+	double delta_ms = self.pass.clock.advance_frame(elapsed_ms);
+
+	// **Taken every frame, whether or not anything is registered to run them.**
+	// An accumulator left filling while no fixed loop was set would fire a
+	// frame's worth of catch-up the moment one was — a game whose first gameplay
+	// step is eight steps long, for no reason a script could see. The count is
+	// consumed here and spent below, inside the budget, because spending it is
+	// calling into JavaScript.
+	int fixed_steps = self.pass.clock.take_fixed_steps();
+
+	// **Animation next, and above the early return.** `game.md` G3/S6: the step
 	// happens in the host frame *before* the callback, so a callback can read
 	// where a character got to this frame rather than where it was last frame —
 	// and so a clip plays with no `setAnimationLoop` registered at all, which is
 	// the case the early return below would otherwise refuse.
-	double delta_ms = self.step_animations(elapsed_ms);
+	self.step_animations(delta_ms);
 
 	// **Physics next, and above the early return, for the same two reasons the
 	// animation step is above it** (`game.md` G3/S6, G5/S1): a callback should
@@ -273,7 +289,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// already happened, so a handler that reacts to a hit and a callback that
 	// draws the consequence run in that order within one frame.
 	if (!self.timed_out) self.dispatch_physics_events();
-	if (!self.timed_out && self.frame_active) self.call_frame(elapsed_ms);
+	// **Fixed steps before the frame callback**, so a callback drawing the
+	// consequence of a gameplay step draws this frame's rather than last
+	// frame's. It is the same ordering argument the clip and the solver make one
+	// level up, and it is why both of those are above the early return while
+	// this is not: they are the host's work and this is a script's.
+	if (!self.timed_out && self.fixed_active) self.call_fixed(fixed_steps);
+	if (!self.timed_out && self.frame_active) self.call_frame(self.pass.clock.time * 1000.0);
 	if (!self.timed_out) self.drain_frame_jobs();
 
 	self.in_frame = false;
@@ -309,19 +331,67 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 
 <*
  The animation callback, called once.
+
+ @param time_ms : `The game clock in milliseconds. See tick on why it is not the host's reading.`
 *>
-fn void JsRuntime.call_frame(&self, double elapsed_ms)
+fn void JsRuntime.call_frame(&self, double time_ms)
 {
+	if (!self.call_loop(self.frame_fn, time_ms, FRAME_CALLBACK)) self.clear_frame();
+}
+
+<*
+ The fixed callback, called once per step this frame owes.
+
+ **The dt it is handed is a constant**, which is the whole of what a fixed step
+ is for: the same number every call whatever the frame rate did, so an
+ integration written against it produces the same trajectory on a slow machine
+ as on a fast one. `GameClock` has the accumulator and the cap.
+
+ The loop stops on the first step that fails, rather than running the remaining
+ seven into a callback that has already been taken away — and it stops on a
+ budget overrun without calling again, for the reason the dispatches in `tick`
+ give: a step interrupted on its first instruction would be stopped for
+ somebody else's overrun.
+*>
+fn void JsRuntime.call_fixed(&self, int steps)
+{
+	double dt = self.pass.clock.fixed_dt();
+	for (int i = 0; i < steps; i++)
+	{
+		if (self.timed_out) break;
+		if (!self.call_loop(self.fixed_fn, dt, FIXED_CALLBACK))
+		{
+			self.clear_fixed();
+			return;
+		}
+	}
+}
+
+<*
+ Call one of the two loop callbacks once and say whether it survived.
+
+ Shared because the three ways a callback stops are a property of *being called
+ inside a frame* rather than of which callback it is — a throw, the budget, and
+ returning a promise. What is not shared is which reference gets released, which
+ is why this reports the failure and the caller does the clearing.
+
+ @param what : `Which callback, for the sentence: FRAME_CALLBACK or FIXED_CALLBACK.`
+ @return `false when it misbehaved and must be taken away. The reason is already reported.`
+*>
+fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what)
+{
+	bool survived = true;
 	@pool()
 	{
-		qjs::Value[1] args = { qjs::number_value(elapsed_ms) };
-		qjs::Value? answer = self.js.call(self.frame_fn, qjs::undefined_value(), args[..]);
+		qjs::Value[1] args = { qjs::number_value(arg) };
+		qjs::Value? answer = self.js.call(callback, qjs::undefined_value(), args[..]);
 
 		if (catch err = answer)
 		{
-			self.stop_frame(self.timed_out
-				? self.frame_timeout_message()
-				: string::tformat("the animation callback threw and was stopped: %s", self.js.exception(tmem)));
+			self.report_frame_failure(self.timed_out
+				? self.loop_timeout_message(what)
+				: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem)));
+			survived = false;
 		}
 		else
 		{
@@ -333,13 +403,16 @@ fn void JsRuntime.call_frame(&self, double elapsed_ms)
 
 			if (promised)
 			{
-				self.stop_frame(
-					"the animation callback returned a promise. It has to finish inside the frame, "
-					"so it must be synchronous — do the awaiting in a run_script instead"
-				);
+				self.report_frame_failure(string::tformat(
+					"%s returned a promise. It has to finish inside the frame, "
+					"so it must be synchronous — do the awaiting in a run_script instead",
+					what
+				));
+				survived = false;
 			}
 		}
 	};
+	return survived;
 }
 
 <*
@@ -355,6 +428,16 @@ fn void JsRuntime.clear_frame(&self)
 	self.js.release(self.frame_fn);
 	self.frame_fn = qjs::undefined_value();
 	self.frame_active = false;
+}
+
+// The same, for the fixed loop. `close` calls both, and for the same reason:
+// the reference has to go back while there is still a context to give it to.
+fn void JsRuntime.clear_fixed(&self)
+{
+	if (!self.fixed_active) return;
+	self.js.release(self.fixed_fn);
+	self.fixed_fn = qjs::undefined_value();
+	self.fixed_active = false;
 }
 
 <*
@@ -393,11 +476,15 @@ fn void JsRuntime.report_frame_failure(&self, String why)
  five seconds. The number and the thing it names have to come from the same
  place or the message is free to be wrong in exactly the case it is read in.
 *>
-fn String JsRuntime.frame_timeout_message(&self)
+fn String JsRuntime.frame_timeout_message(&self) => self.loop_timeout_message(FRAME_CALLBACK);
+
+// The same sentence for whichever loop ran long. See `frame_timeout_message`
+// for why the number comes off `budget_ns` rather than off the constant.
+fn String JsRuntime.loop_timeout_message(&self, String what)
 {
 	return string::tformat(
-		"the animation callback ran for longer than %d ms in one frame and was stopped",
-		self.budget_ns / 1_000_000
+		"%s ran for longer than %d ms in one frame and was stopped",
+		what, self.budget_ns / 1_000_000
 	);
 }
 
@@ -588,6 +675,37 @@ fn void js_set_frame(
 
 	self.frame_fn = js.retain(args[0]);
 	self.frame_active = true;
+}
+
+<*
+ `__three.setFixed(fn)` — register, replace, or with null stop.
+
+ `js_set_frame`'s shape exactly, and a second callback rather than an argument
+ to the first one because the two answer different questions: the animation
+ callback runs once a frame and is where a script draws, and this runs however
+ many times the clock owes and is where a script *simulates*. A single callback
+ told which kind of call it was would be one function with two contracts, and
+ the frame-rate independence a fixed step exists for would be an `if` inside it.
+*>
+fn void js_set_fixed(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	self.clear_fixed();
+
+	if (argc < 1 || args[0].is_undefined() || args[0].is_null()) return;
+
+	if (!js.is_function(args[0]))
+	{
+		*out = js.raise("three.setFixedLoop(fn) wants a function, or null to stop");
+		return;
+	}
+
+	self.fixed_fn = js.retain(args[0]);
+	self.fixed_active = true;
 }
 
 <*
