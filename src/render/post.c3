@@ -177,19 +177,14 @@ struct PostStage (FullscreenPass)
 }
 
 <*
- The chain, and the one field `Renderer` reads to know whether there is one.
+ The chain, and `active()` is what `Renderer` asks to know whether there is one.
 
- Everything here is inert until `set` or `add` is called: `active` is false, the
- images are null, the list is empty and `record_chain` is never reached. That is
- the state a `Renderer` starts in and the state `clear` puts it back into.
+ Everything here is inert until `set` or `add` is called: the images are null,
+ the list is empty and `record_chain` is never reached. That is the state a
+ `Renderer` starts in and the state `clear` puts it back into.
 *>
 struct PostPass
 {
-	// Whether the frame goes through the chain. `stages.len() > 0`, kept as a
-	// field because `Renderer.record_scene` must read it exactly once — see there
-	// for why twice is a bug.
-	bool active;
-
 	// Image A: what the scene renders into, and what every pass reads as `scene`.
 	// Created lazily — a runtime that never sets a post shader never pays for a
 	// second full-size attachment.
@@ -306,7 +301,6 @@ fn void? PostPass.set(
 	// Past every fault: from here the swap cannot fail half way.
 	self.drop_stages(gpu, assets);
 	self.stages.push(built);
-	self.active = true;
 }
 
 <*
@@ -397,7 +391,6 @@ fn uint? PostPass.add(
 		// process being wrong, and the fault reaches the script.
 		self.ensure_keeps(gpu)!;
 	}
-	self.active = true;
 	return (uint)self.stages.len() - 1;
 }
 
@@ -531,9 +524,8 @@ fn PostStage*? PostPass.build_stage(
 *>
 fn void PostPass.clear(&self, Gpu* gpu, Assets* assets = null)
 {
-	if (!self.active) return;
+	if (!self.active()) return;
 	self.drop_stages(gpu, assets);
-	self.active = false;
 }
 
 <*
@@ -575,12 +567,23 @@ fn void PostPass.drop_stages(&self, Gpu* gpu, Assets* assets)
 *>
 fn PostStage* PostPass.stage(&self, uint index)
 {
-	if (!self.active || index >= self.stages.len()) return null;
+	if (index >= self.stages.len()) return null;
 	return self.stages[index];
 }
 
 // How many passes a script has put in the chain. The tonemap is not one of them.
 fn uint PostPass.count(&self) => (uint)self.stages.len();
+
+<*
+ Whether the frame goes through the chain.
+
+ Derived rather than a field: every stage push and every `drop_stages` would
+ otherwise have to keep a `bool` in step with the list, and the frame a
+ disagreement produces is a black one — image A written by nobody. The "read it
+ exactly once" rule `Renderer.record_scene` needs is served by the local it
+ already copies this into, not by the answer being stored.
+*>
+fn bool PostPass.active(&self) => self.stages.len() > 0;
 
 <*
  Point a uniform at new values.
@@ -809,15 +812,11 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 
 	vk::cmdBeginRendering(cmd, &rendering);
 
+	set_full_viewport(cmd, io.extent, false);
+
+	// Also the first two floats of the push block below.
 	float width  = (float)io.extent.width;
 	float height = (float)io.extent.height;
-	vk::cmdSetViewport(
-		cmd,
-		0,
-		1,
-		(vk::Viewport[]) { { .x = 0, .y = 0, .width = width, .height = height, .minDepth = 0.0, .maxDepth = 1.0 } }
-	);
-	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = io.extent } });
 
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
 

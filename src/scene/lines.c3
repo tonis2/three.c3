@@ -328,7 +328,11 @@ fn AssetId? Assets.wireframe(&self, Gpu* gpu, AssetId asset, uint mesh)
 			}
 		}
 
-		sort::quicksort(edges.array_view());
+		// Merge rather than quick for `Scene.build_draw_list`'s reason: the packed
+		// edges arrive in triangle order, which for a grid — a terrain, a plane —
+		// is already ascending over long stretches, and that is the input
+		// `std::sort::quicksort` degrades to quadratic on.
+		sort::mergesort(edges.array_view());
 
 		ulong previous = 0;
 		bool started = false;

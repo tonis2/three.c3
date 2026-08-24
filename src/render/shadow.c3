@@ -337,10 +337,7 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 	String path = find_shader("shadow.slang", mem)!;
 	defer path.free(mem);
 
-	String source = load_source(path)!;
-	defer source.free(mem);
-
-	ShaderModule mod = compile_slang(source, "shadow.slang", SHADOW_ENTRIES[..])!;
+	ShaderModule mod = compile_shader_file(path, SHADOW_ENTRIES[..], "shadow.slang")!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -422,8 +419,8 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 		direction = { 0, 1, 0 };
 	}
 
-	Vec3 centre  = (bounds.min + bounds.max) * 0.5f;
-	float radius = (bounds.max - bounds.min).length() * 0.5f;
+	Vec3 centre  = bounds.center();
+	float radius = bounds.extent().length();
 	if (radius < 1e-4f) radius = 1.0f;
 
 	// Straight down is the one direction `look_at` cannot use +Y for, and it is
@@ -438,7 +435,7 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 
 	// Degenerate on any axis means nobody supplied one, or the camera is looking
 	// away from the scene entirely. The whole box is the honest answer to both.
-	Vec3 span3 = focus.max - focus.min;
+	Vec3 span3 = focus.size();
 	if (span3.x <= 0.0f || span3.y <= 0.0f || span3.z <= 0.0f) focus = bounds;
 
 	collision::Aabb3 lit = transform_aabb(view, focus);
@@ -538,22 +535,16 @@ fn vk::DescriptorImageInfo ShadowMap.descriptor(&self)
 *>
 fn void ShadowMap.begin(&self, vk::CommandBuffer cmd)
 {
-	vk::ImageMemoryBarrier2 to_attachment = {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	// UNDEFINED because the map is cleared on load, so there is nothing to preserve.
+	vk::ImageMemoryBarrier2 to_attachment = { ...IMAGE_BARRIER,
 		.image = self.image,
 		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		.srcAccessMask = (vk::AccessFlags2)0,
 		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, // Cleared on load, so there is nothing to preserve.
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
+		.subresourceRange = DEPTH_LEVEL,
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_attachment }));
 
@@ -569,14 +560,7 @@ fn void ShadowMap.begin(&self, vk::CommandBuffer cmd)
 
 	vk::cmdBeginRendering(cmd, &rendering);
 
-	float side = (float)self.created;
-	vk::cmdSetViewport(
-		cmd,
-		0,
-		1,
-		(vk::Viewport[]) { { .x = 0, .y = side, .width = side, .height = -side, .minDepth = 0.0, .maxDepth = 1.0 } }
-	);
-	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = extent } });
+	set_full_viewport(cmd, extent, true);
 }
 
 <*
@@ -591,8 +575,7 @@ fn void ShadowMap.end(&self, vk::CommandBuffer cmd)
 {
 	vk::cmdEndRendering(cmd);
 
-	vk::ImageMemoryBarrier2 to_sampled = {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	vk::ImageMemoryBarrier2 to_sampled = { ...IMAGE_BARRIER,
 		.image = self.image,
 		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -600,13 +583,7 @@ fn void ShadowMap.end(&self, vk::CommandBuffer cmd)
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
+		.subresourceRange = DEPTH_LEVEL,
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_sampled }));
 }

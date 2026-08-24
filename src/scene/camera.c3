@@ -474,8 +474,7 @@ fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
 	float tan_half = math::tan(math::deg_to_rad(self.fov) * 0.5f);
 	Vec3 eye = self.eye();
 
-	const float HUGE = 3.0e38f;
-	collision::Aabb3 box = { .min = { HUGE, HUGE, HUGE }, .max = { -HUGE, -HUGE, -HUGE } };
+	collision::Aabb3 box = collision::NEW_AABB3;
 	float[2] depths = { near, far };
 	foreach (d : depths)
 	{
@@ -488,8 +487,8 @@ fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
 			foreach (sy : signs)
 			{
 				Vec3 corner = centre + right * (w * sx) + up * (h * sy);
-				box.min = { math::min(box.min.x, corner.x), math::min(box.min.y, corner.y), math::min(box.min.z, corner.z) };
-				box.max = { math::max(box.max.x, corner.x), math::max(box.max.y, corner.y), math::max(box.max.z, corner.z) };
+				box.min = math::min(box.min, corner);
+				box.max = math::max(box.max, corner);
 			}
 		}
 	}

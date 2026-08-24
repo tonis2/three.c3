@@ -852,6 +852,148 @@ fn void? MeshPipeline.build_layouts(
 }
 
 <*
+ What a graphics pipeline in this project looks like when nothing has asked for
+ anything unusual, and the fields the three constructors below vary.
+
+ Splatted the way `IMAGE_BARRIER` is — `{ ...GRAPHICS_PIPELINE, .stages = … }` —
+ so each constructor names exactly the settings its own doc block enumerates and
+ says nothing about the rest. A function taking these positionally would put four
+ booleans and two enums in a row at the call site.
+
+ Everything *not* here is the same for every pipeline in the project and lives in
+ `build_graphics`: an empty vertex input state, `defaultMultisampleState`, one
+ viewport and one scissor, and `POLYGON_MODE_FILL` with counter-clockwise front
+ faces.
+*>
+struct GraphicsPipelineDesc
+{
+	// One entry is a depth-only pipeline; two is vertex plus fragment. There is no
+	// third case here.
+	vk::PipelineShaderStageCreateInfo[] stages;
+	// The attachment formats the pass will actually begin with. Dynamic rendering
+	// checks these against the real attachments, so a wrong one is a validation
+	// error rather than a wrong picture.
+	vk::PipelineRenderingCreateInfo* rendering;
+	// One attachment for a pass that writes colour, zero for one that does not.
+	vk::PipelineColorBlendStateCreateInfo* color_blend;
+	vk::PrimitiveTopology topology;
+	// Ignored when `dynamic_cull` is set — see the rasterization state below.
+	vk::CullModeFlags cull;
+	// Declare `DYNAMIC_STATE_CULL_MODE` and let `MeshPass.record` set the
+	// material's own per bucket. Off for the post and shadow passes, deliberately:
+	// each runs on a path where an inherited dynamic value would decide whether
+	// the frame appears at all, and both say so in their headers.
+	bool dynamic_cull;
+	bool depth_test;
+	bool depth_write;
+}
+
+<*
+ A pipeline that draws opaque triangles, culls nothing, and neither tests nor
+ writes depth. Every field is overridden by somebody; the point is that a
+ constructor states its differences and not its agreements.
+*>
+const GraphicsPipelineDesc GRAPHICS_PIPELINE = {
+	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+	.cull = CULL_MODE_NONE,
+	.dynamic_cull = false,
+	.depth_test = false,
+	.depth_write = false,
+};
+
+<*
+ The half of a graphics pipeline that is the same whatever the pass rasterises.
+
+ `build_layouts` is the other shared half — the module's declarations turned into
+ Vulkan objects — and this is the fixed-function description that used to be
+ written out three times, once per constructor, agreeing in about forty lines and
+ differing in the eight `GraphicsPipelineDesc` carries. The fourth pass that
+ arrives is a `desc`, not a fourth copy.
+
+ **Counter-clockwise, the same as glTF's own convention, and the negative
+ viewport does not change that.** It is tempting to reason that
+ `gpu/target.c3`'s negative-height viewport mirrors the image and therefore
+ reverses the winding. It does not, and getting this backwards culls exactly the
+ faces that should be visible — which looks like a broken pipeline rather than a
+ raster setting, because validation is perfectly happy and the screen is empty.
+ The negative viewport exists to *undo* Vulkan's Y-down NDC so a glm-convention
+ projection works unchanged; undoing a flip is not a flip.
+
+ `POLYGON_MODE_FILL` only, whatever the topology: `fillModeNonSolid` is false on
+ the bundled driver, which is why `LINE_STATE` reaches lines through
+ `PRIMITIVE_TOPOLOGY_LINE_LIST` and an index buffer of pairs rather than through
+ a raster state (`plan.md` §1).
+
+ The depth compare op is always `LESS_OR_EQUAL`. Vulkan ignores it when
+ `depthTestEnable` is false, so the post pass carrying it costs nothing and the
+ alternative is a branch that reads as though it mattered.
+
+ @param mod : `Only its layout is read, and it is copied rather than moved — see the note at the end.`
+*>
+fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod, GraphicsPipelineDesc desc)
+{
+	// Empty, and that is the point: geometry arrives as buffer device addresses.
+	// There is no attribute-binding layer in this project.
+	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
+
+	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
+		.setTopology(desc.topology)
+		.setPrimitiveRestartEnable(vk::FALSE);
+
+	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
+		.setCullMode(desc.cull)
+		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
+		.setPolygonMode(POLYGON_MODE_FILL);
+
+	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
+
+	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
+		.setDepthTestEnable(desc.depth_test ? vk::TRUE : vk::FALSE)
+		.setDepthWriteEnable(desc.depth_write ? vk::TRUE : vk::FALSE)
+		.setDepthCompareOp(COMPARE_OP_LESS_OR_EQUAL);
+
+	// `CULL_MODE` alongside the two the swapchain needs, and only when the pass
+	// wants it. Core in Vulkan 1.3 with no feature bit, so there is nothing to
+	// query and nothing to fall back to — see `PipelineState` for why topology is
+	// not here beside it.
+	vk::DynamicState[3] dynamic_states = {
+		DYNAMIC_STATE_VIEWPORT,
+		DYNAMIC_STATE_SCISSOR,
+		DYNAMIC_STATE_CULL_MODE,
+	};
+	usz dynamic_used = desc.dynamic_cull ? 3 : 2;
+	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
+		.setDynamicStates(dynamic_states[:dynamic_used]);
+
+	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
+		.setScissorCount(1);
+
+	self.handle = vk::graphicsPipelineCreateInfo().setNext(desc.rendering).setStages(desc.stages)
+		.setVertexInputState(&vertex_input)
+		.setInputAssemblyState(&input_assembly)
+		.setViewportState(&viewport)
+		.setRasterizationState(&rasterization)
+		.setMultisampleState(&multisample)
+		.setColorBlendState(desc.color_blend)
+		.setDepthStencilState(&depth)
+		.setDynamicState(&dynamic)
+		.setLayout(self.layout)
+		.build(gpu.handle, gpu.driver_cache.handle)!;
+
+	// A copy, not a move. Until the pipeline cache learned to keep modules this
+	// took the module's own layout and left it empty, which was right while a
+	// module produced exactly one pipeline. It now produces one per render state —
+	// the line pass and the solid pass are one `mesh.slang`, and a material's two
+	// sides are one source — so the module has to survive with its layout intact.
+	//
+	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
+	// the argument against borrowing instead.
+	self.shader = mod.layout.copy();
+
+	return *self;
+}
+
+<*
  Build the mesh pipeline from a compiled Slang module.
 
  No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment
@@ -886,46 +1028,11 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		.setColorAttachmentFormats((vk::Format[]) { target.color_format })
 		.setDepthAttachmentFormat(target.depth_format);
 
-	// Empty, and that is the point: geometry arrives as buffer device
-	// addresses. There is no attribute-binding layer in this project.
-	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
-
-	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
-		.setTopology(state.topology)
-		.setPrimitiveRestartEnable(vk::FALSE);
-
-	// **Counter-clockwise, the same as glTF's own convention, and the negative
-	// viewport does not change that.**
-	//
-	// It is tempting to reason that `gpu/target.c3`'s negative-height viewport
-	// mirrors the image and therefore reverses the winding. It does not, and
-	// getting this backwards culls exactly the faces that should be visible —
-	// which looks like a broken pipeline rather than a raster setting, because
-	// validation is perfectly happy and the screen is empty. The negative
-	// viewport exists to *undo* Vulkan's Y-down NDC so a glm-convention
-	// projection works unchanged; undoing a flip is not a flip, so a triangle
-	// that is counter-clockwise in glTF space is counter-clockwise here.
-	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
-		// **Ignored.** `DYNAMIC_STATE_CULL_MODE` is declared below, so the value
-		// here is never read and `MeshPass.record` supplies the material's own.
-		// Written as the old default rather than left zero, because zero spells
-		// CULL_MODE_NONE and a reader who missed the dynamic state would take it
-		// for a deliberate choice.
-		.setCullMode(CULL_MODE_BACK_BIT)
-		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
-		// POLYGON_MODE_FILL only, whatever the topology. fillModeNonSolid is
-		// false on the bundled driver here, which is why `LINE_STATE` reaches
-		// lines through PRIMITIVE_TOPOLOGY_LINE_LIST and an index buffer of
-		// pairs rather than through a raster state (plan.md §1).
-		.setPolygonMode(POLYGON_MODE_FILL);
-
-	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
-
 	// **Baked in, because it cannot be anything else on this device.** Every
 	// colour-blend bit of `VK_EXT_extended_dynamic_state3` is false on the
 	// KosmicKrisp build this targets — Metal keeps blending inside the compiled
-	// pipeline state — so unlike the cull mode two lines up, this is a pipeline
-	// per mode and not a command per bucket. `plan.md` §10 has the probe that
+	// pipeline state — so unlike the cull mode, which `dynamic_cull` below turns
+	// into a command per bucket, this is a pipeline per mode. `plan.md` §10 has the probe that
 	// says so and `BlendMode` has the consequences.
 	//
 	// `vk::defaultColorBlendAttachment` is *already* standard alpha —
@@ -954,48 +1061,20 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
 
-	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
-		.setDepthTestEnable(state.depth_test ? vk::TRUE : vk::FALSE)
-		.setDepthWriteEnable(state.depth_write ? vk::TRUE : vk::FALSE)
-		.setDepthCompareOp(COMPARE_OP_LESS_OR_EQUAL);
-
-	// `CULL_MODE` alongside the two the swapchain needs. Core in Vulkan 1.3 with no
-	// feature bit, so there is nothing to query and nothing to fall back to — see
-	// `PipelineState` for why topology is not here beside it.
-	vk::DynamicState[3] dynamic_states = {
-		DYNAMIC_STATE_VIEWPORT,
-		DYNAMIC_STATE_SCISSOR,
-		DYNAMIC_STATE_CULL_MODE,
-	};
-	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
-		.setDynamicStates(dynamic_states[..]);
-
-	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
-		.setScissorCount(1);
-
-	self.handle = vk::graphicsPipelineCreateInfo().setNext(&rendering).setStages(stages[..])
-		.setVertexInputState(&vertex_input)
-		.setInputAssemblyState(&input_assembly)
-		.setViewportState(&viewport)
-		.setRasterizationState(&rasterization)
-		.setMultisampleState(&multisample)
-		.setColorBlendState(&color_blend)
-		.setDepthStencilState(&depth)
-		.setDynamicState(&dynamic)
-		.setLayout(self.layout)
-		.build(gpu.handle, gpu.driver_cache.handle)!;
-
-	// A copy, not a move. Until the pipeline cache learned to keep modules this
-	// took the module's own layout and left it empty, which was right while a
-	// module produced exactly one pipeline. It now produces one per render state —
-	// the line pass and the solid pass are one `mesh.slang`, and a material's two
-	// sides are one source — so the module has to survive with its layout intact.
-	//
-	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
-	// the argument against borrowing instead.
-	self.shader = mod.layout.copy();
-
-	return *self;
+	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
+		.stages = stages[..],
+		.rendering = &rendering,
+		.color_blend = &color_blend,
+		.topology = state.topology,
+		// **Ignored**, because `dynamic_cull` is set just below and
+		// `MeshPass.record` supplies the material's own per bucket. Written as the
+		// old default rather than left as the struct's `CULL_MODE_NONE`, because a
+		// reader who missed the dynamic state would take that zero for a choice.
+		.cull = CULL_MODE_BACK_BIT,
+		.dynamic_cull = true,
+		.depth_test = state.depth_test,
+		.depth_write = state.depth_write,
+	});
 }
 
 <*
@@ -1063,55 +1142,20 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
 		.setColorAttachmentFormats((vk::Format[]) { color_format });
 
-	// Empty, like every pipeline here — and for once literally rather than by
-	// convention: the three vertices come out of `SV_VertexID` arithmetic and
-	// there is no buffer behind them at all.
-	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
-
-	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
-		.setTopology(PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-		.setPrimitiveRestartEnable(vk::FALSE);
-
-	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
-		.setCullMode(CULL_MODE_NONE)
-		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
-		.setPolygonMode(POLYGON_MODE_FILL);
-
-	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
-
 	vk::PipelineColorBlendAttachmentState blend = vk::defaultColorBlendAttachment();
 	blend.blendEnable = vk::FALSE;
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::defaultColorBlendState(
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
 
-	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
-		.setDepthTestEnable(vk::FALSE)
-		.setDepthWriteEnable(vk::FALSE);
-
-	// Two, not three: the cull mode is static here. See the header.
-	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };
-	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
-		.setDynamicStates(dynamic_states[..]);
-
-	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
-		.setScissorCount(1);
-
-	self.handle = vk::graphicsPipelineCreateInfo().setNext(&rendering).setStages(stages[..])
-		.setVertexInputState(&vertex_input)
-		.setInputAssemblyState(&input_assembly)
-		.setViewportState(&viewport)
-		.setRasterizationState(&rasterization)
-		.setMultisampleState(&multisample)
-		.setColorBlendState(&color_blend)
-		.setDepthStencilState(&depth)
-		.setDynamicState(&dynamic)
-		.setLayout(self.layout)
-		.build(gpu.handle, gpu.driver_cache.handle)!;
-
-	self.shader = mod.layout.copy();
-
-	return *self;
+	// No depth of any kind, and `CULL_MODE_NONE` statically — both are the
+	// header's argument, and `dynamic_cull` staying false is the half that keeps
+	// an inherited cull mode from deciding whether the frame appears.
+	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
+		.stages = stages[..],
+		.rendering = &rendering,
+		.color_blend = &color_blend,
+	});
 }
 
 <*
@@ -1174,55 +1218,20 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
 		.setDepthAttachmentFormat(depth_format);
 
-	// Empty, like every pipeline here: geometry arrives as buffer device
-	// addresses. `shaders/shadow.slang` reads the same three streams the main
-	// pass does, through the same record.
-	vk::PipelineVertexInputStateCreateInfo vertex_input = vk::pipelineVertexInputStateCreateInfo();
-
-	vk::PipelineInputAssemblyStateCreateInfo input_assembly = vk::pipelineInputAssemblyStateCreateInfo()
-		.setTopology(PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-		.setPrimitiveRestartEnable(vk::FALSE);
-
-	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
-		.setCullMode(CULL_MODE_NONE)
-		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
-		.setPolygonMode(POLYGON_MODE_FILL);
-
-	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
-
 	// Zero attachments, which is legal precisely because the rendering info above
 	// declares none. Passed rather than left null so that nothing has to reason
 	// about which of the two spellings a driver accepts.
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::pipelineColorBlendStateCreateInfo();
 
-	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
-		.setDepthTestEnable(vk::TRUE)
-		.setDepthWriteEnable(vk::TRUE)
-		.setDepthCompareOp(COMPARE_OP_LESS_OR_EQUAL);
-
-	// Two, not three: the cull mode is static here. See the header.
-	vk::DynamicState[2] dynamic_states = { DYNAMIC_STATE_VIEWPORT, DYNAMIC_STATE_SCISSOR };
-	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
-		.setDynamicStates(dynamic_states[..]);
-
-	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
-		.setScissorCount(1);
-
-	self.handle = vk::graphicsPipelineCreateInfo().setNext(&rendering).setStages(stages[..])
-		.setVertexInputState(&vertex_input)
-		.setInputAssemblyState(&input_assembly)
-		.setViewportState(&viewport)
-		.setRasterizationState(&rasterization)
-		.setMultisampleState(&multisample)
-		.setColorBlendState(&color_blend)
-		.setDepthStencilState(&depth)
-		.setDynamicState(&dynamic)
-		.setLayout(self.layout)
-		.build(gpu.handle, gpu.driver_cache.handle)!;
-
-	self.shader = mod.layout.copy();
-
-	return *self;
+	// Depth tested and written is the whole output; `CULL_MODE_NONE` statically
+	// for the two reasons in the header.
+	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
+		.stages = stages[..],
+		.rendering = &rendering,
+		.color_blend = &color_blend,
+		.depth_test = true,
+		.depth_write = true,
+	});
 }
 
 fn void MeshPipeline.free(&self, Gpu* gpu)

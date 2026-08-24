@@ -384,6 +384,25 @@ fn Material* MeshPass.material(&self, uint index)
 }
 
 <*
+ The material an agent is allowed to change, or a fault saying why not.
+
+ **The built-in materials are refused.** `DEFAULT_MATERIAL` is shared by every
+ node that was never given one of its own and `LINE_MATERIAL` by every debug
+ line, so editing either would reach across every node at once through a handle
+ that reads like it names one thing. Every setter below goes through here, which
+ is what keeps that rule in one place rather than in each of them.
+
+ @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+*>
+fn Material*? MeshPass.editable(&self, uint index)
+{
+	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
+	Material* material = self.material(index);
+	if (material == null) return MATERIAL_UNKNOWN~;
+	return material;
+}
+
+<*
  Load a `.glb` and put one node on screen for each mesh in it.
 
  The flat placement is deliberate: this is the CLI's "show me this file", not a
@@ -455,16 +474,20 @@ fn collision::Aabb3 MeshPass.bounds(&self) => self.scene.bounds(&self.assets);
  `frame_bounds`'s reason: it is orientation independent, so the answer does not
  change as the turntable turns and the far plane does not breathe during a drag.
 
- Costs one walk of the node array, on camera moves only — not per frame. An
- empty scene answers with a unit box, whose reach is under the floor, so nothing
- special-cases it.
+ Costs one walk of the node array *and every vertex of every drawable mesh* —
+ `Scene.bounds` is exact, not conservative. That was "on camera moves only" when
+ only `Controls` called it; a follow camera calls it every tick, so a followed
+ scene pays it per frame, on top of the walk `MeshPass.prepare` already does for
+ the shadow fit. `plan.md` §19 has the fix — a box cached on `Scene` and dirtied
+ by the setters — and the reason it is not a one-line change is the invalidation.
+
+ An empty scene answers with a unit box, whose reach is under the floor, so
+ nothing special-cases it.
 *>
 fn void MeshPass.derive_camera_planes(&self)
 {
 	collision::Aabb3 bounds = self.scene.bounds(&self.assets);
-	Vec3 centre = (bounds.min + bounds.max) * 0.5f;
-	float radius = (bounds.max - bounds.min).length() * 0.5f;
-	self.camera.derive_planes((self.camera.eye() - centre).length() + radius);
+	self.camera.derive_planes((self.camera.eye() - bounds.center()).length() + bounds.extent().length());
 }
 
 <*
@@ -562,16 +585,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			collision::Aabb3 bounds = self.scene.bounds(&self.assets);
 			collision::Aabb3 seen = self.camera.view_bounds(aspect, self.shadows.distance);
 			collision::Aabb3 focus = {
-				.min = {
-					math::max(seen.min.x, bounds.min.x),
-					math::max(seen.min.y, bounds.min.y),
-					math::max(seen.min.z, bounds.min.z),
-				},
-				.max = {
-					math::min(seen.max.x, bounds.max.x),
-					math::min(seen.max.y, bounds.max.y),
-					math::min(seen.max.z, bounds.max.z),
-				},
+				.min = math::max(seen.min, bounds.min),
+				.max = math::min(seen.max, bounds.max),
 			};
 			self.shadows.fit(self.light, bounds, focus);
 			self.shadows.live = true;
@@ -756,7 +771,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 
  @param cmd : `A command buffer inside a render pass, on a frame prepare has run for.`
 *>
-fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
 	if (!self.prepared) return;
 
@@ -778,6 +793,15 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// disagree about which ones draw.
 		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
 		if (at == NOT_DRAWN) continue;
+		// **`visible`, not `count`** — the tail of a bucket is the copies only the
+		// light can see, and drawing them here would put geometry on screen the
+		// camera frustum rejected. `Bucket.visible` has why they are a prefix.
+		//
+		// Here rather than at the draw call, so a bucket the camera cannot see at
+		// all costs nothing instead of a pipeline bind, a cull mode, a descriptor
+		// collect and a push. With a shadow pass on, a caster behind the camera is
+		// the ordinary case — that is what §18.2 added.
+		if (bucket.visible == 0) continue;
 
 		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
 		Material* material = self.material(bucket.material);
@@ -906,10 +930,6 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// Index binding is independent of vertex bindings, which is why the
 		// pass can have an index buffer and no vertex input state at all.
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
-		// **`visible`, not `count`** — the tail of a bucket is the copies only the
-		// light can see, and drawing them here would put geometry on screen the
-		// camera frustum rejected. `Bucket.visible` has why they are a prefix.
-		if (bucket.visible == 0) continue;
 		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.visible, 0, 0, 0);
 	}
 }
@@ -1374,10 +1394,7 @@ fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 	String path = find_shader("skin.slang", mem)!;
 	defer path.free(mem);
 
-	String source = load_source(path)!;
-	defer source.free(mem);
-
-	ShaderModule mod = compile_slang(source, "skin.slang", SKIN_ENTRIES[..])!;
+	ShaderModule mod = compile_shader_file(path, SKIN_ENTRIES[..], "skin.slang")!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -1503,9 +1520,7 @@ fn uint? MeshPass.create_material(
 *>
 fn void? MeshPass.set_material_side(&self, uint index, int side)
 {
-	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
-	Material* material = self.material(index);
-	if (material == null) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 
 	material.cull = cull_for_side(side);
 }
@@ -1544,9 +1559,7 @@ fn void? MeshPass.set_material_side(&self, uint index, int side)
 *>
 fn void? MeshPass.set_material_opacity(&self, uint index, float opacity)
 {
-	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
-	Material* material = self.material(index);
-	if (material == null) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 
 	material.one_minus_opacity = 1.0f - opacity;
 }
@@ -1708,9 +1721,7 @@ fn float[4] MeshPass.material_uv(&self, uint index)
 *>
 fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 {
-	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
-	Material* material = self.material(index);
-	if (material == null) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 	if (material.texture == texture) return;
 
@@ -1759,9 +1770,7 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 *>
 fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name, int texture)
 {
-	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
-	Material* material = self.material(index);
-	if (material == null) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 
 	uint binding = material.binding_of_texture(name);
@@ -1817,9 +1826,7 @@ fn int MeshPass.material_texture(&self, uint index, String name)
 *>
 fn void? MeshPass.dispose_material(&self, Gpu* gpu, uint index)
 {
-	if (index == DEFAULT_MATERIAL || index == LINE_MATERIAL) return MATERIAL_UNKNOWN~;
-	Material* material = self.material(index);
-	if (material == null) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 	if (material.released) return;
 
 	material.released = true;

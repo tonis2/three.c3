@@ -992,7 +992,7 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
 			"and it does not name the agent's own line: %s",
 			diagnostic
 		);
-		test::@check(renderer.post.active, "a failed set left the pass inactive");
+		test::@check(renderer.post.active(), "a failed set left the pass inactive");
 
 		image::Image after = renderer.capture()!!;
 		defer after.free();

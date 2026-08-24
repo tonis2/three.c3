@@ -5092,7 +5092,7 @@ fn void a_bad_post_shader_throws_the_diagnostic() @test
 			"the throw does not carry the Slang text: %s",
 			result.value
 		);
-		test::@check(run.renderer.post.active, "the failed set left the pass with no shader at all");
+		test::@check(run.renderer.post.active(), "the failed set left the pass with no shader at all");
 	};
 }
 

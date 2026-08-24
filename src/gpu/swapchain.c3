@@ -258,39 +258,10 @@ fn void Viewer.free(&self, Gpu* gpu)
 // The blit — the swapchain's entire contribution
 // ============================================================================
 
-fn vk::ImageMemoryBarrier2 blit_barrier(
-	vk::Image target,
-	vk::ImageLayout from,
-	vk::ImageLayout to,
-	vk::PipelineStageFlags2 src_stage,
-	vk::AccessFlags2 src_access,
-	vk::PipelineStageFlags2 dst_stage,
-	vk::AccessFlags2 dst_access
-)
-{
-	return {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-		.image = target,
-		.srcStageMask = src_stage,
-		.srcAccessMask = src_access,
-		.dstStageMask = dst_stage,
-		.dstAccessMask = dst_access,
-		.oldLayout = from,
-		.newLayout = to,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
-	};
-}
-
 <*
  Blit the target into the acquired image and leave it presentable.
 
- The source is already in `TRANSFER_SRC_OPTIMAL` — `Target.end_render`
+ The source is already in `TRANSFER_SRC_OPTIMAL` — `Target.close`
  guarantees it — so only the destination needs transitioning, and it comes
  from `UNDEFINED` because a presented image's old contents are of no interest.
 
@@ -306,15 +277,15 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 		cmd,
 		&&vk::dependencyInfo().setImageMemoryBarriers(
 			{
-				blit_barrier(
-					dst,
-					IMAGE_LAYOUT_UNDEFINED,
-					IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					(vk::AccessFlags2)0,
-					PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					ACCESS_2_TRANSFER_WRITE_BIT
-				),
+				(vk::ImageMemoryBarrier2) { ...IMAGE_BARRIER,
+					.image = dst,
+					.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+					.srcAccessMask = (vk::AccessFlags2)0,
+					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+					.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+					.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+					.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				},
 			}
 		)
 	);
@@ -346,15 +317,15 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 		cmd,
 		&&vk::dependencyInfo().setImageMemoryBarriers(
 			{
-				blit_barrier(
-					dst,
-					IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					IMAGE_LAYOUT_PRESENT_SRC_KHR,
-					PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					ACCESS_2_TRANSFER_WRITE_BIT,
-					PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-					(vk::AccessFlags2)0
-				),
+				(vk::ImageMemoryBarrier2) { ...IMAGE_BARRIER,
+					.image = dst,
+					.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+					.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+					.dstStageMask = PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+					.dstAccessMask = (vk::AccessFlags2)0,
+					.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					.newLayout = IMAGE_LAYOUT_PRESENT_SRC_KHR,
+				},
 			}
 		)
 	);
