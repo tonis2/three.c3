@@ -777,6 +777,22 @@ Live, all of them. Each cost real time and none is visible in a diff.
   image and nothing else* — a first draft that unloaded a whole asset and
   asserted on total bytes returned passed with the bug in place, because four
   vertex streams came back and outweighed the image that did not.
+- **A constant picked to hide a seam is charged to the shadow map.**
+  `examples/lumbridge.js` made ground out of 3249 boxes and gave each one a
+  depth of 30 units, for one reason: so a low camera could not see under the
+  terrain where two tiles step. Nothing about that reason is wrong and nothing
+  in the picture changes if it is 8. It cost **1.1 ms of a 3.9 ms frame** —
+  around 30 % — because a tile's four side faces are 120 units² each, are buried
+  entirely inside the neighbouring tiles, and are rasterised into a 4096² shadow
+  map every frame from an angle where they are invisible. **The tell is that the
+  cost of the constant scales with the shadow map, not with the scene**: raising
+  tile depth from 3 to 30 costs 0.42 ms at 2048 and 1.39 ms at 4096, so it is
+  fill and not geometry, and no triangle count anywhere moves. A depth-only pass
+  makes this cheap to do by accident — there is no fragment stage to notice that
+  a surface is occluded by its own neighbour, and `stats()` reports the same
+  `triangles` either way. **Geometry that exists only to be hidden is still
+  drawn, and the shadow pass is where you are billed for it.** §18 has the full
+  curve; §18.4 is the fix that stops it recurring.
 
 ---
 
@@ -1317,14 +1333,250 @@ measurement this section does not have.
 
 ---
 
+## 18. Outdoor scenes: terrain, and what the shadow map is actually spending
+
+The first scene built on this engine by an agent rather than by its author is
+`examples/lumbridge.js` — a RuneScape village, four thousand placed objects in
+nine draw calls. It works, and the two things that fought it the whole way are
+the two this section is about. Both are measured; neither is a guess.
+
+### The measurement
+
+Apple M5, 1280x720, the village above, camera pinned, median of eleven renders.
+`gpuMs` is read from GPU timestamps, so the validation layers in the build do not
+inflate it.
+
+| `three.light.shadow.size` | ms  | delta over the one below |
+|---------------------------|-----|--------------------------|
+| off (2214 of 4178 culled) | 0.67 | —                       |
+| 256                       | 1.27 | —                       |
+| 512                       | 1.27 | 0.00                    |
+| 1024                      | 1.47 | +0.20                   |
+| 2048                      | 2.06 | +0.79                   |
+| 4096                      | 3.92 | +2.65                   |
+| 8192                      | 10.16 | +8.89                  |
+
+Three facts fall out, and they rank everything below.
+
+**The floor is 1.27 ms.** 256 and 512 cost the same, so beneath 1024 the frame is
+not fill-bound at all. That 1.27 is everything a shadow pass costs *except*
+rasterising the map: the main pass having lost its frustum cull, plus the shadow
+pass's own vertex and submit work for 4178 instances across 9 draws.
+
+**At most 0.60 ms of it is the lost cull.** The main pass with culling costs 0.67;
+the floor is 1.27. The difference is the uncull penalty and the shadow pass's own
+per-instance work *together*, and nothing here separates them — so 0.60 is a
+ceiling on what §18.2 can recover, not an estimate of it. Splitting it needs the
+per-pass timings of §18.3, which is why that one is first.
+
+**Everything else is rasterisation, and it is quadratic.** +0.20, +0.79, +2.65,
++8.89 per doubling from 1024 — ratios of 3.95, 3.35, 3.35. Textbook fill. At 4096
+the frame is **68 % shadow-map fill, 15 % lost culling, 17 % the scene the user
+asked for**.
+
+So: the fix `src/render/shadow.c3` already names — a second draw list — is the
+*small* one. The large one is that the map is fitted around the whole scene.
+
+### 18.1 Fit the light's box to what the camera can see
+
+`ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds)` is called with
+`Scene.bounds`. For the village that is 224 units across while the camera frames
+about 70, so roughly nine tenths of the texels are outside the picture and every
+one of them is rasterised into.
+
+**The signature already takes an arbitrary box.** That is the whole reason this is
+worth doing before cascades: the pass, the matrix, the single `FrameBlock` write
+and the two barriers are all unchanged. What changes is the argument — the
+intersection of the camera frustum with `Scene.bounds`, extruded along the light
+direction so casters behind the camera still reach it.
+
+At the village's numbers that is about a tenfold gain in texel density, which is
+spendable either way: keep 4096 and get shadows an order of magnitude sharper, or
+drop to 1024 for today's quality at **1.47 ms instead of 3.92**.
+
+**The cost is that the box now moves with the camera, and a shadow map whose
+texel grid slides under the geometry crawls.** The fix is standard — snap the
+light-space origin to whole texels before building the ortho — but it is the part
+to get right, and it is the reason this is not a five-line change. The test is a
+slow camera pan with a static scene: an unsnapped fit shimmers along every shadow
+edge, and it is obvious once seen.
+
+Cascades stay deferred, with `shadow.c3`'s trigger unchanged — the largest size a
+device will allocate still being too coarse. 18.1 pushes that trigger a long way
+out, because it buys most of what a first cascade would.
+
+### 18.2 Two draw lists rather than one uncalled one
+
+`src/render/shadow.c3:38` already specifies this and names its trigger: *"The
+trigger for a second draw list is a scene where that vertex work is measurable."*
+It is measurable. 0.60 ms of 3.92, 15 %.
+
+The present behaviour is conservative and correct, not wrong: a caster outside the
+camera frustum does throw a shadow into frame, so the shadow pass genuinely needs
+the unculled list. What is given away for free is the **main** pass's cull, which
+was never the thing at risk. Two lists, two frustums:
+
+- the main pass against the camera, as it was before shadows existed;
+- the shadow pass against the light's ortho box — which 18.1 makes small, so this
+  cull starts dropping real work rather than nothing.
+
+`stats()` should follow: `culledLastFrame` goes back to meaning the camera cull
+even with shadows on, and a new `shadowCulled` reports the light one. Today's
+`culledLastFrame == 0` is honest but says nothing, and it is what sent this
+investigation down the wrong path first.
+
+### 18.3 Per-pass GPU timings — do this one first
+
+Everything above was bisected by hand: toggle shadows, strip materials, resize the
+ground tiles, six runs of the same scene. The device already reports
+`timestamps true` with a period of 41.67 ns and `gpuMs` is already a timestamp
+difference. Splitting it into `shadowMs`, `sceneMs` and `postMs` is a few more
+writes and would have answered "where does 3.7 ms go" in one call instead of six.
+
+It goes first because it is the instrument that tells whether 18.1 and 18.2
+worked. A refactor of the culling that is verified by total frame time is a
+refactor verified by the wrong number.
+
+### 18.4 Terrain is not a pile of boxes
+
+The village's ground is **3249 `BoxGeometry` copies**, four units square and
+thirty deep, one per tile. That was the only shape available for ground that a
+scene can stand on, and it cost, measured:
+
+- **1.1 ms at 4096**, purely in shadow fill. Each tile's four side faces are
+  120 units² and are buried entirely inside its neighbours — around 13,000 quads
+  that cannot be seen from any angle, rasterised into the map every frame. The
+  tell is that tile depth costs four times more at 4096 than at 2048: fill, not
+  geometry. Thinning the tiles from 30 to 8 units is a one-character fix and is
+  worth more than any shader change in the file.
+- **The staircase.** A monotonic slope across four-unit tiles is a flight of
+  steps. Rolling hills on the horizon had to be abandoned and replaced with a
+  treeline, because the terracing was worse than the hard edge it hid.
+- **Four hand-written functions that every consumer had to call in the right
+  order** — `ground(x, z)`, `riverX(z)`, `roadNear(x, z)` and a `flats` list —
+  with `plot()` required to run *before* the tiles were laid or the buildings
+  floated. Nothing in the engine could see that these were the same terrain the
+  meshes were built from, so nothing could catch them disagreeing.
+
+**18.4a — a heightfield primitive.** `new three.TerrainGeometry({ width, depth,
+segments, heights })`, heights being a `Float32Array` or a callback. It is built
+through the `GeometryBuilder` and `upload_built` that the six existing shapes and
+`split.c3` already use, so it is one asset, one draw call, no new pipeline and no
+new bucket. Normals from the grid, which is the whole difference between ground
+and steps. A skirt around the border so the map edge is a wall and not a hole.
+
+**18.4b — query it: `terrain.heightAt(x, z)`, `terrain.normalAt(x, z)`.** This is
+the piece that makes the rest work, and the piece hand-written above. Everything
+that stands outdoors needs it — buildings, fence posts, trees, and every NPC that
+will follow. Bilinear over the same grid the mesh was built from, so it *cannot*
+disagree with what is drawn, which is exactly the failure the hand-written version
+was one edit away from at all times. It is also what makes `align('y', 'min')`
+mean anything on open ground.
+
+**18.4c — stamping: `flatten(rect, y)`, `carve(polyline, width, depth)`.** These
+two are `plot()` and the river channel, and they are the two operations every
+outdoor scene needs. A building pad and a watercourse.
+
+**18.4d — mask authoring.** The *consumption* side is already done and good:
+`LayeredMaterial` takes a mask with per-channel layer selection, and
+`examples/terrain.js` already paints one from a height function into a
+`Uint8Array` by hand. What is missing is the painting: `three.Mask(size)` with
+`fill`, `stroke(polyline, width, feather)`, `circle`, `fromHeight(fn)`, `blur`,
+`.texture()`. `roadNear()` in the village is `stroke` over the road polylines,
+written out longhand and evaluated per tile.
+
+The pairing is the point, and it is the answer to "ground matching some texture
+and depth": **carve the channel and stroke the mask from the same polyline**, so
+the mud is where the water is by construction rather than because two constants
+were kept in step. Same for a road: one polyline, a shallow carve, a dirt stroke.
+
+**18.4e — a heightfield collider.** `body: { shape: 'heightfield' }`. The four
+colliders are box, sphere, capsule and hull, and a convex hull of a landscape is
+useless. Nothing can walk on the ground until this exists, so it blocks the whole
+NPC phase and should be costed with 18.4a rather than after it.
+collision.c3l already has heightfield testing
+
+### 18.5 Three silent failures, each cheap
+
+Small, unrelated to the above, and each one cost real time in a single session.
+
+**`mesh.geometry = other` is swallowed.** `src/js/prelude/mesh.js:41` is a getter
+with no setter, so a non-strict assignment vanishes: it does not throw, the
+property still reads the old value, and the frame still draws the old shape. The
+engine already has the right convention and states it deliberately — writing a
+dynamic body's transform throws, because a solver and a script fighting over one
+transform is jitter rather than a compromise. Immutable geometry deserves the
+same sentence. Worth auditing the other getter-only properties at the same time;
+`camera.near` and `.far` already throw, so the precedent is set twice.
+
+**Shader errors point at generated code.** A body with a parameter named `t`
+produces `--> three.material:512:16 | #define t (push.t)`, naming a line the
+author never wrote, because every uniform is spliced in as a `#define`. Two
+fixes, either useful: map the error back to the submitted body, since the engine
+knows where it spliced it; or refuse a colliding uniform name at `ShaderMaterial`
+construction with a sentence saying why. Best of all, stop using `#define` for
+uniforms — as struct members the collision cannot happen.
+
+**The vertex and fragment bodies are one module.** A helper declared in both is
+`error[E30201]: function 'ripple' already has a body`, which is correct and
+surprising. One sentence in `docs.js` — declare shared helpers in `vertex`, which
+comes first — costs nobody a compile.
+
+### 18.6 Scatter
+
+Written twice in one file, by hand, both times: a seeded LCG, rejection sampling,
+keep-out circles, and point-to-polyline distance. `three.scatter({ count, bounds,
+avoid, onTerrain, seed })` is engine-shaped precisely because it wants 18.4b, and
+it is the most repeated block in any scene with a landscape in it.
+
+### 18.7 What changed in the example, and what did not
+
+Two constants in `examples/lumbridge.js`, landed ahead of any engine work
+because they cost nothing and they are the measurement's own conclusion:
+
+- ground tile depth **30 -> 8**, for §10's trap. 8 rather than 3 because the
+  terrain steps about three units at the riverbank and under a levelled building
+  pad, and a 3-unit slab shows daylight under the seam.
+- `three.light.shadow.size` **4096 -> 2048**. The map is fitted around 224 units,
+  so 4096 is 18 texels per unit and 2048 is 9. Nothing in the frame is visibly
+  different and it is the difference between 3.9 ms and 1.6 ms.
+
+**No engine default moves.** `shadow.size` has no default to change — a script
+asks for a size or gets none at all — and picking one for it would be picking it
+for a scene shape nobody has measured yet. The village wants 2048 because it is
+wide and flat; the number a room wants is a different number, and §18's closing
+caveat is that no room has been measured. The right time to give the fit a
+default is after 18.1, when the box is no longer the whole scene and the answer
+stops depending on how big the level is.
+
+### Order, and why
+
+1. **18.3, per-pass timings.** The instrument. Everything below is verified by it,
+   and a culling change verified by whole-frame time is verified by the wrong
+   number.
+2. **18.2, two draw lists.** Smallest correct change, already specified in
+   `shadow.c3` with a trigger that has now fired. Bounded by 0.60 ms, and 18.3
+   says how much of that is real.
+3. **18.1, fit to the view.** The large one, about 2.4 ms, and the only item here
+   with a genuine new failure mode — texel snapping — so it wants the instrument
+   and the easy win landed first.
+4. **18.4a + 18.4b + 18.4e, heightfield, query, collider.** Unblocks every outdoor
+   scene and every NPC, and deletes the box-tile shadow cost as a side effect.
+5. **18.4c + 18.4d, stamping and masks.** Authoring, and only meaningful once a
+   terrain object exists to stamp.
+6. **18.5, the silent failures.** Hours, not days, and independent of all of it.
+7. **18.6, scatter.** After 18.4b.
+
+**What this section does not have** is a second scene. Every number here comes
+from one village on one machine, and the shape of that village — wide, flat,
+outdoors, shadowed, forty thousand triangles of nothing much — is exactly the
+shape that makes shadow-map fill dominate. An interior would rank these
+differently, and nothing here has measured one.
+
+---
+
 ## What is deliberately absent
 
-- **No `BufferGeometry` and no attribute access.** That is the thesis. Nothing in
-  eight milestones has needed one, and a game is the workload that would be worst
-  served by it. `ConvexGeometry`'s point cloud is a description too — most of the
-  points are discarded and none can be read back. `ref.split()` does not undermine
-  it either: what comes back is asset handles, not vertices, and the cut is one
-  the geometry already had.
 - **No ECS.** The scene graph is the entity list and a game's components are
   JavaScript objects keyed by node id. Building an entity system in C3 would be
   building the part JavaScript is good at.
@@ -1369,40 +1621,13 @@ measurement this section does not have.
 - **No caching of `bounds`.** The numbers never change for a live asset, but a
   cached box would keep answering after `unloadUnused()` freed the thing it
   described. Every other handle in this API revalidates on use.
-- **No skin in the export.** `scene/export.c3` writes geometry, materials and
-  nodes; a rigged character round-trips as its bind pose with no `skins` and no
-  `JOINTS_0`/`WEIGHTS_0`. The reading side is built (§3) and the writing side is
-  work rather than a decision — `gltf.c3l`'s `add_skin_binding` and
-  `add_skeleton` are what it would go through. Listed here so that a round trip
-  through `scene.export()` is known to lose the rig rather than discovered to.
 - **No `.gltf` output and no external `.bin`.** A `.gltf` beside a `.bin` beside
   a folder of `.png`s is four things to copy and four things to lose.
-- **The export writes no camera.** glTF has one and this project has a turntable,
-  which is not a `perspective` camera with a transform — inventing one would be
-  exporting a fiction as though it were content. (It used to write no *light*
-  either, for the same reason. §12 made the light addressable, so that half is
-  work rather than a decision now, and it is listed there.)
-- **No per-instance texture, and no alpha-to-coverage.** Blending itself is done:
-  a blend mode is a `PipelineState` field and a cache key (dynamic blend state is
-  unusable here, §10), `mesh.color.a` fades one copy of a shared draw call, and
-  every transparent bucket is sorted farthest-first against the near plane and
-  recorded after the opaque ones.
 
-  What is still absent, and why. **Per-instance texture**: an instance carries a
-  colour and a variant, and a texture per copy would need bindless or an atlas,
-  either of which changes what a draw call is. **Alpha-to-coverage** — still the
-  cheaper first answer for cutouts than sorting — is static pipeline state that
-  needs a multisampled target, and the offscreen one is not multisampled.
-  **Sorting inside one instanced bucket**: copies fused into a single draw cannot
-  be depth-ordered against each other, which is three.js's limit too, and the
-  cost of the fix is the batching this project exists to keep.
+
 - **No line width, and no fourth debug-line shape.** `wideLines` is false on the
   bundled driver, so every line here is one pixel and there is nothing to set.
-- **No helper that follows its object.** `BoxHelper.update()` is called by hand,
-  as Three.js's is. Making it automatic means either a per-frame walk that costs
-  every scene with no helpers in it, or a dirty flag on every object for the
-  benefit of a debug tool — and the failure it would prevent is visible in the
-  picture the helper is being looked at in.
+
 
 TODO:
 
