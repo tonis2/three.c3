@@ -24,6 +24,7 @@ import vk;
 import image;
 import std::core::test;
 import std::io;
+import std::math;
 
 // Small on purpose: these check correctness, not throughput, and a 64x48
 // target keeps a leak-tracked run quick.
@@ -725,3 +726,99 @@ fn void capture_updates_the_gpu_time_it_measured() @test
 		test::@check(ms < 1000.0, "one capture was measured at %f ms", ms);
 	};
 }
+
+<*
+ The five phases add up to the frame.
+
+ The whole value of `plan.md` §18.3 is that a breakdown can be *trusted as a
+ breakdown*: an optimisation of one pass is judged by whether that pass's number
+ moved, and a number that is a sample of the frame rather than a partition of it
+ cannot do that job. So this checks the arithmetic and not the plausibility —
+ five consecutive spans between six marks, so their sum is the outer span by
+ construction, and the tolerance is a nanosecond because the only difference is
+ five double conversions instead of one.
+
+ Two renders, so both frame slots have written a full run of six marks: a timer
+ that laid the runs out wrong — the second slot's marks overlapping the first's,
+ the pool sized for pairs — produces stamps from two different frames in one
+ reading, and the sum stops matching immediately.
+
+ **Proved by injection**, twice, and both are the same mistake at different
+ marks — a phase boundary that is not recorded. The stamp read back is then
+ whatever the host reset left in the query, so the span before it runs from zero
+ and the sum leaves the frame far behind rather than falling just short of it:
+
+ - the `SCENE` mark dropped: "the phases sum to 197699740.423692 ms but the
+   frame was 0.254000 ms (prepare 0.000000, shadow 0.000000, scene 0.000000,
+   post 197907073.828811, present 0.000000)";
+ - the `POST` mark made conditional on `posted` — the tempting shape, since an
+   unposted frame records no chain: "the phases sum to 197845015.740876 ms but
+   the frame was 0.264292 ms (... post 0.000000, present 197845015.476584)".
+
+ The second is the one to notice: it is invisible to every other check in this
+ file, `gpu_ms` is unchanged and correct throughout, and the frame it breaks is
+ the ordinary unposted one that almost every test here draws. Restored, green
+ again.
+*>
+fn void the_phases_account_for_the_whole_frame() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+
+		three::FrameTiming t = renderer.timing();
+		double sum = t.prepare + t.shadow + t.scene + t.post + t.present;
+
+		test::@check(t.total > 0.0, "the frame was not measured at all: %f ms", t.total);
+		test::@check(
+			math::abs(sum - t.total) < 1e-6,
+			"the phases sum to %f ms but the frame was %f ms (prepare %f, shadow %f, scene %f, post %f, present %f)",
+			sum, t.total, t.prepare, t.shadow, t.scene, t.post, t.present
+		);
+		test::@check(t.total == renderer.gpu_ms(),
+			"gpu_ms() and timing().total disagree: %f vs %f", renderer.gpu_ms(), t.total);
+	};
+}
+
+<*
+ An empty phase reports nothing, and the frame is charged to the one pass that
+ did something.
+
+ `@with_renderer` draws a clear: no shadow pass, no post chain, nothing to
+ upload, and no blit or readback on `render_offscreen`. Four of the five spans
+ therefore bound no commands at all, and the whole of the frame belongs to the
+ rendering — which makes this the simplest possible attribution check, and one
+ the sum above cannot make: five numbers can add up to the frame while being
+ shared out wrongly among themselves.
+
+ The empty ones are bounded rather than required to be exactly 0. On this device
+ two `ALL_COMMANDS` stamps recorded back to back land on the same tick and the
+ span really is 0.000000, but that is a property of the driver's sampling and
+ not of this code; 0.01 ms is two orders of magnitude under the frame and says
+ the same thing without depending on it.
+
+ **Proved by injection.** The `SCENE` mark dropped from `record_scene`: "a clear
+ frame spent 0.000000 of 0.277333 ms in the pass that drew it", and the whole of
+ it reappearing one phase along in `post`. That is what a missing boundary looks
+ like from here, and the check on the empty phases catches the same injection
+ from the other side. Restored, green again.
+*>
+fn void an_empty_phase_costs_a_zero_and_not_the_reading() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+
+		three::FrameTiming t = renderer.timing();
+		test::@check(t.total > 0.0, "the frame was not measured at all: %f ms", t.total);
+		test::@check(
+			t.scene > t.total * 0.5,
+			"a clear frame spent %f of %f ms in the pass that drew it", t.scene, t.total
+		);
+		test::@check(t.shadow < 0.01, "an unshadowed frame spent %f of %f ms in the shadow pass", t.shadow, t.total);
+		test::@check(t.post < 0.01, "an unposted frame spent %f of %f ms in the post chain", t.post, t.total);
+	};
+}
+

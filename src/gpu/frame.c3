@@ -313,13 +313,19 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// possible.
 	bool posted = self.post.active;
 
+	// The same read `pass.prepare` makes below, and for the same reason: the
+	// slot is advanced by the caller *after* the submit, so every mark recorded
+	// here belongs to the run `timer.begin` opened.
+	uint slot = self.frames.slot;
+
 	// **Before the render pass, because a dispatch cannot be inside one.** This is
 	// the scene update, the frame's buffers, and the compute skinning for any
 	// character routed through it — everything that used to sit at the top of
 	// `MeshPass.record` and had to move out when compute skinning landed. It is a
 	// phase and not a branch: the frame path still does not grow a case per kind
 	// of thing that can be drawn.
-	self.pass.prepare(&self.gpu, cmd, &self.target, self.frames.slot)!;
+	self.pass.prepare(&self.gpu, cmd, &self.target, slot)!;
+	self.timer.mark(cmd, slot, FrameMark.PREPARE);
 
 	// **The shadow map, and it is a line rather than a branch** — which is what
 	// this function was rewritten as a sequence to make possible, and `plan.md`
@@ -332,6 +338,11 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// rest of this function holds: exactly one stage writes it, and the close
 	// happens once, at the bottom.
 	self.pass.record_shadow(cmd);
+	// **Recorded even when the call above recorded nothing**, which is the one
+	// place the byte-identity claim just made does not hold: with shadows off
+	// the buffer carries this timestamp and `stats().shadowMs` reads 0. The
+	// alternative is a frame that reports no timings at all — `gpu/timing.c3`.
+	self.timer.mark(cmd, slot, FrameMark.SHADOW);
 
 	if (posted)
 	{
@@ -348,6 +359,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// below be a list of passes rather than a thing that also has to know how the
 	// frame started.
 	vk::cmdEndRendering(cmd);
+	self.timer.mark(cmd, slot, FrameMark.SCENE);
 
 	// The asset table comes down with it because each post shader's own samplers
 	// resolve through it — bindings 0 and 1 are the chain's own images, and
@@ -359,6 +371,8 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 			self.pass.camera.near_plane, self.pass.camera.far_plane
 		)!;
 	}
+
+	self.timer.mark(cmd, slot, FrameMark.POST);
 
 	self.target.close(cmd);
 }
@@ -377,7 +391,19 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
  `Scene.stats().culled_last_frame`, which is also a number about the past that
  callers may only read.
 *>
-fn double Renderer.gpu_ms(&self) => self.timer.gpu_ms;
+fn double Renderer.gpu_ms(&self) => self.timer.timing.total;
+
+<*
+ The same frame, split into the phases that produced it.
+
+ `total` is what `gpu_ms` returns and the five phases sum to it, so this is the
+ whole of the answer rather than a sample of it — `gpu/timing.c3` has the marks
+ and `plan.md` §18.3 has why a frame that cannot say which pass it spent itself
+ in makes every optimisation of a pass unverifiable.
+
+ Same "which frame" rules as `gpu_ms` above, because it is the same reading.
+*>
+fn FrameTiming Renderer.timing(&self) => self.timer.timing;
 
 <*
  Rebuild the swapchain for the window's current size.

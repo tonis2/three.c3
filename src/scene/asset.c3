@@ -482,6 +482,14 @@ struct Asset
 	Primitive primitive;
 	bool has_primitive;
 
+	// The grid behind a `TerrainGeometry`, and the reason it is kept where
+	// `primitive` is kept: both are how a generated shape was described. The
+	// difference is what reads them — `primitive` exists for the exporter, and
+	// this exists because `heightAt` is the whole point of the shape. Owned, and
+	// freed by `free_slot` with the meshes. `scene/terrain.c3`.
+	Heightfield terrain;
+	bool has_terrain;
+
 	// The file, still open. `Assets.load` parses the JSON and stops, so the
 	// document and its mmapped buffer have to stay until the last mesh in them
 	// is uploaded or the asset is freed — which is what `game.md` G3/S3 calls
@@ -1033,6 +1041,11 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	asset.meshes.free();
 	free_nodes(asset);
 	free_stream(asset);
+	// Before the zeroing below, for `free_nodes`' reason: after it the slot no
+	// longer says it had one.
+	if (asset.has_terrain) asset.terrain.heights.free();
+	asset.terrain = {};
+	asset.has_terrain = false;
 	// Zeroed rather than left dangling: `claim_slot` overwrites the whole struct
 	// and `Assets.free` walks every slot, so a freed `List` must not look
 	// initialised to either of them.
@@ -3231,6 +3244,11 @@ fn void Assets.free(&self, Gpu* gpu)
 		asset.meshes.free();
 		free_nodes(asset);
 		free_stream(asset);
+		// The one owned allocation a generated shape can carry — a terrain's
+		// grid. `free_slot` frees it on the unload path and this is the other
+		// one; they are separate because this walk deliberately skips the
+		// reference counting and the texture releases that path does.
+		if (asset.has_terrain) asset.terrain.heights.free();
 		if (asset.path.len > 0) asset.path.free(mem);
 	}
 	self.assets.free();

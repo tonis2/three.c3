@@ -518,10 +518,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 
 	// **Before the draw list, because the draw list depends on the answer.** A
 	// caster the camera cannot see still throws a shadow into the frame, so a
-	// frame with a shadow pass builds its list without the camera frustum —
-	// `render/shadow.c3` has the argument and the cost. Deciding this after
-	// `scene.update` would mean a shadow map missing exactly the casters that
-	// matter, and nothing anywhere saying so.
+	// frame with a shadow pass builds its list against the light's box as well as
+	// the camera's — `render/shadow.c3` has the argument and `plan.md` §18.2 has
+	// what the second list was worth. Deciding this after `scene.update` would
+	// mean a shadow map missing exactly the casters that matter, and nothing
+	// anywhere saying so.
 	//
 	// The fit needs the image, because the texel size and the normal offset are
 	// derived from the size it was actually created at; and it needs the world
@@ -553,7 +554,26 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		}
 		else
 		{
-			self.shadows.fit(self.light, self.scene.bounds(&self.assets));
+			// **The two boxes §18.1 splits.** `bounds` is everything drawable and
+			// decides where the light stands and how far it reaches; the focus is
+			// what the camera can actually see, clipped to the same box, and is
+			// what the texels are spent on. Intersected here rather than inside
+			// `fit` because this is the only place that has a camera.
+			collision::Aabb3 bounds = self.scene.bounds(&self.assets);
+			collision::Aabb3 seen = self.camera.view_bounds(aspect, self.shadows.distance);
+			collision::Aabb3 focus = {
+				.min = {
+					math::max(seen.min.x, bounds.min.x),
+					math::max(seen.min.y, bounds.min.y),
+					math::max(seen.min.z, bounds.min.z),
+				},
+				.max = {
+					math::min(seen.max.x, bounds.max.x),
+					math::min(seen.max.y, bounds.max.y),
+					math::min(seen.max.z, bounds.max.z),
+				},
+			};
+			self.shadows.fit(self.light, bounds, focus);
 			self.shadows.live = true;
 		}
 	}
@@ -571,7 +591,13 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			transparent[i] = material.alive && material.blend != BlendMode.NONE;
 			margins[i] = material.alive ? material.bounds : 0;
 		}
-		self.scene.update(&self.assets, view_projection, transparent, margins, self.shadows.live);
+		// The fit above wrote `light_view_projection`, so the box the pass will
+		// rasterise into and the box the cull is against are the same box by
+		// construction rather than by two agreeing derivations.
+		self.scene.update(
+			&self.assets, view_projection, transparent, margins,
+			self.shadows.live ? &self.shadows.light_view_projection : null
+		);
 	};
 	if (self.scene.buckets.len() == 0)
 	{
@@ -880,7 +906,11 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		// Index binding is independent of vertex bindings, which is why the
 		// pass can have an index buffer and no vertex input state at all.
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
-		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.count, 0, 0, 0);
+		// **`visible`, not `count`** — the tail of a bucket is the copies only the
+		// light can see, and drawing them here would put geometry on screen the
+		// camera frustum rejected. `Bucket.visible` has why they are a prefix.
+		if (bucket.visible == 0) continue;
+		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.visible, 0, 0, 0);
 	}
 }
 
@@ -986,6 +1016,9 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 		);
 
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+		// **`count`, not `visible`** — the counterpart of the line in `record`.
+		// This pass wants every copy the light's box kept, which is the visible
+		// prefix plus the tail of casters the camera cannot see.
 		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.count, 0, 0, 0);
 		recorded++;
 	}

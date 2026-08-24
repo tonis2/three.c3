@@ -4585,8 +4585,59 @@ fn void stats_reports_the_renderers_gpu_time() @test
 		// The host's own reading and the script's are the same number, which is
 		// what says the binding read the renderer rather than something that
 		// merely moves like it.
-		test::@check(result.gpu_ms == run.renderer.gpu_ms(),
-			"the run result agrees with the renderer: %f vs %f", result.gpu_ms, run.renderer.gpu_ms());
+		test::@check(result.timing.total == run.renderer.gpu_ms(),
+			"the run result agrees with the renderer: %f vs %f", result.timing.total, run.renderer.gpu_ms());
+	};
+}
+
+<*
+ The frame arrives already split into the passes that produced it.
+
+ `gpu_test.c3` proves the arithmetic and `shadow_test.c3` proves the
+ attribution; what is proved here is that a *script* can see it, which is the
+ whole point of `plan.md` §18.3 — the caller who needs this is an agent reading
+ `stats()` off a tool result, not a C3 test.
+
+ The sum is checked in the script rather than here, because that is the claim as
+ a script would make it: five properties that add up to `gpuMs` are a breakdown,
+ and five that merely exist are decoration. `Number.isFinite` on each one is the
+ other half — a missing key is `undefined`, and `undefined` in a sum is `NaN`,
+ which would make a naive `sum === gpuMs` comparison fail for the right reason
+ but report nothing about which key was missing.
+
+ **Proved by injection.** `js_stats` setting only `gpuMs` and leaving the five
+ out, which is the shape of the mistake where the object literal is updated and
+ the wiring behind it is not: "the phases came through:
+ {"gpuMs":1.2055000367889404,"sum":null,"drift":false,"allFinite":false} — five
+ numbers that add up to gpuMs". Restored, green again.
+*>
+fn void stats_splits_the_frame_into_its_passes() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.frameAll();
+			three.render(scene, three.camera);
+
+			const s = three.stats();
+			const parts = [s.prepareMs, s.shadowMs, s.sceneMs, s.postMs, s.presentMs];
+			const sum = parts.reduce((a, b) => a + b, 0);
+			return {
+				gpuMs: s.gpuMs,
+				sum: sum,
+				drift: Math.abs(sum - s.gpuMs) < 1e-6,
+				allFinite: parts.every(Number.isFinite),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value.contains(`"drift":true`) && result.value.contains(`"allFinite":true`),
+			"the phases came through: %s — five numbers that add up to gpuMs", result.value
+		);
 	};
 }
 
@@ -4627,7 +4678,7 @@ fn void a_runtime_without_a_device_reports_zero_gpu_time() @test
 		test::@check(result.value == `{"present":true,"gpuMs":0}`,
 			"a runtime with no device answers %s — the key has to be there, with a 0 behind it",
 			result.value);
-		test::@check(result.gpu_ms == 0.0, "and so does the run result: %f", result.gpu_ms);
+		test::@check(result.timing.total == 0.0, "and so does the run result: %f", result.timing.total);
 	};
 }
 
@@ -5342,5 +5393,345 @@ fn void framing_the_scene_refuses_while_the_camera_is_attached() @test
 
 		test::@check(!result.ok, "it refused");
 		test::@check(result.error.contains("detach"), "and said what to do about it: '%s'", result.error);
+	};
+}
+
+// ============================================================================
+// The silent failures — plan.md §18.5
+//
+// Three properties that a script could assign to and get **nothing** back:
+// no effect, no error, and the old value still reading back. A non-strict
+// script swallows an assignment to a getter-only property, which is the worst
+// of the three possible behaviours — worse than throwing, and worse than
+// working — because the only evidence is a frame that looks wrong later.
+//
+// The engine had already made this call twice, for `camera.near` and
+// `camera.far`, and the argument there is written down: "a plane nobody could
+// see had already cost a session". These are the same call for the properties
+// that cost the next one.
+// ============================================================================
+
+<*
+ `mesh.geometry = other` throws rather than vanishing.
+
+ **The one that cost a session**, and the reason it is worth a refusal rather
+ than a setter: geometry is immutable *by design*. `plan.md`'s first thesis is
+ that a thousand copies of a shape are one draw call precisely because the shape
+ cannot be edited under them, so "swap this mesh's geometry" is not a feature
+ that is missing, it is a feature that was refused — and a silent assignment
+ tells the caller the opposite.
+
+ The read-back is asserted as well as the throw. A setter that threw *after*
+ mutating would pass a check on the exception alone.
+*>
+fn void assigning_a_geometry_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const a = new three.BoxGeometry(1, 1, 1);
+			const b = new three.SphereGeometry(1, 8, 6);
+			const mesh = new three.Mesh(a);
+			let threw = '';
+			try { mesh.geometry = b; } catch (e) { threw = e.message; }
+			return {
+				threw: threw.length > 0,
+				names: threw.includes('immutable') && threw.includes('draw call'),
+				kept: mesh.geometry === a,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"threw":true`), "the assignment threw: %s", result.value);
+		test::@check(result.value.contains(`"names":true`), "and said why: %s", result.value);
+		test::@check(result.value.contains(`"kept":true`), "and changed nothing: %s", result.value);
+	};
+}
+
+<*
+ A texture's load-time options refuse assignment too.
+
+ `colorSpace` and `generateMipmaps` are the two that read like settings and are
+ not: both are decided during the upload, and both are spelled the way Three.js
+ spells a mutable field. A script that writes either of them after the load is
+ asking for a different image and getting silence.
+
+ The rest of the getter-only properties on `Texture` — `width`, `height`,
+ `levels`, `path`, `alive` — are left alone deliberately. Nothing about them
+ reads like a request: assigning to `texture.width` is obviously a mistake in a
+ way that assigning to `texture.colorSpace` is not, and a refusal on every
+ derived number would be noise around the two that matter.
+*>
+fn void a_textures_load_options_are_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			let a = '', b = '';
+			try { tex.colorSpace = 'srgb'; } catch (e) { a = e.message; }
+			try { tex.generateMipmaps = true; } catch (e) { b = e.message; }
+			return { colorSpace: a.includes('fixed at load'), mips: b.includes('during the upload') };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"colorSpace":true,"mips":true}`,
+			"both refusals arrived with their reasons: %s", result.value
+		);
+	};
+}
+
+<*
+ A compile error on a generated line says so, and names the uniforms.
+
+ **The third silent failure, and it is silent in a different way**: the message
+ arrives, it is precise, and it describes a line the author never wrote. Every
+ uniform is spliced in as `#define <name> (push.<name>)` across the whole module,
+ so a helper's parameter named after a uniform is rewritten and the error lands
+ on the `#define` — `plan.md` §18.5 has the instance, reported as
+ `error[E20001]: unexpected token --> three.material:512:16 | #define t (push.t)`.
+
+ The refusals in `material_source.c3` cannot reach this: they check the uniform's
+ name against the *shader's* vocabulary, and this is the author's own vocabulary
+ colliding with the uniform, which would need the body parsed to see. So the
+ diagnostic is kept whole and a sentence is added after it.
+
+ What is asserted is the sentence and the *list*, not the wording of Slang's own
+ half — the list is what turns "something is wrong on line 512" into "you called
+ something `t` and `t` is one of yours".
+*>
+fn void a_uniform_name_collision_explains_itself() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			let threw = '';
+			try {
+				new three.ShaderMaterial({
+					uniforms: { t: 0, tint: [1, 1, 1] },
+					fragment: 'float wobble(float t) { return sin(t); }'
+						+ ' float3 shade(Surface s) { return tint * wobble(s.position.x); }',
+				});
+			} catch (e) { threw = e.message; }
+			return {
+				threw: threw.length > 0,
+				generated: threw.includes('that line is generated, not yours'),
+				lists: threw.includes('(t, tint)'),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"threw":true`), "the collision was refused: %s", result.value);
+		test::@check(result.value.contains(`"generated":true`), "and said the line is not the author's: %s", result.value);
+		test::@check(result.value.contains(`"lists":true`), "and named the uniforms: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Terrain, fields and scatter — plan.md §18.4 and §18.6
+//
+// The engine half is proved in `three_tests::terrain`: that the query is the
+// surface, that normals come from the grid, that the stride is right. What is
+// proved here is the *authoring* half, which is all script — and the property
+// that matters is the one §18.4 exists for: **the description the ground was
+// stamped from and the ground itself are the same numbers**, so a script cannot
+// place a house on a pad that is not there.
+// ============================================================================
+
+<*
+ A field stamped, then uploaded, answers the same heights afterwards.
+
+ **The whole of §18.4c in one check.** The village's failure mode was four
+ hand-written functions that had to be called in the right order, with `plot()`
+ required to run before the tiles were laid or the buildings floated — and
+ nothing in the engine able to see they described one surface. Here the pad is
+ flattened into a `Field`, the `Field` becomes a `TerrainGeometry`, and
+ `heightAt` on the geometry is asked whether the pad is there.
+
+ Three points, and each rules out a different way of being wrong:
+
+ - **On the pad**, the height is the level, so the stamp happened.
+ - **Far from it**, the height is the original function, so the stamp was local
+   and did not lift the whole field.
+ - **`field.valueAt` and `terrain.heightAt` agree at both**, which is the claim
+   that lets a script scatter and place *before* the upload — the thing the
+   village needed and could only do by keeping two functions in step.
+*>
+fn void a_stamped_field_is_the_ground_that_gets_built() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const field = new three.Field({ width: 200, depth: 200, segments: 100 })
+				.fill((x, z) => 10 + x * 0.05 + z * 0.02)
+				.flatten({ x: 40, z: -30, width: 30, depth: 30 }, 25);
+
+			const terrain = new three.TerrainGeometry({
+				width: 200, depth: 200, segments: 100, heights: field,
+			});
+
+			const onPad = terrain.heightAt(40, -30);
+			const away = terrain.heightAt(-80, 60);
+			return {
+				pad: Math.abs(onPad - 25) < 1e-3,
+				away: Math.abs(away - (10 + -80 * 0.05 + 60 * 0.02)) < 1e-3,
+				agreePad: Math.abs(field.valueAt(40, -30) - onPad) < 1e-3,
+				agreeAway: Math.abs(field.valueAt(-80, 60) - away) < 1e-3,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"pad":true,"away":true,"agreePad":true,"agreeAway":true}`,
+			"the stamp survived the upload and the two sides agree: %s", result.value
+		);
+	};
+}
+
+<*
+ One polyline carves the channel and paints the mask.
+
+ **The pairing §18.4d calls the point**, and the reason a height field and a
+ splat mask are the same class. The village kept a `riverX(z)` function and a
+ `roadNear(x, z)` function in step by hand; here the river is an array of points
+ passed to `carve` and to `stroke`, and the claim is that the low ground and the
+ painted channel are in the same place *by construction*.
+
+ Asserted at three points: on the line, where the ground is low and the mask is
+ high; a short way off, where the feather has run out and both are back to
+ nothing; and the mask's own range, which says `stroke` painted a weight rather
+ than an arbitrary number a `LayeredMaterial` would clip.
+*>
+fn void one_polyline_carves_and_paints() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const river = [[-80, -80], [0, 0], [80, 80]];
+
+			const ground = new three.Field({ width: 200, depth: 200, segments: 100 })
+				.fill(20)
+				.carve(river, 20, 6);
+			const mud = new three.Field({ width: 200, depth: 200, segments: 100 })
+				.stroke(river, 20, 1);
+
+			const [low, high] = mud.range();
+			return {
+				carved: Math.abs(ground.valueAt(0, 0) - 14) < 0.2,
+				painted: mud.valueAt(0, 0) > 0.9,
+				offGroundFlat: Math.abs(ground.valueAt(40, -40) - 20) < 1e-6,
+				offMaskClear: mud.valueAt(40, -40) < 1e-6,
+				weights: low >= 0 && high <= 1,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value.contains(`"carved":true`) && result.value.contains(`"painted":true`),
+			"the channel is low where the mask is high: %s", result.value
+		);
+		test::@check(
+			result.value.contains(`"offGroundFlat":true`) && result.value.contains(`"offMaskClear":true`),
+			"and both stop in the same place: %s", result.value
+		);
+		test::@check(result.value.contains(`"weights":true`), "the mask is a weight: %s", result.value);
+	};
+}
+
+<*
+ A mask packs four fields into the image a LayeredMaterial reads, and refuses a
+ mismatch.
+
+ The refusal is the half worth a test. Two masks at different resolutions is a
+ mistake about which field is which, and a silent resample would produce a scene
+ where one layer is subtly offset from the geometry it was carved with — visible,
+ wrong, and impossible to attribute.
+*>
+fn void a_mask_packs_channels_and_refuses_a_mismatch() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const a = new three.Field({ width: 100, depth: 100, segments: 63 }).fill(1);
+			const b = new three.Field({ width: 100, depth: 100, segments: 63 }).fill(0);
+			const wrong = new three.Field({ width: 100, depth: 100, segments: 31 }).fill(1);
+
+			const tex = three.Field.mask({ r: a, g: b });
+			let refused = '';
+			try { three.Field.mask({ r: a, g: wrong }); } catch (e) { refused = e.message; }
+
+			return {
+				size: tex.width === 64 && tex.height === 64,
+				linear: tex.colorSpace === 'srgb-linear',
+				refused: refused.includes('one resolution'),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"size":true,"linear":true,"refused":true}`,
+			"the mask packed and the mismatch was refused: %s", result.value
+		);
+	};
+}
+
+<*
+ Scatter respects the ground, the keep-outs and the seed.
+
+ **The block that had been written by hand three times**, so what is asserted is
+ every constraint it exists to apply at once — a scatter that ignored one of
+ them still returns a plausible list of points.
+
+ The seed check is last and is the one that makes the rest usable: a scene that
+ places its trees differently on every run is a scene whose screenshot cannot be
+ compared to yesterday's, which is the loop this whole project is built around.
+*>
+fn void scatter_honours_its_constraints() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const field = new three.Field({ width: 200, depth: 200, segments: 100 })
+				.fill((x, z) => (x < 0 ? 0 : 20));
+
+			const road = [[-100, 0], [100, 0]];
+			const opts = {
+				count: 120, seed: 5, onTerrain: field, spacing: 8,
+				minHeight: 10, avoid: [{ path: road, width: 30 }, { x: 60, z: 60, radius: 25 }],
+			};
+			const spots = three.scatter(opts);
+			const again = three.scatter(opts);
+
+			const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+			let tooClose = 0, tooLow = 0, onRoad = 0, inCircle = 0;
+			for (let i = 0; i < spots.length; i++) {
+				const p = spots[i];
+				if (p.y < 10) tooLow++;
+				if (Math.abs(p.z) < 15) onRoad++;
+				if (Math.hypot(p.x - 60, p.z - 60) < 25) inCircle++;
+				for (let j = i + 1; j < spots.length; j++) if (dist(p, spots[j]) < 8) tooClose++;
+			}
+			return {
+				placed: spots.length > 10,
+				tooLow, onRoad, inCircle, tooClose,
+				repeats: again.length === spots.length && again[0].x === spots[0].x,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"placed":true`), "something was placed: %s", result.value);
+		test::@check(result.value.contains(`"tooLow":0`), "nothing landed on the low half: %s", result.value);
+		test::@check(result.value.contains(`"onRoad":0`), "nothing landed on the road: %s", result.value);
+		test::@check(result.value.contains(`"inCircle":0`), "nothing landed in the keep-out: %s", result.value);
+		test::@check(result.value.contains(`"tooClose":0`), "nothing is closer than the spacing: %s", result.value);
+		test::@check(result.value.contains(`"repeats":true`), "the same seed placed the same points: %s", result.value);
 	};
 }

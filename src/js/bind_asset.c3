@@ -1328,3 +1328,129 @@ fn void js_inventory(
 	}
 	*out = listed;
 }
+
+<*
+ `terrain(width, depth, segments, skirt, heights)` — a heightfield, as an asset.
+
+ `heights` is a flat array of `(segments + 1)^2` numbers, row-major in z then x,
+ for `js_convex`'s reason: it is the one shape the crossing can read in a single
+ pass, and the prelude has to walk the caller's input to validate it anyway — so
+ it flattens while it validates and hands over something already checked. A
+ callback is resolved on the JS side into exactly this array, which is why there
+ is no callback here.
+
+ The length is checked against the segment count in `Assets.terrain` and refused
+ rather than padded: a height array off by a row is a surface that reads at the
+ wrong stride, which produces a plausible-looking diagonal ripple and nothing
+ that says why.
+*>
+fn void js_terrain(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a shape needs a GPU device and this context has none");
+		return;
+	}
+
+	float width = arg_float(&js, argc, args, 0);
+	float depth = arg_float(&js, argc, args, 1);
+	long segments = arg_int(&js, argc, args, 2);
+	float skirt = arg_float(&js, argc, args, 3);
+
+	if (segments < (long)MIN_TERRAIN_SEGMENTS || segments > (long)MAX_TERRAIN_SEGMENTS)
+	{
+		*out = js.raise(string::tformat(
+			"a terrain has between %d and %d segments a side, got %d",
+			MIN_TERRAIN_SEGMENTS, MAX_TERRAIN_SEGMENTS, segments
+		));
+		return;
+	}
+
+	long wanted = (segments + 1) * (segments + 1);
+	long length = argc > 4 ? js.length(args[4]) : -1;
+	if (length != wanted)
+	{
+		*out = js.raise(string::tformat(
+			"a %d-segment terrain wants %d heights, got %d — the array is (segments + 1) squared, row-major in z",
+			segments, wanted, length
+		));
+		return;
+	}
+
+	@pool()
+	{
+		Heightfield field = {
+			.width = width,
+			.depth = depth,
+			.segments = (uint)segments,
+			.skirt = skirt > 0 ? skirt : 0,
+		};
+		field.heights.tinit((usz)wanted);
+		for (long i = 0; i < wanted; i++)
+		{
+			qjs::Value sample = js.index(args[4], (uint)i);
+			double value = js.number(sample);
+			js.release(sample);
+			// The prelude refuses a non-finite height with a sentence naming its
+			// index. Zero is the backstop for a forged call: a NaN here would
+			// spread through the normals into every neighbouring vertex and put a
+			// black hole in the middle of the ground.
+			field.heights.push(math::is_finite(value) ? (float)value : 0.0f);
+		}
+
+		AssetId? asset = self.pass.assets.terrain(&self.renderer.gpu, &field);
+		if (catch err = asset)
+		{
+			*out = js.raise(string::tformat("could not build a terrain: %s", err));
+			return;
+		}
+		*out = asset_value(&js, asset);
+	};
+}
+
+<*
+ `terrainAt(asset, generation, x, z)` — the ground and its normal at a point.
+
+ Both in one crossing and one array, because every caller wants both: something
+ placed on a hillside needs the height to sit at and the normal to lean with, and
+ two calls would sample the grid twice to answer one question.
+
+ `[y, nx, ny, nz]`, or an empty array when the handle does not name a live
+ terrain — which the prelude turns into a sentence. Not a throw here, because the
+ same call answers "is this a terrain at all" and a fault would make the ordinary
+ negative answer expensive.
+*>
+fn void js_terrain_at(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = {
+		.index = (uint)arg_int(&js, argc, args, 0),
+		.generation = (uint)arg_int(&js, argc, args, 1),
+	};
+	Heightfield* field = self.pass.assets.terrain_field(id);
+
+	qjs::Value list = js.array();
+	if (field == null)
+	{
+		*out = list;
+		return;
+	}
+
+	float x = arg_float(&js, argc, args, 2);
+	float z = arg_float(&js, argc, args, 3);
+	Vec3 normal = field.normal_at(x, z);
+	js.set_index(list, 0, qjs::number_value((double)field.height_at(x, z)));
+	js.set_index(list, 1, qjs::number_value((double)normal.x));
+	js.set_index(list, 2, qjs::number_value((double)normal.y));
+	js.set_index(list, 3, qjs::number_value((double)normal.z));
+	*out = list;
+}

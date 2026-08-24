@@ -17,6 +17,7 @@ module three;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
+import collision;
 
 struct Camera
 {
@@ -430,4 +431,67 @@ fn void CameraFollow.apply(&self, Camera* camera, Vec3 anchor, float dt_ms)
 	// 1 - e^(-t/τ): the fraction of the remaining distance to close this frame.
 	float t = 1.0f - math::exp(-step / self.lag_ms);
 	camera.target = camera.target + (want - camera.target) * t;
+}
+
+<*
+ The world box of everything this camera can see, out to `reach`.
+
+ **What §18.1 exists to produce.** A shadow map fitted around `Scene.bounds`
+ spends its texels on the whole level; a village is 224 units across and the
+ camera frames about 70 of them, so nine tenths of the map is rasterised into and
+ then never sampled. This is the box that says which tenth is worth having.
+
+ Built from the camera's own fields rather than from the inverse of its
+ view-projection: the eight corners are `eye + forward * d ± right * w ± up * h`
+ at two depths, which is four multiplies rather than a matrix inversion, and it
+ cannot disagree with `view()` about handedness because it is derived from the
+ same `orbit_dir`. The basis is `look_at`'s: forward towards the target, right
+ the cross with world up, up the cross back.
+
+ The result is **conservative and axis-aligned**, which is the right shape for
+ what reads it: intersecting it with the scene's own box is two `min`/`max`
+ pairs, and a tighter hull would buy texels that the square, snapped fit in
+ `ShadowMap.fit` immediately gives back.
+
+ @param aspect : `Width over height, the same number view_projection is given. A different one here would size the box for a frame nobody is drawing.`
+ @param reach : `How far down the view direction to bother with, in world units. 0 or more than the far plane means the far plane — which for the default camera is 1000 units and is why shadow.distance exists.`
+*>
+fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
+{
+	Vec3 back    = self.orbit_dir();
+	Vec3 forward = -back;
+	// `look_at` builds its basis this way round, and at the 89-degree pitch limit
+	// the cross product is still well conditioned — which is the reason that
+	// limit is one degree short of the pole rather than at it.
+	Vec3 right = forward.cross({ 0, 1, 0 }).normalize();
+	Vec3 up    = right.cross(forward);
+
+	float near = self.near_plane;
+	float far  = self.far_plane;
+	if (reach > 0.0f && reach < far) far = reach;
+	if (far <= near) far = near + 1.0f;
+
+	float tan_half = math::tan(math::deg_to_rad(self.fov) * 0.5f);
+	Vec3 eye = self.eye();
+
+	const float HUGE = 3.0e38f;
+	collision::Aabb3 box = { .min = { HUGE, HUGE, HUGE }, .max = { -HUGE, -HUGE, -HUGE } };
+	float[2] depths = { near, far };
+	foreach (d : depths)
+	{
+		float h = d * tan_half;
+		float w = h * aspect;
+		Vec3 centre = eye + forward * d;
+		float[2] signs = { -1.0f, 1.0f };
+		foreach (sx : signs)
+		{
+			foreach (sy : signs)
+			{
+				Vec3 corner = centre + right * (w * sx) + up * (h * sy);
+				box.min = { math::min(box.min.x, corner.x), math::min(box.min.y, corner.y), math::min(box.min.z, corner.z) };
+				box.max = { math::max(box.max.x, corner.x), math::max(box.max.y, corner.y), math::max(box.max.z, corner.z) };
+			}
+		}
+	}
+	return box;
 }

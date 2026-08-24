@@ -18,7 +18,8 @@ import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
 import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
-import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry } from './geometry.js';
+import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry } from './geometry.js';
+import { Field, scatter } from './field.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
 import { DOCS } from './docs.js';
 
@@ -95,8 +96,8 @@ const light = {
 			// — a project that does not ask pays for none of it.
 			get enabled() { return H.shadowGet()[0] !== 0; },
 			set enabled(v) {
-				const [, size, bias, intensity] = H.shadowGet();
-				H.shadowSet(v ? 1 : 0, size, bias, intensity);
+				const [, size, bias, intensity, distance] = H.shadowGet();
+				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
 			},
 
 			// Texels per side. Clamped to 256..8192 and rounded down to a
@@ -104,8 +105,8 @@ const light = {
 			// allocated rather than as what was typed.
 			get size() { return H.shadowGet()[1]; },
 			set size(v) {
-				const [enabled, , bias, intensity] = H.shadowGet();
-				H.shadowSet(enabled, +v, bias, intensity);
+				const [enabled, , bias, intensity, distance] = H.shadowGet();
+				H.shadowSet(enabled, +v, bias, intensity, distance);
 			},
 
 			// Extra depth offset in the light's clip space, 0 by default.
@@ -116,8 +117,8 @@ const light = {
 			// tune.
 			get bias() { return H.shadowGet()[2]; },
 			set bias(v) {
-				const [enabled, size, , intensity] = H.shadowGet();
-				H.shadowSet(enabled, size, +v, intensity);
+				const [enabled, size, , intensity, distance] = H.shadowGet();
+				H.shadowSet(enabled, size, +v, intensity, distance);
 			},
 
 			// How dark a shadow is, 0 to 1. 1 takes the whole directional
@@ -125,8 +126,24 @@ const light = {
 			// shadow is never black unless the ambient floor is zero.
 			get intensity() { return H.shadowGet()[3]; },
 			set intensity(v) {
-				const [enabled, size, bias] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, +v);
+				const [enabled, size, bias, , distance] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, +v, distance);
+			},
+
+			// How far down the view direction the map is fitted, in world
+			// units. 0 is the camera's far plane, which is the default and
+			// is what a scene the camera can see all of wants.
+			//
+			// This is the texel-density knob, and it matters more than
+			// `size`: the map covers a square this wide, so halving the
+			// distance is worth quadrupling the size and costs nothing.
+			// Set it to roughly how far away shadows are worth having.
+			// Too small and shadows stop at a visible line across the
+			// ground; too large and they are soft mush.
+			get distance() { return H.shadowGet()[4]; },
+			set distance(v) {
+				const [enabled, size, bias, intensity] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, intensity, +v);
 			},
 		};
 	},
@@ -136,19 +153,20 @@ const light = {
 	// second is what they write after. An object sets only the keys it
 	// names; a boolean is `{ enabled: it }`.
 	set shadow(v) {
-		const [enabled, size, bias, intensity] = H.shadowGet();
+		const [enabled, size, bias, intensity, distance] = H.shadowGet();
 		if (typeof v === 'boolean' || v == null) {
-			H.shadowSet(v ? 1 : 0, size, bias, intensity);
+			H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
 			return;
 		}
 		if (typeof v !== 'object') {
-			throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias or intensity');
+			throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias, intensity or distance');
 		}
 		H.shadowSet(
 			('enabled' in v ? (v.enabled ? 1 : 0) : enabled),
 			('size' in v ? +v.size : size),
 			('bias' in v ? +v.bias : bias),
 			('intensity' in v ? +v.intensity : intensity),
+			('distance' in v ? +v.distance : distance),
 		);
 	},
 };
@@ -643,6 +661,21 @@ export const three = {
 	ConeGeometry,
 	TorusGeometry,
 	ConvexGeometry,
+	// The one shape that carries data instead of parameters, and the one that
+	// answers questions afterwards — heightAt and normalAt read the grid the
+	// mesh was built from. See scene/terrain.c3.
+	TerrainGeometry,
+	// A scalar grid in world coordinates, and the authoring half of the shape
+	// above: fill it with noise, flatten a building pad into it, carve a river
+	// channel, hand it to a TerrainGeometry. The SAME object is a splat mask —
+	// stroke the road's polyline into a second Field and Field.mask packs four
+	// of them into the RGBA a LayeredMaterial reads. Carving the channel and
+	// painting the mud from one polyline is the point.
+	Field,
+	// Where to put a hundred trees. Rejection sampling with keep-outs, a
+	// slope test and a seed — the block every landscape scene writes by hand,
+	// and it wants terrain.heightAt, which is why it lives beside Field.
+	scatter,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the

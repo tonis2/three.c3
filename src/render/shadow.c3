@@ -140,6 +140,24 @@ struct ShadowMap
 	// no image is allocated, no shader is compiled and the pass records nothing,
 	// so a project that never asks for shadows pays for none of this.
 	bool enabled;
+
+	<*
+	 How far down the view direction the map is fitted, in world units. 0 is the
+	 camera's own far plane.
+
+	 **The knob §18.1 leaves behind**, and the reason it is needed rather than
+	 optional: the default far plane is 1000 units, so a camera in a 200-unit
+	 level can see past the end of it and the focus box is the level again. Set
+	 this to the distance shadows are wanted at — for a village looked at from 80
+	 units away, 120 spends every texel on what is in shot.
+
+	 Zero by default, which is the pre-§18.1 behaviour for any scene the camera
+	 can see all of, and a large improvement for any scene it cannot. No default
+	 is invented for it: the number that is right depends on how big the level is
+	 and how far the camera stands off, and `plan.md` §18.7 argues that picking one
+	 for a scene shape nobody has measured is picking it wrong.
+	*>
+	float distance;
 	// Texels per side, already clamped. What the image is *actually* at is
 	// `created` — the two differ between a script writing this and the next
 	// frame reaching `ensure`.
@@ -208,6 +226,7 @@ fn void ShadowMap.defaults(&self)
 {
 	self.enabled = false;
 	self.size = SHADOW_DEFAULT_SIZE;
+	self.distance = 0;
 	self.bias = 0.0;
 	self.intensity = 1.0;
 	self.light_view_projection = matrix::IDENTITY4{float};
@@ -356,10 +375,41 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  `transform_aabb` is exact for an affine transform of a box, which a view matrix
  is, so this is the same eight corners with the arithmetic already written down.
 
+ ## The focus box, and why the extent is a square that snaps — §18.1
+
+ `bounds` decides where the light stands and how deep the pass reaches; **`focus`
+ decides how many texels a metre gets.** They were the same box until §18.1, and
+ the cost of that is in `plan.md`: a village 224 units across framed 70 units at
+ a time spends nine tenths of the map outside the picture, and the measurement
+ says the map's fill is the largest single item in the frame.
+
+ Three things have to be true at once, and each one is why the arithmetic below
+ is not simply "re-bound the focus box":
+
+ - **The extent may not change when the camera turns.** An axis-aligned box in
+   light space grows and shrinks as the camera orbits, which changes the world
+   size of a texel every frame, which makes every shadow edge boil. So the extent
+   is a *square* the size of the focus box's diagonal — the one number a rotation
+   cannot move.
+ - **The origin may only move in whole texels.** With a stable texel size, the
+   remaining shimmer is the grid sliding under static geometry, and flooring the
+   light-space origin to a multiple of the texel size removes it. This is the
+   part the plan called "the reason this is not a five-line change", and it is
+   two `floor`s once the extent is stable.
+ - **It may never be worse than fitting the whole scene.** A camera that can see
+   everything has a focus box that *is* the scene, and its diagonal is 1.7 times
+   the box — so the square is capped at the scene's own light-space extent, and
+   the fit degrades to what it always was rather than to something coarser.
+
+ The depth range still comes from `bounds`, not from `focus`: a caster standing
+ between the light and the visible region is outside the focus box and its shadow
+ lands inside it.
+
  @param light : `xyz surface-to-light in world space, w ignored. A zero direction is treated as straight up rather than producing a NaN matrix — the same value three.light refuses at the door, defended again here because this is the only place it would be silent.`
- @param bounds : `The world box of everything drawable — Scene.bounds. A unit box for an empty scene, which fits and shadows nothing.`
+ @param bounds : `The world box of everything drawable — Scene.bounds. A unit box for an empty scene, which fits and shadows nothing. Sets the light's stand-off and the near and far planes.`
+ @param focus : `The part of it worth spending texels on — Camera.view_bounds intersected with bounds. Omitted, empty or degenerate falls back to bounds, which is the pre-§18.1 fit exactly, and is what the tests that check the fit itself pass.`
 *>
-fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds)
+fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = {})
 {
 	Vec3 direction = { light[0], light[1], light[2] };
 	float length   = direction.length();
@@ -386,6 +436,33 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds)
 	Matrix4f view        = matrix::look_at{float}(centre + direction * (radius * 2.0f), centre, up);
 	collision::Aabb3 box = transform_aabb(view, bounds);
 
+	// Degenerate on any axis means nobody supplied one, or the camera is looking
+	// away from the scene entirely. The whole box is the honest answer to both.
+	Vec3 span3 = focus.max - focus.min;
+	if (span3.x <= 0.0f || span3.y <= 0.0f || span3.z <= 0.0f) focus = bounds;
+
+	collision::Aabb3 lit = transform_aabb(view, focus);
+
+	// The diagonal, so that orbiting the camera cannot change it — and capped at
+	// the scene's own light-space extent, so that a camera which frames
+	// everything is fitted exactly as it was before this existed.
+	float extent = (focus.max - focus.min).length();
+	float ceiling = math::max(box.max.x - box.min.x, box.max.y - box.min.y);
+	if (extent > ceiling || extent <= 1e-4f) extent = ceiling;
+	if (extent <= 1e-4f) extent = 1.0f;
+
+	uint texels = self.created > 0 ? self.created : self.size;
+	float per_texel = extent / (float)texels;
+
+	// Centred on the focus, then floored onto the texel grid. `math::floor` and
+	// not a cast: the light-space origin is negative about as often as it is
+	// positive, and a cast truncates towards zero, which snaps the two halves of
+	// the world onto two different grids.
+	float low_x = (lit.min.x + lit.max.x - extent) * 0.5f;
+	float low_y = (lit.min.y + lit.max.y - extent) * 0.5f;
+	low_x = math::floor(low_x / per_texel) * per_texel;
+	low_y = math::floor(low_y / per_texel) * per_texel;
+
 	// A right-handed eye looks down -Z, so everything in front of it has a
 	// negative z and the ortho's near and far are the *distances* — which is the
 	// sign flip that turns the box's z range into them. Getting this backwards is
@@ -395,18 +472,17 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds)
 	if (near < 0.01f) near = 0.01f;
 	if (far <= near) far = near + 1.0f;
 
-	self.light_view_projection = matrix::ortho{float}(box.min.x, box.max.x, box.min.y, box.max.y, near, far).mul(view);
+	self.light_view_projection =
+		matrix::ortho{float}(low_x, low_x + extent, low_y, low_y + extent, near, far).mul(view);
 
-	float width  = box.max.x - box.min.x;
-	float height = box.max.y - box.min.y;
-	float widest = width > height ? width : height;
-	uint side    = self.created > 0 ? self.created : self.size;
-
-	self.texel = 1.0f / (float)side;
+	self.texel = 1.0f / (float)texels;
 	// The world size of one texel, times the standard two. `fit` is the only
 	// place that knows both halves of that product — the box's extent and the
 	// map's resolution — which is why the offset is derived here and not set.
-	self.normal_offset = widest / (float)side * SHADOW_NORMAL_OFFSET_TEXELS;
+	// It follows the focus rather than the scene, so a tighter fit tightens the
+	// offset with it instead of leaving a peter-pan gap that was tuned for a
+	// coarser map.
+	self.normal_offset = per_texel * SHADOW_NORMAL_OFFSET_TEXELS;
 }
 
 <*

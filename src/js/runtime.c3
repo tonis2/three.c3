@@ -116,6 +116,7 @@ const char[*] PRELUDE_MESH = $embed("prelude/mesh.js");
 const char[*] PRELUDE_SCENE = $embed("prelude/scene.js");
 const char[*] PRELUDE_ASSET = $embed("prelude/asset.js");
 const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
+const char[*] PRELUDE_FIELD = $embed("prelude/field.js");
 const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
 const char[*] PRELUDE_API = $embed("prelude/api.js");
 const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
@@ -132,7 +133,7 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[14] parts;
+	static qjs::EmbeddedModule[15] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -145,6 +146,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:scene.js", (char[])PRELUDE_SCENE[..] },
 		{ "three:asset.js", (char[])PRELUDE_ASSET[..] },
 		{ "three:geometry.js", (char[])PRELUDE_GEOMETRY[..] },
+		{ "three:field.js", (char[])PRELUDE_FIELD[..] },
 		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
@@ -167,12 +169,13 @@ struct RunResult
 	// The message and, when the throw carried one, the stack. Empty when `ok`.
 	String error;
 	SceneStats stats;
-	// What the GPU spent on the last frame this run drew, in milliseconds, and 0
-	// when it drew none or when there is no device to measure — `gpu/timing.c3`
-	// argues which frame that is. Beside `stats` rather than inside it: a
-	// `SceneStats` is a fact about the scene and is produced with no device at
-	// all, so the two are joined here, where the runtime can see both.
-	double gpu_ms;
+	// What the GPU spent on the last frame this run drew, split by pass, in
+	// milliseconds — all zero when it drew none or when there is no device to
+	// measure, and `gpu/timing.c3` argues which frame that is. Beside `stats`
+	// rather than inside it: a `SceneStats` is a fact about the scene and is
+	// produced with no device at all, so the two are joined here, where the
+	// runtime can see both.
+	FrameTiming timing;
 
 	// What the animation loop did between the last run and this one, which is
 	// the only window an agent has onto it: nothing else reports a callback that
@@ -545,7 +548,7 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.value = self.value.copy_str(mem),
 		.error = self.error.copy_str(mem),
 		.stats = stats,
-		.gpu_ms = self.renderer != null ? self.renderer.gpu_ms() : 0.0,
+		.timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ },
 		.frame_running = self.frame_active,
 		.frame_ticks = frame_ticks,
 		.frame_overruns = frame_overruns,

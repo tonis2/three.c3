@@ -103,6 +103,13 @@ export class Texture {
 	// is why this is a getter and not a settable field as it is in Three.js.
 	// Load the file again with the other colourspace to get the other image.
 	get colorSpace() { return this._colorSpace; }
+	set colorSpace(_) {
+		throw new TypeError(
+			'texture.colorSpace is fixed at load — it is the image\'s Vulkan format, and there is '
+			+ 'nothing to change afterwards. Load the file again with { colorSpace } to get the '
+			+ 'other image.'
+		);
+	}
 
 	// How many mip levels the image has. 1 means the top level and nothing
 	// below it, so the sampler has nothing to fall back on as the surface
@@ -115,6 +122,12 @@ export class Texture {
 	// mips on a device that cannot make them sees false here rather than the
 	// true it passed in.
 	get generateMipmaps() { return this._levels > 1; }
+	set generateMipmaps(_) {
+		throw new TypeError(
+			'texture.generateMipmaps is what this image got, not a request you can change — the '
+			+ 'chain is built during the upload. Pass { generateMipmaps } to the load instead.'
+		);
+	}
 
 	// Whether this handle still names an image. False after dispose(), and
 	// the reason a disposed Texture throws rather than quietly texturing

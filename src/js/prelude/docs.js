@@ -36,6 +36,7 @@ export const DOCS = {
 		'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
 		'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row. A table is not capped at the push block: past 104 bytes the array columns move to a device buffer on their own and the body is unchanged, so hundreds of rows is an ordinary thing to ask for (up to 256 KiB, which is thousands). PLAIN uniforms — the ones with no rows — do stay in the push block and are still held to that 104.',
 		'A ShaderMaterial has a vertex stage as well as a fragment one: { vertex: `void displace(inout Vertex v) { v.position.y += sin(v.local.x * 3 + t) * 0.4; }` } moves geometry per vertex with no draw call, no upload and no geometry change — the mesh is still the same asset and a thousand copies of it are still one call. Vertex is the varyings: position (world), normal, uv, color and variant are read back after your body runs, and local (object space) and index (the vertex number) are inputs. The normal is not recomputed for you. Always pass `bounds` with a vertex body — the number of world units it can displace by — because culling tests the mesh\'s undisplaced box and geometry outside it is dropped while still on screen.',
+		'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
 		'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 		'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
 		'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
@@ -552,6 +553,52 @@ export const DOCS = {
 			properties: ['bounds'],
 			methods: ['toJSON()', 'toString()'],
 		},
+		TerrainGeometry: {
+			construct: 'new three.TerrainGeometry({ width, depth, segments, heights, skirt })',
+			note:
+				'Ground that is a surface rather than a pile of boxes, and the only geometry here that '
+				+ 'answers questions afterwards. heights is a three.Field, a flat array of '
+				+ '(segments + 1) squared numbers row-major in z, or a function (x, z) => y sampled at '
+				+ 'the grid points in WORLD coordinates — the same frame everything else in the scene '
+				+ 'uses, so one height function can drive the terrain, the mask and the scatter. Omit it '
+				+ 'for a flat field to stamp into later. It lies in the xz plane with +y up and is '
+				+ 'centred on the origin, its uv runs 0..1 across the whole field so a splat mask lines '
+				+ 'up with no transform, and its normals come from the GRID rather than from the '
+				+ 'triangles, which is the difference between ground and steps. skirt is how far a wall '
+				+ 'drops around the border so the map edge is not a hole. One asset, one draw call: a '
+				+ '256-segment field is one vkCmdDrawIndexed. heightAt(x, z) and normalAt(x, z) read the '
+				+ 'same grid the mesh was built from, through the same interpolation, so what a script '
+				+ 'stands on cannot disagree with what is drawn; off the map the edges extend outwards '
+				+ 'rather than dropping to zero.',
+			properties: ['bounds'],
+			methods: ['heightAt(x, z)', 'normalAt(x, z)', 'toJSON()', 'toString()'],
+		},
+		Field: {
+			construct: 'new three.Field({ width, depth, segments, value })',
+			note:
+				'A scalar grid in world coordinates — the authoring half of TerrainGeometry, and the '
+				+ 'SAME object a splat mask is made of. That is the point rather than a convenience: '
+				+ 'carve a river channel and stroke the mud mask from one polyline and the mud is where '
+				+ 'the water is by construction, instead of because two functions were kept in step. '
+				+ 'Everything mutates in place and returns this, so it chains. fill and add take a '
+				+ 'number or an (x, z) => v in world coordinates; flatten({x, z, width, depth}, y) is a '
+				+ 'building pad and defaults y to the mean under the rect, which is where the ground '
+				+ 'already was; carve(path, width, depth) lowers along a polyline and stroke(path, '
+				+ 'width, value) paints along the same one; circle, blur, normalize and clamp finish the '
+				+ 'set. Every stamp takes a feather in world units with a smoothstep falloff. '
+				+ 'valueAt(x, z) reads it back bilinearly BEFORE any upload, which is what lets a script '
+				+ 'place buildings and scatter trees on ground that does not exist on the device yet. '
+				+ 'texture() is the field as a mask in all four channels; three.Field.mask({r, g, b, a}) '
+				+ 'packs up to four of one resolution into the RGBA image a LayeredMaterial reads, '
+				+ 'always linear because a mask is a weight and not a colour.',
+			properties: ['width', 'depth', 'segments', 'side', 'values'],
+			methods: [
+				'fill(v)', 'add(v)', 'flatten(rect, y, feather)', 'carve(path, width, depth, feather)',
+				'stroke(path, width, value, feather)', 'circle(x, z, radius, value, feather)',
+				'blur(passes)', 'normalize(low, high)', 'clamp(low, high)', 'range()',
+				'valueAt(x, z)', 'xAt(i)', 'zAt(j)', 'texture()',
+			],
+		},
 		Box3Helper: {
 			construct: 'new three.Box3Helper(box, color = 0xffff00)',
 			note:
@@ -684,10 +731,23 @@ export const DOCS = {
 			+ 'in between, which gives a fresh one and makes the old handle throw. '
 			+ 'asset.instantiate() for the file\'s own hierarchy, asset.mesh(name) for one piece of it.',
 		'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
+		'three.scatter(options)':
+			'Where to put a hundred trees: { count, seed, onTerrain, bounds, spacing, minHeight, '
+			+ 'maxHeight, maxSlope, avoid, accept }. Returns [{ x, y, z, normal, index }] — placements, '
+			+ 'not meshes, because the loop that turns a placement into a mesh is three lines and the '
+			+ 'caller almost always wants to vary the colour or the scale per point. onTerrain is a '
+			+ 'TerrainGeometry or a Field and supplies the height and the normal; bounds defaults to '
+			+ 'that terrain\'s own extent. avoid takes { x, z, radius } circles and { path, width } '
+			+ 'corridors, so the same polyline that carved the river keeps the trees out of it. '
+			+ 'maxSlope is in degrees off flat. spacing is a minimum separation enforced by rejection, '
+			+ 'not a guarantee: the sampler gives up after a bounded number of tries and returns a '
+			+ 'shorter list rather than spinning, so read .length. The same seed places the same points, '
+			+ 'which is what makes a screenshot comparable to yesterday\'s.',
 		'three.stats()':
-			'The numbers below, for the whole scene, with culling off. gpuMs is the one exception: it is '
-			+ 'not a fact about the scene but a measurement of the last frame drawn, so it moves when '
-			+ 'nothing about the scene has.',
+			'The numbers below, for the whole scene, with culling off. The six ...Ms are the exception: '
+			+ 'they are not facts about the scene but measurements of the last frame drawn, so they move '
+			+ 'when nothing about the scene has. gpuMs is the frame and the other five are what it was '
+			+ 'spent on, which is how you find out that a slow scene is slow in the shadow pass.',
 		'three.camera.attach(object, options)':
 			'Follow an object with the camera. { offset: [x, y, z] } is added to its world position and '
 			+ 'becomes the orbit point every frame; { distance } is how far behind the eye sits, and 0 '
@@ -1114,8 +1174,8 @@ export const DOCS = {
 			+ 'a name Three.js has would be read as a promise of the two things it cannot do.',
 		'three.light.shadow':
 			'The shadow this light casts, off until you ask. three.light.shadow = true turns it on; '
-			+ 'three.light.shadow = { enabled: true, size: 4096 } sets several at once; and the four '
-			+ 'properties — enabled, size, bias, intensity — read and write one at a time. size is '
+			+ 'three.light.shadow = { enabled: true, size: 4096 } sets several at once; and the five '
+			+ 'properties — enabled, size, bias, intensity, distance — read and write one at a time. size is '
 			+ 'texels per side, clamped to 256..8192 and rounded DOWN to a power of two, so it reads '
 			+ 'back as what will be allocated rather than as what you typed. bias is an extra depth '
 			+ 'offset in the light\'s clip space and defaults to 0, because each sample is already '
@@ -1123,6 +1183,12 @@ export const DOCS = {
 			+ 'stripes; reach for it in small numbers like 0.0005 if a scene still shows them. '
 			+ 'intensity is how dark, 0 to 1, and 1 takes the whole directional term away and leaves '
 			+ 'three.light.ambient — so a shadow is never black unless the ambient floor is. '
+			+ 'distance is how far down the view direction the map is fitted, in world units, and 0 '
+			+ '(the default) means the camera\'s far plane. It is the sharpness knob, and it beats '
+			+ 'size: the map covers a square this wide, so halving distance is worth quadrupling size '
+			+ 'and costs nothing. The default far plane is much larger than most levels, so a wide '
+			+ 'outdoor scene gets nothing from the fit until you set this — try roughly the distance '
+			+ 'shadows are worth having, and watch for the line across the ground where they stop. '
 			+ 'Nothing is allocated and no shader compiled until the first frame with it on, turning '
 			+ 'it off costs nothing and keeps the map for next time, and new three.Scene() turns it '
 			+ 'off. Everything opaque casts and everything shaded receives: there is no castShadow or '
@@ -1171,7 +1237,8 @@ export const DOCS = {
 		vertices: 'Likewise.',
 		textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 		textureBytes: 'What those cost.',
-		culledLastFrame: 'Instances the frustum dropped in the last render(). Always 0 while three.light.shadow.enabled is set — a shadow pass needs every caster, not every visible one.',
+		culledLastFrame: 'Instances the camera frustum dropped in the last render(). Meaningful with shadows on too: the shadow pass has its own draw list against the light\'s box, so turning shadows on no longer costs the camera its cull.',
+		shadowCulled: 'Instances neither pass drew — outside the camera frustum AND outside the light\'s box. 0 with shadows off. A caster the camera cannot see is still drawn into the map, so this is smaller than culledLastFrame, not equal to it.',
 		shadowDraws: 'Draw calls the last frame\'s shadow pass made, and 0 with shadows off. Roughly drawCalls minus the transparent buckets and the helpers, so this is what shadows cost in draws.',
 		skinnedDraws: 'Draw calls whose geometry is posed by a skeleton.',
 		skinnedInstances: 'Characters in those draws. A hundred here with skinnedDraws at 1 is the crowd working as intended.',
@@ -1187,6 +1254,16 @@ export const DOCS = {
 			+ 'renderSize() if you need to tell "nothing drawn" from "nothing to draw with". The span is '
 			+ 'the whole submission, including the blit or the readback copy that puts the frame where you '
 			+ 'can see it, so it answers what the frame cost rather than what the draws cost.',
+		prepareMs: 'Of gpuMs: uploads, the frame\'s buffer writes and compute skinning. Everything before '
+			+ 'the first pass begins.',
+		shadowMs: 'Of gpuMs: the shadow map. 0 with shadows off. This is the one worth looking at first in '
+			+ 'an outdoor scene — the map is fitted around the whole scene, so a wide level pays for texels '
+			+ 'nowhere near the camera, and three.light.shadow.size is the knob.',
+		sceneMs: 'Of gpuMs: the pass that draws the picture.',
+		postMs: 'Of gpuMs: the post chain, and 0 with no post shader.',
+		presentMs: 'Of gpuMs: getting the finished image out — the blit to the window, or the readback copy '
+			+ 'behind a screenshot. The five add up to gpuMs, so anything unaccounted for is a bug rather '
+			+ 'than a gap.',
 	},
 	intersection: {
 		object: 'The Mesh that was hit. Null only for a node this script did not build — one opened from the command line.',

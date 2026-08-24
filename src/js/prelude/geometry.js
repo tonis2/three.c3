@@ -305,3 +305,126 @@ export class ConvexGeometry extends Geometry {
 // from, and in `three.camera.frameAll()`. Parent an AxesHelper to a piece
 // and the piece measures bigger than it is — so align first and add helpers
 // after, or hang them from a Group of their own.
+
+// A surface rather than a pile of boxes — plan.md §18.4.
+//
+// The one generated shape that carries data instead of parameters, and the
+// one that answers questions afterwards. `heightAt` and `normalAt` read the
+// same grid the mesh was built from, through the same interpolation, so a
+// script cannot place something on ground that disagrees with what is drawn
+// — which is exactly what a hand-written `ground(x, z)` beside a hand-built
+// tile grid could do at any moment, and did.
+export class TerrainGeometry extends Geometry {
+	constructor(options = {}) {
+		const where = 'new three.TerrainGeometry({ width, depth, segments, heights })';
+		if (options === null || typeof options !== 'object') {
+			throw new TypeError(`${where} takes an options object`);
+		}
+
+		const width = positiveSize(options.width ?? 100, where, 'width');
+		const depth = positiveSize(options.depth ?? width, where, 'depth');
+		const segments = segmentCount(options.segments ?? 32, where, 'segments', 1);
+		const skirt = options.skirt === undefined ? 0 : +options.skirt;
+		if (!Number.isFinite(skirt) || skirt < 0) {
+			throw new RangeError(`${where}: skirt cannot be negative, got ${options.skirt}`);
+		}
+
+		const side = segments + 1;
+		const wanted = side * side;
+		const heights = new Float64Array(wanted);
+		const source = options.heights;
+
+		if (typeof source === 'function') {
+			// **Sampled here rather than passed across**, because a callback that
+			// crossed into the host would be one QuickJS call per sample — a
+			// 256-segment field is sixty-six thousand of them — and because a
+			// script's height function is the most natural thing in the world to
+			// write in terms of Math.sin and a couple of closures.
+			//
+			// The arguments are WORLD x and z, not grid indices: a height function
+			// written against the same coordinates everything else in the scene
+			// uses is one that can be reused for the mask, the scatter and the
+			// carve without a change of frame.
+			for (let j = 0; j < side; j++) {
+				const z = -depth / 2 + (j / segments) * depth;
+				for (let i = 0; i < side; i++) {
+					const x = -width / 2 + (i / segments) * width;
+					const y = +source(x, z);
+					if (!Number.isFinite(y)) {
+						throw new RangeError(
+							`${where}: heights(${x}, ${z}) returned ${y} — every sample must be a finite number`
+						);
+					}
+					heights[j * side + i] = y;
+				}
+			}
+		} else if (source === undefined || source === null) {
+			// Flat. A terrain with no heights is a plane you can stand on and
+			// stamp into later, which is a perfectly ordinary thing to want and
+			// is not worth an error.
+		} else if (typeof source.valueAt === 'function' && typeof source.values === 'object') {
+			// A three.Field, which is the authoring path: fill it with noise,
+			// flatten the pads, carve the river, hand it over. Checked
+			// structurally rather than with `instanceof` so that geometry.js
+			// does not have to import field.js and field.js does not have to
+			// avoid importing geometry.js.
+			if (source.segments !== segments || source.values.length !== wanted) {
+				throw new RangeError(
+					`${where}: the Field is ${source.segments} segments and the terrain is ${segments} — `
+					+ 'build both at one resolution, or the surface will not be the field you stamped'
+				);
+			}
+			for (let i = 0; i < wanted; i++) heights[i] = source.values[i];
+		} else if (typeof source.length === 'number') {
+			if (source.length !== wanted) {
+				throw new RangeError(
+					`${where}: ${segments} segments wants ${wanted} heights ((segments + 1) squared), got ${source.length}`
+				);
+			}
+			for (let i = 0; i < wanted; i++) {
+				const y = +source[i];
+				if (!Number.isFinite(y)) {
+					throw new RangeError(`${where}: heights[${i}] is ${source[i]} — every sample must be a finite number`);
+				}
+				heights[i] = y;
+			}
+		} else {
+			throw new TypeError(`${where}: heights must be an array of numbers or a function (x, z) => y`);
+		}
+
+		super(
+			'TerrainGeometry',
+			options.name ?? '',
+			{ width, depth, segments, skirt },
+			H.terrain(width, depth, segments, skirt, heights)
+		);
+	}
+
+	// The ground at a world (x, z) — §18.4b, and the piece everything that
+	// stands outdoors needs. Bilinear, so it is continuous: a query that
+	// snapped to the nearest sample would put a walker through a staircase on
+	// a smooth hill, which is the defect this shape exists to remove.
+	//
+	// Outside the field the edges extend outwards, so walking off the map
+	// keeps the ground it last stood on rather than dropping through zero.
+	heightAt(x, z) { return this._at(x, z, 'heightAt')[0]; }
+
+	// The surface normal there, unit length, blended exactly as the shading
+	// blends it — so something laid flush with the ground agrees with what
+	// the light does to it.
+	normalAt(x, z) {
+		const [, nx, ny, nz] = this._at(x, z, 'normalAt');
+		return [nx, ny, nz];
+	}
+
+	_at(x, z, what) {
+		const answer = H.terrainAt(this.asset, this.assetGeneration, +x, +z);
+		if (answer.length === 0) {
+			throw new Error(
+				`terrain.${what}() — this handle no longer names a live terrain, `
+				+ 'which happens after scene.unload() or three.unloadUnused()'
+			);
+		}
+		return answer;
+	}
+}

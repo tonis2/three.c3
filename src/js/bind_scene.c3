@@ -55,6 +55,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "textureRead", &js_texture_read, 2);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
+	self.bind(host, "terrain", &js_terrain, 5);
+	self.bind(host, "terrainAt", &js_terrain_at, 4);
 	self.bind(host, "lines", &js_lines, 2);
 	self.bind(host, "wireframe", &js_wireframe, 3);
 	self.bind(host, "assetPath", &js_asset_path, 2);
@@ -126,7 +128,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightGet", &js_light_get, 0);
 	self.bind(host, "lightSet", &js_light_set, 4);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
-	self.bind(host, "shadowSet", &js_shadow_set, 4);
+	self.bind(host, "shadowSet", &js_shadow_set, 5);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "cameraAttach", &js_camera_attach, 7);
@@ -930,6 +932,16 @@ fn void js_raycast(
  with no device gets 0, not `undefined`: a missing key makes `ms > 16` false and
  `ms.toFixed(2)` throw, and neither failure names the reason. Zero is the honest
  answer — nothing was measured — and it arrives in the shape the caller expects.
+
+ ## The five phase millisecond counts
+
+ Same join, same zero, and they sum to `gpuMs` — `gpu/timing.c3` writes the
+ marks and `plan.md` §18.3 has why they exist: without them, "which pass is this
+ frame" is answered by editing the scene and rendering it again, six times, and
+ an optimisation of one pass is verified by the total. They are five properties
+ rather than one object because every other number here is flat, and a script
+ that wants to print a frame breakdown should not have to know which of the
+ fifteen keys are nested.
 *>
 fn void js_stats(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -951,6 +963,10 @@ fn void js_stats(
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
 	js.set_property(object, "culledLastFrame", qjs::int_value((int)stats.culled_last_frame));
+	// The light's cull beside the camera's — §18.2. Zero with shadows off, which
+	// is the honest answer rather than an absent property, and the same shape as
+	// `shadowDraws` below.
+	js.set_property(object, "shadowCulled", qjs::int_value((int)stats.shadow_culled_last_frame));
 	// What skinning costs, apart from everything else — see `SceneStats`. A scene
 	// with no character in it reports four zeroes, which is the honest answer and
 	// costs four properties nobody reads.
@@ -963,7 +979,13 @@ fn void js_stats(
 	// `drawCalls` above counts the scene pass and always has. Zero with shadows
 	// off, which is the honest answer rather than an absent property.
 	js.set_property(object, "shadowDraws", qjs::int_value((int)stats.shadow_draws));
-	js.set_property(object, "gpuMs", qjs::number_value(self.renderer != null ? self.renderer.gpu_ms() : 0.0));
+	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ };
+	js.set_property(object, "gpuMs", qjs::number_value(timing.total));
+	js.set_property(object, "prepareMs", qjs::number_value(timing.prepare));
+	js.set_property(object, "shadowMs", qjs::number_value(timing.shadow));
+	js.set_property(object, "sceneMs", qjs::number_value(timing.scene));
+	js.set_property(object, "postMs", qjs::number_value(timing.post));
+	js.set_property(object, "presentMs", qjs::number_value(timing.present));
 	*out = object;
 }
 
@@ -1445,7 +1467,7 @@ fn void js_light_set(
 }
 
 <*
- `shadowGet()` — the shadow settings, as `[enabled, size, bias, intensity]`.
+ `shadowGet()` — the shadow settings, as `[enabled, size, bias, intensity, distance]`.
 
  `enabled` comes back as 1 or 0 rather than as a boolean because this array is
  the same shape `lightGet` uses and the JS side reads it positionally; `api.js`
@@ -1470,16 +1492,17 @@ fn void js_shadow_get(
 	js.set_index(list, 1, qjs::number_value((double)shadows.size));
 	js.set_index(list, 2, qjs::number_value((double)shadows.bias));
 	js.set_index(list, 3, qjs::number_value((double)shadows.intensity));
+	js.set_index(list, 4, qjs::number_value((double)shadows.distance));
 	*out = list;
 }
 
 <*
- `shadowSet(enabled, size, bias, intensity)` — all four at once.
+ `shadowSet(enabled, size, bias, intensity, distance)` — all five at once.
 
- ## Why all four rather than four setters
+ ## Why all five rather than five setters
 
- The same shape `lightSet` has, for the same reason: `api.js` presents four
- independent properties and each one reads the other three back and writes the
+ The same shape `lightSet` has, for the same reason: `api.js` presents five
+ independent properties and each one reads the other four back and writes the
  lot, so there is one crossing per assignment instead of a getter and a setter per
  field. It also makes the clamping happen in one place.
 
@@ -1523,6 +1546,12 @@ fn void js_shadow_set(
 	float bias = arg_float(&js, argc, args, 2);
 	shadows.bias = bias > 0.0f ? bias : 0.0f;
 	shadows.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+	// Floored at zero, where zero means the camera's own far plane — see
+	// `ShadowMap.distance`. There is no ceiling: a distance past the far plane
+	// is silently the far plane, because the fit takes the smaller of the two,
+	// and refusing a number that already behaves sensibly would be noise.
+	float reach = arg_float(&js, argc, args, 4);
+	shadows.distance = reach > 0.0f ? reach : 0.0f;
 }
 
 fn void js_camera_get(
