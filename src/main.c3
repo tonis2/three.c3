@@ -9,8 +9,6 @@
 	--width <n>           offscreen render width  (default 1280)
 	--height <n>          offscreen render height (default 720)
 	--headless            no window, no surface, no swapchain
-	--validate            Vulkan validation layers + debug messenger
-	--no-validate         turn them off — --mcp turns them on by default
 	--script <file.js>    boot one script, then keep the window running
 	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
 
@@ -24,14 +22,17 @@
  CLI the base stage was driven by, kept because it is how a human looks at a
  file.
 
- **`--mcp` implies `--validate`, in a debug build.** `plan.md` §4: "run the
- validation layers whenever a script is executing". Serving is when scripts
- execute, and a validation error only becomes part of `run_script`'s answer if
- the layer that produces it is loaded — so leaving it to the caller would mean
- the third of the four things a run answers with is usually absent.
- `--no-validate` is the way back out; a machine with no layer installed needs
- neither, because `create_instance` skips it and says so. A binary built without
- `-D DEBUG` has no layer to imply — `src/debug.c3` has the argument.
+ **Validation is not on this list, and that is the whole of its interface.**
+ `plan.md` §4 asks for the layers "whenever a script is executing", and a
+ validation error only reaches `run_script`'s answer if the layer that produces
+ it is loaded — so the question the CLI used to ask, and get wrong, was one
+ nobody wanted asked. The build answers it instead: `-D DEBUG` runs the layers,
+ always; a release build has none in it to run. `src/debug.c3` carries the
+ argument and the measurement.
+
+ The flags that used to be here are gone rather than deprecated, so `--validate`
+ is now refused as an unknown option. A machine with no layer installed still
+ needs nothing: `create_instance` skips it and says so.
 
  The server's handlers run on *this* thread — `Listener` moves bytes on its own
  and `pump` runs the work on the caller's — so a script, the scene it builds and
@@ -62,11 +63,6 @@ struct Options
 	uint width;
 	uint height;
 	bool headless;
-	bool validate;
-	// Kept apart from `validate` so that "not asked for" and "asked to be off"
-	// stay distinguishable while --mcp is deciding the default.
-	bool no_validate;
-	String shader;
 	// 0 for "do not serve". The port is only ever bound on 127.0.0.1 — and under
 	// `--mcp-stdio` it is the port *connected to* rather than bound, which is
 	// what makes `--mcp 9000 --mcp-stdio` relay to 9000.
@@ -95,19 +91,12 @@ fn Options? parse_args(String[] args)
 				opts.help = true;
 			case "--headless":
 				opts.headless = true;
-			case "--validate":
-				opts.validate = true;
-			case "--no-validate":
-				opts.no_validate = true;
 			case "--assets":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.assets = args[++i];
 			case "--script":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.script = args[++i];
-			case "--shader":
-				if (i + 1 >= args.len) return MISSING_VALUE~;
-				opts.shader = args[++i];
 			case "--screenshot":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.screenshot = args[++i];
@@ -160,17 +149,6 @@ fn Options? parse_args(String[] args)
 	if (opts.screenshot.len > 0) opts.headless = true;
 	// A server that rendered one frame and exited would be no server at all.
 	if (opts.mcp_port > 0) opts.screenshot = "";
-	// Serving is when scripts run, and a script's validation errors are part of
-	// what `run_script` answers with — see the header. `--no-validate` wins
-	// outright rather than by position, because a flag whose meaning depends on
-	// what came before it on the line is a flag people get wrong.
-	//
-	// **The implication is a debug build's**, and only the implication: an
-	// explicit `--validate` is left standing so that `create_instance` can refuse
-	// it out loud. Nobody asked for this one, so nothing is printed when it is
-	// dropped — see `src/debug.c3`.
-	if (opts.no_validate) { opts.validate = false; }
-	else if (opts.mcp_port > 0) { opts.validate = DEBUG_BUILD; }
 
 	return opts;
 }
@@ -190,14 +168,21 @@ fn void usage()
 	io::printn("  --headless            no window, no surface, no swapchain");
 	io::printn("  --script <file.js>    run one script, then keep the window running");
 	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
-	io::printn("  --validate            Vulkan validation layers + debug messenger");
-	io::printn("  --no-validate         turn them off — --mcp turns them on by default");
-	if (!DEBUG_BUILD)
-	{
-		io::printn("                        (this binary has neither: build with -D DEBUG)");
-	}
-	io::printn("  --shader <path>       a mesh.slang other than the one on the search path");
 	io::printn("  -h, --help            this");
+	io::printn("");
+	// Which binary this is, rather than a flag for changing it. The layers moved
+	// to `-D DEBUG` and the shader search path to `shaders/`, so the two things
+	// the line used to be able to say are now properties of the build and of the
+	// working directory — and `--help` is where somebody goes to find that out.
+	if (DEBUG_BUILD)
+	{
+		io::printn("  Built with -D DEBUG: Vulkan validation layers on, @debug_log compiled in.");
+	}
+	else
+	{
+		io::printn("  Built without -D DEBUG: no validation layers in this binary.");
+	}
+	io::printn("  Shaders are read from shaders/ — run from the project root.");
 }
 
 fn int main(String[] args)
@@ -225,14 +210,15 @@ fn int main(String[] args)
 	{
 		io::printfn("three: %s", err);
 		// The one failure with an obvious next step, and the one most likely to
-		// be hit: the shader is read from disk relative to the working
+		// be hit: the shaders are read from disk relative to the working
 		// directory, so running from anywhere but the project root finds
 		// nothing. There is no build step to suggest any more — M4 compiles
-		// the source at startup.
+		// the source at startup — and no flag either: five templates are looked
+		// up this way and a flag that named one of them fixed nothing.
 		if (err == SHADER_NOT_FOUND)
 		{
-			io::printn("  shaders/mesh.slang is not on the search path.");
-			io::printn("  Run from the project root, or point at one with --shader <path>.");
+			io::printn("  shaders/ is not on the search path — mesh, material, post,");
+			io::printn("  shadow and skin are all read from it. Run from the project root.");
 		}
 		// The path is named here rather than in the fault, because this is the
 		// only place that still has it: a `--script` typo is otherwise a bare
@@ -279,7 +265,7 @@ fn void? run(Options opts)
 	}
 	defer if (windowed) window.free();
 
-	vk::Instance instance = create_instance(opts.validate, headless: opts.headless)!;
+	vk::Instance instance = create_instance(DEBUG_BUILD, headless: opts.headless)!;
 	defer instance.free();
 
 	vk::SurfaceKHR surface;
@@ -293,15 +279,20 @@ fn void? run(Options opts)
 	defer if (windowed) surface.free(instance);
 
 	Renderer renderer;
-	renderer.init(instance, surface, opts.width, opts.height, opts.validate)!;
+	renderer.init(instance, surface, opts.width, opts.height, DEBUG_BUILD)!;
 	defer renderer.free();
 
-	if (opts.validate) renderer.gpu.report();
+	// The device table on every debug run, where it used to take a flag. A build
+	// that carries the validation layers is a build somebody is diagnosing with,
+	// and the first question a diagnosis asks is which device and which limits —
+	// `Gpu.report` prints whether validation actually loaded, which is the one
+	// thing `DEBUG_BUILD` cannot promise on its own.
+	if (DEBUG_BUILD) renderer.gpu.report();
 
 	// The shader is compiled here, from shaders/mesh.slang on disk. Editing it
 	// and re-running changes the picture — no rebuild of this binary, and since
 	// M4 no build step for the shader either.
-	renderer.pass.init(&renderer.gpu, &renderer.target, opts.shader)!;
+	renderer.pass.init(&renderer.gpu, &renderer.target)!;
 
 	if (opts.model.len > 0)
 	{

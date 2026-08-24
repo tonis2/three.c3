@@ -231,6 +231,94 @@ fn void an_unload_queues_its_buffers_rather_than_waiting_for_the_device() @test
 	};
 }
 
+<*
+ Total bytes on the allocator's free lists.
+
+ The only handle a test has on "was this allocation actually given back". Vulkan
+ will not answer "is this `VkImage` alive", and the validation layer only says so
+ at `vkDestroyDevice`, which is after the last test has run. But `vk::Memory.free`
+ destroys the handle *and* returns the block in one call, so a block reappearing
+ here is that call having happened.
+*>
+fn sz free_block_bytes(three::Gpu* gpu)
+{
+	sz total = 0;
+	foreach (page : gpu.allocator.pages)
+	{
+		foreach (block : page.free_blocks) total += block.size;
+	}
+	return total;
+}
+
+<*
+ Draining the queue destroys what is in it, images included.
+
+ The test above proves the queue holds an unload for two frames and then lets go
+ of it. It cannot prove that letting go *frees* anything, and for images it did
+ not: `free_retired_memory` guarded its last call on `due.memory.buffer != null`,
+ and an image-backed `vk::Memory` leaves that field null and fills in `.image`
+ instead. Every texture, shadow map and chain image that ever reached the queue
+ was dequeued and dropped on the floor — the `VkImage` never destroyed, the page
+ block never returned.
+
+ It survived because the suite had no way to see it. A leaked image is reported
+ by `vkDestroyDevice`, which happens after the last check in a run; the sink is
+ armed around a script and this is not one; and the picture is identical either
+ way. What finally showed it was a `-D DEBUG` build validating without being
+ asked — see `src/debug.c3` — which put "1 leaked object" under the built-in
+ triangle, the white 1x1 stand-in being the only image it makes.
+
+ So the assertion is the byte count rather than the handle: `vk::Memory.free`
+ destroys the image and returns the block in the same three lines, so the block
+ coming back is that call having run.
+
+ **One image alone in the queue, and nothing else**, which is the part the first
+ draft of this got wrong. Retiring a whole asset and asserting on the total bytes
+ returned passes with the bug in place: its four vertex streams are buffers, they
+ come back, and they outweigh the image that did not. So this makes exactly one
+ image, checks the queue holds exactly one entry, and measures across the drain
+ and nothing else.
+
+ **Proved by injection.** The guard put back to `due.memory.buffer != null`:
+ "the drain returned 0 bytes for a 262144-byte image".
+*>
+fn void a_drained_image_is_destroyed_and_not_merely_dequeued() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Gpu* gpu = &renderer.gpu;
+
+		// Big enough that the answer cannot be alignment slack, and mip-less so
+		// that the allocation is the 256 KiB the arithmetic below expects.
+		const uint SIDE = 256;
+		char[] rgba = mem::new_array(char, (usz)SIDE * SIDE * 4);
+		defer free(rgba);
+		three::Texture texture = gpu.create_texture(rgba, SIDE, SIDE, mips: false)!!;
+
+		sz queued_before = gpu.deletions.memory.len();
+		texture.free(gpu);
+		test::@check(
+			gpu.deletions.memory.len() == queued_before + 1,
+			"freeing one texture queued %d entries",
+			(int)(gpu.deletions.memory.len() - queued_before)
+		);
+
+		// With the queue full, so the drain is the only thing between the two
+		// readings — `drain_deletions` waits idle and frees, and allocates
+		// nothing that could eat a block on the way.
+		sz before = free_block_bytes(gpu);
+		gpu.drain_deletions();
+		sz returned = free_block_bytes(gpu) - before;
+
+		sz image_bytes = (sz)SIDE * SIDE * 4;
+		test::@check(
+			returned >= image_bytes,
+			"the drain returned %d bytes for a %d-byte image",
+			(int)returned, (int)image_bytes
+		);
+	};
+}
+
 // ============================================================================
 // What a reference means
 // ============================================================================

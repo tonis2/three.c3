@@ -22,36 +22,49 @@
  400 boxes, 400 distinct materials, 400 draw calls a frame, 100 frames timed
  inside the script after a warm one, on the machine this was written on:
 
-	-D DEBUG, --validate         2.02 ms/frame
-	-D DEBUG, validation off     0.97 ms/frame
+	-D DEBUG                     2.02 ms/frame
+	-D DEBUG, layer not installed 0.97 ms/frame
 	default build                0.92 ms/frame
 	default build, --safe=no -O3 0.63 ms/frame
 
  **The layer is a little over 2x, and it scales with Vulkan calls rather than
  with pixels** — the same bench at 24 draw calls a frame could not tell the two
- apart at all. So the flag is worth most exactly where a game gets into trouble,
- and worth nothing on a scene that is one instanced draw. The gap between the
- middle two rows is the machinery that is merely *present*, and it is the width
- of the noise: compiling it out buys nothing on its own, which is the honest
- reason this switch exists at build time rather than as a smaller runtime one.
+ apart at all. So the switch is worth most exactly where a game gets into
+ trouble, and worth nothing on a scene that is one instanced draw. The gap
+ between the middle two rows is the machinery that is merely *present*, and it
+ is the width of the noise.
 
- ## Why it is a compile-time switch when `--validate` already exists
+ ## Why this is the only switch
 
- Because they answer different questions. `--validate` is "do I want the layer
- running *this time*", and it stays: a debug build still starts without it
- unless asked. `-D DEBUG` is "does this binary contain the diagnostic machinery
- at all", which is the question a shipped build wants to have answered no — a
- runtime flag can still be passed, and a binary that can still be asked to load
- the layer is a binary somebody will accidentally ship in that state.
+ It was not always. There were `--validate` and `--no-validate` on the command
+ line as well, and the two together made three states out of two useful ones: a
+ debug build that was not validating, which is a binary carrying a 0.05 ms/frame
+ cost for a diagnostic it had been told not to run, and a release build being
+ asked for a layer it did not contain, which could only be answered by printing
+ an apology. `--mcp` then implied `--validate` to paper over the first, in a
+ debug build only, which made the flag's meaning depend on two other things on
+ the line.
 
- The visible consequence, and it is worth knowing before it surprises somebody:
- **`--mcp` no longer implies validation in a release build.** It implies it in a
- debug one, because `plan.md` §4 wants the layer running whenever a script is
- and a `run_script` answer is a third empty without it. In a release build there
- is nothing to imply, so the implication is dropped silently rather than
- refused — nobody asked for it. An explicit `--validate` *is* refused, out loud,
- by `create_instance`: a flag that silently did nothing would be worse than one
- that is not there.
+ So the question moved to where it is already being asked. **A `-D DEBUG` build
+ validates, always; a release build has no layer in it to run.** That satisfies
+ `plan.md` §4 — "run the validation layers whenever a script is executing" —
+ without an implication, because there is no mode left in which a debug build is
+ not validating.
+
+ What is given up is a debug binary that runs at full speed, and the price of
+ getting it back is a rebuild rather than a flag. That is the right trade at 2x:
+ anybody who cares about the 2x is measuring, and anybody who is measuring wants
+ the fourth row, not the second.
+
+ `-D DEBUG` is still "does this binary contain the diagnostic machinery at all",
+ which is the question a shipped build wants answered no. A runtime flag can
+ always be passed, and a binary that can be *asked* to load the layer is one
+ somebody will eventually ship in that state.
+
+ The two flags are removed rather than accepted-and-ignored, so `--validate` is
+ now an unknown option and `parse_args` refuses it. A flag that silently meant
+ nothing would be worse than one that is not there — `test/mcp_test.c3` pins
+ that refusal.
 
  ## What this switch is not
 

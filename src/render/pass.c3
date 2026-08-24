@@ -216,9 +216,15 @@ const uint NOT_DRAWN = uint::max;
  source and compiles it — which is why editing `shaders/mesh.slang` and re-running
  now shows the change with no build step of any kind in between.
 
- @param shader_path : `Empty to look in the usual places for mesh.slang.`
+ The path is `find_shader`'s and there is no way to override it. There used to be
+ a `--shader <path>` parameter here, and it could only ever name *this* template:
+ `material.slang`, `post.slang`, `shadow.slang` and `skin.slang` are looked up by
+ the same search path from four other places, so a run that pointed one of the
+ five somewhere else got as far as the first `ShaderMaterial` and then failed
+ with `SHADER_NOT_FOUND`. One search path for all five is the honest version of
+ what the flag was promising.
 *>
-fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path = "")
+fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 {
 	self.pipelines.init();
 	// One entry per bucket, rewritten every frame. Sized like the instance array
@@ -236,10 +242,9 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target, String shader_path =
 	// one — see `GameClock.defaults`.
 	self.clock.defaults();
 
-	String path = shader_path;
 	@pool()
 	{
-		if (path.len == 0) path = find_shader("mesh.slang", tmem)!;
+		String path = find_shader("mesh.slang", tmem)!;
 
 		String source = load_source(path, tmem)!;
 		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE)!;
@@ -834,7 +839,7 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 		//
 		// Worth knowing how it fails, because it is not how it sounds: the
 		// picture is **pixel-identical** either way on this driver, so no test
-		// here catches it and only `--validate` does, naming both numbers. It is
+		// here catches it and only the validation layer does, naming both numbers. It is
 		// still undefined behaviour, and a driver that took the spec literally
 		// would drop the push and render nothing at all.
 		//

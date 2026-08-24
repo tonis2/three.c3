@@ -15,7 +15,7 @@
 
  So `-force-glsl-scalar-layout` is legal here and the `float4`-never-`float3`
  tax does not apply. It is still **queried, not assumed**
- (`Gpu.limits.scalar_block_layout`) and printed by `--validate`. Narrowing to one
+ (`Gpu.limits.scalar_block_layout`) and printed by `Gpu.report`. Narrowing to one
  driver is not a licence to assume: versions differ, a checkout without the
  bundled driver runs on whatever ICD the loader discovers, and a driver that
  gained `fillModeNonSolid` would still have to be asked. Nothing in this project
@@ -176,7 +176,7 @@ struct ValidationSink
 	DString errors;
 	DString warnings;
 	// Armed for the length of one script run and nothing else. Off means print,
-	// which is what `--validate` on the command line has always done.
+	// which is what a debug build's layer has always done.
 	bool capturing;
 }
 
@@ -193,7 +193,7 @@ struct Gpu
 	vk::MemoryAllocator allocator;
 	GpuLimits limits;
 	// **Whether validation is running, not whether it was asked for.** A machine
-	// with no Khronos layer installed sets this false even under `--validate`,
+	// with no Khronos layer installed sets this false even in a `-D DEBUG` build,
 	// and `js/runtime.c3` reads it to decide whether there is a sink worth
 	// arming.
 	bool validation;
@@ -272,7 +272,7 @@ fn void push_surface_extensions(vk::ZStringList* out)
  deterministic, which is what makes screenshots reproducible across machines.
  A checkout without one falls back to loader discovery, and says so.
 
- @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed.`
+ @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed. main.c3 passes DEBUG_BUILD — there is no flag for it — and the suite passes false except where a test is checking the layer's own output.`
  @param headless : `Skip the surface extensions entirely — nothing will present.`
 *>
 fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync = false)
@@ -290,6 +290,11 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 		// missing from the machine and the fix is to install the SDK; in a release
 		// build the machinery is not in the binary and the layer being installed
 		// changes nothing.
+		//
+		// The second is unreachable from `main`, which passes `DEBUG_BUILD` and so
+		// never asks a release build for a layer. It is kept for the caller that
+		// is not `main` — a test, or anything embedding this — because a silent
+		// false is exactly the answer that made the old `--validate` confusing.
 		$if DEBUG_BUILD:
 			io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
 		$else
@@ -686,8 +691,8 @@ fn void? Gpu.install_debug_messenger(&self)
 
  Armed by `JsRuntime.run` for exactly the length of one script and by nothing
  else, which is what makes a captured message attributable to the script that
- caused it. Outside that window a message is printed, which is what `--validate`
- on the command line has always done and still does.
+ caused it. Outside that window a message is printed, which is what a debug
+ build has always done and still does.
 
  A no-op when validation is off: there is no messenger to capture from, and an
  armed flag would be a claim this cannot keep.
