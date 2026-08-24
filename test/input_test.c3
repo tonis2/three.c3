@@ -1352,11 +1352,11 @@ fn void the_docs_describe_the_click() @test
 	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
 	{
 		String found = @answer(run, `
-			const d = three.getApiDocs();
+			const d = three.getApiDocs({ all: true });
 			return [
 				'three.onClick(fn)' in d.functions,
 				'three.input.pointer' in d.functions,
-				d.differences.some(s => s.includes('onClick')),
+				Object.values(d.differences).some(s => s.includes('onClick')),
 			];
 		`);
 		defer found.free(mem);

@@ -2944,7 +2944,9 @@ fn void the_docs_name_everything_the_api_exposes() @test
 	@with_js(; three::JsRuntime* run)
 	{
 		three::RunResult result = run.run(`
-			const docs = three.getApiDocs();
+			// The whole object, not the index: this asks whether every name the
+			// API exposes has PROSE behind it, and the index answers with names.
+			const docs = three.getApiDocs({ all: true });
 			const elsewhere = JSON.stringify(docs.functions) + JSON.stringify(Object.keys(docs.classes));
 
 			const members = (ctor) => {

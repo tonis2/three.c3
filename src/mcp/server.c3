@@ -33,6 +33,8 @@
 module three;
 
 import std::io;
+import std::io::file;
+import std::encoding::json;
 import std::collections::object;
 import std::encoding::base64;
 import image;
@@ -86,11 +88,16 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	server.add_tool({
 		.name = "get_api_docs",
 		.description =
-			"The whole three.c3 scripting API as JSON: classes, methods, the stats block, "
-			"and every place it deliberately differs from Three.js. Read this before writing "
-			"a script — the differences are short and each one is a script that would "
-			"otherwise fail.",
-		.input_schema = `{"type":"object","properties":{}}`,
+			"The three.c3 scripting API as JSON. With no arguments: the INDEX — the summary, "
+			"every place it deliberately differs from Three.js, the stats block and the examples "
+			"in full, and the names of the classes and functions. `search` is the grep over the "
+			"whole surface: every entry whose name or prose mentions a word, with its text. "
+			"`section` opens one of those names. `path` also writes the whole thing to a Markdown "
+			"file, which is how you grep it with your own tools instead of asking again. Read the "
+			"index before writing a script — the differences are short and each one is a script "
+			"that would otherwise fail.",
+		.input_schema =
+			`{"type":"object","properties":{"search":{"type":"string","description":"A word or phrase. Answers with every entry whose name or text contains it, keyed by the path 'section' takes. This is the grep."},"section":{"type":"string","description":"One entry or one whole section: 'differences', 'classes.ShaderMaterial', 'functions.three.load(path)'. A bare name like 'ShaderMaterial' is found too."},"path":{"type":"string","description":"Where to also write the whole surface as Markdown, one heading per entry. Answers with the path and its size rather than the docs, since the point of a file is not having to read it here."},"all":{"type":"boolean","description":"Everything at once, about 113 KB of JSON. The index and a search cover nearly every reason to want it."}}}`,
 		.handler = &tool_get_api_docs,
 		.user_data = host,
 	});
@@ -232,6 +239,20 @@ fn String? tool_screenshot(Object* args, void* user_data, DString* detail)
 // get_api_docs
 // ============================================================================
 
+<*
+ The docs, narrowly.
+
+ The whole object is about 113 KB of JSON — thirty thousand tokens paid before a
+ line is written — and from outside this repository there is nothing to grep:
+ the strings are embedded in the binary, so an agent that wanted one fact had to
+ take all of them or none. So the arguments are the narrowing, and a bare call
+ answers with the index rather than the dump.
+
+ **The narrowing is `docs.js`'s, not this file's.** Every argument here is
+ forwarded into `three.getApiDocs`, so the walk over the docs lives beside the
+ strings it walks and a script asking from `run_script` and an agent asking over
+ JSON-RPC get the same answer by the same code.
+*>
 fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 {
 	ToolHost* host = (ToolHost*)user_data;
@@ -241,12 +262,108 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 		return TOOL_NO_RUNTIME~;
 	}
 
-	// Asked of the runtime rather than kept here, so the docs and the API they
-	// describe are one file — `prelude.js` — and cannot drift apart.
-	// `drain_frame: false` — this run is the server's own, not the agent's, and
-	// consuming what the animation loop logged here would lose it: nothing below
-	// reads anything but `value`.
-	RunResult result = host.runtime.run("return three.getApiDocs();", "<get_api_docs>", drain_frame: false);
+	String search = "";
+	String section = "";
+	String path = "";
+	bool all = false;
+	if (args != null)
+	{
+		if (try given = args.get_string("search")) search = given;
+		if (try given = args.get_string("section")) section = given;
+		if (try given = args.get_string("path")) path = given;
+		if (try given = args.get_bool("all")) all = given;
+	}
+
+	if (path.len > 0) return write_api_docs(host, path, detail);
+
+	// A JS object literal built by hand because JSON *is* one, and the escaping
+	// that makes an argument safe to splice into source is the escaping the
+	// answer already uses. An empty `search` or `section` is not a search for
+	// nothing: `docsQuery` reads both as unasked.
+	DString source;
+	source.init(mem, 256);
+	defer source.free();
+
+	source.append_string(`return three.getApiDocs({"all":`);
+	source.append_string(all ? "true" : "false");
+	source.append_string(`,"search":`);
+	append_json_string(&source, search);
+	source.append_string(`,"section":`);
+	append_json_string(&source, section);
+	source.append_string(`});`);
+
+	return ask_the_runtime(host, source.str_view(), detail);
+}
+
+<*
+ Write the whole surface to a file, and answer with the path rather than the docs.
+
+ The `path` argument `screenshot` already has, with the one difference worth
+ stating: a screenshot writes *and* returns the image, because a file is not
+ something the agent can look at, while these docs are something it can grep —
+ and returning 113 KB beside "I wrote it to a file you can grep" would undo the
+ reason for writing the file.
+
+ Markdown rather than JSON because the tools that would read it are line-based:
+ one heading per entry means a grep hit is a paragraph and the heading above it
+ is the `section` to ask for next.
+*>
+fn String? write_api_docs(ToolHost* host, String path, DString* detail)
+{
+	String? docs = ask_the_runtime(host, `return three.getApiDocs({"markdown":true});`, detail);
+	if (catch err = docs) return err~;
+	defer docs.free(mem);
+
+	// The runtime answers in JSON, so a string comes back quoted and escaped.
+	// Parsed rather than unquoted by hand: this prose is full of quotes,
+	// newlines and em dashes, and every one of them is an escape here.
+	Object*? parsed = json::parse(mem, docs);
+	if (catch err = parsed)
+	{
+		detail.appendf("the docs came back as something other than JSON: %s", err)!!;
+		return TOOL_NO_RUNTIME~;
+	}
+	defer parsed.free();
+
+	if (!parsed.is_string())
+	{
+		detail.append_string("the docs came back as something other than a string");
+		return TOOL_NO_RUNTIME~;
+	}
+	String markdown = parsed.s;
+
+	if (catch err = file::save(path, (char[])markdown))
+	{
+		detail.appendf("could not write %s: %s", path, err)!!;
+		return TOOL_WRITE_FAILED~;
+	}
+
+	DString report;
+	report.init(mem, 256);
+	defer report.free();
+
+	report.append_string(`{"path":`);
+	append_json_string(&report, path);
+	report.append_string(`,"bytes":`);
+	report.appendf("%d", markdown.len)!!;
+	report.append_string(`,"note":`);
+	append_json_string(&report,
+		"The whole API surface, one heading per entry, and every heading is a path this tool's "
+		"`section` argument accepts. Grep it rather than asking again.");
+	report.append_char('}');
+	return report.copy_str(mem);
+}
+
+<*
+ Run one of this tool's own snippets and hand back what it returned.
+
+ `drain_frame: false` — the run is the server's own rather than the agent's, and
+ consuming what the animation loop logged would lose it: nothing here reads
+ anything but `value`.
+*>
+fn String? ask_the_runtime(ToolHost* host, String source, DString* detail)
+{
+	RunResult result = host.runtime.run(source, "<get_api_docs>", drain_frame: false);
 	defer result.free();
 
 	if (!result.ok)
