@@ -55,6 +55,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "textureRead", &js_texture_read, 2);
 	self.bind(host, "primitive", &js_primitive, 8);
 	self.bind(host, "convex", &js_convex, 1);
+	self.bind(host, "ribbon", &js_ribbon, 5);
 	self.bind(host, "terrain", &js_terrain, 5);
 	self.bind(host, "terrainAt", &js_terrain_at, 4);
 	self.bind(host, "lines", &js_lines, 2);

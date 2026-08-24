@@ -595,6 +595,164 @@ fn void js_convex(
 }
 
 <*
+ One FNV-1a step over a single uint, split out because the ribbon key mixes a
+ lot of them and the multiplier is easier to trust in one place.
+*>
+fn ulong ribbon_fnv(ulong hash, uint bits) @inline
+{
+	hash ^= (ulong)bits;
+	hash *= 0x100000001b3u;
+	return hash;
+}
+
+// Read one number out of a flat array argument, with the same finite backstop
+// the other geometry reads use: `prelude.js` refuses a non-finite component
+// with a sentence naming its index, and zero is what a forged call gets instead
+// of spreading a NaN into sixty neighbouring vertices.
+fn float ribbon_float(qjs::Context* js, qjs::Value array, uint idx)
+{
+	qjs::Value value = js.index(array, idx);
+	double number = js.number(value);
+	js.release(value);
+	return math::is_finite(number) ? (float)number : 0.0f;
+}
+
+<*
+ `ribbon(positions, normals, uvs, columns, rows)` — a strip geometry as an
+ asset, built from a grid of vertices rather than from a parametric shape.
+
+ Flat `positions`, `normals` and `uvs` arrays, row-major over `columns` x
+ `rows`: one cross-section of `columns` vertices, one per row, in the order
+ `row` walked down the path then `column` walked across the width. The host
+ does the only thing it can know — emit the triangles between adjacent cells of
+ the grid — and nothing about the shape of the curve, which is the prelude's
+ domain and is where it was already authored.
+
+ The index pattern is a grid like `Heightfield.build`'s, but wound the other
+ way. A ribbon's across axis is 90 degrees counter-clockwise from its tangent
+ (in the xz plane), so `across x along = +y`; the ground's axes run the other
+ hand and its winding is mirrored. The triangles here are emitted so their
+ front face points +y, matching the normals the prelude computed — which is
+ what a strip culled from above needs to stay visible and lit.
+
+ Uploaded through `upload_built`, so it is an asset like any other — one draw
+ call per unique ribbon, deduplicated by a hash of the vertices, filling the
+ bounds and BVH through the same tail a built primitive uses. None of the data
+ is retained on the slot (unlike a terrain, a ribbon answers no questions), so
+ `upload_built` is the whole story.
+*>
+fn void js_ribbon(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a shape needs a GPU device and this context has none");
+		return;
+	}
+
+	long npos = argc > 0 ? js.length(args[0]) : -1;
+	long nnorm = argc > 1 ? js.length(args[1]) : -1;
+	long nuv = argc > 2 ? js.length(args[2]) : -1;
+	if (npos < 3 || npos % 3 != 0)
+	{
+		*out = js.raise(
+			"three.RibbonGeometry wants the vertex positions as a flat x, y, z array — its length must be a multiple of three"
+		);
+		return;
+	}
+	usz count = (usz)(npos / 3);
+	if (nnorm != npos)
+	{
+		*out = js.raise("ribbon normals must be the same length as positions — one x, y, z per vertex");
+		return;
+	}
+	if (nuv != (long)(count * 2))
+	{
+		*out = js.raise("ribbon uvs must be u, v per vertex — twice as many numbers as vertices");
+		return;
+	}
+	int columns = (int)math::max(arg_int(&js, argc, args, 3), 0);
+	int rows = (int)math::max(arg_int(&js, argc, args, 4), 0);
+	if (columns < 2 || rows < 2)
+	{
+		*out = js.raise("a ribbon needs at least 2 columns across and 2 rows along");
+		return;
+	}
+	if ((usz)columns * (usz)rows != count)
+	{
+		*out = js.raise(string::tformat(
+			"columns x rows (%d x %d) must equal the number of vertices (%d)",
+			columns, rows, count
+		));
+		return;
+	}
+
+	@pool()
+	{
+		GeometryBuilder geometry;
+		geometry.init();
+		defer geometry.free();
+
+		ulong hash = 0xcbf29ce484222325u;
+		for (usz i = 0; i < count; i++)
+		{
+			Vec3 position = { 0, 0, 0 };
+			Vec3 normal = { 0, 1, 0 };
+			for (usz axis = 0; axis < 3; axis++)
+			{
+				position[axis] = ribbon_float(&js, args[0], (uint)(i * 3 + axis));
+				normal[axis] = ribbon_float(&js, args[1], (uint)(i * 3 + axis));
+				hash = ribbon_fnv(hash, bitcast(position[axis], uint));
+				hash = ribbon_fnv(hash, bitcast(normal[axis], uint));
+			}
+			float ux = ribbon_float(&js, args[2], (uint)(i * 2));
+			float uy = ribbon_float(&js, args[2], (uint)(i * 2 + 1));
+			hash = ribbon_fnv(hash, bitcast(ux, uint));
+			hash = ribbon_fnv(hash, bitcast(uy, uint));
+			geometry.vertex(position, normal, { ux, uy });
+		}
+
+		for (int r = 0; r + 1 < rows; r++)
+		{
+			for (int c = 0; c + 1 < columns; c++)
+			{
+				uint a = (uint)(r * columns + c);
+				uint b = a + 1;
+				uint cc = a + (uint)columns;
+				uint d = cc + 1;
+				geometry.triangle(a, b, cc);
+				geometry.triangle(b, d, cc);
+			}
+		}
+
+		if (geometry.indices.len() < 3 || geometry.positions.len() == 0)
+		{
+			*out = js.raise("the ribbon produced no triangles — check the path and the width");
+			return;
+		}
+
+		String key = string::tformat("ribbon:%d:%d:%x", columns, rows, hash);
+		if (try hit = self.pass.assets.built(key))
+		{
+			*out = asset_value(&js, hit);
+			return;
+		}
+
+		AssetId? asset = self.pass.assets.upload_built(&self.renderer.gpu, key, "ribbon", &geometry);
+		if (catch err = asset)
+		{
+			*out = js.raise(string::tformat("could not build a ribbon: %s", err));
+			return;
+		}
+		*out = asset_value(&js, asset);
+	};
+}
+
+<*
  `lines(kind, divisions)` — a debug line shape, or the one already built for
  exactly this shape.
 
