@@ -18,8 +18,8 @@ import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
 import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
-import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry } from './geometry.js';
-import { Field, scatter } from './field.js';
+import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry, RibbonGeometry } from './geometry.js';
+import { Field, scatter, catmullRom } from './field.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
 import { DOCS } from './docs.js';
 
@@ -665,6 +665,12 @@ export const three = {
 	// answers questions afterwards — heightAt and normalAt read the grid the
 	// mesh was built from. See scene/terrain.c3.
 	TerrainGeometry,
+	// A ribbon that follows a curve — a road, a river, a path, a wall. It is
+	// the mesh half of the curve pair (`three.catmullRom` is the path half):
+	// give it a hand-written control path and it is smooth between the bends,
+	// draped over a terrain when you hand it one, or a flat sheet at `y` when
+	// you do not. One asset, one draw call, like every other shape.
+	RibbonGeometry,
 	// A scalar grid in world coordinates, and the authoring half of the shape
 	// above: fill it with noise, flatten a building pad into it, carve a river
 	// channel, hand it to a TerrainGeometry. The SAME object is a splat mask —
@@ -676,6 +682,12 @@ export const three = {
 	// slope test and a seed — the block every landscape scene writes by hand,
 	// and it wants terrain.heightAt, which is why it lives beside Field.
 	scatter,
+	// A smooth curve through sparse control points, as a dense polyline — the
+	// path half of the ribbon pair. Centripetal Catmull-Rom, so a road through
+	// three close landmarks and two far ones passes through all of them instead
+	// of swinging wide of the close ones. Feed the result to field.carve /
+	// field.stroke / a scatter's avoid corridor, or to a RibbonGeometry.
+	catmullRom,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the

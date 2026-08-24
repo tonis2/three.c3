@@ -561,3 +561,93 @@ export function scatter(options = {}) {
 
 	return placed;
 }
+
+// -----------------------------------------------------------------------
+// Curves — §18.4c's answer to a road that looked like it was drawn with a ruler.
+//
+// A `carve` or `stroke` takes a polyline, and a polyline is only as smooth as
+// the points that were written into it. Six control points for a river that
+// bends three times is six straight segments, and the channel they carve is a
+// hexagon on the ground no matter how fine the field is underneath. The fix is
+// not a finer field — it is a denser *path*: interpolate a smooth curve through
+// the sparse points and stamp that, and the carved swath is as smooth as the
+// curve is.
+//
+// **Centripetal Catmull-Rom.** The choice matters. A uniform Catmull-Rom
+// through three points at very different spacings overshoots on the short
+// side — a road through a village of close landmarks would swing wide of the
+// corner it was told to pass — and a chordal one undershoots the same corner.
+// Centripetal is the compromise Three.js's own `CatmullRomCurve3` defaults to
+// for exactly this reason: it closes the loop between "passes through the
+// points" and "does not blow up between them", and it is robust to the uneven
+// spacing a hand-written control path always has.
+//
+// What comes back is a polyline, not a curve object: `[[x, z], ...]` for the
+// same reason `CarveGeometry` exists to be handed straight to `carve`,
+// `stroke`, a scatter's `avoid` corridor and a `RibbonGeometry`. There is no
+// curve state to keep alive across calls and no second vocabulary to learn —
+// the same array shape everything else already accepts.
+//
+// The two endpoints are reproduced exactly. A Curve that a script cannot ask
+// "where do I start" would be a curve a script has to guess, and the answer is
+// `path[0]`, not a point the spline drifted half a cell from.
+export function catmullRom(points, options = null) {
+	const where = 'three.catmullRom(points, { samples, type })';
+	const line = readPath(points, where);
+	if (line.length < 2) {
+		throw new RangeError(`${where}: a curve needs at least 2 control points, got ${line.length}`);
+	}
+
+	let samples = Math.floor(+(options?.samples ?? 16));
+	if (!Number.isFinite(samples) || samples < 2) {
+		throw new RangeError(`${where}: samples must be at least 2, got ${options?.samples}`);
+	}
+
+	const type = options?.type ?? 'centripetal';
+	const alpha = type === 'chordal' ? 1 : (type === 'uniform' ? 0 : 0.5);
+	if (!['centripetal', 'chordal', 'uniform'].includes(type)) {
+		throw new RangeError(`${where}: type is 'centripetal', 'chordal' or 'uniform' (default centripetal), got '${type}'`);
+	}
+
+	const last = line.length - 1;
+	// The extended array duplicates the two ends, so a segment near an edge has
+	// a real p0 / p3 to interpolate against instead of an out-of-range index to
+	// clamp — the difference between a smooth end and a degenerate one.
+	const E = [line[0], ...line, line[last]];
+	const knots = new Array(E.length);
+	knots[0] = 0;
+	for (let i = 1; i < E.length; i++) {
+		const dx = E[i][0] - E[i - 1][0];
+		const dz = E[i][1] - E[i - 1][1];
+		knots[i] = knots[i - 1] + Math.pow(Math.hypot(dx, dz), alpha);
+	}
+
+	// Barry–Goldman evaluation on the non-uniform knot vector — the same
+	// pyramid a Catmull-Rom is, written for knots that are not 0,1,2,3.
+	function component(a0, a1, a2, a3, p0, p1, p2, p3, at) {
+		// `at` is clamped to [p1, p2] by construction; the guard is for a
+		// zero-length span (two coincident control points), where the limit of
+		// the fraction is the point itself.
+		const blend = (u, v, tu, tv) => (tv - tu < 1e-12) ? u : (tv - at) / (tv - tu) * u + (at - tu) / (tv - tu) * v;
+		const A1 = blend(a0, a1, p0, p1);
+		const A2 = blend(a1, a2, p1, p2);
+		const A3 = blend(a2, a3, p2, p3);
+		const B1 = blend(A1, A2, p0, p2);
+		const B2 = blend(A2, A3, p1, p3);
+		return blend(B1, B2, p1, p2);
+	}
+
+	const out = [line[0]];
+	for (let i = 0; i < last; i++) {
+		const e0 = E[i], e1 = E[i + 1], e2 = E[i + 2], e3 = E[i + 3];
+		const t0 = knots[i], t1 = knots[i + 1], t2 = knots[i + 2], t3 = knots[i + 3];
+		for (let s = 1; s <= samples; s++) {
+			const t = t1 + (t2 - t1) * (s / samples);
+			out.push([
+				component(e0[0], e1[0], e2[0], e3[0], t0, t1, t2, t3, t),
+				component(e0[1], e1[1], e2[1], e3[1], t0, t1, t2, t3, t),
+			]);
+		}
+	}
+	return out;
+}

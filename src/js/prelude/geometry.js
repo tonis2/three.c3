@@ -1,6 +1,7 @@
 // three.c3 — the generated shapes, with Three.js's signatures and defaults.
 
 import { refBounds } from './math.js';
+import { catmullRom } from './field.js';
 
 const H = globalThis.__three;
 
@@ -426,5 +427,149 @@ export class TerrainGeometry extends Geometry {
 			);
 		}
 		return answer;
+	}
+}
+
+// A flat or ground-draped strip that follows a curve — a road, a river, a
+// path, a wall. The shape a hand-written landscape scene reaches for once it
+// has a curve to follow, and the thing that makes it smooth: a road built from
+// per-tile boxes is a staircase, and a RibbonGeometry along `three.catmullRom`'s
+// centerline is the same road as one mesh.
+//
+// **It is authored from sparse control points, not from a finished polyline.**
+// `path` is bent by centripetal Catmull-Rom internally (same curve as
+// `three.catmullRom`), sampling `samples` cross-sections per control segment.
+// So the agent writes the bends it can see and the ribbon is smooth everywhere
+// between them — there is no two-step "smooth then build" to get right, and no
+// way to hand over a polyline whose corners still show.
+//
+// Two modes, chosen by the options:
+// - **Flat (`y`).** The whole strip sits at one height, whatever the ground
+//   does. That is a river or a pond — a water surface is a plane, not a drape.
+// - **Draped (`terrain`).** Every vertex samples `terrain.heightAt(x, z)` (or
+//   `Field.valueAt`), so the strip hugs the ground. That is a road or a path.
+//   `lift` raises it a hair so it does not z-fight the surface it lies on.
+//   `terrain` may be a `TerrainGeometry` or a `Field`; both are accepted
+//   because authoring is sometimes before the upload.
+//
+// The cross-section is `columns` vertices across the width, which matters on a
+// draped strip: two corners is a straight chord across a crowned or banked
+// surface, while three or five let the road follow the camber. `width` is the
+// full width in world units, `columns` is how the width is sampled.
+//
+// It is one asset and one draw call per unique ribbon, like every other shape.
+// The uv runs u across the width and v along the length, so a texture flows
+// with the road instead of tiling across it.
+export class RibbonGeometry extends Geometry {
+	constructor(options = {}) {
+		const where = 'new three.RibbonGeometry({ path, width, y, terrain, lift, samples, columns })';
+		if (options === null || typeof options !== 'object') {
+			throw new TypeError(`${where} takes an options object`);
+		}
+
+		const width = positiveSize(options.width ?? 1, where, 'width');
+		const half = width / 2;
+		const columns = Math.max(2, Math.floor(+(options.columns ?? 2)));
+		if (!Number.isFinite(columns) || columns > 64) {
+			throw new RangeError(`${where}: columns is between 2 and 64, got ${options.columns}`);
+		}
+		const samples = Math.max(2, Math.floor(+(options.samples ?? 24)));
+		if (!Number.isFinite(samples)) {
+			throw new RangeError(`${where}: samples must be at least 2, got ${options.samples}`);
+		}
+		const lift = options.lift === undefined ? 0 : +options.lift;
+		if (!Number.isFinite(lift)) throw new RangeError(`${where}: lift must be a finite number, got ${options.lift}`);
+
+		const terrain = options.terrain ?? null;
+		const heightOf = terrain === null
+			? null
+			: (typeof terrain.heightAt === 'function' ? (x, z) => terrain.heightAt(x, z)
+				: (typeof terrain.valueAt === 'function' ? (x, z) => terrain.valueAt(x, z) : null));
+		if (terrain !== null && heightOf === null) {
+			throw new TypeError(`${where}: terrain wants a three.TerrainGeometry or a three.Field`);
+		}
+		const base = options.y === undefined || options.y === null ? 0 : +options.y;
+		if (!Number.isFinite(base)) throw new RangeError(`${where}: y must be a finite number, got ${options.y}`);
+
+		// Smooth the sparse control points into a dense centerline. `catmullRom`
+		// already validated the path shape, so this is thrown only for a bad
+		// `samples` — which is the caller's, reported above.
+		const center = catmullRom(options.path, { samples });
+
+		const rows = center.length;
+		const positions = [];
+		const uvs = [];
+
+		// Cross-section vertices, laid out row-major: `rows` along the path,
+		// `columns` across it. Easing the offset across the width puts the
+		// outmost column at each edge and anything between them on the camber.
+		for (let k = 0; k < rows; k++) {
+			const [cx, cz] = center[k];
+			const prev = center[k > 0 ? k - 1 : 0];
+			const next = center[k < rows - 1 ? k + 1 : rows - 1];
+			let tx = next[0] - prev[0];
+			let tz = next[1] - prev[1];
+			const tl = Math.hypot(tx, tz) || 1;
+			tx /= tl;
+			tz /= tl;
+			// A 90° offset in the xz plane: the across direction, unit length.
+			const wx = -tz;
+			const wz = tx;
+			for (let c = 0; c < columns; c++) {
+				const across = columns === 1 ? 0.5 : c / (columns - 1);
+				const off = (across - 0.5) * width;
+				const x = cx + wx * off;
+				const z = cz + wz * off;
+				const y = heightOf === null ? base + lift : heightOf(x, z) + lift;
+				positions.push(x, y, z);
+				uvs.push(across, rows > 1 ? k / (rows - 1) : 0);
+			}
+		}
+
+		// Normals from the strip itself, not a guess: at each vertex the across
+		// run and the along run meet on the surface, and their cross product is
+		// the unit normal the light should treat as up. Central differences,
+		// degraded to forward/backward at an edge by clamping the far neighbour
+		// to the near one — which is the same trick Heightfield.grid_normal uses,
+		// and keeps an edge vertex from reading itself as both ends of a zero
+		// vector. Flipped if it points down, so a camera under a banked ribbon
+		// still sees the top lit as the top.
+		const normals = new Array(rows * columns * 3);
+		for (let k = 0; k < rows; k++) {
+			for (let c = 0; c < columns; c++) {
+				const at = (r, cc) => (
+					Math.max(0, Math.min(rows - 1, r)) * columns
+					+ Math.max(0, Math.min(columns - 1, cc))
+				) * 3;
+				// across = P(k, c+1) - P(k, c-1); along = P(k+1, c) - P(k-1, c).
+				const iM = at(k, c - 1);
+				const iP = at(k, c + 1);
+				const jM = at(k - 1, c);
+				const jP = at(k + 1, c);
+				const ax = positions[iP] - positions[iM];
+				const ay = positions[iP + 1] - positions[iM + 1];
+				const az = positions[iP + 2] - positions[iM + 2];
+				const bx = positions[jP] - positions[jM];
+				const by = positions[jP + 1] - positions[jM + 1];
+				const bz = positions[jP + 2] - positions[jM + 2];
+				// across x along, so a strip lying in xz (across +z, along +x)
+				// comes out +y before the flip guard.
+				let nx = ay * bz - az * by;
+				let ny = az * bx - ax * bz;
+				let nz = ax * by - ay * bx;
+				const nl = Math.hypot(nx, ny, nz) || 1;
+				if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+				const a = at(k, c);
+				normals[a] = nx / nl;
+				normals[a + 1] = ny / nl;
+				normals[a + 2] = nz / nl;
+			}
+		}
+
+		super(
+			'RibbonGeometry', 'ribbon',
+			{ width, samples, columns, rows },
+			H.ribbon(positions, normals, uvs, columns, rows),
+		);
 	}
 }

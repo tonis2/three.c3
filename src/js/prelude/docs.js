@@ -573,6 +573,26 @@ export const DOCS = {
 			properties: ['bounds'],
 			methods: ['heightAt(x, z)', 'normalAt(x, z)', 'toJSON()', 'toString()'],
 		},
+		RibbonGeometry: {
+			construct:
+				'new three.RibbonGeometry({ path, width, y, terrain, lift, samples, columns })',
+			note:
+				'A mesh that follows a curve — a road, a river, a path, a wall — and the answer to "why '
+				+ 'does the bend look like it was drawn with a ruler". path is sparse control points '
+				+ '([[x, z], ...] or {x, z}) and is bent by the SAME centripetal Catmull-Rom as '
+				+ 'three.catmullRom, sampling samples cross-sections per control segment, so you write '
+				+ 'the bends you can see and the ribbon is smooth between them. Two modes by the options: '
+				+ 'flat at a constant y (a river or pond — a water surface is a plane, not a drape), or '
+				+ 'draped over `terrain` (a TerrainGeometry or a Field), where every vertex is '
+				+ 'heightAt/valueAt + lift so the strip hugs the ground (a road or a path) and lift keeps '
+				+ 'it from z-fighting where it lies. columns is the cross-section: 2 is a straight chord '
+				+ 'across the width, more follows a crown or a bank. width is the full width in world '
+				+ 'units, u runs across it and v along the length, so a texture flows with the road. One '
+				+ 'asset, one draw call, like every other shape — the strip is one mesh, not a row of '
+				+ 're-edged boxes.',
+			properties: ['bounds'],
+			methods: ['toJSON()', 'toString()'],
+		},
 		Field: {
 			construct: 'new three.Field({ width, depth, segments, value })',
 			note:
@@ -731,6 +751,15 @@ export const DOCS = {
 			+ 'in between, which gives a fresh one and makes the old handle throw. '
 			+ 'asset.instantiate() for the file\'s own hierarchy, asset.mesh(name) for one piece of it.',
 		'three.render(scene, camera)': 'Draw one frame. camera is optional and must be three.camera.',
+		'three.catmullRom(points, options)':
+			'A smooth curve through sparse control points, as a dense polyline — the path half of the '
+			+ 'curve pair (RibbonGeometry is the mesh half). Pass [[x, z], ...] or {x, z} control points '
+			+ 'and get back [[x, z], ...] with samples points per control segment (default 16). Type is '
+			+ '\'centripetal\' (default), \'chordal\' or \'uniform\'; centripetal passes through every point '
+			+ 'without swinging wide of a tight one, which is what a hand-written road path is. Feed the '
+			+ 'result to field.carve / field.stroke / a scatter avoid corridor so a sparse polyline stops '
+			+ 'being a black-and-white zigzag, or pass the raw control points to a RibbonGeometry, which '
+			+ 'curves them itself. The first and last control points are reproduced exactly.',
 		'three.scatter(options)':
 			'Where to put a hundred trees: { count, seed, onTerrain, bounds, spacing, minHeight, '
 			+ 'maxHeight, maxSlope, avoid, accept }. Returns [{ x, y, z, normal, index }] — placements, '

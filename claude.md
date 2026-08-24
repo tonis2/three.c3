@@ -1,4 +1,4 @@
-Close three instance after working on it, so on next session it doesent clash with the scene rendering.
+Before running C3 tests, close all three instances
 
 For testing use
 
