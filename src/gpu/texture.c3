@@ -68,15 +68,6 @@ fn vk::Format ColorSpace.format(self)
 	}
 }
 
-fn String ColorSpace.name(self)
-{
-	switch (self)
-	{
-		case LINEAR: return "linear";
-		default: return "srgb";
-	}
-}
-
 struct Texture
 {
 	vk::Image image;
@@ -247,8 +238,7 @@ fn Texture? Gpu.create_texture(
 		// not a level that reads as black — it is a blit destination in a layout
 		// the blit does not admit, which is
 		// `VUID-vkCmdBlitImage-dstImageLayout-00226` and undefined contents after.
-		vk::ImageMemoryBarrier2 to_transfer = {
-			.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		vk::ImageMemoryBarrier2 to_transfer = { ...IMAGE_BARRIER,
 			.image = texture.image,
 			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
 			.srcAccessMask = (vk::AccessFlags2)0,
@@ -256,13 +246,7 @@ fn Texture? Gpu.create_texture(
 			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
 			.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = {
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = levels,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-			},
+			.subresourceRange = { ...COLOR_LEVEL, .levelCount = levels },
 		};
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_transfer }));
 
@@ -292,8 +276,7 @@ fn Texture? Gpu.create_texture(
 		int mip_height = (int)height;
 		for (uint level = 1; level < levels; level++)
 		{
-			vk::ImageMemoryBarrier2 to_source = {
-				.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+			vk::ImageMemoryBarrier2 to_source = { ...IMAGE_BARRIER,
 				.image = texture.image,
 				.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 				.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
@@ -301,13 +284,7 @@ fn Texture? Gpu.create_texture(
 				.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
 				.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				.subresourceRange = {
-					.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-					.baseMipLevel = level - 1,
-					.levelCount = 1,
-					.baseArrayLayer = 0,
-					.layerCount = 1,
-				},
+				.subresourceRange = { ...COLOR_LEVEL, .baseMipLevel = level - 1 },
 			};
 			vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_source }));
 
@@ -357,8 +334,7 @@ fn Texture? Gpu.create_texture(
 		//
 		// A one-level image takes the second entry alone, which is the barrier
 		// this function had before the chain existed.
-		vk::ImageMemoryBarrier2 read_levels = {
-			.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		vk::ImageMemoryBarrier2 read_levels = { ...IMAGE_BARRIER,
 			.image = texture.image,
 			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 			.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
@@ -366,30 +342,13 @@ fn Texture? Gpu.create_texture(
 			.dstAccessMask = ACCESS_2_SHADER_READ_BIT,
 			.oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = {
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = levels - 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-			},
+			.subresourceRange = { ...COLOR_LEVEL, .levelCount = levels - 1 },
 		};
 		vk::ImageMemoryBarrier2 last_level = {
-			.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-			.image = texture.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			...read_levels,
 			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-			.dstAccessMask = ACCESS_2_SHADER_READ_BIT,
 			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = {
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = levels - 1,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-			},
+			.subresourceRange = { ...COLOR_LEVEL, .baseMipLevel = levels - 1 },
 		};
 		// `last_level` first so that a one-level image is the head of this array
 		// rather than a special case built somewhere else.

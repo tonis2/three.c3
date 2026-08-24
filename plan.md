@@ -1868,6 +1868,50 @@ attachments, N pipelines, N fits, and every one of them sized by a guess.
   second reason this comes before cascades: `shadow.c3`'s cascade trigger has
   never been about the code, it has been about where the texels come from.
 
+### 19.5 The CPU side of a frame, which nothing measures
+
+`gpuMs` and the five phase spans are GPU timestamps. Everything below is CPU
+cost inside `Scene`/`MeshPass` that no counter in the project reports, found by
+a review pass over the renderer after §18 landed. One of them is fixed; the rest
+are written down here because they are all larger than anything §19.3 saves.
+
+- **Fixed: the draw-list sort was quadratic.** `std::sort::quicksort` pivots on
+  `list[l]` with no median-of-three and no three-way partition, so a run the
+  comparator calls equal peels one element per pass — *k²/2* for a run of *k*.
+  The draw list is a few thousand draws over as many distinct keys as there are
+  buckets (nine in the village), pushed in node-slot order and therefore already
+  ascending. Measured at 4178 draws in 9 buckets: **8.7M comparisons and 20.4 ms**
+  against mergesort's 24.9k and 0.196 ms, same answer element for element.
+  `Scene.build_draw_list` and the edge dedup in `lines.c3` now both use
+  `mergesort`, which is O(n log n) worst case and stable.
+- **`Scene.bounds` is exact and uncached.** It transforms *every vertex* of every
+  drawable node — 100k–370k vertex transforms on the village. Called once per
+  frame from `prepare` whenever shadows are on, and a second time per frame
+  whenever a follow camera is attached, because `follow_camera` calls
+  `derive_camera_planes` every tick. The value only changes when the scene does.
+  A box cached on `Scene` behind a dirty flag set by the transform setters and by
+  `create_slot`/`kill` is the fix; the reason it has not been done here is that
+  the invalidation is the whole of the risk, and a stale bounding box is a
+  silently wrong shadow fit rather than a crash. The cheaper half-fix: the shadow
+  fit does not need exactness and could take the conservative per-node box the
+  cull already computes.
+- **`update_world_matrices` runs three to five times per frame** — once per
+  `Scene.bounds`, once from `follow_camera`, once from `Scene.update`. The dirty
+  flag saves the matrix arithmetic on the repeats but not the traversal, the
+  per-node validation, or the 64-byte by-value `parent_world` copy per recursion.
+  A `matrices_current` flag cleared by the same setters would make the repeats
+  free.
+- **The instance array is written twice.** `build_draw_list` fills a
+  `List{Instance}` (~635 KB on the village) that only `write_instances` reads,
+  which then `mem::copy`s the whole of it into the mapped buffer. The count is
+  known before the coalescing loop, so the loop could write straight into the
+  slot's buffer the way `write_live_poses` and `build_draw_records` already do.
+- **`Scene.stats()` rebuilds the entire draw list**, instance records included,
+  to report counts — with culling off, which is exactly the all-equal shape that
+  made the sort quadratic. It is called after every script run, so an agent
+  polling `stats()` pays for a full frame's draw-list build each time. A
+  count-only mode would make it nearly free.
+
 ### Order
 
 1. **§18.1 and §18.2**, as already planned — they are the cheapest and they are

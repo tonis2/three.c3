@@ -25,9 +25,9 @@
  The colour image cycles through exactly two layouts and both ends are here:
 
 	begin_render   UNDEFINED               -> COLOR_ATTACHMENT_OPTIMAL
-	end_render     COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
+	close          COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
 
- So after `end_render` the image is ready for *either* consumer with no further
+ So after `close` the image is ready for *either* consumer with no further
  transition, and the next frame's `UNDEFINED` discards contents it is about to
  clear anyway. Anything that reads the colour image outside that window is
  reading it in TRANSFER_SRC_OPTIMAL.
@@ -175,6 +175,34 @@ fn void Target.free(&self, Gpu* gpu)
 // ============================================================================
 
 <*
+ The parts every image barrier in this project agrees on: the type tag, and one
+ mip level of the colour aspect of a single-layer image.
+
+ Splatted rather than passed as arguments — `{ ...IMAGE_BARRIER, .image = x, … }`
+ — so each barrier below still names every field it sets. A function taking four
+ stage and access masks positionally would read as eight interchangeable flags at
+ the call site, and transposing a source with a destination is the kind of
+ mistake that produces a barrier which validates and still races.
+
+ `DEPTH_LEVEL` and the mip chain in `texture.c3` splat the range in turn, so
+ every barrier in the project states its layers exactly here and nowhere else.
+ Image *views* and blit subresource *layers* are a different struct and keep
+ their own.
+*>
+const vk::ImageSubresourceRange COLOR_LEVEL = {
+	.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+	.baseMipLevel = 0,
+	.levelCount = 1,
+	.baseArrayLayer = 0,
+	.layerCount = 1,
+};
+const vk::ImageSubresourceRange DEPTH_LEVEL = { ...COLOR_LEVEL, .aspectMask = IMAGE_ASPECT_DEPTH_BIT };
+const vk::ImageMemoryBarrier2 IMAGE_BARRIER = {
+	.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	.subresourceRange = COLOR_LEVEL,
+};
+
+<*
  The barrier a colour attachment is opened with, for whichever image the pass
  is about to write.
 
@@ -186,34 +214,25 @@ fn void Target.free(&self, Gpu* gpu)
 *>
 fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 {
-	return {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	// The contents are cleared on load, so UNDEFINED preserves nothing that
+	// matters. ALL_COMMANDS with no source access is an execution dependency and
+	// nothing more, which is exactly what the hazard here needs: last frame
+	// *read* this image (blit, or readback copy) and this frame writes it.
+	// Write-after-read wants ordering, not a cache flush.
+	return { ...IMAGE_BARRIER,
 		.image = image,
-		// ALL_COMMANDS with no source access is an execution dependency and
-		// nothing more, which is exactly what the hazard here needs: last
-		// frame *read* this image (blit, or readback copy) and this frame
-		// writes it. Write-after-read wants ordering, not a cache flush.
 		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		.srcAccessMask = (vk::AccessFlags2)0,
 		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-		// The contents are cleared on load, so there is nothing to preserve.
 		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
 	};
 }
 
 fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 {
-	return {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	return { ...IMAGE_BARRIER,
 		.image = self.color,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -221,13 +240,6 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 		.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
 	};
 }
 
@@ -242,8 +254,7 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 *>
 fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 {
-	return {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	return { ...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -251,13 +262,6 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
 	};
 }
 
@@ -280,8 +284,7 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 *>
 fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 {
-	return {
-		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	return { ...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -289,13 +292,7 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-		.subresourceRange = {
-			.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
+		.subresourceRange = DEPTH_LEVEL,
 	};
 }
 
@@ -357,30 +354,41 @@ fn void Target.begin_render_to(
 
 	vk::cmdBeginRendering(cmd, &rendering);
 
-	float width  = (float)self.extent.width;
-	float height = (float)self.extent.height;
+	set_full_viewport(cmd, self.extent, true);
+}
+
+<*
+ Viewport and scissor over the whole of `extent`, as every pass in the project
+ sets them.
+
+ Both are dynamic state on every pipeline here, so each pass sets them after
+ `cmdBeginRendering` rather than baking them in — which is what lets one pipeline
+ serve a window that resizes.
+
+ @param flip_y : `Negative height, putting +Y up. Every pass that rasterises geometry wants it; the post chain, which draws a full-screen triangle in clip space and samples with uv, does not.`
+*>
+fn void set_full_viewport(vk::CommandBuffer cmd, vk::Extent2D extent, bool flip_y)
+{
+	float width  = (float)extent.width;
+	float height = (float)extent.height;
 	vk::cmdSetViewport(
 		cmd,
 		0,
 		1,
-		(vk::Viewport[]) { { .x = 0, .y = height, .width = width, .height = -height, .minDepth = 0.0, .maxDepth = 1.0 } }
+		(vk::Viewport[]) { {
+			.x = 0,
+			.y = flip_y ? height : 0,
+			.width = width,
+			.height = flip_y ? -height : height,
+			.minDepth = 0.0,
+			.maxDepth = 1.0,
+		} }
 	);
-	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = self.extent } });
+	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = extent } });
 }
 
 <*
- End rendering and leave the colour image in TRANSFER_SRC_OPTIMAL, ready for
- the swapchain blit, the readback copy, both, or neither.
-*>
-fn void Target.end_render(&self, vk::CommandBuffer cmd)
-{
-	vk::cmdEndRendering(cmd);
-	self.close(cmd);
-}
-
-<*
- The second half of `end_render`, on its own: hand the colour image to whatever
- reads it next.
+ Hand the colour image to whatever reads it next.
 
  Split out because **the frame is a list now and the close happens exactly once,
  at the end of it** — see `Renderer.record_scene`. With a post chain running it is
@@ -419,7 +427,7 @@ fn vk::Memory? Target.create_readback(&self, Gpu* gpu)
 
 <*
  Record the copy. The colour image must already be in TRANSFER_SRC_OPTIMAL,
- which `end_render` guarantees.
+ which `close` guarantees.
 
  `bufferRowLength` and `bufferImageHeight` of zero mean tightly packed to
  `imageExtent`, so the destination is exactly `readback_size()` bytes with no

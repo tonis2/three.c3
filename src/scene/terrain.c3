@@ -285,7 +285,7 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 
  Four strips, each walked so that its front face points away from the field.
 *>
-fn void Heightfield.build_skirt(&self, GeometryBuilder* out) @local
+fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 {
 	uint side = self.side();
 	float half_w = self.width * 0.5f;

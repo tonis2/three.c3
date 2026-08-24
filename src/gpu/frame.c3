@@ -237,26 +237,6 @@ fn void Renderer.free(&self)
 }
 
 <*
- Everything drawn into the target, between `begin_render` and `end_render`.
-
- One call, on purpose: the frame path should not grow a branch per kind of
- thing that can be drawn. M2 made `MeshPass.record` a loop over buckets with an
- instance array behind it, and this stayed one line.
-
- `frames.slot` is passed down because the instance array is per frame in flight
- (see the rule at the top of this file). It is read here rather than threaded
- through a parameter because every frame path advances it only *after*
- recording, so it is the current slot on all of them.
-
- A pass that was never given a pipeline records nothing, which is what lets the
- M0 tests and a headless clear-colour render work with no shader on disk.
-*>
-fn void? Renderer.draw(&self, vk::CommandBuffer cmd)
-{
-	return self.pass.record(&self.gpu, cmd, &self.target, self.frames.slot);
-}
-
-<*
  A whole frame of scene, recorded into `cmd`: begin the target, draw, end the
  target.
 
@@ -311,7 +291,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// Read once: `active` must not be allowed to change between the begin and
 	// the end of one recording, and reading it twice is how that becomes
 	// possible.
-	bool posted = self.post.active;
+	bool posted = self.post.active();
 
 	// The same read `pass.prepare` makes below, and for the same reason: the
 	// slot is advanced by the caller *after* the submit, so every mark recorded
@@ -353,7 +333,12 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 		self.target.begin_render(cmd, self.clear);
 	}
 
-	self.draw(cmd)!;
+	// Everything drawn into the target, between `begin_render` and `close`. One
+	// call, on purpose: the frame path does not grow a branch per kind of thing
+	// that can be drawn. A pass that was never given a pipeline records nothing,
+	// which is what lets the M0 tests and a headless clear-colour render work
+	// with no shader on disk.
+	self.pass.record(cmd);
 
 	// The scene's rendering ends here on both paths, which is what lets the chain
 	// below be a list of passes rather than a thing that also has to know how the

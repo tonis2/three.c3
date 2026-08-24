@@ -1632,7 +1632,22 @@ fn void Scene.build_draw_list(
 	//
 	// `order` and `depth` were computed at push time because this comparator is a
 	// captureless function pointer — see `Draw`.
-	quicksort(self.draws.array_view(), fn int(Draw a, Draw b) {
+	//
+	// **Merge, not quick, and the reason is this data.** `std::sort::quicksort`
+	// pivots on `list[l]` with no median-of-three and no three-way partition, so
+	// a run of elements the comparator calls equal peels exactly one element per
+	// pass: a run of *k* costs *k²/2*. This list is the worst input that shape
+	// has — a few thousand draws over as many distinct keys as there are buckets,
+	// which is nine in the reference village, pushed in node-slot order and so
+	// already ascending whenever a script places one asset at a time. Measured on
+	// 4178 draws in 9 buckets: 8.7M comparisons and 20.4 ms against mergesort's
+	// 24.9k and 0.196 ms, for the same answer element for element. The sort was
+	// costing an order of magnitude more than the frame it was preparing.
+	//
+	// Being stable is the second reason: draws the comparator cannot separate
+	// keep their slot order, so a bucket's instances land in the same sequence
+	// every frame instead of in whatever order a partition happened to leave.
+	mergesort(self.draws.array_view(), fn int(Draw a, Draw b) {
 		if (a.order < b.order) return -1;
 		if (a.order > b.order) return 1;
 		// Farthest first, and only within the transparent band: everything else is
