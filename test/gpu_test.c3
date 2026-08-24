@@ -335,8 +335,8 @@ fn void verbose_messages_are_not_delivered_at_all() @test
  With nothing capturing, a message is printed and the buffer is left as it was
  found.
 
- Two things at once, and both matter. The printing is what `--validate` on the
- command line has always been, and this project may not quietly take it away.
+ Two things at once, and both matter. The printing is what an unarmed debug
+ build has always done, and this project may not quietly take it away.
  The rewind is what keeps a server that has been up for a week from accumulating
  every message it ever saw between runs — and what stops the *next* run
  inheriting the previous one's complaints, which would be a validation error
@@ -541,7 +541,8 @@ fn void captures_are_reproducible() @test
  **The middle check is the one that matters, and nothing else can make it.**
  Destroying on the next frame rather than the one after is undefined behaviour
  that surfaces as a corrupted draw under load, and no picture here catches it —
- nor does `--validate`, which is usually the answer when a picture cannot. Both
+ nor does the validation layer, which is usually the answer when a picture
+ cannot. Both
  headless frame paths wait on their own fence immediately after submitting, so
  by the time either returns the device has finished with everything it bound.
  The hazard is only reachable through `Renderer.frame`, which needs a window.

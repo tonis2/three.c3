@@ -8,7 +8,8 @@ c3c test --trust=full                   # with leak tracking; much slower
 c3c test --trust=full --test-filter <suite>
 
 `-D DEBUG` compiles in the Vulkan validation layers and `@debug_log`; without it
-they are not in the binary at all, and `--mcp` no longer implies `--validate`.
+they are not in the binary at all. It is the only switch for them — there is no
+`--validate` on the command line, and a `-D DEBUG` build always runs the layers.
 The suite passes either way, but the validation half of it only runs with the
 flag — `src/debug.c3` has the argument and the measurements.
 

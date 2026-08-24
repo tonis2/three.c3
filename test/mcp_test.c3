@@ -412,53 +412,55 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
 }
 
 // ============================================================================
-// Validation, from the script that caused it to the reply
+// The command line: what it takes, and what it no longer takes
 // ============================================================================
 
 <*
- Serving turns the layers on, and `--no-validate` turns them off again.
+ The validation flags are gone, and a line that still names one is refused.
 
- `plan.md` §4 asks for validation whenever a script is executing, and serving is
- the mode where scripts execute. Left to the caller it would be off almost
- always, and the third of the four things a run answers with would be
- permanently empty — which from the outside looks exactly like a device that
- never complains.
+ `--validate` and `--no-validate` used to be here, and `--mcp` used to imply the
+ first of them in a debug build. All three went when the layers became a property
+ of the build — `src/debug.c3` carries the argument and the 2x it costs. So did
+ `--shader <path>`, which could only ever name one of the five templates
+ `find_shader` looks up; `src/shader/load.c3` has that one.
 
- **In a debug build.** `-D DEBUG` is what puts the layer in the binary at all,
- so a release build has nothing to imply and says so through `--help` and
- through `create_instance` rather than by pretending. `src/debug.c3` carries the
- argument for the switch being a compile-time one.
+ What is pinned here is not that they are absent, which nothing can observe, but
+ that their absence is **loud**. A `.mcp.json`, a shell alias or a run script
+ written before the change still carries the flag, and the two ways of meeting it
+ are not close: refused, it stops with usage printed and the line gets fixed;
+ ignored, a debug build validates when the line asked it not to, at the 2x, with
+ nothing on screen to point at.
 
- The last case is the one worth writing down: `--no-validate` wins wherever it
- appears, because a flag whose meaning depends on what came before it on the
- line is a flag people get wrong.
+ The control line first, because a test that only checks for refusals passes just
+ as well against a `parse_args` that refuses everything.
+
+ **Proved by injection**, once per flag, since one `default:` arm serves all
+ three and only a per-flag check says all three reach it. `case "--validate":`
+ added back as a no-op: "--validate was accepted rather than refused". The same
+ for `case "--no-validate":`: "--no-validate was accepted rather than refused".
+ And `case "--shader":` restored with its value consumed: "--shader was accepted
+ rather than refused".
 *>
-fn void serving_turns_validation_on_and_no_validate_turns_it_off() @test
+fn void the_flags_that_went_are_refused_rather_than_ignored() @test
 {
-	String[*] serving = { "three", "--mcp", "--headless" };
-	three::Options on = three::parse_args(serving[..])!!;
-	// **The one place the build flag is visible from outside**, so it is asserted
-	// as an equality rather than branched around: a release build that implied
-	// validation would be asking for a layer it cannot load, and a debug build
-	// that stopped implying it would empty a third of every `run_script` answer.
-	// One line fails on either mistake. See `src/debug.c3`.
-	test::@check(
-		on.validate == three::DEBUG_BUILD,
-		"--mcp implies validation in a debug build and only there: validate=%s, DEBUG_BUILD=%s",
-		on.validate, three::DEBUG_BUILD
-	);
+	String[*] control = { "three", "--mcp", "--headless" };
+	three::Options fine = three::parse_args(control[..])!!;
+	test::@check(fine.headless, "the control line was not understood");
+	test::@check(fine.mcp_port > 0, "the control line asked for no server");
 
-	String[*] refused = { "three", "--mcp", "--no-validate", "--headless" };
-	three::Options off = three::parse_args(refused[..])!!;
-	test::@check(!off.validate, "--no-validate did not turn it off");
+	String[*] off = { "three", "--mcp", "--no-validate", "--headless" };
+	three::Options? refused_off = three::parse_args(off[..]);
+	test::@check(@catch(refused_off), "--no-validate was accepted rather than refused");
 
-	String[*] plain = { "three", "--headless", "model.glb" };
-	three::Options cli = three::parse_args(plain[..])!!;
-	test::@check(!cli.validate, "validation leaked into the plain CLI path");
+	String[*] on = { "three", "--validate" };
+	three::Options? refused_on = three::parse_args(on[..]);
+	test::@check(@catch(refused_on), "--validate was accepted rather than refused");
 
-	String[*] both = { "three", "--validate", "--no-validate", "--mcp" };
-	three::Options wins = three::parse_args(both[..])!!;
-	test::@check(!wins.validate, "--no-validate lost to a --validate that came first");
+	// With a value after it, which is the shape that was removed — a `--shader`
+	// refused only when bare would still swallow the path beside it.
+	String[*] pointed = { "three", "--shader", "shaders/mesh.slang" };
+	three::Options? refused_shader = three::parse_args(pointed[..]);
+	test::@check(@catch(refused_shader), "--shader was accepted rather than refused");
 }
 
 <*

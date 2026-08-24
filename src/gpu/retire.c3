@@ -232,12 +232,26 @@ fn void Gpu.retire_memory(
  One copy of the order that `Texture.free`, `ShadowMap.destroy_image` and
  `ChainImage.free` each used to carry. It matters: the memory is what destroys
  the image, so a view outliving it would be a view of nothing.
+
+ **The last guard asks about both handles, and the reason is the bug it fixes.**
+ A `vk::Memory` from `vk::new_buffer` fills in `.buffer` and leaves `.image`
+ null; one from `vk::create_image_buffer` does the opposite. This line asked
+ only about `.buffer`, so every image that ever reached this queue — the 1x1
+ white stand-in, every texture a material dropped, a resized shadow map, a
+ resized chain image — was retired, dequeued, and then silently skipped:
+ `vkDestroyImage` never called and the page block never returned.
+
+ Nothing caught it because nothing could. The suite arms the validation sink
+ around a script run, and this leaks at `vkDestroyDevice`, after the last one.
+ It surfaced the moment a `-D DEBUG` build started validating without being
+ asked, which is what `src/debug.c3` is now for: the built-in triangle reported
+ one leaked `VkImage` — the white texture, the only one it makes.
 *>
 fn void free_retired_memory(Gpu* gpu, RetiredMemory due) @local
 {
 	if (due.sampler != null && gpu.handle != null) vk::destroySampler(gpu.handle, due.sampler, null);
 	if (due.view != null && gpu.handle != null) due.view.free(gpu.handle);
-	if (due.memory.buffer != null) due.memory.free();
+	if (due.memory.buffer != null || due.memory.image != null) due.memory.free();
 }
 
 <*

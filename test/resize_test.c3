@@ -35,8 +35,8 @@
  price of presentation actually happening, which is the thing under test.
 
  In a `-D DEBUG` build with the layer installed the walk runs validated and the
- sink's errors are asserted empty — the old probe's "run it under `--validate`;
- the pass condition is that nothing is printed", made checkable. Without the
+ sink's errors are asserted empty — the old probe's "run it validated; the pass
+ condition is that nothing is printed", made checkable. Without the
  layer the extent checks still run and the validation half says it was skipped,
  the way `gpu_test.c3` does.
 *>

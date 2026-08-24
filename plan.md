@@ -751,6 +751,32 @@ Live, all of them. Each cost real time and none is visible in a diff.
   differ — all of them on silhouette edges. Rendering itself is bit-exact
   deterministic, so a pixel diff of a round trip is *not* noise and should not be
   dismissed as such.
+- **A `features:` entry in `project.json` makes `-D DEBUG` a no-op, silently.**
+  `"features": ["DEBUG"]` defines the feature for *every* build, so `$feat(DEBUG)`
+  is true unconditionally, `c3c build --trust=full` produces a debug binary
+  carrying the Khronos validation layer, and `--help` reports a flag nobody
+  passed. It sat there for two days inside a commit about Vulkan settings, with
+  `src/debug.c3` and `claude.md` both documenting the opposite. Nothing fails
+  when you add it — that is why it gets added, to stop typing the flag — and
+  nothing fails afterwards either, which is why it stays. **A build switch is
+  only a switch if the default build does not set it**; `project.json` now
+  carries the argument beside the empty list.
+- **A guard on the wrong handle hides a whole class of object.** `vk::Memory` is
+  one struct for two kinds of allocation: `new_buffer` fills `.buffer` and leaves
+  `.image` null, `create_image_buffer` does the reverse. `free_retired_memory`
+  asked `if (due.memory.buffer != null)`, so every image the deletion queue ever
+  held was dequeued and then skipped — no `vkDestroyImage`, no page block
+  returned, for the white 1x1 stand-in, every dropped texture, every resized
+  shadow map and chain image. **Nothing in the suite could see it**: a leaked
+  image is named by `vkDestroyDevice`, which runs after the last check; the
+  validation sink is armed around a script and this is not one; and the picture
+  is identical either way. It surfaced the day a `-D DEBUG` build started
+  validating without being asked, which is the argument for that default in one
+  sentence. The test that now holds it
+  (`a_drained_image_is_destroyed_and_not_merely_dequeued`) had to retire *one
+  image and nothing else* — a first draft that unloaded a whole asset and
+  asserted on total bytes returned passed with the bug in place, because four
+  vertex streams came back and outweighed the image that did not.
 
 ---
 

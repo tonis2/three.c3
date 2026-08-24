@@ -926,7 +926,7 @@ fn void a_texture_from_a_file_reads_back_its_own_pixels() @test
 
  That is the same situation `render/pass.c3` records about pushing 64 bytes into
  a 60-byte range — "pixel-identical either way on this driver, so no test here
- catches it and only `--validate` does" — and it has the same answer. So this
+ catches it and only the validation layer does" — and it has the same answer. So this
  arms the sink, does the read, draws, and requires the layer to have said
  nothing.
 

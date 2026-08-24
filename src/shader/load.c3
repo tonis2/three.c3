@@ -16,9 +16,15 @@
 
  That is also why the source is read rather than embedded, unlike `js/prelude.js`
  next door, which is `$embed`-ed. The prelude *defines* an API that must exist
- wherever the binary runs; a shader is content the loop iterates on. A binary
- carried away from its checkout needs `--shader <path>`, which is the same
- contract M1 had.
+ wherever the binary runs; a shader is content the loop iterates on.
+
+ **The consequence, stated plainly: this binary runs from its checkout.** There
+ was a `--shader <path>` on the command line that read as a way out of that, and
+ it was not one — it could only name `mesh.slang`, while `material.slang`,
+ `post.slang`, `shadow.slang` and `skin.slang` came through this function
+ regardless, so a run from elsewhere drew the built-in triangle and then failed
+ on the first `ShaderMaterial`. Rather than grow the flag into a directory, the
+ search path below is the whole answer, and `three --help` says so.
 *>
 module three;
 
@@ -29,13 +35,14 @@ import std::io::path;
 faultdef SHADER_NOT_FOUND;
 
 <*
- Where `mesh.slang` is looked for when nothing says otherwise.
+ Where a template is looked for: `mesh.slang` and the four beside it.
 
  Both candidates are relative to the working directory, because `c3c run`, a
  shell at the project root and `c3c test` all start there, and that is where the
- edit-and-rerun loop lives. `--shader <path>` is the way to point somewhere else.
+ edit-and-rerun loop lives. Nothing overrides them, and the header has why the
+ flag that used to is gone.
 
- @return? SHADER_NOT_FOUND : `No shader by that name on the search path. Run from the project root, or point at one with --shader.`
+ @return? SHADER_NOT_FOUND : `No shader by that name on the search path. Run from the project root.`
 *>
 fn String? find_shader(String name, alloc::Allocator allocator = mem)
 {
