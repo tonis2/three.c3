@@ -61,6 +61,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
 	self.bind(host, "meshLayers", &js_mesh_layers, 3);
+	self.bind(host, "meshMaterial", &js_mesh_material, 3);
+	self.bind(host, "splitMesh", &js_split_mesh, 3);
 	self.bind(host, "assetNodes", &js_asset_nodes, 3);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
 	self.bind(host, "bindAnimation", &js_bind_animation, 6);

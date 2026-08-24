@@ -34,7 +34,9 @@
  3. **A convex hull** is rebuilt from `hull_positions`/`hull_triangles`, the CPU
     copy the picking tree already holds. Its normals are per face and its
     vertices are split per face, so recomputing them from the triangles gives
-    back exactly what `build_convex` produced. It has no uvs and never did.
+    back exactly what `build_convex` produced — including its uvs, which are a
+    per-face planar projection and so are recomputed from the face rather than
+    stored.
 
  ## What is deliberately not in the file
 
@@ -1685,11 +1687,16 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 <*
  A hull, out of the CPU copy the picking tree holds.
 
- Its normals are recomputed rather than stored, and that is exact rather than
- approximate: `build_convex` splits a vertex per face, so every vertex here
- belongs to exactly one triangle and the accumulated normal is that triangle's.
- A hull has no uvs and never had any — its faces meet at creases and there is no
- unwrap of an arbitrary hull that does not seam.
+ Its normals and its uvs are recomputed rather than stored, and that is exact
+ rather than approximate: `build_convex` splits a vertex per face, so every vertex
+ here belongs to exactly one triangle. The accumulated normal is therefore that
+ triangle's, and the uv is that triangle's own planar projection through the same
+ `face_basis` the builder used — `scene/convex.c3` has the rule.
+
+ Two passes over the triangles rather than one, because the uv needs a *unit*
+ normal and the normals are only unit after the accumulate. The cost is one more
+ walk of a list that is already in cache; the alternative is normalising each face
+ twice.
 *>
 fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 {
@@ -1720,6 +1727,25 @@ fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 		// A vertex no triangle reached keeps a zero normal rather than a NaN one.
 		// glTF requires unit normals, and zero is the lesser of the two lies.
 		out.normals[i] = length > 0 ? normal / length : (Vec3){ 0, 0, 0 };
+	}
+
+	// Now that the normals are unit, the projection. A vertex no triangle reached
+	// keeps (0, 0) — it has no face and therefore no plane to be projected onto,
+	// and it is also not in the index buffer, so nothing will sample it.
+	foreach (position : mesh.hull_positions) out.uvs.push({ 0, 0 });
+	foreach (triangle : mesh.hull_triangles)
+	{
+		foreach (corner : triangle)
+		{
+			if (corner >= out.positions.len()) continue;
+			Vec3 normal = out.normals[corner];
+			if (normal.length() < 0.5f) continue;
+			Vec3 tangent;
+			Vec3 bitangent;
+			face_basis(normal, &tangent, &bitangent);
+			Vec3 at = out.positions[corner];
+			out.uvs[corner] = { at.dot(tangent), at.dot(bitangent) };
+		}
 	}
 	return out.indices.len() >= 3;
 }

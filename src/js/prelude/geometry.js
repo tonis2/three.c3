@@ -253,8 +253,10 @@ function readPointCloud(value, where) {
 // is computed *from*, most of them are discarded, and nothing can read a
 // vertex back out. `scene/convex.c3` carries the full argument for why this
 // leaves "JS may not touch vertices" standing, and why the result is flat
-// shaded with no uvs — a hull's faces meet at creases, and smoothing them
-// removes the only thing that makes it read as a cut stone.
+// shaded — a hull's faces meet at creases, and smoothing them removes the only
+// thing that makes it read as a cut stone. The uvs are a per-face planar
+// projection for the same reason: face-on, one unit per unit, and no unwrap of
+// an arbitrary hull to seam.
 //
 // Handing the same points over twice is one asset and one draw call, as with
 // every other geometry. The key is bit-exact rather than rounded, though, so

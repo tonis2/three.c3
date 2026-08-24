@@ -214,6 +214,15 @@ $assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
 const uint LAYER_PARAMS_BYTES = 4 * (uint)float::size;
 
 <*
+ What `Material.table_pointer` holds when a material's uniforms fit the push
+ block, which is almost every material.
+
+ `uint::max` rather than zero, because zero is a real offset in a push block —
+ the same hazard `NO_TEXTURE` is -1 for.
+*>
+const uint NO_TABLE_POINTER = uint::max;
+
+<*
  One material: a pipeline to bind, and the bytes to push with it.
 
  `block` is laid out *as the push block itself* rather than as a list of values.
@@ -342,6 +351,28 @@ struct Material
 	// Never read directly outside `Material.opacity`.
 	float one_minus_opacity;
 	char[PUSH_BUDGET] block;
+	// **The uniform table, when it did not fit the block.** Empty for every
+	// material whose uniforms fit — which is almost all of them, and then nothing
+	// below this line costs anything.
+	//
+	// A CPU shadow rather than the device buffer itself. `set_uniform` writes
+	// here, and `MeshPass.prepare` copies it into that frame slot's table buffer
+	// once per frame — which is what makes writing a uniform safe while frames are
+	// in flight, for exactly the reason the instance array is per slot: the GPU may
+	// still be reading last frame's copy.
+	//
+	// Laid out as the shader lays the table out, so the copy is one memcpy with no
+	// per-uniform loop, and every offset in it came from reflection.
+	char[] table;
+	// Where in the push block the pointer to that buffer goes — the reflected
+	// offset of `material_table` — or `NO_TABLE_POINTER` for a material that has
+	// no table. Cached rather than looked up per draw: `record` binds a material
+	// per bucket and a name scan there would be a scan per bucket per frame.
+	uint table_pointer;
+	// Where this material's table sits inside the frame's shared table buffer.
+	// Assigned by `MeshPass.prepare` every frame, because a material collected and
+	// reused moves.
+	uint table_offset;
 	// Whether this slot holds a material at all. False for a slot whose material
 	// was collected, which stays in the list so that every index ever handed out
 	// keeps meaning what it meant — and is handed to the next `create_material`
@@ -627,13 +658,23 @@ fn uint Material.binding_of_texture(&self, String name)
 fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, uint rows = 1)
 {
 	ShaderField* field = self.pipeline.shader.field_of(name);
-	if (field == null || field.offset < MATERIAL_PUSH_START) return MATERIAL_UNIFORM_UNKNOWN~;
+	// **The `MATERIAL_PUSH_START` cut only applies to the block.** A table field's
+	// offset is inside the table buffer, where zero is a real offset and the mesh
+	// contract does not exist.
+	if (field == null) return MATERIAL_UNIFORM_UNKNOWN~;
+	if (!field.indirect && field.offset < MATERIAL_PUSH_START) return MATERIAL_UNIFORM_UNKNOWN~;
 
 	uint width = (uint)(values.len * float::size);
 	if (width == 0 || rows == 0 || row >= rows) return MATERIAL_UNIFORM_WIDTH~;
 	if (field.size != width * rows) return MATERIAL_UNIFORM_WIDTH~;
 
 	uint at = field.offset + row * width;
+	if (field.indirect)
+	{
+		if ((sz)(at + width) > self.table.len) return MATERIAL_UNIFORM_WIDTH~;
+		mem::copy(&self.table[at], values.ptr, width);
+		return;
+	}
 	if (at + width > PUSH_BUDGET) return MATERIAL_UNIFORM_WIDTH~;
 
 	mem::copy(&self.block[at], values.ptr, width);
@@ -651,8 +692,52 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
 {
 	foreach (field : self.pipeline.shader.push_fields)
 	{
+		// A table field is a uniform a script sets by name exactly as a pushed one
+		// is; the pointer it hangs off is not, and is the one generated name that
+		// has to be kept out of `material.uniforms`.
+		if (field.indirect)
+		{
+			out.push(field);
+			continue;
+		}
+		if (field.name == MATERIAL_TABLE_FIELD) continue;
 		if (field.offset >= MATERIAL_PUSH_START) out.push(field);
 	}
+}
+
+<*
+ Give this material somewhere to keep a uniform table, if its shader has one.
+
+ Called once, wherever a material is built, and idempotent. Two things come out
+ of the reflected layout and neither can be derived from the uniform list on this
+ side — the pointer's offset in the push block, and how large the table is —
+ because both are Slang's answers rather than ours.
+
+ A material whose uniforms fit the push block gets `NO_TABLE_POINTER`, an empty
+ table and no allocation, which is every material this project had before a table
+ could spill.
+*>
+fn void Material.bind_table(&self)
+{
+	self.table_pointer = NO_TABLE_POINTER;
+	uint size = 0;
+	foreach (field : self.pipeline.shader.push_fields)
+	{
+		if (field.indirect)
+		{
+			uint end = field.offset + field.size;
+			if (end > size) size = end;
+			continue;
+		}
+		if (field.name == MATERIAL_TABLE_FIELD) self.table_pointer = field.offset;
+	}
+
+	if (self.table.len > 0) mem::free(self.table);
+	self.table = {};
+	if (size == 0) return;
+	// Zero-filled, exactly as `block` is: a uniform nobody set reads zero, and
+	// that is the same promise on both sides of the spill.
+	self.table = mem::new_array(char, (sz)size);
 }
 
 <*
@@ -737,6 +822,8 @@ fn void Material.free(&self)
 {
 	if (self.fragment.len > 0) self.fragment.free(mem);
 	if (self.vertex.len > 0) self.vertex.free(mem);
+	if (self.table.len > 0) mem::free(self.table);
+	self.table = {};
 	self.free_script_layers();
 	*self = { };
 	// **Not left at the zero fill.** Zero is a perfectly ordinary texture index —

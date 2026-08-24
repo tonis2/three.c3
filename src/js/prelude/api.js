@@ -741,6 +741,15 @@ export const three = {
 			spec,
 			'three.setPost({ fragment, uniforms }) wants an options object, or null to clear the pass'
 		);
+		// The first pass of a chain has nothing before it to read, and `setPost`
+		// is always the first pass of a chain. Refused rather than ignored: a
+		// script that wrote `reads` here meant something, and it is not this.
+		if (parsed.args[5] !== -1) {
+			throw new TypeError(
+				'three.setPost() replaces the whole chain, so this pass is the first one and there is '
+				+ 'nothing before it to read — `reads` belongs on a three.addPass()'
+			);
+		}
 		H.setPost(...parsed.args);
 		// After the host call, for the same reason the null branch bumps after
 		// it: a set that threw changed nothing, and handles from before it are
@@ -758,11 +767,27 @@ export const three = {
 	//     p.color   what the pass before this one wrote — the scene, for the
 	//               first pass in the chain
 	//     p.scene   the frame as the geometry left it, whatever has run since
+	//     p.tap     the pass named by `reads`, or the scene if none was
+	//               (its sampler is in scope as `tap_image`)
+	//     p.depth   how far this pixel is from the camera, in world units
 	//
-	// Those two are the chain's whole dependency model. A pass reads its
-	// predecessor and it reads the original picture, and everything a
-	// multi-pass effect actually wants is one of those two — bloom is
-	// `blur(bright(scene)) + scene`, which is `scene` three passes later.
+	// The first two are the chain's dependency model and cover most of what a
+	// multi-pass effect wants — bloom is `blur(bright(scene)) + scene`, which
+	// is `scene` three passes later.
+	//
+	// `reads` is the third source, for the case they do not cover: a pass in
+	// the *middle* of the chain that two later passes both want, a mask one
+	// pass built for another to apply. Hand it the handle addPass gave you:
+	//
+	//     const bright = three.addPass({ fragment: threshold });
+	//     three.addPass({ fragment: blurX });
+	//     three.addPass({ fragment: blurY });
+	//     three.addPass({ fragment: combine, reads: bright });
+	//
+	// Naming a pass costs that pass an image of its own — the chain normally
+	// ping-pongs two between every pass, and a tapped one cannot be
+	// overwritten — so it is one allocation per distinct pass tapped and
+	// nothing at all for a chain that taps none.
 	//
 	// Adding to an empty chain is exactly a setPost, which is what makes
 	// addPass usable without one in front of it. **It does not invalidate

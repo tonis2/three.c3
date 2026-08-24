@@ -51,8 +51,8 @@ import qjs;
 *>
 fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "setPost", &js_set_post, 5);
-	self.bind(host, "addPass", &js_add_pass, 5);
+	self.bind(host, "setPost", &js_set_post, 6);
+	self.bind(host, "addPass", &js_add_pass, 6);
 	self.bind(host, "clearPost", &js_clear_post, 0);
 	self.bind(host, "setPostUniform", &js_set_post_uniform, 7);
 	self.bind(host, "setPostTexture", &js_set_post_texture, 3);
@@ -172,6 +172,12 @@ fn void JsRuntime.post_verb(
 		String texture_names = arg_text(&js, argc, args, 3, tmem);
 		String texture_ids = arg_text(&js, argc, args, 4, tmem);
 
+		// The third source, as an index into the chain or -1. `postSpec` has
+		// already turned a handle into this number and refused everything that is
+		// not one; what it deliberately did not do is check the range, because the
+		// chain is the host's — `PostPass.add` refuses an index that names no pass.
+		int tap = argc > 5 ? arg_int(&js, argc, args, 5) : -1;
+
 		List{String} texture_name_list;
 		List{String} texture_id_list;
 		texture_name_list.tinit(4);
@@ -207,6 +213,7 @@ fn void JsRuntime.post_verb(
 				fragment,
 				uniforms.array_view(),
 				textures.array_view(),
+				tap,
 				diagnostic: &diagnostic
 			);
 			err = @catch(added);

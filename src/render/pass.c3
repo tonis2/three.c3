@@ -118,6 +118,15 @@ struct MeshPass
 	// fence has been waited on.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] draw_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] draw_capacity;
+	// Every spilled material's uniform table, end to end, for one frame in flight
+	// — see `Material.table` and `write_tables`. Per slot for the instance
+	// array's reason and no other: a script writing a uniform between frames must
+	// not reach a buffer the GPU is still reading.
+	//
+	// **Zero bytes for a scene with no spilled material**, which is every scene
+	// until one declares more than 104 bytes of uniforms.
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] table_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] table_capacity;
 	// This frame's joint matrices for the characters posed from their bone nodes
 	// rather than from a baked clip — `skeleton: true`. Per frame in flight for
 	// the same reason as the two above, and this is the one the rule was written
@@ -180,6 +189,9 @@ struct MeshPass
 	ulong frame_address;
 	ulong instance_address;
 	ulong draw_address;
+	// Where this frame's spilled uniform tables are, or 0 when no material
+	// spilled — `write_tables`.
+	ulong table_address;
 	ulong live_address;
 	// False when `prepare` found nothing to draw, which is what `record` returns
 	// on rather than repeating the emptiness checks.
@@ -336,11 +348,17 @@ fn uint MeshPass.claim_slot(&self, Material material)
 	{
 		if (existing.alive) continue;
 		*existing = material;
+		// **After the copy, and on the stored one.** `bind_table` allocates, and a
+		// table allocated on the by-value parameter would be freed with it. This
+		// is the only choke point where a material becomes live, which is why it
+		// is also the only place that has to remember.
+		existing.bind_table();
 		return (uint)i;
 	}
 
 	uint index = (uint)self.materials.len();
 	self.materials.push(material);
+	self.materials[index].bind_table();
 	return index;
 }
 
@@ -578,6 +596,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// count that has to predict which buckets those are.
 	self.reserve_draws(gpu, slot, self.scene.buckets.len())!;
 	self.draw_address = self.draw_buffers[slot].address;
+	self.write_tables(gpu, slot)!;
 
 	// **Outside the render pass, which is the whole reason this phase exists.**
 	// `vkCmdDispatch` is illegal between `vkCmdBeginRendering` and
@@ -841,6 +860,16 @@ fn void? MeshPass.record(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target,
 			);
 		}
 
+		// **The spilled uniform table, if this material has one.** Written over the
+		// bytes the block copy above already put there — `material_table` is a
+		// pointer field of the block like the other three, and `Material.block`'s
+		// copy of it is stale by definition because the buffer moves every frame.
+		if (material.table_pointer != NO_TABLE_POINTER && material.table.len > 0)
+		{
+			ulong table = self.table_address + (ulong)material.table_offset;
+			mem::copy(&staging[material.table_pointer], (char*)&table, ulong::size);
+		}
+
 		vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, push_size, &staging);
 
 		// Index binding is independent of vertex bindings, which is why the
@@ -1001,17 +1030,63 @@ fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
 }
 
 <*
- Make sure this slot's draw buffer holds `count` records, growing it if not.
+ Copy every spilled material's uniform table into this slot's buffer, and tell
+ each one where it landed.
 
- The twin of `write_instances` and deliberately shaped like it — doubling rather
- than fitting, freeing the old buffer only after the slot's fence has been waited
- on — with one difference: this reserves and does not write. The records are
- filled through the mapped pointer as `record` walks the buckets, because what
- goes in one is what the draw itself has just resolved.
+ ## Why the whole list rather than the buckets that draw
 
- A count of zero still allocates, so `record` can take `.data()` without a null
- check; `INITIAL_INSTANCES` is the floor for both buffers and a frame with no
- buckets has already returned by the time this is called.
+ Materials are tens and buckets are hundreds, a material can be in several
+ buckets, and the same table would then be copied several times. Walking the list
+ is one copy per material per frame and gives every material a *stable* offset
+ that `record` can read without a second lookup.
+
+ ## Why it is copied at all, every frame
+
+ `Material.table` is a CPU shadow and this buffer is per frame in flight. A script
+ writes a uniform between frames; the GPU may still be executing a frame that
+ reads the other slot's copy. Copying at prepare — after the fence wait that owns
+ this slot — is the same discipline the instance array has, and the same one
+ `gpu/buffer.c3` says the pose palette tore for want of.
+
+ The cost is `sum(table bytes)` of memcpy per frame, which is why
+ `MATERIAL_TABLE_BUDGET` bounds a single table: 256 KiB is already a quarter of a
+ megabyte a frame for one material.
+
+ **Nothing at all when no material spilled**, which is the common case and is one
+ comparison to find out.
+*>
+fn void? MeshPass.write_tables(&self, Gpu* gpu, uint slot)
+{
+	sz wanted = 0;
+	foreach (&material : self.materials)
+	{
+		if (!material.alive) continue;
+		material.table_offset = (uint)wanted;
+		wanted += material.table.len;
+	}
+	self.table_address = 0;
+	if (wanted == 0) return;
+
+	if (self.table_capacity[slot] < wanted)
+	{
+		sz capacity = self.table_capacity[slot] > 0 ? self.table_capacity[slot] : 1024;
+		while (capacity < wanted) capacity *= 2;
+		if (self.table_buffers[slot].buffer != null) self.table_buffers[slot].free();
+		self.table_buffers[slot] = gpu.create_dynamic(capacity)!;
+		self.table_capacity[slot] = capacity;
+	}
+
+	char* into = (char*)self.table_buffers[slot].data();
+	foreach (&material : self.materials)
+	{
+		if (!material.alive || material.table.len == 0) continue;
+		mem::copy(&into[material.table_offset], material.table.ptr, material.table.len);
+	}
+	self.table_address = self.table_buffers[slot].address;
+}
+
+<*
+ Grow this slot's draw buffer to hold `count` records.
 *>
 fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
 {
@@ -1609,10 +1684,10 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
 
 	// The old image goes only if nothing else names it, and a frame in flight may
-	// still be sampling the one about to be destroyed — the hazard `unload_unused`
-	// waits for. Waited only when this release is the last one, so re-pointing a
-	// map inside a frame callback costs no stall at all.
-	if (gpu != null && self.assets.texture_refs(material.texture) == 1) gpu.wait_idle();
+	// still be sampling the one about to be destroyed. `Texture.free` retires it
+	// through `gpu/retire.c3` rather than destroying it, which is why there is no
+	// stall here any more: re-pointing a map inside a frame callback costs a list
+	// push and two frames of patience.
 	self.assets.release_texture(gpu, material.texture);
 
 	material.texture = texture;
@@ -1658,7 +1733,6 @@ fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name,
 	if (held == texture) return;
 
 	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
-	if (gpu != null && self.assets.texture_refs(held) == 1) gpu.wait_idle();
 	self.assets.release_texture(gpu, held);
 
 	material.textures.set(binding, texture);
@@ -1764,15 +1838,12 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 
 	// The same wait `set_material_map` makes, for the same reason and only when
 	// this release is the last one: a frame in flight may still be sampling the
-	// image about to be destroyed. The pipeline below needs no equivalent — it
-	// goes through the deletion queue, which is that hazard's other answer, and
-	// routing images through it too is what `plan.md` §2 wants next.
+	// image about to be destroyed. The image goes through the deletion queue now,
+	// exactly as the pipeline below does — `plan.md` §2 wanted that and it is what
+	// `Texture.free` is.
 	//
-	// **This can land inside a frame**, since `record` collects. It lands at the
-	// top of one, before the draw list is built and immediately after the frame's
-	// own fence wait, which is the cheapest moment a stall can happen at — and it
-	// happens only when a disposed material held the last reference to an image.
-	if (gpu != null && self.assets.texture_refs(material.texture) == 1) gpu.wait_idle();
+	// **This can land inside a frame**, since `record` collects, and that is no
+	// longer a reason to be careful: nothing here waits for anything.
 	self.assets.release_texture(gpu, material.texture);
 
 	// The agent's own samplers, on the same terms. Walked by binding rather than
@@ -1784,7 +1855,6 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	{
 		int held = material.textures.at(binding);
 		if (held == NO_TEXTURE) continue;
-		if (gpu != null && self.assets.texture_refs(held) == 1) gpu.wait_idle();
 		self.assets.release_texture(gpu, held);
 	}
 
@@ -1800,6 +1870,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.instance_buffers[i].buffer != null) self.instance_buffers[i].free();
 		self.instance_capacity[i] = 0;
 		if (self.draw_buffers[i].buffer != null) self.draw_buffers[i].free();
+		if (self.table_buffers[i].buffer != null) self.table_buffers[i].free();
+		self.table_capacity[i] = 0;
 		if (self.pose_buffers[i].buffer != null) self.pose_buffers[i].free();
 		if (self.posed_buffers[i].buffer != null) self.posed_buffers[i].free();
 		self.draw_capacity[i] = 0;

@@ -30,11 +30,11 @@ export const DOCS = {
 		'Helpers draw OVER everything — the line pipeline tests no depth, unlike Three.js\'s helpers. That is deliberate: the times you ask where something is are the times it is inside a wall, and a depth-tested helper would be hidden by exactly the geometry being asked about. The cost of being ordinary meshes is the other direction: a helper draws, so it is inside boundingBox(), inside the boundsInParent() of whatever it hangs from, and inside three.camera.frameAll(). Align first and add helpers after, or hang them from a Group of their own.',
 		'A helper cannot be given a ShaderMaterial. A material is a pipeline and every pipeline you can build draws triangles, while a helper\'s indices are pairs — assigning one would read the pairs as triangles rather than fail, so it throws instead. helper.color is the knob a helper has.',
 		'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
-		'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, is capped at 65536, and is flat shaded with no uvs because a hull has hard creases and no natural unwrap. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
+		'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, and is capped at 65536. It is flat shaded, because a hull\'s faces meet at hard creases, and it is textured face by face: each facet gets its own planar projection at one uv unit per unit of local space, so a map is the same size on a hull as on a box beside it. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
 		'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
 		'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
 		'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
-		'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row.',
+		'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row. A table is not capped at the push block: past 104 bytes the array columns move to a device buffer on their own and the body is unchanged, so hundreds of rows is an ordinary thing to ask for (up to 256 KiB, which is thousands). PLAIN uniforms — the ones with no rows — do stay in the push block and are still held to that 104.',
 		'A ShaderMaterial has a vertex stage as well as a fragment one: { vertex: `void displace(inout Vertex v) { v.position.y += sin(v.local.x * 3 + t) * 0.4; }` } moves geometry per vertex with no draw call, no upload and no geometry change — the mesh is still the same asset and a thousand copies of it are still one call. Vertex is the varyings: position (world), normal, uv, color and variant are read back after your body runs, and local (object space) and index (the vertex number) are inputs. The normal is not recomputed for you. Always pass `bounds` with a vertex body — the number of world units it can displace by — because culling tests the mesh\'s undisplaced box and geometry outside it is dropped while still on screen.',
 		'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 		'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
@@ -392,8 +392,42 @@ export const DOCS = {
 				+ 'slots and slots exist only once the primitive is on the device — and every read hands '
 				+ 'back fresh Texture handles each holding a reference, so read it once and keep what it '
 				+ 'gave you)',
+				'material (what this primitive\'s glTF material said, beyond the base colour the mesh '
+				+ 'already draws with: { alphaMode, alphaCutoff, doubleSided, normalMap, emissive, '
+				+ 'emissiveMap, emissiveIntensity, aoMap, metalness, roughness, metalnessRoughnessMap }, '
+				+ 'or null for a primitive that names no material. THIS IS WHAT THE LOADER USED TO DROP. '
+				+ 'Each map arrives with its colourspace already right — normal, occlusion and '
+				+ 'metallic-roughness are data and load linear, emissive is a colour and loads sRGB — '
+				+ 'which is decided by the importer rather than by you and is the difference between a '
+				+ 'normal map that works and one that leans every surface the same way. It is a '
+				+ 'DESCRIPTION and not a material: what to build from it is yours, and '
+				+ 'asset.instantiate({ materials: true }) is the shorter door. aoMap has no built-in '
+				+ 'term (one line in a shade body multiplies by it) and metalness/roughness have '
+				+ 'nothing to feed, because the built-in light is one lambert factor with no specular — '
+				+ 'they cross so a ShaderMaterial can do something with them. LIKE layers THIS UPLOADS '
+				+ 'THE MESH and every read hands back fresh Texture handles holding references, so read '
+				+ 'it once and keep it)',
 			],
-			methods: ['toJSON()', 'toString()'],
+			methods: [
+				'split() — cut this mesh into its connected components and get one geometry back per '
+				+ 'piece. THE ANSWER TO A KIT THAT ARRIVED AS ONE MERGED MESH: a town square with 23 '
+				+ 'buildings in it, or a pack of four animals, is one transform and one bounding box '
+				+ 'until it is cut, so nothing in it can be placed, rotated, culled or picked on its own. '
+				+ 'Two triangles are in the same piece when they share a vertex, which is the right cut '
+				+ 'for a merged kit (they are merged by concatenation, so nothing welds them) and no cut '
+				+ 'at all for a surface that is genuinely connected — a terrain with the houses extruded '
+				+ 'out of it comes back whole. Length one means it was already one thing, and the one '
+				+ 'geometry you get is this mesh itself with nothing uploaded. Each piece is an ordinary '
+				+ 'geometry: instanced, pickable, exportable, unloadable on its own, carrying the '
+				+ 'source\'s colour and base colour map. It does NOT carry a layer stack and a mesh that '
+				+ 'has one throws instead of losing it quietly. Expect the pack to include the details '
+				+ 'that were modelled as separate shells — eyes, horns, hooves — so filter by '
+				+ 'piece.bounds.size if you only want the bodies. Not free and not automatic: it reads '
+				+ 'the geometry back and uploads one asset per piece, so it is a load-time step, and '
+				+ 'splitting the same mesh twice answers with the same assets.',
+				'toJSON()',
+				'toString()',
+			],
 		},
 		Vector3: {
 			construct: 'new three.Vector3(null, x, y, z)',
@@ -406,7 +440,11 @@ export const DOCS = {
 		Asset: {
 			construct: 'three.load(path)',
 			properties: ['path', 'meshes (names, in load order)', 'animations (clip names)'],
-			methods: ['mesh(name)', 'meshAt(index)', 'instantiate(name?, opts?)', 'toJSON()'],
+			methods: [
+				'mesh(name)', 'meshAt(index)',
+				'instantiate(name?, { skeleton, skinning, materials })',
+				'toJSON()',
+			],
 			note:
 				'instantiate() is Three.js\'s gltf.scene: the file\'s own node hierarchy as Object3Ds, '
 				+ 'with the transforms the file gave them. Use it for anything whose pieces are '
@@ -414,6 +452,15 @@ export const DOCS = {
 				+ 'a level laid out in Blender. asset.mesh(name) is the other door and is what you want '
 				+ 'when you are placing pieces yourself. Instantiating twice gives two independent trees '
 				+ 'over one upload. '
+				+ '{ materials: true } BUILDS A MATERIAL PER GLTF MATERIAL and puts it on the meshes that '
+				+ 'wear it, which is how a .glb authored with alphaMode BLEND renders blended and how a '
+				+ 'file\'s normal maps and emissive maps reach the frame — without it the file draws with '
+				+ 'its base colour and its base colour map and nothing else, which is what it always did. '
+				+ 'It builds nothing for a material that is opaque, single-sided and has no normal or '
+				+ 'emissive map, because that is the default material already. Occlusion and '
+				+ 'metallic-roughness are not applied; ref.material has them and the reason. Off by '
+				+ 'default because it compiles a shader per distinct material, which a scene that was '
+				+ 'happy without them should not pay for. '
 				+ 'A RIGGED file: the skeleton is left out by default and the character is posed from a '
 				+ 'table baked once at load, so a hundred of them is a hundred nodes, one draw call and '
 				+ 'one uint per copy per frame — give each a phase with play(name, { time }). '
@@ -492,9 +539,13 @@ export const DOCS = {
 				'The convex hull of a cloud of points, and the way to make a shape that is not one of the '
 				+ 'six parametric ones — a rock, a crystal, a gem, a chunk of debris, the bound of a scan. '
 				+ 'points is an array of Vector3s, of [x, y, z] or of {x, y, z}, or a flat array or '
-				+ 'Float32Array of coordinates; at least 4 points, at most 65536. The hull is flat shaded '
-				+ 'and carries no uvs: its faces meet at hard creases, and there is no unwrap of an '
-				+ 'arbitrary hull that does not seam. The points describe the shape, they are not its '
+				+ 'Float32Array of coordinates; at least 4 points, at most 65536. The hull is flat shaded, '
+				+ 'because its faces meet at hard creases. It carries uvs, but they are a projection '
+				+ 'rather than an unwrap: every facet is mapped face-on at one uv unit per unit of local '
+				+ 'space, so a texture is never stretched and is the same size everywhere on the hull and '
+				+ 'on anything beside it — the only artefact is that two facets meeting at a crease do not '
+				+ 'line up along the shared edge, which reads as nothing on the noise and grain a rock '
+				+ 'wants and as a break on a regular pattern. The points describe the shape, they are not its '
 				+ 'vertices — most are discarded and none can be read back. parameters.points is the count '
 				+ 'you handed over. Two identical arrays are one asset; two runs of Math.random() are two, '
 				+ 'because the key is bit-exact.',
@@ -956,12 +1007,19 @@ export const DOCS = {
 			+ 'this pass, already decoded to linear — the rendered scene, for the first pass of a chain), '
 			+ 'scene (this pixel of the rendered scene whatever has run since; equal to color on the '
 			+ 'first pass), uv (0..1 across the frame, (0,0) top left), resolution '
-			+ '(the frame in pixels — 1.0 / p.resolution is one texel, which is what a blur steps by) and '
-			+ 'time (seconds since this shader was set, wall clock rather than a game clock). p gives you '
+			+ '(the frame in pixels — 1.0 / p.resolution is one texel, which is what a blur steps by), '
+			+ 'time (seconds since this shader was set, on the GAME clock, so a paused world has a still '
+			+ 'chain) and depth (how far this pixel is from the camera, in WORLD UNITS along the view '
+			+ 'direction — p.depth > 20 is twenty units away, and a pixel nothing was drawn into reads as '
+			+ 'the far plane). depth is already linearized for you, which is the point of it: the raw '
+			+ 'device depth spends half its range on the first few percent of the frustum, so fog, depth '
+			+ 'of field and distance-aware edges written against it bunch up against the camera. There '
+			+ 'are no normals and no motion vectors. There is also tap, another pass\'s output, which '
+			+ 'only three.addPass can fill — see its `reads`. p gives you '
 			+ 'this pixel; the two images behind color and scene are also in scope as samplers named prev '
 			+ 'and scene, so a body that needs the NEIGHBOURS reads prev.Sample(p.uv + off) — which is '
 			+ 'what the texel step is for, and the whole of how a blur is written. Each '
-			+ 'uniform is readable in the body by its own name; they are at most 112 bytes in total (28 '
+			+ 'uniform is readable in the body by its own name; they are at most 104 bytes in total (26 '
 			+ 'floats), each a number or an array of up to four numbers, and NOT a table — a post pass '
 			+ 'draws one triangle over the whole frame, so there are no instances for a row to belong to. '
 			+ 'textures is a ShaderMaterial\'s: { grade_lut: tex } declares a Sampler2D the body reads by '
@@ -981,13 +1039,24 @@ export const DOCS = {
 			+ 'three.addPass adds to it. The chain belongs to the renderer rather than to the scene, so '
 			+ 'it survives new three.Scene() and outlives the script that set it. three.setPost(null) is '
 			+ 'the only thing that clears it.',
-		'three.addPass({ fragment, uniforms, textures })':
+		'three.addPass({ fragment, uniforms, textures, reads })':
 			'Put another full-screen pass at the end of the chain. The same spec three.setPost takes and '
 			+ 'the same handle back, and the difference is what the body reads: p.color is what the pass '
 			+ 'BEFORE this one wrote, and p.scene is the frame as the geometry left it, whatever has run '
-			+ 'since. Those two are the whole dependency model — a pass reads its predecessor and it '
-			+ 'reads the original picture — and between them they cover what a multi-pass effect wants: '
-			+ 'bloom is blur(bright(scene)) + scene, which is p.scene three passes later. For the first '
+			+ 'since. Those two are the dependency model — a pass reads its predecessor and it '
+			+ 'reads the original picture — and between them they cover most of what a multi-pass effect '
+			+ 'wants: bloom is blur(bright(scene)) + scene, which is p.scene three passes later. '
+			+ 'reads is the THIRD source, for what they do not cover: hand it the handle an earlier '
+			+ 'addPass gave you and that pass\'s output arrives as p.tap. That is the pass in the MIDDLE of a chain that '
+			+ 'two later passes both want, or a mask one pass built for another to apply — '
+			+ 'const bright = three.addPass({ fragment: threshold }); ... three.addPass({ fragment: '
+			+ 'combine, reads: bright }). The sampler is in scope as tap_image (not tap, which is a word '
+			+ 'bodies use) for reading a different pixel of it. It costs the tapped pass an image of its own (the chain '
+			+ 'ping-pongs two between passes and a tapped one cannot be overwritten), so it is one '
+			+ 'allocation per distinct pass tapped and nothing for a chain that taps none. reads must '
+			+ 'name a pass ALREADY in the chain — a later index or a cycle throws — and it belongs on '
+			+ 'addPass, never on setPost, which is always the first pass and has nothing before it. '
+			+ 'Leave it out and p.tap is the rendered scene, the same as p.scene. For the first '
 			+ 'pass in a chain the two are the same image, so a body written for setPost keeps working '
 			+ 'unchanged. Everything between passes is linear float rather than 8-bit, so a pass may '
 			+ 'return values above 1 and the next one still sees them; the display encode happens once, '

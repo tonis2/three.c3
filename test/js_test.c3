@@ -1154,6 +1154,119 @@ fn void a_thousand_colours_are_still_one_draw_call() @test
 }
 
 <*
+ A table too large for the push block still reaches the shader, row by row.
+
+ `plan.md` §2: "a uniform table is capped by the 104-byte push budget — six rows
+ of four floats... a table of hundreds still needs a device buffer behind a BDA."
+ This is that table, through the whole stack rather than through reflection: forty
+ rows of `float3` is 480 bytes, four and a half times what the push block leaves,
+ and three quads read three of them.
+
+ It is `a_variant_picks_a_row_of_the_material_table` over a spilled table on
+ purpose, because the claim is that **nothing else changes**. Same script shape,
+ same one draw call, same three colours; the only difference is where the bytes
+ live, and a body that indexes `palette[s.variant]` cannot tell.
+
+ ## What a wrong spill looks like
+
+ Every failure mode here paints a *plausible* frame, which is why the colours are
+ far apart and the rows are far apart in the table:
+
+	 the pointer never written     row 0 for all three, or a device fault
+	 the buffer never filled       black, or the previous frame's bytes
+	 the offsets in the wrong space  some other row's colour
+	 one buffer instead of two     the right colours, and a tear under load
+
+ Rows 0, 19 and 39 rather than 0, 1, 2: an offset computed with the wrong stride
+ lands on a neighbour, and neighbours of 0, 1, 2 are each other.
+
+ **Proved by injection**, twice, and by an accident that was worth more than
+ either. The pointer write in `MeshPass.record` removed, so the shader reads
+ through whatever `Material.block` held: "row 0 painted its quad red, got 0
+ pixels". And `MeshPass.write_tables`'s copy loop removed, so the buffer exists
+ and is never filled: the same sentence, because a zeroed table paints black
+ rather than wrong.
+
+ The accident: this test passed once and failed on every run after, with "this
+ material has no uniform called 'palette'". The shader **disk** cache stored a
+ push field's name, offset and size and not its `indirect` flag, so a module that
+ came back off disk had every field looking pushed and a spilled table's uniforms
+ had no names. Only reachable on a warm cache, which is why nothing pinned it —
+ `three_tests::material::a_table_costs_a_row_at_a_time` now does, deterministically,
+ by compiling the same source twice through the cached door.
+*>
+fn void a_table_too_large_for_the_push_block_still_reaches_the_shader() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+
+			// Forty rows of float3 — 480 bytes, against the 104 the push block
+			// leaves. Every row is black except the three that are read, so a
+			// lookup landing on a neighbour paints nothing rather than something
+			// close.
+			const palette = [];
+			for (let i = 0; i < 40; i++) palette.push([0, 0, 0]);
+			palette[0] = [1, 0, 0];
+			palette[19] = [0, 1, 0];
+			palette[39] = [0, 0, 1];
+
+			globalThis.mat = new three.ShaderMaterial({
+				uniforms: { palette },
+				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+			});
+
+			globalThis.scene = new three.Scene();
+			const rows = [0, 19, 39];
+			for (let i = 0; i < 3; i++) {
+				const quad = new three.Mesh(kit.mesh("quad_left"), globalThis.mat);
+				quad.position.set(0.75 + (i - 1) * 1.2, 0, 0);
+				quad.variant = rows[i];
+				globalThis.scene.add(quad);
+			}
+
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(globalThis.scene, three.camera);
+			return globalThis.scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.stats.draw_calls == 1,
+			"one material and one mesh is still one draw, got %d", result.stats.draw_calls);
+
+		image::Image frame = run.renderer.capture()!!;
+		defer frame.free();
+
+		test::@check(count_near(&frame, 255, 0, 0) > 200,
+			"row 0 painted its quad red, got %d pixels", count_near(&frame, 255, 0, 0));
+		test::@check(count_near(&frame, 0, 255, 0) > 200,
+			"row 19 painted its quad green, got %d pixels", count_near(&frame, 0, 255, 0));
+		test::@check(count_near(&frame, 0, 0, 255) > 200,
+			"row 39 painted its quad blue, got %d pixels", count_near(&frame, 0, 0, 255));
+
+		// Written after the material was built and after a frame was drawn with
+		// it, which is the case the per-slot buffer exists for: the copy that
+		// reaches the GPU has to be this frame's, not the one still in flight.
+		three::RunResult moved = run.run(`
+			globalThis.mat.uniforms.palette[19] = [1, 1, 0];
+			three.render(globalThis.scene, three.camera);
+		`);
+		defer moved.free();
+		test::@check(moved.ok, "the second run succeeded: %s", moved.error);
+
+		image::Image after = run.renderer.capture()!!;
+		defer after.free();
+		test::@check(count_near(&after, 0, 255, 0) < 50,
+			"row 19 stopped being green, got %d", count_near(&after, 0, 255, 0));
+		test::@check(count_near(&after, 255, 255, 0) > 200,
+			"and became yellow, got %d", count_near(&after, 255, 255, 0));
+	};
+}
+
+<*
  One material, one draw call, two looks — chosen per copy.
 
  This is the whole point of `variant`. Two quads share a geometry *and* a

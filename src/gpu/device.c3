@@ -203,6 +203,10 @@ struct Gpu
 	// flight are a property of the device, and two owners retiring into two queues
 	// would each have to be swept from the frame loop separately.
 	DeletionQueue deletions;
+	// The driver's own `VkPipelineCache`, warmed off disk — `gpu/driver_cache.c3`.
+	// On the device for the same reason the queue is, and a stronger one: its
+	// validity *is* the device's `pipelineCacheUUID`.
+	DriverCache driver_cache;
 }
 
 <*
@@ -616,6 +620,11 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 
 	self.graphics.handle = self.handle.getQueue(self.graphics.index);
 
+	// Before anything builds a pipeline, and after the device exists — the whole
+	// of what it needs. `properties` is the one already read above; asking the
+	// physical device a second time could not give a different answer.
+	self.driver_cache.open(self, &properties);
+
 	self.allocator = {
 		.device = self.handle,
 		.pdevice = self.pdevice,
@@ -816,13 +825,20 @@ fn void Gpu.free(&self)
 		// here is what keeps a process that exits mid-queue from leaking whatever
 		// the last two frames gave back.
 		self.drain_deletions();
+		// Then the driver's cache, in that order: a pipeline retired above may be
+		// the only reason there is anything new to write, and reading the blob
+		// back out of a cache whose device is idle is the one moment nothing can
+		// be adding to it.
+		self.driver_cache.save(self);
+		self.driver_cache.free(self);
 		self.allocator.free();
 		self.handle.free();
 		self.handle = (vk::Device)null;
 	}
-	// Owns nothing by now — `drain_deletions` emptied it — but the list's own
+	// Owns nothing by now — `drain_deletions` emptied it — but the lists' own
 	// storage is still ours to give back.
 	self.deletions.pipelines.free();
+	self.deletions.memory.free();
 	if (self.debug != null)
 	{
 		self.debug.free(self.instance);

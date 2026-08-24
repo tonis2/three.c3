@@ -1881,49 +1881,59 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
 }
 
 <*
- A stored module from another format version, or built with other arguments, is
- not this process's module.
+ A stored module from another format version, built by another compiler, or
+ built with other arguments, is not this process's module.
 
- Both of these are in the key — `cache_key` hashes the format version and the
- joined argument list before it hashes the source — and neither can be observed
- through the key, because the key is a private function whose only visible
- effect is a filename nothing else knows how to predict. So what is tested here
- is the half that *is* observable and is the half that matters: what the loader
- does when a file arrives under the right name carrying the wrong ones.
+ All three are in the key — `cache_key` hashes the format version, the compiler
+ tag and the joined argument list before it hashes the source — and none can be
+ observed through the key, because the key is a private function whose only
+ visible effect is a filename nothing else knows how to predict. So what is
+ tested here is the half that *is* observable and is the half that matters: what
+ the loader does when a file arrives under the right name carrying the wrong
+ ones.
 
  That is not a weaker test than one that compared two hashes. The key and the
- file are written from the same two values by the same function pair — the
+ file are written from the same three values by the same function pair — the
  arguments `cache_store` writes as a blob are the arguments `cache_key` hashed,
- and the version is a constant used by both — so a key that stopped covering
- either would still be caught here as an identity failure. The failure mode this
- rules out is the real one: a stale file being *believed*.
+ the compiler tag likewise, and the version is a constant used by both — so a key
+ that stopped covering any of them would still be caught here as an identity
+ failure. The failure mode this rules out is the real one: a stale file being
+ *believed*.
 
- ## Why the version half is the one with teeth
+ ## The compiler half is the one that fires without anybody deciding to
 
- It is the manual lever for a Slang upgrade. `lib/slang.c3l` exposes no compiler
- version, so nothing in the key changes when the SDK does, and every stored
- module is one that a compiler which is no longer installed produced. Bumping
- `SHADER_CACHE_FORMAT_VERSION` is what makes those files unreadable, and it only
- works if the loader actually checks the field — which is exactly what a version
- written into a file and never read again would silently stop doing. Recorded in
- `plan.md` §2 rather than fixed, with deleting `build/shader-cache` as the other
- lever.
+ The other two need a person: somebody edits `SLANG_ARGUMENTS`, or somebody
+ bumps `SHADER_CACHE_FORMAT_VERSION`. An SDK upgrade needs nobody, arrives as a
+ changed dylib, and until `slang::build_tag()` was in the key it left every
+ stored module in place — modules a compiler that is no longer installed
+ produced, loaded and used with nothing reporting anything. The symptom is "the
+ shader still behaves the way it did before the upgrade", true on a machine whose
+ cache is warm and not reproducible on one whose cache is empty.
 
- Both halves patch the file in place, keeping every length, and both flip a
- SPIR-V byte alongside so that a module which came off disk can be told from one
- that was recompiled — `a_hash_hit_with_different_source_is_a_miss` explains why
- counters alone would not do it.
+ What it cannot see is two untagged compiler builds, which report the same
+ string. `SHADER_CACHE_FORMAT_VERSION` is still the manual lever for that, and it
+ only works if the loader actually checks the field — which is exactly what a
+ version written into a file and never read again would silently stop doing.
+ Deleting `build/shader-cache` is the blunt one.
 
- **Proved by injection**, twice. The version check removed from `cache_load` —
- `if (reader.u32() != SHADER_CACHE_FORMAT_VERSION) return cache_reject();` cut to
- a bare `reader.u32();` — and the file from the future is believed: "a module
- built under this format version came back, byte 8 of its SPIR-V is 0xff rather
- than 0x00". And separately the argument check removed —
- `if (stored_args != args) return cache_reject();` — for the second half: "a
- module built with these arguments came back, byte 8 of its SPIR-V is 0xff rather
- than 0x00".
+ All three halves patch the file in place, keeping every length, and all three
+ flip a SPIR-V byte alongside so that a module which came off disk can be told
+ from one that was recompiled — `a_hash_hit_with_different_source_is_a_miss`
+ explains why counters alone would not do it.
+
+ **Proved by injection**, three times. The version check removed from
+ `cache_load` — `if (reader.u32() != SHADER_CACHE_FORMAT_VERSION) return
+ cache_reject();` cut to a bare `reader.u32();` — and the file from the future is
+ believed: "a module built under this format version came back, byte 8 of its
+ SPIR-V is 0xff rather than 0x00". The compiler check removed —
+ `if (stored_compiler != compiler) return cache_reject();` — and the file from
+ another SDK is believed the same way: "a module built by this compiler came
+ back, byte 8 of its SPIR-V is 0xff rather than 0x00". And the argument check
+ removed — `if (stored_args != args) return cache_reject();` — for the third:
+ "a module built with these arguments came back, byte 8 of its SPIR-V is 0xff
+ rather than 0x00".
 *>
-fn void the_cache_key_covers_the_arguments_and_the_format_version() @test
+fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version() @test
 {
 	fresh_cache(CACHE_KEY_DIR);
 
@@ -1982,6 +1992,49 @@ fn void the_cache_key_covers_the_arguments_and_the_format_version() @test
 	test::@check(ran, "Slang ran");
 	test::@check(three::shader_cache_stats().invalid == 1,
 		"the file from another version was refused: %d", three::shader_cache_stats().invalid);
+	test::@check(three::shader_cache_stats().loads == 0,
+		"and not read: %d", three::shader_cache_stats().loads);
+
+	// --- the compiler ---
+
+	@pool()
+	{
+		char[] bytes = file::load(tmem, path)!!;
+		// Found by its own text rather than at offset 12, where the format puts
+		// it: a field located by position would keep patching *something* if the
+		// header grew, and what it patched would no longer be the tag. The tag
+		// this process reports is the tag the file was written with one compile
+		// ago, so a search for it is exact.
+		String tag = slang::build_tag();
+		test::@check(tag.len > 0, "libslang reports a build tag: '%s'", tag);
+		usz tag_at = byte_offset(bytes, tag);
+		test::@check(tag_at < bytes.len, "and it is in the file");
+		// Same length, different bytes — a shorter tag would move every offset
+		// after it and the loader would then be refusing a truncated file rather
+		// than a foreign compiler.
+		bytes[tag_at] = bytes[tag_at] == 'x' ? 'y' : 'x';
+
+		usz spirv_at = spirv_offset(bytes);
+		test::@check(spirv_at > 0, "and so is the SPIR-V");
+		bytes[spirv_at + 8] = bytes[spirv_at + 8] ^ 0xff;
+
+		file::save(path, bytes)!!;
+	};
+
+	three::shader_cache_reset_stats();
+
+	three::ShaderModule after_compiler = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer after_compiler.free();
+
+	test::@check(after_compiler.ok, "a module came back");
+	test::@check(after_compiler.spirv == reference.spirv,
+		"a module built by this compiler came back, byte 8 of its SPIR-V is 0x%02x rather than 0x%02x",
+		(int)after_compiler.spirv[8], (int)reference.spirv[8]);
+	test::@check(ran, "Slang ran");
+	test::@check(three::shader_cache_stats().invalid == 1,
+		"the file from another SDK was refused: %d", three::shader_cache_stats().invalid);
 	test::@check(three::shader_cache_stats().loads == 0,
 		"and not read: %d", three::shader_cache_stats().loads);
 

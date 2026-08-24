@@ -552,12 +552,23 @@ fn Texture? Gpu.create_white_texture(&self)
 	return self.create_texture(white[..], 1, 1);
 }
 
+<*
+ Give the image back, once the frames that may still be sampling it are done.
+
+ Through `gpu/retire.c3` rather than straight to the driver, and that is what
+ makes a texture droppable *during* a frame: `MeshPass.set_material_map` and its
+ neighbours used to wait for the whole device to go idle before this, because a
+ command buffer in flight may still be reading the image.
+
+ The struct is zeroed on the way out and that is load-bearing twice over: the
+ queue owns these handles from here, so a copy left behind is a double free, and
+ a dead `SharedTexture` slot with an image handle still in it is the one bug the
+ texture table's tests look for.
+*>
 fn void Texture.free(&self, Gpu* gpu)
 {
-	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
-	if (self.view != null) self.view.free(gpu.handle);
-	// Memory.free destroys the image it was bound to; destroying it here too
-	// would be a double free.
-	self.memory.free();
+	// Memory.free destroys the image it was bound to; destroying it separately
+	// would be a double free, which is why the image handle is not handed over.
+	gpu.retire_memory(self.memory, self.view, self.sampler);
 	*self = { };
 }

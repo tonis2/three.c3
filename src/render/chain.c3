@@ -132,8 +132,7 @@ fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent
 *>
 fn void ChainImage.free(&self, Gpu* gpu)
 {
-	if (self.view != null) self.view.free(gpu.handle);
-	self.memory.free();
+	gpu.retire_memory(self.memory, self.view);
 	*self = {};
 }
 
@@ -172,6 +171,28 @@ struct PassIo
 	vk::ImageView dst_view;
 	vk::Extent2D extent;
 	vk::Sampler sampler;
+	// The frame's own depth buffer, already in `DEPTH_STENCIL_READ_ONLY_OPTIMAL`
+	// — `record_chain` transitions it once, beside `scene`, and every pass in the
+	// frame reads the same image in the same layout.
+	vk::ImageView depth;
+	// Nearest, and a second sampler for one reason: `D32_SFLOAT` is not required
+	// to support linear filtering, and a device that does not would refuse the
+	// descriptor. Nothing wants a filtered depth anyway — the two values either
+	// side of a silhouette are metres apart and their average is a surface that
+	// is not there.
+	vk::Sampler depth_sampler;
+	// The camera's planes, for the linearisation in `post.slang`. Facts about the
+	// frame being recorded, like `extent` and `time`, and for the same reason:
+	// a pass that read them from the camera itself could be recorded against a
+	// camera the frame was not drawn with.
+	float near_plane;
+	float far_plane;
+	// The output of the pass this one named as its third source, already in
+	// `SHADER_READ_ONLY_OPTIMAL`. Image A for a pass that named none — the same
+	// answer `p.scene` gives, so a body that reads `tap` without a tap would see
+	// the frame rather than something undefined. It cannot: `build_stage` refuses
+	// that body outright, and this is the belt to that pair of braces.
+	vk::ImageView tap;
 	Assets* assets;
 	// The game clock, in seconds — `scene/clock.c3`. An argument at record time
 	// rather than a field on the chain, for the same reason `extent` is one: it
@@ -248,10 +269,11 @@ interface FullscreenPass
  which is the difference between a script that set one post shader and a script
  that built a chain — the first pays for A and P0 and nothing more.
 
- `waitIdle` before destroying anything, because these images have no deletion
- queue of their own. Pipelines do, and one mechanism earning its keep for the
- objects a resize touches would be a mechanism built for a case that has never
- happened — `Target.init` is called once, from `Renderer.init`.
+ Nothing waits for the device before destroying anything: `ChainImage.free`
+ retires its handles through `gpu/retire.c3` and they go two frames later. The
+ stall that used to be here was redundant as well as expensive — a resize has
+ already recreated the swapchain, which waits idle because the images it replaces
+ belong to the presentation engine and cannot be queued.
 
  @param stages : `How many script passes the chain is about to have. Zero still creates A, because a set that fails to compile has already paid for it.`
 *>
@@ -260,8 +282,11 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	bool moved = self.extent.width != target.extent.width || self.extent.height != target.extent.height;
 	if (moved && self.extent.width != 0)
 	{
-		gpu.handle.waitIdle();
 		self.destroy_images(gpu);
+		// A tapped stage's image has an extent too, and it is not in `pong`. Freed
+		// here rather than in `destroy_images`, which `free` also calls after the
+		// stages are already gone.
+		foreach (stage : self.stages) if (stage.keep.exists()) stage.keep.free(gpu);
 		// Every stage that owns anything at the old extent hears about it. A stage
 		// that owns nothing does not implement `resize` and is skipped — see
 		// `FullscreenPass`.
@@ -272,6 +297,8 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 		}
 	}
 	self.extent = target.extent;
+	// After the extent, because that is what they are created at.
+	self.ensure_keeps(gpu)!;
 
 	// **`target.color_format`, not `POST_CHAIN_FORMAT`** — `render/post.c3`'s
 	// colour argument in one line, and the reason it is not the chain's format is
@@ -301,6 +328,24 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 *>
 fn void? PostPass.ensure_sampler(&self, Gpu* gpu)
 {
+	if (self.depth_sampler == null)
+	{
+		// **Nearest, and that is not a shortcut.** `D32_SFLOAT` is not required to
+		// advertise `SAMPLED_IMAGE_FILTER_LINEAR`, so a linear sampler on it is a
+		// descriptor a conformant device may refuse; and a filtered depth is
+		// meaningless where it would matter, because the two texels either side of
+		// a silhouette are metres apart and their average is a surface that does
+		// not exist. CLAMP_TO_EDGE for the colour sampler's reason.
+		self.depth_sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
+			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
+			.setMinLod(0.0)
+			.setMaxLod(0.0)
+			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
+			.build(gpu.handle)!;
+	}
 	if (self.sampler != null) return;
 	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
 		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
@@ -412,7 +457,15 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 
  @param now : `The game clock in seconds. Every stage is told it, and a stage set from here on is stamped against it.`
 *>
-fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Assets* assets = null, double now = 0)
+fn void? PostPass.record_chain(
+	&self,
+	vk::CommandBuffer cmd,
+	Target* target,
+	Assets* assets = null,
+	double now = 0,
+	float near_plane = 0,
+	float far_plane = 0
+)
 {
 	sz count = self.stages.len();
 	if (count == 0) return;
@@ -424,16 +477,25 @@ fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Ass
 	// same number in two places for that.
 	self.now = now;
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(self.scene.image) }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({
+		shader_read_barrier(self.scene.image),
+		depth_read_barrier(target.depth),
+	}));
 
 	foreach (i, boxed : self.stages)
 	{
-		ChainImage* dst = &self.pong[i & 1];
+		// `output_of` rather than `pong[i & 1]`, in all three places a destination
+		// or a source is named here: a stage something taps writes into an image of
+		// its own, and the whole difference between the two kinds lives in that one
+		// function.
+		ChainImage* dst = self.output_of(i);
 		// The first pass's `prev` is A, which is what makes a chain of one
 		// identical to the pass this file replaced: both bindings point at the
 		// same image, so `p.color == p.scene` and a shader written before the
 		// chain existed reads exactly what it always read.
-		vk::ImageView prev = i == 0 ? self.scene.view : self.pong[(i - 1) & 1].view;
+		vk::ImageView prev = i == 0 ? self.scene.view : self.output_of(i - 1).view;
+		int tapped = self.stages[i].tap;
+		vk::ImageView tap = tapped >= 0 ? self.output_of((sz)tapped).view : self.scene.view;
 
 		// Taken fresh from the boxed stage rather than cached — see
 		// `FullscreenPass` on interface values being pointers.
@@ -445,6 +507,11 @@ fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Ass
 			.dst_view = dst.view,
 			.extent = self.extent,
 			.sampler = self.sampler,
+			.depth = target.depth_view,
+			.depth_sampler = self.depth_sampler,
+			.near_plane = near_plane,
+			.far_plane = far_plane,
+			.tap = tap,
 			.assets = assets,
 			.time = now,
 		})!;
@@ -456,12 +523,19 @@ fn void? PostPass.record_chain(&self, vk::CommandBuffer cmd, Target* target, Ass
 	// built with its format.
 	FullscreenPass tone = &self.tonemap;
 	tone.record(cmd, {
-		.prev = self.pong[(count - 1) & 1].view,
+		.prev = self.output_of(count - 1).view,
 		.scene = self.scene.view,
 		.dst = target.color,
 		.dst_view = target.color_view,
 		.extent = self.extent,
 		.sampler = self.sampler,
+		.depth = target.depth_view,
+		.depth_sampler = self.depth_sampler,
+		.near_plane = near_plane,
+		.far_plane = far_plane,
+		// The tonemap is the engine's and reads no third source. Image A, for the
+		// reason `PassIo.tap` gives.
+		.tap = self.scene.view,
 		.assets = assets,
 		.time = now,
 	})!;

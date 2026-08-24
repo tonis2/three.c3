@@ -128,6 +128,91 @@ struct MaterialUniform
 const uint MATERIAL_UNIFORM_BUDGET = 104;
 
 <*
+ The generated pointer a spilled uniform table hangs off, and the struct it
+ points at.
+
+ A name rather than a binding index, because it is a *field of the push block*
+ and reflection resolves it there — `shader/reflect.c3` follows exactly this one
+ pointer and nothing else, which is what keeps `FrameBlock`, `Instance` and `Draw`
+ out of the field list. In `MATERIAL_RESERVED` for the usual reason.
+*>
+const String MATERIAL_TABLE_FIELD = "material_table";
+const String MATERIAL_TABLE_TYPE = "MaterialTable";
+
+<*
+ How large a spilled uniform table may be.
+
+ `plan.md` §2: "a table of hundreds still needs a device buffer behind a BDA,
+ which is now a thing this codebase does once and could do twice." This is the
+ second time. Past the push block's 104 bytes a material's **array** columns move
+ into a device buffer and the push block carries a pointer to them, so the ceiling
+ stops being a push-constant limit and starts being a memory one.
+
+ 256 KiB is 4096 rows of four `float4` columns, and it is a bound on a mistake
+ rather than a budget: the buffer is written **per bucket per frame** — see
+ `MeshPass.build_draw_records` — so a table this size is a quarter of a megabyte
+ of memcpy per draw, which is a cost worth refusing before somebody discovers it
+ as a frame time.
+
+ The **scalar** uniforms never spill. They stay in the push block where
+ reflection puts them and where `set_uniform` is a memcpy with nothing to
+ invalidate, which is the property the old entry said was worth keeping; what
+ moves is the part that wanted to be large, which was always the table.
+*>
+const uint MATERIAL_TABLE_BUDGET = 256 * 1024;
+
+<*
+ Does this material's table have to go in a buffer?
+
+ One question, asked in three places — the validator, the assembler and
+ `Material.set_uniform`'s far side — and answered from the uniform list alone, so
+ the generated source and the C3 side cannot disagree about which shape a
+ material is.
+
+ **The whole list, not the table half.** A material whose scalars alone overflow
+ spills too, and then fails the scalar check below; deciding on the table's size
+ would make "your scalars do not fit" reachable only for a material that also had
+ a table.
+*>
+fn bool material_spills(MaterialUniform[] uniforms)
+{
+	return material_uniform_bytes(uniforms) > MATERIAL_UNIFORM_BUDGET;
+}
+
+<*
+ What the array columns cost, which is what goes in the buffer when a material
+ spills.
+*>
+fn uint material_table_bytes(MaterialUniform[] uniforms)
+{
+	uint total = 0;
+	foreach (uniform : uniforms)
+	{
+		uint rows = uniform_rows_of(uniform);
+		if (rows > 1) total += uniform.components * rows * 4;
+	}
+	return total;
+}
+
+<*
+ What stays in the push block when a material spills: the scalars, plus the
+ 8-byte pointer to the table.
+
+ The pointer is declared **first**, before the scalars, so that it lands at
+ `MATERIAL_PUSH_START` — 24, a multiple of 8 — and scalar layout has no
+ alignment padding to insert in front of it. Declared after a `float` it would.
+*>
+fn uint material_pushed_bytes(MaterialUniform[] uniforms)
+{
+	uint total = 8;
+	foreach (uniform : uniforms)
+	{
+		if (uniform_rows_of(uniform) == 1) total += uniform.components * 4;
+	}
+	return total;
+}
+
+<*
  How many samplers of its own a material may declare, on top of `map`.
 
  A budget rather than a device limit, the same way `PUSH_BUDGET` is. The real
@@ -210,6 +295,11 @@ const String[*] MATERIAL_RESERVED @local = {
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
 	"srgb_to_linear",
+	// The spilled uniform table's pointer and its struct, generated only for a
+	// material whose uniforms do not fit the push block — but reserved for every
+	// material, because whether a name collides must not depend on how many other
+	// uniforms happened to be declared beside it.
+	"material_table", "MaterialTable",
 	// The shadow lookup: the reserved sampler at binding 1, the function that
 	// reads it, and the one global in the template. `g_shadow` is the one worth
 	// naming out loud — a uniform of that name would shadow the value `lambert`
@@ -446,16 +536,48 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			return textures.len > MATERIAL_TEXTURE_LIMIT ? MATERIAL_TOO_MANY_TEXTURES~ : MATERIAL_NAME_INVALID~;
 		}
 
-		uint wanted = material_uniform_bytes(uniforms);
-		if (wanted > MATERIAL_UNIFORM_BUDGET)
+		// **Two shapes, and this is where a material is told which one it is.**
+		// Everything that fits the push block stays in it, byte for byte as it
+		// always was. Past that the array columns move to a device buffer and the
+		// block carries a pointer — see `MATERIAL_TABLE_BUDGET`.
+		if (material_spills(uniforms))
 		{
-			material_note(string::tformat(
-				"material: the uniforms want %d bytes of push block and %d are free; the mesh contract takes the other %d of the 128 every device offers",
-				wanted,
-				MATERIAL_UNIFORM_BUDGET,
-				PUSH_BUDGET - MATERIAL_UNIFORM_BUDGET
-			));
-			return MATERIAL_TOO_MANY_UNIFORMS~;
+			uint table = material_table_bytes(uniforms);
+			// **Nothing to move.** A material of plain uniforms that overflows has
+			// no array column to spill, so the answer is the one it always was and
+			// the sentence is too — telling it about a table's pointer would be
+			// telling it about a thing it does not have.
+			if (table == 0)
+			{
+				material_note(string::tformat(
+					"material: the uniforms want %d bytes of push block and %d are free; the mesh contract takes the other %d of the 128 every device offers",
+					material_uniform_bytes(uniforms),
+					MATERIAL_UNIFORM_BUDGET,
+					PUSH_BUDGET - MATERIAL_UNIFORM_BUDGET
+				));
+				return MATERIAL_TOO_MANY_UNIFORMS~;
+			}
+
+			uint pushed = material_pushed_bytes(uniforms);
+			if (pushed > MATERIAL_UNIFORM_BUDGET)
+			{
+				material_note(string::tformat(
+					"material: the uniforms that are not arrays want %d bytes of push block and %d are free (the table's pointer takes 8 of them); a plain uniform cannot move to the table buffer, so declare fewer of them or make them rows of one",
+					pushed,
+					MATERIAL_UNIFORM_BUDGET
+				));
+				return MATERIAL_TOO_MANY_UNIFORMS~;
+			}
+
+			if (table > MATERIAL_TABLE_BUDGET)
+			{
+				material_note(string::tformat(
+					"material: the uniform table wants %d bytes and %d is the most one may have; it is written per draw per frame, so a table that size is a frame time rather than a limit",
+					table,
+					MATERIAL_TABLE_BUDGET
+				));
+				return MATERIAL_TOO_MANY_UNIFORMS~;
+			}
 		}
 
 		material_note("");
@@ -503,6 +625,7 @@ fn String? material_source(
 		MATERIAL_VERTEX_NAME,
 		MATERIAL_PREAMBLE_NAME,
 		MATERIAL_BINDING_FIRST,
-		allocator
+		allocator,
+		material_spills(uniforms)
 	);
 }

@@ -27,6 +27,8 @@ import vk;
 import slang;
 import std::core::test;
 import std::io;
+import std::io::path;
+import std::io::file;
 
 // A global rather than a function returning a slice literal: a slice literal is
 // backed by the stack frame that made it, and c3c says so.
@@ -840,18 +842,34 @@ fn void columns_of_different_heights_are_refused() @test
 }
 
 <*
- A table costs its rows of the budget, whatever the budget currently is.
+ A table costs its rows, and past the push block it moves to a buffer rather than
+ being refused.
 
- The failure this pins is an implementation that charges a column once rather
- than once per row: four rows of four floats is 64 bytes, and counting it as 16
- would let a material declare four times the push block it has and be refused by
- Vulkan at pipeline creation instead of here, with a message about ranges rather
- than about uniforms.
+ The arithmetic half first: an implementation that charged a column once rather
+ than once per row would count four rows of four floats as 16 bytes instead of 64,
+ and a material could then declare four times the push block it has and be refused
+ by Vulkan at pipeline creation with a message about ranges rather than about
+ uniforms.
 
- Seven rows is what does not fit now that the mesh contract lives in a
- `DrawRecord` and the budget is 104 — it was five when the contract was pushed and
- the budget was 52. The count is derived rather than written down for that reason:
- the property is "a row is charged", not "five rows is too many".
+ The second half is what `plan.md` §2 wanted and it inverts what this test used to
+ assert. Seven rows of `float4` is 112 bytes and did not fit the 104 the mesh
+ contract leaves, and **that was the ceiling on a material's table**. It is not
+ any more: past the budget the array columns move into a device buffer behind a
+ pointer in the push block, so seven rows compiles, and so does a thousand.
+
+ What the spill is checked to have actually done, rather than merely to have
+ accepted:
+
+ - the module reports `material_table` as a push field — the pointer;
+ - `palette` is reflected as an **indirect** field, so its offset is in the buffer
+   and `Material.set_uniform` writes it there;
+ - the push block is small again, because 112 bytes of table became 8 of pointer.
+
+ The row count is derived rather than written down, because the property is "a row
+ is charged" and not "seven rows is the number".
+
+ **Proved by injection.** `material_spills` forced to false, so the old refusal
+ comes back: "a table past the push block was refused: MATERIAL_TOO_MANY_UNIFORMS".
 *>
 fn void a_table_costs_a_row_at_a_time() @test
 {
@@ -863,16 +881,89 @@ fn void a_table_costs_a_row_at_a_time() @test
 	);
 
 	uint rows = three::MATERIAL_UNIFORM_BUDGET / 16 + 1;
-	three::MaterialUniform[1] too_many = { { "palette", 4, rows } };
-	String? refused_source = three::material_source(
-		`float3 shade(Surface s) { return palette[s.variant].rgb; }`, too_many[..]
-	);
-	fault refused = @catch(refused_source);
-	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "one row past the budget does not fit, got %s", refused);
+	three::MaterialUniform[1] spilled = { { "palette", 4, rows } };
 	test::@check(
-		three::material_diagnostic().contains(string::tformat("%d", rows * 16)),
-		"saying what it asked for: %s", three::material_diagnostic()
+		three::material_uniform_bytes(spilled[..]) > three::MATERIAL_UNIFORM_BUDGET,
+		"%d rows is supposed to be past the budget, and is %d bytes",
+		rows, three::material_uniform_bytes(spilled[..])
 	);
+	test::@check(three::material_spills(spilled[..]), "%d rows did not spill", rows);
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return palette[s.variant].rgb; }`, spilled[..]
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+	test::@check(mod.ok, "a table past the push block was refused: %s", mod.diagnostic);
+
+	three::ShaderField* pointer = mod.layout.field_of(three::MATERIAL_TABLE_FIELD);
+	test::@check(pointer != null, "the module declares no table pointer");
+	if (pointer == null) return;
+	test::@check(!pointer.indirect, "the pointer is itself in the push block");
+	test::@check(pointer.offset == three::MATERIAL_PUSH_START,
+		"and at %d, where the mesh contract ends, rather than %d",
+		three::MATERIAL_PUSH_START, pointer.offset);
+	test::@check(pointer.size == 8, "a device pointer is 8 bytes, got %d", pointer.size);
+
+	three::ShaderField* column = mod.layout.field_of("palette");
+	test::@check(column != null, "the column is not reflected at all");
+	if (column == null) return;
+	test::@check(column.indirect, "the column stayed in the push block");
+	test::@check(column.size == rows * 16,
+		"the whole table is %d bytes, got %d", rows * 16, column.size);
+
+	// 24 of mesh contract plus 8 of pointer. The table it replaced was 112.
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 8,
+		"the push block is %d bytes rather than %d",
+		mod.layout.push_size, three::MATERIAL_PUSH_START + 8);
+
+	// --- and it survives the disk cache ---
+	//
+	// **The one that was found by being flaky rather than by being thought of.**
+	// `indirect` is a field of the reflected layout, the shader cache writes that
+	// layout to disk, and a format that stored the offset and the size and not the
+	// flag came back with every field looking pushed — so a spilled table's
+	// uniforms had no names at all and `material.uniforms.palette = ...` threw
+	// "this material has no uniform called 'palette'". On the **second** run only,
+	// which is why it is pinned here rather than left to whether the machine
+	// running the suite happened to have a warm cache.
+	//
+	// Compiled twice through the cached door: the first call stores and the second
+	// loads, and the assertion is that the two agree about the one bit.
+	@pool()
+	{
+		String dir = "build/test-cache-table";
+		if (file::is_dir(dir))
+		{
+			PathList entries = path::ls(tmem, (Path)dir)!!;
+			foreach (entry : entries) (void)file::delete(string::tformat("%s/%s", dir, (String)entry));
+		}
+		three::shader_cache_set_dir(dir);
+		// Back off, whatever happens: every other test in this suite counts on the
+		// cache being out of the way.
+		defer three::shader_cache_set_dir("");
+
+		bool ran = false;
+		three::ShaderModule stored = three::compile_slang_cached(source, "material.slang", both_stages(), &ran)!!;
+		defer stored.free();
+		test::@check(ran, "the first compile came off disk, so nothing was stored");
+
+		three::ShaderModule loaded = three::compile_slang_cached(source, "material.slang", both_stages(), &ran)!!;
+		defer loaded.free();
+		test::@check(!ran, "the second compile ran Slang, so the cache was not read");
+
+		three::ShaderField* cached = loaded.layout.field_of("palette");
+		test::@check(cached != null, "the loaded module lost the column entirely");
+		if (cached == null) return;
+		test::@check(cached.indirect,
+			"the column came back off disk looking like a push field, at offset %d",
+			cached.offset);
+		test::@check(cached.offset == column.offset && cached.size == column.size,
+			"and at %d/%d rather than %d/%d",
+			cached.offset, cached.size, column.offset, column.size);
+	};
 }
 
 // ============================================================================

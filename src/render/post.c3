@@ -136,9 +136,10 @@ struct PostStage (FullscreenPass)
 	// with no per-uniform loop.
 	char[PUSH_BUDGET] block;
 
-	// The samplers the body declared, at bindings 2..N. Bindings 0 and 1 are
-	// `prev` and `scene` and are not in here — they are the chain's, the way
-	// `base_color_map` is a material's own. `TextureSlots` has what is stored.
+	// The samplers the body declared, at bindings 4..N. Bindings 0 to 3 are
+	// `prev`, `scene`, the depth buffer and `tap`, and are not in here — they are
+	// the chain's, the way `base_color_map` is a material's own. `TextureSlots`
+	// has what is stored.
 	//
 	// **Held across nothing.** Replacing a stage releases these before the new
 	// shader's bindings exist, for the same reason it does not carry the uniform
@@ -154,6 +155,25 @@ struct PostStage (FullscreenPass)
 	// and §17's clock answered. It was `clock::now()` and a wall clock until
 	// then, so a paused scene kept its post pass animating.
 	double set_at;
+
+	// Which *earlier* stage this one also reads, as `tap`, or -1 for the passes
+	// that read only their predecessor. The third source `plan.md` §2 wanted, and
+	// the reason it is an index rather than an edge list is in `render/chain.c3`:
+	// one extra source keeps adjacency as the barrier derivation, and a set of
+	// them does not.
+	int tap;
+
+	// This stage's own output image, for a stage somebody taps.
+	//
+	// A stage normally writes into the ping-pong pair, where P0 is overwritten by
+	// the stage after next — which is exactly what a later reader cannot have. So
+	// a tapped stage is given an image nothing else writes, and `PostPass.output_of`
+	// is the one place that decides which of the two a stage got.
+	//
+	// **Allocated only when something taps it**, so a chain nobody taps costs the
+	// two images it always cost.
+	ChainImage keep;
+	bool kept;
 }
 
 <*
@@ -190,6 +210,10 @@ struct PostPass
 	// How every image in the chain is read. One for all of them — see
 	// `ensure_sampler`.
 	vk::Sampler sampler;
+
+	// How `target.depth` is read, which is nearest rather than linear.
+	// `ensure_sampler` has the two reasons it cannot be the one above.
+	vk::Sampler depth_sampler;
 
 	// The script's passes, in the order they run. Boxed, because an interface value
 	// is a pointer into this list and `add` grows it.
@@ -275,7 +299,9 @@ fn void? PostPass.set(
 {
 	// One, not `stages.len() + 1`: this call is about to be the whole chain, so
 	// the second ping-pong image is only allocated if a later `add` asks for it.
-	PostStage* built = self.build_stage(gpu, target, 1, fragment, uniforms, textures, diagnostic)!;
+	// `-1`: the first pass of a chain has nothing before it to tap, and `setPost`
+	// is always the first pass of a chain.
+	PostStage* built = self.build_stage(gpu, target, 1, fragment, uniforms, textures, -1, diagnostic)!;
 
 	// Past every fault: from here the swap cannot fail half way.
 	self.drop_stages(gpu, assets);
@@ -298,7 +324,34 @@ fn void? PostPass.set(
  the chain that was running stays running, including the passes this one was
  going to follow.
 
+ ## The third source
+
+ `tap` names an *earlier* pass whose output this one also reads, as the sampler
+ `tap` and the field `p.tap`. That is `plan.md` §2's "a pass wanting a third
+ source", and it is deliberately one index rather than an edge list — see
+ `render/chain.c3` for why one keeps adjacency as the barrier derivation and a
+ set does not.
+
+ Naming a pass makes that pass's output survive: it is given an image of its own
+ instead of a ping-pong slot, which is what `PostPass.output_of` decides and the
+ whole cost of the feature.
+
+ **A `tap` naming a pass that is not in the chain yet is refused**, because it
+ would be a cycle or a dangling read and there is nothing sensible to bind.
+
+ **A body that reads `p.tap` having named nothing is not**, and that is a
+ deliberate asymmetry rather than a gap. Binding 3 is declared by the template
+ unconditionally — `fragmentMain` fills `p.tap` for every body, so Slang keeps the
+ sampler whether or not the agent's lines mention it, and the reflected layout
+ cannot tell the two apart. Rather than guess textually, the untapped case is
+ *defined*: it binds image A, so `p.tap` is the rendered scene. That is exactly
+ what `p.scene` gives, and it is this chain's existing rule for a source that is
+ not distinct — `p.color == p.scene` on a chain of one, and a null sampler reads
+ white.
+
+ @param tap : `Which earlier pass this one also reads, or -1 for none. Must be an index already in the chain.`
  @return `Which position in the chain this pass took. Stable until the chain is set or cleared.`
+ @return? POST_TAP_UNKNOWN : `tap is not an index of a pass already in the chain. diagnostic has the sentence.`
 *>
 fn uint? PostPass.add(
 	&self,
@@ -307,14 +360,80 @@ fn uint? PostPass.add(
 	String fragment,
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures = {},
+	int tap = -1,
 	String* diagnostic = null
 )
 {
-	PostStage* built = self.build_stage(gpu, target, self.stages.len() + 1, fragment, uniforms, textures, diagnostic)!;
+	// **Before the compile**, unlike the `tap`-is-unread check below, because
+	// this one needs nothing from the module and refusing early costs the caller
+	// no Slang.
+	if (tap < -1 || tap >= (int)self.stages.len())
+	{
+		if (diagnostic != null)
+		{
+			*diagnostic = string::format(
+				mem,
+				"post: this pass reads pass %d, and the chain has %d — a pass may only read one that already ran",
+				tap,
+				self.stages.len()
+			);
+		}
+		return POST_TAP_UNKNOWN~;
+	}
+
+	PostStage* built = self.build_stage(
+		gpu, target, self.stages.len() + 1, fragment, uniforms, textures, tap, diagnostic
+	)!;
 
 	self.stages.push(built);
+	// After the push, and after every fault: giving a stage its own image is a
+	// change to a chain that is already running, and `build_stage` may still have
+	// refused above this line.
+	if (tap >= 0)
+	{
+		self.stages[tap].kept = true;
+		// A failure here leaves the stage kept with no image, which `output_of`
+		// answers with the ping-pong slot — the picture is wrong rather than the
+		// process being wrong, and the fault reaches the script.
+		self.ensure_keeps(gpu)!;
+	}
 	self.active = true;
 	return (uint)self.stages.len() - 1;
+}
+
+<*
+ Which image a stage writes into: its own if something taps it, otherwise its
+ ping-pong slot.
+
+ **The one place the two kinds of destination are told apart**, which is what
+ keeps the difference from leaking into the recording loop, the tonemap's `prev`
+ and the tap binding — all three ask this rather than indexing `pong` themselves.
+
+ A stage marked `kept` whose image failed to allocate falls back to the slot. That
+ is a wrong picture and not a crash, and the allocation failure was already
+ reported to the script.
+*>
+fn ChainImage* PostPass.output_of(&self, sz stage)
+{
+	PostStage* owner = self.stages[stage];
+	if (owner.kept && owner.keep.exists()) return &owner.keep;
+	return &self.pong[stage & 1];
+}
+
+<*
+ Create an image for every stage something taps, at the chain's extent.
+
+ Idempotent and cheap: the common call finds every kept stage already holding an
+ image and returns. Called from `add` when a tap arrives and from `ensure_images`
+ when the extent moves, which are the only two moments the set can change.
+*>
+fn void? PostPass.ensure_keeps(&self, Gpu* gpu)
+{
+	foreach (stage : self.stages)
+	{
+		if (!stage.kept || stage.keep.exists()) continue;
+		stage.keep.init(gpu, POST_CHAIN_FORMAT, self.extent)!;
+	}
 }
 
 <*
@@ -341,6 +460,7 @@ fn PostStage*? PostPass.build_stage(
 	String fragment,
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures,
+	int tap,
 	String* diagnostic
 )
 {
@@ -392,6 +512,7 @@ fn PostStage*? PostPass.build_stage(
 	stage.pipeline = built;
 	stage.fragment = fragment.copy(mem);
 	stage.set_at = self.now;
+	stage.tap = tap;
 	return stage;
 }
 
@@ -428,6 +549,10 @@ fn void PostPass.drop_stages(&self, Gpu* gpu, Assets* assets)
 	{
 		stage.release_textures(gpu, assets);
 		gpu.retire_pipeline(stage.pipeline);
+		// Retired too — `ChainImage.free` goes through the deletion queue, which is
+		// what makes replacing a chain mid-frame safe for its images as well as for
+		// its pipelines.
+		if (stage.keep.exists()) stage.keep.free(gpu);
 		if (stage.fragment.ptr != null) stage.fragment.free(mem);
 		mem::free(stage);
 	}
@@ -546,7 +671,6 @@ fn void? PostPass.set_texture(&self, Gpu* gpu, Assets* assets, String name, int 
 	if (held == texture) return;
 
 	if (texture != NO_TEXTURE) assets.retain_texture(texture);
-	if (gpu != null && assets.texture_refs(held) == 1) gpu.wait_idle();
 	assets.release_texture(gpu, held);
 
 	target.textures.set(binding, texture);
@@ -595,7 +719,6 @@ fn void PostStage.release_textures(&self, Gpu* gpu, Assets* assets)
 	{
 		int held = self.textures.at(binding);
 		if (held == NO_TEXTURE) continue;
-		if (gpu != null && assets.texture_refs(held) == 1) gpu.wait_idle();
 		assets.release_texture(gpu, held);
 	}
 	self.textures = {};
@@ -619,6 +742,7 @@ fn void PostPass.free(&self, Gpu* gpu)
 		}
 		self.tonemap.free(gpu);
 		if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
+		if (self.depth_sampler != null) vk::destroySampler(gpu.handle, self.depth_sampler, null);
 		self.destroy_images(gpu);
 	}
 	self.stages.free();
@@ -630,6 +754,7 @@ fn void PostPass.free(&self, Gpu* gpu)
 fn void PostStage.free(&self, Gpu* gpu) @dynamic
 {
 	self.pipeline.free(gpu);
+	if (self.keep.exists()) self.keep.free(gpu);
 	if (self.fragment.ptr != null) self.fragment.free(mem);
 	*self = {};
 }
@@ -710,19 +835,44 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	SampledBindings samplers;
 	if (pipeline_declares_binding(&self.pipeline, 0)) samplers.add(0, sampled_with(io.sampler, io.prev));
 	if (pipeline_declares_binding(&self.pipeline, 1)) samplers.add(1, sampled_with(io.sampler, io.scene));
+	// The depth buffer, in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than
+	// `SHADER_READ_ONLY_OPTIMAL` — a different layout and a different sampler
+	// from the two above, which is why it does not go through `sampled_with`.
+	if (pipeline_declares_binding(&self.pipeline, 2))
+	{
+		samplers.add(2, {
+			.sampler = io.depth_sampler,
+			.imageView = io.depth,
+			.imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		});
+	}
+	// The third source. `io.tap` is the view of whatever pass this one names, and
+	// the chain has already transitioned it — a tapped stage's output goes to
+	// SHADER_READ_ONLY_OPTIMAL after it runs like every other stage's, and it is
+	// an image nothing overwrites in between.
+	if (pipeline_declares_binding(&self.pipeline, POST_TAP_BINDING))
+	{
+		samplers.add(POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
+	}
 	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets, POST_BINDING_FIRST);
 	samplers.push(cmd, &self.pipeline);
 
 	// `info` is rewritten here and nowhere else. The uniforms above it are
 	// whatever `set_uniform` last wrote, which is what makes them live between
 	// frames with no upload and no per-frame crossing.
-	float[4] info = {
+	// Six floats: `info` and then `planes`, which is exactly `POST_PUSH_START`
+	// bytes and exactly what `POST_PUSH_FIELDS` pins. Written as one array
+	// because they are contiguous in the shader's block and splitting them would
+	// be two `mem::copy`s to say the same thing.
+	float[6] info = {
 		width,
 		height,
 		(float)(io.time - self.set_at),
 		0,
+		io.near_plane,
+		io.far_plane,
 	};
-	mem::copy(&self.block[0], &info[0], (sz)(4 * float::size));
+	mem::copy(&self.block[0], &info[0], (sz)POST_PUSH_START);
 
 	// **The reflected size, not `PUSH_BUDGET`.** Pushing more than the block the
 	// shader declared is a validation error, and `MeshPass.record` has the note

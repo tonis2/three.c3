@@ -509,44 +509,51 @@ fn void a_post_uniform_cannot_be_a_table() @test
 }
 
 <*
- 112 bytes fit and 128 do not, which is the budget stated as behaviour.
+ 104 bytes fit and 112 do not, which is the budget stated as behaviour.
 
  Both sides on purpose. The upper bound alone would pass for a budget of one
  byte, and the lower bound alone would pass for a budget of the whole 128 — and
- 128 is precisely the wrong answer, because `info` is already in the block and
- the overflow would be a validation error at pipeline creation rather than a
- sentence here.
+ 128 is precisely the wrong answer, because `info` and `planes` are already in the
+ block and the overflow would be a validation error at pipeline creation rather
+ than a sentence here.
+
+ The numbers moved when `p.depth` arrived: the camera's near and far are 8 bytes
+ of push block that no body declares and every body may read through, so the
+ budget went 112 → 104. Written as multiples of a float4 either side of the line,
+ which is what a body actually declares.
 
  **Proved by injection.** `validate_post`'s comparison changed from
- `POST_UNIFORM_BUDGET` to `PUSH_BUDGET` — the mistake of forgetting that `info`
- is already in the block: "128 bytes of uniforms were accepted". Restored, green
- again.
+ `POST_UNIFORM_BUDGET` to `PUSH_BUDGET` — the mistake of forgetting that the
+ contract is already in the block: "128 bytes of uniforms were accepted".
+ Restored, green again.
 *>
 fn void post_uniforms_are_held_to_what_info_leaves() @test
 {
 	@pool()
 	{
-		// Seven float4s is 112 bytes exactly — the budget, to the byte.
+		// Six float4s and a float2 is 104 bytes exactly — the budget, to the byte.
 		three::MaterialUniform[] exact = alloc::new_array(tmem, three::MaterialUniform, 7);
 		foreach (i, &uniform : exact) *uniform = { string::tformat("u%d", i), 4, 1 };
+		exact[6].components = 2;
 
 		test::@check(
 			three::post_uniform_bytes(exact) == three::POST_UNIFORM_BUDGET,
-			"seven float4s should be the whole budget, got %d",
+			"six float4s and a float2 should be the whole budget, got %d",
 			three::post_uniform_bytes(exact)
 		);
 
 		String fits = three::post_source(IDENTITY, exact, tmem)!!;
 		test::@check(fits.len > 0, "the budget exactly was refused: %s", three::post_diagnostic());
 
-		three::MaterialUniform[] over = alloc::new_array(tmem, three::MaterialUniform, 8);
+		// One float4 more, which is 112 — over by the eight bytes `planes` takes.
+		three::MaterialUniform[] over = alloc::new_array(tmem, three::MaterialUniform, 7);
 		foreach (i, &uniform : over) *uniform = { string::tformat("u%d", i), 4, 1 };
 
 		String? refused = three::post_source(IDENTITY, over);
 		fault why = @catch(refused);
-		test::@check(why == three::POST_TOO_MANY_UNIFORMS, "128 bytes of uniforms were accepted");
+		test::@check(why == three::POST_TOO_MANY_UNIFORMS, "112 bytes of uniforms were accepted");
 		test::@check(
-			three::post_diagnostic().contains("128") && three::post_diagnostic().contains("112"),
+			three::post_diagnostic().contains("112") && three::post_diagnostic().contains("104"),
 			"the refusal should name what was wanted and what is free: %s",
 			three::post_diagnostic()
 		);
@@ -623,6 +630,12 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					// The identity, which is what a material without a `vertex:`
 					// gets — one line, and the same one every time.
 					want.push("void displace(inout Vertex v) { }");
+				case "//@table":
+					// Nothing: this material's uniforms fit the push block, so no
+					// table struct is generated and the marker is replaced by zero
+					// lines. `three_tests::material` has the material that does
+					// spill and what it generates instead.
+					break;
 				case "//@textures":
 					// Nothing: this material declared no samplers, and a marker with
 					// nothing to generate is replaced by zero lines rather than left
@@ -1092,12 +1105,18 @@ fn void the_post_pass_is_silent_under_validation() @test
  its own lookup table as though it were the picture. `POST_BINDING_FIRST` is why
  it cannot, and this asserts both ends of that rather than the constant.
 
- **Two reserved bindings and not one**, which is the half that would break
+ **Four reserved bindings and not one**, which is the half that would break
  quietly the other way: raising the shared `TEXTURE_BINDING_FIRST` instead of
  giving the two kinds their own base would have renumbered every *material*
- sampler by one, and every material's reflection would still have agreed with
- itself. So the count is asserted, and `material_test`'s own binding check is the
- other end of it.
+ sampler, and every material's reflection would still have agreed with itself. So
+ the count is asserted, and `material_test`'s own binding check is the other end
+ of it.
+
+ The third is the frame's depth buffer and the fourth is `tap`, the third source.
+ Both are in the count here even though this body reads neither `p.depth` nor
+ `p.tap`: `fragmentMain` samples both unconditionally to fill the fields, so Slang
+ keeps the declarations either way. That is also exactly why the untapped `tap`
+ binds image A rather than being refused — `PostPass.add` has that argument.
 *>
 fn void a_post_texture_is_a_binding_beside_the_scene() @test
 {
@@ -1119,14 +1138,21 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 4,
-		"the two reserved and the two the body asked for, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 6,
+		"the four reserved and the two the body asked for, got %d", mod.layout.bindings.len());
 
 	three::ShaderBinding* previous = mod.layout.binding_of("prev");
 	test::@check(previous != null && previous.binding == 0, "the pass before this one is binding 0");
 
 	three::ShaderBinding* frame = mod.layout.binding_of("scene");
 	test::@check(frame != null && frame.binding == 1, "image A is binding 1");
+
+	three::ShaderBinding* depth = mod.layout.binding_of("depth_buffer");
+	test::@check(depth != null && depth.binding == 2, "the depth buffer is binding 2");
+
+	three::ShaderBinding* tapped = mod.layout.binding_of("tap_image");
+	test::@check(tapped != null && tapped.binding == three::POST_TAP_BINDING,
+		"the third source is binding %d", three::POST_TAP_BINDING);
 
 	three::ShaderBinding* lut = mod.layout.binding_of("grade_lut");
 	test::@check(lut != null, "the first declared texture is there by name");
@@ -1425,6 +1451,224 @@ fn void the_chain_carries_values_above_one_between_passes() @test
 
 		int delta = worst_channel_delta(&once, &amplified);
 		test::@check(delta <= 1, "the chain clamped what passed between its two passes: %d levels", delta);
+	};
+}
+
+<*
+ `p.depth` is a distance in world units, and the numbers are checked against a
+ camera whose distance the test set.
+
+ `plan.md` §2 deferred this with an instruction attached — "do it with `p.depth`
+ already linearized to world units, using the camera's derived near and far,
+ rather than handing over the raw buffer" — and both halves of that sentence are
+ what this asserts. A test that only checked "the background is further away than
+ the plane" would pass against the raw device depth, which is the exact thing the
+ instruction was about.
+
+ ## The setup is arithmetic, not framing
+
+ The camera is placed rather than fitted: `distance` is 10 and the plane is at the
+ origin with the target on it, so the eye is exactly 10 units from the plane's
+ centre along the view direction and the centre pixel's depth is 10. `pitch` and
+ `yaw` are zeroed so the plane is face-on and every pixel of it is at the same
+ depth — an oblique plane would make the centre pixel's depth depend on where the
+ centre lands, which is a fact about the projection and not about this field.
+
+ ## Three cuts
+
+ The body is a threshold rather than a value written into a channel, because the
+ tonemap sRGB-encodes whatever a body returns and reading a float back out
+ through that is a second thing to get wrong. A step function survives it exactly:
+ red or black, and both are exact after the encode.
+
+ - **cut = 9** — nothing on the plane is nearer than that, so the plane is black
+   and so is the background.
+ - **cut = 11** — the plane is red, at 324 pixels of 6912; the background is not.
+   The two together bracket the distance the camera was given, to within 10%.
+ - **cut = 900** — still exactly those 324 pixels, because a pixel nothing was
+   drawn into sits at the *far* plane, which is 1000. That is the empty-pixel case
+   and it is what a reconstruction that saturated, clamped or divided by zero
+   would get wrong.
+
+ **Proved by injection**, twice. `p.depth` set to the raw `d` rather than the
+ reconstruction: a device depth at 10 units under these planes is 0.999, so
+ everything is under every cut — "the plane is nearer than 9 units: 6912 red
+ pixels of 6912". That injection is invisible to a check on ordering alone, which
+ is the argument for asserting the numbers.
+
+ And `p.depth` clamped at 100 on its way out, which is the shape of every
+ reconstruction bug that gets the near end right and the far end wrong: the first
+ two cuts stay green and the third does not — "the background is not at the far
+ plane: 6912 red pixels at a cut of 900, and the plane alone is 324".
+*>
+fn void the_post_depth_is_in_world_units() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId plane = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		renderer.pass.scene.add_mesh(plane, 0);
+
+		// Placed, not framed. Face-on and ten units back, so the plane's depth is
+		// a number this test chose rather than one `frame_camera` derived.
+		renderer.pass.camera.target = { 0, 0, 0 };
+		renderer.pass.camera.distance = 10.0;
+		renderer.pass.camera.yaw = 0;
+		renderer.pass.camera.pitch = 0;
+		renderer.pass.camera.near_plane = 0.1;
+		renderer.pass.camera.far_plane = 1000.0;
+
+		three::MaterialUniform[1] uniforms = { { "cut", 1, 1 } };
+		renderer.post.set(
+			&renderer.gpu,
+			&renderer.target,
+			`float3 post(Post p) { return float3(p.depth < cut ? 1.0 : 0.0, 0.0, 0.0); }`,
+			uniforms[..]
+		)!!;
+
+		renderer.post.set_uniform("cut", (float[]) { 9.0 })!!;
+		image::Image nearer = renderer.capture()!!;
+		defer nearer.free();
+		uint red_at_9 = count_red(&nearer);
+		test::@check(red_at_9 == 0,
+			"the plane is nearer than 9 units: %d red pixels of %d",
+			red_at_9, W * H);
+
+		renderer.post.set_uniform("cut", (float[]) { 11.0 })!!;
+		image::Image further = renderer.capture()!!;
+		defer further.free();
+		uint red_at_11 = count_red(&further);
+		test::@check(red_at_11 > 100,
+			"the plane is not within 11 units: %d red pixels of %d",
+			red_at_11, W * H);
+		test::@check(red_at_11 < W * H,
+			"everything is within 11 units, background included: %d red pixels of %d",
+			red_at_11, W * H);
+
+		renderer.post.set_uniform("cut", (float[]) { 900.0 })!!;
+		image::Image most = renderer.capture()!!;
+		defer most.free();
+		uint red_at_900 = count_red(&most);
+		test::@check(red_at_900 == red_at_11,
+			"the background is not at the far plane: %d red pixels at a cut of 900, and the plane alone is %d",
+			red_at_900, red_at_11);
+	};
+}
+
+// A pixel the threshold body wrote: full red, nothing else. Exact rather than a
+// range, because a step function survives the tonemap's encode exactly — see
+// `the_post_depth_is_in_world_units`.
+fn uint count_red(image::Image* img)
+{
+	uint found = 0;
+	sz bpp = img.bytes_per_pixel();
+	for (sz i = 0; i + bpp <= img.pixels.len; i += bpp)
+	{
+		if (img.pixels[i] > 200 && img.pixels[i + 1] < 60 && img.pixels[i + 2] < 60) found++;
+	}
+	return found;
+}
+
+<*
+ A pass reads a pass that is not its predecessor, and gets that pass's output
+ rather than something adjacent to it.
+
+ `plan.md` §2's "a pass wanting a third source", asserted as the thing that makes
+ it a *third* source and not a rename of one of the two that were already there.
+
+ ## The chain, and why the colours are what they are
+
+ Three passes, each returning a constant so that nothing about the scene enters
+ the answer:
+
+	 0   red    (1, 0, 0)   ← tapped
+	 1   green  (0, 1, 0)
+	 2   p.color + p.tap
+
+ So pass 2's `p.color` is pass 1's green and its `p.tap` is pass 0's red, and the
+ frame is yellow. Each of the three ways to get this wrong lands on a different
+ colour, which is what makes one check enough:
+
+	 tap bound to prev     green + green = green
+	 tap bound to scene    green + whatever the geometry drew
+	 tap bound to nothing  green
+
+ ## What it also pins, without a second test
+
+ **The ping-pong.** Pass 0 and pass 2 are two apart, so without a dedicated image
+ for the tapped pass they would both write P0 — and pass 2 would be sampling the
+ image it is rendering into, which is the hazard the ping-pong exists to avoid.
+ `PostPass.output_of` is what gives pass 0 an image of its own, and a yellow frame
+ is only reachable if it did.
+
+ **The layer.** Run under the validating pass, because a fourth binding written
+ every frame and an image outside the ping-pong pair are both new things for the
+ barrier derivation to be wrong about, and neither has a pixel symptom on this
+ driver.
+
+ **Proved by injection**, twice. `PostPass.output_of` changed to return the
+ ping-pong slot unconditionally, so pass 0 and pass 2 share P0 again. The layer
+ catches it before the picture check does: "VUID-vkCmdDraw-imageLayout-00344:
+ Cannot use VkImage ... with specific layout VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+ (specified by combined image sampler descriptor [Set 0, Binding 3, Index 0,
+ variable "tap"]) that doesn't match the previous known layout
+ VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL" — pass 2 sampling the image it is
+ rendering into, named by the binding it came in on.
+
+ And separately `io.tap` swapped for `io.prev` at the descriptor write, which is
+ the shape of a plumbing mistake that leaves every barrier correct: the layer
+ stays silent and the picture does not — "the third source did not reach the
+ frame: rgb (0, 255, 0)".
+*>
+fn void a_pass_reads_a_pass_that_is_not_its_predecessor() @test
+{
+	@with_validating_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		renderer.gpu.begin_capture();
+
+		renderer.post.set(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return float3(1.0, 0.0, 0.0); }`, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return float3(0.0, 1.0, 0.0); }`, {})!!;
+		uint combine = renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.color + p.tap; }`, {}, {}, 0)!!;
+		test::@check(combine == 2, "the combine landed at %d rather than 2", combine);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+
+		// The centre pixel. Every pass returns a constant, so any pixel would do —
+		// the centre is the one a wrong picture is least likely to be right at by
+		// accident.
+		sz bpp = shot.bytes_per_pixel();
+		sz middle = ((sz)shot.height / 2 * (sz)shot.width + (sz)shot.width / 2) * bpp;
+		int red = (int)shot.pixels[middle];
+		int green = (int)shot.pixels[middle + 1];
+		int blue = (int)shot.pixels[middle + 2];
+
+		test::@check(red > 200 && green > 200 && blue < 60,
+			"the third source did not reach the frame: rgb (%d, %d, %d)", red, green, blue);
+
+		// An index the chain does not have. Refused rather than clamped, and
+		// before Slang runs — a pass reading a pass that does not exist is not a
+		// picture that can be produced.
+		String reason;
+		fault missing = @catch(renderer.post.add(&renderer.gpu, &renderer.target,
+			`float3 post(Post p) { return p.tap; }`, {}, {}, 9, &reason));
+		defer if (reason.ptr != null) reason.free(mem);
+		test::@check(missing == three::POST_TAP_UNKNOWN,
+			"a pass reading pass 9 of a three-pass chain was accepted");
+		test::@check(reason.contains("9") && reason.contains("3"),
+			"the refusal should name the index and the chain's length: %s", reason);
+
+		String errors = renderer.gpu.sink.errors.str_view();
+		String warnings = renderer.gpu.sink.warnings.str_view();
+		renderer.gpu.end_capture();
+
+		if (!renderer.gpu.validation) return;
+		test::@check(errors.len == 0, "the tapped chain produced validation errors: %s", errors);
+		test::@check(warnings.len == 0, "and warnings: %s", warnings);
 	};
 }
 
