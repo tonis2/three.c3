@@ -1369,6 +1369,12 @@ per-instance work *together*, and nothing here separates them — so 0.60 is a
 ceiling on what §18.2 can recover, not an estimate of it. Splitting it needs the
 per-pass timings of §18.3, which is why that one is first.
 
+> **§18.3 was built, and it split them: the lost cull is 0.163 ms, not 0.60.**
+> The rest of that 0.60 is the shadow pass's own geometry, which is a different
+> item with a different fix. The measurements below were taken by hand before the
+> instrument existed and are left as they were written; **§19 has the numbers the
+> instrument produced**, and where the two disagree the instrument is right.
+
 **Everything else is rasterisation, and it is quadratic.** +0.20, +0.79, +2.65,
 +8.89 per doubling from 1024 — ratios of 3.95, 3.35, 3.35. Textbook fill. At 4096
 the frame is **68 % shadow-map fill, 15 % lost culling, 17 % the scene the user
@@ -1377,7 +1383,8 @@ asked for**.
 So: the fix `src/render/shadow.c3` already names — a second draw list — is the
 *small* one. The large one is that the map is fitted around the whole scene.
 
-### 18.1 Fit the light's box to what the camera can see
+### 18.1 Fit the light's box to what the camera can see — **DONE, and the
+prediction was wrong**
 
 `ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds)` is called with
 `Scene.bounds`. For the village that is 224 units across while the camera frames
@@ -1405,11 +1412,47 @@ Cascades stay deferred, with `shadow.c3`'s trigger unchanged — the largest siz
 device will allocate still being too coarse. 18.1 pushes that trigger a long way
 out, because it buys most of what a first cascade would.
 
-### 18.2 Two draw lists rather than one uncalled one
+**Built, and the tenfold is not there by default.** `ShadowMap.fit` now takes a
+third box — `Camera.view_bounds(aspect, reach)` intersected with `Scene.bounds` —
+and spends its texels on that. The extent is the focus box's *diagonal*, so
+orbiting cannot change the world size of a texel, capped at the scene's own
+light-space extent so a camera that frames everything is fitted exactly as it was
+before; and the light-space origin is floored onto the texel grid, so a camera
+that moves less than a texel produces a **byte-identical** matrix. That last one
+is asserted at the matrix rather than in a picture, because a crawling shadow
+edge is invisible in a screenshot.
+
+**What the measurement said, and it corrects the paragraph above.** For the
+village the scene's light-space box is 318 x 291 and the focus square is 288 —
+**a factor of 1.1, not 10.** The reason is the camera's far plane: it is 640
+units and the village is 224, so "what the camera can see" is the whole level and
+then some. The frustum was never the thing that bounded the box.
+
+So the item leaves a knob rather than a win: **`three.light.shadow.distance`**,
+how far down the view direction to fit, 0 meaning the far plane. With it set the
+lever is real — at `distance: 100` the same village renders shadows that differ
+from the old 2048 fit in 2.9 % of pixels while running at `size: 1024`, which is
+**0.65 ms against 0.99**. Without it, 18.1 buys about 4 % of the shadow pass.
+
+**No default is invented for `distance`.** §18.7's rule stands and this is
+exactly the case it was written for: the number that is right depends on how big
+the level is and how far the camera stands off, one village is one data point,
+and a default picked from it would be picked wrong for a room. The question is
+now well posed, though, which it was not before: *what fraction of the far plane
+is worth shadowing?* — and it wants a second scene, not more thinking.
+
+### 18.2 Two draw lists rather than one uncalled one — **DONE**
 
 `src/render/shadow.c3:38` already specifies this and names its trigger: *"The
 trigger for a second draw list is a scene where that vertex work is measurable."*
-It is measurable. 0.60 ms of 3.92, 15 %.
+It is measurable — **0.163 ms of 1.94 at `size` 2048**, measured by §18.3 rather
+than bounded: the scene pass costs 0.712 ms with culling and 0.875 ms without,
+over the 2068 instances of 4178 that the camera cannot see.
+
+That is the *main* pass's half. The other half is the shadow pass's own geometry,
+**0.496 ms** for those 4178 instances, and a light-side cull only reaches it once
+§18.1 has made the light's box smaller than the scene — which is why these two
+are one item and why this one is second rather than first.
 
 The present behaviour is conservative and correct, not wrong: a caster outside the
 camera frustum does throw a shadow into frame, so the shadow pass genuinely needs
@@ -1420,12 +1463,24 @@ was never the thing at risk. Two lists, two frustums:
 - the shadow pass against the light's ortho box — which 18.1 makes small, so this
   cull starts dropping real work rather than nothing.
 
+**Built, as one list with two ranges rather than two lists.** A draw is kept if
+*either* frustum wants it, and the sort puts the camera-visible copies at the
+front of their bucket — so `Bucket.visible` is a prefix the colour pass draws and
+`Bucket.count` is the whole of it for the shadow pass. One instance array, one
+sort, one upload; the second range is a different `instanceCount` on the same
+`vkCmdDrawIndexed`. The safety argument is that a caster and the ground it
+shadows share x and y in light space and differ only in z, so a caster the light
+box rejects laterally cannot be casting into the picture.
+
+Measured on the village at `size` 2048: **1.94 ms to 1.86**, and
+`culledLastFrame` back to 2068 from 0.
+
 `stats()` should follow: `culledLastFrame` goes back to meaning the camera cull
 even with shadows on, and a new `shadowCulled` reports the light one. Today's
 `culledLastFrame == 0` is honest but says nothing, and it is what sent this
 investigation down the wrong path first.
 
-### 18.3 Per-pass GPU timings — do this one first
+### 18.3 Per-pass GPU timings — do this one first — **DONE**
 
 Everything above was bisected by hand: toggle shadows, strip materials, resize the
 ground tiles, six runs of the same scene. The device already reports
@@ -1436,6 +1491,23 @@ writes and would have answered "where does 3.7 ms go" in one call instead of six
 It goes first because it is the instrument that tells whether 18.1 and 18.2
 worked. A refactor of the culling that is verified by total frame time is a
 refactor verified by the wrong number.
+
+**Built.** `FrameTimer` carries six marks per frame slot rather than a pair, and
+`stats()` gained `prepareMs`, `shadowMs`, `sceneMs`, `postMs` and `presentMs`
+beside `gpuMs`. They are five consecutive spans between six marks, so they sum to
+the frame exactly, and `gpu_test.c3` asserts that they do. The MCP `run_script`
+result carries them too, which is the point: the agent that has to ask "where did
+this frame go" now reads the answer off the tool result it already gets.
+
+**One caveat, and it is a real one: the total is exact, the split is not.** Apple
+runs the vertex stage of one render encoder underneath the fragment stage of the
+previous one, so work can be credited to a neighbouring span. The tell, measured:
+at 320x180 the scene span reads 0.442 ms with shadows *on* and 4178 instances,
+and 0.676 ms with shadows *off* and 2110 — impossible as a like-for-like, and it
+is the scene pass's vertex work hiding under the shadow pass's fill. At 1280x720
+everything reconciles to within 1 % (0.712 + 1.048 + 0.163 = 1.923 against a
+measured 1.941). **So: compare configurations at the same encoder structure, and
+trust a delta in `gpuMs` over any single span.**
 
 ### 18.4 Terrain is not a pile of boxes
 
@@ -1458,14 +1530,14 @@ scene can stand on, and it cost, measured:
   floated. Nothing in the engine could see that these were the same terrain the
   meshes were built from, so nothing could catch them disagreeing.
 
-**18.4a — a heightfield primitive.** `new three.TerrainGeometry({ width, depth,
+**18.4a — a heightfield primitive. DONE.** `new three.TerrainGeometry({ width, depth,
 segments, heights })`, heights being a `Float32Array` or a callback. It is built
 through the `GeometryBuilder` and `upload_built` that the six existing shapes and
 `split.c3` already use, so it is one asset, one draw call, no new pipeline and no
 new bucket. Normals from the grid, which is the whole difference between ground
 and steps. A skirt around the border so the map edge is a wall and not a hole.
 
-**18.4b — query it: `terrain.heightAt(x, z)`, `terrain.normalAt(x, z)`.** This is
+**18.4b — query it: `terrain.heightAt(x, z)`, `terrain.normalAt(x, z)`. DONE.** This is
 the piece that makes the rest work, and the piece hand-written above. Everything
 that stands outdoors needs it — buildings, fence posts, trees, and every NPC that
 will follow. Bilinear over the same grid the mesh was built from, so it *cannot*
@@ -1473,11 +1545,11 @@ disagree with what is drawn, which is exactly the failure the hand-written versi
 was one edit away from at all times. It is also what makes `align('y', 'min')`
 mean anything on open ground.
 
-**18.4c — stamping: `flatten(rect, y)`, `carve(polyline, width, depth)`.** These
+**18.4c — stamping: `flatten(rect, y)`, `carve(polyline, width, depth)`. DONE.** These
 two are `plot()` and the river channel, and they are the two operations every
 outdoor scene needs. A building pad and a watercourse.
 
-**18.4d — mask authoring.** The *consumption* side is already done and good:
+**18.4d — mask authoring. DONE.** The *consumption* side is already done and good:
 `LayeredMaterial` takes a mask with per-channel layer selection, and
 `examples/terrain.js` already paints one from a height function into a
 `Uint8Array` by hand. What is missing is the painting: `three.Mask(size)` with
@@ -1490,13 +1562,44 @@ and depth": **carve the channel and stroke the mask from the same polyline**, so
 the mud is where the water is by construction rather than because two constants
 were kept in step. Same for a road: one polyline, a shallow carve, a dirt stroke.
 
-**18.4e — a heightfield collider.** `body: { shape: 'heightfield' }`. The four
-colliders are box, sphere, capsule and hull, and a convex hull of a landscape is
-useless. Nothing can walk on the ground until this exists, so it blocks the whole
-NPC phase and should be costed with 18.4a rather than after it.
-collision.c3l already has heightfield testing
+**18.4e — a heightfield collider. NOT DONE, and the premise was wrong.** The note
+this item carried — *"collision.c3l already has heightfield testing"* — is true
+about the file and false about what it can carry.
 
-### 18.5 Three silent failures, each cheap
+`collision::Heightmap` exists, implements `CollisionShape`, and reports
+`ShapeType.CONVEX`. Its support function is the problem, and it is worth quoting
+what it actually does:
+
+> `Heightmap.furthest_point` builds four `Vec3`s — the four **corners of the
+> whole map** — lifts each to its own height, and returns whichever has the
+> largest dot product with the direction.
+
+Under GJK that makes the collider a quadrilateral spanning the entire terrain: a
+body does not rest on the ground, it rests on the plane through the four corner
+samples. On the 200-unit field in `examples/` that is tens of units away from the
+surface almost everywhere. Wiring `shape: 'heightfield'` to it would ship a
+feature that draws, runs, reports no error and does not work — which is the exact
+failure mode every header in this project is written to prevent, so it was not
+wired.
+
+**What it would actually take**, and it is solver work rather than a cast: a
+heightfield is not a convex shape and cannot be one. The standard construction is
+per-contact rather than per-shape — take each nearby body's AABB, find the
+terrain cells it overlaps, and collide against **those triangles**, which are
+convex and which the library already has a `ShapeType.TRIANGLE` for. That means
+generating shapes inside the step rather than owning one per body, which is a
+change to how `Physics` feeds the world and not a fifth case in
+`build_collider`'s switch.
+
+**What unblocks the NPC phase in the meantime is 18.4b**, and it is worth saying
+plainly because it changes the ordering: `terrain.heightAt` and `normalAt` are
+how most engines move a character over terrain anyway — sample the ground under
+the feet, set the height, use the normal for the slope limit and the lean. A
+kinematic character needs no collider at all. What still wants one is a *dynamic*
+body — a barrel rolling downhill, a ragdoll — and that is a smaller and later
+class of thing than this item assumed.
+
+### 18.5 Three silent failures, each cheap — **DONE**
 
 Small, unrelated to the above, and each one cost real time in a single session.
 
@@ -1522,12 +1625,42 @@ uniforms — as struct members the collision cannot happen.
 surprising. One sentence in `docs.js` — declare shared helpers in `vertex`, which
 comes first — costs nobody a compile.
 
-### 18.6 Scatter
+**All three built.**
+
+- `mesh.geometry = other` throws, with the reason: a geometry is immutable, which
+  is what lets every copy share one draw call. The audit went with it, and it
+  found two more of the same shape — `texture.colorSpace` and
+  `texture.generateMipmaps`, both load-time requests spelled the way Three.js
+  spells a mutable field, both now refused with the load option to pass instead.
+  The other getter-only properties are left alone on purpose: assigning to
+  `texture.width` is obviously a mistake in a way that assigning to
+  `colorSpace` is not, and a refusal on every derived number is noise.
+- The collision diagnostic keeps Slang's text whole and adds a sentence after it
+  **only when the reported line is still in the preamble** — which after all the
+  `#line` arithmetic means it is genuinely generated — naming the uniforms this
+  material declared. The refusal that would have been better, "stop using
+  `#define`", is still not taken: a uniform has to be reachable from a helper at
+  file scope, and a local binding inside the entry point is not.
+- The one-module rule is a sentence in `docs.js`.
+
+### 18.6 Scatter — **DONE**
 
 Written twice in one file, by hand, both times: a seeded LCG, rejection sampling,
 keep-out circles, and point-to-polyline distance. `three.scatter({ count, bounds,
 avoid, onTerrain, seed })` is engine-shaped precisely because it wants 18.4b, and
 it is the most repeated block in any scene with a landscape in it.
+
+**Built** — and it was written by hand a third time, in the demo that was meant
+to show the terrain off, before being replaced by the call. `avoid` takes keep-out
+circles *and* `{ path, width }` corridors, so the polyline that carved the river
+keeps the trees out of it; `spacing`, `maxSlope`, `minHeight` and an `accept`
+callback are the rest. It returns placements rather than meshes, because the loop
+that turns a placement into a mesh is three lines and the caller almost always
+wants to vary the colour per point.
+
+The sampler is bounded rather than exhaustive: it gives up after `count * 24`
+tries and returns a shorter list, which a caller reads off `.length`. A hundred
+trees in a clearing that fits nine is a scene that ends, not one that hangs.
 
 ### 18.7 What changed in the example, and what did not
 
@@ -1548,6 +1681,25 @@ wide and flat; the number a room wants is a different number, and §18's closing
 caveat is that no room has been measured. The right time to give the fit a
 default is after 18.1, when the box is no longer the whole scene and the answer
 stops depending on how big the level is.
+
+### What §18 delivered, and what it did not
+
+Everything in this section is built except 18.4e, which turned out to rest on a
+premise that does not hold — its own entry has the evidence. The corrections the
+work produced are worth more than the summary:
+
+- **18.1's tenfold is a factor of 1.1** at the default settings, because the
+  camera's far plane and not the frustum was what bounded the box. The item now
+  ships a knob, `shadow.distance`, and the win arrives when it is set.
+- **18.2's 0.60 ms was 0.163 ms**, because the bound conflated the main pass's
+  lost cull with the shadow pass's own geometry. 18.3 separated them.
+- **18.4e is solver work, not a cast**, and 18.4b unblocks the NPC phase without
+  it.
+
+Two of those three were the estimate being wrong in the pessimistic direction and
+one in the optimistic. All three were invisible before 18.3 existed, which is the
+argument for having built the instrument first restated as a result rather than
+as a prediction.
 
 ### Order, and why
 
@@ -1572,6 +1724,165 @@ from one village on one machine, and the shape of that village — wide, flat,
 outdoors, shadowed, forty thousand triangles of nothing much — is exactly the
 shape that makes shadow-map fill dominate. An interior would rank these
 differently, and nothing here has measured one.
+
+---
+
+## 19. Shadows at game scale, and the shading architecture behind them
+
+§18 measured one village and ranked the work inside it. This section is what the
+instrument said once it existed, and what it implies for a scene that is not a
+village — which is the question §18's own closing caveat left open.
+
+### The two constants
+
+Everything below follows from two numbers, both measured on an M5 at 1280x720
+over `examples/lumbridge.js`, 4178 instances, median of fifteen renders.
+
+| `shadow.size` | gpuMs | shadowMs | sceneMs | culled |
+|---------------|-------|----------|---------|--------|
+| off           | 0.712 | —        | 0.712   | 2068   |
+| 256           | 1.314 | 0.496    | 0.806   | 0      |
+| 512           | 1.467 | 0.647    | 0.820   | 0      |
+| 1024          | 1.570 | 0.721    | 0.840   | 0      |
+| 2048          | 1.941 | 1.048    | 0.875   | 0      |
+| 4096          | 3.109 | 2.231    | 0.873   | 0      |
+
+**Depth-only geometry costs about 119 ns per instance.** The `size` 256 row is a
+depth pass with the fill taken out of it: 0.496 ms for 4178 instances. This is
+the number that scales with the world.
+
+**Depth fill runs at about 10 Gtexel/s.** 2048 to 4096 adds 12.6 M texels for
+1.183 ms; 1024 to 2048 adds 3.1 M for 0.327. This is the number that scales with
+the map, and it is quadratic in `size`.
+
+So a shadow-casting light costs `instances x 119 ns + texels / 10 G`. **At twenty
+thousand instances that is 2.4 ms per casting light before a single texel**, and
+three casting lights is seven milliseconds of shadow before the picture is drawn.
+That is the wall, it arrives long before shading does, and **no choice of forward
+or deferred moves it** — it is the cost of rasterising the world once per light
+from that light's point of view.
+
+### 19.1 The depth prepass, measured and rejected
+
+Tested against the same scene, by measuring the two quantities that bound it
+rather than by building it, because they bound it by two and a half times.
+
+- **What it would cost.** A depth-only pass over exactly these instances with
+  fill negligible is the 256 row: 0.496 ms. Depth fill for 921 600 screen pixels
+  at 10 Gtexel/s adds 0.09. **A camera-side prepass here is about 0.59 ms.**
+- **What it could save.** The scene pass against resolution, shadows on so the
+  encoder structure is constant: 0.414 ms at 160x90, 0.442 at 320x180, 0.529 at
+  640x360, 0.681 at 960x540, 0.874 at 1280x720. Sixty-four times fewer pixels
+  costs 2.1 times less, so **0.46 ms is all the fragment work there is** and 0.41
+  is a geometry floor a prepass cannot touch. A prepass removes only the
+  overdrawn share of that 0.46 — at most half in a scene of this shape.
+
+Pay 0.59 to save at most 0.23. And the mechanism is already partly spent: this is
+a tile-based deferred GPU that resolves visibility before shading, which is why
+Apple advises against prepasses on their hardware. The data agrees from a second
+direction — the same scene with the triplanar and water shaders on costs 0.874 ms
+and with plain lambert 0.879. **The fragment cost is not shading, it is
+rasterisation and depth bandwidth**, and a prepass would not remove that either.
+
+Revisit only if a scene appears with genuinely expensive fragment work *and* deep
+overdraw, and re-run the resolution sweep first — it is four minutes and it
+answers the question without writing a pipeline.
+
+### 19.2 Forward+ over deferred, and the reason is the material contract
+
+The instinct to put the passes into a G-buffer and light once at the end is the
+right instinct about *lights* and the wrong one about *shadows*: it does nothing
+to the paragraph above. What it would change is the shading, and when several
+lights arrive that does become the question. The answer for this engine is
+**clustered forward**, and the argument is not performance:
+
+- **`float3 shade(Surface s)` returns a lit colour**, with `lambert(s.normal)`
+  inside it, and that is the published API every `ShaderMaterial` in every scene
+  is written against — the triplanar ground and the water in `lumbridge.js`
+  included. Forward+ changes what `lambert` does internally and **not one
+  material body has to change**. Deferred requires a material to stop lighting
+  and start emitting surface parameters, which breaks every one of them, and
+  `shaders/material.slang` has already chosen once that `lambert` is the single
+  place lighting lives.
+- **This is a TBDR machine.** Forward keeps colour and depth in tile memory; a
+  G-buffer is two or three full-screen targets written to main memory and read
+  back. Deferred is a desktop-GPU optimisation and a bandwidth tax here.
+- Transparency and MSAA both want the forward path anyway, so deferred means
+  keeping both.
+
+The shape when it is wanted: a compute pass bins lights into screen-space
+clusters, the frame block carries the cluster grid, and `lambert` loops the
+cluster's list. Nothing above the shader notices.
+
+**The trigger is a scene with more than a couple of lights in it**, and today
+there is exactly one plus an ambient float. This is not next.
+
+### 19.3 Cache the static casters
+
+**The largest win available for the kind of game this engine is for, and it is
+not close.** In a village the sun does not move and the buildings do not move.
+The shadow pass rasterises 4178 instances every frame to produce a depth image
+identical to the previous frame's.
+
+- Render static casters into the map once and keep it. Each frame re-render only
+  what moved.
+- Two maps and one comparison at lookup time is the simple form: a static map
+  that is rebuilt on demand, a small dynamic map for movers, and the shader takes
+  the nearer occluder. One map with the static half blitted back in and the
+  movers drawn over it is cheaper still and needs the static depth preserved,
+  which a copy gives.
+- **What invalidates the static map** is the honest part of the design: the light
+  direction changing, the fit box moving (so this interacts with §18.1 — a fit
+  that tracks the camera invalidates it constantly unless it is snapped and
+  hysteretic), and any static caster being added, removed or transformed. A
+  `Scene` already knows when a node's transform is written; a generation counter
+  on the static set is enough.
+- Nodes have to be able to say which set they are in. `mesh.static = true` is one
+  more per-node bool and **it does not split a draw bucket** — it partitions the
+  shadow list only, which is a list the main pass does not read.
+
+At the village's numbers this takes the shadow pass's geometry from 0.496 ms to
+roughly nothing, every frame, and leaves only the fill — which is what §18.1
+attacks. The two compose.
+
+### 19.4 A shadow atlas, and a casting budget
+
+The moment there are several lights, one image per light is the wrong shape: N
+attachments, N pipelines, N fits, and every one of them sized by a guess.
+
+- **One depth image, tiles allocated per light.** A light's tile size comes from
+  its screen-space importance — how much of the frame it can affect, how close it
+  is — so a sun gets a quarter of the atlas and a torch across the square gets
+  128 texels, and the total fill is a number the engine chooses rather than a
+  number that emerges.
+- **A cast budget rather than a per-light bool.** `castShadow` on a light is
+  necessary but not sufficient: the engine should be able to say "four casters
+  this frame" and pick them, because a room with twelve torches in it should not
+  cost twelve depth passes and the script should not have to hand-tune which
+  three are worth it.
+- **Point lights are six times worse** — a cubemap is six fits and six passes.
+  Spot lights are one. The atlas makes that a tiling question rather than an
+  allocation question, and it is the reason to build the atlas before point
+  lights rather than after.
+- Cascades for the sun become atlas tiles like everything else, which is the
+  second reason this comes before cascades: `shadow.c3`'s cascade trigger has
+  never been about the code, it has been about where the texels come from.
+
+### Order
+
+1. **§18.1 and §18.2**, as already planned — they are the cheapest and they are
+   prerequisites: caching wants a stable fit, the atlas wants a fit that is
+   already parameterised by something other than "the whole scene".
+2. **§19.3, static caching.** Largest measured win for the target, and it is
+   arithmetic on a list rather than a new pipeline.
+3. **§19.4, the atlas and the budget.** Do it when the second casting light
+   arrives, not before.
+4. **§19.2, Forward+.** Do it when the fifth light arrives. The shading side is
+   not what is hurting.
+
+**Not doing:** the depth prepass (19.1, measured), and deferred shading (19.2,
+the material contract). Both are written down here so that the next person to
+have the idea finds the measurement rather than the argument.
 
 ---
 

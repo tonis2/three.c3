@@ -838,22 +838,51 @@ fn void the_settings_are_independent_and_a_new_scene_resets_them() @test
 }
 
 <*
- The camera frustum stops culling while the pass is on, and starts again after.
+ The camera keeps its cull while the pass is on, and the casters it dropped are
+ still in the shadow pass's list.
 
- **Stated in `stats()` rather than hidden**, which is the whole reason this is a
- test and not only a comment: a caster the camera cannot see still throws a shadow
- into the frame, so the draw list has to hold every drawable — and the number that
- would otherwise quietly become a lie is `culledLastFrame`. It reads 0 with
- shadows on for the same reason it reads 0 with `Scene.cull` off: nothing was
- dropped.
+ **This is §18.2, and it replaces a test that pinned the opposite.** Until the
+ second draw list existed, one uncalled list served both passes and
+ `culledLastFrame` read 0 whenever shadows were on — honest, because nothing was
+ dropped, and useless, because it said nothing about the camera. The old test
+ asserted that zero. What is asserted now is that the number does not move at
+ all: the same scene culls the same copies with the pass on and with it off, so
+ turning shadows on costs the colour pass nothing.
 
- The scene puts most of its copies outside the camera's view so that the
- unshadowed frame has something to cull. It leaves the camera's target alone
- rather than aiming it: `three.camera.lookAt([0, 0, 0])` puts the turntable's
- focus at NaN, every frustum plane follows it, and nothing is culled — a failure
- that looks exactly like the one this test is here to detect.
+ The three numbers together are what make this more than "culling still works":
+
+ - `culledLastFrame` is the same on and off, so the camera's list is unchanged.
+ - `shadowCulled` is **more than zero and fewer than `culledLastFrame`**, which is
+   the whole shape of two lists in one number. Zero would mean the light's box is
+   still the whole scene — the pre-§18.1 fit. Equal to `culledLastFrame` would
+   mean the camera's frustum had been applied to both passes, which is the
+   mistake this item is one line away from. Between them is a shadow list that is
+   larger than the colour list and smaller than everything.
+ - `shadowDraws` is 1, so the pass did record the bucket holding them.
+
+ The exact number is not asserted, and deliberately: it is a property of where
+ §18.1's square landed on the texel grid, and a fixture pinned to it would fail
+ on a change to the snapping that was an improvement.
+
+ The scene puts most of its copies outside the camera's view so that there is
+ something to cull. It leaves the camera's target alone rather than aiming it:
+ `three.camera.lookAt([0, 0, 0])` puts the turntable's focus at NaN, every
+ frustum plane follows it, and nothing is culled — a failure that looks exactly
+ like the one this test is here to detect.
+
+ **Proved by injection.** `Scene.update` passing the *camera's* frustum as the
+ light's — the one-line version of "give the shadow pass a cull too", and the
+ mistake this whole item is one edit away from: "every dropped copy is still a
+ caster, got '39'". `culledLastFrame` and `shadowDraws` are both unchanged by it,
+ which is the argument for asserting all three. Restored, green again.
+
+ Passing `null` for the light frustum instead — a second list threaded through
+ the signature and not through the call — leaves every check here green, because
+ then nothing is kept for the light and `shadowCulled` is never counted. That
+ failure is caught in pixels by the test below, and the pair is deliberate: this
+ one says the *lists* are two, that one says the *shadow* is still right.
 *>
-fn void culling_stops_while_the_pass_is_on() @test
+fn void the_camera_keeps_its_cull_while_the_pass_is_on() @test
 {
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
 	{
@@ -875,26 +904,138 @@ fn void culling_stops_while_the_pass_is_on() @test
 		test::@check(culled.ok, "the script ran: %s", culled.error);
 		test::@check(culled.value != "0", "the camera culls something to begin with, got '%s'", culled.value);
 
-		three::RunResult uncounted = run.run(`
+		three::RunResult lit = run.run(`
 			three.light.shadow = true;
 			three.render();
-			return three.stats().culledLastFrame;
+			const s = three.stats();
+			return [s.culledLastFrame, s.shadowCulled, s.shadowDraws].join(',');
 		`);
-		defer uncounted.free();
-		test::@check(uncounted.ok, "the second script ran: %s", uncounted.error);
+		defer lit.free();
+		test::@check(lit.ok, "the second script ran: %s", lit.error);
+
+		String[] parts = lit.value.trim(`"`).tsplit(",");
+		test::@check(parts.len == 3, "three numbers came back: %s", lit.value);
+		if (parts.len != 3) return;
+
 		test::@check(
-			uncounted.value == "0",
-			"and nothing is dropped while the shadow pass needs every caster, got '%s'", uncounted.value
+			parts[0] == culled.value,
+			"the camera culls the same %s copies with the pass on, got '%s'", culled.value, parts[0]
 		);
+		int camera_dropped = culled.value.to_int() ?? -1;
+		int both_dropped = parts[1].to_int() ?? -1;
+		test::@check(
+			both_dropped > 0,
+			"the light's box drops something of its own, got '%s' — is the fit still the whole scene?", parts[1]
+		);
+		test::@check(
+			both_dropped < camera_dropped,
+			"and keeps casters the camera dropped: %d of %d went to neither pass", both_dropped, camera_dropped
+		);
+		test::@check(parts[2] == "1", "and the pass recorded the bucket, got '%s'", parts[2]);
 
 		three::RunResult again = run.run(`
 			three.light.shadow = false;
 			three.render();
-			return three.stats().culledLastFrame;
+			const s = three.stats();
+			return [s.culledLastFrame, s.shadowCulled].join(',');
 		`);
 		defer again.free();
 		test::@check(again.ok, "the third script ran: %s", again.error);
-		test::@check(again.value == culled.value, "and it culls again afterwards, got '%s'", again.value);
+		test::@check(
+			again.value.contains(culled.value),
+			"and it culls the same afterwards, got '%s'", again.value
+		);
+		test::@check(
+			again.value.ends_with(`,0"`) || again.value.ends_with(",0"),
+			"with no light box to be outside of, got '%s'", again.value
+		);
+	};
+}
+
+<*
+ A caster the camera cannot see still darkens the ground it can.
+
+ **The regression §18.2 could have introduced, asserted in pixels.** Giving the
+ shadow pass a cull is one line away from giving it the *camera's* cull, and the
+ result is a scene whose shadows appear and vanish as the caster crosses the edge
+ of the frame — which is the single most conspicuous failure a shadow map has,
+ and no counter in `stats()` would show it.
+
+ The fixture is built so that the caster cannot be in shot: a post 8 units tall
+ at x = 20, with the camera looking down at the origin from 7 units away, is
+ outside the frustum by a wide margin — and `culledLastFrame` is asserted to be
+ 1, so a fixture that accidentally framed it fails rather than passing for the
+ wrong reason. The sun is 14 degrees above the horizon on the +x side, which
+ throws a streak roughly thirty units long back across the origin.
+
+ The two frames are the same scene with the pass off and on, compared at one
+ pixel the streak lands on and one it does not, exactly as
+ `a_caster_darkens_the_ground_under_it` does — so "the whole frame got darker"
+ fails too. The streak runs along z = 0 and is two units wide, so the two
+ samples are one *column* apart in z rather than in x: the whole of the middle
+ row is inside it.
+
+ **Proved by injection**, twice, and this is the check that catches both:
+
+ - `Scene.update` passing the camera's frustum as the light's: "the ground under
+   the off-screen caster went from 411 to 411".
+ - `Scene.update` passing `null` for the light frustum while the pass is live,
+   which the counter test above cannot see at all: the same 411 to 411.
+
+ The picture is otherwise unchanged in both, and every other test in this file
+ stays green, which is the argument for asserting this in pixels. Restored,
+ green again.
+*>
+fn void a_caster_outside_the_frustum_still_casts() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(80, 80), new three.MeshLambertMaterial());
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+
+			const post = new three.Mesh(new three.BoxGeometry(2, 8, 2), new three.MeshLambertMaterial());
+			post.position.set(20, 4, 0);
+			scene.add(post);
+
+			// Low from +x, so the post's shadow is thrown back across the origin.
+			three.light.set([0.97, 0.24, 0.0], 0.25);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 70, 7);
+			three.render();
+			return three.stats().culledLastFrame;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "1", "the caster is out of frame to begin with, got '%s'", built.value);
+
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+
+		three::RunResult on = run.run(`three.light.shadow = true; three.render();`);
+		defer on.free();
+		test::@check(on.ok, "the pass turned on: %s", on.error);
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+
+		// The streak covers the middle band of the picture — measured, y 63 to 117
+		// of 180 — so the centre is inside it and a sixth of the way down is not.
+		uint shaded_before = luma_at(&before, W / 2, H / 2);
+		uint shaded_after  = luma_at(&after,  W / 2, H / 2);
+		uint clear_before  = luma_at(&before, W / 2, H / 6);
+		uint clear_after   = luma_at(&after,  W / 2, H / 6);
+
+		test::@check(
+			shaded_after + 30 < shaded_before,
+			"the ground under the off-screen caster went from %d to %d", shaded_before, shaded_after
+		);
+		test::@check(
+			clear_after == clear_before,
+			"and the ground away from it did not move: %d to %d", clear_before, clear_after
+		);
 	};
 }
 
@@ -1044,4 +1185,238 @@ fn void the_shadow_pass_is_silent_under_validation() @test
 		test::@check(errors.len == 0, "the shadow pass produced validation errors: %s", errors);
 		test::@check(warnings.len == 0, "the shadow pass produced validation warnings: %s", warnings);
 	};
+}
+
+<*
+ The pass costs what `shadowMs` says it costs, and the scene pass does not pay
+ for it.
+
+ This is the check that makes the breakdown an instrument rather than a
+ decoration, and `plan.md` §18.3 is the reason it exists: the first outdoor
+ scene on this engine spent two thirds of its frame here, and finding that out
+ meant rendering the same village six times with the scene edited between the
+ runs. A number that moved when the pass was turned on but was charged to the
+ wrong phase would have sent that investigation somewhere else.
+
+ **Three claims.**
+
+ - With the pass off, `shadow` is a rounding error against the frame: the mark
+   is still recorded — `gpu/timing.c3` says why every mark is unconditional —
+   and it bounds no commands.
+ - With the pass on, `shadow` is milliseconds. A 2048-texel depth map over a
+   scene this small is almost all fill, so this is the largest single number in
+   the frame and not a marginal one.
+ - **The growth lands in `shadow` and not in `total` alone.** A timer that
+   charged the pass to whichever phase happened to be next reports the same
+   `total` and the same "shadows are expensive", and a check on either of those
+   would pass. So the last check is on the *increase in the frame* against the
+   *increase in that one phase*, which is the property a breakdown is for.
+
+ **Proved by injection.** The `FrameMark.SHADOW` write moved above
+ `record_shadow` rather than below it — the whole of the mistake, and it changes
+ nothing else about the frame: "a shadowed frame spent 0.000000 ms in the shadow
+ pass, of 0.554708 (timestamps=true)". It lands on the second check rather than
+ the third, because a misplaced mark leaves the phase at nothing rather than at
+ a wrong number; the third check is what survives a shadow figure that is
+ plausible. Restored, green again.
+*>
+fn void the_pass_is_charged_to_its_own_phase() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		// Twice, so the reading is not the first frame on this slot and both
+		// slots have a full run of marks behind them.
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+		three::FrameTiming off = renderer.timing();
+
+		three::RunResult on = run.run(`three.light.shadow = true`);
+		defer on.free();
+		test::@check(on.ok, "the pass turned on: %s", on.error);
+
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+		three::FrameTiming lit = renderer.timing();
+
+		test::@check(
+			off.shadow < 0.01,
+			"an unshadowed frame spent %f ms in the shadow pass, of %f", off.shadow, off.total
+		);
+		test::@check(
+			lit.shadow > 0.01,
+			"a shadowed frame spent %f ms in the shadow pass, of %f (timestamps=%s)",
+			lit.shadow, lit.total, renderer.gpu.limits.timestamps
+		);
+
+		double frame_grew = lit.total - off.total;
+		double phase_grew = lit.shadow - off.shadow;
+		test::@check(
+			phase_grew > frame_grew * 0.5,
+			"the pass cost %f ms in shadowMs while the frame grew by %f ms",
+			phase_grew, frame_grew
+		);
+	};
+}
+
+
+<*
+ A focus box narrows the fit onto it, and the depth range still reaches the
+ casters outside it.
+
+ **§18.1, asserted as the two halves it has to get right at once.** Spending the
+ texels on what the camera can see is easy; spending them there *without losing
+ the casters standing outside the picture* is the part that is one mistake away,
+ and the mistake is symmetrical — a fit that narrows the depth range along with
+ the extent produces a map that is sharp and missing exactly the shadows that
+ come from off-screen.
+
+ - The focus corners land inside the clip box, as `the_fit_holds_the_whole_scene`
+   requires of the scene corners. That is the fit still being a fit.
+ - **A point in the scene but far outside the focus is outside x or y**, which is
+   what says the texels moved. Without it, "narrowed" is satisfied by not
+   narrowing.
+ - **Every corner of the whole scene is still inside the depth range**, which is
+   the half that keeps off-screen casters. In light space a caster and the ground
+   it shadows share x and y and differ only in z, so this is exactly the property
+   that makes culling against the light's box safe.
+*>
+fn void a_focus_box_narrows_the_fit_without_losing_the_depth() @test
+{
+	float[4] light = { 0.35, 0.80, 0.45, 0 };
+	collision::Aabb3 bounds = { .min = { -100, -2, -100 }, .max = { 100, 20, 100 } };
+	collision::Aabb3 focus  = { .min = { -10, -2, -10 },   .max = { 10, 8, 10 } };
+
+	three::ShadowMap wide;
+	wide.defaults();
+	wide.size = 1024;
+	wide.fit(light, bounds);
+
+	three::ShadowMap near;
+	near.defaults();
+	near.size = 1024;
+	near.fit(light, bounds, focus);
+
+	test::@check(
+		near.normal_offset < wide.normal_offset * 0.5f,
+		"the focused fit has offset %f against the wide fit's %f — a texel did not get smaller",
+		near.normal_offset, wide.normal_offset
+	);
+
+	for (uint corner = 0; corner < 8; corner++)
+	{
+		Vec3 inside = {
+			(corner & 1) != 0 ? focus.max.x : focus.min.x,
+			(corner & 2) != 0 ? focus.max.y : focus.min.y,
+			(corner & 4) != 0 ? focus.max.z : focus.min.z,
+		};
+		float[4] clip = project(near.light_view_projection, inside);
+		test::@check(
+			clip[0] >= -1.0001f && clip[0] <= 1.0001f && clip[1] >= -1.0001f && clip[1] <= 1.0001f,
+			"focus corner %d is at x %f y %f, outside the map it was fitted to", corner, clip[0], clip[1]
+		);
+	}
+
+	// Far outside the focus and well inside the scene: the texels are elsewhere
+	// now, which is the whole point of the item.
+	float[4] away = project(near.light_view_projection, { 90, 0, 90 });
+	test::@check(
+		away[0] < -1.0f || away[0] > 1.0f || away[1] < -1.0f || away[1] > 1.0f,
+		"a corner of the level is still on the map at x %f y %f, so nothing was narrowed",
+		away[0], away[1]
+	);
+
+	// **The depth half.** Every corner of the scene, focused or not, is inside
+	// [0, 1] — a caster over there is between the light and the ground here.
+	for (uint corner = 0; corner < 8; corner++)
+	{
+		Vec3 point = {
+			(corner & 1) != 0 ? bounds.max.x : bounds.min.x,
+			(corner & 2) != 0 ? bounds.max.y : bounds.min.y,
+			(corner & 4) != 0 ? bounds.max.z : bounds.min.z,
+		};
+		float[4] clip = project(near.light_view_projection, point);
+		test::@check(
+			clip[2] >= -0.0001f && clip[2] <= 1.0001f,
+			"scene corner %d is at depth %f, so a caster outside the focus would be clipped",
+			corner, clip[2]
+		);
+	}
+}
+
+<*
+ The fit does not move for a camera that moved less than a texel, and does move
+ for one that moved more.
+
+ **This is the failure §18.1 was warned about**, and it is the reason the item is
+ not a change of argument: a box that tracks the camera slides its texel grid
+ under stationary geometry, and every shadow edge crawls. It is invisible in a
+ screenshot and unmistakable in motion, which is precisely the kind of defect a
+ test has to carry rather than an eye.
+
+ So the property is asserted at the matrix, where it is exact: two fits whose
+ focus boxes differ by a twentieth of a texel must produce **byte-identical**
+ matrices. Only snapping can do that. A fit that merely re-bounds the focus
+ produces two matrices that differ in the eighth decimal place — which is a
+ shimmer, and which no tolerance-based check would call a failure.
+
+ The second half is the one that stops the first from being satisfied by a fit
+ that ignores the camera altogether: move by ten texels and the matrix must
+ change.
+
+ **Proved by injection.** The two `math::floor` calls dropped from `fit`: "a
+ sub-texel move changed the fit". The whole-scene test and the focus test above
+ both stayed green, which is the argument for this being its own check.
+*>
+fn void the_fit_snaps_to_whole_texels() @test
+{
+	float[4] light = { 0.35, 0.80, 0.45, 0 };
+	collision::Aabb3 bounds = { .min = { -100, -2, -100 }, .max = { 100, 20, 100 } };
+	collision::Aabb3 focus  = { .min = { -10, -2, -10 },   .max = { 10, 8, 10 } };
+
+	three::ShadowMap first;
+	first.defaults();
+	first.size = 1024;
+	first.fit(light, bounds, focus);
+
+	// The world size of one texel, recovered from what the fit derived: the
+	// offset is `per_texel * SHADOW_NORMAL_OFFSET_TEXELS`, so this is the one
+	// number the test and the implementation cannot disagree about.
+	float texel = first.normal_offset / (float)three::SHADOW_NORMAL_OFFSET_TEXELS;
+	test::@check(texel > 0.0f, "the fit produced a texel size of %f", texel);
+
+	float nudge = texel * 0.05f;
+	collision::Aabb3 crept = { .min = focus.min + (Vec3) { nudge, 0, nudge }, .max = focus.max + (Vec3) { nudge, 0, nudge } };
+
+	three::ShadowMap second;
+	second.defaults();
+	second.size = 1024;
+	second.fit(light, bounds, crept);
+
+	Matrix4f a = first.light_view_projection;
+	Matrix4f b = second.light_view_projection;
+	bool same = true;
+	for (uint i = 0; i < 16; i++)
+	{
+		if (a.m[i] != b.m[i]) same = false;
+	}
+	test::@check(same, "a sub-texel move changed the fit");
+
+	float stride = texel * 10.0f;
+	collision::Aabb3 walked = { .min = focus.min + (Vec3) { stride, 0, stride }, .max = focus.max + (Vec3) { stride, 0, stride } };
+
+	three::ShadowMap third;
+	third.defaults();
+	third.size = 1024;
+	third.fit(light, bounds, walked);
+
+	bool moved = false;
+	for (uint i = 0; i < 16; i++)
+	{
+		if (a.m[i] != third.light_view_projection.m[i]) moved = true;
+	}
+	test::@check(moved, "a ten-texel move did not change the fit at all");
 }

@@ -104,6 +104,27 @@ struct Bucket
 	uint count;
 
 	<*
+	 How many of `count` the camera can see, and they are the first ones.
+
+	 **Two passes read one instance array, and this is the whole of how.** The
+	 shadow pass draws `[first, first + count)` — every copy that can throw a
+	 shadow into the frame — and the colour pass draws `[first, first + visible)`.
+	 A copy the camera cannot see but the light can sits in the tail and is
+	 rasterised into the map only, which is what `render/shadow.c3:38` asked for
+	 and what `culledLastFrame` reading 0 used to be the absence of.
+
+	 It is a prefix and not a mask because `vkCmdDrawIndexed` takes a first and a
+	 count: two ranges out of one array means one of them is contiguous from
+	 `first`, and the sort puts the visible ones there. See the comparator in
+	 `build_draw_list` — the tiebreak sits *after* `preskinned`, so it orders
+	 copies within a bucket rather than splitting one in two.
+
+	 Equal to `count` in every frame with no shadow pass, so an unshadowed frame
+	 draws exactly the range it always drew.
+	*>
+	uint visible;
+
+	<*
 	 Whether the compute pass poses these copies before the render pass reads them.
 
 	 **Part of what makes two draws two draws.** Everything else a bucket keys on
@@ -152,7 +173,18 @@ struct SceneStats
 	// `update`, and zero again after any `update` made with `Scene.cull` false:
 	// nothing was dropped, and reporting the frame before it would be a stale
 	// number wearing a live one's name.
+	//
+	// **It means the camera again, in a shadowed frame too.** From the day shadows
+	// landed until §18.2 this read 0 whenever the pass was on, because the frame
+	// built one uncalled list for both passes; it was honest and it said nothing,
+	// and it is what sent the investigation in plan.md §18 down the wrong path
+	// first.
 	uint culled_last_frame;
+	// What the light's box dropped, over the same frame. Copies rejected by
+	// **both** frustums, so it is what neither pass drew rather than the
+	// difference between the two lists — `Scene.shadow_culled` has why. Zero in a
+	// frame with no shadow pass, where there is no second box to be outside of.
+	uint shadow_culled_last_frame;
 
 	<*
 	 What skinning costs, reported apart from everything else.
@@ -217,6 +249,11 @@ struct Draw @local
 	// blended pipelines write no depth, so ordering is what stands in for the
 	// depth buffer, and only the draws that lost the depth buffer need it.
 	float depth;
+	// Whether the camera can see this copy, as opposed to whether the light can.
+	// A draw is in the list if *either* is true; this says which range of its
+	// bucket it belongs in. Always true in a frame with no shadow pass, because
+	// then nothing but the camera keeps a draw at all.
+	bool visible;
 	// Whether the compute pass poses this copy. **A field beside the key rather
 	// than a bit inside it**, for `material`'s reason one line up: `bucket_key`
 	// spends all 64 bits on two full-range uints, and stealing one would be a
@@ -262,6 +299,16 @@ struct Scene
 	// the reported number is then zero forever — which is what it was until this
 	// was split.
 	uint culled_last_frame;
+	// The same pair again for the *light's* box. Counted only in a frame that has
+	// a shadow pass, because in every other frame there is no second frustum and
+	// zero is the honest answer rather than a number about a box nobody built.
+	//
+	// A drawable is in the shadow list unless **both** frustums rejected it, so
+	// this counts the copies that are in neither pass — not the difference
+	// between the two lists. `culled` above is still "what the camera dropped",
+	// and the two overlap by exactly the copies the light kept for its own pass.
+	uint shadow_culled;
+	uint shadow_culled_last_frame;
 	bool started;
 }
 
@@ -1348,7 +1395,7 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 
  @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
  @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes; see MeshPass.record for why this crosses as a flat slice.`
- @param casters : `Whether a shadow pass will read this draw list. Set, the camera frustum is not applied — a caster the camera cannot see still throws a shadow into the frame, so the list has to hold every drawable rather than every visible one. render/shadow.c3 carries what that costs and the trigger for a second draw list instead.`
+ @param light_view_projection : `The light's clip matrix when a shadow pass will read this draw list, null otherwise. Its frustum keeps casters the camera cannot see — but as a second test beside the camera's rather than instead of it, so both passes get a cull. render/shadow.c3:38 asked for this and plan.md §18.2 has what it was worth.`
 *>
 fn void Scene.update(
 	&self,
@@ -1356,20 +1403,28 @@ fn void Scene.update(
 	Matrix4f view_projection,
 	bool[] transparent = {},
 	float[] margins = {},
-	bool casters = false
+	Matrix4f* light_view_projection = null
 )
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	// `casters` overrides `cull` rather than the other way round, and neither
-	// turns the *sort* off: `frustum.planes[4]` is the near plane and a
+	// **Two frustums, and `cull` gates only the camera's.** A script turning
+	// culling off is asking for its own draws not to be dropped; it is not asking
+	// the shadow pass to rasterise the far side of the level, and a light box
+	// that is smaller than the scene would then be the only thing keeping the map
+	// affordable. So the light's test stands whether or not `cull` does.
+	//
+	// Neither turns the *sort* off: `frustum.planes[4]` is the near plane and a
 	// transparent draw is ordered by it whether or not anything was culled.
+	Frustum light;
+	if (light_view_projection != null) light = frustum_of(*light_view_projection);
 	self.build_draw_list(
 		assets,
-		(self.cull && !casters) ? &frustum : null,
+		self.cull ? &frustum : null,
 		transparent,
 		&frustum.planes[4],
-		margins
+		margins,
+		light_view_projection != null ? &light : null
 	);
 	// Promoted here rather than inside `build_draw_list`, because this call is
 	// what "a frame happened" means and the other caller is a query. Assigned
@@ -1377,6 +1432,7 @@ fn void Scene.update(
 	// answer, where holding the previous number would report a camera that has
 	// stopped being consulted.
 	self.culled_last_frame = self.culled;
+	self.shadow_culled_last_frame = self.shadow_culled;
 }
 
 // ----------------------------------------------------------------------------
@@ -1434,6 +1490,7 @@ fn uint draw_order(uint material, bool transparent) @local
 
  @param transparent : `One bool per material index — whether that material blends. Empty is an opaque frame, and is what stats() passes.`
  @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
+ @param light : `The light's frustum when a shadow pass will read this list, null otherwise. A draw kept by this and not by the camera goes into the tail of its bucket — see Bucket.visible.`
 *>
 fn void Scene.build_draw_list(
 	&self,
@@ -1443,13 +1500,15 @@ fn void Scene.build_draw_list(
 	Plane* near = null,
 	// Indexed by material, exactly as `transparent` is, and empty when nobody has
 	// asked for one. See the growth below.
-	float[] margins = {}
+	float[] margins = {},
+	Frustum* light = null
 )
 {
 	self.draws.clear();
 	self.instances.clear();
 	self.buckets.clear();
 	self.culled = 0;
+	self.shadow_culled = 0;
 
 	foreach (slot, &node : self.nodes)
 	{
@@ -1487,7 +1546,11 @@ fn void Scene.build_draw_list(
 		// right.
 		float depth = 0;
 		bool sorted = is_transparent && near != null;
-		if (frustum != null || sorted)
+		// True until something rejects it, which is what makes an unculled frame
+		// cost nothing: with no frustum and no light there is no box to compute
+		// and no test to run.
+		bool visible = true;
+		if (frustum != null || light != null || sorted)
 		{
 			// **A skinned node is measured by the poses it can reach, not by the
 			// pose it was authored in.** The bake unioned every joint matrix of
@@ -1518,10 +1581,24 @@ fn void Scene.build_draw_list(
 				float m = margins[node.material];
 				box = { .min = box.min - {m, m, m}, .max = box.max + {m, m, m} };
 			}
-			if (frustum != null && !frustum.contains(box))
+			visible = frustum == null || frustum.contains(box);
+			if (!visible) self.culled++;
+
+			// **The second test, and the reason a draw can survive the first
+			// rejection.** A caster the camera cannot see still throws a shadow
+			// into the frame, so the light's box gets its own say — but only for
+			// geometry that will actually be rasterised into the map. A blended
+			// material casts nothing (`MeshPass.casts_shadow`), so keeping a
+			// transparent draw the camera rejected would put an instance in the
+			// array that neither pass will ever read.
+			if (!visible)
 			{
-				self.culled++;
-				continue;
+				bool casts = light != null && !is_transparent && light.contains(box);
+				if (!casts)
+				{
+					if (light != null) self.shadow_culled++;
+					continue;
+				}
 			}
 			// Signed distance to the near plane: positive in front of the camera and
 			// larger the further away, so "farthest first" is a descending sort with
@@ -1535,6 +1612,7 @@ fn void Scene.build_draw_list(
 			.slot = (uint)slot,
 			.order = draw_order(node.material, is_transparent),
 			.depth = depth,
+			.visible = visible,
 			.preskinned = node.preskinned && node.skin >= 0,
 		});
 	}
@@ -1570,10 +1648,16 @@ fn void Scene.build_draw_list(
 		}
 		if (a.key < b.key) return -1;
 		if (a.key > b.key) return 1;
-		// Last, and only so that copies routed through compute sit beside each
-		// other: they cannot share a bucket with copies that are not, and
+		// Last but one, and only so that copies routed through compute sit beside
+		// each other: they cannot share a bucket with copies that are not, and
 		// interleaving them would make four draws out of two.
 		if (a.preskinned != b.preskinned) return a.preskinned ? 1 : -1;
+		// **Last, and the position is the whole design.** Every key above this
+		// one decides which bucket a draw lands in; this one decides where it
+		// sits *inside* that bucket, so a bucket stays one bucket and its
+		// camera-visible copies are a prefix of it. Move this above `key` and
+		// every mesh with a partly-visible set of copies becomes two draw calls.
+		if (a.visible != b.visible) return a.visible ? -1 : 1;
 		return 0;
 	});
 
@@ -1600,6 +1684,7 @@ fn void Scene.build_draw_list(
 				.material = draw.material,
 				.first = (uint)self.instances.len(),
 				.count = 0,
+				.visible = 0,
 				.preskinned = draw.preskinned,
 			});
 		}
@@ -1615,6 +1700,10 @@ fn void Scene.build_draw_list(
 			.pose = node.pose,
 		});
 		self.buckets[self.buckets.len() - 1].count++;
+		// Correct as a running total only because the sort put the visible copies
+		// first: this counts them wherever they are, and it is the comparator that
+		// makes "how many" the same number as "how many at the front".
+		if (draw.visible) self.buckets[self.buckets.len() - 1].visible++;
 	}
 }
 
@@ -1694,6 +1783,7 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.textures = assets.texture_count(),
 		.texture_bytes = assets.texture_bytes(),
 		.culled_last_frame = self.culled_last_frame,
+		.shadow_culled_last_frame = self.shadow_culled_last_frame,
 	};
 
 	foreach (&node : self.nodes)

@@ -152,7 +152,7 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 	}
 
 	report.append_string(`,"stats":`);
-	append_stats(&report, result.stats, result.gpu_ms);
+	append_stats(&report, result.stats, result.timing);
 
 	// Only when there is something to say. A `"frame"` block on every result
 	// would be noise on the overwhelming majority of scripts, which never
@@ -317,19 +317,26 @@ fn void append_json_string(DString* out, String text)
  tool result and then asserts on `scene.stats().drawCalls` in its next script
  should not have to notice that they were spelled differently.
 
- `gpuMs` rides along for the same reason, and is a separate argument because it
- is not a scene fact: `SceneStats` is device-free, and the millisecond count
- belongs to whichever frame the run last drew. `js/bind_scene.c3`'s `js_stats`
- makes the same join on the script side, so the two spellings still agree.
+ The timings ride along for the same reason, and are a separate argument because
+ they are not scene facts: `SceneStats` is device-free, and the millisecond
+ counts belong to whichever frame the run last drew. `js/bind_scene.c3`'s
+ `js_stats` makes the same join on the script side, so the two spellings still
+ agree.
+
+ **The five phases are here and not only in `stats()`** because this is the
+ result an agent reads without being asked to. `plan.md` §18.3's complaint is
+ that finding out where a frame went took six runs of an edited scene; a tool
+ result that already says `"shadowMs":2.66` next to `"gpuMs":3.92` takes none.
+ They sum to `gpuMs`, so the block is a breakdown rather than a sample.
 
  Six decimal places rather than two: a headless 200x150 frame costs tens of
  microseconds, and `%.2f` would report every one of them as `0.00` — a number
  that looks like the "nothing was measured" zero and is not one.
 *>
-fn void append_stats(DString* out, SceneStats stats, double gpu_ms)
+fn void append_stats(DString* out, SceneStats stats, FrameTiming timing)
 {
 	out.appendf(
-		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d,"gpuMs":%f}`,
+		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d,"shadowCulled":%d,"gpuMs":%f,"prepareMs":%f,"shadowMs":%f,"sceneMs":%f,"postMs":%f,"presentMs":%f}`,
 		stats.draw_calls,
 		stats.unique_meshes,
 		stats.instances,
@@ -340,6 +347,12 @@ fn void append_stats(DString* out, SceneStats stats, double gpu_ms)
 		stats.textures,
 		stats.texture_bytes,
 		stats.culled_last_frame,
-		gpu_ms
+		stats.shadow_culled_last_frame,
+		timing.total,
+		timing.prepare,
+		timing.shadow,
+		timing.scene,
+		timing.post,
+		timing.present
 	)!!;
 }
