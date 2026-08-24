@@ -41,6 +41,7 @@ module three;
 import std::io;
 
 faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
+faultdef POST_TAP_UNKNOWN;
 
 <*
  How many samplers of its own a post pass may declare, on top of `prev` and
@@ -62,16 +63,20 @@ const uint POST_TEXTURE_LIMIT = 4;
  would hand out that struct's tail padding, which the shader's layout does not
  contain.
 *>
-const uint POST_UNIFORM_BUDGET = 112;
+const uint POST_UNIFORM_BUDGET = 104;
 
 <*
  Where a post pass's uniforms begin in the push block.
 
- `info` is the whole of the contract below this, so the number is 16 — and it is
- derived from `POST_PUSH_FIELDS` by assertion rather than copied, the same shape
- `MATERIAL_PUSH_START` has against `MESH_PUSH_FIELDS`.
+ `info` and `planes` are the whole of the contract below this, so the number is
+ 24 — and it is derived from `POST_PUSH_FIELDS` by assertion rather than copied,
+ the same shape `MATERIAL_PUSH_START` has against `MESH_PUSH_FIELDS`.
+
+ It was 16 until `p.depth` arrived and the camera's planes had to reach the
+ shader. That is 8 bytes off what a body may declare, which is two floats of a
+ budget nothing has come close to.
 *>
-const uint POST_PUSH_START = 16;
+const uint POST_PUSH_START = 24;
 
 $assert POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].offset + POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].size == POST_PUSH_START :
 	"`info` moved; post uniforms no longer start where post.slang puts them";
@@ -116,8 +121,9 @@ const String POST_PREAMBLE_NAME = "three.post";
 *>
 const String[*] POST_RESERVED @local = {
 	// What the template declares.
-	"push", "PushData", "info", "prev", "scene", "Post", "p", "VertexOutput",
-	"vertexMain", "fragmentMain", "post", "output", "vid",
+	"push", "PushData", "info", "planes", "prev", "scene", "depth_buffer",
+	"tap_image", "Post", "p", "VertexOutput", "vertexMain", "fragmentMain",
+	"post", "output", "vid", "d", "near", "far", "span",
 	// Types.
 	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
 	"int", "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4",
@@ -143,7 +149,7 @@ const String[*] POST_RESERVED @local = {
  uniform is usually redundant: `p.time` already carries seconds since the shader
  was set.
 *>
-const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time" };
+const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time", "depth", "tap" };
 
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
@@ -284,7 +290,7 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 		if (wanted > POST_UNIFORM_BUDGET)
 		{
 			post_note(string::tformat(
-				"post: the uniforms want %d bytes of push block and %d are free; `info` takes the other %d of the 128 every device offers",
+				"post: the uniforms want %d bytes of push block and %d are free; `info` and `planes` take the other %d of the 128 every device offers",
 				wanted,
 				POST_UNIFORM_BUDGET,
 				PUSH_BUDGET - POST_UNIFORM_BUDGET

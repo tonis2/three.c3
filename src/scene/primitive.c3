@@ -781,7 +781,7 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 	// scope's to undo — the same argument `Assets.load` makes.
 	defer catch
 	{
-		mesh.free_buffers();
+		mesh.free_buffers(gpu);
 		asset.meshes.free();
 		asset.path.free(mem);
 	}

@@ -66,6 +66,11 @@ struct ShaderField
 	String name;
 	uint offset;
 	uint size;
+	// True for a uniform that lives in the **table buffer** rather than in the
+	// push block — `offset` is then within that buffer. `MATERIAL_TABLE_FIELD` is
+	// the pointer these hang off, and `scene/material.c3` has why a table spills
+	// there at all.
+	bool indirect;
 }
 
 <*
@@ -276,13 +281,17 @@ fn ShaderLayout reflect_layout(slang::Reflection reflection, ShaderEntry[] entri
 
 		List{slang::Field} fields;
 		fields.tinit(8);
-		out.push_size = reflection.push_block(&fields);
+		// `MATERIAL_TABLE_FIELD` is followed wherever it appears, which is a
+		// generated material whose uniform table did not fit the push block. Every
+		// other module has no field by that name and the walk is what it was.
+		out.push_size = reflection.push_block(&fields, MATERIAL_TABLE_FIELD);
 		foreach (field : fields)
 		{
 			out.push_fields.push({
 				.name = field.name.copy(mem),
 				.offset = field.offset,
 				.size = field.size,
+				.indirect = field.indirect,
 			});
 		}
 	};

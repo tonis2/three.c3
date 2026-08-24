@@ -768,18 +768,30 @@ fn void the_default_material_wears_no_texture_of_its_own() @test
 }
 
 <*
- A mesh with no uvs is not refused, and shows nothing.
+ A hull wears its map.
 
- The one case where this looks broken and is not, recorded as a test so that the
- next person to see it does not go looking for the bug. A `ConvexGeometry` has no
- natural parameterisation, so `upload_built` leaves `has_uvs` false and
- `mesh.slang` never samples — the material is set, correct, and invisible.
+ This test used to assert the opposite, and the sentence it carried — "a
+ `ConvexGeometry` has no natural parameterisation, so the material is set, correct
+ and invisible" — was the sharp edge `plan.md` §2 recorded. `scene/convex.c3` now
+ gives every face its own planar projection, so a hull is texturable and the check
+ is that the image actually arrives.
 
- Asserted as "drew, but no magenta" rather than as an error, because the two
- failures it separates are worth separating: nothing on screen at all would be a
- geometry bug, and magenta on screen would mean the hull grew uvs from somewhere.
+ Both halves of the old test are kept, because they still separate the two
+ failures worth separating: nothing on screen at all is a geometry bug, and no
+ magenta on screen is a uv one.
+
+ The map is checked for *presence* rather than for placement. Where a particular
+ checker square lands on a particular facet is `three_tests::convex`'s business —
+ `the_hull_is_projected_face_by_face` pins the projection exactly, in numbers,
+ with no renderer involved — and asserting it again through a picture would be a
+ second, weaker copy of that.
+
+ **The no-uv path is still reachable and is still not an error**: a glTF mesh with
+ no `TEXCOORD_0` uploads with `has_uvs` false and draws its base colour, which is
+ what `mesh.slang`'s branch is for. Nothing in the parametric or hull API can
+ produce one any more.
 *>
-fn void a_hull_has_nowhere_to_put_a_map() @test
+fn void a_hull_wears_its_map() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
@@ -794,7 +806,7 @@ fn void a_hull_has_nowhere_to_put_a_map() @test
 			{ -1, -1, 1 }, { 1, -1, 1 }, { 1, 1, 1 }, { -1, 1, 1 },
 		};
 		three::AssetId hull = assets.convex(&renderer.gpu, corners[..])!!;
-		test::@check(!assets.mesh(hull, 0).has_uvs, "a hull grew uvs, so this test is no longer about anything");
+		test::@check(assets.mesh(hull, 0).has_uvs, "the hull uploaded with no uv stream");
 
 		three::NodeId node = scene.add_mesh(hull, 0);
 		scene.set_material(node, material);
@@ -809,8 +821,8 @@ fn void a_hull_has_nowhere_to_put_a_map() @test
 			if (shot.pixels[i] > 30 || shot.pixels[i + 1] > 30 || shot.pixels[i + 2] > 30) drawn++;
 		}
 		test::@check(drawn > 100, "the hull drew %d lit pixels — this is a geometry failure, not a uv one", drawn);
-		test::@check(count_magenta(&shot) == 0,
-			"%d magenta pixels on a mesh with no uv stream", count_magenta(&shot));
+		test::@check(count_magenta(&shot) > 0,
+			"the checkerboard is nowhere on the hull: %d magenta pixels", count_magenta(&shot));
 	};
 }
 

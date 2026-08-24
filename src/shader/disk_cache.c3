@@ -30,18 +30,30 @@
  process — costs one recompile and is overwritten. **It must never be a crash**:
  the file is on disk between runs, so a bad one would otherwise be permanent.
 
+ ## The compiler is in the key
+
+ `slang::build_tag()` — `spGetBuildTagString`, the release tag baked into
+ libslang at its own build — is hashed into the filename *and* written into the
+ file as checked identity. So an SDK upgrade does not leave the cache holding
+ modules built by a compiler that is gone: every key moves, every old file is
+ unreachable, and a hash collision onto one of them fails the identity check the
+ same way a collision between two sources does.
+
+ That costs one call to a function returning a pointer to static storage. The
+ alternative once recorded here — hashing `libslang.dylib` — costs 35 MB of
+ reading per process to learn the same thing, and is why this waited until the
+ binding grew a version query.
+
+ **A build with no tag is still a key.** Slang reports something like `unknown`
+ for a compiler built from an untagged checkout, and two such builds are then
+ indistinguishable here. That is a real hole, and the lever for it is the format
+ version below.
+
  ## What is not in the key
 
- **The Slang version.** `lib/slang.c3l` does not expose one, so an SDK bump
- leaves the cache holding modules built by a compiler that is gone. The manual
- lever is `SHADER_CACHE_FORMAT_VERSION`: bump it and every stored module becomes
- unreadable at the version check. Recorded in `plan.md` §2 rather than hidden —
- the alternative, hashing `libslang.dylib`, costs 35 MB of reading per process
- to save 17 ms.
-
- The **device** is not in it either, and does not need to be: SPIR-V is portable
- and `MeshPipeline.init` re-validates every loaded layout through
- `check_push_block` against the limits of the device actually present.
+ The **device**. It does not need to be: SPIR-V is portable and
+ `MeshPipeline.init` re-validates every loaded layout through `check_push_block`
+ against the limits of the device actually present.
 
  ## The file
 
@@ -52,6 +64,7 @@
 	-----  ------------------------------------------------------------------
 	    4  magic — 'T3SC' as the four bytes T, 3, S, C
 	    4  SHADER_CACHE_FORMAT_VERSION
+	 blob  compiler — slang::build_tag()                  (identity, checked)
 	 blob  arguments — SLANG_ARGUMENTS joined with '\0'   (identity, checked)
 	    4  entry count
 	          per entry:
@@ -76,6 +89,7 @@
 	 blob        name
 	    4        offset
 	    4        size
+	    4        indirect (0 or 1 — a field of the table buffer)
 
  Trailing bytes past the last field are ignored rather than refused. A torn write
  is short, not long, and everything the module is made of has already been read
@@ -88,6 +102,7 @@ import std::io::file;
 import std::io::path;
 import std::collections::list;
 import vk;
+import slang;
 
 // 'T3SC', read back as a little-endian u32. Named so that a file dumped with
 // `xxd` says what it is on its first line.
@@ -98,10 +113,16 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
 
  It is in the **key** as well as in the file, so a bump does not merely reject
  old entries — it moves every module to a new filename and leaves the old ones
- to be deleted with the directory. It is also the only lever for a Slang upgrade,
- which the binding does not expose a version for; see the header.
+ to be deleted with the directory. It is also the lever for the one case
+ `slang::build_tag()` cannot see: two untagged compiler builds reporting the same
+ string.
+
+ 2 added the compiler tag, above the arguments. 3 added `indirect` to a push
+ field, which is what tells a uniform in the table buffer from one in the block —
+ a stored module without it comes back with every field looking pushed, and a
+ spilled table's uniforms then have no names at all.
 *>
-const uint SHADER_CACHE_FORMAT_VERSION = 1;
+const uint SHADER_CACHE_FORMAT_VERSION = 3;
 
 <*
  Where modules are kept when nothing says otherwise.
@@ -168,6 +189,14 @@ fn void shader_cache_set_dir(String dir)
 	cache_dir = (String)cache_dir_storage[:dir.len];
 }
 
+<*
+ Where modules are kept, or empty when the cache is off.
+
+ `gpu/driver_cache.c3` puts its blob in the same directory: two formats, two
+ identity rules, one thing to delete.
+*>
+fn String shader_cache_dir() => cache_dir;
+
 fn ShaderCacheStats shader_cache_stats() => cache_counters;
 
 fn void shader_cache_reset_stats()
@@ -221,12 +250,18 @@ fn String cache_argument_blob() @local
  Not a checksum of the file — a hash of the *request*, so a lookup can be one
  `open` rather than a directory walk. What it covers is what the loader then
  verifies, plus the entry points, which are the third thing a compile depends on.
+
+ @param compiler : `slang::build_tag(). In the key so that an SDK upgrade moves every module rather than shadowing it.`
 *>
-fn ulong cache_key(String args, String source, ShaderEntry[] entries) @local
+fn ulong cache_key(String compiler, String args, String source, ShaderEntry[] entries) @local
 {
 	DString key;
-	key.tinit(source.len + args.len + 128);
+	key.tinit(source.len + args.len + compiler.len + 128);
 	cache_put_u32(&key, SHADER_CACHE_FORMAT_VERSION);
+	// Length-prefixed rather than joined with the arguments, so that a tag
+	// ending in a flag-shaped suffix cannot spell the same bytes as a different
+	// tag and a different first argument.
+	cache_put_blob(&key, compiler);
 	key.append_string(args);
 	foreach (entry : entries)
 	{
@@ -259,15 +294,16 @@ fn String cache_path(ulong key) @local => string::tformat("%s/%016x.slangmod", c
  created or a file that cannot be written costs one stderr line and 17 ms per
  run, and must not cost a render.
 *>
-fn void cache_store(String path, String args, String source, ShaderModule* mod) @local
+fn void cache_store(String path, String compiler, String args, String source, ShaderModule* mod) @local
 {
 	@pool()
 	{
 		DString out;
-		out.tinit((sz)(mod.spirv.len + source.len + 1024));
+		out.tinit((sz)(mod.spirv.len + source.len + compiler.len + 1024));
 
 		cache_put_u32(&out, SHADER_CACHE_MAGIC);
 		cache_put_u32(&out, SHADER_CACHE_FORMAT_VERSION);
+		cache_put_blob(&out, compiler);
 		cache_put_blob(&out, args);
 
 		cache_put_u32(&out, (uint)mod.entries.len());
@@ -302,6 +338,7 @@ fn void cache_store(String path, String args, String source, ShaderModule* mod) 
 			cache_put_blob(&out, field.name);
 			cache_put_u32(&out, field.offset);
 			cache_put_u32(&out, field.size);
+			cache_put_u32(&out, field.indirect ? 1 : 0);
 		}
 
 		// Lazily, on the first store: a process that only ever reads never
@@ -414,7 +451,7 @@ fn bool cache_reject() @local
  @param [out] out : `Filled only on true. Untouched otherwise.`
  @return `True if out now holds a module Slang did not have to produce.`
 *>
-fn bool cache_load(String path, String args, String source, ShaderModule* out) @local
+fn bool cache_load(String path, String compiler, String args, String source, ShaderModule* out) @local
 {
 	@pool()
 	{
@@ -431,8 +468,10 @@ fn bool cache_load(String path, String args, String source, ShaderModule* out) @
 		if (reader.u32() != SHADER_CACHE_FORMAT_VERSION) return cache_reject();
 
 		// **Identity, not the hash.** See the header and `CachedModule`.
+		String stored_compiler = reader.blob();
 		String stored_args = reader.blob();
 		if (reader.bad) return cache_reject();
+		if (stored_compiler != compiler) return cache_reject();
 		if (stored_args != args) return cache_reject();
 
 		uint entry_count = reader.u32();
@@ -491,8 +530,8 @@ fn bool cache_load(String path, String args, String source, ShaderModule* out) @
 		}
 
 		uint field_count = reader.u32();
-		// A blob plus two numbers.
-		if (!reader.room_for(field_count, 12)) return cache_reject();
+		// A blob plus three numbers.
+		if (!reader.room_for(field_count, 16)) return cache_reject();
 		List{ShaderField} fields;
 		fields.tinit(field_count > 0 ? field_count : 1);
 		for (uint i = 0; i < field_count; i++)
@@ -501,6 +540,7 @@ fn bool cache_load(String path, String args, String source, ShaderModule* out) @
 			field.name = reader.blob();
 			field.offset = reader.u32();
 			field.size = reader.u32();
+			field.indirect = reader.u32() != 0;
 			if (reader.bad) return cache_reject();
 			fields.push(field);
 		}
@@ -579,11 +619,12 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 
 	@pool()
 	{
+		String compiler = slang::build_tag();
 		String args = cache_argument_blob();
-		String path = cache_path(cache_key(args, source, entries));
+		String path = cache_path(cache_key(compiler, args, source, entries));
 
 		ShaderModule loaded;
-		if (cache_load(path, args, source, &loaded))
+		if (cache_load(path, compiler, args, source, &loaded))
 		{
 			@debug_log("shader cache: %s hit %s", name, path);
 			return loaded;
@@ -599,7 +640,7 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 		// Overwrites whatever was there, which is the answer to every way a
 		// lookup can fail: a truncated file, a file from a format that no longer
 		// exists, and a hash collision all end here.
-		if (mod.ok) cache_store(path, args, source, &mod);
+		if (mod.ok) cache_store(path, compiler, args, source, &mod);
 		return mod;
 	};
 }

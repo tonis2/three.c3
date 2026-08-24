@@ -96,7 +96,7 @@ export function postSpec(spec, wanted) {
 	if (spec === null || spec === undefined || typeof spec !== 'object') {
 		throw new TypeError(wanted);
 	}
-	const { fragment, uniforms = {}, textures = {} } = spec;
+	const { fragment, uniforms = {}, textures = {}, reads } = spec;
 	if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 		throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
 	}
@@ -122,8 +122,33 @@ export function postSpec(spec, wanted) {
 			shapes.map(s => s[0]).join(','),
 			declared.names.join(','),
 			declared.ids.join(','),
+			readsIndex(reads),
 		],
 	};
+}
+
+// `reads` as an index, or -1 for a pass that names none.
+//
+// A handle or a number, because both are things a script has in hand: the
+// handle is what `addPass` gave back, and the number is what a script that
+// counted its own passes has. `handle.index` is the same integer either way,
+// so this is one unwrap and not two paths.
+//
+// **The range is not checked here.** Whether an index names a pass that is
+// already in the chain is a question about the chain, the host owns the chain,
+// and a check on this side would be a second copy of it that could disagree.
+// What is checked here is the shape, because "reads: {}" reaching the host as
+// NaN would arrive as an index rather than as a mistake.
+function readsIndex(reads) {
+	if (reads === undefined || reads === null) return -1;
+	const index = typeof reads === 'object' ? reads.index : reads;
+	if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) {
+		throw new TypeError(
+			'`reads` wants the handle three.addPass() gave you for an earlier pass, or its index — '
+			+ 'got ' + JSON.stringify(reads)
+		);
+	}
+	return index;
 }
 
 // **After the compile, and not before it.** Putting a shader in the chain

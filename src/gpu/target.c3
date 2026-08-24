@@ -101,8 +101,13 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 {
 	self.extent = { .width = width, .height = height };
 	self.color_format = TARGET_COLOR_FORMAT;
+	// **Both features, for `ShadowMap.ensure`'s reason.** The depth buffer is an
+	// attachment first and a sampled image second — `p.depth` in a post body is
+	// what reads it — and a format that could be written and not read would fail
+	// at the descriptor write rather than here. D32_SFLOAT is required by the
+	// spec to do both, so this narrows nothing on a conformant device.
 	self.depth_format = vk::findDepthFormat(
-		features: FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		features: FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
 		device: gpu.pdevice
 	);
 
@@ -133,7 +138,11 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
 		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+		// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
+		// this image to every pass so that a body can read `p.depth`. Costs
+		// nothing on a device where the format supports both, which is every
+		// conformant one — see `depth_format` above.
+		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
 	self.depth_memory = vk::create_image_buffer(self.depth, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
@@ -244,6 +253,44 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		.subresourceRange = {
 			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+}
+
+<*
+ The depth attachment, finished being written and about to be sampled.
+
+ `shader_read_barrier`'s shape over the depth aspect, and the two differences are
+ both forced. The source stage is the fragment tests rather than colour output,
+ because that is what wrote it; and the destination layout is
+ `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than `SHADER_READ_ONLY_OPTIMAL`, which
+ is the layout a depth image is read in.
+
+ Issued once per frame, by `PostPass.record_chain`, beside the one for image A.
+ There is no barrier back: `vk::depthBarrier` opens the next frame's geometry pass
+ from `UNDEFINED`, which discards the contents this pass has by then finished
+ reading.
+
+ **Only the post chain reads depth**, and only when there is a chain — a frame
+ with no post shader renders straight into `target.color` and never issues this.
+*>
+fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
+{
+	return {
+		.sType = STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		.subresourceRange = {
+			.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
 			.baseMipLevel = 0,
 			.levelCount = 1,
 			.baseArrayLayer = 0,

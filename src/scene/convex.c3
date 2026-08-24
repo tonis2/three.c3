@@ -45,11 +45,42 @@
  a 60-point cloud is roughly 116 triangles and 348 vertices instead of 60 — which
  is the trade Three.js makes too, and it is paid once at upload.
 
- The missing uvs reach the renderer honestly: `GpuMesh.has_uvs` is false, the
- shader takes its no-uv branch, and the mesh draws its base colour. A fabricated
- parameterisation would be worse than none — there is no unwrap of an arbitrary
- hull that does not visibly seam, and an agent that saw uvs would reasonably
- expect a texture to land somewhere sensible.
+ ## The uvs are a projection, not an unwrap
+
+ There is no unwrap of an arbitrary hull that does not visibly seam — that is
+ still true, and it is why this is not one. Every face gets its own **planar
+ projection along its own normal**, taken in the mesh's local space:
+
+ 	t = normalize(cross(axis, n))     axis is whichever of x/y/z is least like n
+ 	b = cross(n, t)
+ 	uv = (dot(p, t), dot(p, b))
+
+ One unit of uv is one unit of local space on every face, so a texture is the
+ same size everywhere on the hull and the same size on a hull as on a box beside
+ it. Nothing is normalised into 0..1: a `_REPEAT` sampler is what makes that
+ sensible, and squeezing a whole rock into one tile would make the texel density
+ depend on how big the rock is.
+
+ **Why this is honest where a fabricated unwrap would not be.** A projection has
+ a rule an agent can hold: the picture is applied to each facet face-on. It never
+ stretches — the basis is orthonormal and the face is flat, so the mapping is an
+ isometry rather than a projection *of* anything — and the only artefact is that
+ two faces meeting at a crease do not agree along the shared edge. That is
+ visible on a repeating material and invisible on the noise, grain and speckle
+ that a rock, a crystal or a chunk of debris actually wants, which is the case
+ `plan.md` §2 named. The alternative it names, triplanar in the shader, is the
+ same projection with a three-way blend on top and costs every mesh in the
+ project a shader branch to give a hull a softer crease.
+
+ **Deterministic, and stable under the one thing that would show.** The basis is
+ derived from the normal alone by a fixed rule, so re-running quickhull on the
+ same cloud produces the same uvs; and because the projection is of the *position*
+ rather than of a corner index, two coplanar faces — which a hull produces
+ whenever four points are flush — tile continuously across the edge between them
+ instead of showing a seam in the middle of a flat wall.
+
+ The gable ends in `plan.md` §2 are exactly that case: hull prisms next to a
+ textured roof, flat-coloured before this because the stream was empty.
 
  ## The winding is enforced here, not assumed
 
@@ -156,6 +187,39 @@ fn String convex_key(Vec3[] points, Allocator allocator)
 }
 
 <*
+ Two unit vectors perpendicular to `normal` and to each other.
+
+ The seed axis is whichever of x, y and z the normal is *least* aligned with,
+ which is what keeps the cross product away from zero: a normal parallel to the
+ axis would give a tangent of length nothing and a uv of NaN, and a hull has faces
+ pointing every way by construction, so the degenerate case is not hypothetical.
+
+ Fixed rather than arbitrary. The same normal always produces the same pair, so
+ two coplanar faces — which a hull produces whenever four of the cloud's points
+ are flush — get the same basis and their projections line up across the edge
+ between them.
+
+ @require normal.length() > 0.99 && normal.length() < 1.01 : `must already be unit`
+ @param [out] tangent : `Unit, perpendicular to normal.`
+ @param [out] bitangent : `Unit, perpendicular to both, completing a right-handed frame with normal.`
+*>
+fn void face_basis(Vec3 normal, Vec3* tangent, Vec3* bitangent)
+{
+	float ax = math::abs(normal.x);
+	float ay = math::abs(normal.y);
+	float az = math::abs(normal.z);
+	Vec3 axis = { 1, 0, 0 };
+	if (az <= ax && az <= ay) { axis = { 0, 0, 1 }; }
+	else if (ay <= ax) { axis = { 0, 1, 0 }; }
+
+	Vec3 t = axis.cross(normal).normalize();
+	*tangent = t;
+	// A cross of two unit perpendicular vectors is already unit; normalising it
+	// again would be arithmetic with nothing to fix.
+	*bitangent = normal.cross(t);
+}
+
+<*
  Fill `out` with the flat-shaded surface of the convex hull of `points`.
 
  Left empty when the cloud encloses no volume — fewer than four points, or
@@ -201,15 +265,21 @@ fn void build_convex(GeometryBuilder* out, Vec3[] points)
 		}
 
 		// One vertex per corner per face: flat shading, and the crease between
-		// two faces stays a crease. No uvs — the header says why, and
-		// `Assets.upload_built` reads the empty stream as `has_uvs = false`.
+		// two faces stays a crease. The uvs are this face's own planar
+		// projection — the header has the rule and the reason it is a projection
+		// rather than an unwrap.
+		Vec3 tangent;
+		Vec3 bitangent;
+		face_basis(normal, &tangent, &bitangent);
+
 		uint first = (uint)out.positions.len();
-		out.positions.push(a);
-		out.positions.push(b);
-		out.positions.push(c);
-		out.normals.push(normal);
-		out.normals.push(normal);
-		out.normals.push(normal);
+		Vec3[3] corners = { a, b, c };
+		foreach (corner : corners)
+		{
+			out.positions.push(corner);
+			out.normals.push(normal);
+			out.uvs.push({ corner.dot(tangent), corner.dot(bitangent) });
+		}
 		out.triangle(first, first + 1, first + 2);
 	}
 }

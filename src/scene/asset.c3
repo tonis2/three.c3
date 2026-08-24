@@ -165,6 +165,77 @@ struct GpuLayers
 }
 
 <*
+ What the primitive's glTF material said, beyond the base colour and its map.
+
+ ## Why this is a record and not a Material
+
+ `plan.md` §2 called this "per-material glTF loading has no unit to load into",
+ and the reason it stayed open is that a `Material` here would be a *modelling*
+ decision — what a glTF material becomes on this side — before it is a loading
+ one. It still is. So this is not a material: it is **what the file said**, with
+ the images uploaded and their colourspaces right, handed to the script through
+ `ref.material` the way `ref.layers` hands over a layer stack. The script decides
+ what to build from it, through the same constructors a hand-written material goes
+ through.
+
+ That closes the asymmetry the entry was actually about. A normal map was
+ reachable from a script and unreachable from a `.glb`; now the `.glb` carries one
+ across, in linear, at the same slot a script would have put it in.
+
+ ## The four maps, and what shades them
+
+	 normal     `mapped_normal` in a ShaderMaterial, or a LayeredMaterial's
+	            `normal` — the same path a hand-written one takes.
+	 emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
+	 occlusion  nothing built in. A `shade` body multiplies by it in one line.
+	 metallic-  nothing built in, and blocked rather than missing: `plan.md`
+	 roughness  §12's specular term is what a roughness value would feed, and
+	            there is no specular term. Loaded anyway, because a `shade` body
+	            is free to do something else with it and "we parsed it and threw
+	            it away" was the previous answer.
+
+ ## The colourspaces are the load-bearing part
+
+ `load_material_texture`'s header has the argument. Three of these four are data
+ rather than pictures — a direction, a weight, two weights — and go in `LINEAR`;
+ emissive is a colour somebody looked at and goes in `SRGB`. The decode memo is
+ keyed on `(image, space)`, so a file using one image as both a colour map and a
+ data map gets two uploads rather than one wrong one.
+
+ ## Alpha
+
+ `alpha_mode` and `alpha_cutoff` are carried and nothing here acts on them, for
+ the reason above: blending is a property of a *pipeline*, so it is a property of
+ the material a script builds, and this is the file talking. It was written on
+ export and ignored on import; now it crosses, and `asset.instantiate({ materials:
+ true })` is the door that acts on it.
+*>
+struct GpuMaterial
+{
+	// False for a primitive that names no material at all, which is a real glTF
+	// and means "the default material" — `bool` rather than a sentinel index for
+	// `GpuLayers.present`'s reason: the zero fill is then the right answer.
+	bool present;
+	// `gltf::AlphaMode.ordinal` — OPAQUE, MASK or BLEND.
+	uint alpha_mode;
+	float alpha_cutoff;
+	bool double_sided;
+
+	// -1 for every one of these when the file named no image, which is what
+	// `NO_TEXTURE` means everywhere else here. Each holds a reference for as long
+	// as this record does — `GpuMesh.release_material` gives them back.
+	int normal_texture;
+	int occlusion_texture;
+	int emissive_texture;
+	int metallic_roughness_texture;
+
+	float[3] emissive_factor;
+	float emissive_strength;
+	float metallic;
+	float roughness;
+}
+
+<*
  One glTF primitive, uploaded.
 
  A glTF *mesh* is a list of primitives, each with its own material, and the
@@ -223,6 +294,8 @@ struct GpuMesh
 	// second of the three strategies `scene/material.c3`'s header lays out —
 	// encode "unset" as a value that cannot be confused with a real one.
 	GpuLayers layers;
+	// What the glTF material said beyond the base colour — see `GpuMaterial`.
+	GpuMaterial material;
 	collision::Aabb3 bounds;
 
 	// Picking, in mesh-local space. The tree holds raw pointers into the two
@@ -954,7 +1027,8 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 		// its own and goes the same way, for the same reason.
 		self.release_texture(gpu, mesh.texture);
 		mesh.release_layers(self, gpu);
-		mesh.free_buffers();
+		mesh.release_material(self, gpu);
+		mesh.free_buffers(gpu);
 	}
 	asset.meshes.free();
 	free_nodes(asset);
@@ -1291,14 +1365,13 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 	}
 	if (!sweepable) return report;
 
-	// `game.md` G2/S4, the simple half. `MAX_FRAMES_IN_FLIGHT` is 2 and a buffer
-	// freed now may still be referenced by a command buffer the GPU has not
-	// finished, so something has to keep the two apart. A tagged deletion queue
-	// is the version that lets a game unload mid-frame without a hitch; a level
-	// boundary is already a stall, so a full idle costs a frame or two exactly
-	// where nobody is looking, and it is a fraction of the code. The queue is
-	// what the first mid-gameplay unload should build.
-	if (gpu != null) gpu.wait_idle();
+	// `game.md` G2/S4. `MAX_FRAMES_IN_FLIGHT` is 2 and a buffer freed now may
+	// still be referenced by a command buffer the GPU has not finished, so
+	// something has to keep the two apart. This used to be `gpu.wait_idle()` —
+	// right for a level boundary, which is already a stall, and wrong the moment
+	// a game unloads while it is running. Every free below now goes through
+	// `gpu/retire.c3` instead, so the sweep costs an allocation and a list push
+	// per object and the frames in flight finish undisturbed.
 
 	usz bytes_before = self.texture_bytes();
 	uint textures_before = self.texture_count();
@@ -1325,7 +1398,8 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 			// base colour map is, so giving it back here is what keeps a sweep of an
 			// unused piece of a kit from holding that piece's images forever.
 			mesh.release_layers(self, gpu);
-			mesh.release_device();
+			mesh.release_material(self, gpu);
+			mesh.release_device(gpu);
 			mesh.uploaded = false;
 			mesh.texture = -1;
 			mesh.has_normals = false;
@@ -2046,7 +2120,7 @@ fn GpuMesh? Assets.upload_primitive(
 	// on the way out. Without this the failure is a leak that surfaces as
 	// "child objects not destroyed" when the device goes away, several layers
 	// from the cause.
-	defer catch out.free_buffers();
+	defer catch out.free_buffers(gpu);
 
 	// Heap-backed for the same reason as `Assets.init`, even though these are
 	// freed in this scope: `@each_texcoord` formats an attribute name through
@@ -2165,6 +2239,10 @@ fn GpuMesh? Assets.upload_primitive(
 				// hold references to pictures nothing can read.
 				self.load_material_layers(gpu, stream, images, material, &out.layers)!;
 			}
+			// **Not gated on uvs**, unlike the maps: the factors and the alpha mode
+			// are numbers, and a mesh with no uvs still has an alpha mode. The
+			// images inside it are, and `load_material_maps` is where that happens.
+			self.load_material_record(gpu, stream, images, material, out.has_uvs, &out.material)!;
 		}
 	}
 
@@ -2616,6 +2694,77 @@ fn void GpuMesh.free_layers(&self)
 }
 
 <*
+ Give back the four images the glTF material named.
+
+ Beside `release_layers` and called from the same three places, for the same
+ reason: a reference taken at load is a reference somebody has to give back, and
+ the sweep that frees a mesh is where.
+*>
+fn void GpuMesh.release_material(&self, Assets* assets, Gpu* gpu)
+{
+	if (!self.material.present) return;
+
+	assets.release_texture(gpu, self.material.normal_texture);
+	assets.release_texture(gpu, self.material.occlusion_texture);
+	assets.release_texture(gpu, self.material.emissive_texture);
+	assets.release_texture(gpu, self.material.metallic_roughness_texture);
+	self.material = {};
+}
+
+<*
+ Copy a glTF material's non-base-colour half onto the mesh, uploading what it
+ names.
+
+ `GpuMaterial`'s header has what each field is for and why the colourspaces are
+ the load-bearing part.
+
+ @param with_uvs : `False for a mesh with no texture coordinates. The factors still cross; the images do not, because nothing could sample them.`
+*>
+fn void? Assets.load_material_record(
+	&self,
+	Gpu* gpu,
+	gltf::GltfStream* stream,
+	List{ImageMemo}* images,
+	gltf::Material material,
+	bool with_uvs,
+	GpuMaterial* out
+)
+{
+	*out = {
+		.present = true,
+		.alpha_mode = (uint)material.alphaMode.ordinal,
+		.alpha_cutoff = material.alphaCutOff,
+		.double_sided = material.doubleSided,
+		.normal_texture = -1,
+		.occlusion_texture = -1,
+		.emissive_texture = -1,
+		.metallic_roughness_texture = -1,
+		.emissive_factor = {
+			material.emissiveFactor[0],
+			material.emissiveFactor[1],
+			material.emissiveFactor[2],
+		},
+		.emissive_strength = material.emissiveStrength,
+		.metallic = material.metallicFactor,
+		.roughness = material.roughnessFactor,
+	};
+
+	if (!with_uvs) return;
+
+	// **Three linear and one sRGB.** A normal is a direction, an occlusion value
+	// is a weight and a metallic-roughness pair is two more; only the emissive map
+	// is a colour somebody looked at. `load_material_texture`'s header measures
+	// what getting this wrong does.
+	out.normal_texture =
+		self.load_material_texture(gpu, stream, images, material.normalTexture, ColorSpace.LINEAR)!;
+	out.occlusion_texture =
+		self.load_material_texture(gpu, stream, images, material.occlusionTexture, ColorSpace.LINEAR)!;
+	out.metallic_roughness_texture =
+		self.load_material_texture(gpu, stream, images, material.metallicRoughnessTexture, ColorSpace.LINEAR)!;
+	out.emissive_texture = self.load_material_texture(gpu, stream, images, material.emissiveTexture)!;
+}
+
+<*
  Give back every texture slot a layer stack holds, then free the stack.
 
  Called beside the release of `GpuMesh.texture` at each of the two sites that
@@ -2974,7 +3123,7 @@ fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
 	};
 	defer catch
 	{
-		mesh.free_buffers();
+		mesh.free_buffers(gpu);
 		asset.meshes.free();
 		asset.path.free(mem);
 	}
@@ -3010,15 +3159,25 @@ fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
  Handles are zeroed rather than merely freed, because "is this on the device"
  is asked by testing them and a freed-but-non-null handle would answer yes.
 *>
-fn void GpuMesh.release_device(&self)
+fn void GpuMesh.release_device(&self, Gpu* gpu)
 {
-	if (self.positions.buffer != null) self.positions.free();
-	if (self.indices.buffer != null) self.indices.free();
-	if (self.normals.buffer != null) self.normals.free();
-	if (self.uvs.buffer != null) self.uvs.free();
-	if (self.colors.buffer != null) self.colors.free();
-	if (self.joints.buffer != null) self.joints.free();
-	if (self.weights.buffer != null) self.weights.free();
+	// Through the deletion queue, so an unload during gameplay costs no stall —
+	// `gpu/retire.c3` has the argument and `unload_unused` is the caller it was
+	// built for. `retire_memory` answers a stream the mesh never had, so the
+	// seven guards this used to carry are one, inside it.
+	//
+	// A null `gpu` is a scene-math runtime, where every one of these is already
+	// null: there is no device, so there was never an upload.
+	if (gpu != null)
+	{
+		gpu.retire_memory(self.positions);
+		gpu.retire_memory(self.indices);
+		gpu.retire_memory(self.normals);
+		gpu.retire_memory(self.uvs);
+		gpu.retire_memory(self.colors);
+		gpu.retire_memory(self.joints);
+		gpu.retire_memory(self.weights);
+	}
 	self.positions = {};
 	self.indices = {};
 	self.normals = {};
@@ -3048,9 +3207,9 @@ fn void GpuMesh.release_device(&self)
  Separate from `Assets.free` because a primitive that fails partway through
  uploading has to undo its own work before anything else has heard of it.
 *>
-fn void GpuMesh.free_buffers(&self)
+fn void GpuMesh.free_buffers(&self, Gpu* gpu)
 {
-	self.release_device();
+	self.release_device(gpu);
 	// The layer stack's names and list, which are this mesh's memory exactly as
 	// `name` is. The references it held are given back by `release_layers` on the
 	// paths that have a live texture table to give them back to; this is the half
@@ -3068,7 +3227,7 @@ fn void Assets.free(&self, Gpu* gpu)
 		// A slot already swept by `unload_unused` gave everything back and left
 		// its lists zeroed; walking it again would free them twice.
 		if (!asset.alive) continue;
-		foreach (&mesh : asset.meshes) mesh.free_buffers();
+		foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
 		asset.meshes.free();
 		free_nodes(asset);
 		free_stream(asset);

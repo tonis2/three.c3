@@ -109,6 +109,19 @@ struct Draw
 // a layout that reflects differently and reads a record out of the middle of a
 // float4. The three occupy 24 bytes of the 128 every device must offer, which is
 // where `MATERIAL_UNIFORM_BUDGET`'s 104 comes from.
+// **The spilled uniform table, when there is one.**
+//
+// A material's uniforms live in the push block, which leaves 104 bytes — six
+// rows of four floats. A material that wants more than that gets this struct
+// instead: its *array* columns move here and the block carries a pointer, so the
+// ceiling stops being a push-constant limit. `src/shader/material_source.c3` has
+// `material_spills` and the budget.
+//
+// **Empty for almost every material**, and then this line is replaced by nothing
+// at all — the generated source for a material that fits is byte for byte what
+// it was before the spill existed.
+//@table
+
 struct PushData
 {
     FrameBlock* frame;

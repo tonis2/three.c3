@@ -47,11 +47,17 @@ away from the camera. The camera follows things now — third person, and first
 person as a boom of zero length. And there is a clock: game time, a scale that
 zero means paused, a step for a stopped one, and a fixed-rate loop under it.
 
+A post body reads depth in world units and may name a third source; a merged kit
+comes apart into its pieces; a hull wears a texture; a uniform table larger than
+the push block moves to a buffer on its own; a `.glb`'s normal, emissive,
+occlusion and alpha mode reach the script; and nothing stalls the device to
+unload any more.
+
 **That paragraph is as much inventory as this file keeps.** What each of those
 does is in its own source file, and `git log -p -- plan.md` has the milestone
 accounts that used to be here.
 
-	c3c test --trust=full       691 passed, 0 failed, leak-clean
+	c3c test --trust=full       721 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -128,16 +134,18 @@ every one of them is something a person will trust and be wrong about.
 Each of these was a decision, not an oversight. The trigger is written down so
 the decision can be revisited on evidence rather than on somebody's mood.
 
-- **The frame-tagged deletion queue exists now, for pipelines only.**
-  `gpu/retire.c3`: a retired object records the frame ordinal it was given back
-  at and is destroyed once `MAX_FRAMES_IN_FLIGHT` frames have started since,
-  which the fence wait at the top of every frame path is what makes sound. It
-  was built for `PipelineCache` eviction and carries one list, of pipelines.
-  Buffers are a second list beside it and the same ordinal — a tagged union
-  before there are two tags to carry would be a name for something that has one.
-  The unload sweep and `set_material_map` still use `vkDeviceWaitIdle`, which is
-  right for a level boundary because a level boundary is already a stall.
-  **Trigger:** something unloads during gameplay.
+**Nine of them have since been built**, and each is kept here as a `*(Built: …)*`
+paragraph rather than deleted, because the argument for the deferral is what
+makes the shape of the answer readable — and in one case (the driver's pipeline
+cache) the measurement says the deferral was right and the thing was built
+anyway.
+
+*(Built: the deletion queue carries buffers and images as well as pipelines —
+`gpu/retire.c3` has the one verb and the argument for why it is not a tagged
+union. `Assets.unload_unused`, every texture whose last reference goes when a
+map is replaced, a shadow map resized mid-play and a post chain resized on a
+window drag all went from `vkDeviceWaitIdle` to a list push. What still stalls is
+teardown and the swapchain, which has to.)*
 
 - **A material nobody disposes is still immortal**, exactly as a texture nobody
   disposes is. `material.dispose()` gives back the handle's reference and the
@@ -150,108 +158,109 @@ the decision can be revisited on evidence rather than on somebody's mood.
   evidence that scripts in practice do not dispose — at which point the answer
   is probably a warning naming the count, not a finalizer.
 
-- **A uniform table is capped by the 104-byte push budget** — six rows of four
-  floats, or eight of three. It was 52 until §15 moved the geometry contract into
-  a buffer and gave the block back; a table of hundreds still needs a device
-  buffer behind a BDA, which is now a thing this codebase does once and could do
-  twice. **Trigger:** something wants more rows than that.
+*(Built: a uniform table past the 104-byte push budget moves into a device
+buffer behind a pointer in the block, so the ceiling is `MATERIAL_TABLE_BUDGET`
+— 256 KiB, thousands of rows — rather than six rows of four floats. The **plain**
+uniforms stay in the push block, which is what keeps `set_uniform` a memcpy with
+nothing to invalidate; only the array columns move, and the body cannot tell
+which shape it got. Slang reflects the pointee's offsets, so nothing computes a
+layout: `shader/reflect.c3` follows exactly one pointer and `ShaderField.indirect`
+is what comes back. The buffer is per frame in flight and refilled at `prepare`,
+for the instance array's reason.
 
-- **Mesh splitting.** Every AI-generated kit ships as one merged mesh; the town
-  square needed an external tool to cut three packs into 23 pieces by connected
-  components and layout gaps. The ingredients are already on the CPU —
-  `hull_positions` and `hull_triangles` are what the picking tree holds, and the
-  export proved they are enough to rebuild a mesh from. A split is a
-  connected-components pass over the triangles and then `upload_built` per
-  component. **Trigger:** an agent generating kits with no person in the loop.
-  Until then a kit that arrives merged can be cut in Blender once, and a
-  splitter in the engine is a tool that runs at load time forever to fix a file
-  that could have been fixed once.
+A bug worth keeping: the shader **disk** cache stored a push field's name, offset
+and size and not `indirect`, so a warm cache came back with a spilled table's
+uniforms unnamed. Format version 3, and `a_table_costs_a_row_at_a_time` compiles
+twice through the cached door to pin it.)*
 
-- **Per-material glTF loading has no unit to load into.** `upload_primitive`
-  folds `baseColorFactor` and `baseColorTexture` into the `GpuMesh` and drops
-  metallic-roughness, normal, occlusion and emissive on the floor. So this is a
-  *modelling* decision — what a glTF material becomes on this side — before it
-  is a loading one, and that decision belongs wherever PBR does.
-  `load_material_images(i)` is the verb waiting for it and the decode memo is
-  keyed the way that verb would want. The *shading* half of one of those four
-  now exists — a `ShaderMaterial` can declare a sampler, take a linear texture
-  and call `mapped_normal` — so a normal map is reachable from a script and
-  unreachable from a `.glb`, which is the asymmetry this entry is about. Note
-  what the memo would need: it is keyed on the glTF image index alone, and a
-  file using one image as both a colour and a data map wants the colourspace in
-  that key the way `claim_texture` now has it.
+*(Built: `scene/split.c3` and `ref.split()`. Connected components over the
+triangles — two are in the same piece when they share a vertex, which is right
+because a merged kit is merged by *concatenation* — then `upload_built` per
+component, through `Assets.read_geometry` so the streams come back exact rather
+than through the picking tree. A mesh that is one connected surface answers with
+itself and uploads nothing, which is a correctness short-circuit as much as a
+saving. Measured on a real pack: `farm_animals.glb` is one primitive and comes
+apart into 35 — four animals and the eyes, horns and hooves that were modelled
+as separate shells. A piece inherits the source's colour and base colour map and
+holds its own reference; a mesh with a layer stack is refused rather than split
+into pieces that lost it.)*
 
-- **`ConvexGeometry` carries no uvs**, so a hull can only ever be flat-coloured.
-  The reason is real — a hull's faces meet at hard creases and there is no unwrap
-  of an arbitrary one that does not seam — but it is a sharp edge on the only
-  escape hatch from the six parametric shapes, and it has already bitten, on
-  gable ends built as hull prisms sitting next to a textured roof.
-  **Trigger:** anything wanting a textured rock, crystal or piece
-  of debris. Triplanar projection in the shader is probably less work than an
-  unwrap, and an extrude/prism primitive with real uvs would cover the
-  flat-sided cases outright.
+*(Built, as a **record** rather than as a material — `GpuMaterial` in
+`scene/asset.c3`, `ref.material` on the JS side. The four that were dropped are
+loaded with their colourspaces right: normal, occlusion and metallic-roughness
+are data and go in `LINEAR`, emissive is a colour and goes in `SRGB`, and the
+decode memo was already keyed on `(image, space)`. What it deliberately is not is
+a `Material`, because "what a glTF material becomes on this side" is still the
+modelling decision this entry named and it still belongs with PBR; what crosses
+is what the file said, and the script decides.
 
-- **glTF `alphaMode` is written on export and ignored on import.** A `.glb`
-  authored with `BLEND` loads and renders opaque, because consuming it at load
-  would mean the loader creating material slots — and the loader has no concept
-  of a material at all: `upload_primitive` folds `baseColorFactor` and
-  `baseColorTexture` into the `GpuMesh` and there is nowhere for a blend mode to
-  live. That is the same missing unit as the per-material-loading entry above,
-  and it should be answered once rather than twice. The workaround is one script
-  line — `mesh.material = new three.MeshLambertMaterial({ transparent: true })`
-  — which is why the export side closed on its own: this engine's own round trips
-  are honest, and only somebody else's file is affected. **Trigger:** shipped
-  assets that rely on it, or a round trip through a tool that authors blending.
+`asset.instantiate({ materials: true })` is one answer to that decision, written
+down where it is made: normal map to `normal`, emissive to a zero-opacity layer,
+`alphaMode` to `transparent`, `doubleSided` to `side`. Occlusion and
+metallic-roughness are carried and not applied — §12's specular term is what a
+roughness value would feed, and there is no specular term.)*
 
-- **The driver's own pipeline cache is not persisted.** `shader/disk_cache.c3`
-  keeps the seventeen-millisecond half of a shader — the Slang compile — and
-  leaves the remaining millisecond, the driver turning SPIR-V into a
-  `VkPipeline`, to be paid on every run. Keeping that half means
-  `vkCreatePipelineCache` with a blob read off disk, which is a second binary
-  format with a second and stricter validity rule: the blob is only valid for the
-  device's `pipelineCacheUUID`, a driver update invalidates it with no error, and
-  a driver handed a blob from elsewhere is entitled to do anything at all. So it
-  needs the same header, version and identity treatment the shader cache has,
-  written a second time, to save about a millisecond per distinct pipeline out of
-  a startup that is now under two hundred. **Trigger:** pipeline creation
-  measurably hurting startup — a scene with dozens of distinct materials, or a
-  post chain rebuilt often enough to notice.
+*(Built: every face gets its own planar projection along its own normal, in the
+mesh's local space, at one uv unit per unit. Not an unwrap — the reason there is
+no unwrap of an arbitrary hull is unchanged — but an isometry per facet, so
+nothing stretches, a texture is the same size on a hull as on a box beside it,
+and two coplanar faces tile continuously because the projection is of the
+*position*. The only artefact is that facets meeting at a crease do not line up
+along the shared edge, which is invisible on the noise and grain a rock wants and
+visible on a regular pattern. Triplanar was the alternative and is this with a
+three-way blend on top, at the cost of a branch in every mesh in the project.)*
 
-- **The Slang version is not in the shader cache key.** `lib/slang.c3l` exposes
-  no compiler version — there is no build tag, no version query and nothing
-  version-shaped anywhere in the binding — so a stored module is keyed on its
-  source, its entry points, `SLANG_ARGUMENTS` and `SHADER_CACHE_FORMAT_VERSION`,
-  and on nothing whatever about the compiler that produced it. Upgrading the SDK
-  therefore leaves `build/shader-cache` full of modules built by a compiler that
-  is no longer installed, and they will be loaded and used. The manual lever is
-  the format version: bump it and every stored module fails the loader's version
-  check, which `the_cache_key_covers_the_arguments_and_the_format_version` is
-  what keeps in place. The blunt lever is `rm -rf build/shader-cache`. Hashing
-  `libslang.dylib` was considered and refused — 35 MB of reading per process to
-  save seventeen milliseconds. **Trigger:** a Slang upgrade that emits different
-  SPIR-V for identical source. Expect it to arrive as "the shader still behaves
-  the way it did before the upgrade", true on a machine whose cache is warm and
-  not reproducible on one whose cache is empty.
+*(Built, and answered once with the entry above rather than twice: `alphaMode`
+and `alphaCutoff` are on the material record, `ref.material.alphaMode` reads them,
+and `instantiate({ materials: true })` is what turns BLEND into a transparent
+material. `the_alpha_mode_survives_the_round_trip` is the check, and it asserts
+both halves separately — the mode crossing and the mode being acted on — because
+only the second one is what made a `.glb` render opaque.)*
 
-- **A script cannot say which pass another pass reads.** A pass gets its
-  predecessor through binding 0 and the frame the geometry left through binding
-  1, and adjacency is the whole edge set — which covers bloom and nothing wider.
-  A pass wanting a *third* source, or a downsampled one, is where this grows
-  next. **Trigger:** script-authored edges — the point at which no human is left
-  in the loop to reason about the dependency. §13 has the argument.
+*(Built, and **it buys nothing on this machine** — which is written down rather
+than quietly dropped. `gpu/driver_cache.c3` is the second binary format the entry
+described, with its own header, its own version and the identity the spec
+actually names: a blob is only handed to `vkCreatePipelineCache` if this device's
+`vendorID`, `deviceID`, `driverVersion` and `pipelineCacheUUID` all match what
+wrote it. Measured warm against cold with the Slang half already cached:
+`examples/chain.js` 0.21 s either way, `examples/village.js` 0.61–0.68 against
+0.62–0.64. MoltenVK does not pay for pipeline creation the way the entry assumed
+a driver does — the expensive part is upstream, in the half the shader cache
+already keeps. It stays because it is where a desktop driver would need it and
+because it costs one read at startup and usually no write at all: MoltenVK's
+serialization is not byte-stable, so `save` writes on **growth** rather than on
+difference, which converges after two runs instead of rewriting 300 KB forever.)*
 
-- **A post body sees colour and nothing else.** No depth, no normals, no motion
-  vectors, so no depth of field, no SSAO, no fog that respects distance and no
-  edge detection that is not luminance-based. The depth image exists and is
-  already the right size (`target.depth`), so the cost is not the resource: it is
-  that the depth attachment would have to be transitioned to
-  `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and back around the post pass, a second
-  binding appears in `post.slang`, and `Post` grows a field whose value is a
-  non-linear device depth that almost every body would want linearized — which
-  means shipping the near/far reconstruction with it or shipping a footgun.
-  **Trigger:** a first request for depth-aware post. Do it with `p.depth` already
-  linearized to world units, using the camera's derived near and far, rather than
-  handing over the raw buffer.
+*(Built: `slang::build_tag()` — `spGetBuildTagString`, which the binding did not
+expose and now does. It reports `2026.12.2` here, is hashed into the cache
+filename and written into the file as checked identity, and costs one call
+returning a pointer to static storage rather than the 35 MB of reading that
+hashing `libslang.dylib` would have. So an SDK upgrade moves every key instead of
+shadowing it. What it cannot see is two *untagged* compiler builds, which report
+the same string; `SHADER_CACHE_FORMAT_VERSION` is still the lever for that.)*
+
+*(Built, for the third source and not for the downsampled one.
+`three.addPass({ fragment, reads: earlierPass })` binds that pass's output as
+`tap`, and naming a pass is what makes its output survive: it is given an image
+of its own instead of a ping-pong slot, which `PostPass.output_of` decides and is
+the whole cost. Still one index rather than an edge list, so adjacency plus the
+tapped set is still the barrier derivation and §13's "why not a render graph"
+stands. A body that reads `p.tap` having named nothing gets image A — the same
+answer `p.scene` gives — because the template fills the field for every body and
+reflection cannot tell "reads it" from "does not". **Still not covered:**
+downsampled intermediates, which need P0/P1 to become a pool keyed by extent, and
+MRT.)*
+
+*(Built, for depth, with the instruction this entry gave: `p.depth` is world
+units along the view direction, near-plane distance on the closest thing drawn
+and far-plane distance on a pixel nothing was drawn into, and the reconstruction
+ships with it rather than the raw buffer. The camera's planes reach the shader as
+8 bytes of push block — the post uniform budget went 112 → 104 — and the depth
+attachment goes to `DEPTH_STENCIL_READ_ONLY_OPTIMAL` once per frame, beside image
+A's barrier, with no barrier back because the next frame's geometry pass opens it
+from `UNDEFINED`. Sampled nearest, because `D32_SFLOAT` is not required to filter
+and a filtered depth is meaningless at a silhouette anyway. **Still not there:**
+normals and motion vectors.)*
 
 - **A stale asset handle is refused at `add()`, not at `new three.Mesh()`.** The
   constructor validates the shape of what it was handed and not the liveness of
@@ -881,11 +890,12 @@ becomes right for a reason that will exist by then.
 - **Downsampled intermediates.** A bloom pyramid at ½, ¼, ⅛ means per-pass
   extents, so P0/P1 become a pool keyed by extent. Still not a solver, but not
   two fields either. This is the piece that grows first.
-- **Reading three passes back**, or a pass fanning out to two consumers. `prev`
-  and `scene` are the only two edges.
+- **Reading four passes back**, or a pass fanning out to two consumers. `prev`,
+  `scene` and one `reads` tap are the edges; the tap closed §2's "a pass wanting
+  a third source", and a second tap per pass is where this would grow next.
 - **MRT** — a pass writing two attachments.
-- **Depth, normals or motion vectors in a post body.** §2 has the cost and the
-  instruction to hand over `p.depth` already linearized rather than raw.
+- **Normals or motion vectors in a post body.** Depth is built — `p.depth` in
+  world units, per §2's instruction — and the other two are not.
 
 ### What is left of the order of work
 
@@ -1286,7 +1296,9 @@ measurement this section does not have.
 - **No `BufferGeometry` and no attribute access.** That is the thesis. Nothing in
   eight milestones has needed one, and a game is the workload that would be worst
   served by it. `ConvexGeometry`'s point cloud is a description too — most of the
-  points are discarded and none can be read back.
+  points are discarded and none can be read back. `ref.split()` does not undermine
+  it either: what comes back is asset handles, not vertices, and the cut is one
+  the geometry already had.
 - **No ECS.** The scene graph is the entity list and a game's components are
   JavaScript objects keyed by node id. Building an entity system in C3 would be
   building the part JavaScript is good at.
@@ -1310,12 +1322,14 @@ measurement this section does not have.
   nothing to schedule. **§13 keeps the shape the alternative takes** — a stage
   list, a chain whose adjacency is its own edge set, and the one trigger that
   would change the answer, which is script-authored *edges* rather than pass
-  count. The counting itself was swept; `git log -p -- plan.md` has it, including
-  the one place it was out by.
-- **What stays absent from the chain: named passes, edges, removal from the
-  middle, and downsampled intermediates.** A pass reads its predecessor and the
-  original frame and nothing else, so a bloom pyramid at ½ and ¼ is the piece that
-  grows first (§13's "what this does not cover"), and reordering is a `setPost`
+  count. `three.addPass({ reads })` is one index rather than an edge set and does
+  not cross that line: adjacency plus the tapped set is still what the barriers
+  are derived from. The counting itself was swept; `git log -p -- plan.md` has it,
+  including the one place it was out by.
+- **What stays absent from the chain: named passes, removal from the middle, and
+  downsampled intermediates.** A pass reads its predecessor, the original frame
+  and one earlier pass it names with `reads`, so a bloom pyramid at ½ and ¼ is the
+  piece that grows first (§13's "what this does not cover"), and reordering is a `setPost`
   followed by the `addPass` calls you want rather than a mutation — which is what
   keeps a handle from ever pointing at somebody else's shader. The old advice
   holds where it still applies: composing two *pointwise* effects inside one body
@@ -1369,10 +1383,10 @@ TODO:
   
   - §1 defects — Linux/Windows never run; WM_DPICHANGED unhandled; Window.width/height stale on Linux; ExportBatch keys
     on (asset, mesh) so sibling nodes collapse onto the first material.
-  - §2 — retire queue is pipelines-only; 104-byte uniform cap; mesh splitting; no material unit for glTF import
-    (metallic-roughness/normal/occlusion/emissive dropped, and alphaMode ignored on import for the same reason);
-    ConvexGeometry has no uvs; driver pipeline cache not persisted; Slang version not in the cache key; no third pass
-    source; no depth/normals in a post body.
+  - §2 — materials nobody disposes are immortal; a stale asset handle is refused at add() rather than at the
+    constructor. (The other nine are built — see the `*(Built: …)*` paragraphs. What they left open: normals and
+    motion vectors in a post body, downsampled post intermediates and MRT, and metallic-roughness having nothing to
+    shade it, which is §12's.)
   - §3 — no crossfade, no morph targets, no sockets; a measured validation gap on the compute→vertex barrier.
   - §4 — KTX2 decode is the big one: grep -rn ktx src test is empty, so every shipped .glb using KHR_texture_basisu
     loads untextured. Plus asset.imageAt(i), async per-mesh load, and the sky.
@@ -1384,6 +1398,6 @@ TODO:
     setAnimationLoop/bodies/camera, and what main.js and run_script share).
   - §12 — second light, per-light colour, specular term (which gates roughness/metalness everywhere: §4's maps, §14's
     PBR fields, §16's export).
-  - §13 — the material unit, IBL bake, fusing pointwise passes; downsampled intermediates first.
+  - §13 — the material unit, IBL bake, fusing pointwise passes; downsampled intermediates first, then a second tap.
   - §14 — parallax; the PBR half is §12's.
   - §16 — lines don't export.

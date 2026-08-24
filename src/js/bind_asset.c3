@@ -363,7 +363,6 @@ fn void js_texture_dispose(
 	if (!self.pass.assets.texture_alive(index)) return;
 
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
-	if (gpu != null && self.pass.assets.texture_refs(index) == 1) gpu.wait_idle();
 	self.pass.assets.release_texture(gpu, index);
 }
 
@@ -876,6 +875,147 @@ fn void js_mesh_bounds(
 
 	GpuMesh* mesh = self.pass.assets.mesh(id, (uint)arg_int(&js, argc, args, 2));
 	*out = mesh == null ? qjs::null_value() : aabb_value(&js, mesh.bounds);
+}
+
+<*
+ `meshMaterial(index, generation, mesh)` — what the primitive's glTF material
+ said, beyond the base colour that is already on the mesh.
+
+ `scene/asset.c3`'s `GpuMaterial` has what is in it and why it is a record rather
+ than a `Material`. What crosses is one flat array, `js_mesh_layers`'s shape and
+ for its reason — the QuickJS shim has no property enumeration, so a positional
+ row is cheaper on both sides than an object.
+
+	 0  alphaMode ordinal      4  emissiveFactor r     8  metallic
+	 1  alphaCutoff           5  emissiveFactor g     9  roughness
+	 2  doubleSided           6  emissiveFactor b    10  normal texture
+	 3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
+	                                                 12  emissive texture
+
+ **Reading this uploads the mesh, and every read holds new references**, exactly
+ as `meshLayers` does and for the same reason: the images exist only once the
+ primitive is on the device, and each texture handed back is a handle of its own.
+
+ `null` for a primitive that names no material, which is a real glTF and means
+ the default one.
+*>
+fn void js_mesh_material(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	uint index = (uint)arg_int(&js, argc, args, 2);
+	self.pass.assets.ensure_uploaded(id, index);
+
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null || !mesh.material.present)
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	GpuMaterial* material = &mesh.material;
+	qjs::Value row = js.array();
+	js.set_index(row, 0, qjs::int_value((int)material.alpha_mode));
+	js.set_index(row, 1, qjs::number_value(material.alpha_cutoff));
+	js.set_index(row, 2, qjs::bool_value(material.double_sided));
+	js.set_index(row, 3, qjs::number_value(material.emissive_strength));
+	js.set_index(row, 4, qjs::number_value(material.emissive_factor[0]));
+	js.set_index(row, 5, qjs::number_value(material.emissive_factor[1]));
+	js.set_index(row, 6, qjs::number_value(material.emissive_factor[2]));
+	js.set_index(row, 7, layer_texture_value(&js, &self.pass.assets, material.occlusion_texture));
+	js.set_index(row, 8, qjs::number_value(material.metallic));
+	js.set_index(row, 9, qjs::number_value(material.roughness));
+	js.set_index(row, 10, layer_texture_value(&js, &self.pass.assets, material.normal_texture));
+	js.set_index(row, 11, layer_texture_value(&js, &self.pass.assets, material.metallic_roughness_texture));
+	js.set_index(row, 12, layer_texture_value(&js, &self.pass.assets, material.emissive_texture));
+	*out = row;
+}
+
+<*
+ `splitMesh(index, generation, mesh)` — one mesh, cut into its connected
+ components, as an array of `[index, generation]` asset handles.
+
+ `scene/split.c3` has the algorithm and what a piece does and does not inherit.
+ What is here is the boundary: the three refusals it can produce become three
+ sentences an agent can act on, because "MESH_HAS_LAYERS" says nothing about what
+ to do next.
+
+ A mesh that is already one piece answers with an array of one holding *this*
+ mesh's own handle — nothing is uploaded. That is not an error and is deliberately
+ not reported as one: "this kit was already cut" is something a script finds out
+ by looking at the length.
+*>
+fn void js_split_mesh(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("splitting a mesh uploads its pieces, and this context has no GPU device");
+		return;
+	}
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	uint index = (uint)arg_int(&js, argc, args, 2);
+
+	@pool()
+	{
+		List{MeshPiece} pieces;
+		pieces.tinit(8);
+
+		uint? count = self.pass.assets.split_mesh(&self.renderer.gpu, id, index, &pieces);
+		if (catch err = count)
+		{
+			switch (err)
+			{
+				case MESH_HAS_LAYERS:
+					*out = js.raise(
+						"that mesh carries a layer stack, and a piece cut out of it cannot inherit one — "
+						"read the stack with ref.layers, build a LayeredMaterial from it, and put that on "
+						"the pieces yourself"
+					);
+				case MESH_CANNOT_BE_SPLIT:
+					*out = js.raise(
+						"there are no triangles to cut there — that mesh index does not exist, or it is a "
+						"line mesh, whose indices are pairs"
+					);
+				case TOO_MANY_SPLIT_PIECES:
+					*out = js.raise(string::tformat(
+						"that mesh comes apart into more than %d pieces, which is not a kit — it is "
+						"geometry whose triangles do not touch each other",
+						MAX_SPLIT_PIECES
+					));
+				default:
+					*out = js.raise(string::tformat("that mesh could not be split: %s", err));
+			}
+			return;
+		}
+
+		// `[index, generation, mesh]` rather than `asset_value`'s pair: a piece
+		// carries which mesh of its asset it is, because the one-component answer
+		// is the source's own handle and that mesh need not be zero.
+		qjs::Value list = js.array();
+		foreach (i, piece : pieces)
+		{
+			qjs::Value triple = js.array();
+			js.set_index(triple, 0, qjs::int_value((int)piece.asset.index));
+			js.set_index(triple, 1, qjs::int_value((int)piece.asset.generation));
+			js.set_index(triple, 2, qjs::int_value((int)piece.mesh));
+			js.set_index(list, (uint)i, triple);
+		}
+		*out = list;
+	};
 }
 
 <*

@@ -21,24 +21,34 @@
 //
 // ## What is deliberately absent
 //
-// No `Instance`, no `FrameBlock`, no geometry pointers, no depth: this pass
-// draws three vertices with no vertex input and reads two images — the pass
-// before it and the scene, which are the same image on a chain of one. That is also
-// why its push block shares nothing with the mesh contract — `POST_PUSH_FIELDS`
-// pins `info` at 0 and nothing else, and `MeshPipeline.init_post` checks against
-// that list rather than `MESH_PUSH_FIELDS`.
+// No `Instance`, no `FrameBlock`, no geometry pointers: this pass draws three
+// vertices with no vertex input and reads four images — the pass before it, the
+// scene (which are the same image on a chain of one), the frame's depth buffer,
+// and whichever earlier pass this one named. That is also why its push block shares nothing with the mesh contract
+// — `POST_PUSH_FIELDS` pins `info` and `planes` and nothing else, and
+// `MeshPipeline.init_post` checks against that list rather than
+// `MESH_PUSH_FIELDS`.
 
 // What the pass knows about itself, and what the agent's uniforms are appended
-// to. `info` is first and 16 bytes, which is what `POST_PUSH_FIELDS` pins:
+// to. `info` is first and 16 bytes, `planes` follows it and is 8 — together they
+// are what `POST_PUSH_FIELDS` pins, and the agent's uniforms start at 24.
 //
-//     xy  the target's extent in pixels
-//     z   seconds since the shader was set — the clock starts at `setPost`
-//     w   unused, and reserved rather than removed: a float4 is the alignment
-//         a scalar-layout block wants at offset 0 anyway, so the fourth
-//         component is free and a fifth field would not be.
+//     info.xy   the target's extent in pixels
+//     info.z    seconds since the shader was set — the clock starts at `setPost`
+//     info.w    unused, and reserved rather than removed: a float4 is the
+//               alignment a scalar-layout block wants at offset 0 anyway, so
+//               the fourth component is free and a fifth field would not be.
+//     planes.x  the camera's near plane, in world units
+//     planes.y  its far plane
+//
+// The planes are here rather than in `info.w` because linearising a device depth
+// needs both of them, and they cost the agent 8 bytes of a 128-byte block once
+// rather than costing a body that wants `p.depth` a uniform it has to remember
+// to set.
 struct PushData
 {
     float4 info;
+    float2 planes;
     //@uniforms
 };
 [vk_push_constant] const PushData push;
@@ -69,7 +79,52 @@ struct PushData
 [vk::binding(0, 0)] Sampler2D prev;
 [vk::binding(1, 0)] Sampler2D scene;
 
-// The samplers the agent asked for, at bindings 2..N in declaration order —
+// **The third reserved binding: the frame's own depth buffer.**
+//
+// Not a colour image and not read like one. It is `D32_SFLOAT` in
+// `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, sampled with a *nearest* sampler — see
+// `PostPass.ensure_sampler` for why linear is both unavailable and meaningless —
+// and its red channel is the non-linear device depth the rasteriser wrote.
+//
+// A body never touches this: `p.depth` is the same texel already reconstructed
+// into world units, and that is the whole reason this binding is reserved rather
+// than being a texture a script attaches. `plan.md` §2 named the alternative —
+// "shipping the near/far reconstruction with it or shipping a footgun" — and
+// this is the first of the two.
+[vk::binding(2, 0)] Sampler2D depth_buffer;
+
+// **The fourth reserved binding: another pass's output.**
+//
+// `plan.md` §2's "a pass wanting a third source". `prev` and `scene` are
+// adjacency and the original picture, and between them they cover bloom; what
+// they do not cover is a pass reading something from the *middle* of the chain —
+// a blurred copy that two later passes both want, a mask one pass built for
+// another to apply.
+//
+// A pass says which one by handle: `three.addPass({ fragment, reads: blurred })`.
+// It is one index and not an edge list, which is what keeps the chain's barriers
+// derived from adjacency — `render/chain.c3` has that argument, and
+// `PostPass.output_of` has the whole cost of it: a pass somebody taps writes into
+// an image of its own instead of a ping-pong slot.
+//
+// **Bound to image A when nothing was named**, which makes `p.tap` the rendered
+// scene — what `p.scene` gives, and this chain's existing rule for a source that
+// is not distinct (`p.color == p.scene` on a chain of one). The alternative,
+// refusing, is not available: this template fills `p.tap` for every body, so
+// Slang keeps the sampler whether the agent's lines mention it or not and the
+// reflected layout cannot tell "reads it" from "does not".
+//
+// **Named `tap_image` and not `tap`**, unlike `prev` and `scene`, which share
+// their names with their fields. `tap` is a word shader bodies use — "a nine-tap
+// blur" — and `examples/blend_post.js` had a helper called exactly that; a
+// reserved global by that name turns somebody's own function into a conflicting
+// declaration. `depth_buffer` is named for the same reason. The *field* stays
+// `p.tap`, which is what a body reads.
+//
+// `p.tap` is the same-pixel sample, as `p.color` is for `prev`.
+[vk::binding(3, 0)] Sampler2D tap_image;
+
+// The samplers the agent asked for, at bindings 4..N in declaration order —
 // `shaders/material.slang` has the argument for why the indices are generated
 // rather than written. A post pass wants them for the things a frame cannot
 // supply about itself: a colour ramp to grade through, a noise field to distort
@@ -113,10 +168,35 @@ struct Post
     // The target's extent in pixels. `1.0 / p.resolution` is one texel, which is
     // what a blur or an edge filter needs to step by.
     float2 resolution;
-    // Seconds since the shader was set, as a float. Wall clock, not a game
-    // clock: nothing here knows about a simulation. `plan.md` §2 has the
-    // deferral.
+    // Seconds since the shader was set, as a float. The **game** clock — so a
+    // paused world has a still post chain, and `three.clock.timeScale = 0.5`
+    // halves an animated effect along with everything else. `scene/clock.c3`.
     float time;
+    // How far this pixel is from the camera, **in world units, along the view
+    // direction**. Near-plane distance on the closest thing drawn, far-plane
+    // distance on a pixel nothing was drawn into.
+    //
+    // **Already linear**, which is the whole design of this field. The device
+    // depth is a reciprocal distribution — half its range covers the first few
+    // percent of the frustum — and every body that wanted it would otherwise
+    // write the same reconstruction, or forget to and get a picture where fog
+    // and focus bunch up against the camera. `plan.md` §2: "do it with `p.depth`
+    // already linearized to world units, rather than handing over the raw
+    // buffer".
+    //
+    // Compare it against distances, not against 0..1: `p.depth > 20` is twenty
+    // units away. `(p.depth - near) / (far - near)` is the normalised version if
+    // a body wants one, and the planes are not exposed because a body that needs
+    // them is a body doing the reconstruction this field already did.
+    float depth;
+    // This pixel of the pass named by `reads`, **linear**. The rendered scene
+    // when none was named, which is `p.scene` — see the binding above for why
+    // that is a definition rather than a fallback.
+    //
+    // The sampler is in scope as `tap`, for `prev`'s reason: a body wanting a
+    // *different* pixel of it — which is most of why a third source is worth
+    // having — reads `tap.Sample(uv)` directly.
+    float3 tap;
 };
 
 struct VertexOutput
@@ -170,6 +250,24 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     p.time = push.info.z;
     p.color = prev.Sample(input.uv).rgb;
     p.scene = scene.Sample(input.uv).rgb;
+    p.tap = tap_image.Sample(input.uv).rgb;
+
+    // The reciprocal undone. `d` is what the rasteriser wrote under a standard
+    // Vulkan 0..1 perspective projection, and
+    //
+    //     z = near * far / (far - d * (far - near))
+    //
+    // is its inverse. At d = 0 that is `near` and at d = 1 it is `far`, which is
+    // what makes a pixel nothing was drawn into read as the far plane rather
+    // than as a division by zero: the clear value is 1.0.
+    float d = depth_buffer.Sample(input.uv).r;
+    float near = push.planes.x;
+    float far = push.planes.y;
+    float span = far - d * (far - near);
+    // A guard rather than an assumption. `span` is positive for every d in 0..1
+    // with sane planes, and a runtime that has not set them yet — both zero —
+    // would otherwise put a NaN into every body that reads `p.depth`.
+    p.depth = span > 1e-6 ? near * far / span : far;
 
     // **Alpha is not the agent's to return**, for `material.slang`'s reason and
     // one more: the last thing this chain writes goes to the blit and the

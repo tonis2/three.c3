@@ -439,8 +439,9 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
  The whole of the post pass's push contract: one `float4` and nothing else.
 
  `shaders/post.slang` declares `info` first — xy the target's extent, z seconds
- since the shader was set, w reserved — and the agent's uniforms after it, so
- `POST_PUSH_START` is 16 and the budget is the other 112.
+ since the shader was set, w reserved — then `planes`, the camera's near and far,
+ and the agent's uniforms after those. So `POST_PUSH_START` is 24 and the budget
+ is the other 104.
 
  **It shares nothing with `MESH_PUSH_FIELDS` and that is deliberate.** A post
  pass has no geometry, no instances and no frame block, so a contract that
@@ -450,6 +451,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 *>
 const PushFieldLayout[*] POST_PUSH_FIELDS = {
 	{ "info", 0, 16 },
+	{ "planes", 16, 8 },
 };
 
 <*
@@ -981,7 +983,7 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		.setDepthStencilState(&depth)
 		.setDynamicState(&dynamic)
 		.setLayout(self.layout)
-		.build(gpu.handle)!;
+		.build(gpu.handle, gpu.driver_cache.handle)!;
 
 	// A copy, not a move. Until the pipeline cache learned to keep modules this
 	// took the module's own layout and left it empty, which was right while a
@@ -1105,7 +1107,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 		.setDepthStencilState(&depth)
 		.setDynamicState(&dynamic)
 		.setLayout(self.layout)
-		.build(gpu.handle)!;
+		.build(gpu.handle, gpu.driver_cache.handle)!;
 
 	self.shader = mod.layout.copy();
 
@@ -1216,7 +1218,7 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 		.setDepthStencilState(&depth)
 		.setDynamicState(&dynamic)
 		.setLayout(self.layout)
-		.build(gpu.handle)!;
+		.build(gpu.handle, gpu.driver_cache.handle)!;
 
 	self.shader = mod.layout.copy();
 
@@ -1303,7 +1305,7 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 		.setLayout(self.layout);
 
 	vk::Pipeline handle;
-	vk::createComputePipelines(gpu.handle, (vk::PipelineCache)null, 1, &info, null, &handle)!;
+	vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &handle)!;
 	self.handle = handle;
 
 	// Moved, exactly as `MeshPipeline.init` moves it: the pipeline outlives the

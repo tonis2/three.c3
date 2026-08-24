@@ -222,22 +222,17 @@ fn void ShadowMap.defaults(&self)
  **The resize stalls the device, and that is the same trade `set_material_map`
  makes.** The image is one object shared by every frame in flight rather than one
  per slot, so destroying it while an earlier frame may still be sampling it is
- undefined behaviour that shows up as a corrupt frame later. The deletion queue
- in `gpu/retire.c3` is the mechanism that avoids the stall and it holds pipelines
- only; a second list for images is the right answer the day something resizes a
- shadow map mid-play, and nothing does — a size is set once, at startup, beside
- the line that turns shadows on.
+ undefined behaviour that shows up as a corrupt frame later. `gpu/retire.c3` is
+ what keeps the two apart: the old image's three handles go on the queue and are
+ destroyed two frames later, so a script that changes `shadow.size` between
+ frames pays an allocation and no stall at all.
 
  @return ? SHADOW_FORMAT_UNSUPPORTED : `No depth format on this device can be both rendered to and sampled. Cannot happen on a conformant device — D32_SFLOAT is required to do both — so this is a sentence rather than a fallback.`
 *>
 fn void? ShadowMap.ensure(&self, Gpu* gpu)
 {
 	if (self.image != null && self.created == self.size) return;
-	if (self.image != null)
-	{
-		gpu.wait_idle();
-		self.destroy_image(gpu);
-	}
+	if (self.image != null) self.destroy_image(gpu);
 
 	// **Both features, and the second one is the half `Target` does not need.**
 	// The target's depth buffer is only ever an attachment, so it asks for
@@ -548,9 +543,12 @@ fn void ShadowMap.end(&self, vk::CommandBuffer cmd)
 *>
 fn void ShadowMap.destroy_image(&self, Gpu* gpu)
 {
-	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
-	if (self.view != null) self.view.free(gpu.handle);
-	self.memory.free();
+	// Retired rather than destroyed, so that a size change mid-play costs
+	// nothing — `gpu/retire.c3` holds the three handles for the frames that may
+	// still be sampling the map. `memory.free` is what destroys the image, so
+	// `image` is not handed over and is only cleared here.
+	gpu.retire_memory(self.memory, self.view, self.sampler);
+	self.memory = {};
 	self.image = (vk::Image)null;
 	self.view = (vk::ImageView)null;
 	self.sampler = (vk::Sampler)null;

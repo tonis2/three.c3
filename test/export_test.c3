@@ -1431,6 +1431,106 @@ fn void a_transparent_material_exports_alpha_blend() @test
 // ============================================================================
 
 <*
+ `alphaMode` survives the round trip, which it did not before the loader had a
+ material record.
+
+ `plan.md` §2: "glTF `alphaMode` is written on export and ignored on import. A
+ `.glb` authored with BLEND loads and renders opaque." Both halves are asserted
+ here, in the order they broke: the *export* half was already honest, and this is
+ the first check that the *import* half is.
+
+ Three surfaces, so that the two answers are told apart by a comparison rather
+ than by a single value: a transparent material writes BLEND, an opaque one writes
+ OPAQUE, and a mesh whose material is the default one writes OPAQUE too. A loader
+ that answered "BLEND" unconditionally — or that answered with the *last* material
+ it read, which is the shape the old `ExportBatch` collapse had — fails on the
+ second and third.
+
+ And `materials: true` on the way back, because reading the mode and acting on it
+ are different claims: the pane comes back with `transparent` on its material, so
+ a `.glb` authored with blending now renders blended without a script line.
+
+ **Proved by injection**, twice. `load_material_record`'s `alpha_mode` hard-coded
+ to `OPAQUE`: `{"pane":"OPAQUE","wall":"OPAQUE","bare":"OPAQUE","paneApplied":false}`
+ — which is exactly the behaviour the entry described, and the last field shows
+ that applying it is downstream of reading it.
+
+ And separately the `materials: true` branch of `instantiate` removed, which is
+ the half that is invisible to the first three checks:
+ `{"pane":"BLEND","wall":"OPAQUE","bare":"OPAQUE","paneApplied":false}`. The mode
+ crossing and the mode being acted on are two things, and a `.glb` that renders
+ opaque is what the entry was actually about.
+*>
+fn void the_alpha_mode_survives_the_round_trip() @test
+{
+	String path = "build/export_alpha.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const pane = new three.Mesh(
+				new three.PlaneGeometry(2, 2),
+				new three.MeshLambertMaterial({ color: 0x3366ff, transparent: true, opacity: 0.5 })
+			);
+			pane.name = "pane";
+			scene.add(pane);
+
+			// A different shape, deliberately: the exporter batches sibling nodes
+			// that share a geometry into one instanced node wearing the first
+			// member's material, which is plan.md section 1's ExportBatch defect
+			// and would collapse all three of these into the pane.
+			const wall = new three.Mesh(
+				new three.PlaneGeometry(3, 3),
+				new three.MeshLambertMaterial({ color: 0x996633 })
+			);
+			wall.name = "wall";
+			wall.position.x = 3;
+			scene.add(wall);
+
+			const bare = new three.Mesh(new three.PlaneGeometry(4, 4));
+			bare.name = "bare";
+			bare.position.x = -3;
+			scene.add(bare);
+
+			scene.export("build/export_alpha.glb");
+			const back = three.load("build/export_alpha.glb");
+
+			// Found by size rather than by name or by index: the exporter names
+			// every one of them "plane", and which slot each landed in is its
+			// business and not this test's. The three widths are distinct on
+			// purpose and that is the whole reason they are.
+			const modes = {};
+			back.meshes.forEach((_, i) => {
+				const ref = back.meshAt(i);
+				modes[Math.round(ref.bounds.size.x)] = ref.material.alphaMode;
+			});
+
+			const root = back.instantiate("back", { materials: true });
+			const applied = {};
+			root.traverse((o) => {
+				if (!o.material) return;
+				applied[Math.round(o.boundsInParent().size.x)] = !!o.material.transparent;
+			});
+
+			return { pane: modes[2], wall: modes[3], bare: modes[4], paneApplied: applied[2] === true };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"pane":"BLEND"`),
+			"the transparent pane came back as %s", result.value);
+		test::@check(result.value.contains(`"wall":"OPAQUE"`),
+			"the opaque wall came back as %s", result.value);
+		test::@check(result.value.contains(`"bare":"OPAQUE"`),
+			"a mesh on the default material came back as %s", result.value);
+		test::@check(result.value.contains(`"paneApplied":true`),
+			"the pane's material is not transparent: %s", result.value);
+	};
+}
+
+<*
  A `CUSTOM_materials_layers` stack goes out and comes back.
 
  The extension is the one thing here that is *not* recovered from the frame. A

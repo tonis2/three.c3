@@ -47,6 +47,10 @@ const String MARKER_TEXTURES @private = "//@textures";
 const String MARKER_VDEFINES @private = "//@vdefines";
 const String MARKER_VERTEX @private = "//@vertex";
 const String MARKER_SHADE @private = "//@shade";
+// The spilled uniform table's struct, at global scope above the push block. Only
+// `material.slang` has it, and only a material whose uniforms overflow the block
+// gets anything written into it — see `material_spills`.
+const String MARKER_TABLE @private = "//@table";
 
 <*
  What a material with no vertex body gets instead of one.
@@ -83,9 +87,18 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 *>
 const uint MATERIAL_BINDING_FIRST = 2;
 
-// `prev` at 0 and `scene` at 1 — see `MATERIAL_BINDING_FIRST` and
-// `shaders/post.slang`.
-const uint POST_BINDING_FIRST = 2;
+// Where a post pass's own samplers begin: after `prev` at 0, `scene` at 1, the
+// frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST` and
+// `shaders/post.slang`. Four reserved rather than the two it started with, and
+// moving this constant is the whole of each of those renumberings: every sampler
+// above it is generated from declaration order and resolved by name.
+const uint POST_BINDING_FIRST = 4;
+
+// The third source, and a number rather than a name for `SHADOW_MAP_BINDING`'s
+// reason: only the chain knows which image this is, and resolving it by name
+// would let a body claim it by declaring a texture called `tap_image`.
+// `POST_RESERVED` is what stops that.
+const uint POST_TAP_BINDING = 3;
 
 <*
  Where the shadow map is bound, in every shader that shades a surface.
@@ -295,7 +308,10 @@ fn String? assemble_shader(
 	String vertex_name,
 	String preamble_name,
 	uint binding_first,
-	alloc::Allocator allocator
+	alloc::Allocator allocator,
+	// **Only ever true for a material.** `post.slang` has no `//@table` marker and
+	// no instances for a table to be indexed by, so its caller never asks.
+	bool spill = false
 ) @private
 {
 	@pool()
@@ -320,13 +336,49 @@ fn String? assemble_shader(
 			start = end + 1;
 
 			String marker = line.trim();
-			if (marker == MARKER_UNIFORMS)
+			if (marker == MARKER_TABLE)
 			{
+				// Nothing at all for a material that fits the push block, which is
+				// every material this project had before the table could spill —
+				// so the generated source for one is byte for byte what it was.
+				if (!spill) continue;
+				out.appendf("struct %s", MATERIAL_TABLE_TYPE)!!;
+				out.append_char('\n');
+				out.append_string("{");
+				out.append_char('\n');
+				physical += 2;
 				foreach (uniform : uniforms)
 				{
 					uint rows = uniform_rows_of(uniform);
+					if (rows == 1) continue;
+					out.appendf("    %s %s[%d];", slang_type_of(uniform.components), uniform.name, rows)!!;
+					out.append_char('\n');
+					physical++;
+				}
+				out.append_string("};");
+				out.append_char('\n');
+				physical++;
+				continue;
+			}
+			if (marker == MARKER_UNIFORMS)
+			{
+				// **The pointer first**, so it lands at `MATERIAL_PUSH_START` — a
+				// multiple of eight — and scalar layout has no alignment padding to
+				// insert in front of it. After a `float` it would.
+				if (spill)
+				{
+					out.appendf("    %s* %s;", MATERIAL_TABLE_TYPE, MATERIAL_TABLE_FIELD)!!;
+					out.append_char('\n');
+					physical++;
+				}
+				foreach (uniform : uniforms)
+				{
+					uint rows = uniform_rows_of(uniform);
+					// An array column is in the table struct above rather than here
+					// when this material spilled, and here when it did not.
 					if (rows > 1)
 					{
+						if (spill) continue;
 						out.appendf("    %s %s[%d];", slang_type_of(uniform.components), uniform.name, rows)!!;
 					}
 					else
@@ -352,7 +404,21 @@ fn String? assemble_shader(
 			{
 				foreach (uniform : uniforms)
 				{
-					out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+					// **The body cannot tell which shape it got**, which is the whole
+					// point of doing this with a macro: `tint[s.variant]` reads the
+					// push block or the table buffer depending on a decision the
+					// agent never made and never has to know about.
+					if (spill && uniform_rows_of(uniform) > 1)
+					{
+						out.appendf(
+							"#define %s (push.%s[0].%s)",
+							uniform.name, MATERIAL_TABLE_FIELD, uniform.name
+						)!!;
+					}
+					else
+					{
+						out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+					}
 					out.append_char('\n');
 					physical++;
 				}
@@ -370,7 +436,20 @@ fn String? assemble_shader(
 				{
 					foreach (uniform : uniforms)
 					{
-						out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+						// The same substitution the fragment block gets, for the same
+						// reason: a vertex body indexes a spilled column exactly as a
+						// fragment body does, and neither knows where it lives.
+						if (spill && uniform_rows_of(uniform) > 1)
+						{
+							out.appendf(
+								"#define %s (push.%s[0].%s)",
+								uniform.name, MATERIAL_TABLE_FIELD, uniform.name
+							)!!;
+						}
+						else
+						{
+							out.appendf("#define %s (push.%s)", uniform.name, uniform.name)!!;
+						}
 						out.append_char('\n');
 						physical++;
 					}

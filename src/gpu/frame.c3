@@ -352,7 +352,13 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// The asset table comes down with it because each post shader's own samplers
 	// resolve through it — bindings 0 and 1 are the chain's own images, and
 	// everything above them is an image a script named.
-	if (posted) self.post.record_chain(cmd, &self.target, &self.pass.assets, self.pass.clock.time)!;
+	if (posted)
+	{
+		self.post.record_chain(
+			cmd, &self.target, &self.pass.assets, self.pass.clock.time,
+			self.pass.camera.near_plane, self.pass.camera.far_plane
+		)!;
+	}
 
 	self.target.close(cmd);
 }

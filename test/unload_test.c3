@@ -161,6 +161,76 @@ fn void a_level_loads_and_unloads_a_hundred_times() @test
 	};
 }
 
+<*
+ An unload during gameplay queues its buffers and its images rather than
+ stalling the device.
+
+ This is `plan.md` §2's trigger — "something unloads during gameplay" — asserted
+ as the two things that had to become true for it: nothing waits, and nothing is
+ destroyed early.
+
+ `Assets.unload_unused` used to open with `gpu.wait_idle()`, which is right for a
+ level boundary and wrong for a game that streams. What replaced it is
+ `gpu/retire.c3`'s second list, and the check below is the same three-step
+ arithmetic `a_retired_pipeline_waits_out_the_frames_in_flight` makes, over
+ objects a frame actually read: the asset is rendered once before it is dropped,
+ so the command buffer that referenced its buffers is genuinely one of the two in
+ flight.
+
+ **The count is a lower bound rather than a number.** A fixture's mesh has
+ positions, indices, normals and uvs, and its image is a fifth entry; asserting
+ "more than four" rather than "exactly five" keeps this about the mechanism and
+ not about what happens to be in `textured.glb`.
+
+ **Proved by injection**, twice. `retire_memory` changed to free rather than
+ queue: "the sweep queued nothing: 0". And `retire_at` set to `frame + 1` rather
+ than `frame + MAX_FRAMES_IN_FLIGHT`, which is the hazard itself and the reason
+ the middle check exists: "the queue gave something back after one frame: 0 of 9
+ left". Nine, on this fixture — which is why the bound is written as "more than
+ four" rather than as a number.
+*>
+fn void an_unload_queues_its_buffers_rather_than_waiting_for_the_device() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Gpu* gpu = &renderer.gpu;
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = &renderer.pass.scene;
+
+		three::AssetId level = assets.load(gpu, FIXTURE)!!;
+		three::NodeId group = scene.add_group(scene.root, "level");
+		renderer.pass.place(level, group);
+
+		// So the buffers about to be given back are buffers a submitted command
+		// buffer has actually referenced. Without this the queue would still be
+		// correct and the test would be about nothing.
+		renderer.render_offscreen()!!;
+
+		scene.remove(group);
+		sz queued_before = gpu.deletions.memory.len();
+		three::UnloadReport report = assets.unload_unused(gpu);
+		test::@check(report.assets == 1, "the sweep freed %d assets, expected 1", report.assets);
+
+		sz queued = gpu.deletions.memory.len() - queued_before;
+		test::@check(queued > 4, "the sweep queued nothing: %d", (int)queued);
+
+		renderer.render_offscreen()!!;
+		test::@check(
+			gpu.deletions.memory.len() >= queued,
+			"the queue gave something back after one frame: %d of %d left",
+			(int)gpu.deletions.memory.len(),
+			(int)queued
+		);
+
+		renderer.render_offscreen()!!;
+		test::@check(
+			gpu.deletions.memory.len() == 0,
+			"and it was empty after two: %d left",
+			(int)gpu.deletions.memory.len()
+		);
+	};
+}
+
 // ============================================================================
 // What a reference means
 // ============================================================================
