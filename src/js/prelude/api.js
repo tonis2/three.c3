@@ -20,8 +20,9 @@ import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
 import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry, RibbonGeometry } from './geometry.js';
 import { Field, scatter, catmullRom } from './field.js';
+import { character } from './character.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
-import { DOCS } from './docs.js';
+import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
 
@@ -314,6 +315,66 @@ const camera = {
 	// Stop following. Answers whether it was, and leaves the camera exactly
 	// where the last frame put it.
 	detach() { return H.cameraDetach(); },
+
+	// -------------------------------------------------------------------
+	// Derived directions
+	//
+	// These are the three vectors a character controller actually needs, and
+	// the reason they exist is that you cannot get them by reading the
+	// camera: `camera.position` and `getWorldPosition()` do not exist, so a
+	// script that wanted "which way is the camera facing" had to hand-roll
+	// the orbit trig — and get the signs wrong in a way that read as the
+	// character walking sideways. Reading them here means one definition,
+	// beside the code that moves the camera.
+	//
+	// The convention they encode, and which a screenshot can verify: yaw is
+	// degrees about +Y from +Z, so `orbit(0, 0)` puts the camera at +Z
+	// looking toward -Z, and `orbit(90, 0)` puts it at +X looking toward -X.
+
+	// The camera's eye, in world space — the point `distance` back from the
+	// target along the orbit direction. Not `target`, which is what it
+	// orbits; not writable, because the turntable owns its own position.
+	position() {
+		const [tx, ty, tz, yaw, pitch, distance] = H.cameraGet();
+		const a = yaw * Math.PI / 180, p = pitch * Math.PI / 180, cp = Math.cos(p);
+		return new Vector3(null,
+			tx + distance * cp * Math.sin(a),
+			ty + distance * Math.sin(p),
+			tz + distance * cp * Math.cos(a));
+	},
+
+	// The direction the camera looks, world space, unit length, including the
+	// pitch. This is "forward" for a view relative to the camera.
+	forward() {
+		const [, , , yaw, pitch] = H.cameraGet();
+		const a = yaw * Math.PI / 180, p = pitch * Math.PI / 180, cp = Math.cos(p);
+		return new Vector3(null, -Math.sin(a) * cp, -Math.sin(p), -Math.cos(a) * cp);
+	},
+
+	// The camera's right on the ground plane, world space, unit length, y=0.
+	// "Screen right" — the `D` key. Flattened so it stays useful for strafe
+	// while pitched down at a character.
+	right() {
+		const [, , , yaw] = H.cameraGet();
+		const a = yaw * Math.PI / 180;
+		return new Vector3(null, Math.cos(a), 0, -Math.sin(a));
+	},
+
+	// The world-space movement direction for a camera-relative input, with
+	// `fwd` forward (the `W`/`S` axis, +1 to -1) and `strafe` sideways (the
+	// `D`/`A` axis, +1 to -1). Returns a unit Vector3 with y=0, or the zero
+	// vector when both inputs are 0. This is the one call that keeps a
+	// character from drifting sideways off the camera's forward line.
+	planarMove(fwd, strafe) {
+		const [, , , yaw] = H.cameraGet();
+		const a = yaw * Math.PI / 180;
+		const Fx = -Math.sin(a), Fz = -Math.cos(a);
+		const Rx = Math.cos(a), Rz = -Math.sin(a);
+		let mx = Fx * fwd + Rx * strafe, mz = Fz * fwd + Rz * strafe;
+		const len = Math.hypot(mx, mz);
+		if (len > 0) { mx /= len; mz /= len; }
+		return new Vector3(null, mx, 0, mz);
+	},
 
 	// What the camera is following, or null. Also how a script finds out
 	// that what it was following has been destroyed: the host drops the
@@ -688,6 +749,13 @@ export const three = {
 	// of swinging wide of the close ones. Feed the result to field.carve /
 	// field.stroke / a scatter's avoid corridor, or to a RibbonGeometry.
 	catmullRom,
+	// A walkable character with a follow camera — the controller every
+	// third-person scene writes by hand, and the place the two worst bugs in it
+	// (camera/movement frame disagreement, and hand-rolled orbit-trig signs) are
+	// already fixed. It rides a terrain height field (or a `height(x, z)`
+	// function), moves with WASD relative to the camera, drag-looks, jumps, and
+	// swings the mesh's limb pivots as it walks. See character.js.
+	character,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the
@@ -1143,8 +1211,17 @@ export const three = {
 		}));
 	},
 
-	getApiDocs() { return DOCS; },
+	// The documentation, designed to be READ rather than dumped. With no
+	// argument this is the index — everything short in full, and the names of
+	// the classes and functions; `{ search }` is the grep over the whole
+	// surface, `{ section }` the drill-down, `{ all: true }` the old answer.
+	// The shapes live in `docs.js` beside the strings they walk, and the MCP
+	// tool calls this rather than reimplementing it, so an agent asking over
+	// JSON-RPC and a script asking here read the same docs the same way.
+	getApiDocs(options) { return docsQuery(options); },
+	searchDocs(term) { return docsSearch(term); },
 };
+
 // Shared by onTrigger and onContact, including the async refusal a key
 // handler and a click handler already make: a handler that returns before
 // it has done anything is not a handler, and the frame does not wait.

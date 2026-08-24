@@ -22,65 +22,65 @@ export const DOCS = {
 		'A Three.js-shaped scene API over Vulkan. Every mesh placed with the same ' +
 		'asset reference is one instanced draw call — there is no batching step to ' +
 		'invoke and no way to write an unbatched scene.',
-	differences: [
-		'three.load(path) is synchronous; await works but is not needed.',
-		'Everything placeable can be MEASURED, and you should measure rather than guess. asset.mesh(name).bounds and geometry.bounds are a Box3 in the piece\'s own space, read out of the glTF JSON so it costs no upload; object.boundingBox() is the world-space box of a subtree, from the host; object.boundsInParent() is the same box in the parent\'s frame and works before add(). A kit piece\'s origin is wherever its exporter left it, so a size table written by hand into a script is the thing that goes stale and sinks pieces into walls.',
-		'object.align(axis, edge, at) moves an object until one face of its box sits at a coordinate — align(\'y\', \'min\', 0) stands a piece on the ground, align(\'z\', \'min\', wallZ) puts its back flush with a wall. object.alignTo(other, {axis, mine, theirs, offset}) says the same thing against a sibling. Both work in the PARENT\'s frame, because that is the frame a script writes positions in; alignTo refuses objects with different parents rather than being wrong by whatever the parents differ by. Set rotation and scale first — they are inputs to where the box is.',
-		'There is DEBUG DRAW, and reaching for it is the cheap move: three.BoxHelper(object) boxes what an object actually occupies, three.Box3Helper(box) boxes a Box3 you worked out yourself, three.AxesHelper(size) shows where a pivot is and which way it faces, three.GridHelper(size, divisions) says where the ground is, and three.WireframeHelper(mesh) draws a mesh\'s own edges — which is how two faces 0.01 apart are found, because a z-fighting starburst is invisible in a solid render. They are ordinary meshes: a thousand of them are one draw call, helper.color is per copy and free, scene.remove(helper) works, and they are NOT pickable, so a click goes through the box onto the thing inside it.',
-		'Helpers draw OVER everything — the line pipeline tests no depth, unlike Three.js\'s helpers. That is deliberate: the times you ask where something is are the times it is inside a wall, and a depth-tested helper would be hidden by exactly the geometry being asked about. The cost of being ordinary meshes is the other direction: a helper draws, so it is inside boundingBox(), inside the boundsInParent() of whatever it hangs from, and inside three.camera.frameAll(). Align first and add helpers after, or hang them from a Group of their own.',
-		'A helper cannot be given a ShaderMaterial. A material is a pipeline and every pipeline you can build draws triangles, while a helper\'s indices are pairs — assigning one would read the pairs as triangles rather than fail, so it throws instead. helper.color is the knob a helper has.',
-		'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
-		'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, and is capped at 65536. It is flat shaded, because a hull\'s faces meet at hard creases, and it is textured face by face: each facet gets its own planar projection at one uv unit per unit of local space, so a map is the same size on a hull as on a box beside it. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
-		'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
-		'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
-		'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
-		'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row. A table is not capped at the push block: past 104 bytes the array columns move to a device buffer on their own and the body is unchanged, so hundreds of rows is an ordinary thing to ask for (up to 256 KiB, which is thousands). PLAIN uniforms — the ones with no rows — do stay in the push block and are still held to that 104.',
-		'A ShaderMaterial has a vertex stage as well as a fragment one: { vertex: `void displace(inout Vertex v) { v.position.y += sin(v.local.x * 3 + t) * 0.4; }` } moves geometry per vertex with no draw call, no upload and no geometry change — the mesh is still the same asset and a thousand copies of it are still one call. Vertex is the varyings: position (world), normal, uv, color and variant are read back after your body runs, and local (object space) and index (the vertex number) are inputs. The normal is not recomputed for you. Always pass `bounds` with a vertex body — the number of world units it can displace by — because culling tests the mesh\'s undisplaced box and geometry outside it is dropped while still on screen.',
-		'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
-		'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
-		'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
-		'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
-		'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
-		'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
-		'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). camera.position does not exist.',
-		'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back.',
-		'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
-		'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
-		'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light and no colour per light — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
-		'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
-		'Everything opaque casts and everything shaded receives — there is no castShadow or receiveShadow per object, because two copies of one mesh disagreeing about it would be two draw calls and this renderer is built to refuse that trade. A transparent material casts nothing (a shadow map holds one depth per texel, so glass would have to be either solid or absent, and absent is the better wrong answer) and neither does a debug helper. A ShaderMaterial receives shadows with no change to its body: lambert() already has the shadow folded into the direct term, and s.shadow is the raw factor for a body that wants it separately.',
-		'One map, fitted around the whole scene every frame, so its resolution is size divided by however wide the scene is. If shadows look blocky the scene is large, not the map small: raise three.light.shadow.size, or draw the part that matters and leave the rest out. There are no cascades. Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and if they do, three.light.shadow.bias is the knob, in small numbers like 0.0005.',
-		'A shadow pass costs a second draw call per opaque bucket — stats().shadowDraws is the count — and it turns frustum culling off for the frame, because a caster the camera cannot see still throws a shadow into the frame. So stats().culledLastFrame reads 0 while shadows are on. Neither costs draw calls: culling here drops instances from buckets, never buckets.',
-		'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
-		'Every colour you state is sRGB — the components a colour picker gives. mesh.color = 0xff8040 renders as 0xff8040 under a full light, scene.background = 0x2060a0 screenshots as 0x2060a0, and a texture\'s bytes come back out as the bytes that went in. The shading arithmetic in between is linear and the conversion is the renderer\'s job, so nothing in a script should ever apply a gamma of its own; a scene that pre-corrects its own textures will now be twice corrected.',
-		'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
-		'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
-		'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
-		'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
-		'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
-		'There is post-processing and it is a CHAIN, not an EffectComposer: three.setPost({ fragment }) runs a float3 post(Post p) over the finished frame, three.addPass({ fragment }) puts another after it, and three.setPost(null) stops all of them. There are no render targets to manage and no dependency declarations — a pass reads what the pass before it wrote as p.color and the frame as the geometry left it as p.scene, and those two are the whole model. The chain runs in linear float, so a pass may return values above 1 and the next one still sees them, which is what a bright pass followed by a blur needs; the encode to the display happens once, at the end, and is the engine\'s. It applies to the window, to render() and to screenshots alike, and it belongs to the renderer rather than to the scene, so it survives new three.Scene() and outlives the script that set it.',
-		'A mesh with no material draws with the base colour and texture its glTF material carried.',
-		'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
-		'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
-		'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
-		'There is a GAME CLOCK, which Three.js has nothing quite like: three.clock.dt is what the frame being drawn is worth in seconds, three.clock.time is what the frames have added up to, and three.clock.timeScale is the multiplier — 0 is paused. It is not a convenience over differencing the callback\'s argument yourself. Everything in a frame that moves is downstream of it — the clips, the physics, the fixed loop, the follow camera, the argument setAnimationLoop is handed and p.time in a post body — so timeScale = 0 stops the WORLD, which no amount of a script stopping its own arithmetic can do.',
-		'Gameplay belongs in three.setFixedLoop(fn), which runs at three.clock.fixedRate (60 Hz) however fast frames arrive and hands the callback the same dt every call. Drawing the consequence belongs in setAnimationLoop. The accumulator is the host\'s: one written in the animation callback spends the script budget catching up and gets the callback stopped for good instead of merely stuttering.',
-		'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. three.clock.timeScale = 0 is the finer instrument: it freezes the world without unregistering anything, and three.clock.advance(seconds) then steps it by exactly as much as you ask, so two runs asking for the same amount draw the same frame. setAnimationLoop(null) still stops the callback outright.',
-		'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
-		'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
-		'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
-		'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is everything else about it for this frame — position, movement, all three buttons and the wheel. There is no mouseDown and no drag events: the left button orbits the camera, a press that travels or is held is a drag rather than a click, and the buttons are latches a script polls rather than edges anything dispatches.',
-		'A mouse look is three.input.pointer.dx and .dy, not a difference you take yourself between frames — the host differences the reading the frame is actually drawing with, while two calls from a script straddle it. There is NO POINTER LOCK, so the movement stops at the edge of the screen where the platform stops the cursor: a look that must keep turning forever needs the cursor recentred, and nothing here can do that yet.',
-		'The camera\'s hand on the window can be taken away: three.controls.enabled = false stops the mouse orbiting, panning and zooming, and is what a scene that drives its own camera every frame needs — otherwise the turntable writes yaw and pitch again underneath it and the two fight over one matrix sixty times a second. It does not stop three.camera.orbit(), which is a script moving the camera on purpose. Turn it back on when the mode ends: a window nobody can move the camera in is a bad way to leave one, and there is no gesture that undoes it.',
-		'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
-		'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
-		'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
-		'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
-		'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
-		'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
-		'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
-		'Return a value from your script with `return`; it comes back as the `value` field.',
-	],
+	differences: {
+		'load-is-synchronous': 'three.load(path) is synchronous; await works but is not needed.',
+		'measure-everything': 'Everything placeable can be MEASURED, and you should measure rather than guess. asset.mesh(name).bounds and geometry.bounds are a Box3 in the piece\'s own space, read out of the glTF JSON so it costs no upload; object.boundingBox() is the world-space box of a subtree, from the host; object.boundsInParent() is the same box in the parent\'s frame and works before add(). A kit piece\'s origin is wherever its exporter left it, so a size table written by hand into a script is the thing that goes stale and sinks pieces into walls.',
+		'align': 'object.align(axis, edge, at) moves an object until one face of its box sits at a coordinate — align(\'y\', \'min\', 0) stands a piece on the ground, align(\'z\', \'min\', wallZ) puts its back flush with a wall. object.alignTo(other, {axis, mine, theirs, offset}) says the same thing against a sibling. Both work in the PARENT\'s frame, because that is the frame a script writes positions in; alignTo refuses objects with different parents rather than being wrong by whatever the parents differ by. Set rotation and scale first — they are inputs to where the box is.',
+		'debug-draw': 'There is DEBUG DRAW, and reaching for it is the cheap move: three.BoxHelper(object) boxes what an object actually occupies, three.Box3Helper(box) boxes a Box3 you worked out yourself, three.AxesHelper(size) shows where a pivot is and which way it faces, three.GridHelper(size, divisions) says where the ground is, and three.WireframeHelper(mesh) draws a mesh\'s own edges — which is how two faces 0.01 apart are found, because a z-fighting starburst is invisible in a solid render. They are ordinary meshes: a thousand of them are one draw call, helper.color is per copy and free, scene.remove(helper) works, and they are NOT pickable, so a click goes through the box onto the thing inside it.',
+		'helpers-draw-over': 'Helpers draw OVER everything — the line pipeline tests no depth, unlike Three.js\'s helpers. That is deliberate: the times you ask where something is are the times it is inside a wall, and a depth-tested helper would be hidden by exactly the geometry being asked about. The cost of being ordinary meshes is the other direction: a helper draws, so it is inside boundingBox(), inside the boundsInParent() of whatever it hangs from, and inside three.camera.frameAll(). Align first and add helpers after, or hang them from a Group of their own.',
+		'helper-material': 'A helper cannot be given a ShaderMaterial. A material is a pipeline and every pipeline you can build draws triangles, while a helper\'s indices are pairs — assigning one would read the pairs as triangles rather than fail, so it throws instead. helper.color is the knob a helper has.',
+		'geometry-kinds': 'Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry and ConvexGeometry, built for you with Three.js\'s signatures, defaults and orientations. There is no BufferGeometry, no attribute access and no way to read or write a vertex — that refusal is what makes every scene one instanced draw per unique shape.',
+		'convex-geometry': 'new three.ConvexGeometry(points) is the way to make a shape that is not one of the six parametric ones: hand over a cloud of points and get its convex hull. Rocks, crystals, gems, debris, the bound of a scan. It takes Vector3s, [x, y, z]s or a flat array of coordinates, needs at least 4 points, and is capped at 65536. It is flat shaded, because a hull\'s faces meet at hard creases, and it is textured face by face: each facet gets its own planar projection at one uv unit per unit of local space, so a map is the same size on a hull as on a box beside it. The points are a description the hull is computed from, not the mesh\'s vertices — most of them are discarded and none can be read back.',
+		'geometry-identity': 'Two geometries with the same numbers are ONE asset and one draw call, however many times you construct them. Two different sizes are two. Prefer mesh.scale over a new size when you want variety cheaply.',
+		'mesh-construct': 'new three.Mesh(geometry, material) takes either a generated shape or asset.mesh(name); material is optional, as in Three.js.',
+		'color-and-variant-only': 'mesh.color and mesh.variant are the ONLY two things copies sharing a geometry and a material may differ in without becoming separate draw calls. A thousand meshes in a thousand colours is one call; giving two of them different materials is two. There is no InstancedMesh because every mesh is already an instance.',
+		'uniform-tables': 'A ShaderMaterial uniform may be a table — { palette: [[1,0,0], [0,1,0]] } becomes float3 palette[2] and mesh.variant picks the row. That is how one material gives many meshes many looks. s.variant is clamped to the table, so an index past the end is the last row. A table is not capped at the push block: past 104 bytes the array columns move to a device buffer on their own and the body is unchanged, so hundreds of rows is an ordinary thing to ask for (up to 256 KiB, which is thousands). PLAIN uniforms — the ones with no rows — do stay in the push block and are still held to that 104.',
+		'vertex-stage': 'A ShaderMaterial has a vertex stage as well as a fragment one: { vertex: `void displace(inout Vertex v) { v.position.y += sin(v.local.x * 3 + t) * 0.4; }` } moves geometry per vertex with no draw call, no upload and no geometry change — the mesh is still the same asset and a thousand copies of it are still one call. Vertex is the varyings: position (world), normal, uv, color and variant are read back after your body runs, and local (object space) and index (the vertex number) are inputs. The normal is not recomputed for you. Always pass `bounds` with a vertex body — the number of world units it can displace by — because culling tests the mesh\'s undisplaced box and geometry outside it is dropped while still on screen.',
+		'one-module': 'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
+		'material-samplers': 'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
+		'no-colour-management': 'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
+		'one-scene': 'There is one scene at a time. new three.Scene() empties it, and handles into the previous scene throw.',
+		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
+		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
+		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
+		'camera-follow': 'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back.',
+		'camera-first-person': 'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
+		'camera-planes-derived': 'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
+		'one-light': 'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light and no colour per light — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
+		'shadows-off-by-default': 'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
+		'shadow-cast-receive': 'Everything opaque casts and everything shaded receives — there is no castShadow or receiveShadow per object, because two copies of one mesh disagreeing about it would be two draw calls and this renderer is built to refuse that trade. A transparent material casts nothing (a shadow map holds one depth per texel, so glass would have to be either solid or absent, and absent is the better wrong answer) and neither does a debug helper. A ShaderMaterial receives shadows with no change to its body: lambert() already has the shadow folded into the direct term, and s.shadow is the raw factor for a body that wants it separately.',
+		'shadow-one-map': 'One map, fitted around the whole scene every frame, so its resolution is size divided by however wide the scene is. If shadows look blocky the scene is large, not the map small: raise three.light.shadow.size, or draw the part that matters and leave the rest out. There are no cascades. Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and if they do, three.light.shadow.bias is the knob, in small numbers like 0.0005.',
+		'shadow-costs-a-draw': 'A shadow pass costs a second draw call per opaque bucket — stats().shadowDraws is the count — and it turns frustum culling off for the frame, because a caster the camera cannot see still throws a shadow into the frame. So stats().culledLastFrame reads 0 while shadows are on. Neither costs draw calls: culling here drops instances from buckets, never buckets.',
+		'background-is-a-colour': 'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
+		'colours-are-srgb': 'Every colour you state is sRGB — the components a colour picker gives. mesh.color = 0xff8040 renders as 0xff8040 under a full light, scene.background = 0x2060a0 screenshots as 0x2060a0, and a texture\'s bytes come back out as the bytes that went in. The shading arithmetic in between is linear and the conversion is the renderer\'s job, so nothing in a script should ever apply a gamma of its own; a scene that pre-corrects its own textures will now be twice corrected.',
+		'side-is-on-the-material': 'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
+		'add-to-add': 'An object is not in the scene until it is add()ed, and removing it makes it a detached description that can be added again.',
+		'group-for-belonging': 'A Group is how several objects stay one object. Nothing else records that they belong together: siblings built by one loop and placed by the same arithmetic have no relationship the scene graph can see, so a later edit that moves one leaves the others where they were. Parent the pieces of a thing to a Group, place them relative to it once, and move the Group instead. It costs a node and no draw call.',
+		'name-things': 'name is empty until a script sets it and getObjectByName answers null for a miss, both as in Three.js — so a node nobody named is reachable only through traverse, and a misspelled one is a null that throws somewhere else. Name whatever a later script will look for. asset.instantiate() trees need no help: the root takes the file name and every node under it keeps the name the file gave it.',
+		'fragment-not-program': 'ShaderMaterial takes a fragment function, not a whole program: you write float3 shade(Surface s) and three.c3 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js\'s { value } wrappers.',
+		'post-is-a-chain': 'There is post-processing and it is a CHAIN, not an EffectComposer: three.setPost({ fragment }) runs a float3 post(Post p) over the finished frame, three.addPass({ fragment }) puts another after it, and three.setPost(null) stops all of them. There are no render targets to manage and no dependency declarations — a pass reads what the pass before it wrote as p.color and the frame as the geometry left it as p.scene, and those two are the whole model. The chain runs in linear float, so a pass may return values above 1 and the next one still sees them, which is what a bright pass followed by a blur needs; the encode to the display happens once, at the end, and is the engine\'s. It applies to the window, to render() and to screenshots alike, and it belongs to the renderer rather than to the scene, so it survives new three.Scene() and outlives the script that set it.',
+		'mesh-no-material': 'A mesh with no material draws with the base colour and texture its glTF material carried.',
+		'no-raycaster': 'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
+		'script-scope': 'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
+		'animation-loop': 'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
+		'game-clock': 'There is a GAME CLOCK, which Three.js has nothing quite like: three.clock.dt is what the frame being drawn is worth in seconds, three.clock.time is what the frames have added up to, and three.clock.timeScale is the multiplier — 0 is paused. It is not a convenience over differencing the callback\'s argument yourself. Everything in a frame that moves is downstream of it — the clips, the physics, the fixed loop, the follow camera, the argument setAnimationLoop is handed and p.time in a post body — so timeScale = 0 stops the WORLD, which no amount of a script stopping its own arithmetic can do.',
+		'fixed-loop-for-gameplay': 'Gameplay belongs in three.setFixedLoop(fn), which runs at three.clock.fixedRate (60 Hz) however fast frames arrive and hands the callback the same dt every call. Drawing the consequence belongs in setAnimationLoop. The accumulator is the host\'s: one written in the animation callback spends the script budget catching up and gets the callback stopped for good instead of merely stuttering.',
+		'animation-loop-freezes-render': 'A running animation loop makes render() and screenshot() no longer repeatable — the scene has moved between them. three.clock.timeScale = 0 is the finer instrument: it freezes the world without unregistering anything, and three.clock.advance(seconds) then steps it by exactly as much as you ask, so two runs asking for the same amount draw the same frame. setAnimationLoop(null) still stops the callback outright.',
+		'keyboard': 'There is a keyboard, which Three.js has no equivalent of at all: three.input.isDown(key) for held keys, three.input.pressed(key)/released(key) for this frame\'s edges, and three.onKeyDown(key, fn)/onKeyUp(key, fn) to bind an action. Key names are the browser\'s KeyboardEvent.key lowercased — three.input.keys() lists every one. It only reports anything while a window is open: --headless has no keyboard.',
+		'script-can-press-keys': 'A script can press keys itself: three.input.press(key), three.input.release(key) and three.input.releaseAll(). A pressed key stays down until released, exactly as a finger does, and goes through the same path a real one does — so isDown, pressed, released and every onKeyDown handler cannot tell the two apart. It adds to the real keyboard rather than replacing it. This is what makes an input-driven scene testable at all: a headless boot has no keyboard, so without it the only way to exercise a character was for the scene to hand its internals to a global.',
+		'keys-read-per-frame': 'Keys are read once per frame, so three.input.pressed() and three.input.text mean something inside the animation callback and almost never outside one. isDown() is fine anywhere.',
+		'mouse-is-one-thing': 'There is a mouse, and it is one thing: three.onClick(fn) calls fn(hit, x, y) with what is under the cursor already picked. three.input.pointer is everything else about it for this frame — position, movement, all three buttons and the wheel. There is no mouseDown and no drag events: the left button orbits the camera, a press that travels or is held is a drag rather than a click, and the buttons are latches a script polls rather than edges anything dispatches.',
+		'mouse-look-and-no-pointer-lock': 'A mouse look is three.input.pointer.dx and .dy, not a difference you take yourself between frames — the host differences the reading the frame is actually drawing with, while two calls from a script straddle it. There is NO POINTER LOCK, so the movement stops at the edge of the screen where the platform stops the cursor: a look that must keep turning forever needs the cursor recentred, and nothing here can do that yet.',
+		'controls-can-be-taken': 'The camera\'s hand on the window can be taken away: three.controls.enabled = false stops the mouse orbiting, panning and zooming, and is what a scene that drives its own camera every frame needs — otherwise the turntable writes yaw and pitch again underneath it and the two fight over one matrix sixty times a second. It does not stop three.camera.orbit(), which is a script moving the camera on purpose. Turn it back on when the mode ends: a window nobody can move the camera in is a bad way to leave one, and there is no gesture that undoes it.',
+		'pointer-is-in-image-pixels': 'three.input.pointer and the click are in the rendered image\'s pixels, not the window\'s. The window shows the image stretched to fit it, so the two differ on a retina display and after any resize; scene.pick(x, y) and the PNG use the same pixels the click does, whatever size the window is.',
+		'physics-world': 'There is a physics world, which Three.js has no equivalent of at all: object.body = { shape, mass } describes a body and three.physics.add(object) gives the object one. It is XPBD with real contacts, friction, restitution, joints and triggers — not a demo. Y is down: three.physics.gravity is [0, -9.8, 0] and there is no axis to configure.',
+		'physics-steer-a-body': 'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
+		'physics-owns-transform': 'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
+		'physics-fixed-60hz': 'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
+		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
+		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
+		'return-is-the-value': 'Return a value from your script with `return`; it comes back as the `value` field.',
+	},
 	classes: {
 		Scene: {
 			construct: 'new three.Scene()',
@@ -760,6 +760,35 @@ export const DOCS = {
 			+ 'result to field.carve / field.stroke / a scatter avoid corridor so a sparse polyline stops '
 			+ 'being a black-and-white zigzag, or pass the raw control points to a RibbonGeometry, which '
 			+ 'curves them itself. The first and last control points are reproduced exactly.',
+		'three.character(options)':
+			'A walkable character with a follow camera, the controller a third-person scene writes by '
+			+ 'hand and the place its worst bugs are already fixed. Takes { mesh, legs, arms, terrain, '
+			+ 'height, speed, jump, gravity, snap, bounds, spawn, keys, camera }. mesh is a Group to '
+			+ 'drive (or omit for a built-in voxel person); terrain is a TerrainGeometry (its heightAt '
+			+ 'is the ground) or height is an (x, z) => y function. spawn is [x, z] or { x, z } — the '
+			+ 'ground supplies the y. Returns { g, step, dispose, position, yaw, pitch, dist, heading, '
+			+ 'moving, grounded, bounds }. scene.add(p.g) FIRST, then call step() from setAnimationLoop '
+			+ '— the follow camera attaches on the first step, which requires the mesh to be in the '
+			+ 'scene. step() with no argument reads three.clock.dt, which is what the loop is stepping; '
+			+ 'a dt that is not a finite number throws rather than leaving the camera NaN. '
+			+ 'It reads WASD/arrows relative to the camera (via camera.planarMove), drag-looks, q/e '
+			+ 'turn and r/f pitch, jumps while space is HELD — hold-to-hop, not one jump per press — '
+			+ 'rides the height field, and swings the limb pivots as it walks. Every key is rebindable '
+			+ 'through keys: { forward, back, left, right, jump, yawLeft, yawRight, pitchUp, pitchDown }, '
+			+ 'each a key name or a list of them, merged over the defaults, and an action that is not in '
+			+ 'that list is an error rather than a binding nothing reads. bounds is the fence it walks '
+			+ 'inside — { x, z, width, depth }, false for none, and by default the terrain\'s own extent, '
+			+ 'the same one three.scatter fills. snap is how far the ground may drop under the feet in '
+			+ 'one frame and still count as walking down it (0.5); past that it is a ledge and the '
+			+ 'character falls rather than being teleported to the bottom. camera takes { offset, '
+			+ 'distance, lag, yaw, pitch, sensitivity, pitchRange, distanceRange } — the ranges default '
+			+ 'to [-8, 84] and [3, 26] WIDENED to hold whatever distance and pitch you asked for, so a '
+			+ 'distance of 40 is 40 and is not silently clamped. Pass { camera: false } to leave the '
+			+ 'camera alone entirely: no attach, no orbit, no look of its own, and movement then follows '
+			+ 'whatever your camera is doing — yaw/pitch/dist read the camera through and refuse to be '
+			+ 'written. yaw/pitch/dist are otherwise the character\'s own look, kept here so the view and '
+			+ 'the movement frame never disagree. dispose() gives the camera and three.controls back, '
+			+ 'and only detaches if the camera is still following this character.',
 		'three.scatter(options)':
 			'Where to put a hundred trees: { count, seed, onTerrain, bounds, spacing, minHeight, '
 			+ 'maxHeight, maxSlope, avoid, accept }. Returns [{ x, y, z, normal, index }] — placements, '
@@ -843,8 +872,9 @@ export const DOCS = {
 			+ 'written, because this renderer has no specular term to have shown them, and lines are '
 			+ 'not written yet.',
 		'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
-		'three.getApiDocs()': 'This.',
-		'three.input.isDown(key)':
+	'three.getApiDocs(options)': 'This, and four ways of asking for it. With no argument you get the INDEX: the summary, every difference from Three.js, the stats block, the key names, the examples, and the NAMES of the classes and functions — about a quarter of the whole and the part that is read every time. { search: "shadow" } is the grep: every entry whose name or prose mentions a word, in full, keyed by the path that asks for it again. { section: "classes.ShaderMaterial" } is one entry or one whole section, and a bare "ShaderMaterial" is found too. { all: true } is everything at once. Over MCP these are get_api_docs\'s arguments, plus a `path` that writes the whole surface to a Markdown file — one heading per entry — which is how you grep it with your own tools instead of asking again.',
+	'three.searchDocs(term)': 'Answers the question where does the API mention X, over the WHOLE documentation rather than only the differences: { query, matches, entries }, where entries maps a path like classes.ConvexGeometry or functions.three.load(path) to the text at it. One answer is capped, and anything that did not fit is named in notShown rather than dropped silently. Example: three.searchDocs("keyboard") finds the headless-has-no-keyboard note without dumping the whole documentation object. Same thing as three.getApiDocs({ search: term }).',
+	'three.input.isDown(key)':
 			'Whether a key is held right now. Poll this in the animation callback for continuous '
 			+ 'movement — a held key fires no repeat events.',
 		'three.input.pressed(key) / released(key)':
@@ -911,6 +941,15 @@ export const DOCS = {
 		+ 'and asking for more clamps rather than throws; zero or negative throws, because there is no way '
 		+ 'to turn the interrupt off. It does not reach the animation callback, which keeps its own 100 ms '
 		+ 'so that one slow frame is a stutter rather than a hang.',
+	'three.budget (a COLD scene build over 5s — the exact trap)':
+		'A run_script that REBUILDS a scene from scratch often times out at 5,000 ms, and the error is '
+		+ 'simply "the script ran for longer than 5000 ms and was stopped" — which reads like a bug when '
+		+ 'it is just the budget. On a fresh --mcp backend, the first build pays for shader compiles and '
+		+ 'texture uploads that a warm (--script-preloaded) backend already did, so it crosses 5s even when '
+		+ 'the SAME script returns in time on a second call. The fix is one line at the TOP of the script, '
+		+ 'before any build: "three.budget = 60000;". Better still, preload the scene so the build runs '
+		+ 'outside the budget: launch the backend with "--script scenes/mine.js" and let run_script move '
+		+ 'the character rather than rebuild. Reading three.budget back answers the current limit.',
 	'material.repeat / material.offset':
 		'How the map is laid across a surface. repeat is [u, v] — or one number for both — and is how '
 		+ 'many times the image is tiled; offset is [u, v] in whole repeats, for shifting it. Without '
@@ -1185,6 +1224,25 @@ export const DOCS = {
 		'three.camera.orbit(yaw, pitch, distance)': 'Degrees, degrees, world units. Any argument may be omitted to leave it alone.',
 		'three.camera.lookAt(x, y, z)': 'Point the turntable at a world position.',
 		'three.camera.frameAll()': 'Aim at everything in the scene and back off far enough to see it.',
+		'three.camera.position()':
+			'The camera eye, in world space — the point a boom of `distance` puts it. Not `target` (what it '
+			+ 'orbits) and not writable. This is the fix for "which way is the camera looking": you cannot '
+			+ 'read it from the camera itself otherwise, because camera.position and getWorldPosition() do '
+			+ 'not exist, so a controller had to hand-roll the orbit trig. The convention: yaw is degrees '
+			+ 'about +Y from +Z, so orbit(0,0) puts the camera at +Z looking toward -Z and orbit(90,0) at +X '
+			+ 'looking toward -X.',
+		'three.camera.forward()':
+			'Where the camera looks, as a unit Vector3 in world space, pitch included. Compute the '
+			+ 'camera-relative move frame as forward() and right() rather than by hand — the signs are '
+			+ 'easy to get wrong and read back as the character walking sideways.',
+		'three.camera.right()':
+			'The camera\'s right on the ground plane, unit Vector3, y=0 — the "D" key. Flattened so it '
+			+ 'stays a strafe direction while the camera is pitched down at a character.',
+		'three.camera.planarMove(fwd, strafe)':
+			'The world-space direction for a camera-relative input: fwd is the W/S axis (+1 to -1), '
+			+ 'strafe the D/A axis (+1 to -1). Returns a unit Vector3 (y=0), or the zero vector for 0,0. '
+			+ 'One call that keeps a character glued to the camera\'s forward line instead of drifting '
+			+ 'sideways — `player.position.x += v.x * speed * dt; player.position.z += v.z * speed * dt`.',
 		'three.camera.near / three.camera.far':
 			'Where the depth range starts and ends, in world units. Read-only: both are derived, from '
 			+ 'the orbit distance and from the scene\'s own bounds, every time the camera moves. They '
@@ -1344,3 +1402,236 @@ export const DOCS = {
 		'return scene.stats();   // { drawCalls: 1, instances: 12, ... }',
 	].join('\n'),
 };
+
+// -----------------------------------------------------------------------
+// Reading the docs rather than swallowing them
+//
+// `DOCS` is about 113 KB of JSON — thirty thousand tokens an agent pays
+// before it has written a line — and from anywhere but this repository it
+// is ungreppable: these strings are embedded in the binary, so there is no
+// file for the usual tools to search. An agent that wanted one fact had to
+// take all of them or none.
+//
+// So the docs answer four questions instead of one. `docsIndex()` is what a
+// bare ask gets: everything short in full, and the NAMES of everything long.
+// `docsSearch(term)` is the grep — every entry whose path or prose mentions
+// a word, with its text. `findSection(path)` is the drill-down after either.
+// `docsMarkdown()` is the whole surface as a file, one heading per entry,
+// for the agent that would rather grep it with its own tools and never call
+// this again. The full dump is still there behind `{ all: true }`, because
+// an agent with the room for it should be able to say so.
+
+// Dumped whole in the index. Each is short, and each is read on nearly every
+// task: `differences` is the section that stops scripts failing, and `stats`
+// is the block that comes back from every `run_script` whether asked for or
+// not. `classes` and `functions` are the 83 KB that becomes a name list.
+const INDEX_WHOLE = [
+	'version', 'summary', 'differences', 'keys', 'stats', 'intersection',
+	'example', 'exampleFromFile',
+];
+
+const HOW =
+	'This is the INDEX, not the whole documentation: `classes` and `functions` are name lists '
+	+ 'here and the prose behind a name is one call away. { search: "shadow" } is the grep — every '
+	+ 'entry whose name or text mentions a word, in full. { section: "classes.ShaderMaterial" } is '
+	+ 'one entry or one whole section, and a bare name like "ShaderMaterial" is found too. '
+	+ '{ path: "api.md" } also writes the whole surface to a file, which is how you grep it with '
+	+ 'ordinary tools instead of calling this again. { all: true } is everything at once, the way '
+	+ 'this used to answer. From a script the same four are three.getApiDocs({ ... }).';
+
+// One answer is capped at roughly this many characters of prose. A search for
+// a common word matches half the API, and an answer that quietly became the
+// whole dump again would defeat the point of asking narrowly.
+const SEARCH_BUDGET = 20000;
+
+// The compact answer: everything short, and the names of everything long.
+export function docsIndex() {
+	const index = { how: HOW };
+	for (const [key, value] of Object.entries(DOCS)) {
+		index[key] = INDEX_WHOLE.includes(key) ? value : Object.keys(value);
+	}
+	return index;
+}
+
+// Every entry whose path or prose mentions `term`, case-insensitively.
+//
+// Entries come back whole and keyed by the path `section` takes, so a hit is
+// both the answer and the way to ask for its neighbours.
+export function docsSearch(term) {
+	const query = String(term == null ? '' : term).trim();
+	if (query.length === 0) return { query, matches: 0, entries: {} };
+
+	const wanted = query.toLowerCase();
+	const hits = [];
+	for (const [path, value] of docsEntries()) {
+		if (path.toLowerCase().includes(wanted) || entryText(value).toLowerCase().includes(wanted)) {
+			hits.push([path, value]);
+		}
+	}
+
+	const answer = { query, matches: hits.length, entries: {} };
+	const notShown = [];
+	let spent = 0;
+	for (const [path, value] of hits) {
+		const cost = path.length + entryText(value).length;
+		// `spent > 0` so the first hit is always answered with, however long it
+		// is: an answer that dropped everything would be worse than a long one.
+		if (spent > 0 && spent + cost > SEARCH_BUDGET) { notShown.push(path); continue; }
+		answer.entries[path] = value;
+		spent += cost;
+	}
+	if (notShown.length > 0) {
+		answer.notShown = notShown;
+		answer.note = `${notShown.length} more entries matched than fit in one answer. They are named `
+			+ 'in notShown — ask for one with { section } — or search for something narrower.';
+	}
+	return answer;
+}
+
+// One entry or one whole section, by the path `docsSearch` keys its hits with.
+//
+// Answers { path, value } for what was found, or null.
+export function findSection(path) {
+	let node = DOCS;
+	let rest = String(path == null ? '' : path).trim();
+	const walked = [];
+
+	while (rest.length > 0) {
+		if (node === null || typeof node !== 'object') return null;
+		const key = longestKey(node, rest);
+		if (key === null) return bareName(String(path).trim());
+		walked.push(key);
+		node = node[key];
+		rest = rest.slice(key.length + 1);
+	}
+	if (walked.length === 0) return null;
+	return { path: walked.join('.'), value: node };
+}
+
+// The whole surface as Markdown, one heading per entry.
+//
+// A file rather than an answer: the headings are the paths `section` takes, so
+// a grep hit names the thing to ask about next as well as answering.
+export function docsMarkdown() {
+	const out = [
+		'# three.c3 — the scripting API',
+		'',
+		`Version ${DOCS.version}. ${DOCS.summary}`,
+		'',
+		'Written out of the docs embedded in the binary; `get_api_docs` answers out of the same '
+		+ 'object, so this file and the tool cannot disagree. Every heading below is a path that '
+		+ '`three.getApiDocs({ section: "..." })` accepts.',
+		'',
+	];
+
+	let section = null;
+	for (const [path, value] of docsEntries()) {
+		const head = path.split('.')[0];
+		if (head !== section) { section = head; out.push(`## ${head}`, ''); }
+		if (path !== head) out.push(`### ${path}`, '');
+		out.push(entryMarkdown(value), '');
+	}
+	return out.join('\n');
+}
+
+// The one entry the host calls, and what `three.getApiDocs(options)` is.
+//
+// `options` is a search string, or { search, section, all, markdown }, or
+// nothing at all — which is the index.
+export function docsQuery(options) {
+	if (options === null || options === undefined) return docsIndex();
+	if (typeof options === 'string') return docsSearch(options);
+	if (options.all === true) return DOCS;
+	if (options.markdown === true) return docsMarkdown();
+
+	const search = typeof options.search === 'string' ? options.search.trim() : '';
+	if (search.length > 0) return docsSearch(search);
+
+	const section = typeof options.section === 'string' ? options.section.trim() : '';
+	if (section.length > 0) {
+		const found = findSection(section);
+		if (found === null) {
+			return {
+				section,
+				found: false,
+				sections: Object.keys(DOCS),
+				note: 'No entry by that name. The top-level sections are in `sections`, and '
+					+ '{ search } finds an entry whose name you only half remember.',
+			};
+		}
+		return { section: found.path, entry: found.value };
+	}
+	return docsIndex();
+}
+
+// The longest key of `node` that `rest` begins with, on a '.' boundary and
+// case-insensitively. Longest rather than first because a function is keyed by
+// its whole call — `three.load(path)` — so not every dot in a path is a
+// separator, and the greedy match is the only one that tells the two apart.
+function longestKey(node, rest) {
+	const wanted = rest.toLowerCase();
+	let best = null;
+	for (const key of Object.keys(node)) {
+		const lower = key.toLowerCase();
+		if (wanted === lower || (wanted.startsWith(lower) && wanted[lower.length] === '.')) {
+			if (best === null || key.length > best.length) best = key;
+		}
+	}
+	return best;
+}
+
+// `section: "ShaderMaterial"` rather than `"classes.ShaderMaterial"`. An agent
+// that read a class name out of the index and asked for it by that name asked
+// a reasonable question, and one level of looking is the whole answer.
+function bareName(name) {
+	const wanted = name.toLowerCase();
+	for (const [group, value] of Object.entries(DOCS)) {
+		if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+		for (const key of Object.keys(value)) {
+			if (key.toLowerCase() === wanted) return { path: `${group}.${key}`, value: value[key] };
+		}
+	}
+	return null;
+}
+
+// Every entry of the docs as [path, value].
+//
+// The shape is two deep and this walk knows it: a top-level plain object is a
+// SECTION, everything one level inside one is an entry, and nothing deeper is.
+// That is the line that matters, and no test on the values finds it — a class
+// record's { construct, note, properties, methods } is four halves of one
+// answer and has to stay whole, while `differences` is a map of the same shape
+// holding fifty separate answers that must not be glued into one.
+function docsEntries() {
+	const out = [];
+	for (const [key, value] of Object.entries(DOCS)) {
+		if (isSection(value)) {
+			for (const [name, entry] of Object.entries(value)) out.push([`${key}.${name}`, entry]);
+			continue;
+		}
+		out.push([key, value]);
+	}
+	return out;
+}
+
+function isSection(value) {
+	return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function entryText(value) {
+	if (value === null || value === undefined) return '';
+	if (typeof value === 'string') return value;
+	if (Array.isArray(value)) return value.join('\n');
+	if (typeof value !== 'object') return String(value);
+	return Object.entries(value).map(([key, field]) => `${key} ${entryText(field)}`).join('\n');
+}
+
+function entryMarkdown(value) {
+	if (value === null || value === undefined) return '';
+	if (typeof value === 'string') return value.includes('\n') ? '```\n' + value + '\n```' : value;
+	if (Array.isArray(value)) return value.map(item => `- ${item}`).join('\n');
+	if (typeof value !== 'object') return String(value);
+	return Object.entries(value)
+		.map(([key, field]) => `**${key}**\n\n${entryMarkdown(field)}`)
+		.join('\n\n');
+}
