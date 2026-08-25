@@ -88,7 +88,8 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 		// than merely indexed: a ground ray finds its floor in the second cell
 		// and does no narrow-phase work in any cell after it. The oversized
 		// entries come through with a `cell_near` of zero and so are never
-		// skipped by this — they have no cell to be ordered by.
+		// skipped by this — they have no cell to be ordered by, and neither do the
+		// entries left loose by a re-file.
 		if (cell_near < best.distance && index.stamp[(sz)i] != index.stamp_now)
 		{
 			index.stamp[(sz)i] = index.stamp_now;

@@ -92,9 +92,43 @@ function finish(result, into) {
 	return into === undefined || into === null ? result.objects() : result.count;
 }
 
-function ignoreHandle(value, where) {
-	if (value === null || value === undefined) return [-1, 0];
-	return liveObject(value, where);
+// How many nodes one sweep may be told to ignore — the host's MAX_IGNORED.
+const MAX_IGNORED = 8;
+
+// The handle pairs the host reads `ignore` out of.
+//
+// ONE array for the process, refilled per call. The host reads it synchronously
+// while the sweep runs and never keeps it, so there is nothing to alias — and a
+// character controller calls this once per character per fixed step, which is
+// exactly where a two-element allocation per call turns into garbage nobody
+// asked for.
+const ignoreScratch = new Int32Array(MAX_IGNORED * 2);
+
+// Fill the scratch from `ignore`, which is an object, an array of them, or
+// nothing. Answers with how many pairs are in it.
+//
+// **A whole subtree is ignored, not one node**, so passing a character's Group
+// is the thing to do — see the host's IgnoreSet. Objects past MAX_IGNORED throw
+// rather than being dropped: a sweep quietly colliding with something it was
+// told to pass through is a bug that looks like the controller misbehaving, and
+// there is nothing a caller can do about it if they are not told.
+function fillIgnore(value, where) {
+	if (value === null || value === undefined) return 0;
+
+	const many = Array.isArray(value) ? value : [value];
+	if (many.length > MAX_IGNORED) {
+		throw new RangeError(`${where} takes at most ${MAX_IGNORED} objects, not ${many.length} — ignoring an object ignores everything under it, so a whole character is one entry`);
+	}
+
+	let count = 0;
+	for (const one of many) {
+		if (one === null || one === undefined) continue;
+		const [index, generation] = liveObject(one, where);
+		ignoreScratch[count * 2] = index;
+		ignoreScratch[count * 2 + 1] = generation;
+		count++;
+	}
+	return count;
 }
 
 function hitObject(raw) {
@@ -172,6 +206,9 @@ export const query = {
 	// This is the same narrow phase `three.moveAndSlide` is built out of, so a
 	// wall this reports and a wall a character slides along cannot be two
 	// different walls.
+	//
+	// `ignore` takes an object or an array of them, and each one's whole
+	// subtree is left out — see `three.moveAndSlide`.
 	sweep(from, to, options = null) {
 		const where = 'three.query.sweep(from, to, { radius, height, ignore })';
 		const [fx, fy, fz] = readVector(from, where);
@@ -185,8 +222,10 @@ export const query = {
 		// distance from the centre to a hemisphere's centre.
 		const height = +(options?.height ?? 0);
 		const half = Math.max((height - 2 * radius) * 0.5, 0);
-		const [ii, ig] = ignoreHandle(options?.ignore, `${where}: ignore`);
-		return hitObject(H.sweep(fx, fy, fz, tx, ty, tz, radius, half, ii, ig));
+		const ignored = fillIgnore(options?.ignore, `${where}: ignore`);
+		return hitObject(H.sweep(
+			fx, fy, fz, tx, ty, tz, radius, half,
+			ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2));
 	},
 };
 
@@ -227,6 +266,13 @@ const MOVE_DEFAULTS = {
 // and it decides `grounded`, whether a step-up is taken and whether a contact
 // is a floor or a wall — one number, because three would disagree.
 //
+// **`ignore` takes an object or an array of them, and it ignores each one's
+// whole SUBTREE.** Pass the character's Group and every mesh under it is out of
+// the sweep — a character built out of a body, a head and four limbs used to
+// collide with its own chest, because this took a single node. Up to eight, and
+// a ninth throws rather than being quietly dropped. It is per call: a thing that
+// should never be collision geometry for anybody is `object.collides = false`.
+//
 // It integrates nothing and remembers nothing between calls: gravity, velocity
 // and the jump are the caller's.
 export function moveAndSlide(position, motion, options = null) {
@@ -240,7 +286,7 @@ export function moveAndSlide(position, motion, options = null) {
 		throw new RangeError(`${where} wants a positive radius, not ${options?.radius}`);
 	}
 	const half = Math.max((height - 2 * radius) * 0.5, 0);
-	const [ii, ig] = ignoreHandle(options?.ignore, `${where}: ignore`);
+	const ignored = fillIgnore(options?.ignore, `${where}: ignore`);
 
 	const raw = H.moveAndSlide(
 		px, py, pz, mx, my, mz,
@@ -249,7 +295,7 @@ export function moveAndSlide(position, motion, options = null) {
 		+(options?.slope ?? MOVE_DEFAULTS.slope),
 		+(options?.skin ?? MOVE_DEFAULTS.skin),
 		+(options?.snap ?? MOVE_DEFAULTS.snap),
-		ii, ig);
+		ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2);
 
 	// `ground` and `hit` are LAZY — see lazyObject. A walking character reads
 	// grounded, slope and position every frame and looks at what it is standing

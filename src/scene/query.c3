@@ -28,14 +28,36 @@
  originally called for and what the solver's broad phase does. Incremental
  maintenance is the right shape for a set of bodies that is mutated one at a time
  and queried every step; it is the wrong shape here, because a world box is only
- knowable after `update_world_matrices` and the scene has no per-node "this one
- moved" signal to hang the update on — `Scene.invalidate` is told a node at most
- half the time and is told nothing at all by the walk that actually moves a
- subtree. A rebuild needs no such signal: it reads what is true now.
+ knowable after `update_world_matrices`. A rebuild needs no signal at all: it
+ reads what is true now.
 
  The rebuild costs what one old raycast cost — the same per-node box transform,
  over the same nodes — so the break-even is the *second* query in a burst, and
  everything past it is free.
+
+ ## A move is re-filed; a structural change is not
+
+ **What that argument got wrong was the frequency of a move.** The paragraph
+ above used to end by saying the scene has no per-node "this one moved" signal
+ to hang an update on, so everything was a rebuild — and a gameplay step that
+ legitimately moved a character and then swept from its new position paid four
+ hundred and thirty re-filings for one moved box, once per sweep. `plan.md` §17
+ measured 6.8 ms a step against 0.65 ms for the same eleven characters with
+ every write deferred to the animation callback, which made "never write between
+ two queries" a rule a script had to know and could not always keep.
+
+ So there is a signal now, and it is narrow on purpose. `Scene.mark_moved`
+ hands `Scene.invalidate` the id it already had, `QueryIndex.note_moved`
+ remembers it, and the next query re-files that subtree's boxes and leaves those
+ entries in `loose` — a short list every query scans, which the stamp keeps from
+ double-reporting against the cells they are still filed in. Past
+ `QUERY_MAX_LOOSE` it gives up and rebuilds, because a linear scan stops being
+ the cheaper answer.
+
+ Everything that is *not* one subtree moving still rebuilds, and that list is
+ the whole of the contract: adding a node, removing one, re-parenting one, and
+ `Node.collides` changing. Toggling `Node.visible` costs nothing at all — see
+ `Scene.query_node`, which tests it when it answers.
 
  ## The grid is a counting sort, not a hash of lists
 
@@ -94,6 +116,17 @@ const int QUERY_MAX_DIM = 128;
 const int QUERY_MAX_TOTAL = 1 << 18;
 
 <*
+ How many entries may be loose before a rebuild is the cheaper answer.
+
+ Every query scans the loose list from end to end, where a rebuild is paid once
+ and then costs queries nothing. A hundred is well inside the range where the
+ scan wins — the case this exists for is a handful of characters sweeping
+ between writes — and well short of the crowd that should be moved with
+ `three.batch` and asked about afterwards.
+*>
+const sz QUERY_MAX_LOOSE = 128;
+
+<*
  The broad phase over a scene's drawable nodes.
 
  Every list here is `clear()`ed and refilled by `rebuild`, so a scene that
@@ -124,6 +157,42 @@ struct QueryIndex
 	List{uint} stamp;
 	uint stamp_now;
 
+	<*
+	 Entries whose node moved since the last rebuild, scanned linearly.
+
+	 **The dirty set `plan.md` §17 asked for.** A rebuild is the right *answer*
+	 to a node moving — the entry really does have a new box — at the wrong
+	 *price*: one moved node re-filed all four hundred and thirty of them, so a
+	 fixed step that moved eleven characters between its sweeps cost 29.2 ms
+	 against 5.9 ms for the same step with every write deferred. That is a rule
+	 a script should not have to know, and it breaks down the moment gameplay
+	 legitimately has to move something and then ask about it.
+
+	 A moved entry has its box rewritten in place and its index pushed here. It
+	 is left filed in the cells it used to cover, which is safe in both
+	 directions: a cell it no longer overlaps rejects it on the box test, and a
+	 cell it now overlaps but is not filed in is reached by this scan. The stamp
+	 above is what stops it being reported twice.
+
+	 Linear, so it is only cheaper than a rebuild while it is short — see
+	 `QUERY_MAX_LOOSE`, which is where it gives up and rebuilds instead.
+	*>
+	List{uint} loose;
+	// One flag per entry, so a node moved five times between two queries is one
+	// entry in `loose` rather than five.
+	List{char} is_loose;
+
+	// The nodes `Scene.invalidate` was told moved, and have not been re-filed
+	// yet. Subtree roots: moving a group moves everything under it, and the
+	// setter was only shown the group.
+	List{NodeId} moved;
+
+	// Entry index per node slot, or -1. What turns "this node moved" into
+	// "re-file entry 214" without a search. Rebuilt with the entries, and only
+	// ever read while `current` holds — every path that can add, remove or
+	// recycle a slot drops the index outright.
+	List{int} slot_entry;
+
 	float cell;
 	int[<3>] origin;
 	int[<3>] dims;
@@ -143,6 +212,10 @@ fn void QueryIndex.init(&self)
 	self.items.init(mem, 64);
 	self.oversized.init(mem, 8);
 	self.stamp.init(mem, 64);
+	self.loose.init(mem, 16);
+	self.is_loose.init(mem, 64);
+	self.moved.init(mem, 16);
+	self.slot_entry.init(mem, 64);
 	self.open = true;
 }
 
@@ -154,8 +227,48 @@ fn void QueryIndex.free(&self)
 	self.items.free();
 	self.oversized.free();
 	self.stamp.free();
+	self.loose.free();
+	self.is_loose.free();
+	self.moved.free();
+	self.slot_entry.free();
 	self.open = false;
 	self.current = false;
+}
+
+<*
+ Throw the index away: the next query rebuilds from scratch.
+
+ One place, so that "the index is stale" and "there is nothing pending to
+ re-file" are set together. A rebuild subsumes every outstanding move, and a
+ `moved` list left behind it would re-file entries the rebuild had just filed
+ correctly — against a `slot_entry` map that no longer describes the same
+ entries.
+*>
+fn void QueryIndex.drop(&self)
+{
+	self.current = false;
+	if (self.open) self.moved.clear();
+}
+
+<*
+ Remember that this node's subtree moved, or give up and rebuild.
+
+ Called by `Scene.invalidate` for the changes whose extent is one subtree — a
+ transform setter, the animation player, the physics write-back. Anything
+ whose extent is not one subtree drops the index instead; see `Scene.invalidate`.
+*>
+fn void QueryIndex.note_moved(&self, NodeId id)
+{
+	if (!self.current) return;
+	// Past the cap the linear scan the re-file leaves behind costs more than the
+	// rebuild it saved. Counted against the same number as `loose` because one
+	// pending node is at least one loose entry.
+	if (self.moved.len() + self.loose.len() >= QUERY_MAX_LOOSE)
+	{
+		self.drop();
+		return;
+	}
+	self.moved.push(id);
 }
 
 fn int[<3>] QueryIndex.cell_of(&self, Vec3 point)
@@ -200,11 +313,96 @@ fn void zero_fill(List{uint}* list, sz count)
 
  Cheap when nothing moved — one bool — which is what makes it safe to call at
  the top of every query rather than making callers remember to.
+
+ **Three states rather than two since §17's fixes.** The index is current; or
+ some nodes moved and their entries can be re-filed, which is what a gameplay
+ step that moves a character and then asks about it does; or it is gone and has
+ to be rebuilt. The last case is what every structural change — an add, a
+ removal, a re-parenting, a node joining the query set — still costs.
+
+ The `matrices_current` test is a backstop rather than the mechanism. Every
+ writer that clears it goes through `invalidate`, which either drops this index
+ or records the move, so reaching this line with the index current and the
+ matrices stale means a fourth writer appeared that neither of those knows
+ about — and rebuilding is the answer that is merely slow rather than wrong.
 *>
 fn void Scene.ensure_query_index(&self, Assets* assets)
 {
-	if (self.query.current && self.matrices_current) return;
-	self.rebuild_query_index(assets);
+	if (!self.query.current)
+	{
+		self.rebuild_query_index(assets);
+		return;
+	}
+	if (self.query.moved.len() > 0)
+	{
+		self.refile_moved(assets);
+		return;
+	}
+	if (!self.matrices_current) self.rebuild_query_index(assets);
+}
+
+<*
+ Rewrite the boxes of everything that moved, and leave those entries loose.
+
+ The cheap half of `ensure_query_index` — see `QueryIndex.loose` for why
+ leaving them out of the grid rather than re-bucketing them is both correct and
+ the point. Cost is the moved subtrees, not the scene.
+*>
+fn void Scene.refile_moved(&self, Assets* assets)
+{
+	// Not optional and not free the first time: the boxes about to be written
+	// are `node.world` through the mesh bounds, and `node.world` is what this
+	// walk produces. It is the same walk the rebuild would have done.
+	self.update_world_matrices();
+
+	QueryIndex* index = &self.query;
+	if (assets != null)
+	{
+		// Copied out: `refile_branch` takes `&self` and the list is a field of
+		// it, so iterating it in place is the habit that stops being safe the
+		// day something pushes to it mid-walk.
+		sz count = index.moved.len();
+		for (sz i = 0; i < count; i++) self.refile_branch(assets, index.moved[i]);
+	}
+	index.moved.clear();
+}
+
+fn void Scene.refile_branch(&self, Assets* assets, NodeId id)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	self.refile_entry(assets, id, node);
+
+	// Read through `self.nodes` per step for `update_branch`'s reason: the
+	// recursion takes `&self`, so a pointer taken before it is not one to
+	// index through afterwards.
+	sz count = node.children.len();
+	for (sz i = 0; i < count; i++) self.refile_branch(assets, self.nodes[id.index].children[i]);
+}
+
+fn void Scene.refile_entry(&self, Assets* assets, NodeId id, Node* node)
+{
+	QueryIndex* index = &self.query;
+	if ((sz)id.index >= index.slot_entry.len()) return;
+
+	int at = index.slot_entry[(sz)id.index];
+	if (at < 0) return;
+
+	QueryEntry* entry = &index.entries[(sz)at];
+	// A slot that was recycled is a different node, and recycling a slot goes
+	// through `create_slot`, which drops the whole index — so this cannot fire
+	// today. It is here because being wrong about it would be a query answering
+	// with a stranger's box, which is a bug nothing would attribute to this.
+	if (entry.node != id) return;
+
+	GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
+	if (mesh == null || mesh.bvh == null) return;
+
+	entry.box = mesh.bounds.transform_matrix(node.world);
+	if (index.is_loose[(sz)at] != 0) return;
+	index.is_loose[(sz)at] = 1;
+	index.loose.push((uint)at);
 }
 
 fn void Scene.rebuild_query_index(&self, Assets* assets)
@@ -218,8 +416,17 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	index.items.clear();
 	index.starts.clear();
 	index.stamp.clear();
+	index.loose.clear();
+	index.is_loose.clear();
+	index.moved.clear();
 	index.stamp_now = 0;
 	index.current = true;
+
+	// One slot per node, -1 until an entry claims it. Sized to the pool rather
+	// than to the entries because it is indexed by slot — see `slot_entry`.
+	index.slot_entry.clear();
+	index.slot_entry.reserve(self.nodes.len());
+	for (sz i = 0; i < self.nodes.len(); i++) index.slot_entry.push(-1);
 
 	if (assets == null)
 	{
@@ -234,6 +441,14 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	{
 		if (!node.alive) continue;
 		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
+		// **Where `collides` is spent** — `plan.md` §17. Filed out here rather
+		// than tested at answer time the way `visible` is, because the two are
+		// different kinds of flag: visibility is toggled per frame by gameplay
+		// and the index must survive it, where this one says what a piece of
+		// geometry *is* and is set when it is authored. Keeping decoration out
+		// of the index entirely is what makes a hundred grass tufts free rather
+		// than merely rejected a hundred times.
+		if (!node.collides) continue;
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		// No tree is no narrow phase, and a broad-phase hit nothing can refine
@@ -247,6 +462,7 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 		// narrow-phase test that rejects. Measured: 65 ns a node against 12,
 		// on the rebuild that a moving scene pays once per query burst.
 		collision::Aabb3 box = mesh.bounds.transform_matrix(node.world);
+		index.slot_entry[slot] = (int)index.entries.len();
 		index.entries.push({ .node = { .index = (uint)slot, .generation = node.generation }, .box = box });
 		world.expand_by_point(box.min);
 		world.expand_by_point(box.max);
@@ -255,6 +471,9 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 
 	sz count = index.entries.len();
 	zero_fill(&index.stamp, count);
+	index.is_loose.clear();
+	index.is_loose.reserve(count);
+	for (sz i = 0; i < count; i++) index.is_loose.push(0);
 
 	if (count == 0)
 	{
@@ -365,6 +584,17 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
  is where that is caught. Invisible nodes are skipped here rather than at build
  time, so toggling `visible` never costs a rebuild — see `Scene.raycast` for why
  invisible means "not found".
+
+ **That sentence was a lie until §17's fix**, and it is worth saying which half
+ was wrong: this end was always right, and `Scene.set_visible` went through
+ `mark_moved` and threw the index away anyway. Measured at 32.7 ms a fixed step
+ against 5.9 ms, on eleven characters that hid themselves around each sweep
+ because `IgnoreSet` did not exist yet. `Scene.set_visible` now propagates
+ `world_visible` itself and leaves this index alone, which is what makes the
+ answer-time test here worth having.
+
+ `collides` is deliberately *not* tested here — see `rebuild_query_index` for
+ why that one is filed out at build time instead.
 *>
 fn Node* Scene.query_node(&self, QueryEntry entry)
 {
@@ -397,6 +627,19 @@ macro void Scene.@each_in_box(&self, Assets* assets, collision::Aabb3 box; @body
 
 	foreach (i : index.oversized)
 	{
+		QueryEntry entry = index.entries[(sz)i];
+		index.stamp[(sz)i] = index.stamp_now;
+		if (!entry.box.collides(box)) continue;
+		if (self.query_node(entry) == null) continue;
+		@body(entry.node, entry.box);
+	}
+
+	// The entries that moved since the last rebuild, before the grid walk so
+	// the stamp keeps the walk from reporting them a second time out of the
+	// cells they used to be filed in. See `QueryIndex.loose`.
+	foreach (i : index.loose)
+	{
+		if (index.stamp[(sz)i] == index.stamp_now) continue;
 		QueryEntry entry = index.entries[(sz)i];
 		index.stamp[(sz)i] = index.stamp_now;
 		if (!entry.box.collides(box)) continue;
@@ -645,6 +888,11 @@ macro void QueryIndex.@walk_ray(&self, collision::Ray ray, float max_distance; @
 	// stopping early must have seen them. `float::max` says "no ordering
 	// information", which every caller reads as "cannot be skipped".
 	foreach (i : self.oversized) @body(i, 0.0f);
+	// The moved ones, for the same reason and with the same disclaimer: they
+	// are filed in the cells they used to cover, so the walk cannot be trusted
+	// to have reached them. The caller's stamp is what stops the ones it did
+	// reach being tested twice.
+	foreach (i : self.loose) @body(i, 0.0f);
 }
 
 <*
@@ -828,6 +1076,93 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 }
 
 <*
+ How many nodes one sweep may be told to ignore.
+
+ Small on purpose. This is "the thing moving, and the two or three things it is
+ allowed to pass through" — a crowd of exceptions is a `collides` flag or a
+ layer, not an argument. Fixed rather than a list so an `IgnoreSet` is a value
+ with no allocator and no lifetime, which is what lets it be a `MoveOptions`
+ field and be copied down four call frames per sweep without anyone thinking
+ about it.
+*>
+const usz MAX_IGNORED = 8;
+
+<*
+ The nodes a sweep leaves out, and everything under them.
+
+ **A set of subtrees rather than one node** — `plan.md` §17. `gather_triangles`
+ took a single `NodeId`, which is right only for a character that is one mesh:
+ a character built out of a body, a head, two arms and two legs collided with
+ its own chest, `hit` came back as one of its own boxes, and the capsule was
+ thrown out along that normal — which reads as the controller being broken
+ rather than as the contract being too narrow. Hiding the whole group for the
+ duration of the move was the only workaround, and it cost the query index.
+
+ Subtrees rather than nodes because that is what a character *is*, and because
+ a leaf node is its own subtree — so one id in a set of one is exactly the old
+ behaviour.
+*>
+struct IgnoreSet
+{
+	NodeId[MAX_IGNORED] nodes;
+	usz count;
+}
+
+<*
+ The set holding one node and its subtree, or an empty one for `NO_NODE`.
+*>
+fn IgnoreSet ignore_one(NodeId id)
+{
+	if (!id.is_set()) return {};
+	IgnoreSet set;
+	set.nodes[0] = id;
+	set.count = 1;
+	return set;
+}
+
+<*
+ The set holding each of these nodes and its subtree.
+
+ Ids past `MAX_IGNORED` are dropped rather than raising: this is called from the
+ JS boundary with whatever a script passed, and the failure of dropping one is a
+ sweep that collides with something it was asked to pass through — visible,
+ local, and nothing like as bad as an exception out of the middle of a movement.
+*>
+fn IgnoreSet ignore_list(NodeId[] ids)
+{
+	IgnoreSet set;
+	foreach (id : ids)
+	{
+		if (!id.is_set() || set.count >= MAX_IGNORED) continue;
+		set.nodes[set.count++] = id;
+	}
+	return set;
+}
+
+<*
+ Whether this node, or anything it hangs from, is in the set.
+
+ Up the parent chain rather than down every ignored subtree, so the cost is the
+ node's depth times the set's size — a handful of comparisons on the nodes a
+ sweep actually reached — rather than anything in the size of what is ignored.
+ `Scene.set_parent` refuses to make a cycle, so the walk terminates.
+*>
+fn bool Scene.ignored(&self, NodeId id, IgnoreSet set)
+{
+	if (set.count == 0) return false;
+
+	NodeId at = id;
+	while (at.is_set())
+	{
+		for (usz i = 0; i < set.count; i++) if (set.nodes[i] == at) return true;
+		Node* node = self.node(at);
+		if (node == null) break;
+		at = node.parent;
+	}
+	return false;
+}
+
+<*
  Every triangle of every drawable node overlapping `box`, in **world** space.
 
  The triangles are transformed rather than the query shape being pushed into
@@ -843,10 +1178,10 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
  exactly the meshes a level is built from.
 
  @param out : `Appended to, not cleared. The caller owns the list and its allocator.`
- @param skip : `A node to leave out — the character's own body. NO_NODE for none.`
+ @param skip : `Nodes to leave out, subtrees included — the character's own body. An empty set for none.`
 *>
 fn void Scene.gather_triangles(
-	&self, Assets* assets, collision::Aabb3 box, NodeId skip,
+	&self, Assets* assets, collision::Aabb3 box, IgnoreSet skip,
 	List{collision::TriangleVerts}* out, List{NodeId}* owners
 )
 {
@@ -854,7 +1189,7 @@ fn void Scene.gather_triangles(
 
 	self.@each_in_box(assets, box; NodeId id, collision::Aabb3 world)
 	{
-		if (id != skip)
+		if (!self.ignored(id, skip))
 		{
 			Node* node = self.node(id);
 			if (node != null)
@@ -920,11 +1255,11 @@ fn void Scene.gather_triangles(
 
  @param radius : `The capsule's radius. Zero or less makes this a ray, and Scene.raycast is the faster way to ask that.`
  @param skin : `Extra clearance kept from every surface, in world units. A character uses a millimetre or two so it never rests exactly on a face.`
- @param skip : `A node to ignore — the moving body's own. NO_NODE for none.`
+ @param skip : `Nodes to ignore, subtrees included — the moving body's own. An empty set for none.`
 *>
 fn SweepHit Scene.sweep_capsule(
 	&self, Assets* assets, Vec3 from, Vec3 to,
-	float radius, float half_height, float skin = 0.0f, NodeId skip = NO_NODE
+	float radius, float half_height, float skin = 0.0f, IgnoreSet skip = {}
 )
 {
 	SweepHit miss = { .hit = false, .fraction = 1.0f, .distance = 0.0f };
@@ -1066,7 +1401,7 @@ fn SweepHit Scene.sweep_capsule(
  given. A capsule of zero half-height is a sphere; there is no second
  implementation.
 *>
-fn SweepHit Scene.sweep_sphere(&self, Assets* assets, Vec3 from, Vec3 to, float radius, NodeId skip = NO_NODE)
+fn SweepHit Scene.sweep_sphere(&self, Assets* assets, Vec3 from, Vec3 to, float radius, IgnoreSet skip = {})
 {
 	return self.sweep_capsule(assets, from, to, radius, 0.0f, 0.0f, skip);
 }

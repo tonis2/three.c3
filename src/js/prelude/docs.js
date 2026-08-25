@@ -43,8 +43,9 @@ export const DOCS = {
 		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
-		'spatial-queries': 'There are BULK SPATIAL QUERIES, and they go through an index rather than a scan: three.query.sphere(point, radius), three.query.box(box), three.query.raycastAll(origin, direction) and three.query.sweep(from, to, { radius, height }). scene.raycast goes through the same index, which is why it stopped being linear in the node count — it used to test EVERY node in the scene before it reached any BVH, and a hundred agents casting one ground ray apiece cost 2.1 ms in a 500-node demo. The index is rebuilt by the first query after anything moved and by nothing else, so a frame that asks nothing pays nothing and the hundredth ray in a frame costs a cell walk. Every verb comes in two forms: three.query.sphere(p, r) allocates an Array of objects and is right for a click or a one-off, and three.query.sphere(p, r, buffer) fills a three.query.buffer(n) you keep and answers with a count, which is right for the loop. box and sphere are BROAD phase — box against box — so a node whose box overlaps and whose triangles do not is included; raycastAll and sweep are exact.',
-		'move-and-slide': 'three.moveAndSlide(position, motion, options) is the character controller: it sweeps a capsule, slides along what it hits, climbs a ledge under the step height and reports whether it is standing on anything. It takes a POSITION and answers with a position — it does not own an object, integrates nothing and remembers nothing between calls, so gravity, the velocity and the jump stay yours. Options are { radius, height, step, slope, skin, snap, ignore }; height is the whole capsule, and slope in degrees decides grounded, whether a ledge is climbed and whether a contact is a floor or a wall, all from one number so three cannot disagree. Pass the character\'s own object as ignore or it collides with its own mesh. It is kinematic and touches no rigidbody: a character built out of physics is pushed by contacts, tips over and answers a frame late. Not to be confused with three.character(), which is the higher-level helper that rides a height field and does not collide with anything.',
+		'spatial-queries': 'There are BULK SPATIAL QUERIES, and they go through an index rather than a scan: three.query.sphere(point, radius), three.query.box(box), three.query.raycastAll(origin, direction) and three.query.sweep(from, to, { radius, height }). scene.raycast goes through the same index, which is why it stopped being linear in the node count — it used to test EVERY node in the scene before it reached any BVH, and a hundred agents casting one ground ray apiece cost 2.1 ms in a 500-node demo. The index is refreshed by the first query after anything moved and by nothing else, so a frame that asks nothing pays nothing and the hundredth ray in a frame costs a cell walk. MOVING SOMETHING AND THEN ASKING ABOUT IT IS FINE: a moved node has its entry re-filed rather than the whole index rebuilt, so a gameplay step that moves eleven characters between its sweeps costs what one that moved none does. Toggling object.visible costs the index nothing at all — an invisible node is skipped when a query ANSWERS, so hiding things is the free way to keep them out of a sweep. What does still rebuild it is structure: adding a node, removing one, re-parenting one, or setting object.collides. Every verb comes in two forms: three.query.sphere(p, r) allocates an Array of objects and is right for a click or a one-off, and three.query.sphere(p, r, buffer) fills a three.query.buffer(n) you keep and answers with a count, which is right for the loop. box and sphere are BROAD phase — box against box — so a node whose box overlaps and whose triangles do not is included; raycastAll and sweep are exact.',
+		'not-collision-geometry': 'Every drawable mesh is swept and raycast against, so a pickup lying on a path is a bollard and a field of grass is a fence. object.collides = false is the fix: it takes that ONE mesh out of the spatial index entirely — three.moveAndSlide walks through it, three.query.sphere does not report it, scene.raycast misses it — while it still draws exactly as before. three.physics is untouched by it, so a mesh with collides = false and a { trigger: true } body is the ordinary way to write a pickup you can walk INTO and cannot walk into; before this the shape that worked was two nodes, the thing you see and an invisible volume beside it. It is NOT inherited: set it on the meshes rather than on a Group, because it says what one piece of geometry is. Hiding a whole character from ONE sweep is { ignore } on that call, and hiding something from the frame is object.visible = false — which is free and costs the index nothing, where toggling collides costs an index rebuild. It is an authoring flag, not a per-frame one.',
+		'move-and-slide': 'three.moveAndSlide(position, motion, options) is the character controller: it sweeps a capsule, slides along what it hits, climbs a ledge under the step height and reports whether it is standing on anything. It takes a POSITION and answers with a position — it does not own an object, integrates nothing and remembers nothing between calls, so gravity, the velocity and the jump stay yours. Options are { radius, height, step, slope, skin, snap, ignore }; height is the whole capsule, and slope in degrees decides grounded, whether a ledge is climbed and whether a contact is a floor or a wall, all from one number so three cannot disagree. Pass the character\'s own object as ignore or it collides with its own mesh, and pass the GROUP rather than one mesh out of it — ignore leaves the whole SUBTREE out, so a character built from a body, a head and four limbs does not collide with its own chest. It takes an array too, for up to eight things. It is kinematic and touches no rigidbody: a character built out of physics is pushed by contacts, tips over and answers a frame late. Not to be confused with three.character(), which is the higher-level helper that rides a height field and does not collide with anything.',
 		'navigation': 'three.nav.bake({ cell, radius, height, slope }) voxelizes the scene\'s standing room, and NOTHING bakes it for you — call it after the level is built. Then TWO verbs, and the split is the design: three.nav.path(from, to) is one agent\'s route, and three.nav.field(goals) is a solve KEPT that a whole crowd samples. A path solves the entire reachable set and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has direction(point), cost(point) — Infinity for unreachable — and dispose(). Paths come back shortened against the actual geometry with a capsule sweep at the agent\'s own size, so they do not look like they are walking cell centres, and their waypoints sit on the floor. cell decides everything: it is the resolution AND the largest step that can be climbed, because two cells are connected when they are adjacent and one cell up. three.nav.stats() reports voxels, walkable and bakeMs so you can find out whether the bake is a level-boundary operation or a loading screen.',
 		'steering': 'three.steer(positions, velocities, options) fills a Float32Array with a desired velocity per agent — seek, arrive and separation, for the whole crowd, in ONE crossing. positions is three floats per agent and is read; velocities is three floats per agent and is written. Options are { field, goal, maxSpeed, arrive, separation, separationWeight }; a field wins over a goal, because a field already knows the way round a wall. What comes back is a DESIRED velocity, not a position: integrating it and deciding whether an agent may actually go there are yours, which is what lets the same call feed three.moveAndSlide for agents that collide and a plain add for agents that do not.',
 		'batched-transforms': 'three.batch(objects) moves many nodes in one crossing, through a Float32Array. It is NOT a faster way to move a dozen things and should not be reached for as one — five hundred ordinary mesh.position.set calls measure 0.245 ms a frame, three per cent of the budget, and the trigger for this is about two thousand nodes a frame. It is for the case where the write is already a loop over numbers: a crowd steered by three.steer, a particle field, a chunked terrain. batch.positions is a Float32Array seeded from where the objects are now; batch.flush() writes them and answers with how many landed. With { trs: true } the stride is ten floats — position, an xyzw QUATERNION, then scale.',
@@ -108,6 +109,7 @@ export const DOCS = {
 				// three.light rather than a scene property: it is per renderer, like
 				// three.camera, and listing it here would suggest two scenes could
 				// disagree about it.
+				'collides (on the root, which draws nothing — set it on the meshes)',
 			],
 		},
 		Mesh: {
@@ -121,6 +123,7 @@ export const DOCS = {
 				'color (per copy, free: [r,g,b], [r,g,b,a] or 0xff8800)',
 				'variant (per copy, free: which row of the material\'s table)',
 				'static (this will not move again: drawn into the shadow map once and kept)',
+				'collides (false takes it out of every spatial query — scenery, not a wall)',
 				'animations (empty unless this came from asset.instantiate())',
 			],
 			methods: [
@@ -374,6 +377,7 @@ export const DOCS = {
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
 				'static (this will not move again: see the static-casters topic)',
+				'collides (per node and NOT inherited — set it on the meshes, not on the Group)',
 				'animations (clip names, from asset.instantiate())',
 			],
 		},
@@ -719,6 +723,7 @@ export const DOCS = {
 				'variant (meaningless here: the line material has no table)',
 				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
+				'collides (already false in effect: a helper has no collision geometry and is in no query)',
 			],
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
@@ -745,6 +750,7 @@ export const DOCS = {
 				'variant (meaningless here)',
 				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
+				'collides (already false in effect: a helper has no collision geometry and is in no query)',
 			],
 			methods: [
 				'update()', 'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)',
@@ -766,6 +772,7 @@ export const DOCS = {
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
 				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
+				'collides (already false in effect: a helper has no collision geometry and is in no query)',
 			],
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
@@ -790,6 +797,7 @@ export const DOCS = {
 				'variant (meaningless here)',
 				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
+				'collides (already false in effect: a helper has no collision geometry and is in no query)',
 			],
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
@@ -819,6 +827,7 @@ export const DOCS = {
 				'variant (meaningless here)',
 				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
+				'collides (already false in effect: a helper has no collision geometry and is in no query)',
 			],
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
@@ -870,11 +879,12 @@ export const DOCS = {
 		'three.query.sweep(from, to, options)':
 			'Move a sphere or an upright capsule from one point to another and report the first thing it '
 			+ 'touches, or null. { radius } alone is a sphere; adding { height } makes it a capsule that tall '
-			+ 'overall, and { ignore } leaves one object out. The hit carries fraction — where along the '
+			+ 'overall, and { ignore } leaves objects out. The hit carries fraction — where along the '
 			+ 'motion it happened — so the safe position is from + (to - from) * fraction. This is the same '
 			+ 'narrow phase three.moveAndSlide is built out of, so a wall this reports and a wall a character '
 			+ 'slides along cannot be two different walls. There is no orientation argument: everything this '
-			+ 'is for stands up.',
+			+ 'is for stands up. ignore takes an object or an ARRAY of them and leaves each one\'s whole '
+			+ 'SUBTREE out — see three.moveAndSlide for why that matters.',
 		'three.moveAndSlide(position, motion, options)':
 			'The character controller. Sweeps a capsule from position by motion, slides along whatever it '
 			+ 'hits, climbs a ledge under the step height, and answers with { position, remaining, grounded, '
@@ -884,9 +894,13 @@ export const DOCS = {
 			+ 'drop under the feet in one frame and still be walked down rather than fallen off. It '
 			+ 'integrates nothing: gravity, the velocity and the jump are yours, and a frame is '
 			+ 'three.moveAndSlide(where, [vx * dt, vy * dt, vz * dt], opts) followed by copying r.position '
-			+ 'onto whatever you are driving. Pass the character\'s own object as ignore. It is KINEMATIC and '
+			+ 'onto whatever you are driving. It is KINEMATIC and '
 			+ 'touches no rigidbody — see the move-and-slide topic for why that is the design rather than a '
-			+ 'limitation.',
+			+ 'limitation. PASS THE CHARACTER\'S OWN OBJECT AS ignore, and pass the GROUP rather than one '
+			+ 'mesh out of it: ignore leaves the object\'s whole subtree out, so a character built from a '
+			+ 'body, a head and four limbs does not collide with its own chest. It takes an array too, for '
+			+ 'up to eight things — a ninth throws rather than being silently dropped. It is per call; a '
+			+ 'thing that should never be collision geometry for anybody is object.collides = false.',
 		'three.batch(objects, options)':
 			'A Float32Array-shaped bulk write over many nodes. batch.positions is three floats per object, '
 			+ 'seeded from where they are now; batch.flush() sends the lot in one crossing and answers with '
@@ -905,12 +919,21 @@ export const DOCS = {
 			+ 'cheap bake, and a finer one costs as the CUBE. Answers with the same object stats() does, or '
 			+ 'null when the region held no standing room, which is an answer and not an error. A second bake '
 			+ 'replaces the first, and new three.Scene() drops it — it was voxelized out of triangles that '
-			+ 'are gone.',
+			+ 'are gone. CHECK components ON WHAT COMES BACK: anything above 1 is a level cut into islands, '
+			+ 'and every other number will look healthy while half your agents stand still.',
 		'three.nav.stats()':
 			'What the last bake produced and what it cost: { cell, radius, height, slope, voxels, solid, '
-			+ 'floor, walkable, bakeMs, bounds }, or null if there has not been one. bakeMs and voxels are '
-			+ 'the numbers that decide whether baking is a level-boundary operation or a loading screen for '
-			+ 'YOUR level rather than for a reference one.',
+			+ 'floor, walkable, components, largest, bakeMs, bounds }, or null if there has not been one. '
+			+ 'bakeMs and voxels are the numbers that decide whether baking is a level-boundary operation '
+			+ 'or a loading screen for YOUR level rather than for a reference one. components IS THE ONE TO '
+			+ 'CHECK AND IT IS NOT A COST: it is how many DISJOINT regions the standing room came out in, '
+			+ 'and largest is the size of the biggest. Every other number here is a total, and a total '
+			+ 'cannot tell a level an agent can cross from the same level in pieces — a doorway one cell too '
+			+ 'narrow, a step one cell too high or a ramp that does not quite reach all leave walkable '
+			+ 'looking right, field() returning a live field rather than null, and direction() answering '
+			+ '(0, 0, 0) for every agent on the wrong side of the break. Above 1 means "there is no path" is '
+			+ 'the honest answer for some pairs of points in this level, and the usual cause is a cell too '
+			+ 'coarse for the geometry.',
 		'three.nav.path(from, to, options)':
 			'One agent, one route: an Array of Vector3 waypoints on the walking surface, starting at the '
 			+ 'point given, or empty when there is no route. The straight lines between them have been '

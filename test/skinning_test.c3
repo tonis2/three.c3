@@ -687,7 +687,7 @@ fn void a_crowd_at_different_phases_is_one_draw_call() @test
 				// `mark_moved`, not `node.dirty = true`: since §19.5 the walk is
 				// allowed to skip itself, and a hand-written transform that does not
 				// say so leaves a hundred copies stacked at the origin.
-				renderer.pass.scene.mark_moved(node);
+				renderer.pass.scene.mark_moved(roots[i]);
 			}
 			// Spread across the clip: copy i starts i/COPIES of the way in.
 			renderer.pass.scene.play(roots[i], "Bend", loop: true, speed: 1.0f, time: (float)i / (float)COPIES);
@@ -775,7 +775,7 @@ fn void writing_a_bone_moves_a_live_skin() @test
 		float half = (float)math::PI / 4.0f;
 		bone.rotation = { 0, 0, math::sin(half), math::cos(half) };
 		// See `Scene.mark_moved`: the flag alone no longer reaches the walk.
-		renderer.pass.scene.mark_moved(bone);
+		renderer.pass.scene.mark_moved(mid);
 
 		image::Image after_shot = renderer.capture()!!;
 		Silhouette after = measure(&after_shot, renderer.clear);
@@ -818,7 +818,7 @@ fn void writing_a_bone_does_not_move_a_baked_skin() @test
 				float half = (float)math::PI / 4.0f;
 				bone.rotation = { 0, 0, math::sin(half), math::cos(half) };
 				// See `Scene.mark_moved`: the flag alone no longer reaches the walk.
-				renderer.pass.scene.mark_moved(bone);
+				renderer.pass.scene.mark_moved(mid);
 			}
 
 		}

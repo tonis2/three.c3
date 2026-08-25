@@ -516,13 +516,28 @@ fn Scene* Scene.init(&self)
  remembered two of the three would be a bug that only shows up in the one it
  forgot. Adding a fourth cache means adding a line here and nowhere else.
 
+ **One of the four is not all-or-nothing since §17.** The query index can be
+ told *what* moved and re-file that subtree instead of re-filing the scene, so
+ `moved` is how a caller says "this change is one subtree and nothing else".
+ Everything that is not — an add, a removal, a re-parenting, a node joining or
+ leaving the query set — leaves it unset and pays for a rebuild, which is the
+ conservative answer and the one that was always being paid.
+
  @param node : `The node that changed, or null for a change that is not about one node — an add, a removal, a re-parenting. Only read to decide whether the static half of the shadow map has to be rebuilt; a null is treated as "it might have been static", which is the conservative answer.`
+ @param moved : `The id of that node when the change is a movement of its transform and nothing else. NO_NODE otherwise, which drops the query index rather than re-filing.`
 *>
-fn void Scene.invalidate(&self, Node* node = null)
+fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 {
 	self.matrices_current = false;
 	self.bounds_current = false;
-	self.query.current = false;
+	if (moved.is_set())
+	{
+		self.query.note_moved(moved);
+	}
+	else
+	{
+		self.query.drop();
+	}
 	if (node == null || node.static_caster) self.static_revision++;
 }
 
@@ -536,14 +551,19 @@ fn void Scene.invalidate(&self, Node* node = null)
  this instead of writing the flag, so that the caches in `invalidate` are not
  something a fourth such caller has to know about.
 
- `Scene.touch` is the same thing by handle, for a script that wrote the fields
- itself.
+ `Scene.touch` is the same thing for a script that wrote the fields itself; it
+ is now literally this function, because the handle is what the query index
+ needs and every one of those three callers had one already.
 *>
-fn void Scene.mark_moved(&self, Node* node)
+fn void Scene.mark_moved(&self, NodeId id)
 {
+	Node* node = self.node(id);
 	if (node == null) return;
 	node.dirty = true;
-	self.invalidate(node);
+	// The id as well as the pointer, and that is what the handle is for: it is
+	// what lets the query index re-file this subtree instead of the scene. See
+	// `Scene.invalidate`.
+	self.invalidate(node, id);
 }
 
 <*
@@ -1098,6 +1118,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.static_caster = false;
 	node.visible = true;
 	node.world_visible = true;
+	// Reset for `material`'s reason: a recycled slot that stayed non-colliding
+	// would put a new node into the scene that nothing can sweep against.
+	node.collides = true;
 	node.dirty = true;
 	node.generation = generation;
 	node.alive = true;
@@ -1250,7 +1273,7 @@ fn void Scene.set_position(&self, NodeId id, Vec3 position)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.position = position;
-	self.mark_moved(node);
+	self.mark_moved(id);
 }
 
 <*
@@ -1262,7 +1285,7 @@ fn void Scene.set_rotation(&self, NodeId id, Vec3 rotation)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.rotation = quat_from_euler(rotation);
-	self.mark_moved(node);
+	self.mark_moved(id);
 }
 
 <*
@@ -1279,7 +1302,7 @@ fn void Scene.set_quaternion(&self, NodeId id, Quaternionf rotation)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.rotation = rotation.normalize();
-	self.mark_moved(node);
+	self.mark_moved(id);
 }
 
 fn void Scene.set_scale(&self, NodeId id, Vec3 scale)
@@ -1287,17 +1310,87 @@ fn void Scene.set_scale(&self, NodeId id, Vec3 scale)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.scale = scale;
-	self.mark_moved(node);
+	self.mark_moved(id);
 }
 
+<*
+ Hide or show this node, and everything under it.
+
+ **This does not dirty the node and does not touch the query index** —
+ `plan.md` §17, and it is a fix rather than an optimisation. `query_node` tests
+ `world_visible` when it *answers*, and its doc block says in as many words
+ that this is so toggling visibility never costs a rebuild; `set_visible` then
+ went through `mark_moved` and threw the index away on every call. Design right,
+ code wrong. Measured on eleven characters hiding themselves around each sweep:
+ 32.7 ms a fixed step against 5.9 ms.
+
+ The reason it *looked* necessary is that `world_visible` is resolved in the
+ world-matrix walk, so the only way to propagate a change used to be to make the
+ walk run. `propagate_visible` does that one job directly instead. Nothing else
+ about the node changed: the transform is where it was, so the matrices, the
+ bounds and every entry's box are all still correct.
+
+ What does still have to be said is the shadow map's static half, and only when
+ the subtree actually contains a static caster — a hidden wall casts no shadow,
+ and that image is cached until something bumps the revision.
+*>
 fn void Scene.set_visible(&self, NodeId id, bool visible)
 {
 	Node* node = self.node(id);
-	if (node == null) return;
+	if (node == null || node.visible == visible) return;
 	node.visible = visible;
-	// Visibility is inherited, and inheritance is resolved in the same walk the
-	// world matrices are, so a change to it is a dirty node like any other.
-	self.mark_moved(node);
+
+	// The parent's *resolved* visibility, so hiding a node under a hidden group
+	// is the no-op it should be. A missing parent is the root's case.
+	Node* parent = self.node(node.parent);
+	self.propagate_visible(id, parent == null || parent.world_visible);
+}
+
+<*
+ Carry a resolved visibility down a subtree.
+
+ The half of `update_branch` that is about visibility, on its own, so that a
+ change to `visible` costs the subtree rather than the world-matrix walk and the
+ caches hanging off it. Written unconditionally rather than stopping where the
+ value already agrees: the walk is a bool store per node — hiding a whole
+ four-hundred-node scene is cheaper than one query-index rebuild — and an early
+ exit would have to reason about the one node whose `world_visible` is seeded
+ optimistically by `create_slot`.
+
+ Recursive and reading children through `self.nodes` for `update_branch`'s
+ reasons; nothing may add or remove a node during it.
+*>
+fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	bool now = parent_visible && node.visible;
+	if (node.static_caster && node.world_visible != now) self.static_revision++;
+	node.world_visible = now;
+
+	sz count = node.children.len();
+	for (sz i = 0; i < count; i++) self.propagate_visible(self.nodes[id.index].children[i], now);
+}
+
+<*
+ Whether this node is swept against, and by every spatial query with it.
+
+ `Node.collides` has the argument. Off means the mesh is drawn and is not in the
+ query index at all, so it costs a sweep nothing rather than being rejected by
+ one — which is the difference between a pickup and a hundred grass tufts.
+
+ The whole index is dropped, because this decides membership rather than an
+ answer. That is the cost of the flag and the reason it is an authoring
+ property: a script toggling it per frame is asking for the rebuild
+ `set_visible` above no longer pays.
+*>
+fn void Scene.set_collides(&self, NodeId id, bool collides)
+{
+	Node* node = self.node(id);
+	if (node == null || node.collides == collides) return;
+	node.collides = collides;
+	self.query.drop();
 }
 
 <*
@@ -1431,7 +1524,7 @@ fn void Scene.set_name(&self, NodeId id, String name)
 *>
 fn void Scene.touch(&self, NodeId id)
 {
-	self.mark_moved(self.node(id));
+	self.mark_moved(id);
 }
 
 <*

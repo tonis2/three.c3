@@ -190,6 +190,29 @@ struct Node
 	bool world_visible;
 	bool dirty;
 
+	<*
+	 Whether this node is collision geometry.
+
+	 **The flag that says a drawable is only a drawable** — `plan.md` §17. Every
+	 mesh in the query index is swept against, so a pickup lying on a path was a
+	 bollard and a field of grass was a fence; `trigger: true` does not help,
+	 because that is a *physics* property and a sweep never sees a body. The
+	 shape that worked without this was two nodes — the thing you can see, and
+	 an invisible volume beside it — which is tolerable for one pickup and silly
+	 for a hundred tufts.
+
+	 On by default, because the surprising answer is a wall walked through
+	 rather than a pickup that blocks. **Not inherited**, unlike `visible`: it
+	 describes one piece of geometry rather than a subtree, and a script hiding
+	 a whole character from one sweep wants `IgnoreSet`, which is per call.
+
+	 `Scene.set_collides` is the only writer, and it drops the query index —
+	 this is filed out at build time rather than tested at answer time, so
+	 changing it is a rebuild. That is the right way round for a flag set when a
+	 level is authored, and the wrong way round for one toggled per frame.
+	*>
+	bool collides;
+
 	// Slot bookkeeping. `generation` is bumped when the slot is reused, which is
 	// what makes a stale NodeId detectable rather than silently valid.
 	uint generation;
