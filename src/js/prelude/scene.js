@@ -228,16 +228,19 @@ export class Scene extends Object3D {
 	// identifies it then.
 	_intersection(raw) {
 		if (raw === null) return null;
-		const [i, g] = raw.node;
-		let object = null;
-		this.traverse(o => { if (object === null && o._i === i && o._g === g) object = o; });
-		return {
-			object,
+		// `object` is a LAZY getter — see lazyObject. It used to walk the whole
+		// scene here, which made a pick 79 us in a 500-node scene against 0.5 us
+		// for the raycast itself: a hundred agents casting one ground ray apiece
+		// was eight milliseconds of finding JavaScript objects nobody looked at.
+		// That is `plan.md` §17's entry arriving one layer above where it was
+		// fixed.
+		const hit = {
 			name: raw.name,
 			distance: raw.distance,
 			point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
 			normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
 		};
+		return lazyObject(hit, 'object', Int32Array.from(raw.node), 0);
 	}
 }
 
@@ -265,6 +268,75 @@ export function liveObject(object, where) {
 		);
 	}
 	return [object._i, object._g];
+}
+
+// A node handle, resolved on FIRST ACCESS rather than eagerly.
+//
+// Turning a handle back into the Object3D a script built means walking the
+// scene — there is no lookup table, because one would have to be kept in step
+// with every add, remove and re-parent. Measured: `scene.traverse` over a
+// 501-node scene is **79 us** in QuickJS, against 0.5 us for the host raycast
+// underneath it. So the walk is not a detail of the answer, it IS the answer's
+// cost, and it is paid for a property most callers never read: a character
+// reads `grounded` sixty times a second and looks at what it hit almost never.
+//
+// The result reads exactly as it did — `hit.object` is still a property — and
+// a caller that does read it pays what it always cost. What changes is that a
+// caller that does not pays nothing.
+export function lazyObject(target, key, pairs, at) {
+	let resolved;
+	let done = false;
+	Object.defineProperty(target, key, {
+		enumerable: true,
+		get() {
+			if (!done) { resolved = objectsForHandles(pairs, pairs.length / 2)[at]; done = true; }
+			return resolved;
+		},
+	});
+	return target;
+}
+
+// Many handles at once, resolved in ONE walk of the scene.
+//
+// `objectForHandle` below traverses the whole tree per handle, which is the
+// right trade for a pick (one handle, and no table to keep in step). A bulk
+// query answers with hundreds, and hundreds of walks over a five-hundred-node
+// scene is the cost the query was built to remove, arriving one layer up.
+//
+// The key packs the pair into one number: both halves are below 2^31 and the
+// product is under 2^53, so it is exact.
+//
+// `pairs` is an Int32Array of [index, generation, ...] as the host wrote it.
+// Handles the walk cannot place come back as null — a node the host knows and
+// this scene never built an object for, which is every node of a scene opened
+// from the command line.
+export function objectsForHandles(pairs, count) {
+	if (count <= 0) return [];
+	if (liveScene === null || liveScene._e !== H.epoch()) return new Array(count).fill(null);
+
+	const wanted = new Map();
+	for (let i = 0; i < count; i++) {
+		// A negative index is the host's spelling of "nothing here" — a move
+		// that hit no wall, a sweep that touched nothing. Skipped rather than
+		// looked for, and if they are ALL absent the walk is skipped entirely:
+		// a traverse of a five-hundred-node scene to find nothing is the
+		// commonest single call this makes, once per character per frame.
+		if (pairs[i * 2] < 0) continue;
+		wanted.set(pairs[i * 2] * 4294967296 + pairs[i * 2 + 1], i);
+	}
+
+	const found = new Array(count).fill(null);
+	if (wanted.size === 0) return found;
+
+	let left = wanted.size;
+	liveScene.traverse(o => {
+		if (left === 0) return;
+		const at = wanted.get(o._i * 4294967296 + o._g);
+		if (at === undefined) return;
+		found[at] = o;
+		left--;
+	});
+	return found;
 }
 
 // A [x, y, z] handle from the host, back to the object a script is holding.

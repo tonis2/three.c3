@@ -582,6 +582,25 @@ struct Cursor
 	float scroll;
 	float scroll_x;
 
+	<*
+	 The mouse's own movement over this frame, in image pixels, and whether the
+	 platform is reporting it because the pointer is locked.
+
+	 **A different question from where the cursor is**, and the whole of what
+	 pointer lock buys. `x`/`y` stop at the edge of the screen because the
+	 cursor does; these keep counting, because a hand does. They are here rather
+	 than being differenced by `MouseTracker` for the reason `dx`/`dy` are
+	 differenced there and not in a script: one reading of one instant belongs
+	 in one struct.
+
+	 Reported whether or not the pointer is locked — the window has them either
+	 way and they cost nothing — and `locked` is what says whether they are
+	 still meaningful once the cursor has run out of screen.
+	*>
+	float raw_dx;
+	float raw_dy;
+	bool locked;
+
 	// True when the window could not say where the cursor is — minimised, or
 	// before the first frame has sized anything. The position is then zero
 	// rather than unknown, and zero is a real place, so the flag is what stops
@@ -635,7 +654,8 @@ struct WindowView
 *>
 fn Cursor WindowView.cursor(
 	&self, float[<2>] at, bool down,
-	bool right = false, bool middle = false, float scroll = 0, float scroll_x = 0
+	bool right = false, bool middle = false, float scroll = 0, float scroll_x = 0,
+	float[<2>] raw = { 0, 0 }, bool locked = false
 )
 {
 	// Minimised, or before the first frame. The fallback is a cursor that is
@@ -657,6 +677,14 @@ fn Cursor WindowView.cursor(
 		.middle = middle,
 		.scroll = scroll,
 		.scroll_x = scroll_x,
+		// The raw movement through the same fraction the position goes
+		// through, so a locked look and a dragged one move the camera by the
+		// same amount for the same hand movement. The y is negated for the
+		// same reason the position's is, one line down: the window counts up
+		// and the image counts down.
+		.raw_dx = (raw[0] * self.scale / (float)self.width) * (float)self.image_width,
+		.raw_dy = -(raw[1] * self.scale / (float)self.height) * (float)self.image_height,
+		.locked = locked,
 		.x = across * (float)self.image_width,
 		// The one flip, and the only place it happens. `screen_ray` counts rows
 		// from the top because that is how an image is stored and how every
@@ -694,11 +722,17 @@ struct MouseState
 	//
 	// It keeps reporting while the cursor is outside the window, because the
 	// window goes on saying where it is and a hand that has left the frame is
-	// still moving. What it cannot do is keep reporting past the *screen*,
-	// where the platform stops the cursor and the movement genuinely ends —
-	// that is what pointer lock buys and nothing here has it. See `plan.md` §17.
+	// still moving. Past the *screen* the cursor stops and a difference of
+	// positions stops with it — which is what `three.input.pointerLock` is for:
+	// under a lock this is the platform's own delta instead, and it goes on
+	// counting for as long as the hand moves. See `Cursor.raw_dx`.
 	float dx;
 	float dy;
+
+	// Whether the delta above came from the platform rather than from a
+	// difference of positions — see `Cursor.locked`. A script reads it as
+	// "the look will not stop at the edge of the screen".
+	bool locked;
 
 	// The wheel over this frame, positive away from the user, and the
 	// horizontal half of it. Zero on the frames nobody turned it, which is
@@ -813,6 +847,21 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 		self.has_last = false;
 	}
 
+	// **Under a lock the difference is not the movement.** The cursor is
+	// hidden and periodically put back in the middle of the window, so
+	// differencing its position reports nothing at all most frames and one
+	// enormous jump on the frame it is recentred. The platform's own delta is
+	// the answer then, and it is the only reading that keeps counting once the
+	// cursor has run out of screen.
+	//
+	// The position keeps being tracked either way, so releasing the lock does
+	// not produce a jump from wherever the cursor was left.
+	if (cursor.locked)
+	{
+		dx = cursor.raw_dx;
+		dy = cursor.raw_dy;
+	}
+
 	return {
 		.inside = cursor.inside,
 		.down = cursor.down,
@@ -823,6 +872,7 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 		.y = cursor.y,
 		.dx = dx,
 		.dy = dy,
+		.locked = cursor.locked,
 		.scroll = cursor.scroll,
 		.scroll_x = cursor.scroll_x,
 	};

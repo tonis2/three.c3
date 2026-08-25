@@ -59,6 +59,7 @@ import std::io;
 import std::time;
 import std::collections::list;
 import qjs;
+import c3w;
 
 faultdef JS_ENGINE_FAILED, JS_PRELUDE_FAILED;
 
@@ -119,6 +120,8 @@ const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
 const char[*] PRELUDE_FIELD = $embed("prelude/field.js");
 const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
 const char[*] PRELUDE_CHARACTER = $embed("prelude/character.js");
+const char[*] PRELUDE_QUERY = $embed("prelude/query.js");
+const char[*] PRELUDE_NAV = $embed("prelude/nav.js");
 const char[*] PRELUDE_API = $embed("prelude/api.js");
 const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 
@@ -134,7 +137,7 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[16] parts;
+	static qjs::EmbeddedModule[18] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -150,6 +153,8 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:field.js", (char[])PRELUDE_FIELD[..] },
 		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },
 		{ "three:character.js", (char[])PRELUDE_CHARACTER[..] },
+		{ "three:query.js", (char[])PRELUDE_QUERY[..] },
+		{ "three:nav.js", (char[])PRELUDE_NAV[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
@@ -284,6 +289,19 @@ struct JsRuntime
 	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at
 	// worst and is replaced whole by every tick; `input_text` backs its `text`,
 	// which would otherwise point into a window buffer that clears itself.
+	<*
+	 The window, when this process has one — `js/bind_input.c3`.
+
+	 Null under `--headless`, and every verb that reaches for it says what it
+	 does then. It is here only for what a script may ask of the *window* rather
+	 than of the scene, which today is `three.input.pointerLock`: the renderer is
+	 a consumer of the window (`plan.md` §1) and nothing else in the runtime
+	 knows one exists.
+
+	 Owned by `main.c3`'s loop and outliving this runtime, like `pass`.
+	*>
+	c3w::Window* window;
+
 	InputState input;
 	// Keys a script is holding down through `three.input.press`. Merged into
 	// every frame beside the window's own, which is what makes an input-driven
@@ -327,6 +345,18 @@ struct JsRuntime
 	qjs::Value contact_fn;
 	bool contact_active;
 
+	<*
+	 The baked navigation grid and the solved flow fields over it —
+	 `js/bind_nav.c3`.
+
+	 On the runtime beside `physics` and for its reason: it is voxelized out of
+	 the scene's triangles, so `new three.Scene()` drops it the same way it drops
+	 the bodies. It is not on the scene because a script owns when it is baked;
+	 nothing here bakes one on its own.
+	*>
+	NavMesh nav;
+	List{NavFieldSlot} nav_fields;
+
 	// `import`, wired up by `js/modules.c3` over `quickjs.c3l`'s loader. Empty
 	// root means no `--assets` boot and no disk imports at all, which is what a
 	// plain `--mcp` run wants; the `three:` space works regardless.
@@ -367,6 +397,9 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.frame_log.init(mem, 512);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
+	// Heap-backed explicitly, for the reason every other list in this file is:
+	// a zero-valued List binds itself to the temp arena on its first push.
+	self.nav_fields.init(mem, 4);
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
@@ -408,6 +441,12 @@ fn void JsRuntime.close(&self)
 	self.clear_physics_handlers();
 	self.js.close();
 	self.physics.close();
+	// The bake and every field over it — `js/bind_nav.c3`. Both are plain heap
+	// arrays with no engine reference in them, so the order relative to the
+	// context does not matter; they are beside `physics` because they are the
+	// other thing a script builds that outlives the scene it was built from.
+	self.drop_nav();
+	self.nav_fields.free();
 	self.log.free();
 	self.value.free();
 	self.error.free();

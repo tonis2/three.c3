@@ -50,7 +50,7 @@
  keeps turning across the desktop; where it genuinely ends is where the platform
  stops the cursor. Getting past *that* is pointer lock, which needs a cursor
  warp or an associate-mouse call that `window.c3l` does not expose on any
- platform — `plan.md` §17 has what it would take.
+ platform — `plan.md` §1 has what each would take.
 
  ## And the mouse can be taken away from the camera
 
@@ -101,6 +101,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "keyNames", &js_key_names, 0);
 	self.bind(host, "onKey", &js_on_key, 3);
 	self.bind(host, "pointer", &js_pointer, 0);
+	self.bind(host, "pointerLockGet", &js_pointer_lock_get, 0);
+	self.bind(host, "pointerLockSet", &js_pointer_lock_set, 1);
 	self.bind(host, "onClick", &js_on_click, 1);
 	self.bind(host, "controlsGet", &js_controls_get, 0);
 	self.bind(host, "controlsSet", &js_controls_set, 1);
@@ -537,6 +539,13 @@ fn void js_pointer(
 	js.set_property(object, "right", qjs::bool_value(mouse.right));
 	js.set_property(object, "middle", qjs::bool_value(mouse.middle));
 	js.set_property(object, "clicked", qjs::bool_value(mouse.clicked));
+	// Whether `dx`/`dy` came from the platform rather than from a difference of
+	// positions — which is the same thing as "this look will not stop at the
+	// edge of the screen". Beside the deltas rather than only on
+	// `three.input.pointerLock`, because it is a fact about *these numbers*
+	// and a script correlating them with a flag read at another moment is the
+	// bug this whole object exists to prevent.
+	js.set_property(object, "locked", qjs::bool_value(mouse.locked));
 	js.set_property(object, "scroll", qjs::number_value((double)mouse.scroll));
 	js.set_property(object, "scrollX", qjs::number_value((double)mouse.scroll_x));
 	*out = object;
@@ -616,4 +625,44 @@ fn void js_on_click(
 
 	self.click_fn = js.retain(args[0]);
 	self.click_active = true;
+}
+
+<*
+ `pointerLockGet()` — whether the pointer is locked **right now**.
+
+ Not what a script asked for: what the platform actually did. `--headless` has
+ no window and answers false, and so does a backend that has no implementation
+ — `lib/window.c3l/linux/unified.c3` says at length which those are and what
+ each would need. A script that needs a look either way reads this back after
+ setting it and falls back to a drag-look when it comes back false.
+*>
+fn void js_pointer_lock_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::bool_value(self.window != null && self.window.pointerLocked());
+}
+
+<*
+ `pointerLockSet(on)` — ask for the pointer, and answer with whether it was
+ given.
+
+ **Answering with the result rather than with nothing** is the whole of the
+ error handling here. There is no exception to raise: a headless run and a
+ Wayland session are not mistakes a script made, and throwing would make a
+ perfectly reasonable game refuse to start on a platform where the look merely
+ has to be worse. The boolean is what a caller branches on.
+*>
+fn void js_pointer_lock_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.window == null) { *out = qjs::bool_value(false); return; }
+
+	self.window.setPointerLock(arg_truth(&js, argc, args, 0));
+	*out = qjs::bool_value(self.window.pointerLocked());
 }

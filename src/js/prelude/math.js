@@ -256,3 +256,330 @@ export function asTriple(value, where) {
 	return triple.map(Number);
 }
 
+
+// -----------------------------------------------------------------------
+// Damping — notes.md §17
+//
+// The two verbs a game reaches for between "where it is" and "where it
+// should be", and both are here rather than on the host for the reason
+// notes.md §17 measured: a host call that allocates in order to answer
+// arithmetic costs 185 ns against the 70 ns of the JavaScript it replaced,
+// and it costs that on every call forever. These are four multiplies.
+//
+// **They are the frame-rate-independent forms, and that is the whole
+// point of naming them.** The version everybody writes by hand is
+// `x += (target - x) * 0.1`, which closes a tenth of the gap per FRAME —
+// so it is twice as fast on a 120 Hz display as on a 60 Hz one, and a
+// chase that felt right while it was being tuned is loose on one machine
+// and snappy on another. Nothing about that reads as a bug: the game just
+// feels different, and the difference is not reproducible on the machine
+// it was tuned on. `CameraFollow.apply` in `scene/camera.c3` is the same
+// arithmetic on the host side and carries the same argument.
+
+// Move `current` towards `target` by a fixed fraction of the remaining
+// distance PER SECOND rather than per frame.
+//
+// `lambda` is the rate: the gap decays by e^-lambda every second, so 1 is
+// lazy, 5 is a normal follow and 20 is nearly rigid. `dt` is in seconds —
+// `three.clock.dt / 1000`, because the clock reports milliseconds.
+//
+// Three.js spells this `MathUtils.damp(x, y, lambda, dt)` and means the
+// same thing by it.
+export function damp(current, target, lambda, dt) {
+	const c = +current, t = +target;
+	if (!(Number.isFinite(c) && Number.isFinite(t))) {
+		throw new TypeError('three.damp(current, target, lambda, dt) wants finite numbers');
+	}
+	const rate = +lambda, step = +dt;
+	// A non-positive step is no time at all, so nothing has had a chance to
+	// decay — the honest answer is the value that went in. A non-positive
+	// lambda is "no damping", which is the same answer for the same reason.
+	if (!(rate > 0) || !(step > 0)) return c;
+	return t + (c - t) * Math.exp(-rate * step);
+}
+
+// `damp` for an angle in radians, taking the short way round.
+//
+// The straight one is wrong at exactly one place and that place is the one
+// a mouse look crosses constantly: a heading of +3.1 damping towards -3.1
+// is 0.08 radians apart the short way and 6.2 the long way, and `damp`
+// takes the long way — the character spins a full turn to arrive at a
+// heading it was already almost at. Wrapping the DIFFERENCE rather than
+// the inputs is what fixes it, and it is why this is a separate verb
+// instead of an option: a caller damping a distance must not get angle
+// wrapping by accident.
+export function dampAngle(current, target, lambda, dt) {
+	const c = +current;
+	if (!Number.isFinite(c) || !Number.isFinite(+target)) {
+		throw new TypeError('three.dampAngle(current, target, lambda, dt) wants finite numbers');
+	}
+	const TAU = Math.PI * 2;
+	let delta = (+target - c) % TAU;
+	if (delta > Math.PI) delta -= TAU;
+	if (delta < -Math.PI) delta += TAU;
+	return damp(c, c + delta, lambda, dt);
+}
+
+// A critically damped spring — Unity's `SmoothDamp`, and the one to reach
+// for when `damp` overshoots the feel you wanted.
+//
+// The difference from `damp` is that this one has MOMENTUM. `damp` is a
+// pure decay: it is fastest at the start and asymptotically slow at the
+// end, which is right for a camera easing onto a target and wrong for
+// anything that should look like it was accelerated — a turret slewing, a
+// dial spinning up, a menu sliding. A critically damped spring builds
+// speed, carries it, and arrives without ringing.
+//
+// **The velocity is state, and the caller owns it.** That is what the
+// `state` argument is: any object, and this writes `state.velocity` into
+// it. It has to persist across frames — a `state` created inside the loop
+// is a spring that is re-launched from rest sixty times a second, which
+// looks exactly like `damp` with a worse constant and is the one way to
+// use this and see nothing.
+//
+//     const spin = { velocity: 0 };
+//     three.setAnimationLoop(() => {
+//         angle = three.smoothDamp(angle, want, spin, 0.3, three.clock.dt / 1000);
+//     });
+//
+// `smoothTime` is roughly how long the move takes, in seconds. `maxSpeed`
+// caps it in units per second and defaults to no cap.
+export function smoothDamp(current, target, state, smoothTime, dt, maxSpeed = Infinity) {
+	const where = 'three.smoothDamp(current, target, state, smoothTime, dt, maxSpeed)';
+	const c = +current;
+	let t = +target;
+	if (!(Number.isFinite(c) && Number.isFinite(t))) throw new TypeError(`${where} wants finite numbers`);
+	if (state === null || typeof state !== 'object') {
+		throw new TypeError(`${where}: state is an object this writes .velocity into, and it must OUTLIVE the frame`);
+	}
+	const step = +dt;
+	if (!(step > 0)) return c;
+
+	// Guarded rather than clamped to zero: a smoothTime of 0 is a divide by
+	// zero two lines down and a NaN that spreads into whatever this drives,
+	// and the failure reads as the object disappearing.
+	const time = Math.max(1e-4, +smoothTime);
+	let velocity = +(state.velocity ?? 0);
+	if (!Number.isFinite(velocity)) velocity = 0;
+
+	// The standard critically-damped step: omega is the natural frequency,
+	// and the cubic is a Padé approximation of e^-x that is cheaper and, at
+	// the step sizes a frame produces, indistinguishable.
+	const omega = 2 / time;
+	const x = omega * step;
+	const decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+
+	let delta = c - t;
+	const cap = +maxSpeed;
+	if (Number.isFinite(cap) && cap > 0) {
+		const reach = cap * time;
+		delta = Math.max(-reach, Math.min(reach, delta));
+	}
+	// The target the spring is actually pulled to, after the cap moved it.
+	t = c - delta;
+
+	const accel = (velocity + omega * delta) * step;
+	velocity = (velocity - omega * accel) * decay;
+	let out = t + (delta + accel) * decay;
+
+	// Overshoot guard. Without it a large dt can put the value past the
+	// target with velocity still pointing further past it, and the spring
+	// runs away instead of settling — the one failure mode of this
+	// approximation, and it happens on exactly the frames a tool call ran
+	// long.
+	if ((+target - c > 0) === (out > +target)) {
+		out = +target;
+		velocity = (out - +target) / step;
+	}
+
+	state.velocity = velocity;
+	return out;
+}
+
+// -----------------------------------------------------------------------
+// CatmullRomCurve3 — notes.md §17
+//
+// The three-dimensional half of the curve pair. `three.catmullRom` in
+// field.js is a GROUND path: [x, z] in, a dense polyline out, built to be
+// handed straight to field.carve, field.stroke, a scatter corridor or a
+// RibbonGeometry. This is the gameplay one — a camera rail, a patrol
+// route, a projectile arc, a rope — where the y matters and where the
+// caller wants to ask "where am I at t" every frame rather than to be
+// handed an array once.
+//
+// So the two differ in what they RETURN, which is the reason there are
+// two of them and not one with a flag. A polyline is a description a
+// bake consumes; this is an object a loop samples.
+//
+// Three.js's name, constructor and method names, because that is what an
+// agent will write from memory: getPoint(t), getPointAt(u), getTangent(t),
+// getLength(), getPoints(n), getSpacedPoints(n).
+//
+// **getPoint and getPointAt are not the same function**, and the gap
+// between them is the thing that makes hand-written curve code look
+// wrong. `t` is the curve's own parameter and is spread evenly over the
+// CONTROL SEGMENTS, so an object moving at a constant `t` per second
+// speeds up through the widely spaced ones and crawls through the close
+// ones. `u` is spread evenly over the LENGTH. A camera on a rail wants
+// getPointAt; nothing much wants getPoint except another curve.
+export class CatmullRomCurve3 {
+	// `closed` joins the last point back to the first. `curveType` is
+	// 'centripetal' (the default, and Three.js's), 'chordal' or 'uniform' —
+	// field.js's catmullRom carries the argument for why centripetal.
+	constructor(points, closed = false, curveType = 'centripetal', tension = 0.5) {
+		const where = 'new three.CatmullRomCurve3(points, closed, curveType, tension)';
+		if (!Array.isArray(points)) throw new TypeError(`${where} wants an array of points`);
+		this.points = points.map((p, i) => {
+			const v = readVector(p, `${where}: point ${i}`);
+			return new Vector3(null, v[0], v[1], v[2]);
+		});
+		if (this.points.length < 2) {
+			throw new RangeError(`${where}: a curve needs at least 2 control points, got ${this.points.length}`);
+		}
+		if (!['centripetal', 'chordal', 'uniform'].includes(curveType)) {
+			throw new RangeError(`${where}: curveType is 'centripetal', 'chordal' or 'uniform', got ${JSON.stringify(curveType)}`);
+		}
+		this.closed = !!closed;
+		this.curveType = curveType;
+		this.tension = +tension;
+		this._arc = null;
+	}
+
+	// The control point at `i`, with the ends handled by whichever rule
+	// `closed` chose: wrapped for a loop, and the end point repeated for an
+	// open curve so a segment at the edge has a real neighbour to lean
+	// against instead of an index to clamp.
+	_control(i) {
+		const n = this.points.length;
+		if (this.closed) return this.points[((i % n) + n) % n];
+		return this.points[Math.max(0, Math.min(n - 1, i))];
+	}
+
+	get _segments() { return this.closed ? this.points.length : this.points.length - 1; }
+
+	// Position at the curve parameter, t in [0, 1].
+	getPoint(t) {
+		const segments = this._segments;
+		let u = +t;
+		if (!Number.isFinite(u)) throw new TypeError('curve.getPoint(t) wants a number in 0..1');
+		u = Math.max(0, Math.min(1, u));
+		const scaled = u * segments;
+		// The last point is on the last segment's end, not on a segment that
+		// does not exist — without the clamp, t = 1 indexes one past the end
+		// and reads undefined.
+		let index = Math.min(Math.floor(scaled), segments - 1);
+		const local = scaled - index;
+		return this._segment(index, local);
+	}
+
+	// One segment, evaluated with the same Barry–Goldman pyramid on a
+	// non-uniform knot vector that field.js's catmullRom uses — see there
+	// for why the knots are spaced by chord length raised to alpha.
+	_segment(index, local) {
+		const p0 = this._control(index - 1);
+		const p1 = this._control(index);
+		const p2 = this._control(index + 1);
+		const p3 = this._control(index + 2);
+
+		const alpha = this.curveType === 'chordal' ? 1 : (this.curveType === 'uniform' ? 0 : 0.5);
+		const span = (a, b) => Math.pow(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z), alpha);
+		const t0 = 0;
+		const t1 = t0 + Math.max(1e-6, span(p0, p1));
+		const t2 = t1 + Math.max(1e-6, span(p1, p2));
+		const t3 = t2 + Math.max(1e-6, span(p2, p3));
+		const at = t1 + (t2 - t1) * local;
+
+		const blend = (u, v, tu, tv) => (tv - tu < 1e-12) ? u : ((tv - at) * u + (at - tu) * v) / (tv - tu);
+		const axis = (k) => {
+			const A1 = blend(p0[k], p1[k], t0, t1);
+			const A2 = blend(p1[k], p2[k], t1, t2);
+			const A3 = blend(p2[k], p3[k], t2, t3);
+			const B1 = blend(A1, A2, t0, t2);
+			const B2 = blend(A2, A3, t1, t3);
+			return blend(B1, B2, t1, t2);
+		};
+		return new Vector3(null, axis('x'), axis('y'), axis('z'));
+	}
+
+	// The unit direction of travel at t. Differenced rather than
+	// differentiated: the analytic derivative of the non-uniform pyramid is
+	// a page of algebra for a vector that is normalized immediately
+	// afterwards, and the difference is exact to the precision anything
+	// downstream can use.
+	getTangent(t) {
+		const step = 1e-4;
+		const a = this.getPoint(Math.max(0, +t - step));
+		const b = this.getPoint(Math.min(1, +t + step));
+		const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+		const length = Math.hypot(dx, dy, dz);
+		// A curve can genuinely stand still — two coincident control points —
+		// and normalizing a zero vector is three NaNs that spread into
+		// whatever this aims. +Z is the arbitrary answer, and it is a
+		// direction rather than a hole.
+		if (length < 1e-9) return new Vector3(null, 0, 0, 1);
+		return new Vector3(null, dx / length, dy / length, dz / length);
+	}
+
+	// The arc-length table, built once and kept. `divisions` per segment is
+	// how finely the length is measured; the default is fine enough that
+	// getPointAt is within a fraction of a percent of even spacing on
+	// anything a hand-written control path produces.
+	_arcTable(divisions = 32) {
+		if (this._arc !== null && this._arc.divisions === divisions) return this._arc;
+		const steps = this._segments * divisions;
+		const lengths = new Float64Array(steps + 1);
+		let previous = this.getPoint(0);
+		let total = 0;
+		for (let i = 1; i <= steps; i++) {
+			const point = this.getPoint(i / steps);
+			total += Math.hypot(point.x - previous.x, point.y - previous.y, point.z - previous.z);
+			lengths[i] = total;
+			previous = point;
+		}
+		this._arc = { divisions, steps, lengths, total };
+		return this._arc;
+	}
+
+	getLength() { return this._arcTable().total; }
+
+	// Position at a constant SPEED along the curve, u in [0, 1]. See the
+	// class header for why this is the one a moving object wants.
+	getPointAt(u) {
+		const table = this._arcTable();
+		let want = Math.max(0, Math.min(1, +u)) * table.total;
+		if (!(table.total > 0)) return this.getPoint(0);
+
+		// Binary search for the sample the distance falls in, then linear
+		// interpolation inside it.
+		let low = 0, high = table.steps;
+		while (low < high) {
+			const mid = (low + high) >> 1;
+			if (table.lengths[mid] < want) low = mid + 1; else high = mid;
+		}
+		const index = Math.max(1, low);
+		const before = table.lengths[index - 1];
+		const after = table.lengths[index];
+		const inner = after - before < 1e-12 ? 0 : (want - before) / (after - before);
+		return this.getPoint((index - 1 + inner) / table.steps);
+	}
+
+	// `count` points spread evenly in the curve parameter, as Three.js does:
+	// count + 1 of them, both ends included.
+	getPoints(count = 20) {
+		const n = Math.max(1, Math.floor(+count));
+		const out = [];
+		for (let i = 0; i <= n; i++) out.push(this.getPoint(i / n));
+		return out;
+	}
+
+	// The same, spread evenly in LENGTH. What to hand a RibbonGeometry or a
+	// line helper when the cross-sections should be the same distance apart.
+	getSpacedPoints(count = 20) {
+		const n = Math.max(1, Math.floor(+count));
+		const out = [];
+		for (let i = 0; i <= n; i++) out.push(this.getPointAt(i / n));
+		return out;
+	}
+
+	toString() { return `CatmullRomCurve3(${this.points.length} points, ${this.closed ? 'closed' : 'open'})`; }
+}

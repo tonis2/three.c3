@@ -609,6 +609,10 @@ fn void? live(
 	JsRuntime runtime;
 	runtime.open(&renderer.pass, renderer)!;
 	defer runtime.close();
+	// The one thing a script may ask of the window rather than of the scene —
+	// `three.input.pointerLock`. Null under `--headless`, which the verb reports
+	// rather than pretends about.
+	runtime.window = window;
 
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
@@ -734,7 +738,13 @@ fn void? live(
 			Cursor cursor = window_view(renderer, window).cursor(
 				at, events.is_pressed(LEFT_MOUSE),
 				right: events.is_pressed(RIGHT_MOUSE), middle: events.is_pressed(MIDDLE_MOUSE),
-				scroll: scroll, scroll_x: window.get_scroll_x()
+				scroll: scroll, scroll_x: window.get_scroll_x(),
+				// The platform's own movement, and whether it is the reading
+				// that counts this frame — `three.input.pointerLock`. Asked of
+				// the window rather than of the runtime, because the runtime
+				// records what a script *wanted* and only the window knows
+				// whether the platform gave it.
+				raw: window.getMouseDelta(), locked: window.pointerLocked()
 			);
 
 			// Before `pump`, so a drag and a script that arrives in the same

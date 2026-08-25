@@ -29,9 +29,24 @@ somebody has one.
 - [ ] **Handle `WM_DPICHANGED`** (win32). A window dragged between displays of
       different densities keeps the size it was given.
 - [ ] **`Window.width`/`height` go stale on Linux.** x11 and wayland need their
-      own `GetClientRect` equivalent. **Do this with pointer lock**, not before —
-      the live-resize delta is the half that hurts, and `notes.md` §10 has why
-      fixing the delta instead is the wrong move.
+      own `GetClientRect` equivalent. `notes.md` §10 has why fixing the
+      live-resize delta instead is the wrong move.
+- [ ] **Pointer lock on Linux.** Built on darwin and win32, and reported as
+      absent on both Linux backends rather than faked — `three.input.pointerLock`
+      reads back false there, which is the signal a script branches on. x11 wants
+      `XDefineCursor` with a 1x1 transparent pixmap and `XWarpPointer` back to
+      the centre, which is the same recentre darwin does and simpler because
+      there is no local-event suppression to defeat. Wayland wants
+      `zwp_pointer_constraints_v1` plus `zwp_relative_pointer_v1`, and that is a
+      protocol binding rather than an x11 shortcut: a Wayland client cannot move
+      the cursor at all, by design. `linux/xdg_shell.c3` is the shape a second
+      one would take. Both are blind work until the entry above happens.
+- [ ] **Pointer lock in the browser.** `wasm/main.c3` reports it absent too. The
+      browser has the best version of it — `requestPointerLock` and
+      `movementX`/`movementY` straight out of the platform — but the request must
+      come from a user gesture and resolves through an event, so it is a change
+      to `wasm/bridge.c3` and the JavaScript beside it rather than a function in
+      the backend.
 
 ## 2. Deferred by design
 
@@ -99,11 +114,6 @@ somebody has one.
 
 ## 7. Physics — bindings that do not exist
 
-- [ ] **A character controller.** Ingredients are all in `collision.c3l` — swept
-      CCD, GJK/EPA, a capsule, `Physics.transformed`. Sweep, slide along the
-      contact normal, step up ledges under a threshold, report `grounded`, the
-      slope and what was hit. Otherwise every game rewrites the same 120 lines in
-      JavaScript at 60 Hz.
 - [ ] **Joints from a script.** `add_constraint` (`solver/resolver.c3:441`) and
       `GenericJoint3D` exist; there is no `three.physics.joint(...)`.
 - [ ] **`snapshot`/`restore`.** `solver/lockstep.c3:125` — "what if" as a tool
@@ -193,66 +203,19 @@ count is not the trigger and never was.
 
 ## 17. Gameplay
 
-**Order, and what it is gated on.** The numbering is kept with the struck entry
-in place, because the order was an argument and renumbering would quietly claim
-the argument was different.
+**Everything here but the two below was built.** What each of them settled, and
+what it measured, is `notes.md` §17; the ordering argument that used to head this
+section went with them, because the order was the argument and it has been
+followed.
 
-1. **Pointer lock**, with §1's live-resize delta.
-2. ~~The clock~~ — built.
-3. **The character controller**, then **animation blending**.
-4. **Navigation**, then the **queries** and **steering** that make it a crowd.
-
-- [ ] **Pointer lock. It is not a binding.** A look that keeps turning needs the
-      cursor recentred and hidden every frame, and `window.c3l` exposes no cursor
-      warp and no associate-mouse call on any of its four backends:
-      `CGWarpMouseCursorPosition` / `CGAssociateMouseAndCursorPosition` on darwin,
-      `XWarpPointer` or pointer-constraints on linux, `SetCursorPos`/`ClipCursor`
-      on win32. Window-library work first, a binding afterwards.
-- [ ] **A camera that rolls.** `camera.attach`'s offset is added in world space,
-      which is right for a head and a shoulder camera and cannot express a cockpit
-      or a turret. One 3×3 multiply and a flag — except that a rolled camera also
-      wants the view's up vector to roll, and `Camera.view` hardcodes +Y.
-      **Trigger:** the first vehicle.
-- [ ] **The character controller** — §7 has it.
 - [ ] **Animation blending**, and **clip events** with it: a sorted time list per
       clip compared against the player's clock, fired into a JS callback. Cheap on
       both paths.
-- [ ] **Navigation.** Both halves have their inputs in the repo already: every
-      uploaded mesh keeps `hull_positions`, `hull_triangles` and a `TriBVHNode`
-      (`scene/asset.c3:230`), and `lib/collision.c3l/src/voxel.c3` is a written,
-      unimported distance-field solver — `solve_field`, `sample`,
-      `nearest_solved`, and a multi-source `solve_sources` / `nearest_sourced` /
-      `sample_sources` that is a crowd flow field by another name. Nothing in
-      `src/` imports it. The one piece genuinely missing is the
-      *complement*: `create_voxel_grid` voxelizes the **inside** of a closed mesh
-      and navigation wants free space above a floor.
-      **Two verbs, not one, and the split is the whole design** — `nav.path(from,
-      to)` for one agent, `nav.field(goals)` returning a handle a script samples
-      per agent. An API that only offers `path()` guarantees somebody writes the
-      second one badly. Shorten the extracted path against the BVH: a game that
-      walks cell centres looks like it is walking cell centres.
-      **Measure the bake cost first** at a 0.5 m cell over a 100 m town — that
-      number decides whether this is a level-boundary operation or a
-      loading-screen one.
-- [ ] **Bulk spatial queries.** `overlapSphere(p, r)`, `queryBox(box)`,
-      `raycastAll`, `sweep(shape, from, to)` over the `SpatialHash3D` that already
-      exists, each returning node ids into a caller-owned typed array.
-      **This pays for two entries**: `Scene.raycast` (`scene/pick.c3:63`) walks
-      every node in the scene at 42 ns each before it reaches any BVH, so a
-      hundred agents casting one ground ray apiece is 2.1 ms in a 500-node demo.
-- [ ] **Steering** — seek, arrive, separation, or RVO if avoidance has to be real.
-      Arrives with navigation and is pointless without it.
 - [ ] **Inverse kinematics.** `collision::ik::solve_chain`
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
-- [ ] **Curves and damping** — Catmull-Rom, and `damp`/`smoothDamp` with the
-      frame-rate-independent exponential. **In `math.js`, not in C3**: they are
-      arithmetic on a handful of numbers and crossing for them would cost more
-      than doing them.
-- [ ] **Batched transforms.** A `Float32Array`-shaped bulk write is the right
-      eventual shape and buys nothing anybody can see yet. **Trigger:** a scene
-      moving more than about two thousand nodes a frame.
+
 
 ## 19. Shadows at game scale
 
