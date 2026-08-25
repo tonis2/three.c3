@@ -182,14 +182,31 @@ fn double GameClock.advance_frame(&self, double wall_ms)
 
  What makes a stopped clock steppable, and the reason `timeScale = 0` is a pause
  rather than a freezer: pause, advance a sixtieth, look at the picture, advance
- another. `plan.md` §2's screenshot-reproducibility entry is the case it was
- built for — a post pass animating off `p.time` renders the same frame twice if
- the clock only moves when it is told to.
+ another. Screenshot reproducibility is the case it was built for — a post pass
+ animating off `p.time` renders the same frame twice if the clock only moves when
+ it is told to.
 
  Added to the next frame rather than applied here, because *every* consumer of a
  delta is downstream of `advance_frame`: applying it on the spot would move the
  time without stepping a clip, a solver or a fixed loop, which is a clock telling
  a different story from the world it times.
+
+ **It accumulates, so n calls before one frame boundary is one n-long frame and
+ not n frames** — and the difference is not merely the shape of the delta, it is
+ how far the world gets. A long frame is capped where a short one is not:
+ `PHYSICS_MAX_STEPS` is five, `CLOCK_MAX_FIXED_STEPS` is eight, and
+ `take_fixed_steps` below drops the remainder rather than carrying it. Batching
+ therefore manufactures exactly the very long frame those caps exist to survive.
+
+ Measured against a served headless process: ten `advance(1.0 / 60.0)` in one
+ script moved the clock the full 0.167 s and dropped a falling body 1.41 units,
+ where ten stepped frames drop it about 2.8. **The time lands and the world does
+ not**, which is the one way this verb can lie — it cannot report the shortfall,
+ because from here a debt and a frame's worth are the same number.
+
+ So a stepper calls it once per frame boundary. There is no batch verb on
+ purpose: the thing that runs n frames in one call is `play_frames` in `main.c3`,
+ which counts its own clock from zero and so cannot be called twice in a process.
 
  @param seconds : `Game seconds. Negative is ignored rather than refused — this is reached through a binding that has already said no to it.`
 *>

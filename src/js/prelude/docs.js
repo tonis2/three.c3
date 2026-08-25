@@ -1050,7 +1050,16 @@ export const DOCS = {
 			+ 'clips and bodies and fixed steps and p.time together. It lands on the NEXT frame '
 			+ 'rather than immediately, so under --mcp the order is run_script, a frame, screenshot. '
 			+ 'Two runs that ask for the same amount draw the same picture, which is what makes a '
-			+ 'screenshot with a post pass reproducible.',
+			+ 'screenshot with a post pass reproducible. '
+			+ 'CALLS ACCUMULATE INTO ONE FRAME rather than queueing frames, and that is the one way '
+			+ 'this verb can lie to you: ten advance(1 / 60) before the next frame boundary is a '
+			+ 'single frame worth a sixth of a second, and a frame that long is exactly the one the '
+			+ 'physics-fixed-60hz note warns about — the solver catches up at most five steps and '
+			+ 'DROPS the rest, and the fixed loop does the same at eight. Measured: ten in one call '
+			+ 'moved the clock the full 0.167 s and dropped a falling body 1.41 units where ten '
+			+ 'stepped frames drop it about 2.8. The time lands and the world does not. To step n '
+			+ 'frames, call it once per frame boundary — under --mcp that is n round trips, and '
+			+ 'there is no way to spend them in one.',
 		'three.clock.fixedRate / three.clock.fixedDelta':
 			'How many fixed steps a second of game time is worth — 60 by default, 1 to 240 — and '
 			+ 'the step that follows from it, in seconds. It does NOT change the solver\'s rate, '

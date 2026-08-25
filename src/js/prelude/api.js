@@ -537,6 +537,23 @@ const clock = {
 	// the top of the frame. Under `--mcp` that means a run_script that
 	// advances is followed by a frame and then a screenshot; in a window
 	// the frames are already arriving.
+	//
+	// **It accumulates into one frame, so n calls before the next frame
+	// boundary is one n-long frame and not n frames** — and that is the
+	// one way this verb can lie, because a long frame is capped where a
+	// short one is not. `PHYSICS_MAX_STEPS` is five and
+	// `CLOCK_MAX_FIXED_STEPS` is eight, and both drop the remainder rather
+	// than carrying it, which is the `physics-fixed-60hz` note's stutter
+	// rule met from the other side: batching manufactures the very long
+	// frame that rule exists to survive. Measured against a served headless
+	// process — ten `advance(1 / 60)` in one script moved the clock the full
+	// 0.167 s and dropped a falling body 1.41 units, where ten stepped
+	// frames drop it about 2.8. The time lands and the world does not.
+	//
+	// So step by calling it once per frame boundary. Under `--mcp` that is
+	// one round trip per frame, and there is deliberately no batch verb:
+	// one that queued n frames would be `play_frames` (`main.c3`), which
+	// counts its own clock from zero and cannot run twice in a process.
 	advance(seconds) { H.clockAdvance(+seconds); },
 };
 

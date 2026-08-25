@@ -1,3 +1,10 @@
+`plan.md` is the task list and holds nothing else. `notes.md` holds how things
+work, why they were decided that way, and the traps that have already cost a
+session. Both use the same section numbers, so a source comment citing §N
+resolves against whichever file still has material under it. **When something is
+finished, delete its entry from `plan.md`** — into `notes.md` if it explains
+something, into `git log` if it does not.
+
 Before running C3 tests, close all three instances
 
 For testing use
