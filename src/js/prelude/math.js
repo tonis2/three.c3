@@ -690,7 +690,7 @@ export function fbm2(x, y, options = null) {
 //
 // `lambda` is the rate: the gap decays by e^-lambda every second, so 1 is
 // lazy, 5 is a normal follow and 20 is nearly rigid. `dt` is in seconds —
-// `three.clock.dt / 1000`, because the clock reports milliseconds.
+// `three.clock.dt` as it comes, or a system's own `dt` argument.
 //
 // Three.js spells this `MathUtils.damp(x, y, lambda, dt)` and means the
 // same thing by it.
@@ -747,7 +747,7 @@ export function dampAngle(current, target, lambda, dt) {
 //
 //     const spin = { velocity: 0 };
 //     three.setAnimationLoop(() => {
-//         angle = three.smoothDamp(angle, want, spin, 0.3, three.clock.dt / 1000);
+//         angle = three.smoothDamp(angle, want, spin, 0.3, three.clock.dt);
 //     });
 //
 // `smoothTime` is roughly how long the move takes, in seconds. `maxSpeed`

@@ -130,17 +130,23 @@ fn void a_system_gets_seconds_and_the_animation_callback_gets_milliseconds() @te
 			three.setAnimationLoop(ms => { saw.anim = ms; });
 		`, 8, `
 			return [
-				saw.frame > 0 && saw.frame < 1,
+				Math.abs(saw.frame - three.clock.dt) < 1e-9,
 				Math.abs(saw.fixed - three.clock.fixedDelta) < 1e-9,
-				Math.abs(saw.anim - saw.frame * 1000) < 1e-6,
+				Math.abs(saw.anim - three.clock.time * 1000) < 1e-6,
+				saw.frame * 1000 * 4 < saw.anim,
 			];
 		`, "the units script ran");
 
-		// A frame system's dt is a fraction of a second, a fixed one's is the
-		// step exactly, and the animation callback's is the frame one times a
-		// thousand — which is what makes it the same clock in Three.js's units.
-		test::@check(value == "[true,true,true]",
-			"seconds for a system and milliseconds for the callback; got %s", value);
+		// A frame system's dt is THIS frame's seconds — three.clock.dt — a
+		// fixed one's is the step exactly, and the animation callback's is
+		// Three.js's argument: the milliseconds since the clock started. The
+		// fourth check is the one that matters: after eight frames the
+		// callback's number is many times the system's, because one is a
+		// total and the other is a delta. The first version of this test
+		// asserted `anim ≈ frame * 1000` — that the two AGREED — and a registry
+		// handing systems the cumulative time passed it for a whole section.
+		test::@check(value == "[true,true,true,true]",
+			"a delta for a system and a total for the callback; got %s", value);
 	};
 }
 
@@ -448,6 +454,71 @@ fn void despawn_hands_the_object_back() @test
 		// otherwise, removing it works, and a second despawn is null.
 		test::@check(value == "[true,true,true,true]",
 			"a cast is not a lifetime manager; got %s", value);
+	};
+}
+
+<*
+ `cast.of(object)` answers with an ID, and survives the compaction that moves
+ the slot.
+
+ **An id and not a slot, and the test is the compaction.** A query, a raycast
+ and `three.onTrigger` all hand back an object, and what a script wants back is
+ the thing it can still hold next frame — `_objects` is indexed by SLOT and a
+ slot moves when something above it dies, so a reverse map built on one would
+ answer with somebody else's critter the moment anything was despawned. That is
+ not an error anywhere; it is the wrong entity taking damage, which is the same
+ failure `notes.md` §21 wrote the deferred compaction to prevent, arriving
+ through the lookup instead of through the index.
+
+ `examples/wumpa_run.js` hand-built exactly this map and got it right by keeping
+ an id in it; the point of having it here is that the next script does not have
+ to know why.
+*>
+fn void a_cast_finds_its_entity_from_an_object_across_a_compaction() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const pack = three.cast({ capacity: 8, name: 'pack' });
+			const objects = [], ids = [];
+			for (let i = 0; i < 4; i++) {
+				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				m.position.x = i * 2;
+				scene.add(m);
+				objects.push(m);
+				const id = pack.spawn();
+				ids.push(id);
+				pack.attach(id, m);
+			}
+			const stranger = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(stranger);
+
+			const found = pack.of(objects[3]) === ids[3];
+			const slotBefore = pack.indexOf(pack.of(objects[3]));
+
+			// Kill the first one and close the gap, which moves every slot
+			// above it down by one.
+			scene.remove(pack.despawn(ids[0]));
+			pack.compact();
+
+			return [
+				found, slotBefore,
+				pack.of(objects[3]) === ids[3],
+				pack.indexOf(pack.of(objects[3])),
+				pack.of(objects[0]),
+				pack.of(stranger),
+				three.NO_ENTITY,
+				pack.objectAt(pack.indexOf(pack.of(objects[3]))) === objects[3],
+			];
+		`, "the reverse-lookup script ran");
+
+		// The object answered with its id before the compaction and with the
+		// same id after it, while the SLOT moved from 3 to 2; a despawned
+		// object and one the cast never had are both NO_ENTITY; and the round
+		// trip back through objectAt lands on the object it started from.
+		test::@check(value == "[true,3,true,2,-1,-1,-1,true]",
+			"an object answers with a durable id, not a slot; got %s", value);
 	};
 }
 
