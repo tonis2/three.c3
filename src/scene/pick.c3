@@ -22,8 +22,8 @@
  ## Broad phase first
 
  An instance whose world AABB the ray misses is skipped without touching its
- tree. `transform_aabb` is the same function frustum culling uses, which is the
- point of `plan.md` §2 saying the broad phase is shared.
+ tree. `Aabb3.transform_matrix` is the same function frustum culling uses, which
+ is the point of `plan.md` §2 saying the broad phase is shared.
 *>
 module three;
 
@@ -75,7 +75,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 		if (mesh == null || mesh.bvh == null) continue;
 
 		// Broad phase, in world space: shared with frustum culling.
-		collision::Aabb3 world_box = transform_aabb(node.world, mesh.bounds);
+		collision::Aabb3 world_box = mesh.bounds.transform_matrix(node.world);
 		collision::HitInfo broad = world_box.intersect_ray(ray);
 		if (!broad.collided || broad.depth > best.distance) continue;
 

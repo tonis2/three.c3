@@ -439,7 +439,7 @@ fn void measure_skinned_bounds(Asset* asset, Matrix4f[] poses) @local
 
 	foreach (pose : poses)
 	{
-		collision::Aabb3 moved = transform_aabb(pose, bind);
+		collision::Aabb3 moved = bind.transform_matrix(pose);
 		if (first)
 		{
 			asset.skinned_bounds = moved;

@@ -50,7 +50,8 @@ export const DOCS = {
 		'shadows-off-by-default': 'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
 		'shadow-cast-receive': 'Everything opaque casts and everything shaded receives — there is no castShadow or receiveShadow per object, because two copies of one mesh disagreeing about it would be two draw calls and this renderer is built to refuse that trade. A transparent material casts nothing (a shadow map holds one depth per texel, so glass would have to be either solid or absent, and absent is the better wrong answer) and neither does a debug helper. A ShaderMaterial receives shadows with no change to its body: lambert() already has the shadow folded into the direct term, and s.shadow is the raw factor for a body that wants it separately.',
 		'shadow-one-map': 'One map, fitted around the whole scene every frame, so its resolution is size divided by however wide the scene is. If shadows look blocky the scene is large, not the map small: raise three.light.shadow.size, or draw the part that matters and leave the rest out. There are no cascades. Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and if they do, three.light.shadow.bias is the knob, in small numbers like 0.0005.',
-		'shadow-costs-a-draw': 'A shadow pass costs a second draw call per opaque bucket — stats().shadowDraws is the count — and it turns frustum culling off for the frame, because a caster the camera cannot see still throws a shadow into the frame. So stats().culledLastFrame reads 0 while shadows are on. Neither costs draw calls: culling here drops instances from buckets, never buckets.',
+		'shadow-costs-a-draw': 'A shadow pass costs a second draw call per opaque bucket — stats().shadowDraws is the count — and it turns frustum culling off for the frame, because a caster the camera cannot see still throws a shadow into the frame. So stats().culledLastFrame reads 0 while shadows are on. Neither costs draw calls: culling here drops instances from buckets, never buckets. Mark the scenery object.static = true and that second pass all but disappears — see the static-casters topic.',
+
 		'background-is-a-colour': 'scene.background is a colour or null, never a Texture: [r,g,b], 0x87ceeb, or null for the default. There is no environment map and no scene.environment. A gradient sky is still geometry — what this removes is having to build one to escape the default near-black.',
 		'colours-are-srgb': 'Every colour you state is sRGB — the components a colour picker gives. mesh.color = 0xff8040 renders as 0xff8040 under a full light, scene.background = 0x2060a0 screenshots as 0x2060a0, and a texture\'s bytes come back out as the bytes that went in. The shading arithmetic in between is linear and the conversion is the renderer\'s job, so nothing in a script should ever apply a gamma of its own; a scene that pre-corrects its own textures will now be twice corrected.',
 		'side-is-on-the-material': 'material.side is on the material and not on the mesh, because it is a property of the pipeline: two meshes sharing a geometry and a material are one draw call and would stop being one if they could disagree about it. three.BackSide is how a skydome is made visible from inside; scaling a sphere by -1 does not work, because a negative scale does not reverse a triangle\'s winding.',
@@ -79,7 +80,9 @@ export const DOCS = {
 		'physics-fixed-60hz': 'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
 		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
 		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Siblings that share a shape but not a material do not batch either — a colour travels per copy in _COLOR_0, a texture or a blend mode has no per-copy channel — so they come back as the two draws they were. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
+		'static-casters': 'A shadow pass rasterises every caster every frame, which for a village is the largest thing in the frame. Say object.static = true on whatever will not move again — buildings, ground, walls, scenery — and those are drawn into the shadow map once and kept; each frame after that draws only what moved. It costs no draw call in the colour pass, so marking ten thousand crates is free, and moving one afterwards is safe (the map is rebuilt) rather than wrong. scene.traverse(o => o.static = true) is the usual way to say it. Watch three.stats().shadowStaticDraws: 0 on most frames means the cache is holding. Refused on skinned meshes — a pose changes the silhouette without the transform moving — and reading .static back is how you see that.',
 		'return-is-the-value': 'Return a value from your script with `return`; it comes back as the `value` field.',
+
 	},
 	classes: {
 		Scene: {
@@ -93,6 +96,7 @@ export const DOCS = {
 			],
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
+				'static (marks the whole scene as not moving again — see the static-casters topic)',
 				'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default)',
 				// three.light rather than a scene property: it is per renderer, like
 				// three.camera, and listing it here would suggest two scenes could
@@ -109,6 +113,7 @@ export const DOCS = {
 				'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'material', 'children', 'parent',
 				'color (per copy, free: [r,g,b], [r,g,b,a] or 0xff8800)',
 				'variant (per copy, free: which row of the material\'s table)',
+				'static (this will not move again: drawn into the shadow map once and kept)',
 				'animations (empty unless this came from asset.instantiate())',
 			],
 			methods: [
@@ -361,6 +366,7 @@ export const DOCS = {
 			],
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
+				'static (this will not move again: see the static-casters topic)',
 				'animations (clip names, from asset.instantiate())',
 			],
 		},
@@ -635,6 +641,7 @@ export const DOCS = {
 				'color (per copy, free: [r,g,b] or 0xff8800)',
 				'material (always null, and assigning throws — a helper draws with the line material)',
 				'variant (meaningless here: the line material has no table)',
+				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
 			],
 			methods: [
@@ -660,6 +667,7 @@ export const DOCS = {
 				'color (per copy, free)',
 				'material (always null, and assigning throws)',
 				'variant (meaningless here)',
+				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
 			],
 			methods: [
@@ -680,6 +688,7 @@ export const DOCS = {
 			properties: [
 				'size (settable — rescales the three arms, builds nothing)',
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
+				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
 			],
 			methods: [
@@ -703,6 +712,7 @@ export const DOCS = {
 				'color (per copy, free)',
 				'material (always null, and assigning throws)',
 				'variant (meaningless here)',
+				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
 			],
 			methods: [
@@ -731,6 +741,7 @@ export const DOCS = {
 				'color (per copy, free)',
 				'material (always null, and assigning throws)',
 				'variant (meaningless here)',
+				'static (meaningless here: a helper casts no shadow to cache)',
 				'animations (always empty)',
 			],
 			methods: [
@@ -1287,7 +1298,10 @@ export const DOCS = {
 			+ 'around the whole scene every frame, so blocky shadows mean a large scene rather than a '
 			+ 'small map — and while the pass is on the camera frustum stops culling, because a '
 			+ 'caster you cannot see still throws a shadow into the frame, so stats().culledLastFrame '
-			+ 'reads 0 and stats().shadowDraws is what the pass cost.',
+			+ 'reads 0 and stats().shadowDraws is what the pass cost. The way to make that pass cheap '
+			+ 'is object.static = true on whatever will not move again: static casters go into the map '
+			+ 'once and are kept, and each frame after draws only the movers. It costs no draw call in '
+			+ 'the colour pass. Ask three.docs({ topic: \'static-casters\' }) for the rest.',
 		'three.NoBlending / three.NormalBlending / three.AdditiveBlending':
 			'The values material.blending takes — 0, 1 and 2, Three.js\'s numbers again. '
 			+ 'NormalBlending is what { transparent: true } means and is what glass, water and a '
@@ -1329,7 +1343,8 @@ export const DOCS = {
 		textureBytes: 'What those cost.',
 		culledLastFrame: 'Instances the camera frustum dropped in the last render(). Meaningful with shadows on too: the shadow pass has its own draw list against the light\'s box, so turning shadows on no longer costs the camera its cull.',
 		shadowCulled: 'Instances neither pass drew — outside the camera frustum AND outside the light\'s box. 0 with shadows off. A caster the camera cannot see is still drawn into the map, so this is smaller than culledLastFrame, not equal to it.',
-		shadowDraws: 'Draw calls the last frame\'s shadow pass made, and 0 with shadows off. Roughly drawCalls minus the transparent buckets and the helpers, so this is what shadows cost in draws.',
+		shadowDraws: 'Draw calls the last frame\'s shadow pass made, and 0 with shadows off. Roughly drawCalls minus the transparent buckets and the helpers, so this is what shadows cost in draws. With static casters in the scene it counts the movers alone — the rest were drawn once and kept.',
+		shadowStaticDraws: 'Draw calls that went into the cached half of the shadow map, and 0 on every frame that did not rebuild it — which should be almost all of them. Zero here with objects marked static is the saving working: the map held from one frame to the next. If it equals the caster count every frame, something is invalidating the cache — a camera that has not settled, or a node marked static that is still being moved.',
 		skinnedDraws: 'Draw calls whose geometry is posed by a skeleton.',
 		skinnedInstances: 'Characters in those draws. A hundred here with skinnedDraws at 1 is the crowd working as intended.',
 		preskinnedInstances: 'Of those, the ones routed through the compute pass — instantiate({ skinning: \'compute\' }). '

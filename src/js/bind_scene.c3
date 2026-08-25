@@ -85,6 +85,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setTransform", &js_set_transform, 11);
 	self.bind(host, "setQuaternion", &js_set_quaternion, 6);
 	self.bind(host, "setVisible", &js_set_visible, 3);
+	self.bind(host, "setStatic", &js_set_static, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
@@ -478,7 +479,10 @@ fn void js_set_transform(
 	// describes. JavaScript keeps the triple it sent, so nothing converts back.
 	node.rotation = quat_from_euler({ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) });
 	node.scale    = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
-	node.dirty = true;
+	// Not `node.dirty = true`: the flag alone stopped being enough in §19.5, when
+	// the world-matrix walk gained the right to skip itself. See
+	// `Scene.mark_moved`.
+	self.pass.scene.mark_moved(node);
 }
 
 <*
@@ -670,10 +674,33 @@ fn void js_set_visible(
 	self.pass.scene.set_visible(id, arg_truth(&js, argc, args, 2));
 }
 
+<*
+ `setStatic(index, generation, on)` — put this node in the cached half of the
+ shadow map, and say whether it went.
+
+ **Answers rather than returning nothing**, unlike `setVisible` beside it, and
+ the reason is that this one can be refused: a node with a skin is not something
+ "it does not move" can be true of, so the host says no and the shim keeps the
+ answer. `Scene.set_static_caster` has the argument.
+*>
+fn void js_set_static(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	*out = qjs::bool_value(self.pass.scene.set_static_caster(id, arg_truth(&js, argc, args, 2)));
+}
+
 fn void js_set_name(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 ) @local
 {
+
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
@@ -980,6 +1007,11 @@ fn void js_stats(
 	// `drawCalls` above counts the scene pass and always has. Zero with shadows
 	// off, which is the honest answer rather than an absent property.
 	js.set_property(object, "shadowDraws", qjs::int_value((int)stats.shadow_draws));
+	// And what the cached half cost, on the frames it was rebuilt — §19.3. Zero
+	// is the number to want here: it says the shadow map held from one frame to
+	// the next, which is what marking things static is for. See
+	// `SceneStats.shadow_static_draws`.
+	js.set_property(object, "shadowStaticDraws", qjs::int_value((int)stats.shadow_static_draws));
 	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ };
 	js.set_property(object, "gpuMs", qjs::number_value(timing.total));
 	js.set_property(object, "prepareMs", qjs::number_value(timing.prepare));

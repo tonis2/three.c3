@@ -17,6 +17,9 @@
  record_shadow  UNDEFINED -> DEPTH_ATTACHMENT, draw every caster, -> SAMPLED
  the scene      binding 1 is the map; `shadow_factor` reads it back
 
+ ...where "draw every caster" is one of three shapes since §19.3 — see
+ `SHADOW_PLAN_FULL` and the section below.
+
  The two ends agree because there is one matrix and it is written once, into the
  frame block both passes read — `shaders/shadow.slang` rasterises with it and
  `shaders/mesh.slang` projects into it. A second fit, or a matrix pushed to one
@@ -46,6 +49,35 @@
  draw list is a scene where that vertex work is measurable — and `stats()` says
  `culled` is zero while shadows are on, which is already what it says when
  `Scene.cull` is off, so the number does not lie about it.
+
+ **Every drawable casts *every frame*, until something says it will not.** That
+ was the third cost and §19.3 is the answer to it: `object.static = true` puts a
+ node in a second depth image that is drawn when it changes and kept when it does
+ not, and a frame in which nothing casting is moving records no shadow pass at
+ all. On the reference village at 1280x720 that took the whole pass from 0.334 ms
+ to nothing — a settled shadowed frame costs 0.344 against 0.276 with shadows
+ switched off, and the difference left is the nine PCF taps the colour pass now
+ actually runs — and a frame with a mover over the cache costs 0.078.
+ `SHADOW_PLAN_FULL` has the three shapes, `ShadowMap.static_fit` has the
+ invalidation, and `Bucket.static_first` has the one thing the flag was worth
+ having under: it does not split a draw bucket.
+
+ ## The cached half, and what it asked of the fit — §19.3
+
+ A stored depth image is only depths *in a particular projection*, so a cache is
+ worth exactly as much as the fit is stable — and §18.1 made the fit follow the
+ camera, which is what makes a village's shadows sharp. The two are reconciled in
+ `fit`'s `stable` parameter: fit a square a little larger than the focus needs,
+ then keep it for as long as the focus stays inside it. `SHADOW_FIT_SLACK` is the
+ number, 13% of the texel density §18.1 won is the price, and it is charged only
+ to scenes that marked something static.
+
+ Nothing else about the pass changed. The lookup is one sampler and one
+ projection, exactly as it was; the two images are the same format at the same
+ extent under the same fit, and `descriptor` is the only place either view is
+ named. That was the reason for choosing a copy over the two-map form the plan
+ also costed — the alternative puts a second sampler and a second projection into
+ `shaders/mesh.slang`, which every `ShaderMaterial` in every scene shares.
 
  **A depth pass has no fragment stage, so nothing is alpha tested and no vertex
  body runs.** A leaf card casts the shadow of its quad and a `ShaderMaterial`
@@ -80,6 +112,16 @@
  buckets: two copies of one mesh disagreeing about casting are two draws, which
  is precisely the trade the whole renderer is built to refuse. Everything opaque
  casts and everything shaded receives.
+
+ **`Node.static_caster` is not a counter-example, and the difference is worth
+ being precise about.** `castShadow` would decide *whether* a copy is drawn into
+ the map, which is a property the pass would have to key a draw on. `static`
+ decides *when* — both halves are rasterised, in different frames, into images
+ that are then one image. So it orders copies inside their bucket instead of
+ keying one, and two copies of a wall disagreeing about it are still one draw
+ call in the colour pass. `Bucket.static_first` is where that is spent and
+ `a_mover_is_drawn_over_the_cached_map` is the check.
+
 *>
 module three;
 
@@ -122,6 +164,59 @@ const uint SHADOW_MAX_SIZE = 8192;
  times bigger has texels ten times wider and needs the offset to grow with them.
 *>
 const float SHADOW_NORMAL_OFFSET_TEXELS = 2.0;
+
+<*
+ How much bigger than it needs to be the fitted square is made, once a scene has
+ static casters worth caching — §19.3's half of §18.1's bargain.
+
+ **The cache is only worth having if the fit holds still**, and §18.1's fit does
+ not: it is centred on what the camera can see, so a camera that moves at all
+ moves the light's box and every texel in the cached map is about the wrong part
+ of the world. `plan.md` §19.3 names this as the interaction to solve and calls
+ the solution "snapped and hysteretic". Snapped it already is. This is the
+ hysteresis: fit a square slightly larger than the focus needs, then **keep that
+ square for as long as the focus still fits inside it** rather than recentring
+ every frame. The camera can then drift by 7.5% of the box's width in any
+ direction for free, which at walking pace is measured in seconds rather than in
+ frames.
+
+ 15% is the smallest number that buys a useful window. It costs 13% of the texel
+ density §18.1 won, and it is charged **only to scenes that marked something
+ static** — `fit` takes it as a parameter and a scene with nothing to cache is
+ fitted exactly as it was before this constant existed. That is the whole reason
+ it is a parameter rather than the new default: paying for hysteresis nobody is
+ using would be §18.1 undone.
+*>
+const float SHADOW_FIT_SLACK = 1.15;
+
+<*
+ What `record_shadow` does with the map this frame.
+
+ Three shapes, and which one a frame is in follows entirely from what the draw
+ list holds — see `MeshPass.plan_shadow`, which is the only thing that assigns
+ this.
+
+ - `FULL` is the renderer as it was before §19.3: clear the map, draw every
+   caster into it, sample it. Any frame with nothing marked static is this, and
+   so is a frame whose second image could not be allocated.
+ - `STATIC` is the win. Every caster is static, so the map is a picture of a world
+   that is not moving: it is drawn once into an image of its own and then sampled
+   directly, frame after frame, with **no pass recorded at all** — no clear, no
+   draws, no barriers, not even a copy.
+ - `COMBINED` is a village with somebody walking through it. The static image is
+   copied into the live one and the movers are drawn over the top, so the
+   buildings are rasterised when they change and never because a character took a
+   step.
+*>
+const uint SHADOW_PLAN_FULL = 0;
+const uint SHADOW_PLAN_STATIC = 1;
+const uint SHADOW_PLAN_COMBINED = 2;
+
+// Which copies of each bucket a shadow pass draws — see `Bucket.static_first`
+// for the layout these index into, and `MeshPass.record_casters` for the loop.
+const uint CASTERS_ALL = 0;
+const uint CASTERS_STATIC = 1;
+const uint CASTERS_DYNAMIC = 2;
 
 <*
  One directional shadow map: what a script asked for, the device objects that
@@ -182,6 +277,92 @@ struct ShadowMap
 	// moment and the image can only change between frames.
 	uint created;
 
+	// ---- the cached half, §19.3 ----
+
+	<*
+	 A second depth image holding everything marked `Node.static_caster`, drawn
+	 when something about it changes and kept otherwise.
+
+	 Allocated only once a scene actually has a static caster, so a project that
+	 never sets the flag pays neither the 16 MB nor the copy. Same format, same
+	 extent and same fit as `image` — it has to be, because the whole point is that
+	 one can be copied into the other and the lookup cannot tell which it read.
+	*>
+	vk::Image static_image;
+	vk::ImageView static_view;
+	vk::Memory static_memory;
+	uint static_created;
+
+	<*
+	 What the cached image is a picture of, and the whole of the invalidation.
+
+	 Two things are compared, and each one is a way the stored depths stop meaning
+	 what the lookup will assume they mean:
+
+	 - **the fit**, because a shadow map is only depths *in a particular projection*
+	   and re-projecting is not something a stored image can do. This is why §18.1
+	   and §19.3 are one problem — see `SHADOW_FIT_SLACK`.
+	 - **`Scene.static_revision`**, which moves when a static caster is added,
+	   removed, hidden, re-parented, re-materialled or moved. `Scene.update_branch`
+	   and `Scene.invalidate` are the two places it is bumped from, and that field's
+	   own header says which covers what.
+
+	 The size is a third and is not compared, because it cannot drift: `ensure`
+	 destroys both images when it changes and `invalidate_static` goes with it, so
+	 by the time anything asks, the answer is already no.
+
+	 What is deliberately *not* in here is anything about the camera or about a
+	 dynamic node. That is the point: a character walking through the village must
+	 not cost the village its map, and a camera that turns must not either — the
+	 hysteresis in `fit` is what makes the second one true, and the second key
+	 below is what makes the first.
+	*>
+	Matrix4f static_fit;
+	uint static_revision;
+	// False until the image holds a fit and a revision worth comparing — after
+	// creation, after a resize, and after `defaults`.
+	bool static_valid;
+	// How many buckets the last *static* rebuild drew, for `stats()` to report
+	// beside `draws`. Zero in every frame that did not rebuild.
+	uint static_draws;
+
+	<*
+	 Whether the colour pass samples the cached image rather than the live one.
+
+	 True in a `SHADOW_PLAN_STATIC` frame and only there: nothing moves, so the
+	 cached image *is* the shadow map and copying it into a second image to sample
+	 that instead would be a full-image copy per frame to change nothing.
+	 `descriptor` is where the choice is spent, and it is the only place either
+	 view is named.
+	*>
+	bool sample_static;
+	// This frame's shape — one of the three `SHADOW_PLAN_` constants. Decided by
+	// `MeshPass.plan_shadow` once the draw list exists, read by `record_shadow`.
+	uint plan;
+	// Set when the cached image would not allocate, so the diagnostic is one
+	// sentence and not one per frame — `MeshPass.prepare` clears `enabled` for the
+	// same reason when the map itself will not build. Cleared by a resize, which
+	// is a different allocation and may well succeed.
+	bool static_refused;
+
+	// ---- the fit, as it last landed ----
+
+	<*
+	 The pieces `fit` needs to answer "is the box I already have still good?".
+
+	 Kept apart from `light_view_projection` because that is the *product* and this
+	 is the arithmetic: a projection matrix can be compared for equality but cannot
+	 be asked whether a box is inside the region it covers, which is exactly the
+	 question hysteresis is. See `SHADOW_FIT_SLACK`.
+	*>
+	Matrix4f fit_view;
+	float fit_low_x;
+	float fit_low_y;
+	float fit_extent;
+	float fit_near;
+	float fit_far;
+	bool has_fit;
+
 	// One pipeline for every caster in the scene — there is no material in a
 	// depth pass, so there is nothing to key a second one on. Compiled the first
 	// time shadows are switched on and kept until the pass is freed.
@@ -212,7 +393,26 @@ struct ShadowMap
 	bool live;
 	// How many buckets the last shadow pass drew. Reported through `stats()`,
 	// which is where a script finds out what a shadow costs it.
+	//
+	// **What it counts changed in §19.3.** It is the draws this frame *recorded*,
+	// so a village whose static map is still good reports zero and one with
+	// somebody walking through it reports the movers. That is the number a script
+	// wants: `shadowDraws` is what the frame paid, and `shadowStaticDraws` beside
+	// it is what the rebuild cost on the frames there was one.
 	uint draws;
+}
+
+// Whether two matrices are the same one. Element by element and bitwise, which
+// is the right comparison here rather than a tolerance: `fit` is deterministic,
+// so the same inputs produce the same sixteen floats, and "nearly the same fit"
+// is not a thing a stored depth image can be sampled through.
+fn bool same_matrix(Matrix4f a, Matrix4f b) @local
+{
+	for (usz i = 0; i < 16; i++)
+	{
+		if (a.m[i] != b.m[i]) return false;
+	}
+	return true;
 }
 
 <*
@@ -232,6 +432,61 @@ fn void ShadowMap.defaults(&self)
 	self.light_view_projection = matrix::IDENTITY4{float};
 	self.live = false;
 	self.draws = 0;
+	// The cached half is forgotten rather than freed: `new three.Scene()` empties
+	// the graph, so whatever is in the static image is a picture of a world that
+	// no longer exists. The image itself is worth keeping — the next scene will
+	// want one the same size — and it is rebuilt on the first frame that needs it.
+	self.invalidate_static();
+	self.static_draws = 0;
+	self.sample_static = false;
+	self.plan = SHADOW_PLAN_FULL;
+	self.has_fit = false;
+}
+
+<*
+ Say that the cached image is a picture of something that is no longer true.
+
+ One line, and it exists as a function so that the places that have to call it
+ are a list somebody can read: a resize, a `defaults`, and a freshly created
+ image. The two keys drifting is not one of them — `static_current` compares them
+ every frame and never has to be told. Nothing is destroyed and nothing is drawn:
+ the next frame that wants the static half finds `static_valid` false and rebuilds
+ it.
+*>
+fn void ShadowMap.invalidate_static(&self)
+{
+	self.static_valid = false;
+}
+
+<*
+ Is the cached image still a picture of this frame?
+
+ `ShadowMap.static_fit` is the argument for the two terms and for what is
+ deliberately absent from them. Both are compared rather than trusted — the fit
+ bitwise, because it is recomputed every frame from inputs that have not changed
+ and therefore comes out the same sixteen floats.
+
+ @param revision : `Scene.static_revision, which moves when anything about a static caster does.`
+*>
+fn bool ShadowMap.static_current(&self, uint revision)
+{
+	return self.static_valid
+		&& self.static_revision == revision
+		&& same_matrix(self.static_fit, self.light_view_projection);
+}
+
+<*
+ The cached image now holds this revision under this fit.
+
+ Called immediately after the rebuild and from nowhere else, so the keys are
+ always written from the same values the pass just drew with rather than from
+ whatever they are by the time somebody asks.
+*>
+fn void ShadowMap.mark_static_built(&self, uint revision)
+{
+	self.static_valid = true;
+	self.static_revision = revision;
+	self.static_fit = self.light_view_projection;
 }
 
 <*
@@ -252,6 +507,15 @@ fn void? ShadowMap.ensure(&self, Gpu* gpu)
 {
 	if (self.image != null && self.created == self.size) return;
 	if (self.image != null) self.destroy_image(gpu);
+	// The cached half is the same extent as the live one by construction — one is
+	// copied into the other — so a resize takes both, and what the old one held is
+	// a picture at a resolution nothing is going to ask for again.
+	if (self.static_image != null) self.destroy_static_image(gpu);
+	self.invalidate_static();
+	// A different allocation, and one that may well succeed where the last one
+	// did not — a script halving `shadow.size` after running out of memory is
+	// exactly the recovery this allows.
+	self.static_refused = false;
 
 	// **Both features, and the second one is the half `Target` does not need.**
 	// The target's depth buffer is only ever an attachment, so it asks for
@@ -277,7 +541,12 @@ fn void? ShadowMap.ensure(&self, Gpu* gpu)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
 		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		// TRANSFER_DST because §19.3 copies the cached half in before drawing the
+		// movers over it. Asked for unconditionally rather than only when something
+		// is static: the flag is set per node at any moment and the image can only
+		// be created between frames, so the alternative is a resize-and-stall the
+		// first time a script writes `mesh.static = true`.
+		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
 	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
@@ -318,6 +587,64 @@ fn void? ShadowMap.ensure(&self, Gpu* gpu)
 		.build(gpu.handle)!;
 
 	self.created = self.size;
+}
+
+<*
+ Create the cached image, or do nothing if one at the live map's size exists.
+
+ **Only ever called from a frame that has something to cache**, which is what
+ keeps `plan.md`'s "a project that never asks for shadows pays for none of this"
+ true one level in: a scene with shadows on and nothing marked static allocates
+ one image, not two.
+
+ The sampler is `image`'s, shared rather than duplicated. It is a comparison-free
+ nearest sampler with no state that could differ between the two — see `ensure` —
+ and the lookup must not be able to tell which image it read.
+
+ `ensure` has already run and settled `format` and `created`, so this borrows
+ both rather than deciding again. Two images that disagreed about either would
+ fail at the copy, several frames from the reason.
+*>
+fn void? ShadowMap.ensure_static(&self, Gpu* gpu)
+{
+	if (self.static_image != null && self.static_created == self.created) return;
+	if (self.static_image != null) self.destroy_static_image(gpu);
+	if (self.created == 0) return;
+
+	self.static_image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
+		.setExtent({ .width = self.created, .height = self.created, .depth = 1 })
+		.setMipLevels(1)
+		.setArrayLayers(1)
+		.setSamples(SAMPLE_COUNT_1_BIT)
+		.setTiling(IMAGE_TILING_OPTIMAL)
+		// SAMPLED as well as TRANSFER_SRC: a frame in which *everything* is static
+		// reads this image directly and never copies it, which is the case the
+		// whole section exists for. See `sample_static`.
+		.setUsage(
+			IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT
+		)
+		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
+		.build(gpu.handle)!;
+	self.static_memory = vk::create_image_buffer(
+		self.static_image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+	)!;
+
+	self.static_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
+		.setSubresourceRange(
+			{
+				.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			}
+		)
+		.setImage(self.static_image)
+		.build(gpu.handle)!;
+
+	self.static_created = self.created;
+	// A fresh image holds nothing, whatever the keys happen to say.
+	self.invalidate_static();
 }
 
 <*
@@ -369,8 +696,9 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  time somebody points the light along the box's diagonal.
 
  **The box is re-bounded rather than its corners transformed one at a time.**
- `transform_aabb` is exact for an affine transform of a box, which a view matrix
- is, so this is the same eight corners with the arithmetic already written down.
+ `Aabb3.transform_matrix` is exact for an affine transform of a box, which a view
+ matrix is, so this is the same eight corners with the arithmetic already written
+ down.
 
  ## The focus box, and why the extent is a square that snaps — §18.1
 
@@ -402,12 +730,34 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  between the light and the visible region is outside the focus box and its shadow
  lands inside it.
 
+ ## The hysteresis, and why it is a parameter — §19.3
+
+ A fit that recentres every frame is a cached shadow map thrown away every frame,
+ because a stored depth image is only depths *in a particular projection*. So a
+ scene with static casters asks for `stable`, and gets two changes: the square is
+ fitted `SHADOW_FIT_SLACK` larger than it needs to be, and **the previous square
+ is kept for as long as the focus still fits inside it**. The camera then drifts
+ for free and the fit steps rather than slides.
+
+ It is a parameter and not the behaviour because the slack is texel density spent
+ in advance. A scene that cached nothing would be paying §18.1 back for a saving
+ it is not collecting, so it is fitted exactly as it was before this existed —
+ and every test written against the fit itself passes `stable` false, which is
+ how the two paths stay two paths rather than one path with a flag nobody reads.
+
+ The kept square is dropped in one other case besides the focus leaving it: when
+ the focus has shrunk to less than half of it. Otherwise a camera that zoomed out
+ across a level and back again would spend the rest of the session looking at the
+ coarse map it needed at the far end.
+
  @param light : `xyz surface-to-light in world space, w ignored. A zero direction is treated as straight up rather than producing a NaN matrix — the same value three.light refuses at the door, defended again here because this is the only place it would be silent.`
  @param bounds : `The world box of everything drawable — Scene.bounds. A unit box for an empty scene, which fits and shadows nothing. Sets the light's stand-off and the near and far planes.`
  @param focus : `The part of it worth spending texels on — Camera.view_bounds intersected with bounds. Omitted, empty or degenerate falls back to bounds, which is the pre-§18.1 fit exactly, and is what the tests that check the fit itself pass.`
+ @param stable : `Whether to hold a fit that is still good rather than recentring on the focus. What a scene with static casters wants; see above for what it costs.`
 *>
-fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = {})
+fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = {}, bool stable = false)
 {
+
 	Vec3 direction = { light[0], light[1], light[2] };
 	float length   = direction.length();
 	if (length > 1e-6f)
@@ -431,34 +781,27 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 	if (math::abs(direction.y) > 0.999f) up = { 0, 0, 1 };
 
 	Matrix4f view        = matrix::look_at{float}(centre + direction * (radius * 2.0f), centre, up);
-	collision::Aabb3 box = transform_aabb(view, bounds);
+	collision::Aabb3 box = bounds.transform_matrix(view);
 
 	// Degenerate on any axis means nobody supplied one, or the camera is looking
 	// away from the scene entirely. The whole box is the honest answer to both.
 	Vec3 span3 = focus.size();
 	if (span3.x <= 0.0f || span3.y <= 0.0f || span3.z <= 0.0f) focus = bounds;
 
-	collision::Aabb3 lit = transform_aabb(view, focus);
+	collision::Aabb3 lit = focus.transform_matrix(view);
 
 	// The diagonal, so that orbiting the camera cannot change it — and capped at
 	// the scene's own light-space extent, so that a camera which frames
 	// everything is fitted exactly as it was before this existed.
 	float extent = (focus.max - focus.min).length();
 	float ceiling = math::max(box.max.x - box.min.x, box.max.y - box.min.y);
+	// The slack is applied before the cap, so a scene the camera can see all of is
+	// fitted to the scene either way and pays nothing for hysteresis it cannot use.
+	if (stable) extent *= SHADOW_FIT_SLACK;
 	if (extent > ceiling || extent <= 1e-4f) extent = ceiling;
 	if (extent <= 1e-4f) extent = 1.0f;
 
 	uint texels = self.created > 0 ? self.created : self.size;
-	float per_texel = extent / (float)texels;
-
-	// Centred on the focus, then floored onto the texel grid. `math::floor` and
-	// not a cast: the light-space origin is negative about as often as it is
-	// positive, and a cast truncates towards zero, which snaps the two halves of
-	// the world onto two different grids.
-	float low_x = (lit.min.x + lit.max.x - extent) * 0.5f;
-	float low_y = (lit.min.y + lit.max.y - extent) * 0.5f;
-	low_x = math::floor(low_x / per_texel) * per_texel;
-	low_y = math::floor(low_y / per_texel) * per_texel;
 
 	// A right-handed eye looks down -Z, so everything in front of it has a
 	// negative z and the ortho's near and far are the *distances* — which is the
@@ -469,10 +812,60 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 	if (near < 0.01f) near = 0.01f;
 	if (far <= near) far = near + 1.0f;
 
+	// **The square already in hand, if it still covers what has to be covered.**
+	// The view matrix and the depth range have to be the same ones — they come
+	// from `bounds` and from the light, so a scene that grew or a sun that turned
+	// fails here — and then the question is only whether the focus is inside the
+	// box, which is the exact condition for the map still being right rather than
+	// a heuristic for it. The half-size test is what lets density come back after
+	// a zoom; see the header.
+	bool keep = stable
+		&& self.has_fit
+		&& self.fit_near == near
+		&& self.fit_far == far
+		&& same_matrix(self.fit_view, view)
+		&& lit.min.x >= self.fit_low_x
+		&& lit.min.y >= self.fit_low_y
+		&& lit.max.x <= self.fit_low_x + self.fit_extent
+		&& lit.max.y <= self.fit_low_y + self.fit_extent
+		&& extent * 2.0f >= self.fit_extent;
+
+	float low_x;
+	float low_y;
+	if (keep)
+	{
+		low_x = self.fit_low_x;
+		low_y = self.fit_low_y;
+		extent = self.fit_extent;
+	}
+	else
+	{
+		float per_texel = extent / (float)texels;
+		// Centred on the focus, then floored onto the texel grid. `math::floor` and
+		// not a cast: the light-space origin is negative about as often as it is
+		// positive, and a cast truncates towards zero, which snaps the two halves of
+		// the world onto two different grids.
+		low_x = (lit.min.x + lit.max.x - extent) * 0.5f;
+		low_y = (lit.min.y + lit.max.y - extent) * 0.5f;
+		low_x = math::floor(low_x / per_texel) * per_texel;
+		low_y = math::floor(low_y / per_texel) * per_texel;
+	}
+
+	self.fit_view = view;
+	self.fit_low_x = low_x;
+	self.fit_low_y = low_y;
+	self.fit_extent = extent;
+	self.fit_near = near;
+	self.fit_far = far;
+	self.has_fit = true;
+
+	float per_texel = extent / (float)texels;
+
 	self.light_view_projection =
 		matrix::ortho{float}(low_x, low_x + extent, low_y, low_y + extent, near, far).mul(view);
 
 	self.texel = 1.0f / (float)texels;
+
 	// The world size of one texel, times the standard two. `fit` is the only
 	// place that knows both halves of that product — the box's extent and the
 	// map's resolution — which is why the offset is derived here and not set.
@@ -504,12 +897,18 @@ fn float[4] ShadowMap.params(&self)
  before anything sampled it. The main pass binds this only when `live` is set and
  binds the white 1x1 otherwise — see `MeshPass.record`, which is where the choice
  between the two is made and is the only place that knows both are possible.
+
+ **Which of the two images, since §19.3.** A frame in which nothing casting is
+ moving samples the cached image itself rather than a copy of it — see
+ `sample_static` — and both are left in SHADER_READ_ONLY_OPTIMAL by the frame that
+ last wrote them. This is the only place either view is named, so the choice is
+ made once and the rest of the pass cannot disagree with it.
 *>
 fn vk::DescriptorImageInfo ShadowMap.descriptor(&self)
 {
 	return {
 		.sampler = self.sampler,
-		.imageView = self.view,
+		.imageView = self.sample_static ? self.static_view : self.view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	};
 }
@@ -535,22 +934,81 @@ fn vk::DescriptorImageInfo ShadowMap.descriptor(&self)
 *>
 fn void ShadowMap.begin(&self, vk::CommandBuffer cmd)
 {
-	// UNDEFINED because the map is cleared on load, so there is nothing to preserve.
+	self.begin_depth(cmd, self.image, self.view, IMAGE_LAYOUT_UNDEFINED, true);
+}
+
+<*
+ The cached half's own pass — the one that runs on the frames a static caster
+ actually changed, and on no others.
+
+ UNDEFINED as the old layout for `begin`'s reason: this clears, so whatever the
+ image held is being thrown away and there is nothing to preserve across the
+ transition. That is true on the first rebuild and on every one after it, which
+ is why there is no layout to track between frames.
+*>
+fn void ShadowMap.begin_static(&self, vk::CommandBuffer cmd)
+{
+	self.begin_depth(cmd, self.static_image, self.static_view, IMAGE_LAYOUT_UNDEFINED, true);
+}
+
+<*
+ The movers' pass, over a map that already holds the buildings.
+
+ `ATTACHMENT_LOAD_OP_LOAD` rather than a clear, and the depths it loads are the
+ ones `copy_static` put there a moment ago. The old layout is TRANSFER_DST for
+ the same reason — the copy is what wrote them, so this is the transition that
+ hands the image from the transfer stage to the depth-test stages, and reading
+ the loaded values back means asking for DEPTH_STENCIL_ATTACHMENT_READ as well as
+ WRITE.
+*>
+fn void ShadowMap.begin_over_copy(&self, vk::CommandBuffer cmd)
+{
+	self.begin_depth(cmd, self.image, self.view, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, false);
+}
+
+<*
+ Transition a depth image in and start rendering to it at the map's own extent.
+
+ The three passes above differ by three things and share everything else, which
+ is why they are one function with three arguments rather than three copies of a
+ barrier, a `RenderingInfo` and a viewport.
+
+ The barrier is `ALL_COMMANDS` with no source access, which is `color_attachment_
+ barrier`'s argument one image over: the hazard is that *last* frame sampled this
+ map in the fragment stage and this frame writes it, and a write-after-read wants
+ ordering rather than a cache flush. `vk::depthBarrier` would have been the
+ obvious reuse and is subtly wrong here — its source stage is the depth-test
+ stages, which do not cover a fragment shader's sampled read. Coming out of a
+ copy the hazard is the other kind, so the source is the transfer stage and its
+ write, and both are named rather than folded into ALL_COMMANDS.
+
+ The viewport height is negative, exactly as `Target.begin_render_to`'s is, so
+ this pass rasterises under the same convention as every other pass in the
+ project and `shadow_factor`'s ndc-to-uv flip is the one that follows from it.
+
+ @param from : `The layout the image is in. UNDEFINED discards the contents, which is what a clearing pass wants; TRANSFER_DST preserves what the copy left.`
+ @param clear : `Whether to clear on load. False loads what is already there, which is only legal because the caller put it there in this same command buffer.`
+*>
+fn void ShadowMap.begin_depth(
+	&self, vk::CommandBuffer cmd, vk::Image image, vk::ImageView view, vk::ImageLayout from, bool clear
+)
+{
+	bool loading = from == IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	vk::ImageMemoryBarrier2 to_attachment = { ...IMAGE_BARRIER,
-		.image = self.image,
-		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		.srcAccessMask = (vk::AccessFlags2)0,
+		.image = image,
+		.srcStageMask = loading ? PIPELINE_STAGE_2_COPY_BIT : PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.srcAccessMask = loading ? ACCESS_2_TRANSFER_WRITE_BIT : (vk::AccessFlags2)0,
 		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+		.oldLayout = from,
 		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		.subresourceRange = DEPTH_LEVEL,
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_attachment }));
 
-	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.view)
+	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setLoadOp(clear ? ATTACHMENT_LOAD_OP_CLEAR : ATTACHMENT_LOAD_OP_LOAD)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
@@ -571,12 +1029,27 @@ fn void ShadowMap.begin(&self, vk::CommandBuffer cmd)
  was written by the tests and is about to be read by a sampler, in the same
  submission, so this needs the access masks a layout change alone would not give.
 *>
-fn void ShadowMap.end(&self, vk::CommandBuffer cmd)
+fn void ShadowMap.end(&self, vk::CommandBuffer cmd) => self.end_depth(cmd, self.image);
+
+<*
+ The same for the cached image, and it always lands in SHADER_READ_ONLY_OPTIMAL.
+
+ **One resting layout for the static image and no field tracking which it is
+ in.** It is read two ways — sampled directly in a frame where nothing moves, and
+ copied in a frame where something does — and the copy is the rarer of the two by
+ a long way once a scene is playing. So the rebuild leaves it sampleable and
+ `copy_static` borrows it for the length of one copy and puts it back, which
+ costs one extra barrier on the frames there is a mover and removes a piece of
+ state that could be wrong.
+*>
+fn void ShadowMap.end_static(&self, vk::CommandBuffer cmd) => self.end_depth(cmd, self.static_image);
+
+fn void ShadowMap.end_depth(&self, vk::CommandBuffer cmd, vk::Image image)
 {
 	vk::cmdEndRendering(cmd);
 
 	vk::ImageMemoryBarrier2 to_sampled = { ...IMAGE_BARRIER,
-		.image = self.image,
+		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
@@ -586,6 +1059,80 @@ fn void ShadowMap.end(&self, vk::CommandBuffer cmd)
 		.subresourceRange = DEPTH_LEVEL,
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_sampled }));
+}
+
+<*
+ Put the buildings back into the live map so the movers can be drawn over them.
+
+ **The one full-image copy §19.3 costs, and what it buys is the geometry.** A
+ depth image cannot be loaded from one attachment and stored to another, and the
+ movers cannot be drawn into the cached image without ruining it — the next frame
+ would find last frame's character baked into the buildings. So the cached depths
+ are copied and the movers are drawn over the copy. At 2048 that is 16 MB read
+ and 16 MB written against 4178 instances of geometry it removes, which is the
+ trade `plan.md` §19.3 costed and the reason the frame where nothing moves does
+ not do it at all.
+
+ Three barriers in two calls. The first pair is one `vkCmdPipelineBarrier2` with
+ both images in it: the cached one from sampleable to transfer-source, the live
+ one from whatever it was to transfer-destination, and UNDEFINED is right for the
+ live one because the copy overwrites every texel of it. The second puts the
+ cached image back where `end_static` leaves it — see there for why it has one
+ resting layout rather than a tracked one.
+*>
+fn void ShadowMap.copy_static(&self, vk::CommandBuffer cmd)
+{
+	vk::ImageMemoryBarrier2 source = { ...IMAGE_BARRIER,
+		.image = self.static_image,
+		.srcStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.srcAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_COPY_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::ImageMemoryBarrier2 destination = { ...IMAGE_BARRIER,
+		.image = self.image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.srcAccessMask = (vk::AccessFlags2)0,
+		.dstStageMask = PIPELINE_STAGE_2_COPY_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ source, destination }));
+
+	vk::ImageSubresourceLayers layer = {
+		.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+		.mipLevel = 0,
+		.baseArrayLayer = 0,
+		.layerCount = 1,
+	};
+	vk::ImageCopy region = {
+		.srcSubresource = layer,
+		.dstSubresource = layer,
+		.extent = { .width = self.created, .height = self.created, .depth = 1 },
+	};
+	vk::cmdCopyImage(
+		cmd,
+		self.static_image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		self.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1, &region
+	);
+
+	vk::ImageMemoryBarrier2 restore = { ...IMAGE_BARRIER,
+		.image = self.static_image,
+		.srcStageMask = PIPELINE_STAGE_2_COPY_BIT,
+		.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ restore }));
 }
 
 <*
@@ -609,6 +1156,23 @@ fn void ShadowMap.destroy_image(&self, Gpu* gpu)
 }
 
 <*
+ The cached image and its view.
+
+ No sampler: there is one, it belongs to `image`, and both views are read through
+ it — see `ensure_static`. Retiring it here would take the live map's sampler
+ away from the frames still using it.
+*>
+fn void ShadowMap.destroy_static_image(&self, Gpu* gpu)
+{
+	gpu.retire_memory(self.static_memory, self.static_view, (vk::Sampler)null);
+	self.static_memory = {};
+	self.static_image = (vk::Image)null;
+	self.static_view = (vk::ImageView)null;
+	self.static_created = 0;
+	self.invalidate_static();
+}
+
+<*
  Everything the map owns, including the pipeline.
 
  Called from `MeshPass.free` with the device already idle, so the pipeline is
@@ -618,6 +1182,7 @@ fn void ShadowMap.destroy_image(&self, Gpu* gpu)
 fn void ShadowMap.free(&self, Gpu* gpu)
 {
 	self.destroy_image(gpu);
+	self.destroy_static_image(gpu);
 	if (self.pipeline_ready) self.pipeline.free(gpu);
 	self.pipeline_ready = false;
 }

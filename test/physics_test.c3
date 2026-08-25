@@ -665,3 +665,67 @@ fn void reading_a_velocity_with_no_body_is_null() @test
 		test::@check(result.value == "true", "no body should read back as null, got '%s'", result.value);
 	};
 }
+
+<*
+ A body the solver moved is drawn where the solver put it.
+
+ **The one thing every check above this takes for granted.** They all read a
+ body's position back through `three.physics` or through the object's own
+ `position`, both of which answer from the solver — so a solver that moved a body
+ and never told the *scene graph* would pass all of them and render a ball
+ hanging in the air where it was dropped.
+
+ `getWorldPosition()` is the only reader in the API that goes through
+ `Node.world`, which is the matrix the draw list copies into the instance record.
+ That makes it the check: the ball's world position has to have fallen, and it
+ has to agree with what the solver says.
+
+ **Proved by injection.** `Physics.write_back` reverted to writing `node.dirty`
+ directly instead of calling `Scene.mark_moved`, which is what it did before
+ `plan.md` §19.5 gave the world-matrix walk the right to skip itself: "the ball
+ was drawn where it was dropped, world y = 6" while `ball.position.y`
+ still reads where the solver put it. Nothing else in this file moves.
+*>
+fn void a_body_the_solver_moved_is_drawn_where_it_landed() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const ball = new three.Mesh(new three.SphereGeometry(0.5, 16, 8));
+			ball.position.set(0, 6, 0);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1 });
+			globalThis.ball = ball;
+			return ball.getWorldPosition().y;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check((built.value.to_double() ?? 0.0) > 5.0, "the ball starts high, y = %s", built.value);
+
+		for (int i = 1; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult world = run.run("return globalThis.ball.getWorldPosition().y;");
+		defer world.free();
+		test::@check(world.ok, "read the ball back: %s", world.error);
+		double drawn = world.value.to_double() ?? 999.0;
+
+		test::@check(
+			drawn < 1.0,
+			"the ball was drawn where it was dropped, world y = %s", world.value
+		);
+
+		three::RunResult solver = run.run("return globalThis.ball.position.y;");
+		defer solver.free();
+		double told = solver.value.to_double() ?? -999.0;
+		test::@check(
+			math::abs(drawn - told) < 0.001,
+			"and the graph agrees with the solver: drawn %s against %s", world.value, solver.value
+		);
+	};
+}

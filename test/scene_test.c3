@@ -546,8 +546,11 @@ fn void a_reused_slot_does_not_inherit_a_material() @test
  halves are asserted at once: a hundred nodes in a hundred colours, one bucket,
  and the bytes the GPU will read checked against what was set.
 
- The instance array is read after `stats()` because that is what rebuilds the
- draw list — the same order `a_thousand_instances_are_one_draw_call` relies on.
+ **The instance array is asked for explicitly**, which it did not used to be:
+ `stats()` rebuilt the whole list including the records, and reading them off it
+ afterwards was free. Since `plan.md` §19.5 it rebuilds the buckets and writes no
+ records at all — a query has no reader for 148 bytes a drawable — so this asks
+ for a writing build of its own. `stats()` still answers the draw-call half.
 *>
 fn void a_colour_per_copy_costs_no_draw_call() @test
 {
@@ -569,8 +572,13 @@ fn void a_colour_per_copy_costs_no_draw_call() @test
 		test::@check(stats.draw_calls == 1, "a hundred colours took %d draw calls", stats.draw_calls);
 		test::@check(scene.buckets.len() == 1, "and %d buckets", scene.buckets.len());
 
+		// A writing build, with no frustum, which is what `stats()` used to leave
+		// behind and now deliberately does not.
+		scene.build_draw_list(&renderer.pass.assets, null);
+
 		// The triangle loaded above is instance 0 and is white; the hundred
 		// follow it in add order, which is the order `build_draw_list` walks.
+
 		test::@check(scene.instances.len() == 101, "%d instances were written", scene.instances.len());
 		for (uint i = 0; i < 100; i++)
 		{
@@ -1839,5 +1847,159 @@ fn void a_displacement_is_culled_unless_the_material_says_how_far() @test
 		uint with = count_drawn(&kept, renderer.clear);
 		test::@check(with > 100,
 			"and one that says how far survives to draw where the body put it: %d pixels", with);
+	};
+}
+
+// ============================================================================
+// What a frame stopped paying for — plan.md §19.5
+// ============================================================================
+
+<*
+ The world-matrix walk skips itself when there is nothing to walk.
+
+ **`Node.dirty` never saved the walk, only the arithmetic**, and a frame does
+ this three to five times: once for `Scene.bounds`, once for a follow camera,
+ once inside `Scene.update`, and once more for every bounding box a script asks
+ for. On the reference village that is several thousand recursive calls with a
+ 64-byte matrix copied by value into each one, four times over, to discover that
+ nothing moved.
+
+ Asserted behaviourally rather than by reading the flag: the world matrix is
+ written by hand between two walks, and the second walk has to leave it alone.
+ A walk that ran would overwrite it from the local transform, which is exactly
+ what makes this a check on the skip rather than on a bool.
+
+ The last two lines are the other half and the one that matters more: `touch`
+ has to bring the walk back. Since §19.5 it is what makes a hand-written
+ transform land at all — `Scene.touch` says so at length — and a version of this
+ change that skipped correctly and never came back would pass every check above
+ it in this file.
+*>
+fn void the_world_matrix_walk_skips_itself() @test
+{
+	three::Scene scene;
+	scene.init();
+	defer scene.free();
+
+	three::NodeId node = scene.add_group();
+	scene.set_position(node, { 1, 0, 0 });
+	scene.update_world_matrices();
+	test::@check(scene.node(node).world.m[12] == 1.0f, "the first walk placed it");
+
+	// Nothing has moved, so the second walk has nothing to do — and proving that
+	// means catching it doing something.
+	scene.node(node).world = matrix::IDENTITY4{float};
+	scene.update_world_matrices();
+	test::@check(
+		scene.node(node).world.m[12] == 0.0f,
+		"the repeat walked anyway and rewrote the matrix to %s", scene.node(node).world.m[12]
+	);
+
+	scene.touch(node);
+	scene.update_world_matrices();
+	test::@check(
+		scene.node(node).world.m[12] == 1.0f,
+		"and touch brought the walk back, got %s", scene.node(node).world.m[12]
+	);
+}
+
+<*
+ The cached bounds notice every way a scene can move.
+
+ **The invalidation is the whole of the risk**, which is why `plan.md` §19.5
+ wrote the fix down and did not make it: `Scene.bounds` transforms every vertex
+ of every drawable node, so caching it is worth 100k–370k matrix multiplies a
+ frame, and getting the invalidation wrong is a shadow fitted around the wrong
+ region and a camera framed on the wrong thing — neither of which announces
+ itself.
+
+ So this walks the five doors a scene changes through, and each one has to move
+ the answer: a setter, a hand-written transform followed by `touch`, a node
+ added, a *parent* moved, and a subtree removed. The fourth is the one a naive
+ version gets wrong, because the node that moved is not the node that draws.
+*>
+fn void the_bounds_cache_notices_every_way_a_scene_moves() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = &renderer.pass.scene;
+		three::Assets* assets = &renderer.pass.assets;
+
+		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
+		collision::Aabb3 start = scene.bounds(assets);
+		test::@check(start.max.x < 5.0f, "the triangle starts near the origin: %s", start.max.x);
+
+		scene.set_position(first, { 10, 0, 0 });
+		test::@check(scene.bounds(assets).max.x > 9.0f, "a setter moved the box: %s", scene.bounds(assets).max.x);
+
+		// Written by hand, which is legal and is what `touch` exists for.
+		scene.node(first).position = { 30, 0, 0 };
+		scene.touch(first);
+		test::@check(scene.bounds(assets).max.x > 29.0f, "and touch moved it: %s", scene.bounds(assets).max.x);
+
+		three::NodeId second = scene.add_mesh(TRIANGLE, 0);
+		scene.set_position(second, { 0, 50, 0 });
+		test::@check(scene.bounds(assets).max.y > 49.0f, "a new node grew it: %s", scene.bounds(assets).max.y);
+
+		// The case a version that only asked the node it was handed would miss:
+		// the group is not drawable and has no bounds of its own.
+		three::NodeId yard = scene.add_group();
+		scene.set_parent(second, yard);
+		scene.set_position(yard, { 0, 0, 70 });
+		test::@check(scene.bounds(assets).max.z > 69.0f, "moving a parent moved it: %s", scene.bounds(assets).max.z);
+
+		scene.remove(yard);
+		test::@check(scene.bounds(assets).max.z < 5.0f, "and removing the subtree shrank it: %s", scene.bounds(assets).max.z);
+	};
+}
+
+<*
+ `stats()` counts the buckets and writes no instance records.
+
+ **A query has no reader for 148 bytes a drawable.** `plan.md` §19.5 found this
+ call building the whole instance array — 635 KB on the reference village — to
+ report numbers every one of which comes off the buckets, after every script an
+ agent runs. The array is left empty now, and the numbers are the same numbers.
+
+ Both halves are asserted together on purpose. "It reports the same counts" alone
+ would pass if nothing had changed; "the array is empty" alone would pass if the
+ build had simply stopped working. The frame at the end is the third: a query
+ that left the draw list in a state the next frame could not use would be a much
+ worse trade than the one it saves.
+*>
+fn void stats_counts_without_writing_the_instance_array() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = &renderer.pass.scene;
+
+		for (uint i = 0; i < 100; i++)
+		{
+			three::NodeId made = scene.add_mesh(TRIANGLE, 0);
+			scene.set_position(made, { (float)i * 2.0f, 0, 0 });
+		}
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.draw_calls == 1, "a hundred and one copies took %d draw calls", stats.draw_calls);
+		test::@check(stats.instances == 101, "over %d instances", stats.instances);
+		test::@check(
+			scene.instances.len() == 0,
+			"and wrote %d instance records for a query that reads none", scene.instances.len()
+		);
+
+		// The list the query did not build is the list the next frame builds.
+		// Culling off so the number is about the rebuild rather than about where
+		// the camera happens to point — which is the same reason `stats()` turns
+		// it off, one function over.
+		scene.cull = false;
+		image::Image shot = renderer.capture()!!;
+
+		defer shot.free();
+		test::@check(
+			scene.instances.len() == 101,
+			"the frame after built them, %d of them", scene.instances.len()
+		);
 	};
 }

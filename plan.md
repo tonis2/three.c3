@@ -57,7 +57,7 @@ unload any more.
 does is in its own source file, and `git log -p -- plan.md` has the milestone
 accounts that used to be here.
 
-	c3c test --trust=full       746 passed, 0 failed, leak-clean
+	c3c test --trust=full       756 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -1760,6 +1760,19 @@ That is the wall, it arrives long before shading does, and **no choice of forwar
 or deferred moves it** — it is the cost of rasterising the world once per light
 from that light's point of view.
 
+⚠ **Both constants are pessimistic by two to four times, and the reason is the
+methodology rather than the machine.** Re-run during §19.3 with sixty warm-up
+renders in front of it and the sizes interleaved in one process, the same sweep
+reads 0.243 / 0.239 / 0.256 / 0.336 / 0.582 ms — same shape, a geometry floor and
+a fill quadratic in `size`, at **about 58 ns an instance and 40–50 Gtexel/s**.
+Fifteen renders in a headless process that then exits measures a GPU that never
+left its idle clock. The wall is real and arrives in the same order; it is about
+1.2 ms per casting light at twenty thousand instances rather than 2.4, so it is
+twice as far away as this section assumes. Nothing below changes its conclusion
+on that account — §19.1 rejects the prepass by a ratio, and a ratio between two
+numbers measured in the same run survives the correction.
+
+
 ### 19.1 The depth prepass, measured and rejected
 
 Tested against the same scene, by measuring the two quantities that bound it
@@ -1815,33 +1828,110 @@ cluster's list. Nothing above the shader notices.
 **The trigger is a scene with more than a couple of lights in it**, and today
 there is exactly one plus an ambient float. This is not next.
 
-### 19.3 Cache the static casters
+### 19.3 Cache the static casters — **DONE, and a settled shadowed frame now costs what an unshadowed one costs**
 
-**The largest win available for the kind of game this engine is for, and it is
+**The largest win available for the kind of game this engine is for, and it was
 not close.** In a village the sun does not move and the buildings do not move.
-The shadow pass rasterises 4178 instances every frame to produce a depth image
-identical to the previous frame's.
+The shadow pass was rasterising 4178 instances every frame to produce a depth
+image identical to the previous frame's.
 
-- Render static casters into the map once and keep it. Each frame re-render only
-  what moved.
-- Two maps and one comparison at lookup time is the simple form: a static map
-  that is rebuilt on demand, a small dynamic map for movers, and the shader takes
-  the nearer occluder. One map with the static half blitted back in and the
-  movers drawn over it is cheaper still and needs the static depth preserved,
-  which a copy gives.
-- **What invalidates the static map** is the honest part of the design: the light
-  direction changing, the fit box moving (so this interacts with §18.1 — a fit
-  that tracks the camera invalidates it constantly unless it is snapped and
-  hysteretic), and any static caster being added, removed or transformed. A
-  `Scene` already knows when a node's transform is written; a generation counter
-  on the static set is enough.
-- Nodes have to be able to say which set they are in. `mesh.static = true` is one
-  more per-node bool and **it does not split a draw bucket** — it partitions the
-  shadow list only, which is a list the main pass does not read.
+`object.static = true` is the per-node bool, `render/shadow.c3` holds a second
+depth image of everything wearing it, and `MeshPass.plan_shadow` picks one of
+three shapes per frame: draw everything (nothing is static), draw nothing at all
+(nothing that casts is moving — the cached image *is* the map and the colour pass
+samples it), or copy the cached image into the live one and draw the movers over
+the top.
 
-At the village's numbers this takes the shadow pass's geometry from 0.496 ms to
-roughly nothing, every frame, and leaves only the fill — which is what §18.1
-attacks. The two compose.
+**Measured on `examples/lumbridge.js`, 1280x720, 4178 instances, `shadow.size`
+2048.** Four configurations **interleaved in one process**, five rounds each,
+median of thirty renders per round after sixty warm-up renders — see the warning
+under the table, because the methodology is the finding.
+
+| | gpuMs | shadowMs |
+|---|---|---|
+| shadows off | 0.276 | — |
+| on, nothing cached | 0.521 | 0.334 |
+| on, all static, settled | 0.344 | 0.000 |
+| on, one mover over the cache | 0.288 | 0.078 |
+
+The settled row is the result: **0.344 against 0.276 with shadows switched off
+entirely.** The pass is gone rather than cheaper, and what is left of the
+difference is the nine PCF taps the colour pass now actually runs — with shadows
+off `shadow_factor` returns on its first line. The mover row is the honest
+general case: a full-image copy plus one draw is 0.078 ms where the whole pass
+was 0.334.
+
+At `shadow.size` 4096 the same comparison is 0.766 uncached against 0.341
+settled, which is the shape to expect: the cache removes the fill as well as the
+geometry, and the fill is the half that grows with the map.
+
+⚠ **These are not comparable with the size-sweep table at the top of §19, and the
+reason is worth writing down.** Re-run warm, the whole sweep is two to three
+times cheaper than that table records — 0.336 at 2048 against 1.048, 0.582 at
+4096 against 2.231 — while its *shape* reproduces exactly (a geometry floor of
+about 0.24 and a fill that is quadratic in `size`). The difference is GPU clock
+state: a headless process that renders fifteen frames and exits measures a GPU
+that never left its idle clock. Anything comparing two shadow configurations
+should interleave them in one warmed process, as the table above does; anything
+comparing across sessions should not.
+
+
+Three things the design had to answer, and what each one came out as:
+
+- **It does not split a draw bucket**, which was the condition the whole idea was
+  worth having under. The flag is a tiebreak in `build_draw_list`'s sort rather
+  than part of the bucket key, so each bucket is laid out
+  `[visible dynamic | visible static | hidden static | hidden dynamic]` —
+  `visible` stays the prefix `record` has always drawn and the static run is
+  contiguous. `Bucket.static_first` carries the diagram. The cost is that the
+  *dynamic* casters of a bucket that also holds static ones are two runs and so
+  two draw calls in the movers' pass, which is paid on the small half by
+  construction.
+- **The invalidation is bumped by the world-matrix walk**, not by the setters.
+  That is the correction the design needed: a static wall parented to a dynamic
+  group moves when the group does, and the setter was handed the group.
+  `Scene.update_branch` is the only place that knows a node actually moved, so a
+  static node whose world matrix is recomputed bumps `Scene.static_revision`
+  there; `Scene.invalidate` covers the changes that have no walk to be seen by —
+  adds, removals, re-parenting, a material swap, joining or leaving the set.
+  `moving_a_group_rebuilds_its_static_children` is the injection proof.
+- **§18.1's fit had to be given hysteresis**, exactly as this entry predicted.
+  A stored depth image is only depths in a particular projection, so a fit that
+  recentres every frame is a cache thrown away every frame. `ShadowMap.fit` now
+  takes `stable`: it fits a square `SHADOW_FIT_SLACK` (15%) larger than the focus
+  needs and **keeps it for as long as the focus stays inside it**. That costs 13%
+  of the texel density §18.1 won and is charged only to scenes that marked
+  something static — a scene with nothing to cache is fitted exactly as before.
+  On lumbridge the two frames differ in 2.45% of their bytes by a mean of 2.9/255
+  with nothing over 32, which is a shadow edge moving by a texel.
+
+**Refused on anything with a skin.** A character's silhouette is `Node.pose`, an
+offset into a palette that an animation rewrites without touching a transform, so
+"it does not move" cannot be made true of one. `Scene.set_static_caster` returns
+whether it took, and the JS property reads the answer back rather than assuming.
+
+**One measurement that came out backwards, left here rather than acted on.**
+`SHADOW_PLAN_STATIC` exists because a frame in which nothing casting moves should
+not need to copy an image to sample a copy of it — so it samples the cached image
+directly and records no pass at all. It is measurably the *slower* of the two:
+forcing that frame through the copy path as well gives 0.289 against 0.344 at
+`size` 2048 and 0.324 against 0.341 at 4096, repeatably and with a tight spread.
+The copy is nearly free on this hardware (0.078 ms at 2048, 0.094 at 4096 — it
+barely scales, so it is not bandwidth-bound), and sampling an image that has only
+ever been written by a render pass appears to cost the fragment shader something
+that sampling one written by a blit does not; lossless depth compression is the
+obvious suspect and is not proven here.
+
+It was not acted on because the gap is 0.02–0.06 ms, the direction may well be
+this machine's rather than the design's, and "nothing moved, so nothing is
+recorded" is the cheaper answer on any device where a full-image copy is not
+free. **The trigger to revisit is a device where the copy shows up** — the
+experiment is two lines in `MeshPass.plan_shadow` and the numbers above are what
+to beat.
+
+What is left is the fill, which is what §18.1 attacks and §19.4 would finish.
+
+
 
 ### 19.4 A shadow atlas, and a casting budget
 
@@ -1870,8 +1960,8 @@ attachments, N pipelines, N fits, and every one of them sized by a guess.
 
 `gpuMs` and the five phase spans are GPU timestamps. Everything below is CPU
 cost inside `Scene`/`MeshPass` that no counter in the project reports, found by
-a review pass over the renderer after §18 landed. One of them is fixed; the rest
-are written down here because they are all larger than anything §19.3 saves.
+a review pass over the renderer after §18 landed. Four of the five are fixed; the
+one that is left is written down here because nothing about it has changed.
 
 - **Fixed: the draw-list sort was quadratic.** `std::sort::quicksort` pivots on
   `list[l]` with no median-of-three and no three-way partition, so a run the
@@ -1882,45 +1972,56 @@ are written down here because they are all larger than anything §19.3 saves.
   against mergesort's 24.9k and 0.196 ms, same answer element for element.
   `Scene.build_draw_list` and the edge dedup in `lines.c3` now both use
   `mergesort`, which is O(n log n) worst case and stable.
-- **`Scene.bounds` is exact and uncached.** It transforms *every vertex* of every
-  drawable node — 100k–370k vertex transforms on the village. Called once per
-  frame from `prepare` whenever shadows are on, and a second time per frame
-  whenever a follow camera is attached, because `follow_camera` calls
+- **Fixed: `Scene.bounds` was exact and uncached.** It transforms *every vertex*
+  of every drawable node — 100k–370k vertex transforms on the village — and was
+  called once per frame from `prepare` whenever shadows are on, and a second time
+  per frame whenever a follow camera is attached, because `follow_camera` calls
   `derive_camera_planes` every tick. The value only changes when the scene does.
-  A box cached on `Scene` behind a dirty flag set by the transform setters and by
-  `create_slot`/`kill` is the fix; the reason it has not been done here is that
-  the invalidation is the whole of the risk, and a stale bounding box is a
-  silently wrong shadow fit rather than a crash. The cheaper half-fix: the shadow
-  fit does not need exactness and could take the conservative per-node box the
-  cull already computes.
-- **`update_world_matrices` runs three to five times per frame** — once per
+  `Scene.bounds_box` is now the answer and `Scene.bounds_current` is whether it is
+  still good. The invalidation was the whole of the risk and it is one function:
+  `Scene.invalidate`, called by every setter, by `create_slot`/`kill`, by
+  `set_parent`, and by the three writers outside `scene.c3` that reach for
+  `Node.dirty` directly — `AnimationPlayer.apply`, `Physics.write_back` and
+  `setTransform` at the JS boundary, all of which now call `Scene.mark_moved`
+  instead. `the_bounds_cache_notices_every_way_a_scene_moves` walks all five
+  doors, including the one a naive version misses: a *parent* moving.
+- **Fixed: `update_world_matrices` ran three to five times per frame** — once per
   `Scene.bounds`, once from `follow_camera`, once from `Scene.update`. The dirty
-  flag saves the matrix arithmetic on the repeats but not the traversal, the
+  flag saved the matrix arithmetic on the repeats but not the traversal, the
   per-node validation, or the 64-byte by-value `parent_world` copy per recursion.
-  A `matrices_current` flag cleared by the same setters would make the repeats
-  free.
+  `Scene.matrices_current` makes the repeats free, cleared by the same
+  `invalidate`. The cost of that is worth stating: `Scene.touch` is no longer
+  optional after a hand-written `node.position = ...`, because the walk that used
+  to notice on its way past may not run at all.
 - **The instance array is written twice.** `build_draw_list` fills a
   `List{Instance}` (~635 KB on the village) that only `write_instances` reads,
   which then `mem::copy`s the whole of it into the mapped buffer. The count is
   known before the coalescing loop, so the loop could write straight into the
   slot's buffer the way `write_live_poses` and `build_draw_records` already do.
-- **`Scene.stats()` rebuilds the entire draw list**, instance records included,
-  to report counts — with culling off, which is exactly the all-equal shape that
-  made the sort quadratic. It is called after every script run, so an agent
-  polling `stats()` pays for a full frame's draw-list build each time. A
-  count-only mode would make it nearly free.
+- **Fixed: `Scene.stats()` rebuilt the entire draw list**, instance records
+  included, to report counts — none of which has ever been read off an `Instance`.
+  It is called after every script run, so an agent polling `stats()` paid for
+  635 KB of records nothing would look at. `build_draw_list` takes `counts_only`
+  now and `stats()` is its only caller; the buckets are still built, because the
+  sort that produces them is what `drawCalls` *is*. `stats_counts_without_writing_the_instance_array`
+  asserts both halves and that the next frame still builds the list.
+
 
 ### Order
 
-1. **§18.1 and §18.2**, as already planned — they are the cheapest and they are
-   prerequisites: caching wants a stable fit, the atlas wants a fit that is
+1. **§18.1 and §18.2** — done. They were the cheapest and they were
+   prerequisites: caching wanted a stable fit, the atlas wants a fit that is
    already parameterised by something other than "the whole scene".
-2. **§19.3, static caching.** Largest measured win for the target, and it is
-   arithmetic on a list rather than a new pipeline.
-3. **§19.4, the atlas and the budget.** Do it when the second casting light
-   arrives, not before.
-4. **§19.2, Forward+.** Do it when the fifth light arrives. The shading side is
+2. **§19.3, static caching** — done, and it took the fit's stability with it.
+   A settled shadowed frame now costs what an unshadowed one costs.
+3. **§19.5's remaining item, the instance array written twice.** The only one of
+   the five left, and the cheapest thing on this list.
+4. **§19.4, the atlas and the budget.** Do it when the second casting light
+   arrives, not before. What is left of the shadow pass after §19.3 is the fill,
+   which is the atlas's subject.
+5. **§19.2, Forward+.** Do it when the fifth light arrives. The shading side is
    not what is hurting.
+
 
 **Not doing:** the depth prepass (19.1, measured), and deferred shading (19.2,
 the material contract). Both are written down here so that the next person to
