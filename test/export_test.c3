@@ -537,6 +537,101 @@ fn void a_colour_per_copy_rides_the_instance_buffer() @test
 }
 
 <*
+ **Two materials over one mesh are two nodes, and it took `plan.md` §1 to say so.**
+
+ `ExportBatch` used to key on `(asset, mesh)` alone, on the argument that a
+ material follows from the mesh. It does not: a node names a material of its own,
+ and `surface_for` reads that node for the blend mode, the cull mode, the UV
+ transform, the layer stack and the map. Siblings that disagreed about any of
+ them were gathered into one instanced node written with `members[0]`'s material,
+ and the rest inherited it.
+
+ This is that scene, at its smallest honest size. Four brick walls and two glass
+ windows, every one of them a `PlaneGeometry(2, 2)` — so the *only* thing that can
+ keep them apart in the file is the material, which is exactly the claim.
+
+ Every number here moves under the defect, which is what makes it a test rather
+ than a demonstration. Under the old key: one batch, one `mesh` entry, one
+ material, and — because a wall was added first — an export with no `BLEND` in it
+ at all and two windows the colour of brick. The reload half is the one that
+ matters to a person: the file came back as **one** draw call, which reads like
+ the exporter doing well.
+
+ The geometry count is the other half of the argument and is asserted for it.
+ Splitting the batch does not duplicate a vertex: `meshes` stays 1, because
+ geometry is deduplicated on `(asset, mesh)` regardless of material, so the two
+ instanced nodes share one set of accessors. The split costs a node, and buys
+ back the two draws that were always there.
+
+ **Proved by injection.** `known.material == material` dropped from `batch_of`'s
+ compare, which is the old key exactly:
+ `{"wrote":[1,1,1,1],"drawCalls":[2,1],"instances":[6,6],"modes":["OPAQUE"]}` —
+ one material, one draw call back, and the glass gone.
+*>
+fn void siblings_that_share_a_mesh_but_not_a_material_stay_apart() @test
+{
+	String path = "build/export_walls.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			// One geometry, deliberately: with the shapes equal the material is the
+			// only thing left that can split these two runs.
+			const pane = new three.PlaneGeometry(2, 2);
+			const brick = new three.MeshLambertMaterial({ color: 0x996633 });
+			const glass = new three.MeshLambertMaterial({ color: 0x99ccff, transparent: true, opacity: 0.4 });
+
+			// Interleaved, so neither run is a contiguous block of children. The
+			// batching walks the child list in order and a test where the walls
+			// happen to come first would pass on a weaker rule than the one meant.
+			for (let n = 0; n < 6; n++) {
+				const m = new three.Mesh(pane, n % 3 === 2 ? glass : brick);
+				m.position.set(n, 0, 0);
+				scene.add(m);
+			}
+
+			const before = three.stats();
+			const report = scene.export("build/export_walls.glb");
+
+			new three.Scene();
+			const asset = three.load("build/export_walls.glb");
+			const reloaded = new three.Scene();
+			reloaded.add(asset.instantiate());
+			const after = three.stats();
+
+			// By value rather than by index: which mesh entry each material landed
+			// in is the exporter's business, and sorting makes the claim "one of
+			// each" rather than "this one first".
+			const modes = [];
+			asset.meshes.forEach((_, i) => modes.push(asset.meshAt(i).material.alphaMode));
+			modes.sort();
+
+			return {
+				wrote: [report.meshes, report.entries, report.materials, report.batches],
+				drawCalls: [before.drawCalls, after.drawCalls],
+				instances: [before.instances, after.instances],
+				modes: modes,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"wrote":[1,2,2,2],"drawCalls":[2,2],"instances":[6,6],"modes":["BLEND","OPAQUE"]}`,
+			"one geometry, two materials, two batches, two draw calls either side, and the glass still glass; got %s",
+			result.value
+		);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"alphaMode":"BLEND"`),
+			"the window run says so in the format's own words: %s", json);
+	};
+}
+
+<*
  Every copy comes back where it was, turned and scaled as it was.
 
  The colour is the interesting attribute and the transforms are the ones that
@@ -1477,10 +1572,12 @@ fn void the_alpha_mode_survives_the_round_trip() @test
 			pane.name = "pane";
 			scene.add(pane);
 
-			// A different shape, deliberately: the exporter batches sibling nodes
-			// that share a geometry into one instanced node wearing the first
-			// member's material, which is plan.md section 1's ExportBatch defect
-			// and would collapse all three of these into the pane.
+			// A different shape, deliberately, and now for one reason rather than
+			// two. The lookup below finds these by width, so the widths have to
+			// differ. The second reason is gone: the exporter used to batch
+			// siblings sharing a geometry into one node wearing the first
+			// member's material, which would have collapsed all three of these
+			// into the pane — see siblings_that_share_a_mesh_but_not_a_material.
 			const wall = new three.Mesh(
 				new three.PlaneGeometry(3, 3),
 				new three.MeshLambertMaterial({ color: 0x996633 })
