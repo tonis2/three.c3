@@ -111,6 +111,30 @@ struct MoveOptions
 const int MOVE_DEFAULT_SLIDES = 4;
 
 <*
+ How many floats `Scene.move_capsules` writes per agent, and what is in them.
+
+ A flat block rather than an array of `MoveResult` because it crosses to
+ JavaScript as a `Float32Array`, and the whole reason the crowd form exists is
+ that the single form spends three fifths of its time building an object. Eight
+ rather than the seven it needs so the stride is a shift rather than a multiply,
+ which matters on the JavaScript side where the indexing is interpreted.
+
+	0..2  remaining   what was left of the motion when the slides ran out
+	3..5  normal      the last contact's outward normal
+	6     slope       degrees from level of whatever is being stood on
+	7     flags       MOVE_GROUNDED | MOVE_STEPPED | MOVE_TOUCHED, added
+
+ The flags are floats because everything else in the block is, and a bit field
+ that small is exact in a float32 — the alternative is a second buffer of a
+ different type for three bits.
+*>
+const sz MOVE_RESULT_STRIDE = 8;
+
+const float MOVE_GROUNDED = 1.0f;
+const float MOVE_STEPPED = 2.0f;
+const float MOVE_TOUCHED = 4.0f;
+
+<*
  Sensible numbers for a person, so a caller who supplied none gets a character
  rather than a division by zero.
 *>
@@ -447,4 +471,109 @@ fn bool Scene.try_step_up(
 
 	*out = landed;
 	return true;
+}
+
+<*
+ The crowd form: one call, however many characters — `notes.md` §17.
+
+ ## Why this exists, and it is not the crossing
+
+ `notes.md` §17's "gameplay boundary at crowd scale" measured one
+ `three.moveAndSlide` at 7.53 us per agent and took it apart: 3.10 us is the
+ sweep, 1.05 us is the crossing and the raw host answer, and **3.63 us — three
+ fifths — is the JavaScript result object**, three live `Vector3`s and two lazy
+ node properties built for a caller who reads four numbers out of them. At two
+ hundred agents that is 1.5 ms of a fixed step, 0.9 ms of which buys an object.
+
+ So this is the rule §17 wrote down, applied where it finally bites: a verb
+ called once per agent per frame answers into memory the caller already owns.
+ The saving is not the crossing — one crossing against two hundred is 380 ns
+ against 76 us and would have been worth having on its own, but it is the
+ smaller half.
+
+ **And the index is built once.** A JavaScript loop calling the single form
+ writes each character's node between sweeps, so every sweep after the first
+ re-files an entry (`scene/query.c3`, `refile_moved`). This writes no node at
+ all, so the index the first agent builds is the index the two hundredth uses.
+
+ ## Everyone moves at once, and that is a decision
+
+ Every agent is swept against the world **as it was when the call started**.
+ Nothing is written to a node, so agent 3 does not see agent 2's new position —
+ they resolve simultaneously rather than in array order.
+
+ The alternative, resolving in sequence, makes the answer depend on the order
+ the caller happened to store its agents in: two characters walking into the
+ same gap would have the earlier index win, and re-sorting the array for an
+ unrelated reason would change who gets through. `steer_agents` already assumes
+ simultaneity for its separation term, and a crowd whose steering and whose
+ collision disagree about what "now" means is worse than either.
+
+ The cost of it is that two agents *can* end the step overlapping, because
+ neither saw the other move. Separation in `three.steer` is what keeps that
+ rare, and a frame of overlap resolves on the next step's depenetration.
+
+ ## What it does not answer
+
+ **No node handles.** `MoveResult` carries `ground` and `hit`; a flat float
+ array cannot, and adding a parallel `Int32Array` for them would be two more
+ buffers for a question a crowd does not ask — "what am I standing on" is a
+ moving-platform question and belongs to the one character riding the platform.
+ That character calls the single form, which still exists and still answers it.
+
+ @param positions : `Three floats per agent, the capsule CENTRE. Read and written in place — this is the caller's position column and it is updated where it lies.`
+ @param motions : `Three floats per agent, the whole step's motion. Read only.`
+ @param results : `MOVE_RESULT_STRIDE floats per agent, written. May be empty for a caller that only wants the positions.`
+ @param selves : `Two ints per agent — that agent's own node and generation, whose whole SUBTREE it does not collide with. May be empty. -1 in the index slot is "this one has no node".`
+ @return `How many agents were stepped, which is the shortest of the buffers given.`
+*>
+fn uint Scene.move_capsules(
+	&self, Assets* assets,
+	float[] positions, float[] motions, float[] results,
+	MoveOptions options, IgnoreSet skip, int[] selves)
+{
+	sz count = positions.len / 3;
+	if (motions.len / 3 < count) count = motions.len / 3;
+	if (results.len > 0 && results.len / MOVE_RESULT_STRIDE < count) count = results.len / MOVE_RESULT_STRIDE;
+	if (count == 0 || !(options.radius > 0.0f)) return 0;
+
+	for (sz i = 0; i < count; i++)
+	{
+		// The shared set plus this agent's own subtree. Copied per agent rather
+		// than mutated in place because `skip` is the caller's and the next
+		// agent needs it back the way it came.
+		IgnoreSet mine = skip;
+		if (selves.len >= (i + 1) * 2 && selves[i * 2] >= 0 && mine.count < MAX_IGNORED)
+		{
+			NodeId own = { .index = (uint)selves[i * 2], .generation = (uint)selves[i * 2 + 1] };
+			// Dropped rather than raised on, as `ignore_set` drops a stale
+			// handle: the caller's intent — do not collide with that — is
+			// satisfied by a node that is not there any more.
+			if (self.node(own) != null) mine.nodes[mine.count++] = own;
+		}
+
+		sz at = i * 3;
+		Vec3 centre = { positions[at], positions[at + 1], positions[at + 2] };
+		Vec3 motion = { motions[at], motions[at + 1], motions[at + 2] };
+		MoveResult result = self.move_capsule(assets, centre, motion, options, mine);
+
+		positions[at] = result.position.x;
+		positions[at + 1] = result.position.y;
+		positions[at + 2] = result.position.z;
+
+		if (results.len == 0) continue;
+		sz to = i * MOVE_RESULT_STRIDE;
+		results[to] = result.remaining.x;
+		results[to + 1] = result.remaining.y;
+		results[to + 2] = result.remaining.z;
+		results[to + 3] = result.normal.x;
+		results[to + 4] = result.normal.y;
+		results[to + 5] = result.normal.z;
+		results[to + 6] = result.slope;
+		results[to + 7] =
+			(result.grounded ? MOVE_GROUNDED : 0.0f)
+			+ (result.stepped ? MOVE_STEPPED : 0.0f)
+			+ (result.hit.is_set() ? MOVE_TOUCHED : 0.0f);
+	}
+	return (uint)count;
 }

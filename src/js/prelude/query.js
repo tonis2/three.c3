@@ -321,6 +321,159 @@ export function moveAndSlide(position, motion, options = null) {
 	return result;
 }
 
+// Where each agent's answer sits inside the `results` array of
+// `three.moveAndSlideAll`, and what the flags in it mean.
+//
+// A flat block rather than an object per agent, because an object per agent is
+// exactly the 3.63 us the bulk form exists to not spend — see below. Eight
+// floats so the stride is a shift.
+export const moveResult = {
+	stride: 8,
+	// Offsets inside one agent's block.
+	remaining: 0,
+	normal: 3,
+	slope: 6,
+	flags: 7,
+	// Bits inside the flags float. `(results[i * 8 + 7] | 0) & moveResult.GROUNDED`.
+	GROUNDED: 1,
+	STEPPED: 2,
+	TOUCHED: 4,
+};
+
+// A results array for `n` agents. Make it once, outside the loop — the whole
+// point of the verb is that it allocates nothing per frame.
+export function moveBuffer(count) {
+	return new Float32Array(Math.max(1, Math.floor(+count)) * moveResult.stride);
+}
+
+// The scratch the convenient form of `self` fills. Grown, never shrunk: a crowd
+// changes size rarely and a per-call allocation here would be the thing this
+// verb exists to avoid.
+let selfScratch = new Int32Array(0);
+function selfColumn(value, agents, where) {
+	if (value === null || value === undefined) return { view: null, count: 0 };
+	if (value instanceof Int32Array) return { view: value, count: value.length >> 1 };
+	if (!Array.isArray(value)) {
+		throw new TypeError(`${where}: self is an Int32Array of handle pairs — three.batch(objects).handles is one — or an array of objects`);
+	}
+	if (selfScratch.length < agents * 2) selfScratch = new Int32Array(agents * 2);
+	for (let i = 0; i < agents; i++) {
+		const object = value[i];
+		if (object === null || object === undefined) { selfScratch[i * 2] = -1; continue; }
+		const [index, generation] = liveObject(object, where);
+		selfScratch[i * 2] = index;
+		selfScratch[i * 2 + 1] = generation;
+	}
+	return { view: selfScratch, count: agents };
+}
+
+// Move a whole crowd of capsules, sliding along what each one hits — one call,
+// however many characters.
+//
+// **This is the same controller as `three.moveAndSlide` and it exists for one
+// reason: the shape of the answer.** `notes.md` §17 measured the single form at
+// 7.53 us per agent and took it apart — 3.10 us is the sweep, 1.05 us is the
+// crossing and the raw host answer, and 3.63 us, three fifths of it, is the
+// JavaScript result object: three live `Vector3`s and two lazy node properties,
+// built for a caller who reads four numbers out of them. At two hundred agents
+// that is 1.5 ms of a fixed step, 0.9 ms of which buys an object. This writes
+// into arrays the caller already owns and builds nothing.
+//
+//     const pos = new Float32Array(n * 3);      // where they are — updated IN PLACE
+//     const motion = new Float32Array(n * 3);   // where they want to go this step
+//     const out = three.moveBuffer(n);          // made once
+//
+//     three.setFixedLoop(dt => {
+//         three.steer(pos, motion, { field, maxSpeed: 4 });
+//         for (let i = 0; i < n * 3; i++) motion[i] *= dt;
+//         three.moveAndSlideAll(pos, motion, { radius: 0.4, height: 1.2, results: out, self: crowd.handles });
+//         crowd.flush();                        // one more crossing, and they are drawn
+//     });
+//
+// `positions` is the capsule CENTRE, three floats per agent, and it is READ AND
+// WRITTEN — it is the caller's position column, updated where it lies, so there
+// is nothing to copy back. `motions` is the whole step's motion and is read.
+//
+// Options are `{ radius, height, step, slope, skin, snap, ignore, self,
+// results }` — the same six numbers `three.moveAndSlide` takes, one set for the
+// whole crowd, because a crowd is one agent size. Two sizes is two calls over
+// two columns, which is also how they would have to be stored.
+//
+// **`self` is how an agent stops colliding with its own mesh**, and it is a
+// column rather than a single object: two ints per agent, that agent's node and
+// generation, whose whole SUBTREE it passes through. `three.batch(objects).handles`
+// is already exactly that array, which is the intended way to get one; an array
+// of objects also works and is filled into a scratch. `ignore` is still the
+// shared set — the lift everybody rides — and with a `self` column it takes at
+// most seven, because the eighth slot is the agent itself.
+//
+// **`results` is optional and is 8 floats per agent** — see `three.moveResult`
+// for the layout. Leave it out and only the positions are written, which is
+// what a crowd that just walks wants.
+//
+// **Everyone moves at once.** Every agent is swept against the world as it was
+// when the call started: nothing is written to a node, so agent 3 does not see
+// agent 2's new position. Resolving in sequence instead would make the answer
+// depend on the order the caller happened to store its agents in, and
+// `three.steer`'s separation already assumes simultaneity. Two agents can
+// therefore end a step overlapping; separation is what keeps that rare, and the
+// next step's depenetration is what resolves it.
+//
+// **It answers with no node handles.** `three.moveAndSlide` reports `ground`
+// and `hit`; a flat float array cannot, and "what am I standing on" is a
+// moving-platform question that belongs to the one character riding the
+// platform. That character calls the single form, which still exists.
+export function moveAndSlideAll(positions, motions, options = null) {
+	const where = 'three.moveAndSlideAll(positions, motions, options)';
+	if (!(positions instanceof Float32Array) || !(motions instanceof Float32Array)) {
+		throw new TypeError(`${where} wants two Float32Arrays, three floats per agent`);
+	}
+	const agents = Math.min(positions.length, motions.length) / 3 | 0;
+	if (agents === 0) return 0;
+
+	const radius = +(options?.radius ?? MOVE_DEFAULTS.radius);
+	const height = +(options?.height ?? MOVE_DEFAULTS.height);
+	if (!(Number.isFinite(radius) && radius > 0)) {
+		throw new RangeError(`${where} wants a positive radius, not ${options?.radius}`);
+	}
+	const half = Math.max((height - 2 * radius) * 0.5, 0);
+
+	const results = options?.results ?? null;
+	if (results !== null && !(results instanceof Float32Array)) {
+		throw new TypeError(`${where}: results is a Float32Array of ${moveResult.stride} floats per agent — three.moveBuffer(n) makes one`);
+	}
+	if (results !== null && results.length < agents * moveResult.stride) {
+		throw new RangeError(`${where}: results holds ${results.length} floats, which is ${moveResult.stride * agents} short of ${agents} agents — three.moveBuffer(${agents})`);
+	}
+
+	const own = selfColumn(options?.self, agents, `${where}: self`);
+	// One ignore slot per agent is spent on the agent itself, so the shared set
+	// may only fill the other seven. Refused rather than silently dropping the
+	// eighth: a sweep quietly colliding with something it was told to pass
+	// through is a bug that reads as the controller misbehaving.
+	const shared = options?.ignore ?? null;
+	if (own.count > 0 && Array.isArray(shared) && shared.length > MAX_IGNORED - 1) {
+		throw new RangeError(`${where}: with a self column, ignore takes at most ${MAX_IGNORED - 1} objects — the last of the ${MAX_IGNORED} slots is the agent itself`);
+	}
+	const ignored = fillIgnore(shared, `${where}: ignore`);
+
+	return H.moveAndSlideAll(
+		positions.buffer, positions.byteOffset, positions.length,
+		motions.buffer, motions.byteOffset, motions.length,
+		results === null ? positions.buffer : results.buffer,
+		results === null ? 0 : results.byteOffset,
+		results === null ? 0 : agents * moveResult.stride,
+		own.view === null ? selfScratch.buffer : own.view.buffer,
+		own.view === null ? 0 : own.view.byteOffset,
+		own.count * 2,
+		radius, half,
+		+(options?.step ?? MOVE_DEFAULTS.step),
+		+(options?.slope ?? MOVE_DEFAULTS.slope),
+		+(options?.skin ?? MOVE_DEFAULTS.skin),
+		+(options?.snap ?? MOVE_DEFAULTS.snap),
+		ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2);
+}
+
 // -----------------------------------------------------------------------
 // Batched transforms — notes.md §17
 
@@ -344,21 +497,69 @@ export function moveAndSlide(position, motion, options = null) {
 //     });
 //
 // `positions` is a Float32Array of three floats per object, seeded from where
-// the objects are now. With `{ trs: true }` the array is ten floats per object
-// — position, an xyzw QUATERNION, then scale — because a batch is written by
-// arithmetic and the arithmetic that produced a rotation produced a quaternion.
+// the objects are now.
+//
+// **Two rotation forms, and they are not redundant.** `{ trs: true }` is ten
+// floats — position, an xyzw QUATERNION, then scale — and is for a batch
+// written by ARITHMETIC, where whatever produced the rotation (a look-at, a
+// slerp, a physics read-back) produced a quaternion and converting it to Euler
+// angles to send it would be lossy at every gimbal-locked pose. `{ euler: true }`
+// is nine floats — position, an xyz EULER triple, then scale — and is for a
+// batch written by a GAME, where the rotation is a heading and a limb swing:
+// one angle each, typed by a person.
+//
+// The Euler form is what makes a crowd of characters one crossing instead of
+// four. `notes.md` §17 measured a critter writing a group position, a group
+// heading and two leg angles at four crossings a frame, about 380 ns apiece —
+// and the reason it was four rather than one was that the batch could not
+// express the three angles it wanted to write.
+//
+// **The two seed differently, and that follows from the same argument.** A TRS
+// batch is seeded with an identity rotation and a unit scale, because reading
+// the objects' own Euler angles and converting them would silently rewrite
+// rotations the script had set by hand — a caller using that form is writing
+// all ten numbers. An Euler batch IS the script's own numbers, so it is seeded
+// from `object.rotation` and `object.scale` and a batch made and immediately
+// flushed changes nothing.
 //
 // A member that leaves the scene is skipped on flush rather than throwing: a
 // crowd where one agent was removed this frame is ordinary, and abandoning the
 // other nine hundred halfway through would be worse. `flush()` answers with how
 // many actually landed.
+//
+// ## `flush()` writes the NODE, and the object stops agreeing with it
+//
+// **This is the one thing about a batch that will bite.** `object.position` and
+// `object.rotation` are JavaScript numbers this file's header explains — the
+// host is never the authority on them — and a batch goes straight to the node.
+// So after a flush the object's own numbers are whatever they were before, and
+// two things follow:
+//
+// - Reading `object.position.x` back gives the stale value. `boundingBox()`,
+//   `align()` and the follow camera all read the host and are fine.
+// - **Writing any single component afterwards undoes the batch.**
+//   `object.position.y = 5` sends all nine numbers from the object, so the
+//   rotation and scale the batch wrote are overwritten with the object's old
+//   ones. It renders as a crowd snapping back to a pose it had frames ago.
+//
+// `sync()` is the fix and it is opt-in: it copies the array back onto the
+// objects, in JavaScript, with no crossing. Call it when a script is going to
+// read or write those objects by hand again — and not every frame merely
+// because it is available, because the whole reason to reach for a batch is
+// that nothing per-object is being paid for.
 export class TransformBatch {
 	constructor(objects, options = null) {
 		const where = 'three.batch(objects, { trs })';
 		if (!Array.isArray(objects)) throw new TypeError(`${where} wants an array of scene objects`);
 
 		this.trs = !!options?.trs;
-		this.stride = this.trs ? 10 : 3;
+		this.euler = !!options?.euler;
+		if (this.trs && this.euler) {
+			throw new RangeError(`${where}: trs and euler are two spellings of the rotation, not two things to have — pick one`);
+		}
+		// The host's BATCH_POSITION / BATCH_TRS / BATCH_EULER.
+		this.mode = this.euler ? 2 : (this.trs ? 1 : 0);
+		this.stride = this.euler ? 9 : (this.trs ? 10 : 3);
 		this.objects = objects.slice();
 		this.handles = new Int32Array(objects.length * 2);
 		this.data = new Float32Array(objects.length * this.stride);
@@ -385,21 +586,78 @@ export class TransformBatch {
 				this.data[at + 7] = 1;
 				this.data[at + 8] = 1;
 				this.data[at + 9] = 1;
+			} else if (this.euler) {
+				// The object's own numbers, in the object's own units — see the
+				// header for why this one is seeded and the TRS one is not.
+				this.data[at + 3] = object.rotation.x;
+				this.data[at + 4] = object.rotation.y;
+				this.data[at + 5] = object.rotation.z;
+				this.data[at + 6] = object.scale.x;
+				this.data[at + 7] = object.scale.y;
+				this.data[at + 8] = object.scale.z;
 			}
 		});
 	}
 
 	// The transform array, named for what is in it. `positions` reads better at
-	// the call site than `data` and is the same memory.
+	// the call site than `data` and is the same memory — in the TRS and Euler
+	// forms the rotation and the scale are in the same array, `stride` apart.
 	get positions() { return this.data; }
 
+	// Where agent `i`'s rotation starts in `data`, or -1 in the position-only
+	// form. Written as a method rather than left to the caller to work out
+	// because `i * this.stride + 3` is the kind of arithmetic that is wrong
+	// once and then wrong everywhere.
+	rotationAt(i) { return this.mode === 0 ? -1 : i * this.stride + 3; }
+
+	// Where agent `i`'s scale starts. -1 in the position-only form.
+	scaleAt(i) { return this.mode === 0 ? -1 : i * this.stride + (this.euler ? 6 : 7); }
+
 	get length() { return this.objects.length; }
+
+	// Copy the array back onto the objects, so `object.position` and
+	// `object.rotation` agree with what was flushed. See the header for the
+	// trap this exists for. No crossing — this is JavaScript writing
+	// JavaScript, and it deliberately does not touch `_flush`.
+	//
+	// Answers with how many objects were written, which is every live one.
+	sync() {
+		let written = 0;
+		for (let i = 0; i < this.objects.length; i++) {
+			const object = this.objects[i];
+			if (object === null || object === undefined) continue;
+			const at = i * this.stride;
+			object.position._x = this.data[at];
+			object.position._y = this.data[at + 1];
+			object.position._z = this.data[at + 2];
+			if (this.euler) {
+				object.rotation._x = this.data[at + 3];
+				object.rotation._y = this.data[at + 4];
+				object.rotation._z = this.data[at + 5];
+				// The Euler triple IS what was sent, so the exact quaternion an
+				// `instantiate()` left on the object is no longer what the node
+				// holds — dropping it here is what stops the next ordinary
+				// write from sending a rotation the batch has already replaced.
+				object._q = null;
+				object.scale._x = this.data[at + 6];
+				object.scale._y = this.data[at + 7];
+				object.scale._z = this.data[at + 8];
+			}
+			// The TRS form is deliberately not copied back: its rotation is a
+			// quaternion and `object.rotation` is an Euler triple, so writing
+			// one from the other is the lossy conversion that form exists to
+			// avoid. A caller using it is writing all ten numbers and reading
+			// none of them off the object.
+			written++;
+		}
+		return written;
+	}
 
 	flush() {
 		return H.setTransforms(
 			this.handles.buffer, this.handles.byteOffset, this.handles.length,
 			this.data.buffer, this.data.byteOffset, this.data.length,
-			this.trs ? 1 : 0);
+			this.mode);
 	}
 }
 

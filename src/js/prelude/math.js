@@ -56,6 +56,60 @@ export class Vector3 {
 	clone() { return new Vector3(null, this._x, this._y, this._z); }
 	toArray() { return [this._x, this._y, this._z]; }
 
+	// **Every method below MUTATES and answers with `this`**, which is
+	// Three.js's convention and the one thing about it worth saying out loud
+	// here: `a.cross(b)` does not mean "the cross product of a and b", it
+	// means "a becomes the cross product". On a live vector — anything that
+	// came off `mesh.position` — that is a write to the object, so
+	// `direction.copy(mesh.position).sub(target).normalize()` moves the mesh
+	// and `mesh.position.clone().sub(target).normalize()` is what was meant.
+	// `dot`, `length*`, `distanceTo*`, `angleTo` and `equals` are the ones
+	// that only read.
+
+	setScalar(s) { return this.set(s, s, s); }
+	negate() { return this.set(-this._x, -this._y, -this._z); }
+	divideScalar(s) { return this.multiplyScalar(1 / s); }
+	addScaledVector(v, s) { return this.set(this._x + v.x * s, this._y + v.y * s, this._z + v.z * s); }
+	lerp(v, t) { return this.set(this._x + (v.x - this._x) * t, this._y + (v.y - this._y) * t, this._z + (v.z - this._z) * t); }
+	cross(v) {
+		return this.set(
+			this._y * v.z - this._z * v.y,
+			this._z * v.x - this._x * v.z,
+			this._x * v.y - this._y * v.x);
+	}
+
+	// Unit length, and a zero vector STAYS ZERO rather than becoming three
+	// NaNs. Three.js divides regardless and hands back NaNs, which is the
+	// worse answer here for the reason `CatmullRomCurve3.getTangent` gives:
+	// a direction is almost always fed straight to something that aims,
+	// and a NaN aim renders as the object vanishing rather than as an error.
+	normalize() {
+		const l = this.length();
+		return l < 1e-9 ? this : this.divideScalar(l);
+	}
+
+	dot(v) { return this._x * v.x + this._y * v.y + this._z * v.z; }
+	lengthSq() { return this._x * this._x + this._y * this._y + this._z * this._z; }
+
+	// **The one to reach for in a loop.** `a.distanceTo(b) < r` is a square
+	// root per pair to answer a question that never needed one; compare this
+	// against `r * r` instead. In a crowd that is n^2 square roots a frame.
+	distanceToSquared(v) {
+		const dx = this._x - v.x, dy = this._y - v.y, dz = this._z - v.z;
+		return dx * dx + dy * dy + dz * dz;
+	}
+	distanceTo(v) { return Math.sqrt(this.distanceToSquared(v)); }
+
+	// The angle between two directions, in radians, 0 to pi. Clamped before
+	// the acos because a dot product of two unit vectors is allowed to come
+	// out at 1.0000000001 in floating point, and `Math.acos` of that is NaN.
+	angleTo(v) {
+		const d = Math.sqrt(this.lengthSq() * (v.x * v.x + v.y * v.y + v.z * v.z));
+		return d < 1e-9 ? Math.PI / 2 : Math.acos(clamp(this.dot(v) / d, -1, 1));
+	}
+
+	equals(v) { return this._x === v.x && this._y === v.y && this._z === v.z; }
+
 	// So `console.log(m.position)` and a returned value both read as numbers
 	// rather than as "[object Object]".
 	toJSON() { return { x: this._x, y: this._y, z: this._z }; }
@@ -101,6 +155,34 @@ export class Box3 {
 			default: throw new TypeError(
 				`box.edge(axis, which) wants 'min', 'center' or 'max', not ${JSON.stringify(which)}`);
 		}
+	}
+
+	// Whether a point is inside, edges included — the trigger test that costs
+	// no host call. A Box3 out of `object.boundingBox()` compared against a
+	// position a script already has is the cheapest volume there is, and it is
+	// what `three.physics` triggers are for when the volume has to MOVE.
+	containsPoint(point) {
+		const [x, y, z] = readVector(point, 'box.containsPoint(point)');
+		return x >= this.min.x && x <= this.max.x
+			&& y >= this.min.y && y <= this.max.y
+			&& z >= this.min.z && z <= this.max.z;
+	}
+
+	// Whether two boxes overlap at all. Touching counts, as it does in
+	// Three.js and as `three.query.box` counts it.
+	intersectsBox(other) {
+		return other.max.x >= this.min.x && other.min.x <= this.max.x
+			&& other.max.y >= this.min.y && other.min.y <= this.max.y
+			&& other.max.z >= this.min.z && other.min.z <= this.max.z;
+	}
+
+	// Grow (or, negative, shrink) by the same amount on every face. The
+	// "within a metre of this crate" question, asked without a second box.
+	expandByScalar(amount) {
+		const k = +amount;
+		return new Box3(
+			this.min.x - k, this.min.y - k, this.min.z - k,
+			this.max.x + k, this.max.y + k, this.max.z + k);
 	}
 
 	union(other) {
@@ -258,6 +340,333 @@ export function asTriple(value, where) {
 
 
 // -----------------------------------------------------------------------
+// Scalars — the block four of the eight examples wrote out by hand
+//
+// `crash_canyon.js`, `terrain_village.js`, `village.js` and `wumpa_run.js`
+// each opened with the same eight helpers — `smooth`, `lerp`, `clamp01`,
+// `step`, `band`, `tint`, `mixc`, `hash2` — spelled slightly differently in
+// each. Four copies of one line of arithmetic is not a performance problem;
+// it is four chances for one of them to be subtly different, and the one
+// that was is why this section exists.
+//
+// **They stay in JavaScript, and that is a measurement rather than a
+// preference.** `notes.md` §17 timed a host call that allocates to answer
+// arithmetic at 185 ns against the 70 ns of the JavaScript it replaced —
+// slower on every call, forever. A verb belongs on the host when it does
+// real work or answers a scalar about state the host owns; none of these do
+// either.
+//
+// **Three.js's names and Three.js's ARGUMENT ORDER**, which is worth saying
+// once because one of them is a trap — see `smoothstep`.
+
+// Three.js's MathUtils.clamp.
+export function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+
+// Clamp to 0..1 — GLSL's `saturate`, and the one the examples reached for
+// most. Not a Three.js name: MathUtils has only the three-argument `clamp`,
+// and `clamp(v, 0, 1)` written out fifty times is what this replaces.
+export function clamp01(value) { return value < 0 ? 0 : value > 1 ? 1 : value; }
+
+export function lerp(x, y, t) { return x + (y - x) * t; }
+
+// Where `value` sits between x and y, as a 0..1 fraction — `lerp` run
+// backwards. Answers 0 when x and y are the same, because the honest
+// alternative is a division by zero that reads as the whole gradient
+// disappearing.
+export function inverseLerp(x, y, value) { return x === y ? 0 : (value - x) / (y - x); }
+
+// Remap from one range onto another. Three.js's MathUtils.mapLinear.
+export function mapLinear(x, a1, a2, b1, b2) { return b1 + ((x - a1) * (b2 - b1)) / (a2 - a1); }
+
+// The 0..1 ramp with flat ends, `t * t * (3 - 2t)` over the clamped fraction.
+//
+// **The argument order is Three.js's, not GLSL's, and they are different.**
+// GLSL is `smoothstep(edge0, edge1, x)` and Three.js is
+// `smoothstep(x, min, max)` — the value comes FIRST here. Every shader body
+// in this project uses the GLSL one and every script uses this one, so the
+// two orders sit a few lines apart in the same file and swapping them is
+// silent: the result is still a number in 0..1, just the wrong one. The
+// examples that wrote this by hand called it `step` and used the GLSL order,
+// which is exactly the divergence this is named to stop.
+export function smoothstep(x, min, max) {
+	if (x <= min) return 0;
+	if (x >= max) return 1;
+	const t = (x - min) / (max - min);
+	return t * t * (3 - 2 * t);
+}
+
+// The same with a zero second derivative at both ends — Ken Perlin's, and
+// what to use when a `smoothstep` ramp still shows a crease where it meets
+// the flat part. Three.js's MathUtils.smootherstep.
+export function smootherstep(x, min, max) {
+	if (x <= min) return 0;
+	if (x >= max) return 1;
+	const t = (x - min) / (max - min);
+	return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+// A smooth bump: 0 outside `lo..hi`, 1 in the middle, `smoothstep` on both
+// flanks. No Three.js equivalent — it is the splat-mask verb, and the reason
+// a layered terrain reads as bands of material rather than as one gradient.
+// The value comes first, like `smoothstep` beside it.
+export function band(x, lo, hi) {
+	const mid = (lo + hi) / 2;
+	return smoothstep(x, lo, mid) * (1 - smoothstep(x, mid, hi));
+}
+
+// Ramp up to `length` and back down, forever. Three.js's MathUtils.pingpong.
+export function pingpong(x, length = 1) {
+	return length - Math.abs(euclideanModulo(x, length * 2) - length);
+}
+
+// `%` that answers with the sign of the DIVISOR, so `-1 % 4` is 3 rather
+// than -1. Three.js's MathUtils.euclideanModulo, and the one a wrap-around
+// index or a tiling coordinate wants: JavaScript's `%` is a remainder, and
+// the negative half of every tiled texture is where that shows.
+export function euclideanModulo(n, m) { return ((n % m) + m) % m; }
+
+export function degToRad(degrees) { return degrees * (Math.PI / 180); }
+export function radToDeg(radians) { return radians * (180 / Math.PI); }
+
+// Step towards a target at a FIXED RATE, stopping exactly on it.
+//
+// The linear sibling of `damp`, and the difference is what the two are for.
+// `damp` is a decay: it closes a fraction of the gap per second, so it is
+// fastest at the start and never quite arrives. This closes `maxDelta` per
+// call and lands exactly, which is what a turn-rate limit, a reload timer, a
+// fuel gauge and an ammo counter all want — anything whose speed is a rule
+// rather than a feel. `maxDelta` is a distance, so it is `rate * dt`.
+export function moveTowards(current, target, maxDelta) {
+	const c = +current, t = +target, m = Math.abs(+maxDelta);
+	const delta = t - c;
+	return Math.abs(delta) <= m ? t : c + Math.sign(delta) * m;
+}
+
+// -----------------------------------------------------------------------
+// Angles
+//
+// The half of the arithmetic above that is wrong at exactly one place, and
+// that place is the one every heading in every game crosses: the seam at
+// +/-pi. `dampAngle` already carried the fix inline; these are it, named,
+// because a turn-rate limit and a "am I facing it yet" test need the same
+// wrap and hand-writing it twice is how the two end up disagreeing.
+
+const TAU = Math.PI * 2;
+
+// Fold an angle into [-pi, pi) — half open at the TOP, so exactly pi comes
+// back as -pi. That is the same heading and every consumer here goes through
+// `angleDelta`, which is right either way; it is written down because
+// `Math.atan2` uses the other half-open interval and a heading computed as
+// `Math.atan2(0, -1)` therefore changes sign passing through this. Closing the
+// interval the other way costs a branch on every call to make one axis-aligned
+// direction print with a different sign, which is not a trade worth taking.
+export function wrapAngle(radians) {
+	const x = euclideanModulo(+radians + Math.PI, TAU);
+	return x - Math.PI;
+}
+
+// The SHORT way from one heading to another, signed. A heading of +3.1
+// against a target of -3.1 is 0.08 radians apart this way and 6.2 the
+// straight way — and a character told to turn 6.2 radians spins a full
+// circle to arrive somewhere it was already almost pointing.
+export function angleDelta(from, to) { return wrapAngle(+to - +from); }
+
+// `moveTowards` for a heading: turn at most `maxDelta` radians, the short
+// way, and stop exactly on the target. A turn rate in radians per second is
+// `rate * dt`.
+export function moveTowardsAngle(current, target, maxDelta) {
+	const delta = angleDelta(current, target);
+	const m = Math.abs(+maxDelta);
+	return +current + (Math.abs(delta) <= m ? delta : Math.sign(delta) * m);
+}
+
+// -----------------------------------------------------------------------
+// Colour arithmetic
+//
+// Both take whatever `readColor` takes — a hex, an `[r, g, b]`, an
+// `[r, g, b, a]` or an `{r, g, b}` — and both answer with four components,
+// so the result feeds straight back into `mesh.color`, a uniform, or another
+// one of these. There is no colour management here (see `readColor`), so
+// these are arithmetic on the numbers the pixel gets and nothing else.
+
+// Blend two colours. `t` is not clamped, for the same reason `lerp` does not
+// clamp: a caller extrapolating on purpose is doing something legitimate and
+// a caller who did not mean to gets a colour that is visibly wrong rather
+// than one that is quietly clipped.
+export function mixColor(a, b, t) {
+	const where = 'three.mixColor(a, b, t)';
+	const x = readColor(a, where), y = readColor(b, where);
+	return [lerp(x[0], y[0], t), lerp(x[1], y[1], t), lerp(x[2], y[2], t), lerp(x[3], y[3], t)];
+}
+
+// Scale a colour's brightness. Alpha is left alone — a tint that also faded
+// the thing out would be a surprise, and every call site that wanted that
+// wanted to say so.
+export function tintColor(colour, k) {
+	const c = readColor(colour, 'three.tintColor(colour, k)');
+	return [c[0] * k, c[1] * k, c[2] * k, c[3]];
+}
+
+// -----------------------------------------------------------------------
+// Randomness that can be replayed — notes.md §17, §6
+//
+// **`Math.random` is the one thing that throws away the determinism the rest
+// of this engine goes to some trouble to have.** `notes.md` §17 named it
+// while building the clock: the fixed step, the solver's own accumulator and
+// `state_hash` exist so that the same inputs produce the same frame, and one
+// `Math.random()` in the gameplay layer costs all of it — a bug that
+// reproduces on the tester's machine and not on yours, with no way to
+// bisect. It is not a hypothetical: every scatter, every spawn table and
+// every debris burst reaches for one.
+//
+// So the module-level `randFloat` / `randInt` / `randFloatSpread` here keep
+// Three.js's names and DO NOT use `Math.random` — they draw from a seeded
+// generator this module owns, which `three.seed(n)` resets. That is a
+// deliberate divergence: a script that writes `three.randFloat(0, 1)` from
+// Three.js memory gets a reproducible run without having asked for one, and
+// a script that wants an unrepeatable one still has `Math.random`.
+//
+// `new three.Random(seed)` is the same generator, owned by the caller. Reach
+// for it when two systems must not perturb each other's sequence — a level
+// generator and a particle burst drawing from one stream means adding a
+// spark changes the terrain.
+
+export class Random {
+	constructor(seed = 1) { this.seed(seed); }
+
+	// Reseed in place, and answer with `this` so `new Random().seed(n)` and a
+	// reseed mid-run read the same. A seed of 0 is replaced: the generator
+	// below is a counter and a zero state is its one short cycle.
+	seed(value) {
+		this._s = (Math.floor(+value) >>> 0) || 0x9e3779b9;
+		return this;
+	}
+
+	// mulberry32 — 32 bits of state, four operations, and it passes the
+	// smallcrush tests that matter for scattering trees. Not cryptographic
+	// and not trying to be.
+	float() {
+		this._s = (this._s + 0x6d2b79f5) >>> 0;
+		let t = this._s;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	}
+
+	// Three.js's MathUtils.randFloat, as a method.
+	range(low, high) { return low + (high - low) * this.float(); }
+
+	// INCLUSIVE at both ends, as Three.js's MathUtils.randInt is.
+	int(low, high) { return Math.floor(low + (high - low + 1) * this.float()); }
+
+	// Centred on zero: `spread(4)` is -2..2. Three.js's randFloatSpread.
+	spread(range) { return range * (this.float() - 0.5); }
+
+	// True with probability `p`. Written out as `r.float() < p` everywhere it
+	// is not named, and that spelling is the one place a `<=` slips in.
+	chance(p) { return this.float() < p; }
+
+	// One of them, uniformly. Throws on an empty list rather than answering
+	// `undefined`, which downstream reads as a missing asset three calls later.
+	pick(list) {
+		if (!Array.isArray(list) || list.length === 0) {
+			throw new RangeError('random.pick(list) wants a non-empty array');
+		}
+		return list[Math.floor(this.float() * list.length)];
+	}
+
+	// -1 or +1.
+	sign() { return this.float() < 0.5 ? -1 : 1; }
+
+	toString() { return `Random(state ${this._s})`; }
+}
+
+// The stream `randFloat` and friends draw from.
+const shared = new Random(0x9e3779b9);
+
+// Reset the shared stream, so a run replays. Answers with the generator, for
+// a caller that wants to keep drawing from it directly.
+export function seed(value) { return shared.seed(value); }
+
+export function randFloat(low, high) { return shared.range(low, high); }
+export function randInt(low, high) { return shared.int(low, high); }
+export function randFloatSpread(range) { return shared.spread(range); }
+
+// -----------------------------------------------------------------------
+// Noise
+//
+// The other block the examples copied between themselves, and the one where
+// the copies had actually drifted — three of them took `(size, cellsX,
+// cellsY, seed)` and one took `(size, cells, seed)`.
+//
+// These are sampled AT A POINT rather than baked into a grid, which is the
+// shape that composes: the same call fills a texture in a double loop, feeds
+// `field.fill((x, z) => ...)` for terrain, and answers a single query for a
+// spawn test. `period` is what the grid form was really for — see below.
+
+// The integer hash everything here is built on: three ints in, a number in
+// 0..1 out, and the same three always answer the same. `Math.imul` is what
+// makes it a 32-bit multiply rather than a float one, which is what makes it
+// reproducible across engines.
+export function hash(x, y = 0, seed = 0) {
+	let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(seed | 0, 2246822519);
+	h = Math.imul(h ^ (h >>> 13), 1274126177);
+	return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// Smooth value noise on a unit lattice: 0..1, one feature per unit of x and
+// y. `period` wraps the lattice, which is what makes a texture TILE — pass
+// the number of cells across the image and the left edge meets the right.
+// Zero, the default, does not wrap.
+function latticeNoise(x, y, seed, period) {
+	const wrap = period > 0
+		? (n) => euclideanModulo(n, period)
+		: (n) => n;
+	const x0 = Math.floor(x), y0 = Math.floor(y);
+	const fx = smoothstep(x - x0, 0, 1), fy = smoothstep(y - y0, 0, 1);
+	const xa = wrap(x0), xb = wrap(x0 + 1), ya = wrap(y0), yb = wrap(y0 + 1);
+	return lerp(
+		lerp(hash(xa, ya, seed), hash(xb, ya, seed), fx),
+		lerp(hash(xa, yb, seed), hash(xb, yb, seed), fx),
+		fy);
+}
+
+// `{ seed, period }`. See `latticeNoise` above for what `period` buys.
+export function noise2(x, y, options = null) {
+	return latticeNoise(x, y,
+		Math.floor(+(options?.seed ?? 0)),
+		Math.max(0, Math.floor(+(options?.period ?? 0))));
+}
+
+// Fractal Brownian motion: `octaves` layers of `noise2`, each twice as fine
+// and half as strong, normalized back to 0..1. The verb behind every
+// generated rock face, bark, dirt and cloud in `examples/`.
+//
+// `{ octaves, seed, period, lacunarity, gain }`. **`period` tiles the
+// result**, and it tiles correctly only because each octave's period is
+// scaled with its frequency — which is the one part of this that is wrong if
+// it is written out by hand, and the reason a hand-rolled tiling fbm shows a
+// seam at exactly one octave's worth of the image.
+export function fbm2(x, y, options = null) {
+	const octaves = clamp(Math.floor(+(options?.octaves ?? 4)), 1, 16);
+	const seed = Math.floor(+(options?.seed ?? 0));
+	const lacunarity = +(options?.lacunarity ?? 2);
+	const gain = +(options?.gain ?? 0.5);
+	let period = Math.max(0, Math.floor(+(options?.period ?? 0)));
+
+	let amplitude = 1, total = 0, sum = 0, fx = x, fy = y;
+	for (let o = 0; o < octaves; o++) {
+		sum += amplitude * latticeNoise(fx, fy, seed + o * 131, period);
+		total += amplitude;
+		amplitude *= gain;
+		fx *= lacunarity;
+		fy *= lacunarity;
+		period = period > 0 ? Math.round(period * lacunarity) : 0;
+	}
+	return sum / total;
+}
+
+// -----------------------------------------------------------------------
 // Damping — notes.md §17
 //
 // The two verbs a game reaches for between "where it is" and "where it
@@ -313,11 +722,10 @@ export function dampAngle(current, target, lambda, dt) {
 	if (!Number.isFinite(c) || !Number.isFinite(+target)) {
 		throw new TypeError('three.dampAngle(current, target, lambda, dt) wants finite numbers');
 	}
-	const TAU = Math.PI * 2;
-	let delta = (+target - c) % TAU;
-	if (delta > Math.PI) delta -= TAU;
-	if (delta < -Math.PI) delta += TAU;
-	return damp(c, c + delta, lambda, dt);
+	// `angleDelta` above IS this wrap, and having it in one place is the
+	// point of naming it: two spellings of one seam is how the turn-rate
+	// limiter and the camera damp end up disagreeing by a full circle.
+	return damp(c, c + angleDelta(c, target), lambda, dt);
 }
 
 // A critically damped spring — Unity's `SmoothDamp`, and the one to reach

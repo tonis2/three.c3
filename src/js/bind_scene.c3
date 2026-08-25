@@ -129,6 +129,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "budgetGet", &js_budget_get, 0);
 	self.bind(host, "budgetSet", &js_budget_set, 1);
 	self.bind(host, "clockTime", &js_clock_time, 0);
+	self.bind(host, "clockWall", &js_clock_wall, 0);
 	self.bind(host, "clockDelta", &js_clock_delta, 0);
 	self.bind(host, "clockScaleGet", &js_clock_scale_get, 0);
 	self.bind(host, "clockScaleSet", &js_clock_scale_set, 1);
@@ -1313,6 +1314,43 @@ fn void js_clock_time(
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 	*out = qjs::number_value(clock.time);
+}
+
+<*
+ `clockWall()` — the process's own monotonic clock, in milliseconds.
+
+ ## The one reading the game clock cannot give
+
+ Everything else here is GAME time: scaled by `timeScale`, stopped by a pause,
+ and that is what makes `x += speed * three.clock.dt` need no `if`. It is also
+ what makes it useless for the one question a profiler asks. A system timed on
+ the game clock reads zero while paused and four times its true cost in slow
+ motion — the measurement would be a function of the thing being measured's
+ own settings.
+
+ So this is a second clock and it answers a different question: **how long did
+ that take**, in real milliseconds, whatever the game clock is doing. It is what
+ `three.systems.report()` is built on, and `notes.md` §19.5 — "the CPU side of a
+ frame, which nothing measures" — is why that report is worth having:
+ `three.stats()` already breaks the GPU frame into six numbers so a slow scene
+ can be blamed on the shadow pass, and there has been nothing at all for the
+ half of the frame a script owns.
+
+ Milliseconds as a double rather than nanoseconds as an integer, because the
+ consumer is JavaScript and every other duration this API hands out is
+ milliseconds. A double holds microsecond resolution for about three hundred
+ years of uptime, so the precision that matters here survives the units.
+
+ **Not the same origin as `elapsed_ms`.** That one is the host's, from whenever
+ the host started counting; this one starts at `JsRuntime.open`. Differences
+ are what either is for, and mixing them is a difference of two origins.
+*>
+fn void js_clock_wall(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value((double)self.wall_clock.to_now() / 1_000_000.0);
 }
 
 <*

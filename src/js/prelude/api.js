@@ -1,7 +1,15 @@
 // three.c3 — the `three` object itself: the light, the camera, the input, and
 // every verb an agent calls.
 
-import { Vector3, Box3, readVector, asTriple, damp, dampAngle, smoothDamp, CatmullRomCurve3 } from './math.js';
+import {
+	Vector3, Box3, readVector, asTriple, damp, dampAngle, smoothDamp, CatmullRomCurve3,
+	clamp, clamp01, lerp, inverseLerp, mapLinear, smoothstep, smootherstep, band,
+	pingpong, euclideanModulo, degToRad, radToDeg, moveTowards,
+	wrapAngle, angleDelta, moveTowardsAngle,
+	mixColor, tintColor,
+	Random, seed, randFloat, randInt, randFloatSpread,
+	hash, noise2, fbm2,
+} from './math.js';
 import { Group } from './object3d.js';
 import {
 	Texture,
@@ -22,8 +30,10 @@ import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry,
 import { Field, scatter, catmullRom } from './field.js';
 import { character } from './character.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
-import { query, moveAndSlide, batch, TransformBatch, QueryResult } from './query.js';
+import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, TransformBatch, QueryResult } from './query.js';
 import { nav, steer, NavField } from './nav.js';
+import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
+import { cast, Cast, NO_ENTITY } from './cast.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -560,6 +570,27 @@ const clock = {
 	get fixedDelta() { return 1 / H.clockRateGet(); },
 	set fixedDelta(_) { throw new TypeError('three.clock.fixedDelta follows three.clock.fixedRate — set the rate'); },
 
+	// The PROCESS's own monotonic clock, in milliseconds, and the one reading
+	// here that is not game time.
+	//
+	// Everything else on this object is scaled by `timeScale` and stops dead
+	// when paused, which is what makes `x += speed * three.clock.dt` need no
+	// `if`. It is also what makes it useless for the one question a profiler
+	// asks: a system timed on the game clock reads zero while paused and four
+	// times its true cost in slow motion, so the measurement would be a
+	// function of the settings of the thing being measured.
+	//
+	// So this answers a different question — **how long did that take**, in
+	// real milliseconds, whatever the game clock is doing. Two readings and a
+	// subtraction; a host call answering a number is 143 ns.
+	// `three.systems.report()` is built on it and is usually the thing to reach
+	// for instead.
+	//
+	// Not the same origin as anything else: it starts when the JavaScript
+	// runtime opens. Differences are what it is for.
+	get wall() { return H.clockWall(); },
+	set wall(_) { throw new TypeError('three.clock.wall is the process clock — it is read, and nothing sets it'); },
+
 	// Move the clock by hand, whatever the scale is. What makes a pause
 	// steppable: `three.clock.timeScale = 0` and then `advance(1 / 60)` is
 	// exactly one frame of world — the clips, the bodies, the fixed steps
@@ -940,6 +971,78 @@ export const three = {
 	dampAngle,
 	smoothDamp,
 
+	// `moveTowards` is the third one, and it is the LINEAR one: it closes a
+	// fixed distance per call and lands exactly on the target, where damp
+	// closes a fraction and never quite arrives. A turn rate, a reload timer
+	// and a fuel gauge are rules rather than feels, and this is the verb for
+	// a rule. `moveTowardsAngle` is it taking the short way round a circle.
+	moveTowards,
+	moveTowardsAngle,
+
+	// The scalar block four of the eight examples used to open with, spelled
+	// slightly differently in each. Three.js's MathUtils names and Three.js's
+	// argument order — which is worth reading once, because `smoothstep` here
+	// is `(x, min, max)` and GLSL's is `(edge0, edge1, x)`, so the shader body
+	// and the script a few lines above it take the same three numbers in
+	// different orders.
+	//
+	// `clamp01` and `band` are the two with no Three.js equivalent: the first
+	// is GLSL's saturate, and the second is the splat-mask verb that makes a
+	// layered terrain read as bands of material rather than one gradient.
+	clamp,
+	clamp01,
+	lerp,
+	inverseLerp,
+	mapLinear,
+	smoothstep,
+	smootherstep,
+	band,
+	pingpong,
+	euclideanModulo,
+	degToRad,
+	radToDeg,
+
+	// The seam at +/-pi, named. `wrapAngle` folds into (-pi, pi] and
+	// `angleDelta(from, to)` is the SHORT way between two headings — +3.1 to
+	// -3.1 is 0.08 radians, not 6.2, and a character told to turn 6.2 spins a
+	// full circle to arrive where it was already pointing. `dampAngle` and
+	// `moveTowardsAngle` are both written in terms of this one function, so
+	// there is one spelling of the wrap rather than three.
+	wrapAngle,
+	angleDelta,
+
+	// Colour arithmetic over whatever `mesh.color` takes — a hex, an [r,g,b],
+	// an [r,g,b,a] or an {r,g,b} — answering with four components, so the
+	// result feeds straight back in. `tintColor` leaves alpha alone.
+	mixColor,
+	tintColor,
+
+	// Randomness that can be REPLAYED, and the reason it is here rather than
+	// left to Math.random: the fixed step, the solver's own accumulator and
+	// state_hash exist so the same inputs give the same frame, and one
+	// Math.random() in the gameplay layer costs all of it — a bug that
+	// reproduces on the tester's machine and not on yours.
+	//
+	// randFloat / randInt / randFloatSpread keep Three.js's names and do NOT
+	// call Math.random: they draw from a stream three.seed(n) resets. A script
+	// that wants an unrepeatable number still has Math.random. new
+	// three.Random(seed) is the same generator owned by the caller, for when
+	// two systems must not perturb each other's sequence.
+	Random,
+	seed,
+	randFloat,
+	randInt,
+	randFloatSpread,
+
+	// Noise, sampled AT A POINT rather than baked into a grid — the same call
+	// fills a texture in a double loop, feeds field.fill((x, z) => ...) for
+	// terrain, and answers one spawn test. `period` is what makes it TILE:
+	// pass the number of cells across an image and the left edge meets the
+	// right, which fbm2 gets right per octave and a hand-rolled one does not.
+	hash,
+	noise2,
+	fbm2,
+
 	// A walkable character with a follow camera — the controller every
 	// third-person scene writes by hand, and the place the two worst bugs in it
 	// (camera/movement frame disagreement, and hand-rolled orbit-trig signs) are
@@ -970,6 +1073,28 @@ export const three = {
 	// higher-level helper that rides a height field and does not collide.
 	moveAndSlide,
 
+	// The same controller for a whole crowd, in ONE call — and it exists for
+	// the shape of the answer rather than for the crossing. notes.md §17 took
+	// the single form's 7.53 us per agent apart: 3.10 us is the sweep, 1.05 us
+	// is the crossing and the raw host answer, and 3.63 us — three fifths — is
+	// the JavaScript result object, three live Vector3s and two lazy node
+	// properties built for a caller who reads four numbers out of them. This
+	// writes into arrays the caller owns and builds nothing.
+	//
+	// positions is the capsule centre and is updated IN PLACE. `self` is the
+	// column of handles that stops each agent colliding with its own mesh, and
+	// three.batch(objects).handles is already exactly that array. `results` is
+	// optional, 8 floats an agent, laid out by three.moveResult.
+	//
+	// Everyone moves at once: every agent is swept against the world as it was
+	// when the call started, because resolving in array order would make the
+	// answer depend on how the caller happened to store its crowd.
+	moveAndSlideAll,
+	// The layout of one agent's block in that results array, and the bits in
+	// its flags float. three.moveBuffer(n) makes one of the right size.
+	moveResult,
+	moveBuffer,
+
 	// Move many nodes in one crossing, through a Float32Array. NOT a faster
 	// way to move a dozen things — notes.md §17 measured five hundred ordinary
 	// position writes at three per cent of a frame — but the right shape when
@@ -994,6 +1119,42 @@ export const three = {
 	// the caller's, which is what lets the same call feed three.moveAndSlide
 	// for agents that collide and a plain add for agents that do not.
 	steer,
+
+	// The ordered system registry — `notes.md` §21. setFixedLoop and
+	// setAnimationLoop each take ONE callback, so a game with five things to do
+	// a frame has one function with five things in it. This is that function
+	// split into named parts that run in a declared order, with per-system
+	// timings over three.clock.wall.
+	//
+	// It makes nothing faster and is not meant to: §17's crowd table put every
+	// JavaScript-side layout inside the noise floor of the measurement. What it
+	// makes is a frame you can read, and a slow one you can attribute — which
+	// three.stats() has done for the GPU half since §19 and nothing has done
+	// for this half.
+	//
+	// three.setAnimationLoop and three.setFixedLoop are systems under reserved
+	// names, so a script that never touches this is unaffected.
+	systems,
+	// The registry's rolling cost as a 0..1 fraction of a frame budget, for a
+	// HUD that wants a bar rather than a number.
+	systemLoad,
+
+	// N things of ONE KIND, stored as columns and stepped by named systems —
+	// the critters, the crates, the pickups. Not the whole world: that
+	// restriction is what keeps every column dense and every bulk verb one
+	// call, and it is why this is not an archetype graph.
+	//
+	// The point is that a column IS the buffer the bulk verbs take, so there is
+	// no marshalling step between the storage and the verb:
+	// three.steer(cast.live(position), ...), three.moveAndSlideAll(..., { self:
+	// cast.live(cast.handles) }), field.sample(...), then cast.flush() draws
+	// the lot in one more crossing.
+	cast,
+	Cast,
+	// What cast.spawn() answers with when there is no room, and what
+	// cast.indexOf() answers for anything despawned. Full is an answer rather
+	// than an error, as three.nav.field answering null is.
+	NO_ENTITY,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the
@@ -1189,7 +1350,7 @@ export const three = {
 	// turning — most of what moves in most of these scenes is a function of
 	// this number.
 	setAnimationLoop(fn) {
-		if (fn === null || fn === undefined) { H.setFrame(null); return; }
+		if (fn === null || fn === undefined) { systems.remove(ANIMATION_SYSTEM); return; }
 		if (typeof fn !== 'function') {
 			throw new TypeError('three.setAnimationLoop(fn) wants a function, or null to stop');
 		}
@@ -1203,7 +1364,13 @@ export const three = {
 				+ 'has done anything, and the frame does not wait. Do the awaiting in a run_script.'
 			);
 		}
-		H.setFrame(fn);
+		// Registered rather than installed: `three.systems` owns the host's
+		// callback slot, and this is one system under a reserved name — see
+		// systems.js. A script that has never heard of the registry installs
+		// exactly one system and gets exactly the behaviour it always had, and
+		// `millis` is what keeps this argument Three.js's milliseconds while
+		// every other system is handed seconds.
+		systems.add(ANIMATION_SYSTEM, fn, { phase: 'frame', millis: true });
 	},
 
 	// The other loop: gameplay, at a fixed rate, however fast the frames
@@ -1227,7 +1394,7 @@ export const three = {
 	// solver on the next one. Stopped the same three ways the animation
 	// callback is, and with `three.setFixedLoop(null)`.
 	setFixedLoop(fn) {
-		if (fn === null || fn === undefined) { H.setFixed(null); return; }
+		if (fn === null || fn === undefined) { systems.remove(FIXED_SYSTEM); return; }
 		if (typeof fn !== 'function') {
 			throw new TypeError('three.setFixedLoop(fn) wants a function, or null to stop');
 		}
@@ -1237,7 +1404,10 @@ export const three = {
 				+ 'anything, and the step does not wait. Do the awaiting in a run_script.'
 			);
 		}
-		H.setFixed(fn);
+		// The same reserved-name registration `setAnimationLoop` makes. No
+		// `millis`: the fixed callback is handed seconds and always was, which
+		// is also what a system is handed.
+		systems.add(FIXED_SYSTEM, fn, { phase: 'fixed' });
 	},
 
 	// Every .glb and .gltf in the assets directory, described without being

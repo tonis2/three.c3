@@ -40,6 +40,7 @@ fn void JsRuntime.bind_query_verbs(&self, qjs::Value host)
 	self.bind(host, "raycastAll", &js_raycast_all, 8);
 	self.bind(host, "sweep", &js_sweep, 11);
 	self.bind(host, "moveAndSlide", &js_move_and_slide, 15);
+	self.bind(host, "moveAndSlideAll", &js_move_and_slide_all, 21);
 	self.bind(host, "setTransforms", &js_set_transforms, 7);
 }
 
@@ -347,9 +348,79 @@ fn void js_move_and_slide(
 	*out = value;
 }
 
-// How a `setTransforms` payload is laid out. Three floats a node, or ten.
+<*
+ `moveAndSlideAll(posBuffer, posByteOffset, posFloats, motionBuffer,
+ motionByteOffset, motionFloats, outBuffer, outByteOffset, outFloats,
+ selfBuffer, selfByteOffset, selfInts, radius, halfHeight, step, slope, skin,
+ snap, ignoreBuffer, ignoreByteOffset, ignoreLength)`.
+
+ The crowd form of the verb above, and the second of the two places in this API
+ where there is exactly one crossing however many agents there are. See
+ `Scene.move_capsules` for what it does and for the two decisions in it —
+ everyone moving at once, and no node handles in the answer.
+
+ `positions` is READ AND WRITTEN: it is the caller's position column and it is
+ updated where it lies, so nothing has to be copied back out afterwards. The
+ options are one set for the whole crowd, because a crowd is one agent size; a
+ pack of two sizes is two calls over two columns, which is also how it would
+ have to be stored.
+
+ @return `How many agents were stepped.`
+*>
+fn void js_move_and_slide_all(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float[] positions = float_view(&js, argc, args, 0);
+	float[] motions = float_view(&js, argc, args, 3);
+	float[] results = float_view(&js, argc, args, 6);
+	int[] selves = int_view(&js, argc, args, 9);
+	if (positions.len < 3 || motions.len < 3) { *out = qjs::int_value(0); return; }
+
+	MoveOptions options = default_move_options();
+	options.radius = arg_float(&js, argc, args, 12);
+	options.half_height = arg_float(&js, argc, args, 13);
+	options.step_height = arg_float(&js, argc, args, 14);
+	options.slope_limit = arg_float(&js, argc, args, 15);
+	options.skin = arg_float(&js, argc, args, 16);
+	options.snap = arg_float(&js, argc, args, 17);
+
+	if (!(options.radius > 0.0f))
+	{
+		*out = js.raise("three.moveAndSlideAll wants a positive radius — a capsule with none is a point and slides off everything");
+		return;
+	}
+
+	uint stepped = self.pass.scene.move_capsules(
+		&self.pass.assets, positions, motions, results,
+		options, ignore_set(self, &js, argc, args, 18), selves);
+	*out = qjs::int_value((int)stepped);
+}
+
+<*
+ How a `setTransforms` payload is laid out.
+
+	BATCH_POSITION   3   x y z
+	BATCH_TRS       10   x y z   qx qy qz qw   sx sy sz
+	BATCH_EULER      9   x y z   rx ry rz      sx sy sz
+
+ **Two rotation forms, and they are not redundant.** `BATCH_TRS` is for a batch
+ written by ARITHMETIC — a look-at, a slerp, a physics read-back — where what
+ produced the rotation produced a quaternion, and converting it to Euler angles
+ to send it would be lossy at every gimbal-locked pose. `BATCH_EULER` is for a
+ batch written by a GAME, where the rotation is a heading and a limb swing: one
+ angle each, typed by a person, and `notes.md` §17 measured what forcing that
+ case through the quaternion form costs — a critter writing a group position, a
+ group heading and two leg angles is four crossings a frame at about 380 ns
+ apiece, and the reason it was four rather than one is that the batch could not
+ express the three angles it wanted to write.
+*>
 const int BATCH_POSITION = 0;
 const int BATCH_TRS = 1;
+const int BATCH_EULER = 2;
 
 <*
  `setTransforms(handleBuffer, handleByteOffset, handleInts, dataBuffer,
@@ -389,7 +460,7 @@ fn void js_set_transforms(
 	float[] data = float_view(&js, argc, args, 3);
 	int mode = arg_int(&js, argc, args, 6);
 
-	sz stride = mode == BATCH_TRS ? 10 : 3;
+	sz stride = mode == BATCH_TRS ? 10 : (mode == BATCH_EULER ? 9 : 3);
 	sz count = handles.len / 2;
 	if (count > data.len / stride) count = data.len / stride;
 	if (count <= 0) { *out = qjs::int_value(0); return; }
@@ -406,7 +477,16 @@ fn void js_set_transforms(
 
 		sz at = i * stride;
 		node.position = { data[at], data[at + 1], data[at + 2] };
-		if (mode == BATCH_TRS)
+		if (mode == BATCH_EULER)
+		{
+			// The same conversion `setTransform` makes, so a node written by a
+			// batch and a node written by `mesh.rotation.y = h` end up with
+			// the same quaternion for the same three numbers. See
+			// `quat_from_euler` for why it is not `from_euler`.
+			node.rotation = quat_from_euler({ data[at + 3], data[at + 4], data[at + 5] });
+			node.scale = { data[at + 6], data[at + 7], data[at + 8] };
+		}
+		else if (mode == BATCH_TRS)
 		{
 			// A quaternion rather than Euler angles, unlike `setTransform`.
 			// A batch is written by arithmetic rather than typed by a person,

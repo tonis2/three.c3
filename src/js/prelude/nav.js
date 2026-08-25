@@ -68,6 +68,58 @@ export class NavField {
 	// Whether this point can reach any of the goals at all.
 	reaches(point) { return Number.isFinite(this.cost(point)); }
 
+	// `direction` and `cost` for a whole crowd, in ONE crossing.
+	//
+	// **The two above are the wrong verbs to call in a loop, and the reason is
+	// not the crossing.** `notes.md` §17 measured the bare host call that
+	// answers a number at 143 ns and `cost(point)` — the same call, through the
+	// `readVector` that allocates a three-element array and runs three
+	// `Number.isFinite` checks to be polite about its argument — at 455 ns. The
+	// ergonomics layer costs twice what the boundary does. That is a good trade
+	// for a verb called once a frame and a bad one for a verb called once per
+	// agent per frame, and both are this verb.
+	//
+	//     const pos = new Float32Array(n * 3);
+	//     const cost = new Float32Array(n);
+	//     const dir = new Float32Array(n * 3);
+	//     field.sample(pos, { costs: cost, directions: dir });
+	//
+	// `positions` is read, three floats per agent. `costs` is one float per
+	// agent and `directions` is three; either may be left out, so a caller
+	// asking only "how far is everyone from the goal" pays for no directions.
+	//
+	// **A NEGATIVE cost is unreachable here**, where `cost(point)` answers
+	// `Infinity`. The two disagree on purpose: converting would mean a
+	// JavaScript pass over the array, which is precisely the loop this exists
+	// to avoid, and C3 has no infinity constant to write into the array
+	// instead. `costs[i] < 0` is the test, and `Number.isFinite` is not.
+	sample(positions, options = null) {
+		const where = 'field.sample(positions, { costs, directions })';
+		if (!(positions instanceof Float32Array)) {
+			throw new TypeError(`${where} wants a Float32Array of three floats per agent`);
+		}
+		const costs = options?.costs ?? null;
+		const directions = options?.directions ?? null;
+		if (costs === null && directions === null) {
+			throw new TypeError(`${where} wants costs, directions or both — with neither there is nothing to write`);
+		}
+		if (costs !== null && !(costs instanceof Float32Array)) {
+			throw new TypeError(`${where}: costs is a Float32Array of ONE float per agent`);
+		}
+		if (directions !== null && !(directions instanceof Float32Array)) {
+			throw new TypeError(`${where}: directions is a Float32Array of THREE floats per agent`);
+		}
+		return H.navSample(
+			this._h,
+			positions.buffer, positions.byteOffset, positions.length,
+			costs === null ? positions.buffer : costs.buffer,
+			costs === null ? 0 : costs.byteOffset,
+			costs === null ? 0 : costs.length,
+			directions === null ? positions.buffer : directions.buffer,
+			directions === null ? 0 : directions.byteOffset,
+			directions === null ? 0 : directions.length);
+	}
+
 	dispose() {
 		if (this._h < 0) return false;
 		const freed = H.navFieldFree(this._h);
