@@ -173,6 +173,19 @@ struct FrameBlock
 	 the full account of what each of the four does.
 	*>
 	float[4] shadow;
+	<*
+	 The debug view, as `three.debug.view` set it. x is the mode — 0 draws the
+	 scene, 1 the shadow factor, 2 what the shadow lookup would read — and yzw
+	 are room for a view that needs an argument.
+
+	 **A whole float4 for one number**, because the block is already aligned to
+	 one: a scalar here costs the same sixteen bytes and would have to be
+	 repacked the first time a second view wanted a parameter.
+
+	 `shaders/mesh.slang` carries the account of what each mode draws and why
+	 they are in the shading pass rather than in post.
+	*>
+	float[4] debug;
 }
 
 <*
@@ -318,7 +331,7 @@ $assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer 
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert DrawRecord::size == 104 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 168 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 184 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 
@@ -389,7 +402,8 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	light                   64    16
 	live_poses              80     8
 	light_view_projection   88    64
-	shadow                 152    16    = 168, and no tail padding
+	shadow                 152    16
+	debug                  168    16    = 184, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "view_projection",         0, 64 },
@@ -397,6 +411,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "live_poses",             80,  8 },
 	{ "light_view_projection",  88, 64 },
 	{ "shadow",                152, 16 },
+	{ "debug",                 168, 16 },
 };
 
 <*

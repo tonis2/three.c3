@@ -98,9 +98,10 @@ fn void js_physics_add(
 			case "sphere": shape = ColliderShape.SPHERE;
 			case "capsule": shape = ColliderShape.CAPSULE;
 			case "hull": shape = ColliderShape.HULL;
+			case "heightfield": shape = ColliderShape.HEIGHTFIELD;
 			default:
 				*out = js.raise(string::tformat(
-					"'%s' is not a collider shape — it is one of box, sphere, capsule or hull",
+					"'%s' is not a collider shape — it is one of box, sphere, capsule, hull or heightfield",
 					shape_name
 				));
 				return;
@@ -142,6 +143,9 @@ fn String physics_add_message(fault err, String shape_name) @local
 		case NODE_IS_NOT_TOP_LEVEL:
 			return "a body-backed object has to be a child of the scene, not of another object — "
 				"the solver works in world space and a parent transform would fight it";
+		case NODE_IS_NOT_TERRAIN:
+			return "a 'heightfield' collider is the terrain's own grid of heights, and this mesh "
+				"has none — build it with new three.TerrainGeometry(field), or use 'hull'";
 		default:
 			return string::tformat("the body could not be added: %s", err);
 	}

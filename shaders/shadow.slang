@@ -51,6 +51,7 @@ struct FrameBlock
     float4x4* live_poses;
     float4x4 light_view_projection;
     float4 shadow;
+    float4 debug;
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.

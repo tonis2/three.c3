@@ -51,6 +51,23 @@ const sz INITIAL_INSTANCES = 64;
 *>
 const float[4] DEFAULT_LIGHT = { 0.35, 0.80, 0.45, 0.25 };
 
+<*
+ The debug views `three.debug.view` selects, as `shaders/mesh.slang` reads them
+ out of `FrameBlock.debug.x`.
+
+ Numbers and not an enum because they cross into a shader as a float, and the one
+ place that maps a name to one of them is `src/js/prelude/api.js`. `plan.md` §20.2
+ has what each draws and the hour that motivated them.
+*>
+const uint DEBUG_VIEW_OFF = 0;
+// `shadow_factor` as greyscale: white lit, black fully shadowed.
+const uint DEBUG_VIEW_SHADOW = 1;
+// What the shadow lookup would read, with magenta for "outside the fitted box"
+// and dark purple for "no shadow pass ran".
+const uint DEBUG_VIEW_SHADOW_MAP = 2;
+// The highest view there is, so the binding can range-check without listing them.
+const uint DEBUG_VIEW_MAX = DEBUG_VIEW_SHADOW_MAP;
+
 struct MeshPass
 {
 	// Compiled on demand and kept by content hash. `pipeline` is borrowed from
@@ -196,6 +213,18 @@ struct MeshPass
 	// False when `prepare` found nothing to draw, which is what `record` returns
 	// on rather than repeating the emptiness checks.
 	bool prepared;
+
+	<*
+	 Which debug view the shading pass draws, or `DEBUG_VIEW_OFF`.
+
+	 **Not scene state, and so not reset by `new three.Scene()`.** It belongs
+	 with the camera and `three.controls.enabled` on the other side of that line:
+	 a script rebuilding the world is not a reason to put a diagnostic somebody
+	 is reading back to normal, and a view that switched itself off every time a
+	 scene was rebuilt would be unusable from the one place it is most needed —
+	 an agent iterating on a level.
+	*>
+	uint debug_view;
 
 	bool ready;
 }
@@ -585,7 +614,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			// what the texels are spent on. Intersected here rather than inside
 			// `fit` because this is the only place that has a camera.
 			collision::Aabb3 bounds = self.scene.bounds(&self.assets);
-			collision::Aabb3 seen = self.camera.view_bounds(aspect, self.shadows.distance);
+			collision::Aabb3 seen = self.camera.view_bounds(aspect, self.shadows.reach(self.camera.distance));
 			collision::Aabb3 focus = {
 				.min = math::max(seen.min, bounds.min),
 				.max = math::min(seen.max, bounds.max),
@@ -637,6 +666,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.live_poses = live_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
+		.debug = { (float)self.debug_view, 0, 0, 0 },
 	};
 	self.frame_view_projection = view_projection;
 	self.live_address = live_address;

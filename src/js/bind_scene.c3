@@ -131,6 +131,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightSet", &js_light_set, 4);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
 	self.bind(host, "shadowSet", &js_shadow_set, 5);
+	self.bind(host, "shadowFit", &js_shadow_fit, 0);
+	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
+	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
 	self.bind(host, "cameraSet", &js_camera_set, 7);
 	self.bind(host, "cameraAttach", &js_camera_attach, 7);
@@ -1530,6 +1533,80 @@ fn void js_shadow_get(
 }
 
 <*
+ `shadowFit()` — what the last fit came out as, as
+ `[live, cx, cy, cz, extent, near, far, texel]`.
+
+ Read-only, and derived rather than stored: this is `ShadowMap.report`, which
+ reads back the same nine numbers `fit` wrote. There is nothing to set here — the
+ fit is a consequence of the light, the scene's bounds and `distance`, and a
+ script that wants it somewhere else moves one of those.
+
+ Positional for the same reason `shadowGet` is: `api.js` names the fields once,
+ at the property, and one array is one host crossing.
+*>
+fn void js_shadow_fit(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	ShadowFit fit = self.pass.shadows.report();
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value(fit.live ? 1.0 : 0.0));
+	js.set_index(list, 1, qjs::number_value((double)fit.centre.x));
+	js.set_index(list, 2, qjs::number_value((double)fit.centre.y));
+	js.set_index(list, 3, qjs::number_value((double)fit.centre.z));
+	js.set_index(list, 4, qjs::number_value((double)fit.extent));
+	js.set_index(list, 5, qjs::number_value((double)fit.near));
+	js.set_index(list, 6, qjs::number_value((double)fit.far));
+	js.set_index(list, 7, qjs::number_value((double)fit.texel));
+	*out = list;
+}
+
+<*
+ `debugViewGet()` — which debug view the shading pass is drawing, as a number.
+
+ The names live in `api.js` and the number lives here, which is the same split
+ every enum in this binding uses: a host crossing carries a number, and the one
+ place that has to know `'shadow'` is 1 is the one place a typo can be caught.
+*>
+fn void js_debug_view_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	*out = qjs::int_value((int)self.pass.debug_view);
+}
+
+<*
+ `debugViewSet(mode)` — draw a diagnostic instead of the scene.
+
+ **It is not scene state and `new three.Scene()` does not clear it**, which is
+ the same rule the camera and `three.controls.enabled` follow: a script rebuilding
+ the world is not a reason to switch off a diagnostic somebody is reading. An
+ agent iterating on a level is exactly the caller here, and it rebuilds the scene
+ every run.
+
+ Out-of-range values clamp to off rather than throwing. The API surface that can
+ produce one is `three.debug.view = 'shadwo'`, and `api.js` refuses that by name
+ before it ever reaches a number — what arrives here is either a name it knew or
+ a script reaching past the property, and the honest answer to the second is the
+ scene.
+*>
+fn void js_debug_view_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float mode = arg_float(&js, argc, args, 0);
+	self.pass.debug_view = mode >= 1.0f && mode <= (float)DEBUG_VIEW_MAX ? (uint)mode : 0;
+}
+
+<*
  `shadowSet(enabled, size, bias, intensity, distance)` — all five at once.
 
  ## Why all five rather than five setters
@@ -1579,8 +1656,8 @@ fn void js_shadow_set(
 	float bias = arg_float(&js, argc, args, 2);
 	shadows.bias = bias > 0.0f ? bias : 0.0f;
 	shadows.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
-	// Floored at zero, where zero means the camera's own far plane — see
-	// `ShadowMap.distance`. There is no ceiling: a distance past the far plane
+	// Floored at zero, where zero means "derive one from the orbit distance" —
+	// see `ShadowMap.reach`. There is no ceiling: a distance past the far plane
 	// is silently the far plane, because the fit takes the smaller of the two,
 	// and refusing a number that already behaves sensibly would be noise.
 	float reach = arg_float(&js, argc, args, 4);

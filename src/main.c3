@@ -11,6 +11,9 @@
 	--headless            no window, no surface, no swapchain
 	--script <file.js>    boot one script, then keep the window running
 	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
+	--frames <n>          run n frames, then stop. Implies --headless
+	--every <n>           with --frames, also shoot every n frames — see frame_path
+	--camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
 
  The window is a viewer and now also a control: drag to orbit, right-drag to
  pan, scroll to zoom. It writes the same `pass.camera` a script writes through
@@ -43,6 +46,7 @@ module three;
 
 import std::io;
 import std::io::file;
+import std::math;
 import std::thread;
 import std::time;
 import c3w;
@@ -63,6 +67,22 @@ struct Options
 	uint width;
 	uint height;
 	bool headless;
+	<*
+	 How many frames to run before stopping. 0 is "not asked for", which is the
+	 window's endless loop or — with `--screenshot` — the single frame that
+	 mode has always rendered.
+
+	 **This is `plan.md` §20.3's one flag.** A headless render is one frame, and
+	 a frame loop is what physics, the animation callback and the keyboard latch
+	 are all downstream of: nothing that moves can be tested against a still.
+	*>
+	uint frames;
+	// With `frames`, write a numbered shot every n of them as well as the last.
+	// 0 writes only the last one. `frame_path` says how the number gets in.
+	uint every;
+	// yaw,pitch,distance — applied after the script has run and again before
+	// every capture. Empty means the scene keeps its own camera.
+	String camera;
 	// 0 for "do not serve". The port is only ever bound on 127.0.0.1 — and under
 	// `--mcp-stdio` it is the port *connected to* rather than bound, which is
 	// what makes `--mcp 9000 --mcp-stdio` relay to 9000.
@@ -106,6 +126,15 @@ fn Options? parse_args(String[] args)
 			case "--height":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.height = args[++i].to_uint()!;
+			case "--frames":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.frames = args[++i].to_uint()!;
+			case "--every":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.every = args[++i].to_uint()!;
+			case "--camera":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.camera = args[++i];
 			case "--mcp":
 				// The port is optional, so a following argument is consumed only
 				// when it actually looks like one — otherwise `three --mcp
@@ -147,8 +176,22 @@ fn Options? parse_args(String[] args)
 	// one without --headless is the common case, so imply it rather than
 	// opening a window that flashes for a frame.
 	if (opts.screenshot.len > 0) opts.headless = true;
-	// A server that rendered one frame and exited would be no server at all.
-	if (opts.mcp_port > 0) opts.screenshot = "";
+	// **A bounded run is a batch**, for the same reason and with one more: a
+	// window that opened, played 600 frames at whatever rate the compositor felt
+	// like, and closed is not something anybody asked to watch — and the point
+	// of counting frames is that the same count means the same thing on every
+	// machine, which a vsynced window is exactly what takes away.
+	if (opts.frames > 0) opts.headless = true;
+	// A server that rendered one frame and exited would be no server at all —
+	// and one that played 600 and exited is the same mistake with a longer fuse.
+	if (opts.mcp_port > 0)
+	{
+		opts.screenshot = "";
+		opts.frames = 0;
+	}
+	// `--screenshot` on its own has always meant one frame. Saying so here is
+	// what lets everything below read `frames` and never ask which mode it is in.
+	if (opts.frames == 0 && opts.screenshot.len > 0) opts.frames = 1;
 
 	return opts;
 }
@@ -168,6 +211,9 @@ fn void usage()
 	io::printn("  --headless            no window, no surface, no swapchain");
 	io::printn("  --script <file.js>    run one script, then keep the window running");
 	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
+	io::printn("  --frames <n>          run n frames and stop — implies --headless");
+	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
+	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  -h, --help            this");
 	io::printn("");
 	// Which binary this is, rather than a flag for changing it. The layers moved
@@ -327,15 +373,26 @@ fn void? run(Options opts)
 	{
 		live(
 			&renderer, windowed ? &window : null, opts.mcp_port,
-			assets: opts.assets, screenshot: opts.screenshot, script: opts.script
+			assets: opts.assets, screenshot: opts.screenshot, script: opts.script,
+			frames: opts.frames, every: opts.every, camera: opts.camera
 		)!;
 		return;
 	}
 
 	if (opts.screenshot.len > 0)
 	{
-		renderer.screenshot(opts.screenshot)!;
-		io::printfn("wrote %s (%dx%d)", opts.screenshot, opts.width, opts.height);
+		// No runtime on this path, so nothing can move and nothing can steal the
+		// camera back: the override is applied once and the frame count is a
+		// count of identical frames. It is still honoured, because `--every`
+		// over a static scene is how the flipbook itself gets checked.
+		aim_camera(&renderer, opts.camera);
+		for (uint i = 0; i < math::max(opts.frames, (uint)1); i++)
+		{
+			String out = frame_path(opts.screenshot, i);
+			renderer.screenshot(out)!;
+			io::printfn("wrote %s (%dx%d)", out, opts.width, opts.height);
+			if (opts.every == 0) break;
+		}
 		return;
 	}
 
@@ -543,7 +600,8 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
 *>
 fn void? live(
 	Renderer* renderer, c3w::Window* window, int port,
-	String assets = "", String screenshot = "", String script = ""
+	String assets = "", String screenshot = "", String script = "",
+	uint frames = 0, uint every = 0, String camera = ""
 )
 {
 	bool serving = port > 0;
@@ -579,16 +637,17 @@ fn void? live(
 	// two things would do through the server.
 	if (script.len > 0) boot_script(&runtime, script)!;
 
-	// One frame of the booted game and out, which is how a game is checked
-	// without a person watching it — and the only path in this function that is
-	// not a loop. The tick is what makes the frame the *game's*: a boot that
-	// only registered a callback has drawn nothing yet, and capturing before it
-	// ran would picture an empty scene and call it the game.
-	if (screenshot.len > 0)
+	// **The bounded run**, which is how a game is checked without a person
+	// watching it — and the only path in this function that is not an endless
+	// loop. The ticks are what make the frames the *game's*: a boot that only
+	// registered a callback has drawn nothing yet, and capturing before it ran
+	// would picture an empty scene and call it the game.
+	//
+	// `--frames 1 --screenshot out.png` is exactly what this used to do, and
+	// `parse_args` is where that "1" comes from.
+	if (frames > 0)
 	{
-		runtime.tick(0.0);
-		renderer.screenshot(screenshot)!;
-		io::printfn("wrote %s", screenshot);
+		play_frames(renderer, &runtime, frames, screenshot, every, camera)!;
 		return;
 	}
 
@@ -779,6 +838,197 @@ fn void? live(
 			if (said.len() > 0) io::print(said.str_view());
 		}
 	}
+}
+
+<*
+ Run a fixed number of frames with no window, printing what they logged and
+ writing the ones that were asked for.
+
+ **This is the whole of `plan.md` §20.3, and it is one loop.** Physics stepping,
+ the animation callback running and `three.input.press` latching are not three
+ features — they are three things downstream of a frame boundary, and a headless
+ render that draws one frame has no boundaries in it at all. The measurement in
+ the plan is the shape of it: after `three.input.press('w')`, `isDown('w')` was
+ false while `planarMove(1, 0)` answered a unit vector in the same breath. The
+ movement code was fine and unreachable.
+
+ **The clock is counted, not measured.** Frame `i` is told
+ `i * HEADLESS_FRAME_MS`, so 600 frames is ten seconds of game time on every
+ machine and the same run twice is the same run. A wall clock here would make
+ every assertion about where something got to an assertion about how busy the
+ laptop was — which is `JsRuntime.tick`'s own argument for taking the time as a
+ parameter, one level up.
+
+ The first frame is told 0.0, which is what a one-frame `--screenshot` has always
+ been told, so `--frames 1` is that mode unchanged rather than that mode plus a
+ clock tick.
+
+ **Frame output is drained every frame**, not at the end: a run that logs from
+ its callback is the run somebody is reading, and a buffer that only reached the
+ terminal at the end would lose everything if the last frame threw.
+
+ @param frames : `How many ticks. At least one — parse_args refuses to reach here with zero.`
+ @param screenshot : `Where to write, or empty to run the frames and write nothing. See frame_path for the numbering.`
+ @param every : `Also write every n frames, not only the last. 0 writes the last only.`
+ @param camera : `A yaw,pitch,distance override, applied before every capture so a follow camera cannot take the shot back.`
+*>
+fn void? play_frames(
+	Renderer* renderer, JsRuntime* runtime, uint frames,
+	String screenshot = "", uint every = 0, String camera = ""
+)
+{
+	// Once here as well as before each shot: a callback that reads the camera on
+	// its first frame should read the one that was asked for, and a scene with
+	// no follow camera then never needs the second application at all.
+	aim_camera(renderer, camera);
+
+	DString said;
+	said.init(mem, 256);
+	defer said.free();
+
+	uint shots = 0;
+	for (uint i = 0; i < frames; i++)
+	{
+		runtime.tick((double)i * (double)HEADLESS_FRAME_MS);
+
+		said.clear();
+		runtime.take_frame_output(&said);
+		if (said.len() > 0) io::print(said.str_view());
+
+		bool last = i + 1 == frames;
+		bool due  = every > 0 && (i + 1) % every == 0;
+		bool shot = screenshot.len > 0 && (last || due);
+
+		// **The draw is not optional and it is not the screenshot.** A tick
+		// without one is what the headless loop has always done, and it is why
+		// `stats().shadowDraws` and `three.light.shadow.fit` answered "nothing
+		// happened" from inside a callback that had been running for four
+		// frames: the fit is computed in `prepare`, and `prepare` is part of
+		// drawing. Ticking and drawing is what a frame is in the window, and a
+		// counted frame that meant something else would be the wrong instrument.
+		//
+		// Exactly one render per frame either way — `screenshot` draws before it
+		// reads back, so a frame that is being captured must not also be drawn.
+		if (!shot)
+		{
+			renderer.render_offscreen()!;
+			continue;
+		}
+
+		// After the tick and immediately before the capture, so what lands in the
+		// PNG is what was asked for rather than wherever `camera.attach` left it.
+		aim_camera(renderer, camera);
+		String out = frame_path(screenshot, shots);
+		renderer.screenshot(out)!;
+		io::printfn("wrote %s (frame %d)", out, i + 1);
+		shots++;
+	}
+
+	if (screenshot.len == 0) io::printfn("ran %d frames", frames);
+}
+
+<*
+ Point the camera where `--camera` said, if it said anything.
+
+ **Applied over the scene rather than under it**, and that is the flag's whole
+ reason for existing: every alternate viewpoint of a level used to be a script
+ that rewrote the scene file into a temporary copy with a different `orbit` call
+ spliced in before its `return`. A viewpoint is not a property of the scene.
+
+ The planes are re-derived afterwards for the same reason `drive_camera` does it:
+ a distance handed straight in is a near and a far plane that were computed for a
+ different one.
+
+ @param spec : `"yaw,pitch,distance" in degrees and world units. Empty does nothing; anything that does not parse says so and does nothing.`
+ @return `true when the camera was moved.`
+*>
+fn bool aim_camera(Renderer* renderer, String spec)
+{
+	if (spec.len == 0) return false;
+
+	@pool()
+	{
+		String[] parts = spec.tsplit(",");
+		if (parts.len != 3)
+		{
+			io::printfn("--camera %s: expected yaw,pitch,distance", spec);
+			return false;
+		}
+
+		float[3] value;
+		foreach (i, part : parts)
+		{
+			double? number = part.trim().to_double();
+			if (catch number)
+			{
+				io::printfn("--camera %s: '%s' is not a number", spec, part);
+				return false;
+			}
+			value[i] = (float)number;
+		}
+
+		renderer.pass.camera.yaw      = value[0];
+		renderer.pass.camera.pitch    = value[1];
+		renderer.pass.camera.distance = value[2];
+		renderer.pass.camera.clamp_angles();
+		renderer.pass.derive_camera_planes();
+		return true;
+	};
+}
+
+<*
+ A screenshot path with the shot number in it, for `--every`.
+
+ `shot-%03d.png` becomes `shot-000.png`, `shot-001.png`, and a path with no
+ `%d` in it is returned unchanged — which is what makes `--screenshot out.png`
+ with no `--every` write `out.png` and not `out0.png`. A width pads with zeros
+ whether or not the `0` was written, because these are filenames and a run of
+ more than nine frames should still sort.
+
+ One specifier, the first one found. A second `%d` in a screenshot path is
+ somebody's typo, not a second counter.
+
+ @param pattern : `The path as it was given on the command line.`
+ @param index : `Which shot this is, counting from zero.`
+ @return `A temp-allocated path, or the pattern itself when there is nothing to substitute.`
+*>
+fn String frame_path(String pattern, uint index)
+{
+	usz at    = 0;
+	usz stop  = 0;
+	usz width = 0;
+	bool found = false;
+
+	for (usz i = 0; i + 1 < pattern.len && !found; i++)
+	{
+		if (pattern[i] != '%') continue;
+		usz j = i + 1;
+		usz digits = 0;
+		while (j < pattern.len && pattern[j] >= '0' && pattern[j] <= '9')
+		{
+			digits = digits * 10 + (usz)(pattern[j] - '0');
+			j++;
+		}
+		if (j < pattern.len && pattern[j] == 'd')
+		{
+			at    = i;
+			stop  = j + 1;
+			width = digits;
+			found = true;
+		}
+	}
+
+	if (!found) return pattern;
+
+	DString out;
+	out.init(tmem);
+	out.append(pattern[:at]);
+
+	String number = string::tformat("%d", index);
+	for (usz i = number.len; i < width; i++) out.append("0");
+	out.append(number);
+	out.append(pattern[stop..]);
+	return out.str_view();
 }
 
 <*

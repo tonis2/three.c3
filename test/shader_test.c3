@@ -563,7 +563,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 168, "and the block is 168 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 184, "and the block is 184 bytes, got %d", three::FrameBlock::size);
 }
 
 <*
