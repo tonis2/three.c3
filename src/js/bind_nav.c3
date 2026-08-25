@@ -52,6 +52,7 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 	self.bind(host, "navFieldFree", &js_nav_field_free, 1);
 	self.bind(host, "navDirection", &js_nav_direction, 4);
 	self.bind(host, "navCost", &js_nav_cost, 4);
+	self.bind(host, "navSample", &js_nav_sample, 10);
 	self.bind(host, "navPath", &js_nav_path, 9);
 	self.bind(host, "steer", &js_steer, 14);
 }
@@ -304,6 +305,78 @@ fn void js_nav_cost(
 	Vec3 point = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
 	float cost = self.nav.cost_at(field, point);
 	*out = qjs::number_value(cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost);
+}
+
+<*
+ `navSample(handle, posBuffer, posByteOffset, posFloats, costBuffer,
+ costByteOffset, costFloats, dirBuffer, dirByteOffset, dirFloats)` — the two
+ verbs above, for a whole crowd, in one crossing.
+
+ ## Why it is here and not written as a loop in the script
+
+ `notes.md` §17's crowd measurement: the bare crossing that answers a number is
+ 143 ns, and `field.cost(point)` — the same crossing, through the `readVector`
+ that allocates a three-element array and runs three `Number.isFinite` checks to
+ be polite about its argument — is 455 ns. **The ergonomics layer costs twice
+ what the boundary does.** That is a good trade for a verb called once a frame
+ and a bad one for a verb called once per agent per frame, and both are this
+ verb. `navDirection` is worse again: it allocates its answer as well.
+
+ Either output may be empty, so a caller asking only "how far is everyone from
+ the goal" pays for no directions.
+
+ ## -1 is unreachable, and it stays -1 here
+
+ The single form's -1 becomes `Infinity` in the prelude before a script sees it.
+ This one cannot: converting means a JavaScript pass over the array, which is
+ precisely the loop being avoided, and it would cost more than the crossing it
+ saved. So the bulk contract is the host's own — **`cost < 0` is unreachable** —
+ and the prelude says so rather than hiding it. C3 has no infinity constant to
+ write into the array instead.
+
+ A field handle that is dead, or a bake that has been replaced, fills the costs
+ with -1 and the directions with zero rather than raising: "nowhere to go" is
+ what every agent's answer would be anyway, and a crowd verb that throws leaves
+ the caller with a half-written buffer and no way to tell how far it got.
+
+ @return `How many agents were sampled.`
+*>
+fn void js_nav_sample(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float[] field = self.nav_field_of(arg_int(&js, argc, args, 0));
+	float[] positions = float_view(&js, argc, args, 1);
+	float[] costs = float_view(&js, argc, args, 4);
+	float[] directions = float_view(&js, argc, args, 7);
+
+	sz count = positions.len / 3;
+	if (costs.len > 0 && costs.len < count) count = costs.len;
+	if (directions.len > 0 && directions.len / 3 < count) count = directions.len / 3;
+	if (count == 0) { *out = qjs::int_value(0); return; }
+
+	for (sz i = 0; i < count; i++)
+	{
+		sz at = i * 3;
+		Vec3 point = { positions[at], positions[at + 1], positions[at + 2] };
+
+		if (costs.len > 0)
+		{
+			float cost = field.len == 0 ? collision::VOXEL_UNREACHED : self.nav.cost_at(field, point);
+			costs[i] = cost >= collision::VOXEL_UNREACHED ? -1.0f : cost;
+		}
+		if (directions.len > 0)
+		{
+			Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : self.nav.direction_at(field, point);
+			directions[at] = direction.x;
+			directions[at + 1] = direction.y;
+			directions[at + 2] = direction.z;
+		}
+	}
+	*out = qjs::int_value((int)count);
 }
 
 <*

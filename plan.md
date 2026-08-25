@@ -107,9 +107,6 @@ somebody has one.
 - [ ] **Saving.** A write verb confined to a single state directory — never the
       assets root, never an arbitrary path. **The one place in this plan where the
       sandbox widens on purpose**, so say it in the doc comment.
-- [ ] **A seeded RNG.** Twenty lines, and it is the difference between a replay
-      that works and one that nearly does: `state_hash` proves determinism that
-      one `Math.random()` throws away.
 - [ ] **Timers, `structuredClone`,** and whatever else a real game hits.
 
 ## 7. Physics — bindings that do not exist
@@ -260,6 +257,22 @@ All four items are built. What they left open:
       costs one cell; there is nothing for a floor under it to protect.
 
 ---
+
+## 21. Systems and a cast
+
+**Built.** `notes.md` §21 has the shape, the three decisions it forced and what
+the example it was measured against looked like before and after.
+
+- [ ] **A second Cast in an example, to check the claim.** §21's own acceptance
+      test was "adding a second kind of enemy is a second Cast and its own
+      systems, and nothing else changes", and `examples/wumpa_run.js` now
+      demonstrates one Cast rather than two — so the claim is argued rather than
+      shown. A flying enemy would settle it, and it is the cheapest possible
+      check of a design that is otherwise only reasoned about.
+- [ ] **`three.systems.report()` has no way to reach a HUD.** It is the CPU half
+      of `three.stats()` and there is nowhere to draw either — §5's text work is
+      what unblocks it, and until then the numbers reach a person through
+      `console.log` and a probe.
 
 ## Standing constraints
 

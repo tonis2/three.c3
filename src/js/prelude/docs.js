@@ -45,11 +45,14 @@ export const DOCS = {
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
 		'spatial-queries': 'There are BULK SPATIAL QUERIES, and they go through an index rather than a scan: three.query.sphere(point, radius), three.query.box(box), three.query.raycastAll(origin, direction) and three.query.sweep(from, to, { radius, height }). scene.raycast goes through the same index, which is why it stopped being linear in the node count — it used to test EVERY node in the scene before it reached any BVH, and a hundred agents casting one ground ray apiece cost 2.1 ms in a 500-node demo. The index is refreshed by the first query after anything moved and by nothing else, so a frame that asks nothing pays nothing and the hundredth ray in a frame costs a cell walk. MOVING SOMETHING AND THEN ASKING ABOUT IT IS FINE: a moved node has its entry re-filed rather than the whole index rebuilt, so a gameplay step that moves eleven characters between its sweeps costs what one that moved none does. Toggling object.visible costs the index nothing at all — an invisible node is skipped when a query ANSWERS, so hiding things is the free way to keep them out of a sweep. What does still rebuild it is structure: adding a node, removing one, re-parenting one, or setting object.collides. Every verb comes in two forms: three.query.sphere(p, r) allocates an Array of objects and is right for a click or a one-off, and three.query.sphere(p, r, buffer) fills a three.query.buffer(n) you keep and answers with a count, which is right for the loop. box and sphere are BROAD phase — box against box — so a node whose box overlaps and whose triangles do not is included; raycastAll and sweep are exact.',
 		'not-collision-geometry': 'Every drawable mesh is swept and raycast against, so a pickup lying on a path is a bollard and a field of grass is a fence. object.collides = false is the fix: it takes that ONE mesh out of the spatial index entirely — three.moveAndSlide walks through it, three.query.sphere does not report it, scene.raycast misses it — while it still draws exactly as before. three.physics is untouched by it, so a mesh with collides = false and a { trigger: true } body is the ordinary way to write a pickup you can walk INTO and cannot walk into; before this the shape that worked was two nodes, the thing you see and an invisible volume beside it. It is NOT inherited: set it on the meshes rather than on a Group, because it says what one piece of geometry is. Hiding a whole character from ONE sweep is { ignore } on that call, and hiding something from the frame is object.visible = false — which is free and costs the index nothing, where toggling collides costs an index rebuild. It is an authoring flag, not a per-frame one.',
+		'systems-and-casts': 'A BIG ANIMATION LOOP IS THE PROBLEM THIS SOLVES, not a slow one. three.systems.add(name, fn, { phase, order }) is an ordered, named list that replaces the one callback setAnimationLoop and setFixedLoop each take, with three.systems.report() giving per-system milliseconds over three.clock.wall — which is the CPU half of what three.stats() has done for the GPU half all along. setAnimationLoop and setFixedLoop are systems under reserved names, so nothing a script already wrote changes, and a system that throws does not stop the others. three.cast({ capacity, name }) is the storage half: N things of ONE KIND as columns, with generational ids, named tag bits, deferred compaction at the end of the frame, and columns that ARE the buffers three.steer / three.moveAndSlideAll / field.sample take. A cast is not the whole world — one per kind is what keeps every column dense. Neither is required and neither makes a frame faster: every JavaScript-side data layout measured inside the noise floor. What they buy is a frame that reads as a list of named things and a slow one you can attribute.',
+		'crowds-in-one-crossing': 'THE THREE VERBS THAT SCALE WITH A PACK, and the rule behind them is that a verb called once per agent per frame answers into memory you already own. three.steer(positions, velocities, options) is seek, arrive and separation for the whole crowd. three.moveAndSlideAll(positions, motions, options) is the character controller for the whole crowd, updating positions IN PLACE, with self as the column of handles that keeps each agent out of its own mesh and an optional three.moveBuffer(n) for the grounded/slope/normal answers. field.sample(positions, { costs, directions }) is the flow field for the whole crowd. three.batch(objects, { euler: true }).flush() then draws them in one more crossing. Measured at 200 agents: the same frame written with the single-agent verbs is 2.20 ms and written with these is 0.51 ms, and the difference is almost entirely the per-agent JavaScript objects the single forms build. The single forms are not deprecated and are the right choice for one character — the player, the thing riding the moving platform — because they answer with node handles and a readable object; the bulk ones are the right choice the moment there is a loop around the call. A NEGATIVE COST IS UNREACHABLE in the bulk sampler where field.cost answers Infinity, and that is the one place the two disagree.',
 		'move-and-slide': 'three.moveAndSlide(position, motion, options) is the character controller: it sweeps a capsule, slides along what it hits, climbs a ledge under the step height and reports whether it is standing on anything. It takes a POSITION and answers with a position — it does not own an object, integrates nothing and remembers nothing between calls, so gravity, the velocity and the jump stay yours. Options are { radius, height, step, slope, skin, snap, ignore }; height is the whole capsule, and slope in degrees decides grounded, whether a ledge is climbed and whether a contact is a floor or a wall, all from one number so three cannot disagree. Pass the character\'s own object as ignore or it collides with its own mesh, and pass the GROUP rather than one mesh out of it — ignore leaves the whole SUBTREE out, so a character built from a body, a head and four limbs does not collide with its own chest. It takes an array too, for up to eight things. It is kinematic and touches no rigidbody: a character built out of physics is pushed by contacts, tips over and answers a frame late. Not to be confused with three.character(), which is the higher-level helper that rides a height field and does not collide with anything.',
 		'navigation': 'three.nav.bake({ cell, radius, height, slope }) voxelizes the scene\'s standing room, and NOTHING bakes it for you — call it after the level is built. Then TWO verbs, and the split is the design: three.nav.path(from, to) is one agent\'s route, and three.nav.field(goals) is a solve KEPT that a whole crowd samples. A path solves the entire reachable set and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has direction(point), cost(point) — Infinity for unreachable — and dispose(). Paths come back shortened against the actual geometry with a capsule sweep at the agent\'s own size, so they do not look like they are walking cell centres, and their waypoints sit on the floor. cell decides everything: it is the resolution AND the largest step that can be climbed, because two cells are connected when they are adjacent and one cell up. three.nav.stats() reports voxels, walkable and bakeMs so you can find out whether the bake is a level-boundary operation or a loading screen.',
 		'steering': 'three.steer(positions, velocities, options) fills a Float32Array with a desired velocity per agent — seek, arrive and separation, for the whole crowd, in ONE crossing. positions is three floats per agent and is read; velocities is three floats per agent and is written. Options are { field, goal, maxSpeed, arrive, separation, separationWeight }; a field wins over a goal, because a field already knows the way round a wall. What comes back is a DESIRED velocity, not a position: integrating it and deciding whether an agent may actually go there are yours, which is what lets the same call feed three.moveAndSlide for agents that collide and a plain add for agents that do not.',
 		'batched-transforms': 'three.batch(objects) moves many nodes in one crossing, through a Float32Array. It is NOT a faster way to move a dozen things and should not be reached for as one — five hundred ordinary mesh.position.set calls measure 0.245 ms a frame, three per cent of the budget, and the trigger for this is about two thousand nodes a frame. It is for the case where the write is already a loop over numbers: a crowd steered by three.steer, a particle field, a chunked terrain. batch.positions is a Float32Array seeded from where the objects are now; batch.flush() writes them and answers with how many landed. With { trs: true } the stride is ten floats — position, an xyzw QUATERNION, then scale.',
 		'pointer-lock': 'three.input.pointerLock = true takes the mouse pointer out of the user\'s hands, and what it buys is a look that does not STOP. Without it three.input.pointer.dx is a difference of cursor positions, and a cursor stops at the edge of the screen while a hand does not — so a mouse look turns until the pointer reaches the edge and then quietly refuses to turn further. Reading the property back tells you whether the platform gave it, not what you asked for: a headless run has no window and always reads false, and so does a backend with no implementation. Nothing throws, so a game can fall back to a drag-look rather than refuse to start. three.input.pointer.locked is the same fact reported beside the deltas it is about.',
+		'scalar-math': 'The MathUtils block is on three itself: clamp, clamp01 (GLSL\'s saturate), lerp, inverseLerp, mapLinear, smoothstep, smootherstep, band, pingpong, euclideanModulo, degToRad, radToDeg, moveTowards, plus wrapAngle / angleDelta / moveTowardsAngle for the seam at +/-pi and mixColor / tintColor for colours. Three.js\'s names and Three.js\'s ARGUMENT ORDER, which matters for exactly one of them: smoothstep here is (x, min, max) and GLSL\'s is (edge0, edge1, x), so the shader body and the script a few lines above it take the same three numbers in different orders and swapping them is silent. Randomness is three.randFloat / randInt / randFloatSpread and they do NOT use Math.random — they draw from a seeded stream three.seed(n) resets, because one Math.random() in the gameplay layer throws away the determinism the fixed step and state_hash exist for. Noise is three.hash / noise2 / fbm2, sampled at a point, with a period option that makes a texture tile. None of this crosses to the host: a host call that allocates to answer arithmetic measures 185 ns against the 70 ns of the JavaScript it replaced, and it is slower on every call forever.',
 		'damping-and-curves': 'three.damp(current, target, lambda, dt) and three.smoothDamp(current, target, state, smoothTime, dt) are the two verbs between "where it is" and "where it should be", and both are frame-rate independent — which is the whole reason they are named rather than written inline. `x += (target - x) * 0.1` closes a tenth of the gap per FRAME, so it is twice as fast at 120 Hz as at 60 and a chase tuned on one machine is a different chase on another. damp is a decay, right for a camera easing onto a target; smoothDamp is a critically damped spring with momentum, right for a turret slew or a sliding panel, and its state object must OUTLIVE the frame or it is re-launched from rest every tick. three.dampAngle takes the short way round a circle, which is what a heading needs. dt is in SECONDS: three.clock.dt is milliseconds, so it is three.clock.dt / 1000 at every call site. new three.CatmullRomCurve3(points) is the three-dimensional curve a loop samples — getPointAt(u) walks its LENGTH and getPoint(t) walks its own parameter, and the difference is what makes hand-written rail code look wrong.',
 		'camera-follow': 'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back.',
 		'camera-first-person': 'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
@@ -390,7 +393,16 @@ export const DOCS = {
 				+ 'size and center are derived from min/max rather than stored. '
 				+ 'edge(axis, which) is one face\'s coordinate, and is what align() is written in terms of.',
 			properties: ['min', 'max', 'size', 'center'],
-			methods: ['edge(axis, \'min\' | \'center\' | \'max\')', 'union(other)', 'clone()', 'toJSON()', 'toString()'],
+			methods: [
+				'edge(axis, \'min\' | \'center\' | \'max\')', 'containsPoint(point)', 'intersectsBox(other)',
+				'expandByScalar(amount)', 'union(other)', 'clone()', 'toJSON()', 'toString()',
+			],
+			note2:
+				'containsPoint is the trigger test that costs no host call — a box out of '
+				+ 'object.boundingBox() against a position a script already has is the cheapest volume '
+				+ 'there is, and three.physics triggers are what to use when the volume has to MOVE. '
+				+ 'intersectsBox counts touching as overlapping, as three.query.box does. expandByScalar '
+				+ 'answers with a NEW box, so it does not disturb the one it grew from.',
 		},
 		MeshRef: {
 			construct: 'not constructible — asset.mesh(name) and asset.meshAt(i) answer with these',
@@ -449,10 +461,44 @@ export const DOCS = {
 		},
 		Vector3: {
 			construct: 'new three.Vector3(null, x, y, z)',
-			note: 'position/rotation/scale are live Vector3s: writing x, y, z or calling set() moves the object.',
+			note:
+				'position/rotation/scale are live Vector3s: writing x, y, z or calling set() moves the object. '
+				+ 'EVERY METHOD BELOW EXCEPT the read-only ones MUTATES and answers with this, which is '
+				+ 'Three.js\'s convention and the one thing worth saying out loud: a.cross(b) does not mean '
+				+ '"the cross product of a and b", it means "a becomes the cross product". On a live vector '
+				+ 'that is a write to the object, so dir.copy(mesh.position).sub(target).normalize() MOVES '
+				+ 'the mesh and mesh.position.clone().sub(target).normalize() is what was meant. The ones '
+				+ 'that only read are dot, length, lengthSq, distanceTo, distanceToSquared, angleTo, equals, '
+				+ 'clone and toArray. normalize() leaves a zero vector at zero rather than handing back three '
+				+ 'NaNs, because a direction is almost always fed straight to something that aims and a NaN '
+				+ 'aim renders as the object vanishing rather than as an error. In a loop compare '
+				+ 'distanceToSquared against r * r: distanceTo is a square root per pair to answer a '
+				+ 'question that never needed one.',
 			methods: [
-				'set(x,y,z)', 'copy(v)', 'add(v)', 'sub(v)', 'multiplyScalar(s)', 'length()', 'clone()',
-				'toArray()', 'toJSON()', 'toString()',
+				'set(x,y,z)', 'copy(v)', 'add(v)', 'sub(v)', 'multiplyScalar(s)', 'divideScalar(s)',
+				'addScaledVector(v,s)', 'setScalar(s)', 'negate()', 'lerp(v,t)', 'cross(v)', 'normalize()',
+				'dot(v)', 'length()', 'lengthSq()', 'distanceTo(v)', 'distanceToSquared(v)', 'angleTo(v)',
+				'equals(v)', 'clone()', 'toArray()', 'toJSON()', 'toString()',
+			],
+		},
+
+		Random: {
+			construct: 'new three.Random(seed)',
+			note:
+				'A seeded generator, and the reason it exists is that Math.random throws away the '
+				+ 'determinism the rest of the engine goes to some trouble to have: the fixed step, the '
+				+ 'solver\'s own accumulator and state_hash are all so the same inputs give the same frame, '
+				+ 'and one Math.random() in the gameplay layer costs all of it — a bug that reproduces on '
+				+ 'the tester\'s machine and not on yours, with no way to bisect. three.randFloat, '
+				+ 'three.randInt and three.randFloatSpread are Three.js\'s names drawing from a shared '
+				+ 'stream that three.seed(n) resets; construct one of these when two systems must not '
+				+ 'perturb each other\'s sequence, because a level generator and a particle burst drawing '
+				+ 'from one stream means adding a spark changes the terrain. mulberry32 — fast, small, and '
+				+ 'not cryptographic. seed(0) is replaced, because a zero state is this generator\'s one '
+				+ 'short cycle. int(low, high) is INCLUSIVE at both ends, as Three.js\'s randInt is.',
+			methods: [
+				'float()', 'range(low,high)', 'int(low,high)', 'spread(range)', 'chance(p)',
+				'pick(list)', 'sign()', 'seed(value)', 'toString()',
 			],
 		},
 		Asset: {
@@ -672,22 +718,97 @@ export const DOCS = {
 			properties: ['handles', 'capacity', 'count', 'full'],
 			methods: ['objects()', 'toString()'],
 		},
-		TransformBatch: {
-			construct: 'three.batch(objects, { trs })',
+		Cast: {
+			construct: 'three.cast({ capacity, name })',
 			note:
-				'A Float32Array-shaped bulk write over many nodes, and NOT a faster way to move a dozen '
-				+ 'things — five hundred ordinary mesh.position.set calls are 0.245 ms, three per cent of a '
-				+ 'frame, and the trigger for reaching here is about two thousand nodes a frame. What it is '
-				+ 'for is the case where the write is ALREADY a loop over numbers: a crowd steered by '
-				+ 'three.steer, a particle field, a chunked terrain. positions is three floats per object, '
+				'A cast of actors of ONE KIND: columns, entities and systems. cast.vec3(name), '
+				+ 'cast.float(name), cast.flags(name) and cast.buffer(name, stride) each answer with a '
+				+ 'typed array of capacity * stride and answer with the SAME array every time — one name '
+				+ 'is one column. cast.live(column) is the live part as a cached subarray and is what to '
+				+ 'hand a bulk verb. cast.transform is a built-in nine-float column (position, an xyz '
+				+ 'EULER triple, then scale) and cast.flush() sends it to the nodes in ONE crossing; '
+				+ 'cast.handles is a built-in two-int column that is both the self column '
+				+ 'three.moveAndSlideAll takes and the handle array that flush uses. '
+				+ 'INDICES ARE VALID FOR THE FRAME YOU GOT THEM IN. spawn() answers with an id carrying a '
+				+ 'generation, the same contract NodeId has; despawn(id) kills the id immediately and '
+				+ 'leaves the SLOT until the end of the frame with its ALIVE bit clear, because a system '
+				+ 'whose indices moved under it is a bug that looks like the wrong entity taking damage. '
+				+ 'An internal system named <cast>.compact closes the gaps last in the frame phase, and '
+				+ 'compact() is public for a game driving its own loop. Compaction is STABLE rather than '
+				+ 'a swap-remove: a crowd that reorders itself whenever something dies makes '
+				+ 'three.steer\'s separation, which reads neighbours out of the same array, behave '
+				+ 'differently for reasons nothing in the game can see. The one place an index moves '
+				+ 'mid-frame is a spawn that finds the cast full with dead slots in it, and that only '
+				+ 'happens to a cast whose capacity is too small — watch cast.free. '
+				+ 'A FULL CAST ANSWERS three.NO_ENTITY rather than throwing, as three.nav.field answers '
+				+ 'null: a pool running out is ordinary for debris and projectiles and a game should drop '
+				+ 'the spark rather than stop. '
+				+ 'indexOf(id) is the slot or NO_ENTITY; idOf(slot) is the reverse and is what to keep '
+				+ 'across frames, because an index is only good for the frame it was read in. '
+				+ 'attach(id, object) fills the handle column and seeds the transform column from where '
+				+ 'the object already is; despawn HANDS THE OBJECT BACK rather than removing it, because '
+				+ 'a Cast is not a lifetime manager — scene.remove(pack.despawn(id)) is the line and it '
+				+ 'says at the call site what happens to the mesh. detach(id) takes it back without '
+				+ 'retiring the entity and objectAt(slot) reads it. '
+				+ 'tag(name) allocates a named bit in the state column — 31 of them, because bit 0 is '
+				+ 'ALIVE — so a system filter is a mask test rather than a property lookup. '
+				+ 'pose(position, { lift, heading }) copies a vec3 column into the transform column with '
+				+ 'a vertical offset and an optional heading, which is the three lines every presentation '
+				+ 'system writes because the capsule centre and the model origin are never the same '
+				+ 'point. sync() copies the transform column back onto the Object3Ds and carries the same '
+				+ 'trap three.batch does — a flush writes the NODE, so the objects go stale and writing '
+				+ 'any single component of one afterwards undoes the flush for that entity. '
+				+ 'system(name, fn, options) registers into three.systems under <cast>.<name> with the '
+				+ 'cast as the callback\'s second argument; dispose() takes them all back out. '
+				+ 'THE CAPACITY IS FIXED, and that follows from the columns being the API: a growing cast '
+				+ 'would reallocate them and every reference a script holds would point at the old memory.',
+			properties: ['capacity', 'name', 'count', 'alive', 'free', 'state', 'handles', 'transform'],
+			methods: [
+				'vec3(name)', 'float(name)', 'flags(name)', 'buffer(name, stride)', 'live(column)',
+				'tag(name)', 'spawn()', 'despawn(id)', 'indexOf(id)', 'idOf(slot)',
+				'attach(id, object)', 'detach(id)', 'objectAt(slot)', 'compact()', 'flush()', 'sync()',
+				'pose(position, options)', 'system(name, fn, options)', 'dispose()', 'toString()',
+			],
+		},
+		TransformBatch: {
+			construct: 'three.batch(objects, { trs })  |  three.batch(objects, { euler: true })',
+			note:
+				'A Float32Array-shaped bulk write over many nodes. positions is three floats per object, '
 				+ 'seeded from where they are now so a batch made and immediately flushed changes nothing. '
-				+ 'With { trs: true } the stride is ten — position, an xyzw QUATERNION, then scale — because a '
-				+ 'batch is written by arithmetic and the arithmetic that produced a rotation produced a '
-				+ 'quaternion. flush() sends the lot in one crossing and answers with how many landed; a '
-				+ 'member that has left the scene is skipped rather than throwing, because a crowd where one '
-				+ 'agent was removed this frame is ordinary.',
-			properties: ['positions', 'data', 'handles', 'objects', 'trs', 'stride', 'length'],
-			methods: ['flush()'],
+				+ 'flush() sends the lot in ONE crossing and answers with how many landed; a member that has '
+				+ 'left the scene is skipped rather than throwing, because a crowd where one agent was '
+				+ 'removed this frame is ordinary. '
+				+ 'TWO ROTATION FORMS, AND THEY ARE NOT REDUNDANT. { trs: true } is a stride of ten — '
+				+ 'position, an xyzw QUATERNION, then scale — for a batch written by ARITHMETIC, where '
+				+ 'whatever produced the rotation (a look-at, a slerp, a physics read-back) produced a '
+				+ 'quaternion and converting it to Euler to send it would be lossy at every gimbal-locked '
+				+ 'pose. { euler: true } is a stride of nine — position, an xyz EULER triple, then scale — '
+				+ 'for a batch written by a GAME, where the rotation is a heading and a limb swing: one '
+				+ 'angle each, typed by a person. The Euler form is what makes a crowd of characters one '
+				+ 'crossing instead of four: a critter writing a group position, a group heading and two leg '
+				+ 'angles measured 1.48 us a frame as four ordinary writes and 405 ns through one batch. '
+				+ 'They also SEED differently and for the same reason — a TRS batch starts at an identity '
+				+ 'rotation and a unit scale, because reading the objects\' Euler angles and converting them '
+				+ 'would silently rewrite rotations the script set by hand, while an Euler batch IS the '
+				+ 'script\'s own numbers and is seeded from object.rotation and object.scale. rotationAt(i) '
+				+ 'and scaleAt(i) give the index those start at, so i * stride + 3 is never written out by '
+				+ 'hand. '
+				+ 'FLUSH WRITES THE NODE, AND THE OBJECT STOPS AGREEING WITH IT. object.position and '
+				+ 'object.rotation are JavaScript numbers the host is never the authority on, and a batch '
+				+ 'goes straight to the node — so reading object.position.x back gives the stale value, and '
+				+ 'worse, WRITING ANY SINGLE COMPONENT AFTERWARDS UNDOES THE BATCH, because object.position.y '
+				+ '= 5 sends all nine of the object\'s numbers and overwrites the rotation and scale the '
+				+ 'batch wrote. It renders as a crowd snapping back to a pose it had frames ago. sync() is '
+				+ 'the fix and it is opt-in: it copies the array back onto the objects in JavaScript with no '
+				+ 'crossing. Call it when a script is about to touch those objects by hand again, and not '
+				+ 'every frame merely because it is there. boundingBox(), align() and the follow camera all '
+				+ 'read the host and are unaffected. '
+				+ 'It is NOT a faster way to move a dozen things — five hundred ordinary mesh.position.set '
+				+ 'calls are 0.245 ms, three per cent of a frame. What it is for is the case where the write '
+				+ 'is ALREADY a loop over numbers: a crowd steered by three.steer, a particle field, a '
+				+ 'chunked terrain.',
+			properties: ['positions', 'data', 'handles', 'objects', 'trs', 'euler', 'mode', 'stride', 'length'],
+			methods: ['flush()', 'sync()', 'rotationAt(i)', 'scaleAt(i)'],
 		},
 		NavField: {
 			construct: 'three.nav.field(goals)',
@@ -703,7 +824,23 @@ export const DOCS = {
 				+ 'agent. Freed by dispose() and by new three.Scene(), and nothing else — a field is one float '
 				+ 'per walkable cell and this API does not collect.',
 			properties: ['alive'],
-			methods: ['direction(point)', 'cost(point)', 'reaches(point)', 'dispose()', 'toString()'],
+			methods: [
+				'direction(point)', 'cost(point)', 'reaches(point)',
+				'sample(positions, { costs, directions })', 'dispose()', 'toString()',
+			],
+			note2:
+				'sample(positions, { costs, directions }) is direction and cost for a whole crowd in ONE '
+				+ 'crossing, and the two above are the wrong verbs to call in a loop — not because of the '
+				+ 'crossing but because of the argument checking in front of it. The bare host call that '
+				+ 'answers a number measures 143 ns; cost(point), the same call through the readVector that '
+				+ 'allocates a three-element array and runs three Number.isFinite checks to be polite about '
+				+ 'its argument, measures 652 ns; sample measures 159 ns an agent. positions is three floats '
+				+ 'per agent and is read; costs is ONE float per agent and directions is THREE, and either '
+				+ 'may be left out so a caller asking only how far everyone is pays for no directions. '
+				+ 'A NEGATIVE COST IS UNREACHABLE HERE, where cost(point) answers Infinity — the two '
+				+ 'disagree on purpose, because converting would mean a JavaScript pass over the array, '
+				+ 'which is precisely the loop this exists to avoid, and C3 has no infinity constant to '
+				+ 'write into a Float32Array instead. costs[i] < 0 is the test; Number.isFinite is not.',
 		},
 		Box3Helper: {
 			construct: 'new three.Box3Helper(box, color = 0xffff00)',
@@ -958,6 +1095,152 @@ export const DOCS = {
 			+ 'an agent starts slowing, and 0 never slows — which is how a crowd ends up orbiting a door. '
 			+ 'What comes back is a DESIRED velocity: integrate it yourself, and feed it to three.moveAndSlide '
 			+ 'for agents that collide or add it straight on for agents that do not.',
+		'three.clamp(v, min, max) / clamp01(v) / lerp(x, y, t) / inverseLerp(x, y, v) / mapLinear(x, a1, a2, b1, b2)':
+			'The scalar block four of the eight examples used to open with, spelled slightly differently in '
+			+ 'each — which is not a performance problem, it is four chances for one of them to be subtly '
+			+ 'different. Three.js\'s MathUtils names and Three.js\'s argument order. clamp01 is GLSL\'s '
+			+ 'saturate and has no Three.js equivalent; inverseLerp answers 0 when x and y are equal, '
+			+ 'because the honest alternative is a division by zero that reads as the whole gradient '
+			+ 'disappearing. These stay in JavaScript on purpose: a host call that allocates in order to '
+			+ 'answer arithmetic measures 185 ns against the 70 ns of the JavaScript it replaced, and it is '
+			+ 'slower on every call forever.',
+		'three.smoothstep(x, min, max) / smootherstep(x, min, max) / band(x, lo, hi)':
+			'The 0..1 ramp with flat ends, and THE ARGUMENT ORDER IS THREE.JS\'S, NOT GLSL\'S. GLSL is '
+			+ 'smoothstep(edge0, edge1, x); this is smoothstep(x, min, max) — the value comes FIRST. Every '
+			+ 'shader body in this project uses the GLSL order and every script uses this one, so the two '
+			+ 'sit a few lines apart in the same file and swapping them is silent: the answer is still a '
+			+ 'number in 0..1, just the wrong one. smootherstep has a zero second derivative at both ends '
+			+ '(Perlin\'s), and is what to use when a smoothstep ramp still shows a crease where it meets '
+			+ 'the flat part. band is a smooth bump — 0 outside lo..hi, 1 in the middle — with no Three.js '
+			+ 'equivalent: it is the splat-mask verb, and the reason a layered terrain reads as bands of '
+			+ 'material rather than as one gradient.',
+		'three.pingpong(x, length) / euclideanModulo(n, m) / degToRad(d) / radToDeg(r)':
+			'euclideanModulo answers with the sign of the DIVISOR, so -1 % 4 is 3 rather than -1 — which is '
+			+ 'what a wrap-around index or a tiling coordinate wants, because JavaScript\'s % is a remainder '
+			+ 'and the negative half of every tiled texture is where that shows. pingpong ramps up to '
+			+ 'length and back down forever. All Three.js MathUtils names.',
+		'three.moveTowards(current, target, maxDelta) / moveTowardsAngle(current, target, maxDelta)':
+			'Step towards a target at a FIXED RATE, stopping exactly on it — the linear sibling of '
+			+ 'three.damp, and the difference is what the two are for. damp closes a fraction of the gap '
+			+ 'per second, so it is fastest at the start and never quite arrives, which is right for a '
+			+ 'camera easing onto a target. This closes maxDelta per call and lands exactly, which is what '
+			+ 'a turn-rate limit, a reload timer, a fuel gauge and an ammo counter want: anything whose '
+			+ 'speed is a rule rather than a feel. maxDelta is a distance, so it is rate * dt. '
+			+ 'moveTowardsAngle is the same taking the short way round a circle.',
+		'three.wrapAngle(radians) / angleDelta(from, to)':
+			'The seam at +/-pi, named. wrapAngle folds an angle into [-pi, pi) — half open at the TOP, so '
+			+ 'exactly pi comes back as -pi, which is the same heading and matters to nothing that goes '
+			+ 'through angleDelta. angleDelta(from, to) is the '
+			+ 'SHORT way between two headings, signed. A heading of +3.1 against a target of -3.1 is 0.08 '
+			+ 'radians apart this way and 6.2 the straight way, and a character told to turn 6.2 radians '
+			+ 'spins a full circle to arrive somewhere it was already almost pointing. three.dampAngle and '
+			+ 'three.moveTowardsAngle are both written in terms of angleDelta, so there is one spelling of '
+			+ 'the wrap rather than three.',
+		'three.mixColor(a, b, t) / tintColor(colour, k)':
+			'Colour arithmetic over whatever mesh.color takes — a hex like 0xff8800, an [r, g, b], an '
+			+ '[r, g, b, a] or an {r, g, b} — answering with four components, so the result feeds straight '
+			+ 'back into mesh.color, a uniform, or another one of these. t is not clamped, for the same '
+			+ 'reason lerp does not clamp. tintColor scales brightness and leaves ALPHA ALONE, because a '
+			+ 'tint that also faded the thing out would be a surprise. There is no colour management here, '
+			+ 'so these are arithmetic on the numbers the pixel gets and nothing else.',
+		'three.seed(n) / randFloat(low, high) / randInt(low, high) / randFloatSpread(range)':
+			'Randomness that can be REPLAYED. These keep Three.js\'s names and DO NOT call Math.random: '
+			+ 'they draw from a seeded stream three.seed(n) resets. That is a deliberate divergence, and '
+			+ 'the reason is that Math.random throws away the determinism the rest of the engine goes to '
+			+ 'some trouble to have — the fixed step, the solver\'s own accumulator and state_hash all '
+			+ 'exist so that the same inputs produce the same frame, and one Math.random() in the gameplay '
+			+ 'layer costs all of it: a bug that reproduces on the tester\'s machine and not on yours, with '
+			+ 'no way to bisect. A script that wants an unrepeatable number still has Math.random. '
+			+ 'randInt is INCLUSIVE at both ends, as Three.js\'s is. new three.Random(seed) is the same '
+			+ 'generator owned by the caller, for when two systems must not perturb each other\'s sequence.',
+		'three.hash(x, y, seed) / noise2(x, y, options) / fbm2(x, y, options)':
+			'Noise, sampled AT A POINT rather than baked into a grid — which is the shape that composes: '
+			+ 'the same call fills a texture in a double loop, feeds field.fill((x, z) => ...) for terrain, '
+			+ 'and answers a single spawn test. hash is three ints in and a number in 0..1 out, and the '
+			+ 'same three always answer the same. noise2 is smooth value noise on a unit lattice, one '
+			+ 'feature per unit of x and y, taking { seed, period }. fbm2 is octaves layers of it, each '
+			+ 'twice as fine and half as strong, normalized back to 0..1 — the verb behind every generated '
+			+ 'rock face, bark, dirt and cloud in examples/ — taking { octaves, seed, period, lacunarity, '
+			+ 'gain }. PERIOD IS WHAT MAKES IT TILE: pass the number of cells across the image and the left '
+			+ 'edge meets the right. fbm2 tiles correctly only because each octave\'s period is scaled with '
+			+ 'its frequency, which is the one part of this that is wrong when it is written out by hand — '
+			+ 'and the reason a hand-rolled tiling fbm shows a seam at exactly one octave\'s worth of the '
+			+ 'image.',
+		'three.systems.add(name, fn, options) / remove / enable / list / report / clear / three.systemLoad(budgetMs)':
+			'THE ORDERED SYSTEM REGISTRY. three.setFixedLoop and three.setAnimationLoop each take ONE '
+			+ 'callback, so a game with five things to do a frame has one function with five things in '
+			+ 'it — and that is what this replaces. IT MAKES NOTHING FASTER and is not meant to: every '
+			+ 'JavaScript-side data layout measured inside the noise floor of the measurement itself. '
+			+ 'What it makes is a frame you can read and a slow one you can attribute. '
+			+ 'Options are { phase, order, enabled, context }: phase is \'frame\' (once a frame, the '
+			+ 'default) or \'fixed\' (zero or more times a frame at three.clock.fixedRate); lower order '
+			+ 'runs first and equal orders run in the order they were added, which is the rule that makes '
+			+ 'a file read top to bottom; context is passed to the callback as its second argument. '
+			+ 'ADDING A NAME THAT EXISTS REPLACES IT, so a re-run top level ends up with one copy of each '
+			+ 'system rather than two. '
+			+ 'SYSTEMS ARE HANDED SECONDS, unlike the animation callback, which keeps Three.js\'s '
+			+ 'milliseconds because it keeps Three.js\'s name — three.setAnimationLoop and '
+			+ 'three.setFixedLoop are themselves systems now, under the reserved names \'animation\' and '
+			+ '\'fixed\', which is why a script that has never heard of this is unaffected and why a '
+			+ 'later setAnimationLoop cannot silently evict the whole list. '
+			+ 'A SYSTEM THAT THROWS DOES NOT STOP THE OTHERS — that is most of the point, because with '
+			+ 'one callback a throw in the fruit code stops the camera. It is not swallowed either: the '
+			+ 'message names the system, repeats a few times and then goes quiet, and report() keeps '
+			+ 'counting. Nothing is disabled behind your back. '
+			+ 'report() answers [{ name, phase, enabled, ms, peak, calls, errors }] MOST EXPENSIVE FIRST, '
+			+ 'where ms is a rolling average of milliseconds PER FRAME — so a fixed system that ran four '
+			+ 'times reports what all four cost — and peak is the worst frame since it started, because '
+			+ 'a mean of 0.4 ms hides a system that spends 9 ms once a second and that is the one a '
+			+ 'player feels. three.systems.frameMs is the total and three.systemLoad(budgetMs) is it as a '
+			+ '0..1 fraction. Timing costs two three.clock.wall calls per system per call, about 3 us a '
+			+ 'frame for ten systems; three.systems.profile = false turns it off. '
+			+ 'clear() forgets everything, and new three.Scene() deliberately does NOT — a Scene is the '
+			+ 'contents of the world and these are the rules it runs under.',
+		'three.cast(options)':
+			'N THINGS OF ONE KIND, stored as columns and stepped by named systems — the critters, the '
+			+ 'crates, the pickups. NOT the whole world, and that restriction is the design rather than a '
+			+ 'simplification: every bulk verb here takes a contiguous typed array, so three.steer, '
+			+ 'three.moveAndSlideAll and field.sample are one call each only while the things they act on '
+			+ 'are one dense column. A general store with an archetype graph would have to gather before '
+			+ 'every call, and the gather is the cost those verbs exist to remove. So a COLUMN IS THE '
+			+ 'BUFFER THE BULK VERB TAKES and nothing is marshalled. Takes { capacity, name }; the name '
+			+ 'prefixes every system it registers, so a report says pack.chase rather than chase. '
+			+ 'three.NO_ENTITY is what cast.spawn() answers when the cast is full and what cast.indexOf() '
+			+ 'answers for anything despawned — full is an answer rather than an error, as '
+			+ 'three.nav.field answering null is. See the Cast class for the rest.',
+		'three.moveAndSlideAll(positions, motions, options) / three.moveBuffer(n) / three.moveResult':
+			'three.moveAndSlide for a whole crowd, in ONE call — the same controller, the same sweeps, and '
+			+ 'it exists for the SHAPE OF THE ANSWER rather than for the crossing. The single form measures '
+			+ '8.32 us per agent and this one measures 1.43 us: at two hundred agents that is 1.66 ms of a '
+			+ 'fixed step against 0.29 ms, and what went away is a JavaScript result object per agent — '
+			+ 'three live Vector3s and two lazy node properties, built for a caller who reads four numbers '
+			+ 'out of them. The index is also built once instead of being re-filed between sweeps, because '
+			+ 'this writes no node at all. '
+			+ 'positions is the capsule CENTRE, three floats per agent, and is READ AND WRITTEN — it is your '
+			+ 'position column, updated where it lies, so there is nothing to copy back. motions is the '
+			+ 'whole step\'s motion, three floats per agent, read. Options are { radius, height, step, '
+			+ 'slope, skin, snap, ignore, self, results }: the same six numbers the single form takes, ONE '
+			+ 'set for the whole crowd, because a crowd is one agent size — two sizes is two calls over two '
+			+ 'columns, which is also how they would have to be stored. '
+			+ 'self is how an agent stops colliding with its own mesh and it is a COLUMN rather than one '
+			+ 'object: two ints per agent, that agent\'s node and generation, whose whole SUBTREE it passes '
+			+ 'through. three.batch(objects).handles is already exactly that array and is the intended way '
+			+ 'to get one; an array of objects also works. ignore is still the shared set — the lift '
+			+ 'everybody rides — and takes at most seven alongside a self column, because the eighth of the '
+			+ 'eight slots is the agent itself. '
+			+ 'results is OPTIONAL and is three.moveBuffer(n): eight floats per agent, laid out by '
+			+ 'three.moveResult — remaining at 0, normal at 3, slope at 6, and a flags float at 7 holding '
+			+ 'moveResult.GROUNDED | STEPPED | TOUCHED. Leave it out and only the positions are written, '
+			+ 'which is what a crowd that just walks wants. '
+			+ 'EVERYONE MOVES AT ONCE: every agent is swept against the world as it was when the call '
+			+ 'started, because nothing is written to a node — so agent 3 does not see agent 2\'s new '
+			+ 'position. Resolving in array order instead would make the answer depend on how you happened '
+			+ 'to store your crowd, and three.steer\'s separation already assumes simultaneity. Two agents '
+			+ 'can therefore end a step overlapping; separation keeps that rare and the next step\'s '
+			+ 'depenetration resolves it. '
+			+ 'IT ANSWERS WITH NO NODE HANDLES. The single form reports ground and hit; a flat float array '
+			+ 'cannot, and "what am I standing on" is a moving-platform question belonging to the one '
+			+ 'character riding the platform — that character calls three.moveAndSlide, which still exists.',
 		'three.damp(current, target, lambda, dt)':
 			'Move current towards target by a fixed fraction of the remaining distance PER SECOND. lambda is '
 			+ 'the rate — 1 is lazy, 5 is a normal follow, 20 is nearly rigid — and dt is in SECONDS, so it '
@@ -1242,6 +1525,17 @@ export const DOCS = {
 			+ 'catching up and gets the callback stopped instead of stuttering. Runs after the '
 			+ 'frame\'s physics and before the animation callback. Same rules as setAnimationLoop — '
 			+ 'synchronous, one of them, null stops it.',
+		'three.clock.wall':
+			'The PROCESS\'s own monotonic clock, in milliseconds, and the one reading on three.clock that '
+			+ 'is not game time. Everything else there is scaled by timeScale and stops dead when paused, '
+			+ 'which is what makes x += speed * three.clock.dt need no check — and what makes it useless '
+			+ 'for the one question a profiler asks, because a system timed on the game clock reads zero '
+			+ 'while paused and four times its true cost in slow motion. So this answers a different '
+			+ 'question: HOW LONG DID THAT TAKE, in real milliseconds, whatever the game clock is doing. '
+			+ 'Two readings and a subtraction; a host call answering a number is 143 ns. '
+			+ 'three.systems.report() is built on it and is usually what to reach for instead. Its origin '
+			+ 'is when the JavaScript runtime opened and is shared with nothing else — differences are '
+			+ 'what it is for. Read only.',
 		'three.clock.time / three.clock.dt':
 			'The game clock, in SECONDS. time is what the frames have added up to and dt is what the '
 			+ 'frame being drawn is worth — 0 before the first frame and 0 while paused, so '

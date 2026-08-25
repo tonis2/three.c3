@@ -122,6 +122,8 @@ const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
 const char[*] PRELUDE_CHARACTER = $embed("prelude/character.js");
 const char[*] PRELUDE_QUERY = $embed("prelude/query.js");
 const char[*] PRELUDE_NAV = $embed("prelude/nav.js");
+const char[*] PRELUDE_SYSTEMS = $embed("prelude/systems.js");
+const char[*] PRELUDE_CAST = $embed("prelude/cast.js");
 const char[*] PRELUDE_API = $embed("prelude/api.js");
 const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 
@@ -137,7 +139,7 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[18] parts;
+	static qjs::EmbeddedModule[20] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -155,6 +157,8 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:character.js", (char[])PRELUDE_CHARACTER[..] },
 		{ "three:query.js", (char[])PRELUDE_QUERY[..] },
 		{ "three:nav.js", (char[])PRELUDE_NAV[..] },
+		{ "three:systems.js", (char[])PRELUDE_SYSTEMS[..] },
+		{ "three:cast.js", (char[])PRELUDE_CAST[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
@@ -222,7 +226,7 @@ fn void RunResult.free(&self)
 }
 
 <*
- One engine, and the host state it drives.
+ One engine, and the host state it drives.w
 
  `pass` is required and `renderer` is not: the scene graph, the handles, the
  staleness checks and `stats()` are all reachable with no Vulkan device at all,
@@ -253,6 +257,19 @@ struct JsRuntime
 	long script_budget_ns;
 	// The run's wall-clock budget. `started` is stamped at the top of `run`.
 	Clock started;
+
+	// The process's own monotonic clock, stamped once in `open` and never
+	// again — `three.clock.wall`.
+	//
+	// **A second clock, deliberately, and it is not the game clock.**
+	// `GameClock` is scaled by `timeScale` and stops dead when paused, which is
+	// exactly right for everything that MOVES and useless for measuring how
+	// long something TOOK: a profiler whose readings freeze with the game is a
+	// profiler that cannot measure a paused frame, and one that stretches with
+	// slow motion reports a system as four times slower for having been
+	// watched. `started` above cannot serve either — it is re-stamped per frame
+	// and per script, because it is a budget and not a clock.
+	Clock wall_clock;
 	long budget_ns;
 	bool timed_out;
 
@@ -390,6 +407,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	// all, which is what the module-loader checks want and what nothing that
 	// boots does. It has no clock either, and the clock verbs say so.
 	if (pass != null) pass.clock.defaults();
+	self.wall_clock = clock::now();
 
 	self.log.init(mem, 1024);
 	self.value.init(mem, 256);

@@ -832,8 +832,210 @@ before it reaches any BVH — 42 ns per node, linear in node count and independe
 of what the ray could possibly hit. So the 21 µs above is a property of the scene
 being 500 nodes, not of the ray. A hundred agents each casting one ground ray is
 2.1 ms, a quarter of the frame, in a scene small enough to be a demo. The
-broadphase to fix it exists and is unbound — see §17's bulk-spatial-queries
-task in `plan.md`, which pays for both.
+broadphase to fix it exists and is unbound.
+
+  **Both of those were then built**, and the numbers under "The gameplay
+  boundary at crowd scale" below replace them: `scene.raycast` goes through the
+  index rather than over every node, and the ceiling moved to somewhere else
+  entirely.
+
+### The gameplay boundary at crowd scale, and where the cost actually is
+
+The two measurements above are per-*object* and per-*frame*. This one is per
+**agent**, which is the unit a game with a pack in it counts in, and it was
+taken because "the loop is getting big" is a question about where the ceiling
+is rather than about tidiness.
+
+Same binary rule as ever — `--safe=no -O3`, and a number from the default build
+is not a number. 200 agents in a 400-node scene, 300 headless frames, so 60,000
+samples per row; the noise floor between two identical runs is ±150 ns, which
+is why the rows under it are given as a band.
+
+	a JS system over typed arrays (SoA)             ~70 ns
+	an ECS mask test plus a system callback        ~100 ns
+	a JS system over entity objects (AoS)          ~150 ns
+	----------------------------------------------------- the boundary
+	a bare host call answering a number             143 ns   (H.navCost)
+	one transform crossing (position.set)          ~380 ns
+	three.steer, per agent, incl. separation        435 ns   (ONE crossing for all 200)
+	field.cost(point) — the same call, through
+	  the prelude's readVector                      455 ns
+	three.moveAndSlide                             7530 ns
+
+**Everything above the line is inside the noise, and that is the finding.**
+Structure-of-arrays, array-of-structs and a masked system dispatch are 70, 150
+and 100 ns — they differ by less than one host call, and by about a third of
+the measurement's own error. The cache-locality argument that makes an ECS
+worth building in a C++ engine does not survive an interpreter in which
+`positions[i]` is already a bounds-checked call into the runtime. So a
+data-oriented layout in the JavaScript is free to adopt for the *legibility* of
+it and buys nothing that can be measured for the speed.
+
+**And `moveAndSlide` is not merely the biggest row, it is a different order of
+magnitude.** At 200 agents it is 1.5 ms of a fixed step, and what the caller
+gets for it is a `{ position, remaining, normal, grounded, slope, stepped,
+slides }` that four numbers are read out of. That is §17's original finding —
+"the crossing is not the cost, the answer is" — arriving at the scale where it
+stops being a curiosity.
+
+  A first attempt to decompose it swept an empty region of space to isolate the
+  crossing from the sweep, and attributed 3.10 us to the sweep and 4.68 us to
+  the crossing and the answer. **That split was wrong and the A/B below replaced
+  it**: sweeping where there is nothing also builds a *cheaper* answer, because
+  `ground` and `hit` come back as two nulls rather than as two allocated handle
+  arrays, so the empty-space measurement charged the sweep for work that was
+  really the answer's. The honest number is the one taken against a bulk form
+  that does the same sweeps and builds nothing — 1.43 us against 8.32 — and it
+  says the answer's shape was **six sevenths of it**, not three fifths. The
+  lesson is narrower than it looks and worth keeping: an isolation measurement
+  is only as good as the thing it holds constant, and "no geometry" did not hold
+  the answer constant.
+
+`field.cost` says the same thing more cheaply and more clearly. The bare host
+crossing is 143 ns; the same call through `readVector` — which allocates a
+three-element array and runs three `Number.isFinite` checks to be polite about
+its argument — is 455 ns. **The ergonomics layer costs twice what the boundary
+does.** That is a good trade for a verb called once a frame and a bad one for a
+verb called once per agent per frame, and the two are the same verb.
+
+So the rule §17 wrote down still holds and now has a second half:
+
+- **A verb answering a vector should write into a `Float32Array` the caller
+  owns** — and `three.steer` is the proof, at 435 ns per agent *including* the
+  seek and the neighbour separation, because its one crossing is amortised over
+  the whole crowd and it allocates nothing per agent.
+- **A verb called once per agent per frame should have a bulk form, and the
+  convenient form's argument checking is part of what the bulk form is
+  avoiding.** Not just the crossing.
+
+### What the three bulk verbs measured, and the one trap that came with them
+
+`three.moveAndSlideAll`, `NavField.sample` and `three.batch(…, { euler: true })`
+are the table above turned into verbs. Same conditions — `--safe=no -O3`, 200
+agents in a 400-node scene, 600 headless frames, 120,000 samples a row — and
+the noise floor between two identical runs came out at ±11 ns, which is tight
+enough that these are single figures rather than bands.
+
+	                                        before      after
+	the character controller, per agent    8.32 us    1.43 us    5.8x
+	the flow field, per agent               652 ns     159 ns    4.1x
+	a critter's transforms, per agent      1.48 us     405 ns    3.7x
+
+And for a frame of two hundred NPCs, which is the number that decides whether a
+game can have a crowd in it:
+
+	                        single verbs   bulk verbs
+	moveAndSlide              1.66 ms       0.29 ms
+	the flow field            0.13 ms       0.03 ms
+	three.steer               0.09 ms       0.09 ms
+	the transforms            0.30 ms       0.08 ms
+	the JavaScript systems    0.02 ms       0.02 ms
+	                          -------       -------
+	                          2.20 ms       0.51 ms
+
+**`three.steer` is now the biggest row, and that is the shape to aim for**: it
+is the only one left that is mostly doing arithmetic rather than paying for the
+way it was asked. Against a 4 ms gameplay budget the NPC ceiling moved from
+about 360 to about 1560.
+
+Three things are worth keeping from building them.
+
+**The crowd controller is a second door into the same room, so the test is an
+equality.** `Scene.move_capsules` calls `move_capsule` — the failure that would
+matter is not a crash but a bulk form that quietly disagrees about a ledge, so a
+pack walks through a step the player has to climb.
+`the_crowd_controller_answers_what_the_single_one_does` compares twelve agents
+over a floor, a wall and a low ledge and requires the positions to match *to the
+bit*, with the fixture asserted to actually reach `grounded` and `stepped` — a
+comparison of two all-false flag sets passes for free.
+
+**Everyone moves at once, and that had to be decided rather than fallen into.**
+Nothing is written to a node during the call, so agent 3 is swept against the
+world as agent 2 left it at the start of the step. Resolving in sequence would
+make the answer depend on the order the caller happened to store its crowd in —
+two characters walking into the same gap would have the earlier index win, and
+re-sorting the array for an unrelated reason would change who gets through.
+`steer_agents` already assumes simultaneity for its separation term. The cost is
+that two agents can end a step overlapping, which separation keeps rare and the
+next step's depenetration resolves.
+
+**The batch trap, which the Euler form makes much likelier.** `flush()` writes
+the NODE, and `object.position` is a JavaScript number the host is never the
+authority on — so after a flush the object is stale, and *writing any single
+component of it afterwards undoes the batch*, because `object.position.y = 5`
+sends all nine of the object's own numbers and overwrites the rotation and scale
+the batch just wrote. It renders as a crowd snapping back to a pose it had
+frames ago, which reads as an animation bug.
+
+  This was always true of `{ trs: true }` and almost never bit, because a batch
+  written by a slerp belongs to code that never touches those objects by hand.
+  The Euler form is for exactly the case that does: a heading and a limb swing
+  are what a script writes. So `sync()` exists, it copies the array back onto
+  the objects in JavaScript with no crossing, and it is **opt-in** — calling it
+  from `flush()` would tax every caller for a read most never do, which is the
+  same argument that keeps `MoveResult.ground` lazy.
+
+  It also drops `object._q`, the exact quaternion `instantiate()` leaves on a
+  glTF node. That is not tidiness: without it the next ordinary write would send
+  a quaternion the batch has already replaced, and the Euler triple beside it
+  would be ignored.
+
+**A negative cost is unreachable in `sample` where `cost()` answers `Infinity`,
+and that is the only place in this API where the convenient form and the flat
+form disagree about a VALUE rather than about a shape.** Converting would mean a
+JavaScript pass over the array, which is precisely the loop being avoided, and
+C3 has no infinity constant to write into a `Float32Array` instead — the same
+wall `js_nav_cost` hit, where the conversion could be done in the prelude
+because there was one number. It is documented in three places and tested,
+because it is the kind of asymmetry that is obvious to whoever wrote it and
+invisible to everyone else.
+
+### The math block, and the two decisions in it
+
+Four of the eight examples opened with the same eight helpers — `smooth`,
+`lerp`, `clamp01`, `step`, `band`, `tint`, `mixc`, `hash2` — and the copies had
+already drifted: three of them took `valueNoise(size, cellsX, cellsY, seed)`
+and one took `valueNoise(size, cells, seed)`. Four copies of one line of
+arithmetic is not a performance problem; it is four chances for one of them to
+be quietly different, and it is why they are now in `math.js` under Three.js's
+`MathUtils` names.
+
+They stay in JavaScript for the reason at the top of this section, and the
+entry exists so that nobody moves them later on the strength of the intuition
+rather than the number.
+
+Two things in it are deliberate divergences and both would otherwise read as
+bugs:
+
+- **`smoothstep(x, min, max)` takes the value FIRST, because Three.js does.**
+  GLSL's is `smoothstep(edge0, edge1, x)`. Every shader body in this project
+  uses the GLSL order and every script now uses the other one, so the two sit a
+  few lines apart in the same file — and swapping them is silent, because the
+  answer is still a number in 0..1. The examples that hand-rolled it called it
+  `step` and used the GLSL order, so this is the drift being named rather than
+  a new hazard being introduced. `band` was given the value-first order too, for
+  consistency with the function it is built out of rather than with GLSL.
+
+- **`randFloat` / `randInt` / `randFloatSpread` keep Three.js's names and do not
+  call `Math.random`.** They draw from a seeded stream that `three.seed(n)`
+  resets. This is the `plan.md` §6 entry, and putting it behind the names an
+  agent already knows is the whole point: the failure it prevents is not "a
+  script wanted determinism and could not get it", it is "a script got
+  non-determinism without ever deciding to". `state_hash`, the fixed step and
+  the solver's own accumulator all exist so that the same inputs produce the
+  same frame, and one `Math.random()` in the gameplay layer costs all of it —
+  a bug that reproduces on the tester's machine and not on yours, with no way
+  to bisect. A script that wants an unrepeatable number still has
+  `Math.random`; a script that needs two systems not to perturb each other's
+  sequence has `new three.Random(seed)`.
+
+The noise is sampled at a point rather than baked into a grid, which is the
+shape that composes — the same call fills a texture in a double loop, feeds
+`field.fill((x, z) => ...)` and answers one spawn test — and `period` is what
+the grid form was really for: it wraps the lattice so a texture tiles.
+`fbm2` scales each octave's period with its frequency, which is the one part of
+a tiling fbm that is wrong when it is written by hand, and the reason a
+hand-rolled one shows a seam at exactly one octave's worth of the image.
 
 ### What building the camera, the clock and the blending settled
 
@@ -898,10 +1100,9 @@ task in `plan.md`, which pays for both.
   halve the accuracy of every contact in the scene, and a physics rate is a
   property of that solver's stability rather than of a game's taste.
 
-  What it did **not** answer, and both belong where they already are: a seeded
-  RNG, without which the determinism `state_hash` proves is thrown away by one
-  `Math.random()` in the gameplay layer (§6), and clip events, which are the
-  animation entry above.
+  What it did **not** answer: clip events, which are the animation entry above.
+  The seeded RNG it also named is built — see "The math block" below, and the
+  divergence from Three.js that came with it.
 
 ---
 
@@ -1972,6 +2173,190 @@ low enough to matter. An interior, or a scene with no physics in it, would rank
 these differently and would find its own four.
 
 ---
+
+## 21. Systems and a cast — what a readable frame cost
+
+**Nothing here makes a frame faster, and that was decided before it was built.**
+§17's crowd table put every JavaScript-side data layout — arrays of structs,
+structures of arrays, a masked dispatch through a callback — between 70 and
+150 ns per agent per frame, inside the ±142 ns noise floor of the measurement
+itself. The speed was the three bulk verbs. This is about the fact that
+`examples/wumpa_run.js` had a ninety-line `setAnimationLoop` doing the camera
+look, the key latching, the transform write-back for eleven characters, the
+player's pose, the fruit's bob and the debris, none of which knew about each
+other, and a hundred-and-one-line `packStep` beside it.
+
+### `setAnimationLoop` is a system, and that is what makes nothing break
+
+The registry owns the host's two callback slots. `three.setAnimationLoop(fn)`
+registers `fn` under the reserved name `animation` and `setFixedLoop` under
+`fixed`, so a script that has never heard of `three.systems` installs exactly
+one system and gets exactly the behaviour it always had.
+
+  The obvious alternative was for the registry to install itself *through*
+  `setAnimationLoop`, like any other caller. It was rejected on paper: a later
+  `setAnimationLoop` would silently evict the whole list, and the symptom is
+  every system quietly not running with nothing raised anywhere. Owning the slot
+  costs one boolean — `millis` — on the reserved entry, which is what keeps that
+  callback's argument Three.js's milliseconds while every other system is handed
+  seconds. **Systems get seconds** because a system is not a Three.js concept
+  and everything else in this API — `three.damp`, `clock.fixedDelta`, every
+  integration in `examples/` — is in seconds.
+
+### A throwing system does not stop the others, and is not swallowed either
+
+With one callback a throw in the fruit code stops the camera, and what gets
+reported is that the camera broke. So a system's throw is caught, the message
+names the system, and the count keeps rising in `report()` after the log has
+gone quiet — three repeats of one message and then silence, because a failing
+system fails sixty times a second and a thousand identical traces is how the
+first one scrolls away.
+
+**Nothing is disabled behind the script's back.** Auto-disabling after N
+failures was considered and dropped: a system silently switched off is a second
+thing to discover, and the first one is already hard enough.
+
+**But the two reserved entries keep the host's contract exactly, and that was
+found by breaking seven tests.** `frame_loop.c3` stops a callback the moment it
+misbehaves — a throw, a budget overrun, or returning a promise — and keeps the
+reason for the next run. The first version of the registry ran everything
+through one `try`, which meant a throw never reached the host, a promise never
+reached the thenable check because the tick returned `undefined` instead of the
+callback's answer, and `three.setAnimationLoop`'s documented failure behaviour
+had quietly become something else for every script that had never heard of
+systems.
+
+  So the reserved entries run outside the containment and their answer is the
+  tick's answer, and the two behaviours are the choice a caller makes by which
+  door they came in:
+
+	three.setAnimationLoop(fn)     throws stop it, for good, with the reason
+	three.systems.add(name, fn)    throws are contained, named and counted
+
+  A budget overrun is neither, and that is worth knowing before writing a
+  `catch` anywhere near a frame: **QuickJS's interrupt is not catchable from
+  JavaScript.** A `try { while (true) {} } catch` does not see it; it goes
+  straight past to the host, which is what keeps an endless system from being
+  swallowed here. That was measured rather than assumed.
+
+**And a phase's host slot is taken only while that phase has systems in it**,
+which is the second thing the seven failures were about. `JsRuntime.tick`
+answers "did anything run", and a callback registered to run an empty list is a
+tick that claims it did — so a registry that installed both slots unconditionally
+made a stopped loop indistinguishable from a running one. The cost of getting
+that right is that a registry of nothing but fixed systems has no frame boundary
+to fold its averages at, and reports per STEP rather than per frame; saying so
+is cheaper than taking a frame slot to do nothing but fold.
+
+  The slots are re-installed on every `add` rather than once, which is also
+  about that stop: after the host takes a misbehaving callback away, the
+  registry is uninstalled without ever having been told. Registering a system is
+  not a per-frame call, so one crossing to be sure is free — and it makes adding
+  a system the way to resume after a callback took the loop down.
+
+### `three.clock.wall`, and why the game clock could not do it
+
+The one host-side addition. Everything on `three.clock` is game time — scaled by
+`timeScale`, stopped by a pause — which is what makes `x += speed * dt` need no
+`if`, and useless for the one question a profiler asks. A system timed on the
+game clock reads **zero while paused and four times its true cost in slow
+motion**: the measurement would be a function of the settings of the thing being
+measured. `JsRuntime.started` could not serve either; it is re-stamped per frame
+and per script, because it is a budget rather than a clock.
+
+Milliseconds as a double rather than nanoseconds as an integer, because the
+consumer is JavaScript and every other duration this API hands out is
+milliseconds; a double holds microsecond resolution for three hundred years of
+uptime.
+
+Profiling is **on by default**. Two `H.clockWall()` calls per system per call at
+143 ns is about 3 us a frame for ten systems — four hundredths of one per cent
+of the eight-millisecond budget — and the question it answers is "why did that
+frame stutter", which a profiler that has to be switched on first cannot answer
+about a stutter that has already happened. `three.systems.profile = false` for
+anyone who disagrees.
+
+  `report()` keeps a `peak` beside the rolling mean, because a mean of 0.4 ms
+  hides a system that spends 9 ms once a second and that is the one a player
+  feels. And it closes a real asymmetry: `three.stats()` has split the GPU frame
+  into six numbers since §19 so that a slow scene can be blamed on the shadow
+  pass, and §19.5 is titled "the CPU side of a frame, which nothing measures".
+
+### The three decisions `plan.md` §21 left open, and how they went
+
+**The name.** `cast` rather than `world`, because one instance is one KIND of
+thing. The restriction is the design and not a simplification held back for
+later: every bulk verb here takes a contiguous typed array, so `three.steer`,
+`three.moveAndSlideAll` and `field.sample` are one call each *only while the
+things they act on are one dense column*. A general store with an archetype
+graph would have to gather before every call, and the gather is the cost those
+verbs exist to remove. `world` would have promised the general thing.
+
+**When a despawn compacts.** At the end of the frame, by a system named
+`<cast>.compact` the Cast registers on construction and which is visible in
+`list()` like anything else. The rule is one sentence — **an index is valid for
+the frame it was obtained in** — and the alternative, compacting on the spot,
+is a bug that looks like the wrong entity taking damage rather than like an
+indexing error. The one exception is a `spawn` that finds the cast full with
+dead slots in it; that is a cast whose capacity is too small for its own churn,
+and `cast.free` is how to notice before then.
+
+  **Compaction is stable rather than a swap-remove**, which is O(count) where
+  the textbook answer is O(1). Two reasons: `count` here is a pack rather than a
+  particle system, and a crowd that reorders itself whenever something dies
+  makes `three.steer`'s separation — which reads neighbours out of the same
+  array — behave differently for reasons nothing in the game can see.
+
+**Whether a Cast owns its `Object3D`s.** It does not. `despawn(id)` hands the
+object back and `scene.remove(pack.despawn(id))` is the line, which says at the
+call site what happens to the mesh. The rest of this API frees nothing until it
+is told to, and a cast that quietly deleted nodes would be a local exception to
+that.
+
+### Two more that came up while building it
+
+**The capacity is fixed, and that follows from the columns being the API.** A
+growing cast would have to reallocate its columns, and every reference a script
+is holding to one would then point at the old memory. There is no way to make
+that safe that does not amount to handing out accessors instead of arrays, which
+is the thing this is built to avoid. A full `spawn()` answers `NO_ENTITY` rather
+than throwing, as `three.nav.field` answers null: a pool running out is ordinary
+for debris and projectiles, and a game should drop the spark rather than stop.
+
+**A spawned slot is zeroed, every column, every time.** A slot that came back
+from the free list holding the last occupant's velocity is the kind of bug that
+shows up as one critter in fifty behaving oddly, which is the hardest kind to
+find and the cheapest kind to prevent.
+
+### What the example looked like afterwards
+
+`examples/wumpa_run.js`, rewritten on it:
+
+	the eight arithmetic helpers it opened with     gone, into math.js
+	`packStep`, 101 lines of one function           6 named systems
+	`setAnimationLoop`, 90 lines                    7 named systems
+	`three.moveAndSlide` x 10, `field.cost` x 10    1 call each
+
+**And the report says the player is the most expensive thing in the frame** —
+0.57 ms against 0.09 ms for the pack's whole movement system, ten critters
+included. That is the single-agent verbs plus the spin's `query.sphere`, and it
+is not what anyone would have guessed before there was a way to ask. It is also
+the honest advertisement for the registry: the number was always there and
+nothing could read it.
+
+  The legs are an ordinary `three.batch` rather than part of the cast, and the
+  two compose the way they should: a cast slot MOVES when something above it
+  dies and a batch's membership does not, so the batch is indexed by the
+  critter's build number and a dead critter's legs are left in it, where the
+  host skips them because their Group has left the scene.
+
+  The fruit is deliberately **not** a cast, and the file says why: each one is a
+  drawn mesh plus a trigger volume the solver owns, and what the pickup is keyed
+  by is the volume's object identity arriving through `three.onTrigger`. A cast
+  buys nothing where the loop is over two dozen things already addressed by
+  object, and would cost a second index to get back to them. Not everything is a
+  cast, and a design that cannot say so is a design being sold.
+
 
 ## What is deliberately absent
 

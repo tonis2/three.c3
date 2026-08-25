@@ -1272,3 +1272,276 @@ fn void a_locked_cursor_reports_the_hand_and_not_the_cursor() @test
 	test::@check(still.dx == 0.0f && still.dy == 0.0f, "unlocked, a still cursor is no movement");
 	test::@check(!still.locked, "and says so");
 }
+
+<*
+ The crowd form of the controller has to be the SAME controller.
+
+ It is a second entry point into `move_capsule`, and the failure that would
+ matter is not a crash: it is a bulk form that quietly disagrees with the single
+ one about a ledge or a slope, so a pack walks through a step the player has to
+ climb. So the test is an exact comparison rather than a plausibility check —
+ twelve agents over a floor, a wall and a ledge, stepped both ways, and every
+ position has to match to the last bit.
+*>
+fn void the_crowd_controller_answers_what_the_single_one_does() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(80, 2, 80));
+			floor.position.y = -1;
+			scene.add(floor);
+			const wall = new three.Mesh(new three.BoxGeometry(20, 4, 1));
+			wall.position.set(0, 2, 6);
+			scene.add(wall);
+			// Low enough to be climbed, which is what makes 'stepped' fire.
+			const ledge = new three.Mesh(new three.BoxGeometry(20, 0.3, 4));
+			ledge.position.set(0, 0.15, -6);
+			scene.add(ledge);
+
+			const N = 12, R = 0.4, HEIGHT = 1.2, HALF = HEIGHT / 2;
+			const OPT = { radius: R, height: HEIGHT, step: 0.45, slope: 50, skin: 0.02, snap: 0.35 };
+
+			const start = new Float32Array(N * 3);
+			const motion = new Float32Array(N * 3);
+			for (let i = 0; i < N; i++) {
+				start[i * 3] = -8 + i * 1.5;
+				start[i * 3 + 1] = HALF + 0.05;
+				// Into the wall, over the ledge, and across open ground.
+				start[i * 3 + 2] = i < 4 ? 4.5 : (i < 8 ? -3 : 0);
+				motion[i * 3] = 0.05;
+				motion[i * 3 + 1] = -0.08;
+				motion[i * 3 + 2] = i < 4 ? 0.9 : (i < 8 ? -1.2 : 0.2);
+			}
+
+			const single = [], grounded = [], stepped = [];
+			for (let i = 0; i < N; i++) {
+				const r = three.moveAndSlide(
+					[start[i * 3], start[i * 3 + 1], start[i * 3 + 2]],
+					[motion[i * 3], motion[i * 3 + 1], motion[i * 3 + 2]], OPT);
+				single.push(r.position.x, r.position.y, r.position.z);
+				grounded.push(r.grounded);
+				stepped.push(r.stepped);
+			}
+
+			const bulk = start.slice();
+			const out = three.moveBuffer(N);
+			const count = three.moveAndSlideAll(bulk, motion, { ...OPT, results: out });
+
+			let worst = 0, flags = 0;
+			for (let i = 0; i < N; i++) {
+				for (let k = 0; k < 3; k++) worst = Math.max(worst, Math.abs(bulk[i * 3 + k] - single[i * 3 + k]));
+				const f = out[i * 8 + 7] | 0;
+				if (((f & three.moveResult.GROUNDED) !== 0) !== grounded[i]) flags++;
+				if (((f & three.moveResult.STEPPED) !== 0) !== stepped[i]) flags++;
+			}
+			// The fixture has to actually reach the branches, or matching is free.
+			return [count, worst, flags, grounded.filter(Boolean).length, stepped.filter(Boolean).length];
+		`, "the crowd controller script ran");
+
+		// Twelve stepped, not one bit of difference, no flag disagreement, all
+		// twelve grounded and four of them having climbed the ledge.
+		test::@check(value == "[12,0,0,12,4]",
+			"the crowd form and the single form agree exactly; got %s", value);
+	};
+}
+
+<*
+ The `self` column, which is what the crowd form has instead of `ignore`.
+
+ A character is a Group of meshes and it collides with its own chest without
+ this — the same defect §17 fixed for the single form, arriving again at the
+ place where "ignore this one object" cannot be written because there are two
+ hundred of them.
+*>
+fn void every_agent_ignores_its_own_subtree() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(60, 2, 60));
+			floor.position.y = -1;
+			scene.add(floor);
+
+			const N = 6, R = 0.4, HEIGHT = 1.2;
+			const bodies = [];
+			for (let i = 0; i < N; i++) {
+				const g = new three.Group();
+				// A snout, in FRONT of the capsule rather than around it: a mesh
+				// the capsule is already inside is depenetrated out and then
+				// walks freely, which would pass this test for the wrong reason.
+				const snout = new three.Mesh(new three.BoxGeometry(0.6, 0.8, 0.6));
+				snout.position.set(1, 0.6, 0);
+				g.add(snout);
+				g.position.set(i * 6, 0, 0);
+				scene.add(g);
+				bodies.push(g);
+			}
+
+			const OPT = { radius: R, height: HEIGHT, step: 0.4, slope: 50, snap: 0.3 };
+			const start = new Float32Array(N * 3);
+			const motion = new Float32Array(N * 3);
+			for (let i = 0; i < N; i++) {
+				start[i * 3] = i * 6;
+				start[i * 3 + 1] = HEIGHT / 2;
+				motion[i * 3] = 1.5;
+			}
+
+			const stuck = start.slice();
+			three.moveAndSlideAll(stuck, motion, OPT);
+
+			const free = start.slice();
+			three.moveAndSlideAll(free, motion, { ...OPT, self: three.batch(bodies).handles });
+
+			// An array of objects has to mean the same thing as the column.
+			const alsoFree = start.slice();
+			three.moveAndSlideAll(alsoFree, motion, { ...OPT, self: bodies });
+
+			let blocked = 0, moved = 0, agrees = 0;
+			for (let i = 0; i < N; i++) {
+				if (stuck[i * 3] - start[i * 3] < 0.5) blocked++;
+				if (free[i * 3] - start[i * 3] > 1.49) moved++;
+				if (Math.abs(free[i * 3] - alsoFree[i * 3]) < 1e-6) agrees++;
+			}
+			return [blocked, moved, agrees];
+		`, "the self-column script ran");
+
+		// Every one of them stopped on its own snout, every one of them walked
+		// the whole metre and a half once told about itself, and the two
+		// spellings of `self` agree.
+		test::@check(value == "[6,6,6]",
+			"an agent walks through itself and nothing else; got %s", value);
+	};
+}
+
+<*
+ The bulk field sampler against the single one, and the sentinel that differs.
+
+ `field.cost` answers `Infinity` for unreachable and `field.sample` answers a
+ negative number, which is the one place in this API where the convenient form
+ and the flat form disagree about a value rather than about a shape. It is
+ deliberate — converting means a JavaScript pass over the array, which is the
+ loop being avoided — and a test is what keeps it deliberate.
+*>
+fn void the_bulk_sampler_agrees_with_the_single_field() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(30, 1, 30));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			// An island nothing can walk to, so there is an unreachable sample.
+			const island = new three.Mesh(new three.BoxGeometry(4, 1, 4));
+			island.position.set(0, 8, 0);
+			scene.add(island);
+
+			three.nav.bake({ cell: 0.6, radius: 0.35, height: 1.2 });
+			const field = three.nav.field([[-10, 0.2, -10]]);
+
+			const points = [[-8, 0.2, -8], [0, 0.2, 0], [6, 0.2, 6], [0, 8.7, 0], [0, 40, 0]];
+			const pos = new Float32Array(points.length * 3);
+			points.forEach((p, i) => { pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2]; });
+
+			const costs = new Float32Array(points.length);
+			const dirs = new Float32Array(points.length * 3);
+			const count = field.sample(pos, { costs, directions: dirs });
+
+			let costAgrees = 0, dirAgrees = 0, unreachable = 0, infinite = 0;
+			points.forEach((p, i) => {
+				const one = field.cost(p);
+				const many = costs[i] < 0 ? Infinity : costs[i];
+				if (one === Infinity) infinite++;
+				if (costs[i] < 0) unreachable++;
+				if ((one === Infinity && many === Infinity) || Math.abs(one - many) < 1e-4) costAgrees++;
+				const d = field.direction(p);
+				if (Math.abs(d.x - dirs[i * 3]) < 1e-6 && Math.abs(d.z - dirs[i * 3 + 2]) < 1e-6) dirAgrees++;
+			});
+
+			// Costs alone is allowed, and a disposed field answers rather than reads.
+			const only = new Float32Array(points.length);
+			const alone = field.sample(pos, { costs: only });
+			field.dispose();
+			const dead = new Float32Array(points.length);
+			field.sample(pos, { costs: dead });
+
+			return [count, costAgrees, dirAgrees, unreachable, infinite === unreachable, alone, dead[0] < 0];
+		`, "the bulk sampler script ran");
+
+		// Five sampled, five costs and five directions matching, TWO points off
+		// the field — the island the floor cannot reach and the one in thin air
+		// — the two sentinels naming the same set of points, and a disposed
+		// field reporting everything unreachable.
+		test::@check(value == "[5,5,5,2,true,5,true]",
+			"the flat sampler is the same field; got %s", value);
+	};
+}
+
+<*
+ The Euler batch, and the trap that comes with any batch.
+
+ Two things at once, because they are the same mistake seen from two sides: the
+ nine-float form has to write the angles a script typed, and the object it wrote
+ them past has to be brought back into agreement before anything writes that
+ object by hand — or the next `position.y = ` sends all nine of the object's
+ stale numbers and undoes the whole flush.
+*>
+fn void an_euler_batch_writes_angles_and_leaves_the_object_behind() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const g = new three.Group();
+			const arm = new three.Mesh(new three.BoxGeometry(0.2, 1, 0.2));
+			arm.position.set(0, 0.5, 0);
+			g.add(arm);
+			scene.add(g);
+
+			// Made and flushed unchanged, an Euler batch changes nothing —
+			// which is only true because it is seeded from the object.
+			g.rotation.set ? 0 : 0;
+			g.rotation.z = Math.PI / 2;
+			g.scale.set(1, 3, 1);
+			const before = g.boundingBox();
+			const seeded = three.batch([g], { euler: true });
+			seeded.flush();
+			const after = g.boundingBox();
+			const unchanged = Math.abs(before.size.x - after.size.x) < 1e-4
+				&& Math.abs(before.size.y - after.size.y) < 1e-4;
+
+			// Now write through it. One flush, one crossing, two nodes.
+			const batch = three.batch([g, arm], { euler: true });
+			batch.positions[0] = 5;
+			batch.positions[batch.rotationAt(0) + 2] = 0;      // undo the roll
+			batch.positions[batch.scaleAt(0) + 1] = 1;
+			batch.positions[batch.rotationAt(1)] = 1.0;        // the arm's own pitch
+			const landed = batch.flush();
+
+			// The node moved; the OBJECT has not, and that is the trap.
+			const nodeMoved = Math.abs(g.boundingBox().center.x - 5) < 0.6;
+			const objectStale = g.position.x === 0;
+
+			const synced = batch.sync();
+			const objectAgrees = g.position.x === 5
+				&& Math.abs(g.rotation.z) < 1e-6
+				&& Math.abs(arm.rotation.x - 1.0) < 1e-6
+				&& g.scale.y === 1;
+
+			// And after sync an ordinary write no longer undoes the batch.
+			g.position.y = 2;
+			const survived = Math.abs(arm.rotation.x - 1.0) < 1e-6 && g.scale.y === 1;
+
+			let refused = false;
+			try { three.batch([g], { trs: true, euler: true }); } catch (e) { refused = e instanceof RangeError; }
+
+			return [batch.stride, landed, synced, unchanged, nodeMoved, objectStale, objectAgrees, survived, refused];
+		`, "the euler batch script ran");
+
+		test::@check(value == "[9,2,2,true,true,true,true,true,true]",
+			"nine floats, written, and the object caught up; got %s", value);
+	};
+}
