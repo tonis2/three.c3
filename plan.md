@@ -57,7 +57,7 @@ unload any more.
 does is in its own source file, and `git log -p -- plan.md` has the milestone
 accounts that used to be here.
 
-	c3c test --trust=full       721 passed, 0 failed, leak-clean
+	c3c test --trust=full       746 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -72,6 +72,14 @@ loud and argues for the exception; it does not just stop being true.
 Small, known, and each one is a number or a picture that lies rather than a
 missing feature. Worth clearing before anything on the feature list, because
 every one of them is something a person will trust and be wrong about.
+
+**What is left of this section is one defect wearing three faces, and none of
+them can be closed from here.** All three are a window on a machine this repo has
+never had: two backends that have compiled and never run, a DPI message nobody
+has seen arrive, and a width that goes stale because there is no `GetClientRect`
+equivalent written for x11 or wayland. So §1 is no longer a list of afternoons —
+it is a list of things that want a Linux box and a Windows box, and it will stay
+this length until somebody has one.
 
 - **Linux and Windows compile and have never been run.** Both backends
   type-check; neither has had a window on screen since any of the mouse, cursor
@@ -116,16 +124,6 @@ every one of them is something a person will trust and be wrong about.
   the first first-person camera, which is what pointer lock is waiting on too.
   Both are about a look that stays honest, and they should be answered together
   rather than one at a time.
-
-- **`ExportBatch` keys on `(asset, mesh)` alone**, so sibling nodes drawing one
-  shape with different materials collapse into a single instanced glTF node
-  wearing the *first* member's material — its texture, and since blending
-  landed, its `alphaMode` too. A wall and a window cut from one pane mesh
-  export as two copies of whichever came first, which is the same shape of bug
-  the old `texture_slot` collapse was: an export that looks right in the count
-  and wrong in the viewer. The fix is the material joining the batch key, which
-  splits the instanced node exactly where the frame's own buckets already
-  split. Surfaced by the blending work, not caused by it.
 
 ---
 
@@ -1987,8 +1985,9 @@ have the idea finds the measurement rather than the argument.
 TODO:
 
   
-  - §1 defects — Linux/Windows never run; WM_DPICHANGED unhandled; Window.width/height stale on Linux; ExportBatch keys
-    on (asset, mesh) so sibling nodes collapse onto the first material.
+  - §1 defects — Linux/Windows never run; WM_DPICHANGED unhandled; Window.width/height stale on Linux. All three are
+    platform-blind from this machine. (The `ExportBatch` collapse is fixed: the batch key is `(asset, mesh, material)`,
+    which is `Scene.Bucket`'s key.)
   - §2 — materials nobody disposes are immortal; a stale asset handle is refused at add() rather than at the
     constructor. (The other nine are built — see the `*(Built: …)*` paragraphs. What they left open: normals and
     motion vectors in a post body, downsampled post intermediates and MRT, and metallic-roughness having nothing to

@@ -135,6 +135,14 @@ export class Scene extends Object3D {
 	// collapsed either — what flattens is a run of leaves under one parent,
 	// into one node beneath that same parent.
 	//
+	// **Siblings that share a shape but not a material do not batch**, and
+	// they should not: a colour travels per copy in `_COLOR_0`, but a
+	// texture, a blend mode, a cull mode and a layer stack have no per-copy
+	// channel to travel in. Two materials over one mesh are two draw calls
+	// in the frame and two nodes in the file, sharing the geometry either
+	// way. So a wall and a window cut from one pane come back as a wall and
+	// a window.
+	//
 	// **`{ flatten: true }` batches copies that are not siblings**, which is
 	// the ones `asset.instantiate()` makes: an instantiated subtree arrives
 	// wrapped in a group of its own, so no two of them share a parent and the

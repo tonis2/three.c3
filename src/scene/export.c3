@@ -139,11 +139,19 @@
 
  ## What gets collapsed, and what keeps its name
 
- Sibling nodes drawing the same `(asset, mesh)` are written as one instanced
- node — but only when there are **two or more of them**. A batch of one is one
- draw call whichever way it is written, so a lone node keeps its name, its place
- in the tree and its own tinted material, and pays nothing for it. What collapses
- is the mass-produced copy, whose name is `crate.012` and whose loss is not one.
+ Sibling nodes drawing the same `(asset, mesh, material)` — the frame's own
+ bucket key — are written as one instanced node, but only when there are **two or
+ more of them**. A batch of one is one draw call whichever way it is written, so
+ a lone node keeps its name, its place in the tree and its own tinted material,
+ and pays nothing for it. What collapses is the mass-produced copy, whose name is
+ `crate.012` and whose loss is not one.
+
+ **The material is in that key and the tint is not**, and the two look alike from
+ a distance. A tint is `mesh.color`, one `Vec4` per copy, and it rides in the
+ instance array. A material is a blend mode, a cull mode, a UV transform, a map
+ and a layer stack, none of which the extension has a channel for and none of
+ which can be averaged — so copies that disagree about it are different buckets
+ in the frame and different nodes here. `ExportBatch` argues the case.
 
  A node with children of its own is never collapsed: instancing replicates a
  node's mesh, not its subtree, so there would be nowhere for the children to go.
@@ -171,8 +179,8 @@
 
  `flatten` is the way out, and it is a parameter rather than the default because
  it trades something real. It abandons the hierarchy: every drawing node in the
- scene is taken in **world space**, batched by shape alone, and written as a
- handful of instanced nodes under one root. The groups go, and so do the names of
+ scene is taken in **world space**, batched by shape and material wherever it
+ sits, and written as a handful of instanced nodes under one root. The groups go, and so do the names of
  the copies inside them. What comes back is the same picture in the same number
  of draw calls, and no longer a scene anybody can navigate in a viewer.
 
@@ -222,8 +230,8 @@ struct ExportReport
 	// `stats().instances`.
 	uint instances;
 	// How many of `nodes` are instanced nodes. Zero for a scene with no two
-	// siblings sharing a shape, which is how a script tells "instancing did not
-	// apply here" from "instancing is not working".
+	// siblings sharing a shape *and* a material, which is how a script tells
+	// "instancing did not apply here" from "instancing is not working".
 	uint batches;
 	// Nodes left out because they were helpers or were switched off.
 	uint skipped;
@@ -345,15 +353,45 @@ struct ExportMaterial @local
 	uint material;
 }
 
-// A run of sibling nodes drawing one shape, to be written as a single instanced
-// node. Keyed on `(asset, mesh)` alone rather than on the material as `entries`
-// is, because the material follows from the mesh — `base_color` and `texture`
-// are the `GpuMesh`'s, and the one thing that used to differ, the per-copy tint,
-// is exactly what moves into the instance arrays.
+<*
+ A run of sibling nodes drawing one shape with one material, to be written as a
+ single instanced node.
+
+ **Keyed on `(asset, mesh, material)`, which is `Scene.Bucket`'s key.** That is
+ the point: a batch is the file's word for what the frame calls a bucket, so a
+ run that is one draw call in the frame is one instanced node in the document and
+ one bucket again when the file is read back.
+
+ This key used to be `(asset, mesh)` alone, on the argument that the material
+ follows from the mesh — `base_color` and `texture` being the `GpuMesh`'s, and
+ the per-copy tint being exactly what moves into the instance arrays. The tint
+ half is still true and is why `_COLOR_0` exists. The rest was wrong the moment a
+ node could name a material of its own: `surface_for` reads the *node's* material
+ for its opacity, its blend mode, its cull mode, its UV transform, its layer
+ stack and — through `texture_slot` — its map, and every one of those is a thing
+ two siblings can disagree about while drawing one mesh.
+
+ What that cost is worth naming, because it is the failure this file is written
+ to prevent: the batch was written with `members[0]`'s material and the rest
+ inherited it. A wall and a window cut from one pane mesh exported as two copies
+ of whichever was added first — right in the count, right in the instance total,
+ and wrong in the viewer. Since blending landed it took `alphaMode` with it, so
+ the window came back opaque.
+
+ A run that splits here is not a run that lost anything: two materials over one
+ mesh are two buckets in the frame already, and writing them as two instanced
+ nodes sharing one set of geometry accessors is the same two draw calls back.
+*>
 struct ExportBatch @local
 {
 	AssetId asset;
 	uint mesh;
+	// `Node.material` — the `MeshPass.materials` index, not the document's. A
+	// resolved surface would dedup two identical materials into one batch and
+	// this does not, which is a split that costs a node and never a wrong colour.
+	// `surface_for` is a `.glb` read and an image encode deep; running it during
+	// batching to save a node in a scene nobody has written is the wrong trade.
+	uint material;
 	List{NodeId} members;
 }
 
@@ -566,11 +604,11 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 		Node* copy = self.collapsible(child);
 		if (copy == null) continue;
 
-		int index = batch_of(&batches, copy.asset, copy.mesh);
+		int index = batch_of(&batches, copy.asset, copy.mesh, copy.material);
 		if (index < 0)
 		{
 			if (self.geometry_for(copy.asset, copy.mesh)! < 0) continue;
-			ExportBatch fresh = { .asset = copy.asset, .mesh = copy.mesh };
+			ExportBatch fresh = { .asset = copy.asset, .mesh = copy.mesh, .material = copy.material };
 			fresh.members.init(mem, 8);
 			batches.push(fresh);
 			index = (int)batches.len() - 1;
@@ -581,7 +619,7 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 	foreach (child : node.children)
 	{
 		Node* copy = self.collapsible(child);
-		int index = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh);
+		int index = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh, copy.material);
 		if (index >= 0)
 		{
 			ExportBatch* batch = batches.get_ref((usz)index);
@@ -624,14 +662,15 @@ fn Node* Exporter.collapsible(&self, NodeId id)
 	return node;
 }
 
-// The batch drawing this shape, or -1. A linear scan: the count is the number of
-// *distinct shapes* among one node's children, which is single digits in a scene
-// anybody wrote and stays single digits in one a script generated.
-fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh) @local
+// The batch drawing this shape with this material, or -1. A linear scan: the
+// count is the number of *distinct buckets* among one node's children, which is
+// single digits in a scene anybody wrote and stays single digits in one a script
+// generated — a thousand crates in six colours are six.
+fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh, uint material) @local
 {
 	foreach (i, &known : batches)
 	{
-		if (known.asset == asset && known.mesh == mesh) return (int)i;
+		if (known.asset == asset && known.mesh == mesh && known.material == material) return (int)i;
 	}
 	return -1;
 }
@@ -660,6 +699,10 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	// Untinted, deliberately: the material is what a reader without `_COLOR_0`
 	// falls back to, so it has to be the shape's own colour rather than the first
 	// copy's. The tints go in the array below.
+	//
+	// Reading it off `members[0]` is exact rather than a sample, because the batch
+	// key holds the material: every member resolves to the same surface, so any of
+	// them would answer this. See `ExportBatch`, and the bug that was.
 	int entry = self.mesh_entry(first, NO_TINT)!;
 	if (entry < 0) return -1;
 
@@ -803,10 +846,10 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 
 	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
-		int index = batch_of(batches, node.asset, node.mesh);
+		int index = batch_of(batches, node.asset, node.mesh, node.material);
 		if (index < 0 && self.geometry_for(node.asset, node.mesh)! >= 0)
 		{
-			ExportBatch fresh = { .asset = node.asset, .mesh = node.mesh };
+			ExportBatch fresh = { .asset = node.asset, .mesh = node.mesh, .material = node.material };
 			fresh.members.init(mem, 16);
 			batches.push(fresh);
 			index = (int)batches.len() - 1;
