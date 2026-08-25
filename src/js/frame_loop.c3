@@ -750,10 +750,10 @@ fn void JsRuntime.follow_camera(&self, double dt_ms)
 
 	self.pass.scene.update_world_matrices();
 
-	// Column-major, so the translation is the last column — the same three
-	// elements `transform_point` adds for a point at the origin.
-	float[<16>] m = node.world.m;
-	self.pass.follow.apply(&self.pass.camera, (Vec3) { m[12], m[13], m[14] }, (float)dt_ms);
+	// The whole matrix rather than its translation column, because a follow with
+	// `local: true` reads the offset in the node's own frame and the rotation is
+	// where that frame lives. `apply_world` pulls the anchor out of it.
+	self.pass.follow.apply_world(&self.pass.camera, node.world, (float)dt_ms);
 
 	// The orbit point moved, so the reach the planes were derived against did
 	// too. `Controls` calls this after every gesture for the same reason.

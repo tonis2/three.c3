@@ -460,6 +460,19 @@ struct Scene
 	*>
 	uint static_revision;
 
+	<*
+	 The broad phase over drawable nodes — `scene/query.c3`.
+
+	 Beside the two caches above and invalidated by the same call, for the same
+	 reason: it is derived from the world matrices, and it cannot go stale
+	 without one of them going stale first. It differs from them in *when* it is
+	 rebuilt — `Scene.bounds` is refreshed by whoever asks and the shadow fit
+	 reads it every frame, where this one is rebuilt only by a query. A frame
+	 that asks nothing spatial pays nothing for it, which is what makes it safe
+	 to have at all.
+	*>
+	QueryIndex query;
+
 	// How many nodes are marked static right now. Maintained by the two writers of
 	// `Node.static_caster` and by `kill`, and read by `MeshPass.prepare` to decide
 	// whether the light's fit should hold still — see `ShadowMap.fit`'s `stable`.
@@ -509,6 +522,7 @@ fn void Scene.invalidate(&self, Node* node = null)
 {
 	self.matrices_current = false;
 	self.bounds_current = false;
+	self.query.current = false;
 	if (node == null || node.static_caster) self.static_revision++;
 }
 
@@ -605,6 +619,7 @@ fn void Scene.free(&self)
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
+	self.query.free();
 	*self = { };
 }
 

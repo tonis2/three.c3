@@ -19,11 +19,11 @@
  as the check on M2's world-matrix propagation, than it will be at M5 when it
  becomes `scene.raycast()` in JS.
 
- ## Broad phase first
+ ## Broad phase first, and it is an index rather than a walk
 
  An instance whose world AABB the ray misses is skipped without touching its
- tree. `Aabb3.transform_matrix` is the same function frustum culling uses, which
- is the point of `plan.md` §2 saying the broad phase is shared.
+ tree. Which instances are *reached* is `scene/query.c3`'s grid — see
+ `Scene.raycast` for why that stopped being a scan over every node in the scene.
 *>
 module three;
 
@@ -62,59 +62,45 @@ struct Hit
 *>
 fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 {
-	self.update_world_matrices();
-
 	Hit best = { .hit = false, .distance = float::max, .node = NO_NODE };
+	if (assets == null) { best.distance = 0; return best; }
 
-	foreach (slot, &node : self.nodes)
+	// **The walk is over cells now, not over nodes** — `scene/query.c3`, and
+	// `plan.md` §17. This used to test every node in the scene against the ray's
+	// broad phase before it could reach any tree: 42 µs of AABB tests in a
+	// 500-node scene for a ray that could only ever have hit what is in front of
+	// it, and `notes.md` §17 measured a hundred agents casting one ground ray
+	// apiece at 2.1 ms. The index below is rebuilt by the first query after
+	// anything moved and by nothing else, so the first cast in a frame costs
+	// what a cast used to and the ninety-ninth costs a cell walk.
+	//
+	// The broad phase itself is unchanged: the same world box, from the same
+	// `world_mesh_bounds`, tested with the same `intersect_ray`. What changed is
+	// which boxes are reached.
+	self.ensure_query_index(assets);
+	QueryIndex* index = &self.query;
+	index.stamp_now++;
+
+	index.@walk_ray(ray, float::max; uint i, float cell_near)
 	{
-		if (!node.alive || !node.world_visible) continue;
-		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
-
-		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
-		if (mesh == null || mesh.bvh == null) continue;
-
-		// Broad phase, in world space: shared with frustum culling.
-		collision::Aabb3 world_box = mesh.bounds.transform_matrix(node.world);
-		collision::HitInfo broad = world_box.intersect_ray(ray);
-		if (!broad.collided || broad.depth > best.distance) continue;
-
-		Matrix4f inverse_world = invert(node.world);
-
-		// A direction is a vector, not a point: the translation column must not
-		// reach it. Transforming it as a point puts the ray's far end at the
-		// inverse-transformed origin instead, which aims every ray at the model
-		// and produces hits that look plausible and are wrong.
-		Vec3 local_origin = transform_point(inverse_world, ray.origin);
-		Vec3 local_direction = transform_direction(inverse_world, ray.direction);
-
-		// The tree wants a unit direction, and normalising changes what the
-		// returned parameter *means*: under a scale of 2, one local unit is two
-		// world units. Dividing the local parameter by the length undoes exactly
-		// that, and is what makes `distance` comparable across instances.
-		float length = local_direction.length();
-		if (length < 1e-12f) continue;
-
-		collision::Ray local_ray = { .origin = local_origin, .direction = local_direction / length };
-		collision::HitInfo narrow = mesh.bvh.ray_intersects(local_ray);
-		if (!narrow.collided) continue;
-
-		float distance = narrow.depth / length;
-		if (distance >= best.distance) continue;
-
-		best = {
-			.hit = true,
-			.node = { .index = (uint)slot, .generation = node.generation },
-			.asset = node.asset,
-			.mesh = node.mesh,
-			.distance = distance,
-			.point = ray.origin + ray.direction * distance,
-			// The normal transforms by the inverse transpose, which the node
-			// already caches for the shader. Using the world matrix instead
-			// would tilt normals on any non-uniformly scaled instance.
-			.normal = transform_direction(node.normal, narrow.normal).normalize(),
-		};
-	}
+		// **Nearest cell first, so a cell that begins beyond the best hit so far
+		// cannot improve on it.** That is what makes the walk sublinear rather
+		// than merely indexed: a ground ray finds its floor in the second cell
+		// and does no narrow-phase work in any cell after it. The oversized
+		// entries come through with a `cell_near` of zero and so are never
+		// skipped by this — they have no cell to be ordered by.
+		if (cell_near < best.distance && index.stamp[(sz)i] != index.stamp_now)
+		{
+			index.stamp[(sz)i] = index.stamp_now;
+			QueryEntry entry = index.entries[(sz)i];
+			collision::HitInfo broad = entry.box.intersect_ray(ray);
+			if (broad.collided && broad.depth <= best.distance && self.query_node(entry) != null)
+			{
+				Hit hit;
+				if (self.ray_hits_node(assets, entry.node, ray, best.distance, &hit)) best = hit;
+			}
+		}
+	};
 
 	if (!best.hit) best.distance = 0;
 	return best;
@@ -181,7 +167,14 @@ fn Vec3 unproject(Matrix4f inverse_view_projection, float x, float y, float z) @
 	return { world[0] / world[3], world[1] / world[3], world[2] / world[3] };
 }
 
-fn Vec3 transform_point(Matrix4f m, Vec3 point) @local
+<*
+ A point through a column-major 4x4.
+
+ Not `@local` since `scene/query.c3`: the sweep and the bulk raycast do exactly
+ this arithmetic and a second copy of it is a second place for a row/column mix-up
+ to hide.
+*>
+fn Vec3 transform_point(Matrix4f m, Vec3 point)
 {
 	float[<16>] v = m.m;
 	return {
@@ -191,7 +184,8 @@ fn Vec3 transform_point(Matrix4f m, Vec3 point) @local
 	};
 }
 
-fn Vec3 transform_direction(Matrix4f m, Vec3 direction) @local
+// A direction through the same matrix: the translation column must not reach it.
+fn Vec3 transform_direction(Matrix4f m, Vec3 direction)
 {
 	float[<16>] v = m.m;
 	return {

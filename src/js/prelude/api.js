@@ -1,7 +1,7 @@
 // three.c3 — the `three` object itself: the light, the camera, the input, and
 // every verb an agent calls.
 
-import { Vector3, Box3, readVector, asTriple } from './math.js';
+import { Vector3, Box3, readVector, asTriple, damp, dampAngle, smoothDamp, CatmullRomCurve3 } from './math.js';
 import { Group } from './object3d.js';
 import {
 	Texture,
@@ -22,6 +22,8 @@ import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry,
 import { Field, scatter, catmullRom } from './field.js';
 import { character } from './character.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
+import { query, moveAndSlide, batch, TransformBatch, QueryResult } from './query.js';
+import { nav, steer, NavField } from './nav.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -210,13 +212,39 @@ const light = {
 const camera = {
 	get fov() { return H.cameraGet()[6]; },
 	set fov(v) {
-		const [tx, ty, tz, yaw, pitch, distance] = H.cameraGet();
-		H.cameraSet(tx, ty, tz, yaw, pitch, distance, +v);
+		const c = H.cameraGet();
+		H.cameraSet(c[0], c[1], c[2], c[3], c[4], c[5], +v, c[9]);
 	},
 
 	get yaw() { return H.cameraGet()[3]; },
 	get pitch() { return H.cameraGet()[4]; },
 	get distance() { return H.cameraGet()[5]; },
+
+	// The third angle, in DEGREES around the view direction, and the one of
+	// the three that is assignable — because it is not part of aiming the
+	// turntable. Yaw and pitch say where the camera looks and are written by
+	// `orbit()`; roll turns the picture and nothing else writes it.
+	//
+	// Zero is a level horizon, which is what a camera that never touches this
+	// has. It is the half of a vehicle camera that `attach({ local: true })`
+	// does not cover: the offset rides the fuselage, and this banks the view
+	// with it.
+	//
+	//     three.camera.attach(plane, { offset: [0, 1.2, 0.4], local: true });
+	//     three.setAnimationLoop(() => { three.camera.roll = plane.rotation.z * 180 / Math.PI; });
+	//
+	// Not clamped and not wrapped, unlike pitch and yaw, so `camera.roll += 1`
+	// in a loop reads back as a number that keeps climbing rather than as a
+	// sawtooth. See `Camera.roll` for why neither guard is needed here.
+	get roll() { return H.cameraGet()[9]; },
+	set roll(v) {
+		const value = +v;
+		if (!Number.isFinite(value)) {
+			throw new TypeError(`three.camera.roll wants degrees around the view direction, not ${v}`);
+		}
+		const c = H.cameraGet();
+		H.cameraSet(c[0], c[1], c[2], c[3], c[4], c[5], c[6], value);
+	},
 
 	// The three that `orbit()` writes, and the two that nothing writes, all
 	// refuse assignment out loud.
@@ -272,6 +300,11 @@ const camera = {
 			pitch ?? c[4],
 			distance ?? c[5],
 			c[6],
+			// Carried through, like the target and the fov. `cameraSet` writes
+			// every field it is given, so leaving roll off would level the
+			// camera on the next `orbit()` — which is one drag away, and would
+			// read as the roll not working rather than as orbit clearing it.
+			c[9],
 		);
 		return this;
 	},
@@ -279,7 +312,7 @@ const camera = {
 	lookAt(x, y, z) {
 		const c = H.cameraGet();
 		if (typeof x === 'object' && x !== null) ({ x, y, z } = x);
-		H.cameraSet(+x, +y, +z, c[3], c[4], c[5], c[6]);
+		H.cameraSet(+x, +y, +z, c[3], c[4], c[5], c[6], c[9]);
 		return this;
 	},
 
@@ -334,7 +367,7 @@ const camera = {
 	// a character faces, so this covers first person and a shoulder camera;
 	// what it does not cover is a camera bolted into something that pitches
 	// and rolls.
-	attach(object, { offset = [0, 0, 0], distance = null, lag = 0 } = {}) {
+	attach(object, { offset = [0, 0, 0], distance = null, lag = 0, local = false } = {}) {
 		const target = liveObject(object, 'three.camera.attach');
 		const [ox, oy, oz] = asTriple(offset, 'three.camera.attach(object, { offset })');
 		const boom = distance === null ? H.cameraGet()[5] : +distance;
@@ -343,7 +376,7 @@ const camera = {
 				`three.camera.attach(object, { distance }) wants zero or more — ${distance} is not a boom length`
 			);
 		}
-		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, +lag);
+		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, +lag, !!local);
 		return this;
 	},
 
@@ -422,8 +455,8 @@ const camera = {
 	set attached(_) { throw new TypeError('the camera follows through three.camera.attach(object) and three.camera.detach()'); },
 
 	toJSON() {
-		const [x, y, z, yaw, pitch, distance, fov, near, far] = H.cameraGet();
-		return { target: { x, y, z }, yaw, pitch, distance, fov, near, far };
+		const [x, y, z, yaw, pitch, distance, fov, near, far, roll] = H.cameraGet();
+		return { target: { x, y, z }, yaw, pitch, roll, distance, fov, near, far };
 	},
 };
 
@@ -645,6 +678,30 @@ const input = {
 	// three.onClick is the one thing dispatched from it.
 	get pointer() { return H.pointer(); },
 
+	// Take the mouse pointer out of the user's hands — plan.md §17.
+	//
+	// **What it buys is a look that does not stop.** Without it, `pointer.dx`
+	// is a difference of cursor positions, and a cursor stops at the edge of
+	// the screen while a hand does not: a mouse look turns until the pointer
+	// reaches the edge and then quietly refuses to turn any further. With it,
+	// the cursor is hidden and held inside the window and `dx`/`dy` come from
+	// the platform's own reading of the mouse, which keeps counting.
+	//
+	//     three.onClick(() => { three.input.pointerLock = true; });
+	//     three.onKeyDown('escape', () => { three.input.pointerLock = false; });
+	//
+	// **Reading it back tells you whether the platform gave it**, not what you
+	// asked for. A headless run has no window and always reads false, and so
+	// does a backend with no implementation. Nothing throws — a game should be
+	// able to fall back to a drag-look rather than refuse to start — so a
+	// script that cares reads the value back after setting it.
+	//
+	// `three.input.pointer.locked` is the same fact reported beside the deltas
+	// it is about, which is the one to test when the question is "are these
+	// numbers the good kind".
+	get pointerLock() { return H.pointerLockGet(); },
+	set pointerLock(on) { H.pointerLockSet(!!on); },
+
 	// True for the one frame a click finished on. A press that travelled or
 	// was held is a drag, and a drag belongs to the camera.
 	get clicked() { return H.pointer().clicked; },
@@ -854,6 +911,35 @@ export const three = {
 	// of swinging wide of the close ones. Feed the result to field.carve /
 	// field.stroke / a scatter's avoid corridor, or to a RibbonGeometry.
 	catmullRom,
+	// The three-dimensional half of the curve pair, and the one a loop
+	// samples rather than a bake consumes: a camera rail, a patrol route,
+	// a rope. Three.js's class, constructor and method names.
+	//
+	// getPoint(t) walks the curve's own parameter and getPointAt(u) walks
+	// its LENGTH, and the difference is what makes hand-written rail code
+	// look wrong — an object moving at constant t speeds up through the
+	// widely spaced control points and crawls through the close ones.
+	CatmullRomCurve3,
+
+	// The two verbs between "where it is" and "where it should be", and
+	// both are frame-rate independent, which is the whole reason they are
+	// named rather than written inline. `x += (target - x) * 0.1` closes a
+	// tenth of the gap per FRAME, so it is twice as fast at 120 Hz as at
+	// 60 — a chase tuned on one machine is a different chase on another,
+	// and nothing about it reads as a bug.
+	//
+	// damp is a decay: fastest at the start, asymptotic at the end, right
+	// for a camera easing onto a target. smoothDamp is a critically damped
+	// spring: it has momentum, so it accelerates and arrives, which is what
+	// a turret slew or a sliding panel wants. dampAngle is damp taking the
+	// short way round a circle, which is the one a heading needs.
+	//
+	// dt is in SECONDS. `three.clock.dt` is milliseconds, so it is
+	// `three.clock.dt / 1000` at every call site.
+	damp,
+	dampAngle,
+	smoothDamp,
+
 	// A walkable character with a follow camera — the controller every
 	// third-person scene writes by hand, and the place the two worst bugs in it
 	// (camera/movement frame disagreement, and hand-rolled orbit-trig signs) are
@@ -861,6 +947,53 @@ export const three = {
 	// function), moves with WASD relative to the camera, drag-looks, jumps, and
 	// swings the mesh's limb pivots as it walks. See character.js.
 	character,
+
+	// The spatial questions a game asks that a picture does not: what is
+	// within five metres, what does this box overlap, what is behind that
+	// wall, and where does this capsule stop if it moves there.
+	//
+	// They go through an index over the scene's drawable nodes, which is
+	// rebuilt by the first query after anything moved and by nothing else — so
+	// a frame that asks nothing pays nothing, and the hundredth ground ray in
+	// a frame costs a cell walk. scene.raycast goes through the same index and
+	// stopped being a scan over every node in the scene because of it.
+	query,
+	// A reusable answer buffer for the flat form of every query verb —
+	// three.query.buffer(n) is the way to make one.
+	QueryResult,
+
+	// The character controller: sweep a capsule, slide along what it hits,
+	// climb a ledge under the step height, and report whether it is standing
+	// on anything. It takes a position and answers with a position — it does
+	// not own an object and integrates nothing, so gravity and the jump stay
+	// the caller's. Not to be confused with three.character, which is the
+	// higher-level helper that rides a height field and does not collide.
+	moveAndSlide,
+
+	// Move many nodes in one crossing, through a Float32Array. NOT a faster
+	// way to move a dozen things — notes.md §17 measured five hundred ordinary
+	// position writes at three per cent of a frame — but the right shape when
+	// the write is already a loop over numbers: a crowd, a particle field, a
+	// chunked terrain. The trigger is about two thousand nodes a frame.
+	batch,
+	TransformBatch,
+
+	// Navigation. three.nav.bake() voxelizes the scene's standing room;
+	// three.nav.path(from, to) is one agent's route, shortened against the
+	// geometry so it does not look like it is walking cell centres; and
+	// three.nav.field(goals) is the solve KEPT, which is what a crowd samples.
+	// The two verbs are two because a path is a whole solve thrown away after
+	// one answer, and offering only that guarantees somebody writes the second
+	// one badly.
+	nav,
+	NavField,
+
+	// Seek, arrive and separation over a whole crowd in one crossing, writing
+	// into a Float32Array the caller owns. It answers with a DESIRED velocity:
+	// integrating it and deciding whether an agent may actually go there are
+	// the caller's, which is what lets the same call feed three.moveAndSlide
+	// for agents that collide and a plain add for agents that do not.
+	steer,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the

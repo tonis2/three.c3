@@ -905,6 +905,217 @@ task in `plan.md`, which pays for both.
 
 ---
 
+### What building the queries, the controller, the nav bake and the crowd settled
+
+Every unbuilt item in this section except animation blending and IK, done in one
+pass. What follows is the part that is not in the code.
+
+**The measurements are on `--safe=no -O3`, macOS arm64, headless**, because
+`notes.md` §17 above says a number that does not name its build is not a
+measurement. The fixture is a 100 m square of ground with N four-by-six-metre
+boxes scattered on it.
+
+	host raycast, static scene, 101 nodes         0.5 us
+	host raycast, static scene, 501 nodes         0.8 us
+	host raycast, static scene, 2001 nodes        1.5 us
+	index rebuild + one cast, 502 nodes          21.5 us
+	index rebuild + 100 casts, 502 nodes         80   us   (0.8 us a cast)
+	index rebuild + one cast, 2002 nodes         70.5 us
+	overlapSphere r=8 into a buffer, 501 nodes    4.0 us
+	sweep a 0.4 capsule 4 m, 501 nodes            4.0 us
+	moveAndSlide one step, 501 nodes             10.5 us
+
+**The raycast is flat now, and it was not the thing that was slow.** §17 above
+measured `scene.raycast` at 21 µs in a 500-node scene and blamed the broad
+phase, which walked every node. The broad phase is now an index and the *host*
+verb is 0.8 µs — but the JavaScript wrapper around it was walking the whole
+scene a second time, to turn the node handle into the `Object3D` a script is
+holding:
+
+	scene.traverse(noop), 501 nodes              79   us
+	scene.raycast, object resolved eagerly       82.5 us
+	scene.raycast, object resolved lazily         2.0 us
+
+So the entry's own worked example — "a hundred agents each casting one ground
+ray is 2.1 ms" — was about to become **eight** milliseconds, in the change that
+was supposed to fix it. `Scene._intersection` now hands back `object` as a getter
+that walks on first access, which is free for the overwhelmingly common caller
+that reads `distance` and `point` and never asks what it hit. Same trick, same
+reason, in `moveAndSlide`'s `ground` and `hit`.
+
+**The lesson is the one §17 already wrote down and did not apply far enough.**
+The rule was "a verb that allocates in order to answer arithmetic is a loss";
+the same is true of a verb that *searches* in order to answer a handle, and
+QuickJS charges 160 ns a node to traverse. Anything that turns a host answer
+into a script's own object should be lazy until proven otherwise.
+
+**The index is rebuilt on demand and never by the frame.** A frame that asks
+nothing spatial pays nothing; a frame in a scene where something moved pays
+21 µs for the first query and 0.8 µs for every one after it. That is the whole
+of the design, and it is what makes the break-even the *second* query rather
+than the twentieth. It is a rebuild rather than an incremental
+insert/update/remove against `collision::SpatialHash3D` — which is what the plan
+called for — because a world box is only knowable after `update_world_matrices`
+and the scene has no per-node "this one moved" signal to hang an update on:
+`Scene.invalidate` is told a node at most half the time and is told nothing at
+all by the walk that actually moves a subtree.
+
+**The box in the index is `mesh.bounds.transform_matrix`, not
+`world_mesh_bounds`.** The second transforms every vertex and is what
+`Scene.bounds` needs; a broad phase wants the cheap conservative one. Measured on
+the rebuild: 65 ns a node against 12.
+
+### The one bug that mattered, and the one that hid behind it
+
+**A capsule resting on a floor could not walk.** Conservative advancement
+measures the clearance to the nearest surface and steps by it, and a character
+standing on the ground is permanently at zero clearance from it — so the sweep
+reported a hit at fraction zero, the slide had nothing to project, and the
+character was pinned to the spot it spawned on: grounded, upright, and deaf to
+every key. Nothing threw.
+
+The fix is that **only a contact the motion is pushing *into* stops anything**,
+and it falls out of making the advance directional: the bound is
+`(distance − clearance) / (direction · axis)` where `axis` points from the
+capsule to the surface, so a floor underfoot has a closing rate of nought for a
+horizontal step and is not in the way at all. That is also what makes the bound
+tight rather than merely safe — a grazing surface gives a large step instead of a
+crawl.
+
+**Behind it was a convergence bug that only appeared once the first was fixed.**
+Each step advances by exactly the gap, so the capsule approaches contact
+asymptotically and `distance <= clearance` is left one ulp short for ever — the
+sweep answers "no hit" for a wall it is a ten-thousandth of a millimetre from,
+and the character walks through it. `SWEEP_TOUCH` is the tolerance, scaled by the
+length of the motion because float's own noise floor is. Both have a test named
+after them in `test/query_test.c3`.
+
+### The nav bake, and the number §17 asked for
+
+"Measure the bake cost first at a 0.5 m cell over a 100 m town — that number
+decides whether this is a level-boundary operation or a loading-screen one."
+
+	40 m town,  60 buildings, 0.5  m cell     8 ms   189k voxels   6.2k walkable
+	100 m town, 300 buildings, 0.5  m cell   39 ms   1.07M voxels  38.6k walkable
+	100 m town, 300 buildings, 0.25 m cell  144 ms   7.1M voxels   176k walkable
+	field solve   (100 m, 0.5 m)              2 ms
+	field solve   (100 m, 0.25 m)            10 ms
+	path          (100 m, 0.5 m)            1.8 ms
+	path          (100 m, 0.25 m)          11.8 ms
+	steer, 200 agents                     25-30 us
+
+**At half a metre it is a level-boundary operation** — forty milliseconds is two
+frames, once, when a level loads. At a quarter it is a loading screen, and the
+ratio is the cube: halving the cell is eight times the voxels and about four
+times the wall clock. So the answer to the plan's question is "either, and the
+cell is the switch", which is why `cell` is the first argument and why
+`three.nav.stats()` reports `bakeMs` — a caller can settle it for their own
+level rather than for this one.
+
+**The two-verb split earns its keep at exactly the ratio the plan guessed.** A
+path is 1.8 ms and a field solve is 2 ms, so the hundredth agent asking for a
+path costs 180 ms and the hundredth agent sampling a field costs nothing. That
+is the entire argument for `nav.field` existing, and it is now a number.
+
+**The complement is the whole of what this file added.** `create_voxel_grid`
+voxelizes the *inside* of a closed mesh by crossing parity; navigation wants the
+outside of many open meshes, and not all of the outside but the thin layer of it
+that is standing room. `VoxelGrid` is a plain struct — an origin, a cell size,
+three extents, a voxel-to-entry index and an ascending entry list — so filling it
+with standing room instead of with material is the only new code. `solve_field`,
+`sample`, `nearest_cell` and the multi-source crowd machinery are used exactly as
+they were written, having never been imported by anything before.
+
+**A step is one cell, and a caller has to know.** The solver relaxes over a
+3x3x3 neighbourhood, so two walkable cells are connected when they are adjacent
+— including diagonally and including one cell up. A stair with a rise larger than
+the cell size is a wall to this grid. At half a metre that is a generous step;
+finer stairs want a finer cell and pay the cube for it.
+
+### The crowd, and where the boundary rule pointed
+
+`three.steer` is one crossing for the whole crowd — 200 agents in 25 µs,
+including a grid-accelerated separation pass. It is one verb rather than five
+because seek and arrive on their own are four multiplies and belong in
+JavaScript by §17's own rule, and they are *composed* with separation and the
+flow field, which do not; splitting the composition would mean three crossings
+and two intermediate arrays to save an arithmetic operation that was never the
+cost.
+
+**Batched transforms confirmed §17's guess about their own trigger.**
+
+	batch.flush(), 2000 nodes                     6 us
+	2000 x mesh.position.y = v                  655 us
+
+§17 said "a scene moving more than about two thousand nodes a frame, which is
+0.6 ms and starting to matter". It is 0.655 ms, and the batch is a hundredfold
+cheaper. The entry was right about the number and right to refuse to build it
+until something needed it — `three.steer` is that something, because a crowd's
+positions are already a `Float32Array`.
+
+### Pointer lock, and the symbol that is not there any more
+
+**`CGAssociateMouseAndCursorPosition` is gone on macOS.** It is the documented
+way to say "stop the mouse moving the cursor", every engine calls it, and on
+Darwin 25 it is not an exported symbol: the link fails with an undefined
+`_CGAssociateMouseAndCursorPosition` and neither the header nor the
+documentation says a word. Measured against the shared cache in the same
+session: `CGWarpMouseCursorPosition`, `CGDisplayHideCursor`,
+`CGGetLastMouseDelta` and `CGSetLocalEventsSuppressionInterval` are all still
+there and that one is not.
+
+So the darwin backend hides the cursor and warps it back to the middle of the
+window, which brings its own trap: **after a warp CoreGraphics ignores local
+mouse events for a quarter of a second by default**, which is exactly what a
+mouse look is made of. `CGSetLocalEventsSuppressionInterval(0)` is the whole
+fix, it is deprecated, and the replacement takes an event source the window does
+not own.
+
+The recentre is **not** every frame — a warp is a round trip to the window
+server and perturbs the event stream. The cursor only has to stay off the
+screen's edges and inside the window, so it is left alone while it is anywhere
+in the middle half and snapped back when it leaves.
+
+**The look itself does not depend on the lock at all.** It is built from
+`Window.getMouseDelta`, the mouse's own reported movement, which keeps arriving
+whatever the cursor is doing. Hiding and recentring are about the *cursor* —
+that it is not sitting in the middle of the picture, and that it cannot wander
+onto another application and take a click with it. That separation is why
+`MouseState.dx` is the platform's delta when locked and a difference of
+positions when not, and why both are reported in the same units and the same way
+up: AppKit's `deltaY` counts down and its `mouseLocationOutsideOfEventStream`
+counts up, and the one negation that reconciles them is in the backend so that
+nothing above the window library has to know which platform it is on.
+
+**`three.input.pointerLock` reads back what the platform DID.** Not what was
+asked for. A headless run has no window and answers false; so does a backend
+with no implementation. Nothing throws, because a headless run and a Wayland
+session are not mistakes a script made, and a game should be able to fall back to
+a drag-look rather than refuse to start.
+
+### The camera's third angle
+
+`roll` is a plain field with no clamp, and that is deliberate: yaw wraps and
+pitch is held a degree off the pole because both protect `look_at` from a
+degenerate basis, and roll cannot produce one — it rotates the up vector *around*
+the forward axis. Wrapping it anyway would make `camera.roll += 1` in a loop read
+back as a sawtooth, which is worse than a large number for a value a script is
+integrating.
+
+**`Camera.up` exists so there is one answer.** `view`, `basis` and `view_bounds`
+each spelled `{ 0, 1, 0 }` inline, and three copies of a constant is how a rolled
+view matrix ends up disagreeing with a rolled pan: the picture leans and the drag
+does not, which reads as the mouse being broken.
+
+**The follow's `local` flag and the roll are separate on purpose.** The offset
+riding the fuselage is what a cockpit needs; a level horizon is what a turret
+needs; and a script that wants both writes `camera.roll` from the vehicle each
+frame. Coupling them would have made the second case unreachable, and driving
+yaw and pitch from the followed node as well would have broken the property
+§17's follow-camera note protects — that a drag still orbits while attached.
+
+---
+
 ## 18. Outdoor scenes — the measurement
 
 The first scene built on this engine by an agent rather than by its author is

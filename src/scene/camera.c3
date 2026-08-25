@@ -26,6 +26,26 @@ struct Camera
 	// Degrees. Yaw turns around +Y, pitch lifts the eye above the horizon.
 	float yaw;
 	float pitch;
+
+	<*
+	 Degrees around the view direction. Zero is level, and level is what
+	 everything that does not set this gets.
+
+	 **The third angle, and the reason it is not a fourth setter on `orbit`.**
+	 Yaw and pitch aim the camera and are what a drag writes; roll does not aim
+	 it at all, it turns the picture. A turntable has no use for it — §17 was
+	 explicit that the trigger is the first vehicle, because a cockpit in
+	 a banking aircraft and a turret on a listing ship are the two cases where a
+	 level horizon is the wrong answer rather than merely an unexciting one.
+
+	 It is a plain field with no clamp. Yaw wraps and pitch is held a degree off
+	 the pole because both of those protect `look_at` from a degenerate basis;
+	 roll cannot produce one — it rotates the up vector *around* the forward
+	 axis, so the cross product it feeds is never near zero however far it is
+	 wound.
+	*>
+	float roll;
+
 	float fov;
 	float near_plane;
 	float far_plane;
@@ -164,7 +184,43 @@ fn void Camera.derive_planes(&self, float reach = 0.0f)
 const float FIRST_PERSON_NEAR = 0.05f;
 
 <*
+ Which way is up for this camera, in world space.
+
+ **World +Y until `roll` is set, and the one function that decides it.**
+ `view`, `basis` and `view_bounds` all used to spell `{ 0, 1, 0 }` inline, and
+ three copies of a constant is exactly how a rolled view matrix ends up
+ disagreeing with a rolled pan: the picture leans and the drag does not, which
+ reads as the mouse being broken rather than as the camera having two ideas
+ about up.
+
+ Rodrigues around the forward axis, which is well conditioned at every roll
+ because `up` and `forward` are perpendicular by construction — the sine term
+ is the full-length `right` vector and the degenerate case the pitch clamp
+ guards against cannot arise here.
+*>
+fn Vec3 Camera.up(&self)
+{
+	if (self.roll == 0.0f) return { 0, 1, 0 };
+
+	Vec3 forward = self.orbit_dir() * -1.0f;
+	Vec3 sideways = forward.cross((Vec3) { 0, 1, 0 });
+	// Same fallback as `basis`, and for the same reason: a caller may write
+	// `pitch` past the clamp directly, and a NaN up vector is an empty frame.
+	if (sideways.length() < 1e-6f) sideways = (Vec3) { 1, 0, 0 };
+	sideways = sideways.normalize();
+	Vec3 level = sideways.cross(forward);
+
+	float angle = math::deg_to_rad(self.roll);
+	return level * math::cos(angle) + sideways * math::sin(angle);
+}
+
+<*
  The camera's right and up axes in world space.
+
+ Rolled, because a pan is a drag across the *picture* and the picture is what
+ `roll` turns. Dragging along a rolled view's screen X and having the target
+ move along an unrolled world axis is the disagreement `Camera.up` exists to
+ make impossible.
 
  @param right : `Out. Screen +X, world space, normalized.`
  @param up : `Out. Screen +Y, world space, normalized.`
@@ -172,7 +228,7 @@ const float FIRST_PERSON_NEAR = 0.05f;
 fn void Camera.basis(&self, Vec3* right, Vec3* up)
 {
 	Vec3 forward = self.orbit_dir() * -1.0f;
-	Vec3 sideways = forward.cross((Vec3) { 0, 1, 0 });
+	Vec3 sideways = forward.cross(self.up());
 
 	// The pitch clamp is what normally keeps this from happening, but the clamp
 	// is applied where angles are *written* and a caller can reach these fields
@@ -228,7 +284,7 @@ fn Matrix4f Camera.view(&self)
 		// One unit along the way the camera is already pointing. The length is
 		// arbitrary and cancels: `look_at` normalizes.
 		: eye - self.orbit_dir();
-	return matrix::look_at{float}(eye, at, { 0.0, 1.0, 0.0 });
+	return matrix::look_at{float}(eye, at, self.up());
 }
 
 <*
@@ -395,6 +451,30 @@ struct CameraFollow
 	Vec3 offset;
 
 	<*
+	 Whether `offset` is read in the followed node's own frame rather than in
+	 the world's — `camera.attach(obj, { local: true })`.
+
+	 **The flag §17 asked for, and it is what a cockpit is.** A world
+	 offset of `[0, 1.7, 0]` is a head and is correct whichever way a character
+	 faces, which is why it is the default and why first person needed nothing
+	 else. `[0, 1.2, 0.4]` in the *pilot's* frame is a seat, and in the world's
+	 frame it is a seat that slides out through the fuselage as the aircraft
+	 turns. The same distinction is the difference between a shoulder camera and
+	 a turret.
+
+	 One 3x3 multiply, by the node's world matrix with the translation column
+	 left out — so it carries the node's rotation *and its scale*, which is
+	 deliberate: a seat inside a model scaled to half size is at half the offset,
+	 and the alternative is an offset that means something different depending on
+	 what units the asset was authored in.
+
+	 The camera's own roll is not touched by this. Banking the picture with the
+	 aircraft is `three.camera.roll`, written from the script each frame, and the
+	 two are separate because a turret wants the offset and a level horizon.
+	*>
+	bool local_offset;
+
+	<*
 	 The time constant of the catch-up, in milliseconds. Zero is rigid.
 
 	 Exponential rather than a fraction per frame: the same lag has to mean the
@@ -419,8 +499,54 @@ const float FOLLOW_MAX_STEP_MS = 100.0f;
 *>
 fn void CameraFollow.apply(&self, Camera* camera, Vec3 anchor, float dt_ms)
 {
-	Vec3 want = anchor + self.offset;
+	self.settle(camera, anchor + self.offset, dt_ms);
+}
 
+<*
+ The same, from the followed node's world matrix rather than from its position.
+
+ **The form `local_offset` needs**, and the reason there are two entry points
+ rather than one: a world-space offset only ever needed the translation, so the
+ caller could hand over three floats and nothing was lost. An offset in the
+ node's own frame needs the rotation and the scale as well, and there is no way
+ to spell that as a `Vec3`.
+
+ `apply` above is kept for the callers that genuinely have only a point — the
+ tests, which construct a follow with no node behind it.
+
+ @param world : `The followed node's world matrix, column-major, as Node.world holds it.`
+*>
+fn void CameraFollow.apply_world(&self, Camera* camera, Matrix4f world, float dt_ms)
+{
+	float[<16>] m = world.m;
+	Vec3 anchor = { m[12], m[13], m[14] };
+
+	Vec3 offset = self.offset;
+	if (self.local_offset)
+	{
+		// The upper 3x3, applied as a direction: the translation column is
+		// already `anchor` and adding it twice would put a seat at twice the
+		// aircraft's position, which for anything away from the origin reads as
+		// the camera being flung off into the distance the moment `local` is set.
+		offset = (Vec3) {
+			m[0] * self.offset.x + m[4] * self.offset.y + m[8] * self.offset.z,
+			m[1] * self.offset.x + m[5] * self.offset.y + m[9] * self.offset.z,
+			m[2] * self.offset.x + m[6] * self.offset.y + m[10] * self.offset.z,
+		};
+	}
+
+	self.settle(camera, anchor + offset, dt_ms);
+}
+
+<*
+ Move the orbit point towards `want`, at the lag.
+
+ Split out so the two entry points above cannot drift on the one thing that is
+ actually a decision here — how the catch-up is integrated — while differing on
+ the one thing that genuinely is different, which is where `want` came from.
+*>
+fn void CameraFollow.settle(&self, Camera* camera, Vec3 want, float dt_ms)
+{
 	if (self.lag_ms <= 0.0f || dt_ms <= 0.0f)
 	{
 		camera.target = want;
@@ -463,7 +589,14 @@ fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
 	// `look_at` builds its basis this way round, and at the 89-degree pitch limit
 	// the cross product is still well conditioned — which is the reason that
 	// limit is one degree short of the pole rather than at it.
-	Vec3 right = forward.cross({ 0, 1, 0 }).normalize();
+	//
+	// Rolled, through `Camera.up`, so the box is around the frustum the frame is
+	// actually drawn with. A roll rotates the frustum about its own axis and the
+	// axis-aligned box around it genuinely changes, which for a wide field of
+	// view is up to a factor of the aspect ratio — a shadow fit built from an
+	// unrolled box would be tight around a region the camera is no longer
+	// looking at.
+	Vec3 right = forward.cross(self.up()).normalize();
 	Vec3 up    = right.cross(forward);
 
 	float near = self.near_plane;

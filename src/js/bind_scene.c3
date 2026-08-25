@@ -111,6 +111,13 @@ fn void JsRuntime.install_bindings(&self)
 	// Physics (js/bind_physics.c3)
 	self.bind_physics_verbs(host);
 
+	// Bulk queries, the character controller and the batched write
+	// (js/bind_query.c3)
+	self.bind_query_verbs(host);
+
+	// Navigation and steering (js/bind_nav.c3)
+	self.bind_nav_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 0);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
@@ -135,8 +142,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
 	self.bind(host, "cameraGet", &js_camera_get, 0);
-	self.bind(host, "cameraSet", &js_camera_set, 7);
-	self.bind(host, "cameraAttach", &js_camera_attach, 7);
+	self.bind(host, "cameraSet", &js_camera_set, 8);
+	self.bind(host, "cameraAttach", &js_camera_attach, 8);
 	self.bind(host, "cameraDetach", &js_camera_detach, 0);
 	self.bind(host, "cameraAttached", &js_camera_attached, 0);
 	self.bind(host, "frameAll", &js_frame_all, 0);
@@ -336,6 +343,11 @@ fn void js_reset(
 	// throw one frame later, which is the same rule handles into the previous
 	// scene follow.
 	self.physics.close();
+	// And the navigation bake, for the same reason and a sharper one: it was
+	// voxelized out of triangles that have just gone, and an agent that walks
+	// confidently through where a wall used to be reads as the pathfinder being
+	// broken rather than as the mesh being stale.
+	self.drop_nav();
 	// The background goes back to the default, unlike materials and assets, which
 	// survive a reset on purpose. It is a property of the Scene in Three.js and
 	// this keeps that true: `new three.Scene()` starts on the default sky rather
@@ -1687,11 +1699,16 @@ fn void js_camera_get(
 	// plane except by rendering and guessing.
 	js.set_index(list, 7, qjs::number_value(camera.near_plane));
 	js.set_index(list, 8, qjs::number_value(camera.far_plane));
+	// Appended rather than slotted in beside the other two angles, because the
+	// index is the wire format: `three.camera.yaw` is `H.cameraGet()[3]` in
+	// `api.js`, and renumbering to put roll next to pitch would silently move
+	// every reader after it.
+	js.set_index(list, 9, qjs::number_value(camera.roll));
 	*out = list;
 }
 
 <*
- `cameraSet(tx, ty, tz, yaw, pitch, distance, fov)`.
+ `cameraSet(tx, ty, tz, yaw, pitch, distance, fov, roll)`.
 
  The near and far planes are re-derived from the distance and the scene's own
  bounds rather than taken from the caller — see `Camera.derive_planes` for why —
@@ -1718,6 +1735,12 @@ fn void js_camera_set(
 	// quietly leave first person for a value no script asked for.
 	camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0f);
 	camera.fov = math::clamp(arg_float(&js, argc, args, 6), 1.0f, 179.0f);
+	// Unclamped and unwrapped, unlike the other two angles. `clamp_angles` holds
+	// pitch off the pole and wraps yaw because both protect `look_at` from a
+	// degenerate basis; roll cannot make one — see `Camera.roll`. Wrapping it
+	// anyway would make `camera.roll += 1` in a loop read back as a sawtooth,
+	// which is worse than a large number for a value a script is integrating.
+	camera.roll = arg_float(&js, argc, args, 7);
 
 	camera.clamp_angles();
 	// Through the pass rather than `camera.derive_planes()` directly, so the far
@@ -1737,7 +1760,7 @@ fn void js_frame_all(
 }
 
 <*
- `cameraAttach(index, generation, ox, oy, oz, distance, lag)` — follow a node.
+ `cameraAttach(index, generation, ox, oy, oz, distance, lag, local)` — follow a node.
 
  `plan.md` §17. Everything about what this does is in `CameraFollow`; what is
  here is the two things the boundary has to decide.
@@ -1753,6 +1776,11 @@ fn void js_frame_all(
  a negative one cannot be a shorthand for anything — it is a sign error in the
  caller's arithmetic, and clamping it to zero would hide that behind a camera
  that merely feels wrong.
+
+ `local` is the eighth argument and is `CameraFollow.local_offset` — whether the
+ offset is read in the node's own frame. It is a flag rather than a second verb
+ because everything else about the attachment is the same; see there for what
+ the two frames mean and why a cockpit needs the second one.
 *>
 fn void js_camera_attach(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1780,6 +1808,7 @@ fn void js_camera_attach(
 			arg_float(&js, argc, args, 4),
 		},
 		.lag_ms = lag,
+		.local_offset = arg_truth(&js, argc, args, 7),
 	};
 
 	self.pass.camera.distance = math::max(arg_float(&js, argc, args, 5), 0.0f);

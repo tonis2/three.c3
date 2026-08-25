@@ -43,6 +43,13 @@ export const DOCS = {
 		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; three.unloadUnused() does the freeing without the emptying. Neither is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Placing one throws a sentence saying so — at the scene.add(), which is where the handle is used, not at the new three.Mesh(), which is still only a description. Loading the file again gives a fresh handle. This is the same rule object handles follow across new three.Scene().',
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
+		'spatial-queries': 'There are BULK SPATIAL QUERIES, and they go through an index rather than a scan: three.query.sphere(point, radius), three.query.box(box), three.query.raycastAll(origin, direction) and three.query.sweep(from, to, { radius, height }). scene.raycast goes through the same index, which is why it stopped being linear in the node count — it used to test EVERY node in the scene before it reached any BVH, and a hundred agents casting one ground ray apiece cost 2.1 ms in a 500-node demo. The index is rebuilt by the first query after anything moved and by nothing else, so a frame that asks nothing pays nothing and the hundredth ray in a frame costs a cell walk. Every verb comes in two forms: three.query.sphere(p, r) allocates an Array of objects and is right for a click or a one-off, and three.query.sphere(p, r, buffer) fills a three.query.buffer(n) you keep and answers with a count, which is right for the loop. box and sphere are BROAD phase — box against box — so a node whose box overlaps and whose triangles do not is included; raycastAll and sweep are exact.',
+		'move-and-slide': 'three.moveAndSlide(position, motion, options) is the character controller: it sweeps a capsule, slides along what it hits, climbs a ledge under the step height and reports whether it is standing on anything. It takes a POSITION and answers with a position — it does not own an object, integrates nothing and remembers nothing between calls, so gravity, the velocity and the jump stay yours. Options are { radius, height, step, slope, skin, snap, ignore }; height is the whole capsule, and slope in degrees decides grounded, whether a ledge is climbed and whether a contact is a floor or a wall, all from one number so three cannot disagree. Pass the character\'s own object as ignore or it collides with its own mesh. It is kinematic and touches no rigidbody: a character built out of physics is pushed by contacts, tips over and answers a frame late. Not to be confused with three.character(), which is the higher-level helper that rides a height field and does not collide with anything.',
+		'navigation': 'three.nav.bake({ cell, radius, height, slope }) voxelizes the scene\'s standing room, and NOTHING bakes it for you — call it after the level is built. Then TWO verbs, and the split is the design: three.nav.path(from, to) is one agent\'s route, and three.nav.field(goals) is a solve KEPT that a whole crowd samples. A path solves the entire reachable set and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has direction(point), cost(point) — Infinity for unreachable — and dispose(). Paths come back shortened against the actual geometry with a capsule sweep at the agent\'s own size, so they do not look like they are walking cell centres, and their waypoints sit on the floor. cell decides everything: it is the resolution AND the largest step that can be climbed, because two cells are connected when they are adjacent and one cell up. three.nav.stats() reports voxels, walkable and bakeMs so you can find out whether the bake is a level-boundary operation or a loading screen.',
+		'steering': 'three.steer(positions, velocities, options) fills a Float32Array with a desired velocity per agent — seek, arrive and separation, for the whole crowd, in ONE crossing. positions is three floats per agent and is read; velocities is three floats per agent and is written. Options are { field, goal, maxSpeed, arrive, separation, separationWeight }; a field wins over a goal, because a field already knows the way round a wall. What comes back is a DESIRED velocity, not a position: integrating it and deciding whether an agent may actually go there are yours, which is what lets the same call feed three.moveAndSlide for agents that collide and a plain add for agents that do not.',
+		'batched-transforms': 'three.batch(objects) moves many nodes in one crossing, through a Float32Array. It is NOT a faster way to move a dozen things and should not be reached for as one — five hundred ordinary mesh.position.set calls measure 0.245 ms a frame, three per cent of the budget, and the trigger for this is about two thousand nodes a frame. It is for the case where the write is already a loop over numbers: a crowd steered by three.steer, a particle field, a chunked terrain. batch.positions is a Float32Array seeded from where the objects are now; batch.flush() writes them and answers with how many landed. With { trs: true } the stride is ten floats — position, an xyzw QUATERNION, then scale.',
+		'pointer-lock': 'three.input.pointerLock = true takes the mouse pointer out of the user\'s hands, and what it buys is a look that does not STOP. Without it three.input.pointer.dx is a difference of cursor positions, and a cursor stops at the edge of the screen while a hand does not — so a mouse look turns until the pointer reaches the edge and then quietly refuses to turn further. Reading the property back tells you whether the platform gave it, not what you asked for: a headless run has no window and always reads false, and so does a backend with no implementation. Nothing throws, so a game can fall back to a drag-look rather than refuse to start. three.input.pointer.locked is the same fact reported beside the deltas it is about.',
+		'damping-and-curves': 'three.damp(current, target, lambda, dt) and three.smoothDamp(current, target, state, smoothTime, dt) are the two verbs between "where it is" and "where it should be", and both are frame-rate independent — which is the whole reason they are named rather than written inline. `x += (target - x) * 0.1` closes a tenth of the gap per FRAME, so it is twice as fast at 120 Hz as at 60 and a chase tuned on one machine is a different chase on another. damp is a decay, right for a camera easing onto a target; smoothDamp is a critically damped spring with momentum, right for a turret slew or a sliding panel, and its state object must OUTLIVE the frame or it is re-launched from rest every tick. three.dampAngle takes the short way round a circle, which is what a heading needs. dt is in SECONDS: three.clock.dt is milliseconds, so it is three.clock.dt / 1000 at every call site. new three.CatmullRomCurve3(points) is the three-dimensional curve a loop samples — getPointAt(u) walks its LENGTH and getPoint(t) walks its own parameter, and the difference is what makes hand-written rail code look wrong.',
 		'camera-follow': 'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back.',
 		'camera-first-person': 'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
 		'camera-planes-derived': 'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
@@ -625,6 +632,75 @@ export const DOCS = {
 				'valueAt(x, z)', 'xAt(i)', 'zAt(j)', 'texture()',
 			],
 		},
+		CatmullRomCurve3: {
+			construct: 'new three.CatmullRomCurve3(points, closed, curveType, tension)',
+			note:
+				'The three-dimensional half of the curve pair, and the one a loop SAMPLES rather than a '
+				+ 'bake consumes: a camera rail, a patrol route, a projectile arc, a rope. Three.js\'s '
+				+ 'class name and method names, so the line an agent writes from memory is the right '
+				+ 'line. curveType is \'centripetal\' (the default), \'chordal\' or \'uniform\' — '
+				+ 'centripetal passes through every control point without swinging wide of a tight one, '
+				+ 'which is what a hand-written path always has. '
+				+ '**getPoint(t) and getPointAt(u) are not the same function**, and the gap between them '
+				+ 'is what makes hand-written rail code look wrong: t is the curve\'s own parameter, '
+				+ 'spread evenly over the control segments, so an object moving at a constant t per '
+				+ 'second speeds up through the widely spaced ones and crawls through the close ones. u '
+				+ 'is spread evenly over the LENGTH, and that is the one anything moving wants. '
+				+ 'three.catmullRom is the other half of the pair: a GROUND path, [x, z] in and a dense '
+				+ 'polyline out, for field.carve, field.stroke and RibbonGeometry.',
+			properties: ['points', 'closed', 'curveType', 'tension'],
+			methods: [
+				'getPoint(t)', 'getPointAt(u)', 'getTangent(t)', 'getLength()',
+				'getPoints(count)', 'getSpacedPoints(count)', 'toString()',
+			],
+		},
+		QueryResult: {
+			construct: 'three.query.buffer(capacity)',
+			note:
+				'A reusable answer for the flat form of three.query.sphere and three.query.box. Make it '
+				+ 'ONCE, outside the loop: the whole reason it exists is that a query answering with an Array '
+				+ 'of objects allocates, and a hundred agents asking every frame is a hundred allocations a '
+				+ 'frame. handles is the raw Int32Array of index/generation pairs the host filled, so a script '
+				+ 'that only wants to COUNT what is nearby never resolves anything at all; objects() resolves '
+				+ 'the lot in one walk of the scene when it does want them. full is true when the query filled '
+				+ 'the buffer, which means there may be more it could not tell you about — a count equal to the '
+				+ 'capacity is otherwise indistinguishable from a scene that happened to have exactly that many.',
+			properties: ['handles', 'capacity', 'count', 'full'],
+			methods: ['objects()', 'toString()'],
+		},
+		TransformBatch: {
+			construct: 'three.batch(objects, { trs })',
+			note:
+				'A Float32Array-shaped bulk write over many nodes, and NOT a faster way to move a dozen '
+				+ 'things — five hundred ordinary mesh.position.set calls are 0.245 ms, three per cent of a '
+				+ 'frame, and the trigger for reaching here is about two thousand nodes a frame. What it is '
+				+ 'for is the case where the write is ALREADY a loop over numbers: a crowd steered by '
+				+ 'three.steer, a particle field, a chunked terrain. positions is three floats per object, '
+				+ 'seeded from where they are now so a batch made and immediately flushed changes nothing. '
+				+ 'With { trs: true } the stride is ten — position, an xyzw QUATERNION, then scale — because a '
+				+ 'batch is written by arithmetic and the arithmetic that produced a rotation produced a '
+				+ 'quaternion. flush() sends the lot in one crossing and answers with how many landed; a '
+				+ 'member that has left the scene is skipped rather than throwing, because a crowd where one '
+				+ 'agent was removed this frame is ordinary.',
+			properties: ['positions', 'data', 'handles', 'objects', 'trs', 'stride', 'length'],
+			methods: ['flush()'],
+		},
+		NavField: {
+			construct: 'three.nav.field(goals)',
+			note:
+				'A solved flow field over the current three.nav.bake() — the solve KEPT, which is the whole '
+				+ 'reason there are two navigation verbs instead of one. three.nav.path solves the entire '
+				+ 'reachable set and throws it away after one answer, so a hundred agents heading for the same '
+				+ 'door is a hundred solves for one field. direction(point) is a unit XZ vector, or zero for '
+				+ 'nowhere to go — standing on the goal, off the mesh, or in a pocket no goal reaches, and '
+				+ 'cost(point) is how those are told apart. cost is measured ALONG THE GROUND rather than '
+				+ 'through walls, and is Infinity for unreachable. Feed the field to three.steer rather than '
+				+ 'calling direction() in a loop: that is one crossing for the whole crowd instead of one per '
+				+ 'agent. Freed by dispose() and by new three.Scene(), and nothing else — a field is one float '
+				+ 'per walkable cell and this API does not collect.',
+			properties: ['alive'],
+			methods: ['direction(point)', 'cost(point)', 'reaches(point)', 'dispose()', 'toString()'],
+		},
 		Box3Helper: {
 			construct: 'new three.Box3Helper(box, color = 0xffff00)',
 			note:
@@ -771,6 +847,118 @@ export const DOCS = {
 			+ 'result to field.carve / field.stroke / a scatter avoid corridor so a sparse polyline stops '
 			+ 'being a black-and-white zigzag, or pass the raw control points to a RibbonGeometry, which '
 			+ 'curves them itself. The first and last control points are reproduced exactly.',
+		'three.query.sphere(centre, radius, into)':
+			'Every drawable node whose bounding box reaches within radius of a point. With no third '
+			+ 'argument it answers with an Array of objects; with a three.query.buffer(n) it fills that '
+			+ 'and answers with a count, which is the form to use in a loop. A BROAD-phase answer: the '
+			+ 'test is against each node\'s box, so something whose box reaches and whose triangles do '
+			+ 'not is included. Invisible nodes are left out, as they are for picking.',
+		'three.query.box(box, into)':
+			'The same, for a Box3, a { min, max } or a flat [minX, minY, minZ, maxX, maxY, maxZ].',
+		'three.query.buffer(capacity)':
+			'A reusable answer for the flat form of every query verb. Make it once, outside the loop. It '
+			+ 'holds .handles (an Int32Array of index/generation pairs), .count, .full — true when the query '
+			+ 'filled it, which means there may be more — and .objects(), which resolves them all in ONE walk '
+			+ 'of the scene. A script that only wants to count what is nearby never has to resolve anything, '
+			+ 'which is most of why this shape exists.',
+		'three.query.raycastAll(origin, direction, options)':
+			'Every node a ray hits, not only the nearest — shooting through a window, listing what is behind '
+			+ 'what, a laser that stops at the first SOLID thing rather than at the first thing. Options are '
+			+ '{ maxDistance, limit }. NOT sorted by distance: sorting means holding every hit before '
+			+ 'answering, and a caller who wants the nearest should call scene.raycast, which is cheaper than '
+			+ 'sorting because it can stop walking.',
+		'three.query.sweep(from, to, options)':
+			'Move a sphere or an upright capsule from one point to another and report the first thing it '
+			+ 'touches, or null. { radius } alone is a sphere; adding { height } makes it a capsule that tall '
+			+ 'overall, and { ignore } leaves one object out. The hit carries fraction — where along the '
+			+ 'motion it happened — so the safe position is from + (to - from) * fraction. This is the same '
+			+ 'narrow phase three.moveAndSlide is built out of, so a wall this reports and a wall a character '
+			+ 'slides along cannot be two different walls. There is no orientation argument: everything this '
+			+ 'is for stands up.',
+		'three.moveAndSlide(position, motion, options)':
+			'The character controller. Sweeps a capsule from position by motion, slides along whatever it '
+			+ 'hits, climbs a ledge under the step height, and answers with { position, remaining, grounded, '
+			+ 'slope, ground, hit, normal, stepped, slides }. Options are { radius, height, step, slope, '
+			+ 'skin, snap, ignore } — height is the whole capsule, step is how high a ledge may be, slope in '
+			+ 'degrees is the steepest ground that still counts as ground, and snap is how far the floor may '
+			+ 'drop under the feet in one frame and still be walked down rather than fallen off. It '
+			+ 'integrates nothing: gravity, the velocity and the jump are yours, and a frame is '
+			+ 'three.moveAndSlide(where, [vx * dt, vy * dt, vz * dt], opts) followed by copying r.position '
+			+ 'onto whatever you are driving. Pass the character\'s own object as ignore. It is KINEMATIC and '
+			+ 'touches no rigidbody — see the move-and-slide topic for why that is the design rather than a '
+			+ 'limitation.',
+		'three.batch(objects, options)':
+			'A Float32Array-shaped bulk write over many nodes. batch.positions is three floats per object, '
+			+ 'seeded from where they are now; batch.flush() sends the lot in one crossing and answers with '
+			+ 'how many landed. With { trs: true } the stride is ten — position, an xyzw QUATERNION, then '
+			+ 'scale. A member that has left the scene is skipped rather than throwing, because a crowd where '
+			+ 'one agent was removed this frame is ordinary. Do not reach for this to move a dozen things: '
+			+ 'five hundred ordinary position writes are three per cent of a frame, and the trigger for this '
+			+ 'is about two thousand nodes a frame.',
+		'three.nav.bake(options)':
+			'Voxelize the scene\'s standing room, so three.nav.path and three.nav.field have a graph to work '
+			+ 'over. { cell, radius, height, slope, bounds } — every one a property of the AGENT except the '
+			+ 'last. Call it AFTER the level is built; nothing bakes on demand, because that would hide a '
+			+ 'cost and would rebake on the first call after anything moved. cell decides everything: it is '
+			+ 'the resolution and it is also the largest step that can be climbed, because two cells are '
+			+ 'connected when they are adjacent and one cell up — half a metre is a generous stair and a '
+			+ 'cheap bake, and a finer one costs as the CUBE. Answers with the same object stats() does, or '
+			+ 'null when the region held no standing room, which is an answer and not an error. A second bake '
+			+ 'replaces the first, and new three.Scene() drops it — it was voxelized out of triangles that '
+			+ 'are gone.',
+		'three.nav.stats()':
+			'What the last bake produced and what it cost: { cell, radius, height, slope, voxels, solid, '
+			+ 'floor, walkable, bakeMs, bounds }, or null if there has not been one. bakeMs and voxels are '
+			+ 'the numbers that decide whether baking is a level-boundary operation or a loading screen for '
+			+ 'YOUR level rather than for a reference one.',
+		'three.nav.path(from, to, options)':
+			'One agent, one route: an Array of Vector3 waypoints on the walking surface, starting at the '
+			+ 'point given, or empty when there is no route. The straight lines between them have been '
+			+ 'checked with a capsule sweep at the agent\'s own size, so a corner it cannot physically round '
+			+ 'has not been cut and the path does not look like it is walking cell centres. This SOLVES A '
+			+ 'WHOLE FIELD and throws it away — right for a wanderer replanning every few seconds, and the '
+			+ 'thing three.nav.field exists to replace for a crowd. { limit } caps the waypoint count.',
+		'three.nav.field(goals)':
+			'Solve towards one or more goals and KEEP the answer — the verb a crowd uses. Takes a point or '
+			+ 'an array of points; many goals is not several routes, it is one field whose value is the '
+			+ 'distance to the nearest of them, which is what a crowd heading for whichever exit is closest '
+			+ 'wants. Returns a NavField with direction(point) — a unit XZ vector, or zero for nowhere to go '
+			+ '— cost(point), which is Infinity for unreachable, reaches(point), and dispose(). Returns null '
+			+ 'when no goal landed on a walkable cell, which is the usual way a goal is wrong: given at the '
+			+ 'height of the floor\'s underside, inside a wall, or outside the baked region. Feed the field '
+			+ 'to three.steer rather than calling direction() in a loop.',
+		'three.steer(positions, velocities, options)':
+			'Seek, arrive and separation over a whole crowd in one crossing. positions and velocities are '
+			+ 'Float32Arrays of three floats per agent — the first read, the second written. Options are '
+			+ '{ field, goal, maxSpeed, arrive, separation, separationWeight }. A field wins over a goal, '
+			+ 'because a field already knows the way round a wall and a goal does not. arrive is how far out '
+			+ 'an agent starts slowing, and 0 never slows — which is how a crowd ends up orbiting a door. '
+			+ 'What comes back is a DESIRED velocity: integrate it yourself, and feed it to three.moveAndSlide '
+			+ 'for agents that collide or add it straight on for agents that do not.',
+		'three.damp(current, target, lambda, dt)':
+			'Move current towards target by a fixed fraction of the remaining distance PER SECOND. lambda is '
+			+ 'the rate — 1 is lazy, 5 is a normal follow, 20 is nearly rigid — and dt is in SECONDS, so it '
+			+ 'is three.clock.dt / 1000. Three.js spells this MathUtils.damp and means the same thing. '
+			+ 'three.dampAngle is the same taking the short way round a circle, which is what a heading needs '
+			+ 'and what the plain one gets wrong at exactly the place a mouse look crosses constantly.',
+		'three.smoothDamp(current, target, state, smoothTime, dt, maxSpeed)':
+			'A critically damped spring — the one to reach for when damp overshoots the feel you wanted. The '
+			+ 'difference is MOMENTUM: damp is fastest at the start and asymptotically slow at the end, right '
+			+ 'for a camera easing onto a target and wrong for anything that should look accelerated. state '
+			+ 'is an object this writes .velocity into and it must OUTLIVE THE FRAME — one created inside the '
+			+ 'loop is a spring re-launched from rest sixty times a second, which looks exactly like damp '
+			+ 'with a worse constant and is the one way to use this and see nothing. smoothTime is roughly '
+			+ 'how long the move takes, in seconds.',
+		'new three.CatmullRomCurve3(points, closed, curveType, tension)':
+			'The three-dimensional half of the curve pair, and the one a loop samples rather than a bake '
+			+ 'consumes: a camera rail, a patrol route, a rope. Three.js\'s class and method names — '
+			+ 'getPoint(t), getPointAt(u), getTangent(t), getLength(), getPoints(n), getSpacedPoints(n). '
+			+ 'getPoint and getPointAt are NOT the same function and the gap between them is what makes '
+			+ 'hand-written rail code look wrong: t is the curve\'s own parameter, spread evenly over the '
+			+ 'control segments, so an object moving at a constant t per second speeds up through the widely '
+			+ 'spaced ones and crawls through the close ones. u is spread evenly over the LENGTH, and that is '
+			+ 'the one anything moving wants. three.catmullRom is the other half: a GROUND path, [x, z] in '
+			+ 'and a dense polyline out, for field.carve, field.stroke and RibbonGeometry.',
 		'three.character(options)':
 			'A walkable character with a follow camera, the controller a third-person scene writes by '
 			+ 'hand and the place its worst bugs are already fixed. Takes { mesh, legs, arms, terrain, '
