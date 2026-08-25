@@ -744,9 +744,10 @@ fn void JsRuntime.follow_camera(&self, double dt_ms)
 	// The solver writes local transforms and marks nodes dirty; nothing has
 	// propagated them to world matrices yet this frame — `Scene.update` does that
 	// while building the draw list, which happens after this. Asking here is what
-	// makes the anchor this frame's rather than the last one's, and it is not a
-	// second walk in any meaningful sense: the propagation is dirty-flagged, so a
-	// scene where nothing moved costs the traversal and no arithmetic.
+	// makes the anchor this frame's rather than the last one's, and since §19.5 it
+	// is not a second walk at all: `Scene.matrices_current` makes the repeat a
+	// compare, where before it was the whole traversal with the arithmetic skipped.
+
 	self.pass.scene.update_world_matrices();
 
 	// Column-major, so the translation is the last column — the same three

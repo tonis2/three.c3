@@ -235,8 +235,9 @@ macro @with_poses(; @body(three::Asset* asset, Matrix4f[] poses))
 	};
 }
 
-// A point through a column-major matrix, spelled out the way `transform_aabb`
-// spells it — translation at m[12..14].
+// A point through a column-major matrix, spelled out the way
+// `Aabb3.transform_matrix` spells it — translation at m[12..14].
+
 fn Vec3 apply(Matrix4f m, Vec3 p)
 {
 	float[<16>] v = m.m;
@@ -683,7 +684,10 @@ fn void a_crowd_at_different_phases_is_one_draw_call() @test
 			if (node != null)
 			{
 				node.position = { (float)i * 2.0f, 0, 0 };
-				node.dirty = true;
+				// `mark_moved`, not `node.dirty = true`: since §19.5 the walk is
+				// allowed to skip itself, and a hand-written transform that does not
+				// say so leaves a hundred copies stacked at the origin.
+				renderer.pass.scene.mark_moved(node);
 			}
 			// Spread across the clip: copy i starts i/COPIES of the way in.
 			renderer.pass.scene.play(roots[i], "Bend", loop: true, speed: 1.0f, time: (float)i / (float)COPIES);
@@ -770,7 +774,8 @@ fn void writing_a_bone_moves_a_live_skin() @test
 		if (bone == null) return;
 		float half = (float)math::PI / 4.0f;
 		bone.rotation = { 0, 0, math::sin(half), math::cos(half) };
-		bone.dirty = true;
+		// See `Scene.mark_moved`: the flag alone no longer reaches the walk.
+		renderer.pass.scene.mark_moved(bone);
 
 		image::Image after_shot = renderer.capture()!!;
 		Silhouette after = measure(&after_shot, renderer.clear);
@@ -812,8 +817,10 @@ fn void writing_a_bone_does_not_move_a_baked_skin() @test
 			{
 				float half = (float)math::PI / 4.0f;
 				bone.rotation = { 0, 0, math::sin(half), math::cos(half) };
-				bone.dirty = true;
+				// See `Scene.mark_moved`: the flag alone no longer reaches the walk.
+				renderer.pass.scene.mark_moved(bone);
 			}
+
 		}
 
 		image::Image after_shot = renderer.capture()!!;

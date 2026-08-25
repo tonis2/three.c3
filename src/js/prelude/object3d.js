@@ -22,6 +22,11 @@ export class Object3D {
 		this.parent = null;
 		this._name = '';
 		this._visible = true;
+		// Whether this object is in the half of the shadow map that is drawn
+		// once and kept — `plan.md` §19.3. Off by default, and the host refuses
+		// it on anything with a skin, which is why the setter reads the answer
+		// back rather than assuming it took.
+		this._static = false;
 		// An exact rotation, when this object has one — `[x, y, z, w]`. Only
 		// `asset.instantiate()` sets it, because only a glTF node arrives as
 		// a quaternion. `rotation` still holds the Euler equivalent and is
@@ -84,6 +89,25 @@ export class Object3D {
 	set visible(v) {
 		this._visible = !!v;
 		if (this._i >= 0) H.setVisible(this._i, this._g, this._visible);
+	}
+
+	// **"This will not move again."** A static object is rasterised into the
+	// shadow map once and then left there, so a village costs its shadows on
+	// the frame it is built and nothing afterwards — three.stats()
+	// .shadowStaticDraws is where that shows. It costs no draw call in the
+	// colour pass: the flag orders copies inside their bucket rather than
+	// keying one, so a static wall and a moving one over the same geometry are
+	// still one draw.
+	//
+	// Moving it afterwards through position/rotation/scale is safe — the host
+	// notices and rebuilds the map — but every such move costs the rebuild, so
+	// this is for the things that genuinely stand still. Refused on a skinned
+	// mesh, where a pose can change the silhouette without a transform moving,
+	// and reading it back is how a script sees that.
+	get static() { return this._static; }
+	set static(v) {
+		const want = !!v;
+		this._static = this._i >= 0 ? !!H.setStatic(this._i, this._g, want) : want;
 	}
 
 	// What this object draws, or null for a group. Overridden by Mesh.
@@ -173,6 +197,7 @@ export class Object3D {
 		this._g = g;
 		this._flush();
 		if (!this._visible) H.setVisible(i, g, false);
+
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(i, g, material);
 		// Only when they are not the identity: `_materialize` runs once per
@@ -188,6 +213,12 @@ export class Object3D {
 		// takes. Without it a character from `asset.instantiate()` would draw its
 		// bind pose forever.
 		if (this._skin >= 0) H.bindSkin(i, g, this._skin, !!this._preskinned);
+		// **After `bindSkin`, not before.** The host refuses a static caster that
+		// has a skin, and it learns about the skin on the line above — so asking
+		// first would be told yes and then quietly overruled, and `this._static`
+		// would disagree with the node for the rest of the session.
+		if (this._static) this._static = !!H.setStatic(i, g, true);
+
 		for (const child of this.children) child._materialize(this);
 		// **A live character needs its player before anything plays**, unlike every
 		// other use of the map: the palette is computed from the bone nodes each

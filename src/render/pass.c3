@@ -474,12 +474,12 @@ fn collision::Aabb3 MeshPass.bounds(&self) => self.scene.bounds(&self.assets);
  `frame_bounds`'s reason: it is orientation independent, so the answer does not
  change as the turntable turns and the far plane does not breathe during a drag.
 
- Costs one walk of the node array *and every vertex of every drawable mesh* —
- `Scene.bounds` is exact, not conservative. That was "on camera moves only" when
- only `Controls` called it; a follow camera calls it every tick, so a followed
- scene pays it per frame, on top of the walk `MeshPass.prepare` already does for
- the shadow fit. `plan.md` §19 has the fix — a box cached on `Scene` and dirtied
- by the setters — and the reason it is not a one-line change is the invalidation.
+ Costs nothing at all in a frame where nothing moved, which it did not before
+ §19.5. `Scene.bounds` is exact rather than conservative — every vertex of every
+ drawable mesh through a matrix — and a follow camera calls this every tick, so a
+ followed scene was paying that per frame on top of the walk `MeshPass.prepare`
+ already does for the shadow fit. It is cached now, behind `Scene.bounds_current`,
+ and the invalidation that was the whole of the risk is `Scene.invalidate`.
 
  An empty scene answers with a unit box, whose reach is under the floor, so
  nothing special-cases it.
@@ -534,8 +534,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// while nothing is moving and a frame of lag the moment something is.
 	//
 	// `update_world_matrices` runs again inside `scene.update` below and costs
-	// almost nothing the second time: it clears `dirty` as it descends, so the
-	// repeat is a walk with no matrix arithmetic in it.
+	// **nothing** the second time — §19.5. It used to cost the traversal, which is
+	// a recursive call and a 64-byte matrix copy per node with no arithmetic in
+	// them; `Scene.matrices_current` is what turned that into a compare.
+
 	self.scene.update_world_matrices();
 	ulong live_address = self.write_live_poses(gpu, slot)!;
 
@@ -588,7 +590,12 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 				.min = math::max(seen.min, bounds.min),
 				.max = math::min(seen.max, bounds.max),
 			};
-			self.shadows.fit(self.light, bounds, focus);
+			// **Stable only when there is something to keep**, which is the whole
+			// of §18.1's argument with §19.3's. A fit that recentres every frame
+			// throws away a cached shadow map every frame; a fit that holds still
+			// spends texel density to avoid that. `ShadowMap.fit`'s header has the
+			// numbers, and this is the one line that decides which scene is which.
+			self.shadows.fit(self.light, bounds, focus, stable: self.scene.static_nodes > 0);
 			self.shadows.live = true;
 		}
 	}
@@ -656,7 +663,69 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// first would name last frame's buffer.
 	self.build_draw_records(slot);
 
+	// Last, because it is the only decision here that needs the finished draw
+	// list: which shape the shadow pass takes follows from how many casters are
+	// static and how many are not, and neither number exists until the buckets do.
+	self.plan_shadow(gpu);
+
 	self.prepared = true;
+}
+
+<*
+ Decide which of the three shapes this frame's shadow pass takes — §19.3.
+
+ **Counted off the buckets rather than off a flag on the scene**, because the
+ question is not "did a script mark anything static" but "is there anything
+ static *that casts*": a static node under a blended material contributes nothing
+ to the map, and a scene of nothing but glass walls would otherwise allocate a
+ second 16 MB image to hold a picture of nothing.
+
+ `SHADOW_PLAN_FULL` is the answer to everything that goes wrong, and it is the
+ renderer exactly as it was before this section. A scene with nothing static, an
+ image that would not allocate — each of them lands here and the frame draws the
+ map the way it always did. That is the same choice `prepare` makes one level up
+ about the map as a whole: a feature that could not be built is a frame without
+ it, never a frame that does not draw.
+*>
+fn void MeshPass.plan_shadow(&self, Gpu* gpu)
+{
+	self.shadows.plan = SHADOW_PLAN_FULL;
+	self.shadows.sample_static = false;
+	if (!self.shadows.live) return;
+
+	uint statics = 0;
+	uint movers = 0;
+	foreach (bucket : self.scene.buckets)
+	{
+		Material* material = self.material(bucket.material);
+		if (material == null || !self.casts_shadow(material)) continue;
+		if (self.assets.mesh(bucket.asset, bucket.mesh) == null) continue;
+		statics += bucket.static_count;
+		movers += bucket.count - bucket.static_count;
+	}
+
+	if (statics == 0 || self.shadows.static_refused) return;
+
+	// **Allocated the first frame a static caster casts, and not before.** A
+	// script may write `mesh.static = true` at any moment; the image can only be
+	// created between frames, and this is between frames.
+	if (catch self.shadows.ensure_static(gpu))
+	{
+		// One message and then the ordinary path forever, which is `prepare`'s rule
+		// for the map itself: the frame still draws, the shadows are still right,
+		// and the only thing lost is the saving. `static_refused` is what keeps it
+		// to one sentence rather than sixty a second.
+		io::eprintn("three: the cached shadow map could not be created — every caster is drawn each frame");
+		self.shadows.static_refused = true;
+		return;
+	}
+	if (self.shadows.static_image == null) return;
+
+	self.shadows.plan = movers == 0 ? SHADOW_PLAN_STATIC : SHADOW_PLAN_COMBINED;
+	// A frame in which nothing casting moves reads the cached image itself. See
+	// `ShadowMap.sample_static` for why that is not merely an optimisation of the
+	// copy — it is the frame that records nothing at all.
+	self.shadows.sample_static = self.shadows.plan == SHADOW_PLAN_STATIC;
 }
 
 <*
@@ -987,10 +1056,51 @@ fn bool MeshPass.casts_shadow(&self, Material* material)
 fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 {
 	self.shadows.draws = 0;
+	self.shadows.static_draws = 0;
 	if (!self.prepared || !self.shadows.live) return;
 
-	self.shadows.begin(cmd);
+	// The renderer as it was before §19.3: one clear, every caster, one image.
+	if (self.shadows.plan == SHADOW_PLAN_FULL)
+	{
+		self.shadows.begin(cmd);
+		self.shadows.draws = self.record_casters(cmd, CASTERS_ALL);
+		self.shadows.end(cmd);
+		return;
+	}
 
+	// **The rebuild, on the frames there is one.** `static_current` is the whole
+	// of the invalidation and `ShadowMap.static_fit` is where it is argued; what
+	// matters here is that the answer is usually yes, and that a yes means the
+	// next two lines are the only ones this function runs.
+	if (!self.shadows.static_current(self.scene.static_revision))
+	{
+		self.shadows.begin_static(cmd);
+		self.shadows.static_draws = self.record_casters(cmd, CASTERS_STATIC);
+		self.shadows.end_static(cmd);
+		self.shadows.mark_static_built(self.scene.static_revision);
+	}
+
+	// **Nothing else at all.** No clear, no copy, no draws, no barriers: the
+	// cached image is left where `end_static` put it and the colour pass samples
+	// it directly. This is the line `plan.md` §19.3 is about — a village in which
+	// the sun does not move and the buildings do not move costs its shadow map
+	// once and then nothing, for as long as that stays true.
+	if (self.shadows.plan == SHADOW_PLAN_STATIC) return;
+
+	self.shadows.copy_static(cmd);
+	self.shadows.begin_over_copy(cmd);
+	self.shadows.draws = self.record_casters(cmd, CASTERS_DYNAMIC);
+	self.shadows.end(cmd);
+}
+
+<*
+ Draw one half of the casters, or both, into whatever depth attachment is open.
+
+ @param which : `CASTERS_ALL, CASTERS_STATIC or CASTERS_DYNAMIC — see Bucket.static_first for the layout these select out of each bucket.`
+ @return `How many draw calls were recorded, which is what stats() reports.`
+*>
+fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
+{
 	// One bind for the whole pass. There is no material in a depth pass and so
 	// nothing to change pipelines for — the counterpart to `record`'s `bound`
 	// tracking, which exists because a bucket there chooses its own shader.
@@ -1012,39 +1122,74 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 		if (mesh == null || material == null) continue;
 		if (!self.casts_shadow(material)) continue;
 
-		// The mesh contract exactly as the main pass pushes it, and pointing at the
-		// same three buffers. The only field that means something different is the
-		// one that is not in here at all: `shaders/shadow.slang` reads
-		// `light_view_projection` out of the frame block where `mesh.slang` reads
-		// `view_projection`.
-		MeshPush push = {
-			.frame = self.frame_address,
-			.instances = self.instance_address + (ulong)bucket.first * Instance::size,
-			.draw = self.draw_address + (ulong)at * DrawRecord::size,
-		};
-
-		// The reflected size, for the reason `record` gives at length: the range
-		// declared at pipeline creation and the range pushed here read the same
-		// field, so they cannot drift without an edit that hardcodes one of them.
-		vk::cmdPushConstants(
-			cmd,
-			self.shadows.pipeline.layout,
-			self.shadows.pipeline.shader.stages,
-			0,
-			self.shadows.pipeline.shader.push_size,
-			&push
-		);
-
-		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
-		// **`count`, not `visible`** — the counterpart of the line in `record`.
-		// This pass wants every copy the light's box kept, which is the visible
-		// prefix plus the tail of casters the camera cannot see.
-		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.count, 0, 0, 0);
-		recorded++;
+		// The four cells of `Bucket.static_first`, read back out. `tail` is the
+		// hidden dynamic copies, which are the one group that is not adjacent to
+		// its own kind — the cost the layout pays to keep `visible` a prefix.
+		uint tail_at = bucket.static_first + bucket.static_count;
+		switch (which)
+		{
+			case CASTERS_ALL:
+				// **`count`, not `visible`** — the counterpart of the line in
+				// `record`. This pass wants every copy the light's box kept, which
+				// is the visible prefix plus the tail of casters the camera cannot
+				// see.
+				recorded += self.draw_casters(cmd, mesh, bucket, at, 0, bucket.count);
+			case CASTERS_STATIC:
+				recorded += self.draw_casters(cmd, mesh, bucket, at, bucket.static_first, bucket.static_count);
+			case CASTERS_DYNAMIC:
+				recorded += self.draw_casters(cmd, mesh, bucket, at, 0, bucket.static_first);
+				recorded += self.draw_casters(cmd, mesh, bucket, at, tail_at, bucket.count - tail_at);
+			default:
+				break;
+		}
 	}
 
-	self.shadows.draws = recorded;
-	self.shadows.end(cmd);
+	return recorded;
+}
+
+<*
+ One range of one bucket's copies, pushed and drawn.
+
+ @param offset : `Where in the bucket the run starts, counted from Bucket.first.`
+ @return `1 if anything was drawn, 0 for an empty run — which is what makes the caller's sum a draw-call count.`
+*>
+fn uint MeshPass.draw_casters(
+	&self, vk::CommandBuffer cmd, GpuMesh* mesh, Bucket bucket, uint at, uint offset, uint count
+)
+{
+	if (count == 0) return 0;
+
+	// The mesh contract exactly as the main pass pushes it, and pointing at the
+	// same three buffers. The only field that means something different is the
+	// one that is not in here at all: `shaders/shadow.slang` reads
+	// `light_view_projection` out of the frame block where `mesh.slang` reads
+	// `view_projection`.
+	//
+	// The instance address carries the run's own offset, for `record`'s reason:
+	// the shader reads copy zero of its own slice and never has to know where in
+	// the bucket the slice began. It is also what makes a sub-range legal at all
+	// — `SV_InstanceID` is relative to what is pushed here.
+	MeshPush push = {
+		.frame = self.frame_address,
+		.instances = self.instance_address + (ulong)(bucket.first + offset) * Instance::size,
+		.draw = self.draw_address + (ulong)at * DrawRecord::size,
+	};
+
+	// The reflected size, for the reason `record` gives at length: the range
+	// declared at pipeline creation and the range pushed here read the same
+	// field, so they cannot drift without an edit that hardcodes one of them.
+	vk::cmdPushConstants(
+		cmd,
+		self.shadows.pipeline.layout,
+		self.shadows.pipeline.shader.stages,
+		0,
+		self.shadows.pipeline.shader.push_size,
+		&push
+	);
+
+	vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+	vk::cmdDrawIndexed(cmd, mesh.index_count, count, 0, 0, 0);
+	return 1;
 }
 
 fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* frame)
@@ -1419,6 +1564,7 @@ fn SceneStats MeshPass.stats(&self)
 	// frame's number, like `culled_last_frame` beside it, and for the same reason:
 	// `stats()` is a query and does not record a pass to count.
 	stats.shadow_draws = self.shadows.draws;
+	stats.shadow_static_draws = self.shadows.static_draws;
 	return stats;
 }
 

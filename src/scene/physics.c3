@@ -625,7 +625,10 @@ fn void Physics.write_back(&self, Scene* scene)
 
 		node.position = rigid.collider.translation;
 		node.rotation = rigid.collider.rotation;
-		node.dirty = true;
+		// Not `node.dirty = true`: the flag alone stopped being enough in §19.5,
+		// when the world-matrix walk gained the right to skip itself. See
+		// `Scene.mark_moved`.
+		scene.mark_moved(node);
 	}
 }
 

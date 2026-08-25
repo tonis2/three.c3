@@ -263,11 +263,22 @@ globalThis.V = {
     const ring = this.forest(P.forest);
     const dressed = P.textured ? this.dress(river) : (three.setAnimationLoop(null), null);
 
+    // Nothing here moves again: the sun is fixed, and the village is the village.
+    // So every caster goes into the shadow map once and stays there — plan.md
+    // §19.3, which measured 0.5 ms of depth-only geometry a frame on exactly this
+    // scene, rasterised to produce an image identical to the previous frame's.
+    // Watch three.stats().shadowStaticDraws: it is the caster count on the frame
+    // after a rebuild and 0 on every frame between. The river keeps its wave —
+    // a depth pass runs no vertex body, so the water's shadow was always its flat
+    // quad and marking it static changes nothing about the picture.
+    S.traverse(o => { o.static = true; });
+
     three.camera.lookAt(P.cam.look[0], P.cam.look[1], P.cam.look[2]);
     three.camera.orbit(P.cam.yaw, P.cam.pitch, P.cam.dist);
     three.render(S, three.camera);
     three.unloadUnused();
     return { stats: S.stats(), trees: placed, forest: ring, water: river.length, dressed };
+
   },
 
   // The treeline that closes the horizon: the map is a square that ends, and

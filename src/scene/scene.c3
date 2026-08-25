@@ -19,9 +19,10 @@
 	MeshPass.record         upload, bind, draw
 
  The first is the only one that touches the hierarchy, and it is the only one
- that can be skipped — a scene where nothing moved recomputes nothing. The
- second is rebuilt every frame because culling depends on the camera. The third
- is in `render/pass.c3` and knows nothing about nodes.
+ that can be skipped — a scene where nothing moved does not walk at all, which
+ matters because a frame asks for it three to five times (`Scene.matrices_current`,
+ and `plan.md` §19.5). The second is rebuilt every frame because culling depends
+ on the camera. The third is in `render/pass.c3` and knows nothing about nodes.
 
  ## Culling is on by default and it changes the numbers
 
@@ -125,6 +126,42 @@ struct Bucket
 	uint visible;
 
 	<*
+	 Where this bucket's static casters start, counted from `first`, and how many
+	 there are.
+
+	 **The second partition of one instance array, and the order is the whole
+	 trick.** `visible` needs a prefix and the static set needs a run, and two
+	 independent halves cannot both be prefixes — so the sort lays a bucket out in
+	 four cells:
+
+		[ visible dynamic | visible static | hidden static | hidden dynamic ]
+		 <----------- visible ----------->
+		                   <--- static_count --->
+		                   ^ static_first
+
+	 Visible is still exactly the prefix `record` has always drawn. The static run
+	 is contiguous and `record_shadow` draws it alone when it is rebuilding the
+	 cached half of the map. The *dynamic* casters are the two ends, which is the
+	 one thing this ordering gives up: a bucket that holds both static and hidden
+	 dynamic copies costs the dynamic shadow pass two `vkCmdDrawIndexed` instead
+	 of one. Movers are the small half by construction — that is what makes the
+	 cache worth having — so the split is paid on a handful of buckets and the
+	 alternative was giving up the visible prefix, which every colour draw depends
+	 on.
+
+	 With nothing marked static the middle two cells are empty, the layout is
+	 `[visible | hidden]` exactly as it was before §19.3, `static_first` equals
+	 `visible` and `static_count` is zero.
+
+	 A pre-skinned bucket is never static: its vertices come out of a buffer the
+	 compute pass wrote this frame, indexed from the bucket's own first copy, so
+	 "it did not move" cannot be true of one and drawing a sub-range of it would
+	 read another copy's posed vertices. `Scene.set_static_caster` refuses there.
+	*>
+	uint static_first;
+	uint static_count;
+
+	<*
 	 Whether the compute pass poses these copies before the render pass reads them.
 
 	 **Part of what makes two draws two draws.** Everything else a bucket keys on
@@ -220,6 +257,24 @@ struct SceneStats
 	 counts the scene pass alone and always has.
 	*>
 	uint shadow_draws;
+
+	<*
+	 How many draw calls went into the cached half of the shadow map, and 0 in a
+	 frame that did not rebuild it — which is most frames, and is the number worth
+	 watching.
+
+	 `shadow_draws` beside it is what the frame paid; this is what the rebuild
+	 cost on the frames there was one. A script that sees this stay at zero while
+	 a character walks about is seeing §19.3 work: the village was rasterised into
+	 the map once, and the frames since have drawn the character and copied the
+	 rest. A script that sees it equal to the caster count every frame has
+	 something invalidating the cache — a camera that has not settled, most
+	 likely, or a node marked static that something is still moving.
+
+	 Zero in every frame with no static caster at all, which is a frame with no
+	 cached map to rebuild rather than a cheap one.
+	*>
+	uint shadow_static_draws;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
@@ -260,6 +315,27 @@ struct Draw @local
 	// silent wrap rather than an error. It is a tiebreaker in the sort so that
 	// copies routed the same way stay adjacent and coalesce.
 	bool preskinned;
+	// Whether this copy belongs to the half of the shadow map that is drawn once
+	// and kept — `Node.static_caster`. Beside `visible` rather than in the key
+	// for the same reason `visible` is: it decides where a copy sits inside its
+	// bucket, not which bucket it lands in. `Bucket.static_first` has the layout.
+	bool is_static;
+}
+
+<*
+ Where a copy sits inside its bucket: the last key of the sort, and the only one
+ that is not about which bucket it lands in.
+
+ Four cells, ordered so that the camera-visible copies are a prefix and the
+ static casters are a run — see `Bucket.static_first` for the diagram and for why
+ both have to be true at once. Everything is cell 0 in a frame with no shadow
+ pass and nothing marked static, which is the arrangement that existed before
+ either feature and is the one this degrades to.
+*>
+fn uint draw_cell(bool visible, bool is_static) @local @inline
+{
+	if (visible) return is_static ? 1 : 0;
+	return is_static ? 2 : 3;
 }
 
 struct Scene
@@ -310,6 +386,87 @@ struct Scene
 	uint shadow_culled;
 	uint shadow_culled_last_frame;
 	bool started;
+
+	<*
+	 Whether every node's `world` is the one its local transform implies.
+
+	 **The flag that makes the second and third `update_world_matrices` of a frame
+	 free**, which `plan.md` §19.5 measured as three to five walks per frame: one
+	 for `Scene.bounds`, one for `follow_camera`, one inside `Scene.update`, and
+	 more if a script asks for a bounding box. `dirty` already saved the matrix
+	 arithmetic on the repeats; it never saved the traversal, the per-node
+	 validation or the 64-byte `parent_world` copy per recursion, which is what is
+	 actually left when a scene is standing still.
+
+	 **Set in exactly one place and cleared in exactly one place.** `update_world_
+	 matrices` sets it; `invalidate` clears it, and every mutation that sets a
+	 `Node.dirty` anywhere goes through `invalidate` — the setters here, and the
+	 three writers outside this file that reach for `Node.dirty` directly
+	 (`AnimationPlayer.apply`, `Physics.write_back`, `setTransform` at the JS
+	 boundary). That is the whole contract, and the cost of getting it wrong is a
+	 node drawn at its previous transform, so `Scene.touch` is now what makes a
+	 hand-written `node.position = ...` land rather than a nicety.
+	*>
+	bool matrices_current;
+
+	<*
+	 `bounds`, as it last answered, and whether that answer is still good.
+
+	 **`Scene.bounds` is exact, not conservative** — it transforms every vertex of
+	 every drawable node, which `plan.md` §19.5 measured at 100k–370k vertex
+	 transforms on the reference village. It was called once per frame by the
+	 shadow fit and a second time per frame by any attached follow camera, for a
+	 value that changes only when the scene does.
+
+	 The invalidation is the whole of the risk, and it is stated plainly because a
+	 stale box is not a crash: it is a shadow fit around the wrong region and a
+	 camera framed on the wrong thing, both of which look like a tuning problem.
+	 So the flag is cleared by `invalidate` beside `matrices_current` and by
+	 nothing else — the two are invalidated by exactly the same events, because a
+	 box over world matrices cannot go stale without a world matrix going stale
+	 first.
+
+	 The one thing outside this file that could move it is the asset table: a mesh
+	 that finished uploading after the box was taken would have hull positions the
+	 box was not fitted around. It cannot happen — `create_slot` retains the mesh
+	 it names and retaining is what uploads, so every node in a scene is past that
+	 point before the node exists. `world_mesh_bounds`' own header argues the same
+	 case from the other end.
+	*>
+	collision::Aabb3 bounds_box;
+	bool bounds_current;
+
+	<*
+	 Bumped whenever something a *static* caster contributes to the shadow map
+	 could have changed.
+
+	 `render/shadow.c3` keeps a depth image of everything marked `Node.static_caster`
+	 and re-rasterises it only when this number moves — see `ShadowMap.static_fit`
+	 for the rest of the key — the light's projection and the map's size. It is deliberately separate from `matrices_current`:
+	 a walking character moves every frame and must not cost the village its cached
+	 map, which is the entire point of §19.3.
+
+	 **Two writers, and the interesting one is the walk.** `update_branch` bumps
+	 this whenever a static node's world matrix is recomputed, which is the only
+	 place that knows a node *actually* moved — a static wall under a dynamic group
+	 moves when the group does, and the setter that moved the group was never shown
+	 the wall. `invalidate` bumps it for the changes that are not a movement and so
+	 have no walk to be seen by: a node added or removed, a subtree re-parented, a
+	 material swapped, a node joining or leaving the static set.
+
+	 Bumped conservatively in both. Over-bumping costs a re-render of the static map
+	 and is invisible; under-bumping is a shadow of where a building used to be, and
+	 that failure looks like a lighting bug rather than like a stale cache.
+	*>
+	uint static_revision;
+
+	// How many nodes are marked static right now. Maintained by the two writers of
+	// `Node.static_caster` and by `kill`, and read by `MeshPass.prepare` to decide
+	// whether the light's fit should hold still — see `ShadowMap.fit`'s `stable`.
+	// A count rather than a bool because it has to go back down: a scene that
+	// marked a wall static and then removed the wall is a scene with nothing to
+	// cache, and should be fitted as tightly as one that never marked anything.
+	uint static_nodes;
 }
 
 <*
@@ -335,6 +492,44 @@ fn Scene* Scene.init(&self)
 	self.started = true;
 	self.root = self.create_slot(NO_NODE, NO_ASSET, NO_MESH, "root");
 	return self;
+}
+
+<*
+ Everything derived from the node pool is out of date as of now.
+
+ **One function so that there is one list.** Three things are cached off the
+ hierarchy — the world matrices, the bounding box, and the shadow map's static
+ half — and they are invalidated by the same events, so a mutation that
+ remembered two of the three would be a bug that only shows up in the one it
+ forgot. Adding a fourth cache means adding a line here and nowhere else.
+
+ @param node : `The node that changed, or null for a change that is not about one node — an add, a removal, a re-parenting. Only read to decide whether the static half of the shadow map has to be rebuilt; a null is treated as "it might have been static", which is the conservative answer.`
+*>
+fn void Scene.invalidate(&self, Node* node = null)
+{
+	self.matrices_current = false;
+	self.bounds_current = false;
+	if (node == null || node.static_caster) self.static_revision++;
+}
+
+<*
+ Mark a node's local transform as changed from outside the setters.
+
+ Three callers write `Node.position` and friends directly and then set
+ `Node.dirty` — `AnimationPlayer.apply`, `Physics.write_back`, and `setTransform`
+ at the JS boundary — because each of them already has the node resolved and the
+ setters would cost a second lookup per channel, per frame, per body. They call
+ this instead of writing the flag, so that the caches in `invalidate` are not
+ something a fourth such caller has to know about.
+
+ `Scene.touch` is the same thing by handle, for a script that wrote the fields
+ itself.
+*>
+fn void Scene.mark_moved(&self, Node* node)
+{
+	if (node == null) return;
+	node.dirty = true;
+	self.invalidate(node);
 }
 
 <*
@@ -553,6 +748,16 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 
 	node.skin = -1;
 	node.pose = 0;
+	// A character cannot be a static caster — `set_static_caster` refuses one, and
+	// this is the other door: a node may be given a skin *after* it was marked
+	// static, and a pose offset moving is a silhouette moving with no transform to
+	// notice it.
+	if (node.static_caster)
+	{
+		node.static_caster = false;
+		self.static_nodes--;
+		self.static_revision++;
+	}
 	if (skin < 0 || self.assets == null) return;
 
 	Asset* owner = self.assets.slot(node.asset);
@@ -872,6 +1077,10 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.skin = -1;
 	node.pose = 0;
 	node.preskinned = false;
+	// Dynamic until a script says otherwise, and reset for `material`'s reason: a
+	// recycled slot that stayed static would put a new node into a shadow map
+	// nothing is going to rebuild.
+	node.static_caster = false;
 	node.visible = true;
 	node.world_visible = true;
 	node.dirty = true;
@@ -882,6 +1091,12 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// the slot is fully written, so a table that somehow reads back into the
 	// scene sees a consistent node.
 	if (self.assets != null && asset.is_set()) self.assets.retain(asset, mesh);
+
+	// A fresh slot is dynamic — `static_caster` was reset a few lines up — so the
+	// static map does not have to be rebuilt for it. It is invalidated here all
+	// the same, because a node that is *about* to be marked static arrives
+	// through this door and `set_static_caster` bumps the revision itself.
+	self.invalidate(node);
 
 	return { .index = index, .generation = generation };
 }
@@ -951,6 +1166,11 @@ fn void Scene.kill(&self, NodeId id)
 	node.name = "";
 	node.children.clear();
 	node.alive = false;
+	// Before the flag is cleared, so a static caster's removal is seen as one.
+	self.invalidate(node);
+	if (node.static_caster) self.static_nodes--;
+	node.static_caster = false;
+
 	// The bump is what makes every outstanding id to this slot stale.
 	node.generation++;
 	self.free_slots.push(id.index);
@@ -1002,6 +1222,9 @@ fn void Scene.set_parent(&self, NodeId id, NodeId parent)
 	node.parent = target;
 	node.dirty = true;
 	self.node(target).children.push(id);
+	// Null rather than `node`: a re-parenting moves the whole subtree, and a
+	// dynamic node can carry static children.
+	self.invalidate();
 }
 
 // The transform setters. Each marks the node dirty; `update_world_matrices`
@@ -1012,7 +1235,7 @@ fn void Scene.set_position(&self, NodeId id, Vec3 position)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.position = position;
-	node.dirty = true;
+	self.mark_moved(node);
 }
 
 <*
@@ -1024,7 +1247,7 @@ fn void Scene.set_rotation(&self, NodeId id, Vec3 rotation)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.rotation = quat_from_euler(rotation);
-	node.dirty = true;
+	self.mark_moved(node);
 }
 
 <*
@@ -1041,7 +1264,7 @@ fn void Scene.set_quaternion(&self, NodeId id, Quaternionf rotation)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.rotation = rotation.normalize();
-	node.dirty = true;
+	self.mark_moved(node);
 }
 
 fn void Scene.set_scale(&self, NodeId id, Vec3 scale)
@@ -1049,7 +1272,7 @@ fn void Scene.set_scale(&self, NodeId id, Vec3 scale)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.scale = scale;
-	node.dirty = true;
+	self.mark_moved(node);
 }
 
 fn void Scene.set_visible(&self, NodeId id, bool visible)
@@ -1059,7 +1282,7 @@ fn void Scene.set_visible(&self, NodeId id, bool visible)
 	node.visible = visible;
 	// Visibility is inherited, and inheritance is resolved in the same walk the
 	// world matrices are, so a change to it is a dirty node like any other.
-	node.dirty = true;
+	self.mark_moved(node);
 }
 
 <*
@@ -1081,6 +1304,54 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.material = material;
+	// Not `mark_moved`: nothing about the node's transform changed and the world
+	// box is where it was. What *can* change is whether this copy casts at all —
+	// `MeshPass.casts_shadow` reads the material's blend mode — so a static
+	// caster changing material is a static map to rebuild.
+	if (node.static_caster) self.static_revision++;
+}
+
+<*
+ Put this node in the half of the shadow map that is drawn once and kept.
+
+ `plan.md` §19.3: in a village the sun does not move and the buildings do not
+ move, and the shadow pass was rasterising every one of them into an image
+ identical to the previous frame's. This is the per-node bool that partitions the
+ casters, and the promise it comes with is that **it does not split a draw
+ bucket** — the flag orders copies *within* a bucket rather than keying one, so a
+ wall marked static and its neighbour that is not are still one
+ `vkCmdDrawIndexed` in the colour pass. `Bucket.static_first` is where that is
+ spent.
+
+ What it costs to be wrong: a node marked static that then moves leaves its old
+ silhouette baked into the cached map until something else invalidates it. Moving
+ one through the setters here is safe — they bump the revision and the map is
+ rebuilt — so the failure needs a transform written by hand with no `touch`,
+ which is the same failure that already draws the node in the wrong place.
+
+ **Refused on anything with a skin**, which is the one exclusion worth spelling
+ out. A skinned node's silhouette is not its transform: it is `Node.pose`, an
+ offset into a palette that `AnimationPlayer.key_pose` rewrites without touching
+ a transform at all, and a compute-routed copy's vertices live in a buffer the
+ dispatch refills every frame. Neither is something the setters here can see
+ move, so "it does not move" cannot be made true of a character, and the request
+ is refused rather than half-honoured. `Bucket.static_first` has the second
+ reason for the compute case, which is about sub-ranges rather than about staleness.
+
+ @return `Whether the node is static now. False for a handle that names nothing and for a skinned node, which is a refusal rather than an error — see above.`
+*>
+fn bool Scene.set_static_caster(&self, NodeId id, bool value)
+{
+	Node* node = self.node(id);
+	if (node == null) return false;
+	bool wanted = value && node.skin < 0 && !node.preskinned;
+	if (node.static_caster == wanted) return wanted;
+	// Bumped whichever way it went: a node joining the static set has to be drawn
+	// into the map, and one leaving it has to be taken out.
+	node.static_caster = wanted;
+	if (wanted) { self.static_nodes++; } else { self.static_nodes--; }
+	self.static_revision++;
+	return wanted;
 }
 
 <*
@@ -1132,10 +1403,20 @@ fn void Scene.set_name(&self, NodeId id, String name)
 	node.name = name.len > 0 ? name.copy(mem) : "";
 }
 
+<*
+ Say that this node's local transform was written by hand.
+
+ **No longer optional, and that is the change §19.5 made.** Writing
+ `scene.node(id).position` directly and letting the next walk notice was always
+ documented as needing this; until the walk could be skipped it also happened to
+ work without it, because `update_world_matrices` re-descended the whole tree
+ every time and read the `dirty` flag on arrival. It does not any more — see
+ `Scene.matrices_current` — so a hand-written transform that is not touched is a
+ node drawn where it used to be.
+*>
 fn void Scene.touch(&self, NodeId id)
 {
-	Node* node = self.node(id);
-	if (node != null) node.dirty = true;
+	self.mark_moved(self.node(id));
 }
 
 <*
@@ -1177,8 +1458,15 @@ macro Scene.@traverse(&self, NodeId id; @body(NodeId child_id, Node* node))
 *>
 fn void Scene.update_world_matrices(&self)
 {
+	// **The repeat is free, which it was not before §19.5.** A frame walks this
+	// three to five times — `Scene.bounds` for the shadow fit, `follow_camera`,
+	// `Scene.update`, and once more for every bounding box a script asks for —
+	// and `Node.dirty` only ever saved the arithmetic, never the walk. See
+	// `Scene.matrices_current` for what has to hold for this line to be safe.
+	if (self.matrices_current) return;
 	if (!self.root.is_set()) return;
 	self.update_branch(self.root, matrix::IDENTITY4{float}, true, false);
+	self.matrices_current = true;
 }
 
 fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent_visible, bool parent_changed)
@@ -1192,7 +1480,17 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
 		node.dirty = false;
+		// **Where the cached shadow map is really invalidated**, and it is here
+		// rather than in the setters because this is the only place that knows a
+		// node *actually* moved. A static wall parented to a dynamic group is the
+		// case that makes the difference: the setter was handed the group, which
+		// is not static, so nothing there would have said anything — and the wall's
+		// world matrix changed all the same. `changed` carries down the tree, so
+		// asking here catches the whole subtree of every move, however it was made
+		// and whichever node it was made on.
+		if (node.static_caster) self.static_revision++;
 	}
+
 	node.world_visible = parent_visible && node.visible;
 
 	// Copied out before recursing: the children list is walked by index because
@@ -1288,33 +1586,16 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
 }
 
 <*
- A box in world space, given a local box and the matrix that places it.
-
- Transforms the centre and the half-extent rather than eight corners: the extent
- along each world axis is the absolute row of the linear part dotted with the
- local extent. Same answer, a fraction of the arithmetic, and it is the form
- that stays correct under a rotation *and* a non-uniform scale.
-
- **The arithmetic lives in `collision`,** which is the same closed form its
- `Aabb3.transform` uses for a translation/rotation/scale triple; this is only
- the spelling the renderer wants, because a node's world matrix is already
- composed and taking it apart to pass a quaternion would undo the saving. The
- name stays because `pick.c3` and `render/shadow.c3` reach for it by name, and
- because reading matrix-then-box left to right is the order the call sites are
- written in.
-*>
-fn collision::Aabb3 transform_aabb(Matrix4f m, collision::Aabb3 box) => box.transform_matrix(m);
-
-<*
  The tight world-space box of one mesh under one transform.
 
- ## Why this is not `transform_aabb`
+ ## Why this is not `Aabb3.transform_matrix`
 
- `transform_aabb` re-bounds a *box*: it takes the mesh's local AABB, rotates its
- extent and takes the axis-aligned hull of the result. That is exact only when
- the shape genuinely fills its box, or when the rotation is a multiple of 90
+ `transform_matrix` re-bounds a *box*: it takes the mesh's local AABB, rotates
+ its extent and takes the axis-aligned hull of the result. That is exact only
+ when the shape genuinely fills its box, or when the rotation is a multiple of 90
  degrees — and it is conservative rather than wrong, which is why it stays in the
- two places that want conservative.
+ places that want conservative: frustum culling, the ray broad phase, and the
+ shadow-map fit.
 
  It is the wrong answer for *measuring*, and the failure is sharp rather than
  marginal. `ConeGeometry(1, 1, 4)` is a square pyramid whose base sits corner-on
@@ -1356,7 +1637,7 @@ fn collision::Aabb3 transform_aabb(Matrix4f m, collision::Aabb3 box) => box.tran
 *>
 fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 {
-	if (mesh.hull_positions.len == 0) return transform_aabb(m, mesh.bounds);
+	if (mesh.hull_positions.len == 0) return mesh.bounds.transform_matrix(m);
 
 	float[<16>] v = m.m;
 	collision::Aabb3 box;
@@ -1491,6 +1772,7 @@ fn uint draw_order(uint material, bool transparent) @local
  @param transparent : `One bool per material index — whether that material blends. Empty is an opaque frame, and is what stats() passes.`
  @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
  @param light : `The light's frustum when a shadow pass will read this list, null otherwise. A draw kept by this and not by the camera goes into the tail of its bucket — see Bucket.visible.`
+ @param counts_only : `Build the buckets and leave the instance array empty — stats()' configuration, and nothing a frame may pass. See Scene.stats.`
 *>
 fn void Scene.build_draw_list(
 	&self,
@@ -1501,7 +1783,8 @@ fn void Scene.build_draw_list(
 	// Indexed by material, exactly as `transparent` is, and empty when nobody has
 	// asked for one. See the growth below.
 	float[] margins = {},
-	Frustum* light = null
+	Frustum* light = null,
+	bool counts_only = false
 )
 {
 	self.draws.clear();
@@ -1565,7 +1848,8 @@ fn void Scene.build_draw_list(
 				Asset* owner = assets.slot(node.asset);
 				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
 			}
-			collision::Aabb3 box = transform_aabb(node.world, local);
+			collision::Aabb3 box = local.transform_matrix(node.world);
+
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
 			// material says how far it moves things and the box grows by that
@@ -1614,6 +1898,7 @@ fn void Scene.build_draw_list(
 			.depth = depth,
 			.visible = visible,
 			.preskinned = node.preskinned && node.skin >= 0,
+			.is_static = node.static_caster,
 		});
 	}
 
@@ -1672,7 +1957,9 @@ fn void Scene.build_draw_list(
 		// sits *inside* that bucket, so a bucket stays one bucket and its
 		// camera-visible copies are a prefix of it. Move this above `key` and
 		// every mesh with a partly-visible set of copies becomes two draw calls.
-		if (a.visible != b.visible) return a.visible ? -1 : 1;
+		uint cell_a = draw_cell(a.visible, a.is_static);
+		uint cell_b = draw_cell(b.visible, b.is_static);
+		if (cell_a != cell_b) return cell_a < cell_b ? -1 : 1;
 		return 0;
 	});
 
@@ -1682,6 +1969,10 @@ fn void Scene.build_draw_list(
 	ulong open = self.draws[0].key + 1;
 	uint open_material = self.draws[0].material;
 	bool open_preskinned = self.draws[0].preskinned;
+	// Where the next copy goes, counted rather than read off `self.instances`,
+	// because in a counting build there is no instance array to read it off. The
+	// two are the same number in every build that writes one.
+	uint placed = 0;
 	foreach (draw : self.draws)
 	{
 		Node* node = &self.nodes[draw.slot];
@@ -1697,28 +1988,40 @@ fn void Scene.build_draw_list(
 				.asset = node.asset,
 				.mesh = node.mesh,
 				.material = draw.material,
-				.first = (uint)self.instances.len(),
+				.first = placed,
 				.count = 0,
 				.visible = 0,
+				.static_first = 0,
+				.static_count = 0,
 				.preskinned = draw.preskinned,
 			});
 		}
 
-		self.instances.push({
-			.model = node.world,
-			.normal = node.normal,
-			.color = node.color,
-			.variant = node.variant,
-			// The whole of what a hundred characters at a hundred phases disagree
-			// about. Zero on everything that is not skinned, which the shader reads
-			// as nothing because the bucket's flags say there is no skin.
-			.pose = node.pose,
-		});
-		self.buckets[self.buckets.len() - 1].count++;
-		// Correct as a running total only because the sort put the visible copies
-		// first: this counts them wherever they are, and it is the comparator that
-		// makes "how many" the same number as "how many at the front".
-		if (draw.visible) self.buckets[self.buckets.len() - 1].visible++;
+		if (!counts_only)
+		{
+			self.instances.push({
+				.model = node.world,
+				.normal = node.normal,
+				.color = node.color,
+				.variant = node.variant,
+				// The whole of what a hundred characters at a hundred phases disagree
+				// about. Zero on everything that is not skinned, which the shader reads
+				// as nothing because the bucket's flags say there is no skin.
+				.pose = node.pose,
+			});
+		}
+		placed++;
+
+		Bucket* bucket = &self.buckets[self.buckets.len() - 1];
+		bucket.count++;
+		// Correct as running totals only because the sort laid the four cells out
+		// in order: each of these counts wherever it finds one, and it is the
+		// comparator that makes "how many" the same number as "how many at the
+		// front". `static_first` is the size of cell 0 — the visible copies that
+		// are not static — which is exactly where cell 1 begins.
+		if (draw.visible) bucket.visible++;
+		if (draw.visible && !draw.is_static) bucket.static_first++;
+		if (draw.is_static) bucket.static_count++;
 	}
 }
 
@@ -1738,7 +2041,19 @@ fn ulong bucket_key(uint asset, uint mesh) @inline => ((ulong)asset << 32) | (ul
  thousand integer compares once per `stats()` call, which is not a number worth a
  hash table and an allocation.
 *>
+// How many copies the buckets cover. `build_draw_list` in counting mode writes
+// no instance array, so this is where the number comes from — and it is the same
+// number a writing build would have left in `instances.len()`, because every
+// draw increments exactly one bucket's count.
+fn uint count_instances(Bucket[] buckets)
+{
+	uint total = 0;
+	foreach (bucket : buckets) total += bucket.count;
+	return total;
+}
+
 fn uint count_unique_meshes(Bucket[] buckets)
+
 {
 	uint unique = 0;
 	foreach (i, bucket : buckets)
@@ -1788,12 +2103,25 @@ fn uint count_unique_meshes(Bucket[] buckets)
 fn SceneStats Scene.stats(&self, Assets* assets)
 {
 	self.update_world_matrices();
-	self.build_draw_list(assets, null);
+	// **Counting, not writing.** Every number below is read off the *buckets*;
+	// nothing here has ever looked at an `Instance`, and building 148 bytes per
+	// drawable to throw them away is what `plan.md` §19.5 found this call doing —
+	// 635 KB of it on the reference village, after every script an agent runs.
+	// The buckets still need the sort that produces them, so this is not free; it
+	// is the write and the growth of a list a query has no reader for.
+	//
+	// The list is left empty rather than stale, which is the honest state: the
+	// next `update` rebuilds both halves, and it would have done that anyway —
+	// see the header on why this call deliberately leaves nothing behind.
+	self.build_draw_list(assets, null, {}, null, {}, null, true);
 
 	SceneStats stats = {
 		.draw_calls = (uint)self.buckets.len(),
 		.unique_meshes = count_unique_meshes(self.buckets.array_view()),
-		.instances = (uint)self.instances.len(),
+		// Summed over the buckets rather than read off `self.instances`, which the
+		// counting build above deliberately left empty. Same number: every draw
+		// that survived lands in exactly one bucket.
+		.instances = count_instances(self.buckets.array_view()),
 		.assets = assets.resident(),
 		.textures = assets.texture_count(),
 		.texture_bytes = assets.texture_bytes(),
@@ -1833,6 +2161,13 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 *>
 fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 {
+	// **Cached, because this is the most expensive query in the project.** Every
+	// vertex of every drawable node goes through a matrix here — `world_mesh_
+	// bounds` explains at length why it is exact rather than conservative — and
+	// `plan.md` §19.5 counted 100k to 370k of them per call on the reference
+	// village, twice a frame. `Scene.bounds_box` carries what invalidates it.
+	if (self.bounds_current) return self.bounds_box;
+
 	self.update_world_matrices();
 
 	bool found = false;
@@ -1856,7 +2191,12 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		}
 	}
 
-	if (!found) return { .min = { -1, -1, -1 }, .max = { 1, 1, 1 } };
+	// The unit box is cached like any other answer. An empty scene is asked this
+	// question by every frame that has shadows on, and re-walking an empty node
+	// pool to be told the same thing is the same waste in miniature.
+	if (!found) total = { .min = { -1, -1, -1 }, .max = { 1, 1, 1 } };
+	self.bounds_box = total;
+	self.bounds_current = true;
 	return total;
 }
 

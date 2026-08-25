@@ -161,8 +161,29 @@ struct Node
 	*>
 	bool preskinned;
 
+	<*
+	 Whether this node is in the half of the shadow map that is drawn once and
+	 kept — `mesh.static = true`, and `plan.md` §19.3.
+
+	 **It does not split a draw bucket**, which is the difference between it and
+	 `preskinned` one line up and the reason it can be set on ten thousand crates
+	 without costing a draw call. It is a tiebreak in the sort rather than a key,
+	 so it orders copies *inside* their bucket; `Bucket.static_first` is the
+	 layout and the argument.
+
+	 Off by default. A scene where everything is dynamic is exactly the renderer
+	 as it was before this existed — the whole map is rebuilt every frame — and
+	 guessing that a node is static because nothing has moved it *yet* is the one
+	 way to get a building's shadow left behind after it moves.
+
+	 `Scene.set_static_caster` is the only writer, and it refuses on a node the
+	 compute skinning pass poses.
+	*>
+	bool static_caster;
+
 	// `visible` is this node's own flag; `world_visible` is it AND every
 	// ancestor's, resolved in the same walk that builds the world matrices.
+
 	// Three.js hides a whole subtree by hiding its root, and a flat scan of the
 	// node pool cannot see that on its own.
 	bool visible;

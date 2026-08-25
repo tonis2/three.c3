@@ -488,7 +488,10 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
 			case AnimatedPath.SCALE:
 				node.scale = { value[0], value[1], value[2] };
 		}
-		node.dirty = true;
+		// Not `node.dirty = true`: the flag alone stopped being enough in §19.5,
+		// when the world-matrix walk gained the right to skip itself. See
+		// `Scene.mark_moved`.
+		scene.mark_moved(node);
 	}
 }
 

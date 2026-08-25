@@ -1174,6 +1174,38 @@ fn void the_shadow_pass_is_silent_under_validation() @test
 		image::Image fourth = renderer.capture()!!;
 		fourth.free();
 
+		// **The cached half, and all three of its shapes** — §19.3, which is where
+		// this test earns its keep. The ordinary path was already silent before it
+		// existed; what is new is a second depth image, a full-image copy between
+		// two of them, a render pass that loads rather than clears, and an image
+		// sampled in one frame that was written in a previous one. Every one of
+		// those is a layout or a hazard the layer *does* speak up about, unlike the
+		// two barriers this test's header says it cannot check.
+		//
+		// Marking only the ground static puts the frame in `SHADOW_PLAN_COMBINED`
+		// with a walking character over the copy, which is the shape with every
+		// piece in it at once.
+		three::RunResult cached = run.run(`stage.children[0].static = true;`);
+		defer cached.free();
+		test::@check(cached.ok, "the ground went static: %s", cached.error);
+		image::Image rebuilt = renderer.capture()!!;
+		rebuilt.free();
+		image::Image over_copy = renderer.capture()!!;
+		over_copy.free();
+
+		// And `SHADOW_PLAN_STATIC`, where the colour pass samples an image no
+		// barrier in this submission has touched.
+		three::RunResult still = run.run(`
+			stage.traverse(o => { o.static = true; });
+			stage.children.forEach(o => { if (o.animations.length) o.stop(); });
+		`);
+		defer still.free();
+		test::@check(still.ok, "the scene settled: %s", still.error);
+		image::Image settled = renderer.capture()!!;
+		settled.free();
+		image::Image held = renderer.capture()!!;
+		held.free();
+
 		// The other frame path, for the reason the post and skinning checks reach
 		// for it: "they all go through one function" is a claim worth checking.
 		renderer.render_offscreen()!!;
@@ -1419,4 +1451,452 @@ fn void the_fit_snaps_to_whole_texels() @test
 		if (a.m[i] != third.light_view_projection.m[i]) moved = true;
 	}
 	test::@check(moved, "a ten-texel move did not change the fit at all");
+}
+
+// ============================================================================
+// The cached half — plan.md §19.3
+// ============================================================================
+
+// `SCENE` with a handle on the scene left behind, because these checks run
+// several scripts against one context and the second one needs to reach what the
+// first built. Everything else about it is `SCENE` exactly, so the pictures here
+// are comparable with the ones above.
+const String KEPT_SCENE = `
+	const scene = new three.Scene();
+	globalThis.stage = scene;
+	const ground = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial());
+	ground.rotation.x = -Math.PI / 2;
+	scene.add(ground);
+	const box = new three.Mesh(new three.BoxGeometry(2, 2, 2), new three.MeshLambertMaterial());
+	box.position.set(0, 2.4, 0);
+	scene.add(box);
+	three.light.set([0.12, 1.0, 0.12], 0.2);
+	three.camera.frameAll();
+	three.camera.orbit(0.0, 1.0, three.camera.distance * 0.85);
+	three.light.shadow = true;
+	three.render();
+`;
+
+<*
+ A village that is not moving is rasterised into the shadow map once.
+
+ **The claim §19.3 is built on, asserted as a count rather than as a duration.**
+ The plan measured depth-only geometry at 119 ns an instance and pointed out that
+ the shadow pass was producing an image identical to the previous frame's, every
+ frame, for a scene where the sun does not move and the buildings do not. So the
+ check is on the draws: the first frame after `static` is set rasterises the
+ casters into the cached image, and every frame after it rasterises **nothing at
+ all** — no clear, no copy, no draws — because the map from the first frame is
+ still the right map.
+
+ `shadowDraws` reading zero is the other half and is not a formality: it is what
+ says the movers' pass was skipped entirely rather than run over an empty list.
+ A frame in `SHADOW_PLAN_STATIC` samples the cached image itself, so there is no
+ pass to record.
+
+ **And the picture is unchanged, byte for byte.** That is the assertion that
+ makes the rest of it mean anything — a cache that produced a slightly different
+ frame would be a cache that is wrong, however few draws it cost. It holds here
+ because this camera can see the whole scene, so the fitted square is capped at
+ the scene's own extent and `SHADOW_FIT_SLACK` has nothing to add to it; a scene
+ with `shadow.distance` set would be fitted a little wider and would not be
+ comparable this way. `the_stable_fit_holds_while_the_focus_does` is where that
+ half is checked instead.
+*>
+fn void a_static_village_is_rasterised_once() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult moving = run.run(KEPT_SCENE +++ `
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer moving.free();
+		test::@check(moving.ok, "the scene built: %s", moving.error);
+		test::@check(moving.value == `"2,2,0"`, "two casters, drawn every frame, nothing cached: %s", moving.value);
+
+		image::Image uncached = renderer.capture()!!;
+		defer uncached.free();
+
+		three::RunResult first = run.run(`
+			stage.traverse(o => { o.static = true; });
+			three.render();
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer first.free();
+		test::@check(first.ok, "the scene went static: %s", first.error);
+		test::@check(
+			first.value == `"2,0,2"`,
+			"the frame that marks them static draws them into the cached image and nowhere else: %s",
+			first.value
+		);
+
+		three::RunResult second = run.run(`
+			three.render();
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer second.free();
+		test::@check(
+			second.value == `"2,0,0"`,
+			"and the next frame rasterises nothing into it at all: %s", second.value
+		);
+
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		test::@check(
+			differing_bytes(&uncached, &cached) == 0,
+			"the cached map draws the same frame, %d bytes differ",
+			differing_bytes(&uncached, &cached)
+		);
+
+		// The cached image is the live one's extent by construction, so a resize
+		// takes both and what the old one held is a picture at a resolution nothing
+		// will ask for again. Worth a line here rather than a test of its own: the
+		// failure is a copy between two images of different sizes, which is the one
+		// mistake in this feature the validation layer *would* catch, and it would
+		// catch it in whichever scene resized first.
+		three::RunResult resized = run.run(`
+			three.light.shadow.size = 512;
+			three.render();
+			const s = three.stats();
+			return [s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer resized.free();
+		test::@check(resized.ok, "the map resized: %s", resized.error);
+		test::@check(
+			resized.value == `"0,2"`,
+			"a resize threw the cached image away and drew it again: %s", resized.value
+		);
+	};
+}
+
+<*
+ A mover is drawn over the cached map, and it does not split the bucket it is in.
+
+ **Two claims, and the second is the promise the flag comes with.** The two boxes
+ share one geometry and one material, so they are one bucket; one of them is
+ static and one is not. `drawCalls` staying at 2 is what says the flag orders
+ copies *inside* a bucket rather than keying one — `Bucket.static_first` is the
+ layout that makes that possible, and the alternative design, where `static` joins
+ the bucket key, would report 3 here and be the exact trade the whole renderer
+ exists to refuse.
+
+ The first claim is the arithmetic of the split pass: the cached rebuild covers
+ both buckets, because both hold something static, and the movers' pass covers
+ one, because only the box bucket holds anything that moves. On the frame after,
+ the rebuild is gone and the cart's single draw is all that is left.
+
+ **The picture is unchanged again**, which for this plan is the harder version of
+ the same claim: the copy, the load and the movers drawn over the top have to
+ produce the depths a single clearing pass would have.
+*>
+fn void a_mover_is_drawn_over_the_cached_map() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial());
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+			globalThis.ground = ground;
+			const shape = new three.BoxGeometry(2, 2, 2);
+			const stone = new three.MeshLambertMaterial();
+			globalThis.wall = new three.Mesh(shape, stone);
+			wall.position.set(-2.5, 2.4, 0);
+			scene.add(wall);
+			globalThis.cart = new three.Mesh(shape, stone);
+			cart.position.set(2.5, 2.4, 0);
+			scene.add(cart);
+			three.light.set([0.12, 1.0, 0.12], 0.2);
+			three.camera.frameAll();
+			three.camera.orbit(0.0, 1.0, three.camera.distance * 0.85);
+			three.light.shadow = true;
+			three.render();
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == `"2,2,0"`, "one bucket for the two boxes, no cache yet: %s", built.value);
+
+		image::Image uncached = renderer.capture()!!;
+		defer uncached.free();
+
+		three::RunResult split = run.run(`
+			ground.static = true;
+			wall.static = true;
+			three.render();
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer split.free();
+		test::@check(split.ok, "the scenery went static: %s", split.error);
+		test::@check(
+			split.value == `"2,1,2"`,
+			"two buckets rebuilt into the cache, one bucket of movers over it, and still two draws: %s",
+			split.value
+		);
+
+		three::RunResult held = run.run(`
+			three.render();
+			const s = three.stats();
+			return [s.drawCalls, s.shadowDraws, s.shadowStaticDraws].join(',');
+		`);
+		defer held.free();
+		test::@check(
+			held.value == `"2,1,0"`,
+			"and the frame after draws the cart alone: %s", held.value
+		);
+
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		test::@check(
+			differing_bytes(&uncached, &cached) == 0,
+			"the copy and the mover on top draw the same frame, %d bytes differ",
+			differing_bytes(&uncached, &cached)
+		);
+	};
+}
+
+<*
+ Moving something marked static rebuilds the map rather than leaving its shadow
+ behind.
+
+ **The failure this feature is one mistake away from.** A cached map whose
+ invalidation missed a case does not crash and does not look broken — it leaves a
+ building's shadow lying on the ground after the building has gone, which reads
+ as a lighting bug and is very hard to attribute. So the setter path is checked
+ directly: move a static caster and the rebuild has to happen on that frame, and
+ the picture has to change.
+
+ The second half is what rules out "it rebuilt an identical map": the ground under
+ where the box *was* has to come back up, which only happens if the old silhouette
+ was thrown away rather than kept.
+*>
+fn void moving_a_static_caster_rebuilds_the_map() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(KEPT_SCENE +++ `
+			stage.traverse(o => { o.static = true; });
+			three.render();
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "0", "the map settled first: %s", built.value);
+
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+
+		three::RunResult moved = run.run(`
+			stage.children[1].position.x = 3.5;
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer moved.free();
+		test::@check(moved.ok, "the box moved: %s", moved.error);
+		test::@check(
+			moved.value == "2",
+			"moving a static caster rebuilt the cached map: %s", moved.value
+		);
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+		test::@check(
+			differing_bytes(&before, &after) > 0,
+			"and the shadow moved with it"
+		);
+	};
+}
+
+<*
+ A skinned mesh refuses to be static, and says so.
+
+ A character's silhouette is `Node.pose` rather than its transform — an animation
+ rewrites the offset into the palette and moves nothing the setters can see — so
+ "it does not move" is not a thing that can be true of one. The refusal is a
+ returned answer rather than a thrown error, because asking is reasonable: a
+ script marking a whole subtree static should not have to know which of its nodes
+ the file rigged.
+*>
+fn void a_skinned_mesh_refuses_to_be_static() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial());
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+			const asset = await three.load('test/fixtures/skinned.glb');
+			const character = asset.instantiate();
+			scene.add(character);
+			ground.static = true;
+			const rigged = [];
+			character.traverse(o => { o.static = true; if (o.geometry) rigged.push(o.static); });
+			three.light.shadow = true;
+			three.render();
+			const s = three.stats();
+			// The file holds a rigged mesh and an unrigged prop hanging off a
+			// joint, so "everything under the character refused" would be the
+			// wrong claim. What has to be true is that the refusals are exactly
+			// the skinned draws — the prop does not move by itself and is
+			// allowed to cache.
+			return [
+				ground.static,
+				s.skinnedDraws > 0,
+				rigged.filter(v => !v).length === s.skinnedDraws,
+			].join(',');
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `"true,true,true"`,
+			"the ground took it and every skinned mesh refused: %s", result.value
+		);
+
+	};
+}
+
+<*
+ The stable fit holds still while the focus stays inside it, and lets go when it
+ does not.
+
+ **Device-free, because the question is arithmetic.** §18.1 made the light's box
+ follow the camera, which is what makes a village's shadows sharp; §19.3 caches
+ the map, which only pays if the box holds still. `ShadowMap.fit`'s `stable` is
+ the reconciliation and this is what it promises: a small camera move produces
+ the *same matrix*, not a similar one, because a stored depth image is only
+ depths in a particular projection and "nearly the same fit" is not something it
+ can be sampled through.
+
+ Three cases, and the third is the one that makes the first two mean something:
+ without `stable`, the same small move refits — so this is a check on the flag
+ rather than on the fit happening to be insensitive to a nudge.
+*>
+fn void the_stable_fit_holds_while_the_focus_does() @test
+{
+	collision::Aabb3 bounds = { .min = { -60, 0, -60 }, .max = { 60, 12, 60 } };
+	float[4] light = { 0.3f, 1.0f, 0.2f, 0.0f };
+
+	three::ShadowMap map;
+	map.defaults();
+	map.size = 1024;
+
+	collision::Aabb3 focus = { .min = { -10, 0, -10 }, .max = { 10, 8, 10 } };
+	map.fit(light, bounds, focus, stable: true);
+	Matrix4f first = map.light_view_projection;
+
+	// A step the size of a few texels. Enough to move the snapped origin, and far
+	// inside the slack the stable fit left around the focus.
+	collision::Aabb3 nudged = { .min = { -9.4f, 0, -9.4f }, .max = { 10.6f, 8, 10.6f } };
+	map.fit(light, bounds, nudged, stable: true);
+	test::@check(
+		same_fit(first, map.light_view_projection),
+		"a small camera move kept the fit it already had"
+	);
+
+	// Far enough that the focus leaves the square, which is the exact condition
+	// for the cached map no longer covering what has to be covered.
+	collision::Aabb3 walked = { .min = { 20, 0, 20 }, .max = { 40, 8, 40 } };
+	map.fit(light, bounds, walked, stable: true);
+	test::@check(
+		!same_fit(first, map.light_view_projection),
+		"and let go once the focus left it"
+	);
+
+	three::ShadowMap tracking;
+	tracking.defaults();
+	tracking.size = 1024;
+	tracking.fit(light, bounds, focus);
+	Matrix4f tracked = tracking.light_view_projection;
+	tracking.fit(light, bounds, nudged);
+	test::@check(
+		!same_fit(tracked, tracking.light_view_projection),
+		"while the tracking fit — every scene with nothing cached — refits on the same nudge"
+	);
+}
+
+fn bool same_fit(Matrix4f a, Matrix4f b)
+{
+	for (usz i = 0; i < 16; i++)
+	{
+		if (a.m[i] != b.m[i]) return false;
+	}
+	return true;
+}
+
+<*
+ A static caster under a group that moves is a static caster that moved.
+
+ **The invalidation hole that is easiest to leave open**, and the reason
+ `Scene.static_revision` is bumped by the world-matrix walk rather than by the
+ setters. The setter here is handed the *group*, which is not static and never
+ was; the wall underneath it is, and its world matrix changes all the same. A
+ version of this that only asked the node it was given would leave the wall's
+ shadow behind while the wall walked away, with nothing anywhere saying so.
+
+ Checked twice over: the rebuild has to happen on the frame the group moves, and
+ the frame has to change. The second half is what rules out a rebuild that
+ produced the same map.
+
+ **Proved by injection.** `if (node.static_caster) self.static_revision++;`
+ deleted from `Scene.update_branch`, which leaves only the setters bumping it:
+ "moving the group rebuilt the map its static child is in: 0". Every other check
+ in this file stays green, the wall is drawn in its new place, and its shadow
+ stays where the wall used to be.
+*>
+
+fn void moving_a_group_rebuilds_its_static_children() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial());
+			ground.rotation.x = -Math.PI / 2;
+			ground.static = true;
+			scene.add(ground);
+			globalThis.yard = new three.Group();
+			scene.add(yard);
+			const wall = new three.Mesh(new three.BoxGeometry(2, 2, 2), new three.MeshLambertMaterial());
+			wall.position.set(0, 2.4, 0);
+			wall.static = true;
+			yard.add(wall);
+			three.light.set([0.12, 1.0, 0.12], 0.2);
+			three.camera.frameAll();
+			three.camera.orbit(0.0, 1.0, three.camera.distance * 0.85);
+			three.light.shadow = true;
+			three.render();
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "0", "the map settled first: %s", built.value);
+
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+
+		three::RunResult moved = run.run(`
+			yard.position.x = 3.5;
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer moved.free();
+		test::@check(moved.ok, "the group moved: %s", moved.error);
+		test::@check(
+			moved.value == "2",
+			"moving the group rebuilt the map its static child is in: %s", moved.value
+		);
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+		test::@check(differing_bytes(&before, &after) > 0, "and the wall's shadow went with it");
+	};
 }
