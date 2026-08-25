@@ -108,6 +108,10 @@ export const nav = {
 	// Answers with the same object `stats()` does, or null when there was no
 	// standing room in the region — an empty scene, a scene of walls, or a
 	// slope limit nothing is under. Null is an answer, not an error.
+	//
+	// **Look at `components` on what comes back.** A bake with more than one is
+	// a level cut into islands, and every other number on it will look healthy
+	// while half the agents stand still — `stats()` has the rest.
 	bake(options = null) {
 		const cell = +(options?.cell ?? 0.5);
 		if (!(Number.isFinite(cell) && cell > 0)) {
@@ -134,6 +138,20 @@ export const nav = {
 	// shape of this API is settled — "that number decides whether this is a
 	// level-boundary operation or a loading-screen one" — and `bakeMs`,
 	// `voxels` and `walkable` are how a caller answers it for their own level.
+	//
+	// `{ cell, radius, height, slope, voxels, solid, floor, walkable,
+	// components, largest, bakeMs, bounds }`.
+	//
+	// **`components` is the one to check, and it is not a cost.** It is how many
+	// DISJOINT regions the standing room came out in, and `largest` is the size
+	// of the biggest. Every other number here is a total, and a total cannot
+	// tell a level an agent can cross from the same level cut into islands: a
+	// doorway one cell too narrow, a step one cell too high or a ramp that does
+	// not quite reach all leave `walkable` looking exactly right, `field()`
+	// returning a live field rather than null, and `direction()` answering
+	// (0, 0, 0) for every agent on the wrong side of the break. Anything above
+	// 1 means "there is no path" is the honest answer for some pairs of points
+	// in this level — usually a `cell` too coarse for the geometry.
 	stats() { return H.navStats(); },
 
 	// Throw the bake and every field over it away.

@@ -86,6 +86,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setQuaternion", &js_set_quaternion, 6);
 	self.bind(host, "setVisible", &js_set_visible, 3);
 	self.bind(host, "setStatic", &js_set_static, 3);
+	self.bind(host, "setCollides", &js_set_collides, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
@@ -497,7 +498,7 @@ fn void js_set_transform(
 	// Not `node.dirty = true`: the flag alone stopped being enough in §19.5, when
 	// the world-matrix walk gained the right to skip itself. See
 	// `Scene.mark_moved`.
-	self.pass.scene.mark_moved(node);
+	self.pass.scene.mark_moved(id);
 }
 
 <*
@@ -687,6 +688,25 @@ fn void js_set_visible(
 	if (!id.is_set()) return;
 
 	self.pass.scene.set_visible(id, arg_truth(&js, argc, args, 2));
+}
+
+<*
+ `setCollides(index, generation, on)` — whether this node is collision geometry.
+
+ Returns nothing, like `setVisible` and unlike `setStatic`: there is no node this
+ can be refused on. `Node.collides` has what it is for.
+*>
+fn void js_set_collides(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeId id = arg_handle(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	self.pass.scene.set_collides(id, arg_truth(&js, argc, args, 2));
 }
 
 <*

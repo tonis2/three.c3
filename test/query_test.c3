@@ -205,6 +205,216 @@ fn void the_index_notices_a_node_that_moved() @test
 }
 
 <*
+ An ignored object takes its whole subtree out of a sweep.
+
+ **The regression this exists for is a character colliding with its own chest.**
+ `gather_triangles` took a single node, and a character is a Group of six or
+ eight meshes — so the capsule was swept against the boxes standing inside it,
+ `hit` came back as one of them, and the controller threw the character out
+ along that normal. Ignoring the leaf you happen to name is not a fix, which is
+ the middle case here: the torso is excluded and a leg answers instead.
+
+ The distance is the assertion rather than `hit`, because a downward motion
+ legitimately finds the floor: a capsule that collided with itself is
+ depenetrated first and comes out somewhere it was never asked to go.
+*>
+fn void ignoring_an_object_ignores_its_subtree() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(40, 1, 40));
+			floor.position.y = -0.5;
+			floor.name = 'floor';
+			scene.add(floor);
+
+			// A character of five meshes: a torso, a head and three limbs, all
+			// of them inside the capsule that is about to be swept.
+			const hero = new three.Group();
+			hero.name = 'hero';
+			const parts = [];
+			for (const [name, y, x] of [['torso', 0.5, 0], ['head', 1.2, 0],
+					['armL', 0.6, -0.4], ['armR', 0.6, 0.4], ['legs', -0.4, 0]]) {
+				const m = new three.Mesh(new three.BoxGeometry(0.3, 0.6, 0.3));
+				m.name = name;
+				m.position.set(x, y, 0);
+				hero.add(m);
+				parts.push(name);
+			}
+			scene.add(hero);
+
+			const opts = { radius: 0.4, height: 1.7, step: 0.4, slope: 52, skin: 0.02, snap: 0.4 };
+			const from = [0, 0.85, 0], motion = [0.25, -0.1, 0];
+			const moved = o => {
+				const r = three.moveAndSlide(from, motion, o ? { ...opts, ignore: o } : opts);
+				// Did it touch one of its own parts, and did it travel exactly
+				// the motion it was given? Free motion is 0.25; a capsule that
+				// started inside its own body is depenetrated first and comes
+				// out somewhere it was never asked to go.
+				const own = r.hit !== null && parts.includes(r.hit.name);
+				return [own, Math.abs(r.position.x - (from[0] + motion[0])) < 1e-4];
+			};
+			return [moved(null), moved(scene.getObjectByName('torso')), moved(hero), moved([hero, floor])];
+		`, "the ignore script ran");
+
+		// Ignoring nothing collides with the character; ignoring the one leaf
+		// you happened to name buys nothing, because five other meshes are still
+		// there; ignoring the Group — or a list holding it — is clear and moves
+		// exactly as asked.
+		test::@check(value == `[[true,false],[true,false],[false,true],[false,true]]`,
+			"twice hitting itself, then twice clear; got %s", value);
+	};
+}
+
+<*
+ A ninth ignored object is refused rather than dropped.
+
+ A sweep quietly colliding with something it was told to pass through is a bug
+ that reads as the controller misbehaving, and there is nothing a caller can do
+ about it if they are not told. Eight is `MAX_IGNORED`, and ignoring an object
+ ignores everything under it — so needing a ninth means the set is being used
+ for something `Node.collides` should be doing.
+*>
+fn void a_ninth_ignored_object_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(m);
+			const opts = { radius: 0.3, height: 1.5 };
+			const tryN = n => {
+				try {
+					three.moveAndSlide([0, 5, 0], [0, -0.1, 0], { ...opts, ignore: new Array(n).fill(m) });
+					return 'ok';
+				} catch (e) { return e.constructor.name; }
+			};
+			return [tryN(8), tryN(9)];
+		`, "the ignore-cap script ran");
+
+		test::@check(value == `["ok","RangeError"]`, "eight is fine and nine is not; got %s", value);
+	};
+}
+
+<*
+ `collides = false` takes a drawable out of every spatial query and leaves it
+ drawn.
+
+ **The regression this exists for is a pickup that is a bollard.** Every mesh in
+ the index is swept against, and `trigger: true` does not help because that is a
+ physics property a sweep never sees — so the shape that worked before this flag
+ was a visible thing plus an invisible volume beside it. The last two numbers
+ are what makes this a different flag from `visible`: it still draws.
+*>
+fn void a_non_colliding_drawable_is_drawn_and_not_queried() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(40, 1, 40));
+			floor.position.y = -0.5;
+			scene.add(floor);
+
+			const pickup = new three.Mesh(new three.SphereGeometry(0.6, 12, 8));
+			pickup.name = 'pickup';
+			pickup.position.set(0, 0.6, 0);
+			scene.add(pickup);
+
+			const opts = { radius: 0.4, height: 1.7, step: 0.4, slope: 52, skin: 0.02, snap: 0.4 };
+			const run = () => +three.moveAndSlide([-2, 0.85, 0], [3, 0, 0], opts).position.x.toFixed(2);
+
+			const seenBefore = three.query.sphere([0, 0.6, 0], 0.2).length;
+			const rayBefore = three.query.raycastAll([-5, 0.6, 0], [1, 0, 0]).length;
+			const stoppedBefore = run();
+
+			pickup.collides = false;
+
+			const seenAfter = three.query.sphere([0, 0.6, 0], 0.2).length;
+			const rayAfter = three.query.raycastAll([-5, 0.6, 0], [1, 0, 0]).length;
+			const stoppedAfter = run();
+
+			return [seenBefore, seenAfter, rayBefore, rayAfter,
+				stoppedBefore < 0.9, stoppedAfter, pickup.visible, scene.stats().drawCalls];
+		`, "the collides script ran");
+
+		// Found then not, hit by the ray then not, blocked then walked through
+		// to the full metre — and still visible, still drawn.
+		test::@check(value == "[1,0,1,0,true,1,true,2]",
+			"out of the queries and still on screen; got %s", value);
+	};
+}
+
+<*
+ Hiding a node does not cost the index, and moving one does not rebuild it.
+
+ There is no clock a script can read, so this checks the two things that are
+ *observable* about the fix rather than the microseconds: that a hidden node
+ stops being found and comes back exactly as it was, and that a sequence of
+ write-then-ask answers correctly however it is interleaved. Both were true
+ before the fix as well — what changed is the price — so this is a guard on the
+ re-file being right, not on it being fast. `notes.md` §17 has the numbers.
+
+ The interleaved half is the one that could actually break: a re-filed entry
+ stays filed in the cells it used to cover, and the stamp is what stops it being
+ reported twice.
+*>
+fn void a_hidden_node_and_a_moved_one_answer_correctly() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const g = new three.BoxGeometry(1, 1, 1);
+			const many = [];
+			for (let i = 0; i < 40; i++) {
+				const m = new three.Mesh(g);
+				m.position.set(i * 3, 0, 0);
+				m.name = 'm' + i;
+				scene.add(m);
+				many.push(m);
+			}
+
+			// Hiding and showing, with a query between every write.
+			const hideSeen = [];
+			for (const m of many.slice(0, 4)) {
+				hideSeen.push(three.query.sphere([m.position.x, 0, 0], 0.6).length);
+				m.visible = false;
+				hideSeen.push(three.query.sphere([m.position.x, 0, 0], 0.6).length);
+				m.visible = true;
+				hideSeen.push(three.query.sphere([m.position.x, 0, 0], 0.6).length);
+			}
+
+			// Moving, with a query between every write. Each one is asked for
+			// where it went AND for where it was.
+			const moveSeen = [];
+			for (let i = 0; i < 4; i++) {
+				const m = many[i];
+				const was = m.position.x;
+				m.position.set(was, 40, 0);
+				moveSeen.push(three.query.sphere([was, 40, 0], 0.6).length);
+				moveSeen.push(three.query.sphere([was, 0, 0], 0.6).length);
+			}
+
+			// And past the loose cap, where it gives up and rebuilds: 200
+			// writes with no query between them, then one question.
+			for (let i = 0; i < many.length; i++) many[i].position.set(i * 3, 80, 0);
+			const afterMany = [
+				three.query.sphere([9, 80, 0], 0.6).length,
+				three.query.sphere([9, 40, 0], 0.6).length,
+				three.query.box({ min: [-2, 78, -2], max: [200, 82, 2] }).length,
+			];
+			return [hideSeen.join(), moveSeen.join(), afterMany.join()];
+		`, "the invalidation script ran");
+
+		test::@check(value == `["1,0,1,1,0,1,1,0,1,1,0,1","1,0,1,0,1,0,1,0","1,0,40"]`,
+			"hidden and back, moved and found where it went, and all forty after the cap; got %s", value);
+	};
+}
+
+<*
  `raycastAll` reports every node on the ray, and `raycast` reports the nearest
  of them.
 
@@ -516,6 +726,103 @@ fn void a_bake_finds_the_floor_and_not_the_wall() @test
 
 		test::@check(value == "[true,true,true,false,false]",
 			"a bake, walkable cells, a reachable floor, and nothing inside the wall or in the sky; got %s", value);
+	};
+}
+
+<*
+ A bake keeps a slope connected to itself, and says how many pieces it is in.
+
+ **The regression this exists for cost half a session.** The erosion that
+ reserves the agent's width used to dilate the whole *solid* set horizontally;
+ the moment `ceil(radius / cell - 0.5)` rounds up to 1, a descending floor comes
+ apart, because the uphill column's floor cell sits at the *walkable* layer of
+ the column beside it and growing it sideways blocks exactly the cell the
+ downhill agent had to stand in. It is invisible on flat ground — there is no
+ floor cell at the walkable layer to grow — which is why it survived every test
+ until a level had a hill in it.
+
+ The fixture is a 60-unit ramp climbing six, which is 5.7 degrees: far inside
+ any slope limit, and steep enough that the layers differ. Three radii, one of
+ which rounds `grow` to zero and was the only one that ever worked. Before the
+ fix, the defaults gave 13 regions and a far end that could not be reached.
+
+ `components` is checked as well as the reachability, because it is the counter
+ that makes this findable: every other number a fragmented bake reports looks
+ healthy.
+*>
+fn void a_ramp_stays_one_region_at_any_agent_radius() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const flatA = new three.Mesh(new three.BoxGeometry(20, 1, 12));
+			flatA.position.set(-40, -0.5, 0);
+			scene.add(flatA);
+			const ramp = new three.Mesh(new three.BoxGeometry(61, 1, 12));
+			ramp.position.set(0, 2.5, 0);
+			ramp.rotation.z = Math.atan2(6, 60);
+			scene.add(ramp);
+			const flatB = new three.Mesh(new three.BoxGeometry(20, 1, 12));
+			flatB.position.set(40, 5.5, 0);
+			scene.add(flatB);
+
+			const bounds = { min: [-55, -4, -10], max: [55, 12, 10] };
+			const ask = (radius, cell) => {
+				const s = three.nav.bake({ cell, radius, height: 1.8, slope: 50, bounds });
+				const f = three.nav.field([40, 6.2, 0]);
+				// The bottom of the ramp, and the direction out of it: a graph
+				// in pieces answers "unreachable" and points nowhere.
+				const cost = f.cost([-40, 0.1, 0]);
+				const dir = f.direction([-40, 0.1, 0]);
+				f.dispose();
+				return [s.components, s.largest === s.walkable, Number.isFinite(cost), dir.x > 0.5];
+			};
+			return [ask(0.35, 0.5), ask(0.43, 0.6), ask(0.30, 0.6), ask(0.6, 0.5)];
+		`, "the ramp bake script ran");
+
+		test::@check(value == `[[1,true,true,true],[1,true,true,true],[1,true,true,true],[1,true,true,true]]`,
+			"one region and a reachable far end at every radius; got %s", value);
+	};
+}
+
+<*
+ `components` counts the pieces, and a gap really does make two.
+
+ The test above would pass on a `components` hard-coded to 1, so this is the
+ other half: two floors with a gap between them are two regions, one floor is
+ one, and `largest` is the bigger of the two rather than the total.
+*>
+fn void components_counts_what_a_walk_cannot_cross() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const a = new three.Mesh(new three.BoxGeometry(20, 1, 10));
+			a.position.set(-15, -0.5, 0);
+			scene.add(a);
+			const b = new three.Mesh(new three.BoxGeometry(10, 1, 10));
+			b.position.set(15, -0.5, 0);
+			scene.add(b);
+
+			const bounds = { min: [-30, -4, -8], max: [25, 6, 8] };
+			const split = three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8, bounds });
+
+			// Bridge the gap and bake again: the same geometry, now crossable.
+			const bridge = new three.Mesh(new three.BoxGeometry(18, 1, 4));
+			bridge.position.set(2.5, -0.5, 0);
+			scene.add(bridge);
+			const joined = three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8, bounds });
+
+			return [
+				split.components, split.largest < split.walkable, split.largest > split.walkable / 2,
+				joined.components, joined.largest === joined.walkable,
+			];
+		`, "the components script ran");
+
+		test::@check(value == "[2,true,true,1,true]",
+			"two islands with the bigger one named, then one; got %s", value);
 	};
 }
 

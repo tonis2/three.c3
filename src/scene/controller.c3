@@ -182,7 +182,7 @@ struct MoveResult
 
  @return `The corrected centre.`
 *>
-fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOptions options, NodeId skip)
+fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOptions options, IgnoreSet skip)
 {
 	if (assets == null) return centre;
 
@@ -250,7 +250,7 @@ fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOption
  it the next move starts at zero clearance — see `MoveOptions.skin`.
 *>
 fn Vec3 Scene.slide_step(
-	&self, Assets* assets, Vec3 at, Vec3 motion, MoveOptions options, NodeId skip, SweepHit* out
+	&self, Assets* assets, Vec3 at, Vec3 motion, MoveOptions options, IgnoreSet skip, SweepHit* out
 )
 {
 	SweepHit hit = self.sweep_capsule(assets, at, at + motion, options.radius, options.half_height, options.skin, skip);
@@ -288,10 +288,10 @@ fn bool walkable(Vec3 normal, float slope_limit) @local
 
  @param centre : `Where the capsule's centre is now, in world space.`
  @param motion : `How far it wants to go this frame. Gravity is the caller's: this integrates nothing and remembers nothing between calls.`
- @param skip : `The character's own node, so it does not collide with its own mesh. NO_NODE if it draws nothing.`
+ @param skip : `The character's own nodes, subtrees included, so it does not collide with its own mesh. An empty set if it draws nothing. A character is usually a Group — see IgnoreSet.`
 *>
 fn MoveResult Scene.move_capsule(
-	&self, Assets* assets, Vec3 centre, Vec3 motion, MoveOptions options, NodeId skip
+	&self, Assets* assets, Vec3 centre, Vec3 motion, MoveOptions options, IgnoreSet skip
 )
 {
 	MoveResult result = {
@@ -418,7 +418,7 @@ fn MoveResult Scene.move_capsule(
  @return `Whether the climb was taken, with the new centre in out.`
 *>
 fn bool Scene.try_step_up(
-	&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions options, NodeId skip, Vec3* out
+	&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions options, IgnoreSet skip, Vec3* out
 )
 {
 	SweepHit ignored;

@@ -22,6 +22,10 @@ export class Object3D {
 		this.parent = null;
 		this._name = '';
 		this._visible = true;
+		// Whether this object is collision geometry — see the accessor. On by
+		// default, because the surprising answer is a wall walked through
+		// rather than a pickup that blocks.
+		this._collides = true;
 		// Whether this object is in the half of the shadow map that is drawn
 		// once and kept — `plan.md` §19.3. Off by default, and the host refuses
 		// it on anything with a skin, which is why the setter reads the answer
@@ -108,6 +112,25 @@ export class Object3D {
 	set static(v) {
 		const want = !!v;
 		this._static = this._i >= 0 ? !!H.setStatic(this._i, this._g, want) : want;
+	}
+
+	// **"This is scenery, not a wall."** Off takes the object out of the
+	// spatial index entirely: nothing sweeps against it, nothing raycasts it,
+	// three.query.sphere does not report it. A pickup lying on a path stops
+	// being a bollard and a field of grass stops being a fence.
+	//
+	// `three.physics` is untouched by it — a body is a body, and a trigger
+	// volume on a mesh with `collides = false` is the ordinary way to write a
+	// pickup you can walk into and cannot walk into.
+	//
+	// NOT inherited, unlike `visible`: it says what one piece of geometry is.
+	// Hiding a whole character from ONE sweep is `{ ignore }` on that call.
+	// Toggling it costs an index rebuild, so it belongs where a level is
+	// authored rather than in a loop — `visible` is the free one.
+	get collides() { return this._collides; }
+	set collides(v) {
+		this._collides = !!v;
+		if (this._i >= 0) H.setCollides(this._i, this._g, this._collides);
 	}
 
 	// What this object draws, or null for a group. Overridden by Mesh.
@@ -197,6 +220,7 @@ export class Object3D {
 		this._g = g;
 		this._flush();
 		if (!this._visible) H.setVisible(i, g, false);
+		if (!this._collides) H.setCollides(i, g, false);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(i, g, material);
@@ -412,6 +436,7 @@ export class Object3D {
 			rotation: this.rotation.toJSON(),
 			scale: this.scale.toJSON(),
 			visible: this._visible,
+			collides: this._collides,
 			inScene: this._i >= 0,
 			children: this.children.length,
 		};

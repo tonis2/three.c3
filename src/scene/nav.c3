@@ -72,7 +72,9 @@ struct NavSettings
 
 	// How wide the agent is. Free space is eroded by this before anything is
 	// called walkable, so a corridor narrower than the agent has no cells in it
-	// rather than a centre line the agent cannot fit on.
+	// rather than a centre line the agent cannot fit on. The erosion grows out
+	// of walls and not out of floors — `bake_nav` has the argument, and it is
+	// what keeps a ramp connected to itself.
 	float agent_radius;
 
 	// How tall it is. Cells above a floor must be clear for this height or the
@@ -134,6 +136,26 @@ struct NavMesh
 	uint walkable_cells;
 	long voxels;
 	double bake_ms;
+
+	<*
+	 How many disjoint regions the walkable set came out in, and how big the
+	 biggest one is.
+
+	 **The number that says whether the bake is usable**, and the one thing
+	 that was missing when the erosion bug below cut a trail into islands: a
+	 bake returns a healthy `walkable_cells`, `field` returns a live field
+	 rather than null, and every other counter here looks exactly right, so the
+	 only thing that showed it was asking a *second* point whether it was
+	 reachable. `components == 1` is a level an agent can cross; anything else
+	 is a level where "there is no path" is the honest answer for some pairs of
+	 points, and a caller who did not intend that wants to know at bake time.
+
+	 Measured over the same 26-neighbour adjacency `collision::relax_voxel`
+	 relaxes across, so it is exactly the graph a field is solved on rather
+	 than an approximation of it.
+	*>
+	uint components;
+	uint largest_component;
 }
 
 fn void NavMesh.free(&self)
@@ -202,7 +224,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 		triangles.tinit(256);
 		List{NodeId} owners;
 		owners.tinit(256);
-		self.gather_triangles(assets, region, NO_NODE, &triangles, &owners);
+		self.gather_triangles(assets, region, {}, &triangles, &owners);
 
 		foreach (tri : triangles)
 		{
@@ -259,22 +281,47 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.solid_cells = solid_count;
 	out.floor_cells = floor_count;
 
-	// Erode the free space by the agent's width, by dilating the solid set
-	// horizontally. Horizontally only: growing it vertically would swallow the
-	// standing room above every floor, which is the space being looked for.
+	// Erode the free space by the agent's width, by dilating the **walls**
+	// horizontally — the solid cells that are not floor. Horizontally only:
+	// growing it vertically would swallow the standing room above every floor,
+	// which is the space being looked for.
+	//
+	// **Walls rather than the whole solid set, and that is a bug fix rather
+	// than a refinement** (`plan.md` §17). Dilating every solid cell is correct
+	// only while the floor is level. The moment it is not, the uphill column's
+	// *floor* cell sits at the walkable layer of the column beside it — that is
+	// what a slope is — so growing it sideways blocks exactly the cell the
+	// downhill agent had to stand in, and any descending floor comes out of the
+	// bake as islands one dilation apart. Measured on a 5.7-degree ramp at
+	// `cell: 0.6`: `agent_radius: 0.43` reached 1 of 49 points down a 200-unit
+	// trail where `0.30` — the same bake with `grow` rounding to zero — reached
+	// all 49. A flat corridor was whole either way, which is why it survived
+	// every test until a level had a hill in it.
+	//
+	// A wall keeps its clearance, because a wall is not floor. A ramp keeps its
+	// continuity, because ground you stand *on* is not something to keep clear
+	// *of*. The seam where a floor triangle and a wall triangle share a cell is
+	// left out of the dilation, and the wall's own cells above it are not, so
+	// the clearance is still there one layer up where the agent's chest is.
 	int grow = (int)math::ceil(math::max(settings.agent_radius, 0.0f) / cell - 0.5f);
 	char[] blocked = solid;
 	char[] dilated;
 	if (grow > 0)
 	{
 		dilated = mem::new_array(char, (sz)total);
+		// Seeded with the whole solid set, so `blocked` keeps meaning "a cell
+		// the agent's centre may not be in" — a cell inside geometry is blocked
+		// whether or not anything was grown into it. Only the *source* of the
+		// dilation is narrowed.
+		mem::copy(dilated.ptr, solid.ptr, (usz)total);
 		for (int z = 0; z < nz; z++)
 		{
 			for (int y = 0; y < ny; y++)
 			{
 				for (int x = 0; x < nx; x++)
 				{
-					if (solid[(sz)((z * ny + y) * nx + x)] == 0) continue;
+					sz from = (sz)((z * ny + y) * nx + x);
+					if (solid[from] == 0 || floor[from] != 0) continue;
 					int x0 = math::max(x - grow, 0);
 					int x1 = math::min(x + grow, nx - 1);
 					int z0 = math::max(z - grow, 0);
@@ -350,7 +397,86 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.walkable_cells = (uint)out.grid.cells.len;
 	out.built = true;
 	out.settings.cell = cell;
+
+	out.measure_components();
+	// Re-stamped, so the number a caller reads is the whole bake and not the
+	// part of it that existed before the component pass did.
+	out.bake_ms = (double)(long)started.to_now() / 1_000_000.0;
 	return true;
+}
+
+<*
+ Label the walkable set's connected regions, and remember how many there were.
+
+ **`plan.md` §17: nothing reported a fragmented bake.** Every other counter on
+ a `NavMesh` is a total, and a total cannot tell a level an agent can cross from
+ the same level cut into a hundred islands — which is what the radius erosion
+ above used to make of any slope. This is the counter that can, and it is worth
+ having on its own: a doorway one cell too narrow, a step one cell too high and
+ a ramp that does not quite reach all look identical in `walkable_cells`.
+
+ A flood fill over the same 26-neighbourhood `collision::relax_voxel` steps, so
+ "one component" means exactly "`solve_field` can carry a cost from any cell to
+ any other". One pass over the cells with an explicit stack — no recursion,
+ because a broad sheet of standing room is tens of thousands of cells deep.
+
+ Cheap next to the voxelization it follows: the walk touches each cell once and
+ looks at 26 neighbours, against a rasterization that is per triangle per cell.
+*>
+fn void NavMesh.measure_components(&self)
+{
+	self.components = 0;
+	self.largest_component = 0;
+	if (!self.usable()) return;
+
+	sz count = self.grid.cells.len;
+	int[] label = mem::new_array(int, count);
+	defer mem::free(label);
+	foreach (&slot : label) *slot = -1;
+
+	int plane = self.grid.nx * self.grid.ny;
+
+	List{int} stack;
+	stack.init(mem, 64);
+	defer stack.free();
+
+	for (sz start = 0; start < count; start++)
+	{
+		if (label[start] >= 0) continue;
+
+		int id = (int)self.components;
+		self.components++;
+		uint size = 0;
+
+		label[start] = id;
+		stack.push((int)start);
+		while (stack.len() > 0)
+		{
+			int entry = stack.pop()!!;
+			size++;
+			int voxel = self.grid.cells[(sz)entry];
+
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				for (int dy = -1; dy <= 1; dy++)
+				{
+					for (int dx = -1; dx <= 1; dx++)
+					{
+						if (dx == 0 && dy == 0 && dz == 0) continue;
+						// Unbounded on purpose, on NAV_PAD's promise that no
+						// entry is within two cells of the edge — the same
+						// promise `collision::relax_voxel` steps on.
+						int neighbour = self.grid.index[voxel + dz * plane + dy * self.grid.nx + dx];
+						if (neighbour < 0 || label[(sz)neighbour] >= 0) continue;
+						label[(sz)neighbour] = id;
+						stack.push(neighbour);
+					}
+				}
+			}
+		}
+
+		if (size > self.largest_component) self.largest_component = size;
+	}
 }
 
 <*
@@ -571,7 +697,7 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
  @return `How many points were written, always at least one.`
 *>
 fn uint Scene.shorten_path(
-	&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, NodeId skip
+	&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, IgnoreSet skip
 )
 {
 	if (count == 0 || out.len == 0) return 0;

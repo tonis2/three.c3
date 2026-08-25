@@ -38,8 +38,8 @@ fn void JsRuntime.bind_query_verbs(&self, qjs::Value host)
 	self.bind(host, "queryBox", &js_query_box, 9);
 	self.bind(host, "overlapSphere", &js_overlap_sphere, 7);
 	self.bind(host, "raycastAll", &js_raycast_all, 8);
-	self.bind(host, "sweep", &js_sweep, 10);
-	self.bind(host, "moveAndSlide", &js_move_and_slide, 14);
+	self.bind(host, "sweep", &js_sweep, 11);
+	self.bind(host, "moveAndSlide", &js_move_and_slide, 15);
 	self.bind(host, "setTransforms", &js_set_transforms, 7);
 }
 
@@ -232,7 +232,8 @@ fn qjs::Value sweep_value(JsRuntime* self, qjs::Context* js, SweepHit hit) @loca
 }
 
 <*
- `sweep(fx, fy, fz, tx, ty, tz, radius, halfHeight, skipIndex, skipGeneration)`.
+ `sweep(fx, fy, fz, tx, ty, tz, radius, halfHeight, ignoreBuffer,
+ ignoreByteOffset, ignoreLength)`.
 
  An upright capsule, which is a sphere when `halfHeight` is zero. See
  `Scene.sweep_capsule` for why there is no orientation argument.
@@ -255,32 +256,45 @@ fn void js_sweep(
 		return;
 	}
 
-	NodeId skip = optional_handle(self, &js, argc, args, 8);
-	SweepHit hit = self.pass.scene.sweep_capsule(&self.pass.assets, from, to, radius, half, 0.0f, skip);
+	SweepHit hit = self.pass.scene.sweep_capsule(
+		&self.pass.assets, from, to, radius, half, 0.0f, ignore_set(self, &js, argc, args, 8));
 	*out = sweep_value(self, &js, hit);
 }
 
 <*
- A node handle that may legitimately be absent.
+ The nodes a sweep was told to ignore, out of an `Int32Array` of handle pairs.
 
- `arg_handle` raises for a stale one, which is right where a script named an
- object; here the pair is "the thing to ignore" and -1 is how the prelude spells
- "nothing". A stale handle is still an absence rather than an error, because the
- caller's intent — do not collide with that — is satisfied by a node that no
- longer exists.
+ **A set rather than one handle since §17**, because a character is a Group and
+ the single node this replaced meant a capsule collided with its own chest —
+ `IgnoreSet` carries the argument. The prelude fills one shared scratch array
+ rather than allocating per call, so the common case of "ignore this one object"
+ costs the same two ints it always did.
+
+ Stale handles are dropped rather than raised on, which is what `optional_handle`
+ did before this and for the same reason: the caller's intent — do not collide
+ with that — is satisfied by a node that no longer exists. `arg_handle`'s
+ raising is right where a script *named* an object; here an absence is an
+ answer.
 *>
-fn NodeId optional_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at) @local
+fn IgnoreSet ignore_set(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at) @local
 {
-	int index = arg_int(js, argc, args, at);
-	if (index < 0) return NO_NODE;
-	NodeId id = { .index = (uint)index, .generation = (uint)arg_int(js, argc, args, at + 1) };
-	if (self.pass == null || self.pass.scene.node(id) == null) return NO_NODE;
-	return id;
+	int[] pairs = int_view(js, argc, args, at);
+	if (pairs.len < 2 || self.pass == null) return {};
+
+	IgnoreSet set;
+	for (sz i = 0; i + 1 < pairs.len && set.count < MAX_IGNORED; i += 2)
+	{
+		if (pairs[i] < 0) continue;
+		NodeId id = { .index = (uint)pairs[i], .generation = (uint)pairs[i + 1] };
+		if (self.pass.scene.node(id) == null) continue;
+		set.nodes[set.count++] = id;
+	}
+	return set;
 }
 
 <*
  `moveAndSlide(px, py, pz, mx, my, mz, radius, halfHeight, step, slope, skin,
- snap, skipIndex, skipGeneration)`.
+ snap, ignoreBuffer, ignoreByteOffset, ignoreLength)`.
 
  **It takes a position and answers with a position; it does not touch a node.**
  The alternative — hand it the character's object and let it write the
@@ -315,8 +329,8 @@ fn void js_move_and_slide(
 		return;
 	}
 
-	NodeId skip = optional_handle(self, &js, argc, args, 12);
-	MoveResult result = self.pass.scene.move_capsule(&self.pass.assets, centre, motion, options, skip);
+	MoveResult result = self.pass.scene.move_capsule(
+		&self.pass.assets, centre, motion, options, ignore_set(self, &js, argc, args, 12));
 
 	qjs::Value value = js.object();
 	js.set_property(value, "position", vec3_value(&js, result.position));
@@ -404,7 +418,7 @@ fn void js_set_transforms(
 			node.rotation = (Quaternionf) { data[at + 3], data[at + 4], data[at + 5], data[at + 6] }.normalize();
 			node.scale = { data[at + 7], data[at + 8], data[at + 9] };
 		}
-		self.pass.scene.mark_moved(node);
+		self.pass.scene.mark_moved(id);
 		written++;
 	}
 

@@ -491,7 +491,7 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
 		// Not `node.dirty = true`: the flag alone stopped being enough in §19.5,
 		// when the world-matrix walk gained the right to skip itself. See
 		// `Scene.mark_moved`.
-		scene.mark_moved(node);
+		scene.mark_moved(id);
 	}
 }
 

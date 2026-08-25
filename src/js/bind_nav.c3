@@ -134,6 +134,13 @@ fn qjs::Value nav_stats_value(JsRuntime* self, qjs::Context* js) @local
 	js.set_property(value, "solid", qjs::number_value((double)self.nav.solid_cells));
 	js.set_property(value, "floor", qjs::number_value((double)self.nav.floor_cells));
 	js.set_property(value, "walkable", qjs::number_value((double)self.nav.walkable_cells));
+	// **The two that say whether the bake is usable rather than what it cost.**
+	// Every counter above is a total, and a total cannot tell a level an agent
+	// can cross from the same level cut into islands — see
+	// `NavMesh.components`. `components > 1` is the signal a caller wants at
+	// bake time rather than after the third agent stands still for no reason.
+	js.set_property(value, "components", qjs::number_value((double)self.nav.components));
+	js.set_property(value, "largest", qjs::number_value((double)self.nav.largest_component));
 	js.set_property(value, "bakeMs", qjs::number_value(self.nav.bake_ms));
 	js.set_property(value, "bounds", aabb_value(js, (collision::Aabb3) {
 		self.nav.grid.origin,
@@ -354,7 +361,7 @@ fn void js_nav_path(
 
 		Vec3[] tight = mem::temp_array(Vec3, (sz)(slots.len / 3));
 		uint kept = self.pass.scene.shorten_path(
-			&self.pass.assets, &self.nav, raw[:(sz)count], count, tight, NO_NODE);
+			&self.pass.assets, &self.nav, raw[:(sz)count], count, tight, {});
 
 		for (uint i = 0; i < kept; i++)
 		{
