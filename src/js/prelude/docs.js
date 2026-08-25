@@ -78,7 +78,7 @@ export const DOCS = {
 		'physics-steer-a-body': 'A dynamic body is steered with three.physics.setVelocity(object, [x, y, z]) and pushed with three.physics.applyImpulse(object, [x, y, z]) — set a speed for a character, add an impulse for a jump or a hit. Between them a dynamic capsule with a velocity set each frame is a character controller: it walks and it collides, which no combination of the other verbs can do. Reading back is three.physics.velocity(object). Static and kinematic bodies refuse both by name, because for those the transform is the only thing that moves them.',
 		'physics-owns-transform': 'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
 		'physics-fixed-60hz': 'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
-		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
+		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, \'heightfield\' is a TerrainGeometry\'s own grid of heights — one shape for a whole landscape, at any slope, where the alternative is a chain of invisible boxes and a path forced flat to have them — and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
 		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Siblings that share a shape but not a material do not batch either — a colour travels per copy in _COLOR_0, a texture or a blend mode has no per-copy channel — so they come back as the two draws they were. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
 		'static-casters': 'A shadow pass rasterises every caster every frame, which for a village is the largest thing in the frame. Say object.static = true on whatever will not move again — buildings, ground, walls, scenery — and those are drawn into the shadow map once and kept; each frame after that draws only what moved. It costs no draw call in the colour pass, so marking ten thousand crates is free, and moving one afterwards is safe (the map is rebuilt) rather than wrong. scene.traverse(o => o.static = true) is the usual way to say it. Watch three.stats().shadowStaticDraws: 0 on most frames means the cache is holding. Refused on skinned meshes — a pose changes the silhouette without the transform moving — and reading .static back is how you see that.',
 		'return-is-the-value': 'Return a value from your script with `return`; it comes back as the `value` field.',
@@ -938,7 +938,7 @@ export const DOCS = {
 			+ 'place: dragging orbits the camera and does not fire this. One handler; binding again '
 			+ 'replaces, null unbinds. Synchronous only, and stopped for good if it throws.',
 		'three.physics.add(object, options)':
-		'Give an object a body and answer with the object. The description is object.body if it has one and `options` wins over it, so a scene can be described once and tweaked at the call: { shape: \'box\' | \'sphere\' | \'capsule\' | \'hull\', mass: 1, friction: 0.5, restitution: 0.2, kinematic: false, trigger: false }. mass 0 means static. The object has to be in the scene already — a body is placed at a world position — and has to be a child of the scene rather than of another object, because the solver works in world space and a parent transform would fight it. A group draws nothing and so has no size to take a collider from; give the body to a mesh.',
+		'Give an object a body and answer with the object. The description is object.body if it has one and `options` wins over it, so a scene can be described once and tweaked at the call: { shape: \'box\' | \'sphere\' | \'capsule\' | \'hull\' | \'heightfield\', mass: 1, friction: 0.5, restitution: 0.2, kinematic: false, trigger: false }. mass 0 means static. The object has to be in the scene already — a body is placed at a world position — and has to be a child of the scene rather than of another object, because the solver works in world space and a parent transform would fight it. A group draws nothing and so has no size to take a collider from; give the body to a mesh.',
 	'three.physics.remove(object)':
 		'Take the body away, and answer whether there was one. A body removed while it is inside a trigger still emits its exit event, so a script that destroys something in a trigger volume still hears it leave.',
 	'three.physics.gravity':
@@ -1285,11 +1285,17 @@ export const DOCS = {
 			+ 'intensity is how dark, 0 to 1, and 1 takes the whole directional term away and leaves '
 			+ 'three.light.ambient — so a shadow is never black unless the ambient floor is. '
 			+ 'distance is how far down the view direction the map is fitted, in world units, and 0 '
-			+ '(the default) means the camera\'s far plane. It is the sharpness knob, and it beats '
-			+ 'size: the map covers a square this wide, so halving distance is worth quadrupling size '
-			+ 'and costs nothing. The default far plane is much larger than most levels, so a wide '
-			+ 'outdoor scene gets nothing from the fit until you set this — try roughly the distance '
-			+ 'shadows are worth having, and watch for the line across the ground where they stop. '
+			+ '(the default) now means five times the camera\'s own orbit distance, derived every '
+			+ 'frame. It used to mean the camera\'s far plane, which is 1000 units by default and is '
+			+ 'not a number about your scene at all. It is the sharpness knob, and it beats size: the '
+			+ 'map covers a square this wide, so halving distance is worth quadrupling size and costs '
+			+ 'nothing. Setting it still beats the derived number — try roughly the distance shadows '
+			+ 'are worth having, and watch for the line across the ground where they stop. '
+			+ 'three.light.shadow.fit reads back where the map actually landed: '
+			+ '{ live, center, extent, near, far, texel }, in world units, for the last frame. Read '
+			+ 'extent first — extent / size is the world size of a texel, and that is what decides '
+			+ 'whether an edge reads as a shadow or as a staircase; live false means no pass ran, '
+			+ 'which is a frame with no shadows in it that needs no further explanation. '
 			+ 'Nothing is allocated and no shader compiled until the first frame with it on, turning '
 			+ 'it off costs nothing and keeps the map for next time, and new three.Scene() turns it '
 			+ 'off. Everything opaque casts and everything shaded receives: there is no castShadow or '
@@ -1302,6 +1308,24 @@ export const DOCS = {
 			+ 'is object.static = true on whatever will not move again: static casters go into the map '
 			+ 'once and are kept, and each frame after draws only the movers. It costs no draw call in '
 			+ 'the colour pass. Ask three.docs({ topic: \'static-casters\' }) for the rest.',
+		'three.debug':
+			'What the renderer draws instead of the scene, when you ask. three.debug.view is one of '
+			+ '\'off\' (the default), \'shadow\' or \'shadowMap\'. It exists because a frame with no '
+			+ 'visible shadows in it has three explanations — the pass did not run, the pass ran and '
+			+ 'the map is fitted somewhere else, or everything in shot is genuinely inside one big '
+			+ 'shadow — and until this existed the renderer distinguished none of them. \'shadow\' '
+			+ 'draws how much light reaches each surface as greyscale: white is lit, black is fully '
+			+ 'shadowed. Uniformly white is a pass that did not run or a fit nothing landed in; '
+			+ 'uniformly dark is the answer that takes longest to reach by looking, and it usually '
+			+ 'means the sun is low enough that a wall is shadowing the whole scene. \'shadowMap\' '
+			+ 'draws the depth the lookup reads at each surface, near-to-far greyscale — the map '
+			+ 'itself, seen through the geometry that samples it. Magenta is outside the fitted box, '
+			+ 'so a mostly-magenta frame is a three.light.shadow.distance fitted somewhere other than '
+			+ 'where you are looking; dark purple is no shadow pass this frame. The sky is not a '
+			+ 'surface and has no shadow, so a debug view colours only what the geometry covers. It '
+			+ 'is deliberately NOT scene state: new three.Scene() does not clear it, for the same '
+			+ 'reason it does not move the camera. Pair it with three.light.shadow.fit for the '
+			+ 'numbers, and with --frames if you are running headless.',
 		'three.NoBlending / three.NormalBlending / three.AdditiveBlending':
 			'The values material.blending takes — 0, 1 and 2, Three.js\'s numbers again. '
 			+ 'NormalBlending is what { transparent: true } means and is what glass, water and a '

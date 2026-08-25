@@ -1560,9 +1560,18 @@ and depth": **carve the channel and stroke the mask from the same polyline**, so
 the mud is where the water is by construction rather than because two constants
 were kept in step. Same for a road: one polyline, a shallow carve, a dirt stroke.
 
-**18.4e — a heightfield collider. NOT DONE, and the premise was wrong.** The note
-this item carried — *"collision.c3l already has heightfield testing"* — is true
-about the file and false about what it can carry.
+**18.4e — a heightfield collider. BUILT, in §20.4.** The analysis below stands
+and is worth keeping: the premise this item carried was wrong in the way it says,
+and the construction it prescribed is the one that shipped. What it got wrong was
+the *ordering* — see §20.4, which is that argument revisited against a scene with
+thirty-nine dynamic crates in it, and which records that the `query_triangles` it
+credits below was written with its triangles wound upside down.
+
+The original entry, unchanged:
+
+**The premise was wrong.** The note this item carried —
+*"collision.c3l already has heightfield testing"* — is true about the file and
+false about what it can carry.
 
 `collision::Heightmap` exists, implements `CollisionShape`, and reports
 `ShapeType.CONVEX`. Its support function is the problem, and it is worth quoting
@@ -2029,6 +2038,332 @@ have the idea finds the measurement rather than the argument.
 
 ---
 
+## 20. Authoring a level, and the four things that cost the time
+
+§18 and §19 measured the renderer from inside it. This section is the other
+direction: one level — `examples/crash_canyon.js`, a Crash-Bandicoot-shaped path
+through a canyon — built against the shipped API by someone reading
+`getApiDocs` rather than the source, and the four places that cost hours instead
+of minutes.
+
+**None of the four is a rendering defect.** Three are missing instruments and one
+is a contract written to catch a memory bug that now catches scenes. That
+distinction is the whole argument of this section: the engine draws this level
+correctly at 21 draw calls and 2.4 ms, and told the author almost nothing while
+it was being built.
+
+What it ships, for the numbers below to be against something: 126,492 triangles,
+21 draw calls, 732 instances, 157 bodies, 16 generated textures, a four-layer
+`LayeredMaterial` over a `TerrainGeometry`, and a kinematic capsule that shoves
+39 dynamic crates. Boot to first frame is 2.18 s, inside the default 5 s script
+budget with no `three.budget` raise.
+
+**All four are built.** Each is kept below as it was written, with a
+`*(Built: …)*` paragraph on it — the argument for wanting the thing is what makes
+the shape of the answer readable, and in two cases the building turned up a
+defect the section had not predicted. Both are recorded where they were found.
+
+### 20.1 The spatial hash refuses a level-sized collider, and the assert is load-bearing
+
+The first thing the level tried to do was give the ground one static box. It got:
+
+    @require "box.size().length_sq() < 100000" violated:
+    'Aabb box is too big, could be because memory errors'
+      collision.PhysicsWorld.add_body (solver/resolver.c3:514)
+
+`spatial_hash.c3:89`, and the note in it is why this is not a one-line deletion.
+The contract reads as a debug check left behind, and the temptation is to remove
+it. **It is holding up a triple loop.** `SpatialHash3D.insert` walks every cell
+the AABB covers at `cell_size = 2.0` and pushes the id into each, and
+`@get_pairs` then walks every occupied cell:
+
+| collider | cells inserted |
+|---|---|
+| one corridor floor slab, 30 x 4 x 34 | 864 |
+| the level's 13 slabs and 68 kerb-wall boxes | **13,680** |
+| the single 254 x 4 x 254 ground box that was refused | **49,152** |
+
+So deleting the assert does not unblock the scene. It converts a loud failure
+into a silent 49,152-entry insert and a broadphase that walks it every step, at
+sixty steps a second — which is the failure mode this project's headers are
+written to prevent, arrived at from the other side.
+
+**What it actually wants is a large-object bucket.** A body whose AABB spans more
+than some cell count — 64 is a reasonable first guess and the number should be
+measured, not chosen — goes into a list that is tested against every cell
+occupant rather than being smeared across the grid. This is the standard
+construction and it is the shape the hash is already missing: static level
+geometry is *precisely* the thing that is both large and never moves, so it pays
+the insert cost once and the pair cost forever.
+
+**The other half of the same contract is pure debug and should go.**
+`size().length_sq() > 0.1` rejects any collider under 0.183 units a side. The
+level's crate debris is 0.32-unit chunks, which clears it — barely — and anything
+finer does not, so the burst of chips is hand-integrated in the frame loop
+instead of being twelve real bodies. A one-cell box costs one cell; there is
+nothing for a floor under it to protect.
+
+*(Built: `SpatialHash3D` grew a large bucket. A box covering more than
+`LARGE_CELLS` (64, an 8x8x8-cell region) goes into `large` and into no cell at
+all; `boxes` keeps every id's AABB, and `@get_pairs` walks the bucket against it
+once a step — exact, `large.len() * boxes.len()` box tests, and a number a caller
+can see. `insert`, `remove` and `update` handle all four transitions across the
+threshold, because a body that ended up in both places or in neither is a pair
+against something that is not there. The lower bound is gone as argued. **The
+upper bound is gone too, which was not the plan**: with a bucket there is nothing
+for it to protect, so what is left of the contract is the half that was never
+about size — a NaN corner fails `length_sq() >= 0` and is caught with a caller
+still attached. `@get_nearby_objects` had to learn about the bucket as well, or
+the one query that answers "what is near this point" would be blind to the floor
+the point is standing on.
+
+**The defect this turned up is not in the hash.** The first version guarded the
+bucket scan with `if (other == entry.id) continue;` inside a `HashMap.@each` —
+whose body is a macro body block, not a loop body, so the `continue` bound to the
+enclosing `foreach` and the first self-pair abandoned the whole scan. It compiles.
+The symptom is a body falling through the floor, and the only reason it was
+caught in minutes rather than in a scene is that `physics_test` drops a ball on
+one. Written down in the file, because the next person to guard a clause inside
+`@each` will write the same line.)*
+
+### 20.2 Shadows are correct, and diagnose nothing
+
+The level spent about an hour on a frame with no visible shadows in it. **The
+renderer was right the whole time.**
+
+The sun was at 32 degrees of elevation. The canyon walls are 20 units high beside
+a corridor 12.6 units wide, and 20 / tan(32 deg) is a 32-unit shadow — so the
+entire path was genuinely inside the wall's shadow, every object's own shadow
+landed inside a larger one, and the frame read as if the shadow pass were not
+running. `stats().shadowDraws` said 19 the whole time, which is true and which
+answers a question nobody was asking.
+
+What it took to establish that, in order: an A/B scene proving `LayeredMaterial`
+receives shadows at all; four variants of the level bisecting light direction,
+the post chain, `unloadUnused` and the static-caster flag; a read of
+`ShadowMap.fit` to rule out the fitted extent; and finally decoding the PNG in
+Python and averaging the luminance of the lower third of the frame, which settled
+it in one number:
+
+| sun elevation | `shadow.intensity` | mean path luminance |
+|---|---|---|
+| 32 deg | 0.8 | 74.9 |
+| 32 deg | 0.0 (off) | 92.2 |
+| 58 deg | 0.8 | 104.4 |
+
+Darker *with* shadows than with them off, at the same sun: everything visible was
+shadowed. **Nine renders and a PNG decoder to learn a fact the fragment shader
+had in a register.**
+
+Three things would have answered it, and none of them is a change to how shadows
+are drawn:
+
+- **`three.debug.view = 'shadow'`** — `shadow_factor` written out as greyscale
+  over the frame. `setPost` already compiles a body, binds uniforms and applies
+  identically to the window, `three.render` and every screenshot. This is a body
+  selection, not new plumbing, and it turns the hour into one render.
+- **`three.light.shadow.debug = true`** — the depth image blitted into a corner.
+  Answers the other half: is anything in the map, and is the fit where the author
+  thinks it is. Neither question is answerable today from a script.
+- **A derived default for `shadow.distance`.** §18.1 already concedes the default
+  is the wrong one — *"the default far plane is much larger than most levels, so a
+  wide outdoor scene gets nothing from the fit until you set this"*. This level
+  set 70 by trying numbers. The camera knows its own near, far and orbit
+  distance, and the focus box is already computed in `fit`; a default that reads
+  one of them is strictly better than a default that is known to be wrong.
+
+The third is the one that would have prevented the problem rather than shortened
+it, and it is the cheapest.
+
+*(Built, with the middle item in a different shape. `three.debug.view` takes
+`'off'`, `'shadow'` or `'shadowMap'` — a `float4` on the frame block and a branch
+at the end of both shading shaders, which is the body selection the entry
+predicted, though in the shading pass rather than in post: `shadow_factor` lives
+there and post has neither the map nor a world position. `'shadowMap'` draws what
+the lookup reads and paints **magenta for outside the fitted box**, which is the
+"is the fit where I think it is" question answered as a picture in one render.
+
+**The depth-map inset became numbers instead.** `three.light.shadow.fit` returns
+`{ live, center, extent, near, far, texel }` for the last frame, read back out of
+the same nine numbers `fit` wrote. A fitted box is a box: an inset is a thing to
+squint at, and a number is the only one of the two a headless run can assert on —
+which is 20.3's whole point, and the two items are better together than either
+was alone.
+
+The default for `shadow.distance` is now five times the camera's orbit distance,
+derived every frame. Five is one measurement and a geometry argument: at a
+45-degree field of view a camera `d` away frames `0.83 d` of world, so `5 d` is
+about six frame-heights down the view direction — and it is within ten per cent
+of the 70 the level arrived at by trying numbers at an orbit distance of 13.
+Setting it explicitly still beats the derived number and the knob stays.)*
+
+### 20.3 Headless renders one frame, so nothing that moves can be tested
+
+`--headless --script X --screenshot out.png` renders exactly one frame. The frame
+loop never runs, and everything a game is made of is downstream of it:
+
+- **Physics never steps.** Crates do not settle, stacks do not stand, triggers do
+  not fire. Every claim about the level's 157 bodies had to be made by reasoning
+  about a probe run in a *window* and then trusting it.
+- **`three.input.press()` does not latch.** Keys are read once per frame, so a
+  synthetic press with no frame behind it never becomes `isDown`. Measured
+  directly: after `three.input.press('w')`, `isDown('w')` is `false`, while
+  `three.camera.planarMove(1, 0)` in the same breath answers
+  `[-0.445, 0, -0.896]`, length 1. The movement code was fine and unreachable.
+  This is the feature whose own header says it is *"what makes an input-driven
+  scene testable at all"*, and it does not work in the mode you would test in.
+- **The animation callback never runs**, so the first frame is whatever the
+  script left behind. This level's sky needed `sky.uniforms.viewFar` set once at
+  setup as well as per frame, purely because a headless render never reaches the
+  callback — a real bug in the scene, found by accident.
+
+Two smaller traps, each one wasted round trip:
+
+- **A script is an async function body, so anything after its `return` is dead
+  code that runs silently.** A debug camera appended to the end of a scene file
+  does nothing, looks exactly like the camera being ignored, and costs a render
+  to distinguish.
+- **There is no camera override.** Every alternate viewpoint of this level —
+  overhead, mid-path, the castle — was a Python script rewriting the source into
+  a temporary copy with a different `orbit` call spliced in before the `return`.
+
+**What fixes most of it is one flag.** `--frames N` — run N frames before the
+screenshot — steps the solver, runs the callback and latches the keyboard, all
+three, because all three are the same missing loop. `--camera yaw,pitch,dist`
+removes the source-rewriting. `--screenshot shot-%03d.png --every N` makes a
+flipbook out of a run, which is how you would ever see a stack fall.
+
+The gameplay in this level was ultimately verified by monkey-patching
+`three.input.isDown` from inside the scene file and calling its own `frame(dt)`
+1,600 times: 291.7 units travelled, the corridor fence held to 5.90 against a 5.9
+limit, crates broke, a TNT lit and chained, no NaNs. **That harness is the shape
+the flag should ship**, and no scene should have to write it.
+
+*(Built: `--frames N`, `--every N` and `--camera yaw,pitch,dist`. `--frames`
+implies `--headless` and `--screenshot` alone means `--frames 1`, so everything
+downstream reads one field and never asks which mode it is in. The clock is
+counted rather than measured — frame `i` is told `i * 16 ms` — so six hundred
+frames is ten seconds of game time on every machine and the same run twice is the
+same run.
+
+**A frame is a tick and a draw, and the draw was the part that was nearly
+missed.** The first version ticked without rendering, which is what the headless
+loop has always done — and then `stats().shadowDraws` and
+`three.light.shadow.fit` answered "nothing happened" from inside a callback that
+had been running for four frames, because the fit is computed in `prepare` and
+`prepare` is part of drawing. `render_offscreen` per frame, and exactly one
+render per frame either way: `screenshot` draws before it reads back, so a frame
+being captured must not also be drawn.
+
+The camera override is applied after the script and again immediately before every
+capture, so a scene driving `camera.attach` every frame cannot take the shot back.
+Verified end to end: a ball dropped in a `--frames 120` run lands at 0.500 on a
+floor whose top is 0, `three.input.press('w')` reads back as `isDown` on frame 1
+with `pressed` firing exactly once, and `--every 60` writes `shot-000.png` and
+`shot-001.png`.)*
+
+### 20.4 §18.4e again — the class of thing it called "smaller and later" is this scene
+
+§18.4e is correct and its evidence still holds: `collision::Heightmap` reports
+`ShapeType.CONVEX`, and its support function returns one of the **four corners of
+the whole map**, so under GJK a body rests on the plane through them. It was
+right not to wire it.
+
+What has changed is the ordering argument. §18.4e closed by saying a kinematic
+character needs no collider, and that what still wants one — *"a barrel rolling
+downhill, a ragdoll"* — is *"a smaller and later class of thing than this item
+assumed"*. **That class arrived in the next scene.** A Crash level is thirty-nine
+dynamic crates that have to rest on, stack on and be knocked across the ground,
+and the character being kinematic did not help at all.
+
+The cost of not having it, in this level, is exact: the corridor floor is 13
+invisible box colliders and the kerbs are 68 more, which is 81 static bodies and
+13,680 spatial-hash cells (20.1) standing in for one terrain shape. It also
+forces the level's geometry: **the path is dead flat at y=0 for its entire
+length**, not as a style choice but because a flat corridor is the only shape a
+chain of axis-aligned boxes can be the floor of. Every slope, step and ramp in
+the level is a thing that could not be built.
+
+The construction §18.4e prescribes is per-contact rather than per-shape, and more
+of it exists than that entry credits: `Heightmap.query_triangles(Aabb3, List
+{TriangleVerts}*)` is written, `ShapeType.TRIANGLE` exists, and the resolver
+already has a triangle path in `test_bvh_collision`. What is missing is
+`ShapeType.HEIGHTFIELD` and a narrowphase dispatch that routes those pairs to
+query-then-collide-triangles instead of to GJK. **It is still solver work and it
+is still the largest item here** — but it is dispatch over machinery that exists,
+rather than new geometry.
+
+*(Built: `ShapeType.HEIGHTFIELD`, `PhysicsWorld.test_heightfield_collision`, and
+`three.physics.add(mesh, { shape: 'heightfield' })` for a `TerrainGeometry`. It
+was dispatch over machinery that existed, as the entry said: the per-triangle
+work came out of `test_bvh_collision` into `TriangleProbe` and
+`triangle_contacts` — one copy of what a one-sided surface means, which is the
+kind of rule that otherwise gets fixed in one of two copies — and the heightfield
+path is `query_triangles` where the BVH path is `@foreach_triangle`. The collider
+is the terrain's own grid rather than a reconstruction, so a body rests on the
+same surface `terrain.heightAt(x, z)` reports, by construction.
+
+**`query_triangles` was wound the wrong way round.** Its two triangles per cell
+had a face normal of `x cross z` — straight down — which nothing noticed while the
+function only ever fed a debug draw, and which disagreed with `get_normal` two
+hundred lines above it in the same file. The moment it fed a contact it meant the
+ground was a one-sided surface facing away from everything standing on it, and
+bodies were pushed through. That is the second defect this section found by
+building rather than by predicting, and the more interesting one: the code §18.4e
+credited as already written was written and wrong, and no test in the library
+would ever have said so.
+
+The gap is closed for the case that motivated it. Six balls dropped on a hill
+settle at 0.60 to 0.66 above the ground under them — their own radius, plus what a
+sphere on a slope is owed — and a box on a ramp rests at exactly
+`half_height / cos(slope)`.
+
+**`crash_canyon.js` was converted, which is where the numbers below come from.**
+Thirteen invisible slabs became one `shape: 'heightfield'` body: 157 bodies to
+145, the same 21 draw calls and the same 2.24 ms. Over 400 frames the level went
+from **eight crates launched at spawn and seven ending up under the terrain** to
+none of either — and neither of those two defects was caused by the change, which
+is the part worth writing down:
+
+- **Seven crates ended up below the ground with the box floor.** The slab chain
+  is 30 x 34 boxes along a path that curves; a crate knocked off the path is off
+  the floor as well, and falls. The terrain has no outside until the map ends.
+- **Eight were launched thirty units into the air on the first frame**, with the
+  boxes and with the heightfield alike. The cause is authoring and it is worth
+  knowing: a stack placed in *exact* contact — `level * CRATE`, where `CRATE` is
+  the box's own size — is resolved on the first step by pushing the boxes apart.
+  Six centimetres of gap per level removes it completely: seven crates moving on
+  frame 4 and ten by frame 20, against none at either.
+- The conversion also exposed a placement bug the box floor had hidden: a
+  three-high stack at `s = 80` was inside the shelf at `s = 79`, whose top is 4.6.
+
+Ruled out rather than assumed: the launch reproduces identically with the large
+bucket disabled (`LARGE_CELLS` raised past any real box), so it is not 20.1's.)*
+
+### Order, and why
+
+1. **20.3, the frames flag.** The instrument, and the same argument §18.3 makes:
+   a solver change verified by one static frame is verified by the wrong thing.
+   Hours, and it is what 20.4 would be tested with.
+2. **20.2's debug views.** Also hours, also an instrument, and independent of
+   everything else. The `shadow.distance` default is the cheapest single item in
+   this section and the only one that prevents its problem rather than shortening
+   it.
+3. **20.4, the heightfield collider.** The one that changes what can be built,
+   and the one that makes 20.1 stop mattering for terrain.
+4. **20.1, the large-object bucket.** After 20.4, because terrain is the case
+   that motivated it — but not cancelled by it: a room, a platform and a wall are
+   still large static boxes, and the lower-bound half of the contract should be
+   deleted whenever somebody is next in that file.
+
+**What this section does not have** is a second author. Every observation here
+comes from one level built in one session, and the things that cost time are the
+things *that* level happened to need — a canyon, a corridor of crates, and a sun
+low enough to matter. An interior, or a scene with no physics in it, would rank
+these differently and would find its own four.
+
+---
+
 ## What is deliberately absent
 
 - **No ECS.** The scene graph is the entity list and a game's components are
@@ -2107,3 +2442,8 @@ TODO:
   - §13 — the material unit, IBL bake, fusing pointwise passes; downsampled intermediates first, then a second tap.
   - §14 — parallax; the PBR half is §12's.
   - §16 — lines don't export.
+  - §20 — all four built; see the `*(Built: …)*` paragraphs. What they left open: `Heightmap.furthest_point` is
+    still the four corners of the map, harmless now that the dispatch never sends a heightfield to GJK but wrong if
+    anything else ever calls it; a heightfield is finite, so a body that slides off the edge falls, which is honest
+    and undocumented anywhere a script can see; and the large bucket's threshold of 64 cells is a guess with an
+    argument rather than a measurement.

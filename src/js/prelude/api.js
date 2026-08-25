@@ -146,6 +146,41 @@ const light = {
 				const [enabled, size, bias, intensity] = H.shadowGet();
 				H.shadowSet(enabled, size, bias, intensity, +v);
 			},
+
+			// Where the map actually landed last frame, read-only.
+			//
+			// Six numbers instead of an inset picture of the depth
+			// buffer, and the reason is that a fitted box is a box: an
+			// inset is a thing to squint at and a number is the only one
+			// of the two a headless run can assert on.
+			//
+			//   live    whether a shadow pass ran at all. False, and a
+			//           frame with no shadows in it needs no further
+			//           explanation.
+			//   center  the middle of the fitted box, in world space.
+			//   extent  how wide the box is, in world units. Read this
+			//           one first — `extent / size` is the world size of
+			//           a texel, and that is what decides whether an
+			//           edge reads as a shadow or as a staircase.
+			//   near    the light's own planes, in world units. They
+			//   far     come from the whole scene and not from the
+			//           focus box, because a caster standing between the
+			//           light and the visible ground has to be in range
+			//           or its shadow never lands.
+			//   texel   `extent / size`, computed here so it cannot be
+			//           computed differently somewhere else.
+			//
+			// A fresh object each read, like everything else on this
+			// object, so it answers about the last frame rather than
+			// about whenever it was captured.
+			get fit() {
+				const [live, cx, cy, cz, extent, near, far, texel] = H.shadowFit();
+				return {
+					live: live !== 0,
+					center: [cx, cy, cz],
+					extent, near, far, texel,
+				};
+			},
 		};
 	},
 
@@ -615,6 +650,58 @@ function asIntersection(raw) {
 	};
 }
 
+// What the renderer draws instead of the scene, when it is asked to.
+//
+// **A frame with no visible shadows in it has three explanations** — the pass
+// did not run, the pass ran and the map is fitted somewhere else, or everything
+// in shot is genuinely inside one big shadow — and until this existed the
+// renderer distinguished none of them. `plan.md` §20.2 is the hour that cost,
+// and the way it was eventually settled was decoding a PNG in Python and
+// averaging the luminance of the lower third of the frame. Each of these views
+// is that hour as one render.
+//
+// It is deliberately not scene state: `new three.Scene()` does not clear it,
+// for the same reason it does not move the camera. A script rebuilding the
+// world is not a reason to switch off a diagnostic somebody is reading, and
+// rebuilding the world is exactly what the caller here does between looks.
+const DEBUG_VIEWS = ['off', 'shadow', 'shadowMap'];
+
+const debug = {
+	// One of:
+	//
+	//   'off'        the scene, which is the default.
+	//   'shadow'     how much light reaches each surface, as greyscale.
+	//                White is lit and black is fully shadowed. A frame that
+	//                is uniformly white is a pass that did not run or a fit
+	//                nothing landed in; a frame that is uniformly dark is
+	//                the answer that takes the longest to reach by looking.
+	//   'shadowMap'  the depth the lookup reads at each surface, as
+	//                greyscale near-to-far — the map itself, seen through
+	//                the geometry that samples it. **Magenta is outside the
+	//                fitted box**, which is the diagnostic: a frame that is
+	//                mostly magenta is a `three.light.shadow.distance`
+	//                fitted somewhere other than where you are looking.
+	//                Dark purple is "no shadow pass ran this frame", which
+	//                is the one answer 'shadow' cannot tell from "lit".
+	//
+	// The sky is not a surface and has no shadow, so a debug view colours
+	// only what the geometry covers. That is a property of answering the
+	// question in the shading pass, where the answer is, rather than a
+	// limitation worth plumbing around.
+	get view() { return DEBUG_VIEWS[H.debugViewGet()] ?? 'off'; },
+	set view(v) {
+		const name = v === null || v === undefined || v === false ? 'off' : String(v);
+		const index = DEBUG_VIEWS.indexOf(name);
+		// By name, here, rather than by a number the host would have to
+		// range-check: a typo is the whole failure mode of a string enum,
+		// and it should say so instead of quietly drawing the scene.
+		if (index < 0) {
+			throw new TypeError(`three.debug.view: unknown view '${name}' — one of ${DEBUG_VIEWS.join(', ')}`);
+		}
+		H.debugViewSet(index);
+	},
+};
+
 // -----------------------------------------------------------------------
 // The module
 
@@ -630,6 +717,7 @@ export const three = {
 	light,
 	controls,
 	clock,
+	debug,
 
 	// How long this script may run before the interrupt stops it, in
 	// milliseconds. 5,000 by default, and raisable to ten minutes.
@@ -1062,6 +1150,16 @@ export const three = {
 		// Give an object a body. The description is `object.body` if it has
 		// one, and `options` wins over it, so a scene can be described once
 		// and tweaked at the call.
+		//
+		// `shape` is one of 'box', 'sphere', 'capsule', 'hull' or
+		// 'heightfield', and every one of them comes from the mesh rather
+		// than from numbers you supply. 'heightfield' is the odd one and
+		// is the reason it is worth naming here: it is only for a
+		// TerrainGeometry, and it is the terrain's own grid of heights
+		// handed to the solver as one shape — so a body rests on the same
+		// surface `terrain.heightAt(x, z)` reports, at any slope, with one
+		// collider instead of a chain of invisible boxes under a path that
+		// had to be flat to have them.
 		add(object, options) {
 			const target = liveObject(object, 'three.physics.add');
 			const desc = Object.assign({}, object.body || {}, options || {});

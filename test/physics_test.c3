@@ -729,3 +729,138 @@ fn void a_body_the_solver_moved_is_drawn_where_it_landed() @test
 		);
 	};
 }
+
+// §20.4. A terrain collider is the grid the geometry was built from, so a body
+// rests on the same surface `terrain.heightAt(x, z)` reports — at any slope,
+// with one collider.
+//
+// **The slope is the whole test.** Before `ShapeType.HEIGHTFIELD` the shape
+// reported CONVEX and its support function answered with one of the four corners
+// of the whole map, so GJK settled every body onto the plane through them: the
+// terrain, flattened, with nothing anywhere reporting an error. On a flat map
+// that failure is invisible, which is why this one is a ramp.
+fn void a_body_rests_on_terrain_and_not_on_its_corners() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			// Rises 0.3 per unit of x, so the ground under the ball is 6 units
+			// above the ground at the low edge — a difference no plane through
+			// the map's corners can be confused with.
+			const terrain = new three.TerrainGeometry({
+				width: 60, depth: 60, segments: 48, heights: (x, z) => 0.3 * x,
+			});
+			const ground = new three.Mesh(terrain);
+			scene.add(ground);
+			three.physics.add(ground, { shape: 'heightfield', mass: 0, friction: 0.9 });
+
+			const ball = new three.Mesh(new three.SphereGeometry(0.5, 16, 8));
+			ball.position.set(10, 12, -4);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1, friction: 0.9 });
+
+			globalThis.ball = ball;
+			globalThis.terrain = terrain;
+			return three.physics.count;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "2", "two bodies, got '%s'", built.value);
+
+		for (int i = 1; i <= 180; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		// The gap rather than the two numbers, because a script's *string* comes
+		// back quoted and a number does not — and what is being asserted is the
+		// difference in any case.
+		three::RunResult after = run.run(
+			"const g = globalThis.terrain.heightAt(ball.position.x, ball.position.z);"
+			"return ball.position.y - g;"
+		);
+		defer after.free();
+		test::@check(after.ok, "read the ball back: %s", after.error);
+
+		// On the ground it is actually standing on, within its own radius and a
+		// slope's worth of slack. A body on the flattened plane is metres away
+		// from this, and one that fell through is metres below.
+		double gap = after.value.to_double() ?? 999.0;
+		test::@check(gap > 0.2 && gap < 1.2, "rests on the slope, gap = %s", after.value);
+
+		// And it is somewhere on the slope rather than still in the air at the
+		// height it was dropped from.
+		three::RunResult height = run.run("return globalThis.ball.position.y;");
+		defer height.free();
+		double y = height.value.to_double() ?? 999.0;
+		test::@check(y < 11.0, "it fell, y = %s", height.value);
+	};
+}
+
+// The same collider asked for on a mesh that has no grid. Refused by name, with
+// the fix in the message — approximating one would be a collider that looks
+// right and behaves wrongly, which is the failure this whole item is about.
+fn void a_heightfield_collider_needs_a_terrain() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult tried = run.run(`
+			const scene = new three.Scene();
+			const box = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+			scene.add(box);
+			try {
+				three.physics.add(box, { shape: 'heightfield', mass: 0 });
+				return 'accepted';
+			} catch (e) {
+				return String(e.message || e);
+			}
+		`);
+		defer tried.free();
+		test::@check(tried.ok, "the script ran: %s", tried.error);
+		test::@check(tried.value != "accepted", "a box was accepted as terrain");
+		test::@check(
+			tried.value.contains("TerrainGeometry"),
+			"and the message names the fix, got '%s'", tried.value
+		);
+	};
+}
+
+// §20.2's first item, at the surface a script sees it. The views themselves are
+// a branch in the shading pass and what they draw is checked by looking; what
+// can break silently is the property — a name that quietly did nothing would be
+// a diagnostic that reported "no shadows here" for every scene.
+fn void the_debug_view_is_selected_by_name() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult checked = run.run(`
+			const seen = [];
+			seen.push(three.debug.view);
+			three.debug.view = 'shadow';
+			seen.push(three.debug.view);
+			three.debug.view = 'shadowMap';
+			seen.push(three.debug.view);
+
+			// A typo is the whole failure mode of a string enum, and it says so
+			// rather than quietly drawing the scene.
+			let refused = 'accepted';
+			try { three.debug.view = 'shadwo'; } catch (e) { refused = 'refused'; }
+			seen.push(refused);
+			seen.push(three.debug.view);
+
+			// **Not scene state.** A script rebuilding the world is not a reason
+			// to switch off a diagnostic somebody is reading, and rebuilding the
+			// world is what the caller here does between looks.
+			new three.Scene();
+			seen.push(three.debug.view);
+
+			three.debug.view = 'off';
+			seen.push(three.debug.view);
+			return seen.join(',');
+		`);
+		defer checked.free();
+		test::@check(checked.ok, "the script ran: %s", checked.error);
+		test::@check(
+			checked.value.contains("off,shadow,shadowMap,refused,shadowMap,shadowMap,off"),
+			"got %s", checked.value
+		);
+	};
+}

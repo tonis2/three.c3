@@ -190,6 +190,51 @@ const float SHADOW_NORMAL_OFFSET_TEXELS = 2.0;
 const float SHADOW_FIT_SLACK = 1.15;
 
 <*
+ How far down the view direction a fit reaches when nothing said — as a multiple
+ of the camera's own orbit distance.
+
+ **The default this replaces was the camera's far plane**, which is 1000 units
+ out of `default_camera` and is not a number about the scene at all: a camera in
+ a 200-unit level can see past the end of it, so the focus box is the level
+ again and §18.1's whole fit collapses back to what it was before. The knob
+ existed to be set, and `plan.md` §20.2 is what it costs when it is not: a level
+ arrived at 70 by trying numbers, and the hour before that was spent asking
+ whether shadows were rendering at all.
+
+ **Five, and here is where five comes from.** At the default 45-degree field of
+ view a camera standing `d` away frames `2 d tan(22.5) = 0.83 d` of the world.
+ A reach of `5 d` is therefore about six frame-heights of ground down the view
+ direction — the subject, and enough behind it that the fit does not end in a
+ visible line across the floor. It is also, within ten per cent, the number the
+ one level that ever set this by hand arrived at: 70 units at an orbit distance
+ of 13.
+
+ It is a guess with one measurement behind it, which is the honest description,
+ and it is why `distance` is still the knob rather than being removed. What it
+ buys is that a scene which never touches it gets a fit around what the camera
+ is looking at instead of a fit around everything that exists.
+*>
+const float SHADOW_DEFAULT_REACH = 5.0;
+
+<*
+ How far the focus box should reach this frame: what a script set, or a number
+ derived from where the camera is standing.
+
+ The derivation is deliberately not clamped to the far plane here —
+ `Camera.view_bounds` already takes the smaller of the two, and doing it in one
+ place is what keeps "reach past the far plane" meaning the far plane rather
+ than meaning two different things in two files.
+
+ @param orbit_distance : `The camera's own distance from its target, in world units.`
+ @return `The world-space reach for Camera.view_bounds. Never zero for a camera that is anywhere.`
+*>
+fn float ShadowMap.reach(&self, float orbit_distance)
+{
+	if (self.distance > 0.0f) return self.distance;
+	return orbit_distance * SHADOW_DEFAULT_REACH;
+}
+
+<*
  What `record_shadow` does with the map this frame.
 
  Three shapes, and which one a frame is in follows entirely from what the draw
@@ -246,11 +291,16 @@ struct ShadowMap
 	 this to the distance shadows are wanted at — for a village looked at from 80
 	 units away, 120 spends every texel on what is in shot.
 
-	 Zero by default, which is the pre-§18.1 behaviour for any scene the camera
-	 can see all of, and a large improvement for any scene it cannot. No default
-	 is invented for it: the number that is right depends on how big the level is
-	 and how far the camera stands off, and `plan.md` §18.7 argues that picking one
-	 for a scene shape nobody has measured is picking it wrong.
+	 Zero means "derive one" — see `reach`, and `SHADOW_DEFAULT_REACH` for the
+	 argument. It used to mean the camera's own far plane, which for the default
+	 camera is 1000 units and is a fit around the whole level whatever the level
+	 is. §18.1 already conceded that default was the wrong one; §20.2 is the bill
+	 for it, and a default read off the camera is strictly better than one known
+	 to be wrong.
+
+	 Setting it explicitly still beats the derived number and always will: this
+	 is the texel-density knob, and the scene knows how far away its shadows are
+	 worth having in a way the orbit distance can only approximate.
 	*>
 	float distance;
 	// Texels per side, already clamped. What the image is *actually* at is
@@ -888,6 +938,89 @@ fn float[4] ShadowMap.params(&self)
 {
 	if (!self.live) return { 0, 0, 0, 0 };
 	return { self.texel, self.bias, self.normal_offset, self.intensity };
+}
+
+<*
+ What the last fit came out as, in world units — `three.light.shadow.fit`.
+
+ **The other half of `plan.md` §20.2, and it is numbers rather than pixels.**
+ The plan asked for the depth image blitted into a corner, to answer two
+ questions: is anything in the map, and is the fit where the author thinks it is.
+ `three.debug.view = 'shadowMap'` answers the first as a picture. This answers
+ the second as six numbers, which is the better shape for it — a fitted box is a
+ box, an inset is a thing to squint at, and a number is the only one of the two a
+ headless run can assert on. §20.3 is what makes that matter.
+
+ `extent` is the one to read first. It is the world width of the square the map
+ covers, so `extent / size` is the world size of a texel and is what actually
+ decides whether a shadow has an edge or a staircase. A scene that looks like it
+ has no shadows and reports an extent of 400 has its texels somewhere else.
+*>
+struct ShadowFit
+{
+	// Whether a shadow pass ran on the last frame. False here and a frame with
+	// no shadows in it needs no further explanation.
+	bool live;
+	// The centre of the fitted box, in world space.
+	Vec3 centre;
+	// How wide the square is, in world units. The square is `fit`'s doing —
+	// a rotation cannot change it, which is what stops the edges boiling.
+	float extent;
+	// The light's near and far planes, in world units along its own direction.
+	// These come from the whole scene's bounds and not from the focus box: a
+	// caster standing between the light and the visible region has to be in
+	// range or its shadow does not land.
+	float near;
+	float far;
+	// The world size of one texel — `extent` divided by the map's real size.
+	// The number that decides how a shadow edge reads.
+	float texel;
+}
+
+<*
+ Read the fit back.
+
+ **The inverse is written out rather than taken.** `fit_view` is a `look_at`
+ matrix, so its rotation is orthonormal and its inverse is the transpose with the
+ translation undone first — nine multiplies against a general 4x4 inversion that
+ can fail and would have to be handled. It is also the only reason this function
+ cannot silently disagree with `fit`: they are the same nine numbers read in the
+ two orders.
+
+ @return `A zeroed report when nothing has been fitted yet, which is a scene that has never turned shadows on.`
+*>
+fn ShadowFit ShadowMap.report(&self)
+{
+	if (!self.has_fit) return {};
+
+	uint texels = self.created > 0 ? self.created : self.size;
+	float per_texel = texels > 0 ? self.fit_extent / (float)texels : 0.0f;
+
+	// The centre of the fitted box in light space: the middle of the square, and
+	// halfway down the depth range. A right-handed eye looks down -Z, which is
+	// the sign that turns the near and far *distances* back into a coordinate.
+	Vec3 middle = {
+		self.fit_low_x + self.fit_extent * 0.5f,
+		self.fit_low_y + self.fit_extent * 0.5f,
+		-(self.fit_near + self.fit_far) * 0.5f,
+	};
+
+	float[<16>] v = self.fit_view.m;
+	Vec3 d = { middle.x - v[12], middle.y - v[13], middle.z - v[14] };
+	Vec3 centre = {
+		v[0] * d.x + v[1] * d.y + v[2] * d.z,
+		v[4] * d.x + v[5] * d.y + v[6] * d.z,
+		v[8] * d.x + v[9] * d.y + v[10] * d.z,
+	};
+
+	return {
+		.live   = self.live,
+		.centre = centre,
+		.extent = self.fit_extent,
+		.near   = self.fit_near,
+		.far    = self.fit_far,
+		.texel  = per_texel,
+	};
 }
 
 <*

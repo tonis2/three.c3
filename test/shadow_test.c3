@@ -1900,3 +1900,75 @@ fn void moving_a_group_rebuilds_its_static_children() @test
 		test::@check(differing_bytes(&before, &after) > 0, "and the wall's shadow went with it");
 	};
 }
+
+// §20.2: `distance` of zero used to mean the camera's far plane, which for the
+// default camera is 1000 units and is not a number about the scene at all. It
+// now means "derive one from where the camera is standing".
+//
+// The check is the shape of the answer rather than the constant: an explicit
+// distance is returned untouched, and a derived one scales with the orbit
+// distance and is far smaller than a default far plane.
+fn void an_unset_shadow_distance_is_derived_from_the_camera() @test
+{
+	three::ShadowMap shadows;
+	shadows.defaults();
+
+	test::@check(shadows.distance == 0.0f, "nothing set it");
+
+	float near_camera = shadows.reach(10.0f);
+	float far_camera  = shadows.reach(40.0f);
+
+	test::@check(near_camera > 0.0f, "a derived reach is a reach, got %s", near_camera);
+	test::@check(far_camera > near_camera, "and follows the camera out");
+	test::@check(near_camera * 3.99f < far_camera + 0.01f, "proportionally, %s vs %s", near_camera, far_camera);
+	// The point of the change: a camera 10 units off its target does not ask for
+	// a fit around a thousand units of world.
+	test::@check(near_camera < 200.0f, "and is not the default far plane, %s", near_camera);
+
+	// What a script sets is what it gets, whatever the camera is doing. This is
+	// the half that keeps `distance` a knob rather than a hint.
+	shadows.distance = 70.0f;
+	test::@check(shadows.reach(10.0f) == 70.0f);
+	test::@check(shadows.reach(400.0f) == 70.0f);
+}
+
+// `three.light.shadow.fit`, which is the numeric half of §20.2 — the half a
+// headless run can assert on. Read back from the same nine numbers `fit` wrote.
+fn void the_fit_reports_itself_in_world_units() @test
+{
+	collision::Aabb3 bounds = { .min = { -20, -2, -20 }, .max = { 20, 8, 20 } };
+
+	three::ShadowMap shadows;
+	shadows.defaults();
+	shadows.size = 1024;
+
+	// Nothing fitted yet: the honest answer is a zeroed report, and `live` false
+	// is a frame with no shadows in it that needs no further explanation.
+	three::ShadowFit before = shadows.report();
+	test::@check(!before.live, "nothing has run yet");
+	test::@check(before.extent == 0.0f, "and nothing has been fitted");
+
+	shadows.fit({ 0.4, 0.9, 0.2, 0 }, bounds);
+	shadows.live = true;
+
+	three::ShadowFit after = shadows.report();
+	test::@check(after.live);
+	test::@check(after.extent > 0.0f, "the square has a width, %s", after.extent);
+	// The whole scene is inside the box, so the square is at least as wide as the
+	// scene's own diagonal is in one axis and no wider than its full diagonal.
+	test::@check(after.extent >= 40.0f, "wide enough for a 40-unit scene, %s", after.extent);
+	test::@check(after.far > after.near, "and a depth range, %s to %s", after.near, after.far);
+	// The number that decides whether an edge reads as a shadow or a staircase.
+	test::@check(
+		math::abs(after.texel - after.extent / 1024.0f) < 1e-5f,
+		"texel is extent over size, %s", after.texel
+	);
+
+	// The centre is the fitted box brought back to world space. The scene is
+	// centred on the origin and the fit is centred on the scene, so it lands
+	// there — an inverse written the wrong way round would put it metres off,
+	// or under the light instead of under the scene.
+	test::@check(math::abs(after.centre.x) < 4.0f, "centred in x, %s", after.centre.x);
+	test::@check(math::abs(after.centre.z) < 4.0f, "centred in z, %s", after.centre.z);
+	test::@check(math::abs(after.centre.y - 3.0f) < 6.0f, "and in y, %s", after.centre.y);
+}

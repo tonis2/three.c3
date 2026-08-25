@@ -39,7 +39,10 @@ struct Instance
     uint pose;
 };
 
-// What every draw in the frame shares, written once per frame. 88 bytes.
+// What every draw in the frame shares, written once per frame. 184 bytes, and
+// the size is pinned against this declaration by `FRAME_BLOCK_FIELDS` in
+// `src/gpu/pipeline.c3` — three files declare this struct and a field added to
+// two of them is a buffer read at the wrong offset with nothing to say so.
 struct FrameBlock
 {
     float4x4 view_projection;
@@ -56,6 +59,9 @@ struct FrameBlock
     // frame with no shadow pass. See `mesh.slang`, which carries the full
     // account of what each of the four is for.
     float4 shadow;
+    // `three.debug.view` — x is the mode. See `mesh.slang`, which carries the
+    // account of what each mode draws.
+    float4 debug;
 };
 
 // One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
@@ -411,6 +417,71 @@ float shadow_factor(float3 position, float3 normal)
 // about the shadow. That is documented rather than fixed, because moving the
 // lookup into the vertex stage would shadow a surface per vertex, which on a
 // ground plane of two triangles is no shadow at all.
+
+// **The debug views, and the whole of `plan.md` §20.2's first two items.**
+//
+// A frame with no visible shadows in it has three explanations and the renderer
+// used to distinguish none of them: the pass did not run, the pass ran and the
+// fit is somewhere else, or everything visible is genuinely inside one big
+// shadow. The plan's level spent about an hour on the third, and settled it by
+// decoding a PNG in Python and averaging the luminance of the lower third of the
+// frame. Each of these is that hour as one render.
+//
+//   1  'shadow'      — `shadow_factor` as greyscale. White is lit, black is
+//                      fully shadowed. A frame that is uniformly white is a pass
+//                      that did not run or a fit nothing landed in; a frame that
+//                      is uniformly dark is the answer that took the hour.
+//   2  'shadowMap'   — the depth the lookup would read at this fragment, as
+//                      greyscale near-to-far, which is the map itself seen
+//                      through the geometry that samples it. **Magenta is
+//                      outside the fitted box**, and that is the diagnostic: a
+//                      frame that is mostly magenta is a `shadow.distance` fitted
+//                      somewhere other than where the author is looking. Dark
+//                      purple is "no shadow pass ran this frame" — the one
+//                      answer the other view cannot distinguish from "lit".
+//
+// The sky is not a surface and has no shadow, so a debug view colours only what
+// the geometry covers. That is a property of doing this in the shading pass and
+// not a limitation worth plumbing around: the question is always about a
+// surface.
+//
+// @param answer : `The colour to draw instead, when the return is true.`
+// @return `true when this frame is a debug view and the shading should not be used.`
+bool debug_view(float3 position, float3 normal, out float3 answer)
+{
+    float mode = push.frame[0].debug.x;
+    answer = float3(0.0);
+    if (mode < 0.5) return false;
+
+    if (mode < 1.5)
+    {
+        answer = float3(shadow_factor(position, normal));
+        return true;
+    }
+
+    float4 params = push.frame[0].shadow;
+    if (params.w <= 0.0)
+    {
+        answer = float3(0.16, 0.0, 0.28);
+        return true;
+    }
+
+    // No normal offset here, unlike the lookup: this view answers "where does
+    // this fragment land in the map", and nudging it two texels first would
+    // answer about a point next to the one being asked about.
+    float4 clip = mul(push.frame[0].light_view_projection, float4(position, 1.0));
+    float3 ndc  = clip.xyz / clip.w;
+    float2 uv   = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0)
+    {
+        answer = float3(1.0, 0.0, 1.0);
+        return true;
+    }
+
+    answer = float3(shadow_map.SampleLevel(uv, 0.0).r);
+    return true;
+}
+
 static float g_shadow = 1.0;
 
 // `mesh.slang`'s light as a single factor, so a body can ask for the default
@@ -644,6 +715,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // never calls it at all.
     s.shadow = shadow_factor(s.position, s.normal);
     g_shadow = s.shadow;
+
+    // Before `shade`, so a debug view of a scene whose bodies are expensive is
+    // still one render — and so a body that cannot compile is still diagnosable.
+    float3 view;
+    if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
 
     // **Alpha is still not the agent's to return**, and blending did not change
     // that. `shade` answers with linear rgb; the alpha is the material's own

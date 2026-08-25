@@ -255,3 +255,4 @@ export function asTriple(value, where) {
 	}
 	return triple.map(Number);
 }
+

@@ -14,7 +14,11 @@ faultdef
 	// A hull was asked for on a mesh whose positions never reached the host.
 	MESH_HAS_NO_HULL,
 	// The solver works in world space; a nested node's local transform is not.
-	NODE_IS_NOT_TOP_LEVEL;
+	NODE_IS_NOT_TOP_LEVEL,
+	// A heightfield collider was asked for on a node whose mesh is not terrain.
+	// There is no grid to take, and approximating one would be a collider that
+	// looks right and behaves wrongly.
+	NODE_IS_NOT_TERRAIN;
 
 // What a script is told when it writes a transform the solver owns. One string
 // rather than two copies, because it is raised from both transform doors and a
@@ -57,6 +61,21 @@ enum ColliderShape : char
 	SPHERE,
 	CAPSULE,
 	HULL,
+	<*
+	 The terrain itself — the grid of heights a `TerrainGeometry` was built from,
+	 handed to the solver as one shape.
+
+	 **Only for a node whose mesh is a terrain**, because it is the only mesh that
+	 has a grid; anything else is refused by name at `build_collider` rather than
+	 being approximated into something that would look right and behave wrongly.
+
+	 `plan.md` §20.4 is why it exists. The alternative, and what the level before
+	 it actually shipped, is a chain of invisible box colliders — 81 of them for
+	 one corridor, and a path that had to be dead flat at y = 0 for its whole
+	 length because a flat floor is the only shape a chain of axis-aligned boxes
+	 can be.
+	*>
+	HEIGHTFIELD,
 }
 
 <*
@@ -92,6 +111,11 @@ fn void PhysicsBody.drop(&self)
 	{
 		collision::Mesh* mesh = (collision::Mesh*)self.collider;
 		mesh.free();
+	}
+	if (self.shape == ColliderShape.HEIGHTFIELD)
+	{
+		collision::Heightmap* field = (collision::Heightmap*)self.collider;
+		field.free();
 	}
 	mem::free(self.collider);
 	self.collider = null;
@@ -386,7 +410,71 @@ fn void*? Physics.build_collider(
 			collision::Mesh* heap = mem::new(collision::Mesh);
 			*heap = hull;
 			return heap;
+
+		case HEIGHTFIELD:
+			// **The grid the geometry was built from, not a reconstruction of
+			// it.** A terrain asset keeps its `Heightfield`, so the collider is
+			// the same numbers the vertices came out of — which is what makes
+			// `terrain.heightAt(x, z)` and the ground a body rests on the same
+			// surface by construction rather than by two derivations agreeing.
+			Heightfield* field = assets.terrain_field(node.asset);
+			if (field == null) return NODE_IS_NOT_TERRAIN~;
+			return build_heightmap(field);
 	}
+}
+
+<*
+ A `collision::Heightmap` from a terrain's own grid.
+
+ **The one thing that is not a straight copy is the cell size.** A
+ `collision::Heightmap` has one, and a `Heightfield` has two — `width /
+ segments` and `depth / segments` — which are the same number only for a square
+ terrain. Rather than refuse a rectangular one, or grow the library's shape a
+ second cell size that nothing else would ever set, the heights are resampled
+ onto a square grid at the finer of the two spacings.
+
+ **For a square terrain that resampling is exact and free**: the sample points
+ land on the original grid points, and `height_at` at a grid point returns that
+ sample. It is the rectangular case that pays, and it pays in memory rather than
+ in accuracy.
+
+ @return `A heap Heightmap the body owns, freed by PhysicsBody.drop.`
+*>
+fn collision::Heightmap* build_heightmap(Heightfield* field)
+{
+	float cell = math::min(field.cell_x(), field.cell_z());
+	if (cell <= 0.0f) cell = 1.0f;
+
+	uint nx = (uint)math::ceil(field.width / cell) + 1;
+	uint nz = (uint)math::ceil(field.depth / cell) + 1;
+
+	// **On the heap, explicitly.** A zero-valued C3 list binds itself to the
+	// *temp* allocator on its first push, and this one outlives every pool there
+	// is — it is owned by a body. The failure that causes is not a crash: the
+	// pool is released, the heights become whatever is there now, and bodies
+	// start falling through terrain or being flung out of the world by a
+	// correction computed from garbage. Same trap, and the same fix, as
+	// `SpatialHash3D.cell`.
+	collision::Heights heights;
+	heights.init(mem, (usz)nx * (usz)nz);
+
+	float low_x = -field.width * 0.5f;
+	float low_z = -field.depth * 0.5f;
+
+	// Row-major in z then x, which is the order `Heightmap.get_height_at_grid`
+	// reads and the same order `Heightfield.heights` is already in.
+	for (uint j = 0; j < nz; j++)
+	{
+		float z = low_z + (float)j * cell;
+		for (uint i = 0; i < nx; i++)
+		{
+			heights.push(field.height_at(low_x + (float)i * cell, z));
+		}
+	}
+
+	collision::Heightmap* heap = mem::new(collision::Heightmap);
+	*heap = collision::create_heightmap_from_list(heights, nx, nz, cell, { low_x, 0, low_z });
+	return heap;
 }
 
 <*
@@ -410,6 +498,7 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
 		case SPHERE:  shape.shape = (collision::Sphere*)body.collider;
 		case CAPSULE: shape.shape = (collision::Capsule*)body.collider;
 		case HULL:    shape.shape = (collision::Mesh*)body.collider;
+		case HEIGHTFIELD: shape.shape = (collision::Heightmap*)body.collider;
 	}
 
 	return shape;
