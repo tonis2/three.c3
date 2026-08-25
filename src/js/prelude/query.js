@@ -252,7 +252,7 @@ const MOVE_DEFAULTS = {
 //
 //     let feet = [0, 0, 0], vy = 0;
 //     three.setAnimationLoop(() => {
-//         const dt = three.clock.dt / 1000;
+//         const dt = three.clock.dt;
 //         vy -= 9.8 * dt;
 //         const motion = [move.x * dt, vy * dt, move.z * dt];
 //         const r = three.moveAndSlide([feet[0], feet[1] + 0.9, feet[2]], motion, { ignore: player });

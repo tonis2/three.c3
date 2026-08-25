@@ -34,6 +34,9 @@ import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, Tr
 import { nav, steer, NavField } from './nav.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
 import { cast, Cast, NO_ENTITY } from './cast.js';
+import { cooldown, Cooldown } from './cooldown.js';
+import { kind, Kind, kindOf } from './kind.js';
+import { assemble } from './assemble.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -965,8 +968,7 @@ export const three = {
 	// a turret slew or a sliding panel wants. dampAngle is damp taking the
 	// short way round a circle, which is the one a heading needs.
 	//
-	// dt is in SECONDS. `three.clock.dt` is milliseconds, so it is
-	// `three.clock.dt / 1000` at every call site.
+	// dt is in SECONDS, and so is `three.clock.dt` — pass it straight through.
 	damp,
 	dampAngle,
 	smoothDamp,
@@ -1155,6 +1157,40 @@ export const three = {
 	// cast.indexOf() answers for anything despawned. Full is an answer rather
 	// than an error, as three.nav.field answering null is.
 	NO_ENTITY,
+
+	// A scalar gameplay timer — the player's spin, a hurt window, coyote time
+	// — for the `if (x > 0) x -= dt` pattern examples/ used to write out by
+	// hand. Ticked by a lazily-registered three.systems entry rather than
+	// read off three.clock, because the game clock only advances once per
+	// host tick and a window shorter than one fixed step would see no time
+	// pass across a multi-step catch-up frame.
+	cooldown,
+	Cooldown,
+
+	// N things of one kind addressed by OBJECT IDENTITY — the other half of
+	// three.cast, and the one a level's crates, pickups and props want. A Kind
+	// owns the object -> record map, the spawn ritual and the physics body, so
+	// kind.of(hit.object) is the record and kind.remove(record) is the whole
+	// removal: the body, the trigger volume, the node and the record, in that
+	// order, on this tick.
+	//
+	// A cast is for a crowd, because a column IS the buffer three.steer and
+	// three.moveAndSlideAll take. A kind is for the things a query, a raycast
+	// or three.onTrigger hands you back, which never appear in a bulk verb and
+	// are only ever named by the object you hit.
+	kind,
+	Kind,
+	// Which Kind owns this object — the drawn node or its trigger volume — or
+	// null. The global reverse of kind.of, for the caller holding two objects
+	// and no idea what either is.
+	kindOf,
+
+	// A compound mesh from a description of its parts: one shared unit geometry
+	// per SHAPE with the size in mesh.scale, `pivot` for a limb that swings
+	// about a hip, `mirror` for the pair, and every part named in the answer.
+	// It replaces the five statements per body part that every hand-built
+	// character in examples/ is made of.
+	assemble,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the

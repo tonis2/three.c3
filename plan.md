@@ -274,6 +274,21 @@ the example it was measured against looked like before and after.
       what unblocks it, and until then the numbers reach a person through
       `console.log` and a probe.
 
+---
+
+## 22. Kinds, assemble, and composing a game
+
+**Built.** `three.kind`, `three.kindOf`, `three.assemble` and `Cast.of`;
+`notes.md` §22 has how they work and what was decided. `examples/wumpa_run.js`
+is converted and its header has the before/after.
+
+- [ ] **An event/rules system — `three.on(a, verb, b, fn)` — still being
+      designed.** The sketch and the honest answer to "who fires the events" are
+      in the session that built §22 and are not settled enough to write down as
+      a task. `three.kindOf(object)` exists because whatever it turns out to be
+      needs to answer "what are these two things" before it can dispatch on
+      them; nothing else in §22 assumes it.
+
 ## Standing constraints
 
 Neither of these is a task. They are the two things a task is allowed to break

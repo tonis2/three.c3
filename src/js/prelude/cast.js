@@ -119,6 +119,10 @@ export class Cast {
 		this._strideOf = new Map();
 		this._views = new Map();
 		this._objects = new Array(capacity).fill(null);
+		// The reverse of `_objects`, and keyed the other way round on purpose:
+		// `_objects` is indexed by SLOT and a slot moves under a compaction,
+		// while an id does not. See `of`.
+		this._idOf = new Map();
 		this._tags = new Map();
 		this._nextTag = 1;
 		this._transform = null;
@@ -275,6 +279,7 @@ export class Cast {
 		this._dead++;
 		const object = this._objects[slot];
 		this._objects[slot] = null;
+		if (object !== null) this._idOf.delete(object);
 		return object;
 	}
 
@@ -309,7 +314,11 @@ export class Cast {
 		const [index, generation] = liveObject(object, `${this.name}.attach(id, object)`);
 		this.handles[slot * 2] = index;
 		this.handles[slot * 2 + 1] = generation;
+		// Re-attaching over an object this entity already had leaves the old
+		// one in the map answering with an id that is no longer its.
+		if (this._objects[slot] !== null) this._idOf.delete(this._objects[slot]);
 		this._objects[slot] = object;
+		this._idOf.set(object, id);
 
 		const at = slot * TRANSFORM_STRIDE;
 		const t = this.transform;
@@ -325,6 +334,7 @@ export class Cast {
 		if (slot < 0) return null;
 		const object = this._objects[slot];
 		this._objects[slot] = null;
+		if (object !== null) this._idOf.delete(object);
 		this.handles[slot * 2] = NO_ENTITY;
 		return object;
 	}
@@ -332,6 +342,23 @@ export class Cast {
 	// The Object3D in a slot, or null.
 	objectAt(slot) {
 		return slot >= 0 && slot < this._count ? this._objects[slot] : null;
+	}
+
+	// Which entity this Object3D is — its ID, or `NO_ENTITY`.
+	//
+	// **An id and not a slot**, and that is the whole of the design: a query, a
+	// raycast and `three.onTrigger` all answer with an object, and what a script
+	// wants back is the thing it can still hold next frame. A slot is only good
+	// for the frame it was read in, so answering with one here would hand out a
+	// number that goes stale at a boundary the caller cannot see — the same
+	// mistake `idOf(slot)` exists to prevent. `cast.indexOf(cast.of(o))` is this
+	// frame's slot, and it is one line at the point where it is safe.
+	//
+	// The map is keyed by object, which does not move; `attach`, `detach` and
+	// `despawn` maintain it, and a compaction does not have to, because it moves
+	// slots and this holds none.
+	of(object) {
+		return this._idOf.get(object) ?? NO_ENTITY;
 	}
 
 	// ------------------------------------------------------------------- frame
@@ -449,6 +476,7 @@ export class Cast {
 		this._count = 0;
 		this._dead = 0;
 		this._views.clear();
+		this._idOf.clear();
 	}
 
 	toString() { return `Cast(${this.name}: ${this.alive} of ${this.capacity})`; }

@@ -41,7 +41,7 @@ unload any more.
 does is in its own source file, and `git log -p -- plan.md` has the milestone
 accounts that used to be here.
 
-	c3c test --trust=full       756 passed, 0 failed, leak-clean
+	c3c test --trust=full -D DEBUG    822 passed, 0 failed, leak-clean
 
 **The thesis, which no milestone below may quietly abandon:** a script describes
 shapes and never touches a vertex, and every copy of one shape sharing one
@@ -2203,6 +2203,21 @@ one system and gets exactly the behaviour it always had.
   and everything else in this API — `three.damp`, `clock.fixedDelta`, every
   integration in `examples/` — is in seconds.
 
+  **And the first version handed them the wrong seconds.** The host calls the
+  frame callback with Three.js's argument — `clock.time * 1000`, the
+  milliseconds since the clock started, a TOTAL — and the registry divided that
+  by a thousand and called it `dt`. Every frame-phase system in `wumpa_run.js`
+  multiplied by the time since the level loaded: the fruit's bob grew a frame
+  at a time until it was jumping metres, a chip's 0.75 s life was one frame
+  long after the first second. The test that should have caught it asserted
+  the two arguments AGREED (`anim ≈ frame × 1000`), which the wrong number
+  satisfies exactly, and its range check (`0 < frame < 1`) passed because
+  eight frames are 128 ms. It was found by wiring `three.cooldown`'s frame
+  phase, whose tests ran long enough to notice. A frame system's `dt` is now
+  `three.clock.dt`, the same delta the fixed loop's accumulator is fed, and the
+  test asserts what each argument IS. **A test that checks two values against
+  each other has not checked either.**
+
 ### A throwing system does not stop the others, and is not swallowed either
 
 With one callback a throw in the fruit code stops the camera, and what gets
@@ -2357,6 +2372,243 @@ nothing could read it.
   object, and would cost a second index to get back to them. Not everything is a
   cast, and a design that cannot say so is a design being sold.
 
+
+## 22. Kinds and assemble — the ritual and the body
+
+Both of these came out of one reading of `examples/wumpa_run.js` after §21, and
+neither of them is about speed. §21 already settled that: every JavaScript-side
+data layout it could have chosen measured inside the noise floor of the
+measurement itself. What was left after the six systems and the cast was that
+the file still hand-rolled the same four-line removal three times, and still
+built two characters out of five statements per body part.
+
+### A kind is the other half of a cast, and §21 already said which half
+
+`notes.md` §21 ends with the fruit: "deliberately **not** a cast, and the file
+says why — each one is a drawn mesh plus a trigger volume the solver owns, and
+what the pickup is keyed by is the volume's object identity. A cast buys nothing
+where the loop is over two dozen things already addressed by object." That is
+correct and it left the alternative unbuilt, so the file went on hand-rolling it.
+
+	a Cast     N of one kind as COLUMNS, addressed by index, because a column
+	           IS the buffer three.steer and moveAndSlideAll take
+	a Kind     N of one kind as RECORDS, addressed by the object, because a
+	           query, a raycast and three.onTrigger all answer with one
+
+The three copies in the file were the crates, the fruit and the critters, and
+each was an array, a `Map` from node back to record, an `alive` flag and a
+removal that had to remember the body, the node, the map and the flag in that
+order. Nothing enforced the order and nothing noticed a missing line: a removal
+that forgot `three.physics.remove` leaves a body shoving the player out of an
+empty space, and one that forgot the `Map` leaves `of()` answering with a crate
+that is not there.
+
+### Removal is immediate; the LIST compacts at the end of the frame
+
+**This is the opposite of the Cast's rule and it is the same reasoning.** A cast
+is indexed by slot, so closing the gap on the spot moves everybody else's index
+under whatever system is holding one — the bug that looks like the wrong entity
+taking damage. A kind is addressed by an object, and an object does not move. So
+what has to happen at once is the half a player can SEE: `breakCrate` is called
+from inside a spin, and the crate has to stop colliding and stop drawing on that
+tick. A crate you walked through the ghost of would be the bug here.
+
+So `remove` does the body, the volume, the volume's body, the node and the map
+before it returns, and the only thing deferred is splicing the live array —
+because `for (const c of crate)` removing things is exactly what a TNT is. The
+iterator skips a dead record straight away and `count` drops straight away; the
+array is spliced by `<kind>.compact`, a frame-phase system at order `Infinity`,
+which is the same place and the same shape `Cast` puts its own for the opposite
+reason. `remove` answers false the second time, so a TNT reaching the same crate
+twice is ordinary rather than an error — which is exactly what the `alive` flag
+was for.
+
+### The trigger volume is a sibling, so something has to carry it
+
+A body-backed node has to be a direct child of the scene: the solver works in
+world space and a parent transform would fight it. That is the rule
+`wumpa_run.js` states over its `groups`, and it means a pickup that draws at
+0.31 units and is collected at 0.9 is two nodes *side by side* rather than one
+inside the other. Nothing carries the second one, so the file's `fruit` system
+ended with `f.vol.position.set(...)` — and a volume left behind is a pickup
+collected where the fruit used to be, with no error and nothing drawn to see.
+
+`<kind>.follow` is that line, registered only for a kind that declares a trigger
+and running at order `1e6` — after the systems that move things, before the
+compaction at `Infinity`. It is **one crossing per entity per frame**, because a
+transform write is a crossing; §17 measured five hundred of them at 0.245 ms, so
+two dozen pickups is not a number anybody will find in a report and two thousand
+would be.
+
+  **`trigger.radius` is a WORLD radius, and that is a divergence from the code it
+  replaced.** `wumpa_run.js` had `PICKUP_R = 1.8` scaling a unit sphere of radius
+  0.5, so the volume was 0.9 across and the constant said 1.8 — a number that
+  meant "scale" while reading as "radius". The kind takes the radius, and the
+  conversion changed the constant to 0.9 so the reach is bit-for-bit what it was.
+
+### A duplicate name throws, where `three.systems.add` replaces
+
+`systems.add` replaces by name because a hot-reloaded script re-running its top
+level should end up with one copy of each system, and a name is the only identity
+a re-evaluated closure keeps. A kind cannot do that: it **owns entities**, and
+replacing one silently would leave a scene full of nodes and bodies that nothing
+can name any more. So the second `three.kind('crate', …)` throws, and the message
+says `crate.dispose()` is what gives the name back. That also makes `dispose` the
+level-teardown verb rather than a tidiness one.
+
+Kinds survive `new three.Scene()`, for §21's reason: a Scene is the contents of
+the world and these are the rules it runs under.
+
+### `Cast.of(object)` answers with an ID, and that is the whole decision
+
+`_objects` is indexed by SLOT and a slot moves under a compaction. A reverse map
+built on one would answer with somebody else's critter the moment anything died —
+not an error anywhere, just the wrong entity taking damage, which is the same
+failure the deferred compaction exists to prevent arriving through the lookup
+instead of through the index. So the map is keyed by object and holds the id,
+which does not move; the compaction has nothing to update.
+`cast.indexOf(cast.of(o))` is this frame's slot and it is one line at the point
+where it is safe. `wumpa_run.js` had hand-built exactly this and got it right;
+the point of having it here is that the next script does not have to know why.
+
+### assemble: one geometry per SHAPE, and a pivot is a Group
+
+`wumpa_run.js` opens its shared block with "one geometry under a scale, one
+material per look, so every crate of a kind is one draw call" — and then every
+hand-written assembly in `examples/` has to remember it. `three.assemble` makes
+it structural: `box` is a single unit `BoxGeometry(1, 1, 1)` cached at module
+scope with the size in `mesh.scale`.
+
+  **The cache is not what makes it one draw call, and that was measured rather
+  than assumed.** The host deduplicates primitives by their parameters: two
+  `new three.BoxGeometry(1, 1, 1)` come back with the same asset index and two
+  meshes over them are one draw call. What the module-level cache saves is a
+  JavaScript object and a crossing per part per assembly. What makes it one draw
+  call is that the SIZE is a scale rather than a constructor argument, and that
+  is the part a hand-written assembly gets wrong.
+
+`cylinder: [rTop, rBottom, h]` is the one shape a unit one cannot cover, because
+a taper is not a scale. It is cached by its RATIO — the geometry is built with
+the widest radius normalised to 0.5 and the scale carries the rest — so every
+straight cylinder shares one geometry and a given taper shares one with every
+part of the same taper.
+
+Two things about the shape of the answer, both chosen because the file being
+converted had to keep reading the same way:
+
+- **`pivot` returns the GROUP.** A leg that rotates about its hip is a Group at
+  the hip with the mesh hanging below it, which is what every hand-built
+  character in `examples/` has as a `legs` array beside an `lm` nobody keeps. So
+  `P.leg[0].rotation.x = swing` swings from the hip, and without a `pivot` the
+  part is the mesh itself, because a head rotating about its own centre needs
+  nothing else.
+- **`mirror` answers `[negative, positive]`**, which is `for (const sx of
+  [-1, 1])`'s order. Swapping the two is silent: the legs still swing, out of
+  phase, which reads as an animation bug rather than an indexing one.
+
+Part names are **flat in the answer even when the parts are nested**, so
+`P.leg[0]` works whether or not the legs hang from a `spinner`, and a duplicate
+name anywhere in the tree throws. A part with no shape and a `parts` is a plain
+Group, which is what a `spinner` actually is.
+
+**The unknown-key refusal earns its place before anything else in the file.**
+`colour` instead of `color` is a part that comes out white; `position` instead of
+`at` is a part at the origin. Neither throws anywhere, both are found by looking
+at the picture, and that is the loop this whole API exists to keep short — so the
+error names the part and lists what a part may take.
+
+### What the conversion measured, and the two traps
+
+The converted parts of `examples/wumpa_run.js`:
+
+	crates            15 lines of code ->  10
+	the fruit         24                ->  14
+	buildPlayer       32                ->  11
+	buildCritter      21                ->   6
+	noCollide          3                ->   0
+	breakCrate        26                ->  22
+	spin              28                ->  27
+	onTrigger         10                ->   6
+	the fruit system  16                ->  14
+	                 ---                   ---
+	                 177                   110
+
+A driven headless run — 950 frames with the player walked down the trail and
+spinning, and `Math.random` replaced by a seeded stream so the two are
+comparable — gives the same numbers on both files: `fruit=29 broken=5 lives=5
+crates=22 wumpa=10 critters=10 bodies=41 best=142.2`. The frame-420 screenshots
+differ only in the player's ears, which are a 32-segment cone from the shared
+unit shape where they used to be the file's own 12-segment one.
+
+**The trap that cost the time was not in either file.** The bake in
+`wumpa_run.js`'s own report went from 24 ms to 391 ms across the change and
+nothing about the conversion could explain it — the voxel and walkable counts
+were identical to the digit. It was the BINARY: the `./build/three` sitting in
+the tree had been built `--safe=no -O3` and the rebuild was the default one.
+`notes.md` §17 already says "a number that does not name its build is not a
+measurement", and this is what it looks like when the build changes underneath a
+comparison rather than inside one. Re-running the *unmodified* file on the new
+binary is the check, and it is the first thing to do with any number that moves
+for no reason.
+
+**And `spawn` builds the record before it builds the node.** The first version
+called `data(params)` last, which meant a `data` that answered with a reserved
+key threw *after* the node was in the scene and the body was in the solver, with
+nothing holding either. Validating the record first costs nothing and is the
+difference between a refusal and a leak.
+
+**Two things about writing a test that embeds JavaScript, both of which cost a
+compile.** A C3 raw string is delimited by BACKTICKS, so a backtick in the
+JavaScript inside one — including in a `//` comment quoting an identifier, which
+is the house style everywhere else in this project — closes the string and the
+error lands on the line the string *opened* on rather than on the line with the
+backtick in it. And C3 has no runtime `String + String`, so a long expected value
+has to be one literal however wide it makes the line.
+
+
+### A cooldown rode along, and found one bug that was not its own
+
+`three.cooldown(duration, { recover, phase })` is not kind/assemble's work —
+it is a separate scalar gameplay timer, built and wired the same session —
+but it landed in `wumpa_run.js` right after them, so its decisions belong
+here rather than in a section of their own. `src/js/prelude/cooldown.js`'s
+own header has the full case; four things are worth finding again from here.
+
+**Ticked, not read off `three.clock`.** `three.clock.time` advances ONCE per
+`JsRuntime.tick`, before `take_fixed_steps()` decides how many times the
+fixed callback runs that tick (`frame_loop.c3:211-219`), and `call_fixed`
+then runs the SAME reading through every one of those steps — its own
+comment says "the dt it is handed is a constant". A clock-based cooldown
+shorter than one fixed step — the 0.12s coyote window already is — would see
+zero elapsed time across a catch-up tick's steps, so a Cooldown is ticked
+with each step's own `dt` from a system the module registers instead.
+
+**Lazy registration is §21's own trap, aimed at a new target.** A `'fixed'`
+system taken at module load would take the fixed-loop slot — and change
+`JsRuntime.tick`'s "did anything run" answer — for every scene that merely
+imports the file, whether or not it ever calls `three.cooldown()`. So a
+phase's system is added on the first cooldown that needs it and removed when
+the last one on that phase disposes; `dispose()` exists only because of this,
+and a clock-based Cooldown would not have needed one. The pause is then free
+on both phases: `'fixed'` simply does not run with nothing feeding the
+accumulator, and `'frame'` runs but is handed a zero delta.
+
+**Wiring the `'frame'` phase found a bug in the registry.** Frame systems were
+being handed the cumulative clock rather than a delta — §21 has it, with the
+test that let it through. The first draft of the cooldown read `three.clock.dt`
+itself to get round it; the fix went into the registry and the workaround went
+with it, so a cooldown on either phase trusts the `dt` it is handed.
+
+**What the wumpa conversion measured: nothing moved.** `ctl.spin`,
+`ctl.spinCool`, `ctl.hurt` and `ctl.coyote` became three `three.cooldown`s,
+and the same driven 950-frame run above — seeded `Math.random`, the player
+walked and spinning — answers `fruit=29 broken=5 lives=5 crates=22 wumpa=10
+critters=10 bodies=41 best=142.2`, bit for bit what the kind/assemble
+conversion measured before it. That is registration order rather than luck:
+`ctl`'s cooldowns are constructed before `three.systems.add('player', …)`
+runs, so `cooldowns.fixed` carries a lower sequence number and — both being
+order 0 — runs first every fixed step, reproducing the decrement-then-check
+order the original `playerStep` did by hand in one function.
 
 ## What is deliberately absent
 

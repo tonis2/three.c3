@@ -57,10 +57,19 @@
 // The animation callback is handed milliseconds because that is what
 // `WebGLRenderer.setAnimationLoop` hands its callback, and the name carries the
 // units. A system is not a Three.js concept and gets the units the rest of this
-// API uses — `three.damp`, `three.clock.fixedDelta` and every integration in
-// `examples/` are in seconds, and every one of those call sites currently
-// divides by a thousand. The reserved `animation` entry is the one exception,
-// and it is an exception so that the old contract is exactly preserved.
+// API uses — `three.damp`, `three.clock.dt`, `three.clock.fixedDelta` and
+// every integration in `examples/` are in seconds. The reserved `animation`
+// entry is the one exception, and it is an exception so that the old contract
+// is exactly preserved.
+//
+// And the two arguments are not the same number in different units. The host
+// hands the frame callback what `WebGLRenderer.setAnimationLoop` does —
+// `clock.time * 1000`, the milliseconds since the clock started, CUMULATIVE —
+// and a system's `dt` is `three.clock.dt`, what this one frame is worth. The
+// first version of this file divided the cumulative number by a thousand and
+// called it `dt`, so every frame-phase system multiplied by the time since the
+// level loaded, and the test that should have caught it asserted that the two
+// arguments AGREED — which the wrong number satisfies exactly. `notes.md` §21.
 import { clamp01 } from './math.js';
 
 const H = globalThis.__three;
@@ -101,7 +110,7 @@ class Registry {
 		// The host reads the return value — a callback that answers with a
 		// promise is stopped — so the tick answers with whatever the reserved
 		// entry answered with, and `undefined` when there is not one.
-		this._frameTick = (ms) => this._run('frame', ms / 1000, ms);
+		this._frameTick = (ms) => this._run('frame', H.clockDelta(), ms);
 		this._fixedTick = (dt) => this._run('fixed', dt, dt * 1000);
 	}
 

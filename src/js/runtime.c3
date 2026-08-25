@@ -124,6 +124,9 @@ const char[*] PRELUDE_QUERY = $embed("prelude/query.js");
 const char[*] PRELUDE_NAV = $embed("prelude/nav.js");
 const char[*] PRELUDE_SYSTEMS = $embed("prelude/systems.js");
 const char[*] PRELUDE_CAST = $embed("prelude/cast.js");
+const char[*] PRELUDE_KIND = $embed("prelude/kind.js");
+const char[*] PRELUDE_ASSEMBLE = $embed("prelude/assemble.js");
+const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
 const char[*] PRELUDE_API = $embed("prelude/api.js");
 const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 
@@ -139,7 +142,7 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[20] parts;
+	static qjs::EmbeddedModule[23] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -159,6 +162,9 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:nav.js", (char[])PRELUDE_NAV[..] },
 		{ "three:systems.js", (char[])PRELUDE_SYSTEMS[..] },
 		{ "three:cast.js", (char[])PRELUDE_CAST[..] },
+		{ "three:kind.js", (char[])PRELUDE_KIND[..] },
+		{ "three:assemble.js", (char[])PRELUDE_ASSEMBLE[..] },
+		{ "three:cooldown.js", (char[])PRELUDE_COOLDOWN[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
