@@ -1,4 +1,18 @@
-// The release smoke test. It is deliberately not a pretty picture: it exercises
+// The release smoke test — **run by hand, on a real GPU, before shipping a
+// tag**. It is not a CI step: no GitHub runner has hardware three.c3 is meant
+// to draw on, so `.github/workflows/release.yml` checks only that a bundle
+// loads and leaves this to a machine that can answer it. From inside an
+// extracted zip, from a directory that is not the bundle:
+//
+//     cd /tmp && ~/Downloads/three-macos-arm64-1.2.3/three \
+//       --headless --script <repo>/packaging/smoke.js \
+//       --frames 6 --screenshot smoke.png
+//
+// It must print `SMOKE OK` and write a non-empty PNG. `SMOKE FAIL`, a
+// `SHADER_NOT_FOUND` anywhere in the output, or no PNG means the zip is not
+// shippable.
+//
+// It is deliberately not a pretty picture: it exercises
 // the three things a bundle can be broken in ways a build cannot catch.
 //
 //   a shape and a material   -> the mesh/material module compiled, so libslang

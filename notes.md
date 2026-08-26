@@ -360,10 +360,32 @@ Live, all of them. Each cost real time and none is visible in a diff.
   and its undefined symbols are `_OBJC_CLASS_$_MTL4*` — so dyld refuses it on
   anything older. The release pipeline was on the `macos-14` image and the whole
   failure was three lines about MoltenVK. The bundle therefore has an OS floor
-  that the engine does not, `.github/workflows/release.yml` compares `sw_vers`
-  against the dylib's `minos` before the smoke test rather than after, and
-  `main.c3` names the floor in the message. **When a fallback is silent, the
-  thing it falls back to has to say what it did not find.**
+  that the engine does not, and `main.c3` names it in the message. **When a
+  fallback is silent, the thing it falls back to has to say what it did not
+  find.**
+
+  The sequel is the other half of the same lesson. On `macos-26` the driver
+  loads and `vkCreateInstance` answers **`VK_ERROR_INITIALIZATION_FAILED`**
+  instead: the ICD was there, ran, and refused the machine. Read the two
+  together — INCOMPATIBLE means no driver at all, INITIALIZATION means one that
+  would not have this hardware — because they are the only way to tell a
+  *packaging* bug from a *machine* apart from the outside. GitHub's macOS
+  runners are VMs and a paravirtualised GPU is not what a Metal 4 driver wants,
+  which is why **the release pipeline does not render at all** and says so in
+  its header: rendering is checked by hand with `packaging/smoke.js` on real
+  hardware.
+- **`--cc` is checked with `file_executable_in_path`, which does not append
+  `.exe`.** c3c 0.8.3, `src/utils/file_utils.c`: a compiler name with no slash
+  in it is looked up by walking `PATH` and testing the name *verbatim*, so on
+  Windows `--cc gcc` never matches `gcc.exe`, `compile_cfiles` falls through to
+  `default_c_compiler()`, and the build proceeds with MSVC — **with no message
+  saying the flag was dropped**. It surfaces as cl.exe choking on GNU flags it
+  was never meant to see (`D8021: invalid numeric argument
+  '/Wno-unused-parameter'`), which reads as a manifest problem and is not one. A
+  name containing a slash skips the search and is tested with `file_exists`, so
+  the fix is to hand it a resolved path *with* the extension — what the release
+  workflow's Build step does. macOS and Linux never see this: there the name
+  and the file agree.
 - **`SomeEnum::values`** (`::`, not `.`) is how c3c spells enum reflection.
 - **Querying an optional feature is not the same as falling back.** Decide
   whether an extension is baseline for the devices this targets — KosmicKrisp and
