@@ -191,6 +191,22 @@ struct SceneStats
 	uint assets;
 	uint textures;
 	usz texture_bytes;
+	<*
+	 How many materials a script has built and not yet had collected.
+
+	 Filled in by `MeshPass.stats` rather than here, for `shadow_draws`' reason:
+	 materials live on the pass and the graph cannot see them. The two built-in
+	 ones are not counted — they are shared, they cannot be disposed, and a floor
+	 of 2 on the one number this exists to watch would be noise in front of it.
+
+	 It is `assets` for the other resource that has to be given back by hand. A
+	 material holds a `VkPipeline`, `material.dispose()` is what gives it back, and
+	 this is how a script finds out whether it is doing that — the same job
+	 `stats().assets` does for `unloadUnused`. It falls at the *collection*, not at
+	 the dispose: a material a node still names is still holding everything it
+	 held.
+	*>
+	uint materials;
 	// From the last `update`, not from this call — `stats()` rebuilds with culling
 	// off, so there is nothing to count during it. Zero until the first `update`,
 	// and zero again after any `update` made with `Scene.cull` false: nothing was

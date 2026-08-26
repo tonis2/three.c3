@@ -60,6 +60,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "terrainAt", &js_terrain_at, 4);
 	self.bind(host, "lines", &js_lines, 2);
 	self.bind(host, "wireframe", &js_wireframe, 3);
+	self.bind(host, "checkAsset", &js_check_asset, 2);
 	self.bind(host, "assetPath", &js_asset_path, 2);
 	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
@@ -1026,6 +1027,9 @@ fn void js_stats(
 	js.set_property(object, "vertices", qjs::int_value((int)stats.vertices));
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
+	// The other resource a script has to give back by hand — `SceneStats.materials`
+	// has why it is beside `assets` and not beside `drawCalls`.
+	js.set_property(object, "materials", qjs::int_value((int)stats.materials));
 	js.set_property(object, "culledLastFrame", qjs::int_value((int)stats.culled_last_frame));
 	// The light's cull beside the camera's — §18.2. Zero with shadows off, which
 	// is the honest answer rather than an absent property, and the same shape as

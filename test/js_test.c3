@@ -3108,13 +3108,22 @@ fn void unloading_a_scene_gives_the_assets_back() @test
 }
 
 <*
- An asset handle from before an unload throws, and says what to do.
+ An asset handle from before an unload throws, at the line that names it.
 
  The failure this whole generation business exists to prevent: the slot is
  reused, so without it `kit.mesh('quad')` after an unload would place geometry
  out of whatever file happened to land there next, silently. The sentence has to
  name the recovery — loading the file again — because "that asset is gone" on its
  own leaves an agent guessing at whether the path or the script is at fault.
+
+ **Where it throws is the other half, and it used to be the `add()`.** The
+ argument for that was that an unadded Mesh is only a description and a
+ description of nothing harms nobody — `plan.md` §2 carried it as deferred by
+ design. It reads worse than it sounds. The add is a correct line: it is handed a
+ Mesh and it adds it. The wrong line is the one that named a handle from before
+ the unload, and in a script that builds a subtree and adds the root at the end,
+ those are nowhere near each other. So `new three.Mesh(ref)` asks the host, and
+ `made` below being empty is what says it never got as far as the add.
 *>
 fn void an_asset_handle_from_before_an_unload_throws() @test
 {
@@ -3126,23 +3135,29 @@ fn void an_asset_handle_from_before_an_unload_throws() @test
 			scene.unload();
 
 			let said = '';
+			let made = 'the constructor took it';
 			try {
-				scene.add(new three.Mesh(kit.meshAt(0)));
+				const m = new three.Mesh(kit.meshAt(0));
+				made = 'the constructor took it';
+				scene.add(m);
 			} catch (e) {
 				said = e.message;
+				made = '';
 			}
 
 			// Loading it again is the recovery the message names, and it works.
 			const fresh = three.load('test/fixtures/textured.glb');
 			scene.add(new three.Mesh(fresh.meshAt(0)));
 
-			return { said, instances: scene.stats().instances, assets: scene.stats().assets };
+			return { said, made, instances: scene.stats().instances, assets: scene.stats().assets };
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("no longer loaded"), "the stale handle was refused: %s", result.value);
 		test::@check(result.value.contains("unloadUnused"), "and the message names what freed it: %s", result.value);
+		test::@check(result.value.contains(`"made":""`),
+			"and it was refused at the new three.Mesh(), not at the add: %s", result.value);
 		test::@check(result.value.contains(`"instances":1`), "the reloaded asset places: %s", result.value);
 		test::@check(result.value.contains(`"assets":1`), "and it is the only one resident: %s", result.value);
 	};

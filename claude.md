@@ -5,6 +5,8 @@ resolves against whichever file still has material under it. **When something is
 finished, delete its entry from `plan.md`** — into `notes.md` if it explains
 something, into `git log` if it does not.
 
+Dont reference plan.md in code comments, code comments are for human users, keep code comments short and easy to read.
+
 Before running C3 tests, close all three instances
 
 For testing use

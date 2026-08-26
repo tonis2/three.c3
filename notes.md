@@ -56,7 +56,7 @@ loud and argues for the exception; it does not just stop being true.
 Each of these was a decision, not an oversight. The trigger is written down so
 the decision can be revisited on evidence rather than on somebody's mood.
 
-**Nine of them have since been built**, and each is kept here as a `*(Built: …)*`
+**Eleven of them have since been built**, and each is kept here as a `*(Built: …)*`
 paragraph rather than deleted, because the argument for the deferral is what
 makes the shape of the answer readable — and in one case (the driver's pipeline
 cache) the measurement says the deferral was right and the thing was built
@@ -69,8 +69,57 @@ map is replaced, a shadow map resized mid-play and a post chain resized on a
 window drag all went from `vkDeviceWaitIdle` to a list push. What still stalls is
 teardown and the swapchain, which has to.)*
 
-  evidence that scripts in practice do not dispose — at which point the answer
-  is probably a warning naming the count, not a finalizer.
+*(Built, and it is the warning the entry predicted rather than the finalizer it
+refused. A material holds its `VkPipeline` until `material.dispose()` gives it
+back, and `MAX_UNUSED_PIPELINES` cannot reach it: an entry a live material names
+has a reference and is never one of the unused ones eviction is allowed to take.
+So the count is the whole of the diagnosis, and it is now kept rather than
+derived — `MeshPass.live_materials`, up in `claim_slot` and down in
+`free_material`, which is the *collection* and not the dispose. A material a mesh
+still draws with is still holding everything it held, and a count that fell at
+the `dispose()` would tell a script it had given back what it had not.
+
+Two doors out of it. `stats().materials` is the number, sitting beside
+`stats().assets` because it is the same job for the other resource nothing frees
+on its own; and past `MATERIAL_WARN_AT` — 64 — the host prints one line naming
+the count and the distinct pipelines behind it, then waits for twice as many
+before printing again. The doubling is what keeps the line that matters from
+being buried under the loop that caused it, and nothing lowers the threshold
+again: a count that fell back under it and warned a second time at the same
+number would say the same sentence forever to a script that is cycling materials
+correctly. The two built-in slots are not counted — they cannot be disposed, and
+a permanent 2 in front of the one number this exists to watch is noise standing
+where the signal goes.
+
+Written to stderr rather than raised, because every one of those materials draws
+correctly: it is a diagnostic about a shape, and a throw would break the one
+script that legitimately holds a hundred. `the_material_warning_waits_for_twice_the_count`
+pins the doubling and reads the threshold rather than naming it.
+
+The trap, and it is the ordering one: `MeshPass.init` claims the two built-in
+materials, so the threshold has to be set *before* those claims and the count
+reset *after* them. Set both afterwards and a threshold still at its zero fill is
+a threshold every claim is already past — a fresh scene printed a warning about
+holding one material and then another about holding two, before any script had
+run. The suite did not catch it because the test runner swallows stderr; running
+a scene did, which is the argument for the probe.)*
+
+*(Built: the stale asset handle is refused at `new three.Mesh(ref)` now, not at
+the `add()`. The deferral's argument was that an unadded Mesh is only a
+description and a description of nothing harms nobody, which is true and is not
+the point. The add is a correct line — it is handed a Mesh and it adds it — while
+the wrong line is the one that named a handle from before the unload, and a
+script that builds a subtree and adds the root at the end puts those nowhere near
+each other.
+
+`checkAsset(index, generation)` is `arg_asset`'s staleness check with nothing
+attached and nothing returned: the pending throw is the whole answer, and it is
+`arg_asset`'s own sentence rather than a second one written beside it, so there
+is one message to keep right and an agent reads at the constructor exactly what
+it would have read at the add — the recovery included. It costs one crossing per
+`Mesh`, which is the same order as the `add()` that is the only useful thing to
+do with one. `an_asset_handle_from_before_an_unload_throws` asserts *where* now,
+by checking that the script never reached the add at all.)*
 
 *(Built: a uniform table past the 104-byte push budget moves into a device
 buffer behind a pointer in the block, so the ceiling is `MATERIAL_TABLE_BUDGET`

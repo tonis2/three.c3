@@ -117,6 +117,13 @@ struct MeshPass
 	// node. Nonzero is the only thing that makes `record` walk the scene for
 	// collectible materials, so the sweep costs nothing in the common case.
 	uint pending_materials;
+	// How many slots in the table above are live, not counting the two built-in
+	// ones, which are nobody's to dispose. What `stats().materials` reports and
+	// what `MATERIAL_WARN_AT` watches.
+	uint live_materials;
+	// The count the next warning is waiting for, doubling each time one fires —
+	// see `note_material_claimed`.
+	uint material_warn_at;
 
 	// Per frame in flight — see the header.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
@@ -301,6 +308,10 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// a counted borrow without exception — the alternative, "the pass's own two are
 	// special", is a rule that has to be remembered at every future release.
 	self.materials.init(mem, 4);
+	// Before the two claims below and not after them, because `claim_slot` counts
+	// through `note_material_claimed` and a threshold still at its zero fill is a
+	// threshold every claim is already past: the built-ins warned about themselves.
+	self.material_warn_at = MATERIAL_WARN_AT;
 	self.pipelines.retain(self.pipeline);
 	self.claim_slot({
 		.pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "", .texture = NO_TEXTURE
@@ -311,6 +322,12 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	self.claim_slot({
 		.pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "", .texture = NO_TEXTURE
 	});
+	// After the two above rather than before them, which is what makes
+	// `live_materials` mean "materials a script made and could dispose". The two
+	// built-in slots are refused by `editable` and are never collected, so
+	// counting them would put a permanent 2 into the number a script watches and
+	// into every sentence `note_material_claimed` prints.
+	self.live_materials = 0;
 
 	self.assets.init(gpu);
 	self.scene.init();
@@ -358,6 +375,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 fn uint MeshPass.claim_slot(&self, Material material)
 {
 	material.alive = true;
+	self.note_material_claimed();
 
 	foreach (i, &existing : self.materials)
 	{
@@ -375,6 +393,56 @@ fn uint MeshPass.claim_slot(&self, Material material)
 	self.materials.push(material);
 	self.materials[index].bind_table();
 	return index;
+}
+
+<*
+ How many live materials it takes before the first word about disposing them.
+
+ A material an agent compiled holds a `VkPipeline` until `material.dispose()`
+ gives it back, and `PipelineCache`'s eviction cannot help: an entry with a live
+ material on it has a reference and is never unused. So a script that builds a
+ material and drops the handle leaks one pipeline per distinct shader source, for
+ the life of the process, exactly as the entry in `plan.md` §2 said it would.
+
+ The answer is a warning and not a `FinalizationRegistry`, and that was decided
+ before it was written: a collector-driven free makes device memory depend on
+ when QuickJS felt like collecting, which is the property `three.unloadUnused()`
+ exists to avoid for assets and would be no better here.
+
+ Sixty-four because it is comfortably above every legitimate scene anybody has
+ written here — `examples/village.js` is under ten, and a kit imported with
+ `{ materials: true }` is one per distinct glTF material — and comfortably below
+ the count at which a per-frame build has done real damage.
+*>
+const uint MATERIAL_WARN_AT = 64;
+
+<*
+ Counts a material into the table, and says something the first time the count
+ looks like a leak.
+
+ Doubling rather than warning per creation, because the script this is aimed at
+ builds materials in a loop and a line per creation would bury the one that
+ mattered. Nothing resets it downwards: a count that fell back under the
+ threshold and warned again at the same number would say the same sentence
+ forever to a script that is cycling materials correctly.
+
+ Written to stderr rather than raised. It is a diagnostic about a shape, not a
+ fault — every one of those materials draws correctly — and a throw would break
+ the one script that legitimately holds a hundred.
+*>
+fn void MeshPass.note_material_claimed(&self)
+{
+	self.live_materials++;
+	if (self.live_materials < self.material_warn_at) return;
+
+	io::eprintfn(
+		"three: %d live materials, and each one holds its pipeline until "
+		"material.dispose() gives it back — %d distinct pipelines so far. "
+		"stats().materials is the number to watch.",
+		self.live_materials,
+		self.pipelines.entries.len()
+	);
+	self.material_warn_at *= 2;
 }
 
 <*
@@ -1527,6 +1595,10 @@ fn SceneStats MeshPass.stats(&self)
 	// `stats()` is a query and does not record a pass to count.
 	stats.shadow_draws = self.shadows.draws;
 	stats.shadow_static_draws = self.shadows.static_draws;
+	// For the same reason, and it is a fact about right now rather than about last
+	// frame: the count is maintained at the two ends of a material's life rather
+	// than swept for here.
+	stats.materials = self.live_materials;
 	return stats;
 }
 
@@ -1989,6 +2061,11 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 
 	self.pipelines.release(gpu, material.pipeline);
 	material.free();
+	// The mirror of `note_material_claimed`, and the only place the count goes
+	// down: `dispose_material` is a *release*, and a material a node still names
+	// is still live and still holding its pipeline. Counting it out at the dispose
+	// would report a scene as having given back what it has not.
+	self.live_materials--;
 }
 
 fn void MeshPass.free(&self, Gpu* gpu)

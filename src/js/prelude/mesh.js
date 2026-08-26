@@ -28,6 +28,22 @@ export class Mesh extends Object3D {
 				+ 'slots reused — a hand-built { asset, mesh } cannot say which load it meant.'
 			);
 		}
+		// **And the handle has to still name something**, which is a question
+		// only the host can answer: an asset that has been unloaded gives its
+		// slot back, so `assetGeneration` is the whole of what separates "this
+		// kit" from "whatever loaded into its slot afterwards".
+		//
+		// This used to be left to `scene.add()`, on the argument that an unadded
+		// Mesh is only a description and a description of nothing harms nobody.
+		// It reads worse than it sounds: the line that gets blamed is the add,
+		// which is correct, while the line that is wrong is the one that named a
+		// handle from before an unload — and in a script that builds a subtree
+		// and adds it at the end, those are nowhere near each other.
+		//
+		// It costs one crossing per Mesh. That is the same order as the `add()`
+		// which is the only useful thing to do with one, and it buys the throw at
+		// the line an agent has to edit.
+		H.checkAsset(geometry.asset, geometry.assetGeneration);
 		this._mesh = geometry;
 		this._name = geometry.name ?? '';
 		this._material = null;
