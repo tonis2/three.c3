@@ -39,7 +39,7 @@ export const DOCS = {
 		'one-module': 'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
 		'material-samplers': 'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 		'no-colour-management': 'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
-		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, and a game that transitions eight times and never disposes holds eight worlds.',
+		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). The look travels with the scene — scene.background, three.light and three.light.shadow are the ACTIVE scene\'s, and activating a scene again brings back the ones it had, so a level does not come home to the default sky. Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, and a game that transitions eight times and never disposes holds eight worlds.',
 		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; scene.dispose() frees the whole scene, its bodies and its bake with it; three.unloadUnused() does the freeing without the emptying. None of them is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Naming one throws a sentence saying so, and it throws at the new three.Mesh() that named it rather than waiting for the scene.add() that would have drawn it — so the line that is wrong is the line that is blamed, which matters in a script that builds a subtree and adds it at the end. Loading the file again gives a fresh handle. Object handles go stale the same way, and the event is scene.dispose() rather than new three.Scene() — a scene you stopped rendering still holds its objects, so its handles still resolve.',
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
@@ -117,10 +117,11 @@ export const DOCS = {
 				'physics (this scene\'s own physics world — three.physics is whichever scene is active)',
 				'nav (this scene\'s own navigation bake — three.nav is whichever scene is active)',
 				'static (marks the whole scene as not moving again — see the static-casters topic)',
-				'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default)',
-				// three.light rather than a scene property: it is per renderer, like
-				// three.camera, and listing it here would suggest two scenes could
-				// disagree about it.
+				'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default — this scene\'s own, so setting it on a scene that is not being rendered paints nothing until you activate it)',
+				// three.light rather than a scene property, even though its value
+				// travels with the scene: there is one light, three.light is the
+				// active scene's, and listing it here would suggest a scene that is
+				// not on screen could be lit through it.
 				'collides (on the root, which draws nothing — set it on the meshes)',
 			],
 			details: {
@@ -132,10 +133,11 @@ export const DOCS = {
 				activate:
 					'Show this Scene, and stop showing whichever one was. Nothing is freed: the scene '
 					+ 'being left keeps its objects, its bodies and its bake, so activating it again '
-					+ 'brings the world back exactly as it was. What DOES go back to its default is '
-					+ 'everything describing the world being shown rather than the scene itself — the '
-					+ 'background, the light, the shadow settings, and the camera\'s attachment. Set '
-					+ 'those after activating, not before.',
+					+ 'brings the world back exactly as it was — its background, its light and its '
+					+ 'shadow settings included, which is why a level looks the way you left it. The '
+					+ 'one thing that does NOT come back is the camera\'s attachment: the follow named '
+					+ 'an object in the scene being left, so it is dropped and three.camera.follow is '
+					+ 'yours to set again.',
 				dispose:
 					'Free this Scene and everything in it: its nodes, its physics bodies, its nav bake, '
 					+ 'and the asset references its meshes held. What is actually reclaimed depends on '

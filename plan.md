@@ -280,31 +280,6 @@ is converted and its header has the before/after.
 
 ---
 
-## 23. More than one scene
-
-**Built.** `new three.Scene()` makes an independent world and shows it without
-freeing the one before it; `scene.activate()` swaps, `scene.dispose()` frees, and
-`stats().scenes` is the count. Physics and the nav bake travel with their scene.
-`SKILL.md`'s trap list and the `many-scenes` topic in `docs.js` have the rules.
-
-What it left open:
-
-- [ ] **The background, the light and the shadow settings are not per-scene.**
-      They go back to their defaults on `activate()`, exactly as
-      `new three.Scene()` has always reset them, so switching back to a scene
-      does not bring its look back. `ShadowMap` would have to split into settings
-      and resources for this; the other two are two small fields on `Scene` and a
-      call in `activate_scene`.
-- [ ] **A scene that is not active is not stepped.** Bodies in it are correct and
-      motionless. Stepping every world every frame would charge a game for the
-      levels it is not playing, so if this changes it should be opt-in per scene
-      rather than the default.
-- [ ] **Node generations come from one process-wide counter** — `next_node_generation`
-      — which is what makes a handle from another scene fail rather than resolve.
-      It wraps after 2^32 node creations.
-
----
-
 ## Standing constraints
 
 Neither of these is a task. They are the two things a task is allowed to break

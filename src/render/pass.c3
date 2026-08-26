@@ -432,14 +432,14 @@ fn void MeshPass.free_scenes(&self)
 <*
  The scene a `new three.Scene()` gets.
 
- A pass has a scene before any script runs — the command line can load a model
- into one — so a run that never claimed it would report two scenes for a script
- holding one, and would warn about a leak that is the pass's own bootstrap.
- The first `new three.Scene()` takes it over instead.
+ A pass has a scene before any script runs — a run with no script at all shows a
+ triangle in it — so a run that never claimed it would report two scenes for a
+ script holding one, and would warn about a leak that is the pass's own
+ bootstrap. The first `new three.Scene()` takes it over instead.
 
- Only while it is empty. A model loaded from the command line is a scene somebody
- built, and `new three.Scene()` does not empty a scene any more — so that case
- gets a fresh one and the loaded model stays exactly where it is.
+ Only while it is empty. The built-in triangle is a scene somebody is looking
+ at, and `new three.Scene()` does not empty a scene any more — so that case gets
+ a fresh one and the triangle stays exactly where it is.
 
  Once, whatever happens. A second `new three.Scene()` is always a second scene,
  because two empty scenes a script asked for separately have to be separate: the
@@ -453,6 +453,9 @@ fn Scene* MeshPass.claim_scene(&self)
 
 	Node* root = first.node(first.root);
 	if (root == null || root.children.len() > 0) return self.new_scene();
+	// Handed out as a brand-new Scene, so it starts on a brand-new Scene's look
+	// rather than on whatever the lines above `new three.Scene()` painted.
+	first.look = DEFAULT_LOOK;
 	return first;
 }
 

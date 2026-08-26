@@ -367,6 +367,11 @@ These are the differences that actually break scripts.
   **stepped**, so bodies in a scene nobody is looking at stand still; a nav bake
   is the exception and works ahead of time. `stats().scenes` is the count a
   transition has to bring back down.
+- **The look belongs to the scene.** `scene.background`, `three.light` and
+  `three.light.shadow` are the active scene's, and `activate()` brings back the
+  ones that scene had — so a level looks the way you left it. The camera is not:
+  its attachment is dropped on a switch, because the follow named an object in
+  the scene being left.
 - **Handles go stale.** Unloading an asset frees its slot; naming an old handle
   throws at the `new three.Mesh()`. Load again for a fresh one.
 - **Nothing is freed automatically.** No GC for resources — `scene.unload()` or

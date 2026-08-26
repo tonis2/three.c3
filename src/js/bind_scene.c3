@@ -127,8 +127,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
-	self.bind(host, "backgroundGet", &js_background_get, 0);
-	self.bind(host, "backgroundSet", &js_background_set, 3);
+	self.bind(host, "backgroundGet", &js_background_get, 1);
+	self.bind(host, "backgroundSet", &js_background_set, 4);
 	self.bind(host, "budgetGet", &js_budget_get, 0);
 	self.bind(host, "budgetSet", &js_budget_set, 1);
 	self.bind(host, "clockTime", &js_clock_time, 0);
@@ -491,37 +491,73 @@ fn void js_scene_active(
 }
 
 <*
- Points the frame at a scene and defaults everything that is not the scene's own.
+ Points the frame at a scene and puts that scene's look on.
 
  One function because there is one list, and it is the same argument
  `Scene.invalidate` makes: a switch that remembered two of these three would be a
  bug that only shows in the one it forgot.
+
+ The look is *loaded*, not defaulted. Nothing has to be saved on the way out
+ because `Scene.look` is where a script's writes land in the first place — the
+ renderer's `clear`, `light` and `shadows` are the frame's live copy of the
+ active scene's, refreshed here and nowhere else.
 *>
 fn void JsRuntime.activate_scene(&self, Scene* target)
 {
 	self.pass.scene = target;
-	// The background goes back to the default, unlike materials and assets, which
-	// survive a switch on purpose. It is a property of the Scene in Three.js and
-	// this keeps that true: a scene starts on the default sky rather than on
-	// whatever the last one painted, so a script that sets a background and a
-	// script that does not render the same first frame.
-	if (self.renderer != null) self.renderer.clear = DEFAULT_CLEAR;
-	// And the light, for exactly the same reason: a scene that sets one and a
-	// scene that does not have to render the same first frame, or "it looked
-	// right when I ran it alone" becomes a thing people say.
-	self.pass.light = DEFAULT_LIGHT;
-	// The shadow settings with it, and for the third time the same reason. Off is
-	// the default, so activating a scene turns shadows off — worth knowing before
-	// a script swaps levels and wonders where the shadows went. The image and the
-	// pipeline are **not** freed: they are the expensive half, they are correct
-	// for whatever comes next, and `ShadowMap.ensure` hands the same one back the
-	// moment anything turns shadows on again.
-	self.pass.shadows.defaults();
+	// A scene brings its own background, light and shadow settings back — a level
+	// looks the way it looked when it was last on screen, which is the whole point
+	// of being able to go back to it. Materials, assets and the camera are not
+	// here: they are the machine rather than the world, and they survive a switch
+	// on purpose.
+	if (self.renderer != null) self.renderer.clear = target.look.clear;
+	self.pass.light = target.look.light;
+	// The image and the pipeline are **not** freed — see `ShadowMap.apply`, which
+	// keeps them and forgets only what the outgoing scene's fit meant.
+	self.pass.shadows.apply(target.look.shadow);
 	// The camera stops tracking a node in a scene it is no longer looking at. The
 	// follow names a `NodeId`, and one from the outgoing scene would resolve to
 	// nothing every frame — a camera that silently stopped following rather than
 	// one that said so.
 	self.pass.follow = { };
+}
+
+<*
+ The one directional light, on the frame and on the scene that owns it.
+
+ Two writes because there are two copies and they have different jobs: the pass
+ shades this frame from its own, and the scene keeps the one that outlives not
+ being on screen. Written here rather than at the two call sites, so that a third
+ caller cannot set one and forget the other.
+*>
+fn void JsRuntime.set_light(&self, float[4] light)
+{
+	self.pass.light = light;
+	if (self.pass.scene != null) self.pass.scene.look.light = light;
+}
+
+// The shadow settings, on the frame and on the scene, for `set_light`'s reason.
+// The live copy is assigned rather than `apply`-ed: `apply` forgets the cached
+// static half, which is right when the world changes and wrong when a script
+// nudges the bias.
+fn void JsRuntime.set_shadow(&self, ShadowSettings settings)
+{
+	self.pass.shadows.settings = settings;
+	if (self.pass.scene != null) self.pass.scene.look.shadow = settings;
+}
+
+<*
+ The clear colour of one scene, which is only this frame's if that scene is
+ active.
+
+ Unlike the light and the shadows, `scene.background` names a scene in the
+ script, so setting it on the level being built has to land on that level rather
+ than repainting the one on screen.
+*>
+fn void JsRuntime.set_clear(&self, Scene* scene, float[4] clear)
+{
+	scene.look.clear = clear;
+	if (self.renderer != null && scene == self.pass.scene) self.renderer.clear = clear;
 }
 
 <*
@@ -1322,7 +1358,11 @@ fn void js_render_size(
 }
 
 <*
- `backgroundGet()` — the colour every frame starts on, as `[r, g, b]`.
+ `backgroundGet(sceneId)` — the colour that scene's frames start on, as
+ `[r, g, b]`.
+
+ The scene's own rather than the renderer's, so a level being built off screen
+ reads back what was set on it instead of what the level on screen is showing.
 *>
 fn void js_background_get(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1337,13 +1377,16 @@ fn void js_background_get(
 		return;
 	}
 
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
 	qjs::Value list = js.array();
-	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(self.renderer.clear[i]));
+	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(scene.look.clear[i]));
 	*out = list;
 }
 
 <*
- `backgroundSet(r, g, b)` — what every frame starts on.
+ `backgroundSet(sceneId, r, g, b)` — what that scene's frames start on.
 
  ## The alpha stays at one, and is not an argument
 
@@ -1380,11 +1423,15 @@ fn void js_background_set(
 		return;
 	}
 
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	float[4] clear = { 0, 0, 0, 1.0f };
 	for (int i = 0; i < 3; i++)
 	{
-		self.renderer.clear[i] = math::clamp(arg_float(&js, argc, args, i), 0.0f, 1.0f);
+		clear[i] = math::clamp(arg_float(&js, argc, args, i + 1), 0.0f, 1.0f);
 	}
-	self.renderer.clear[3] = 1.0f;
+	self.set_clear(scene, clear);
 }
 
 <*
@@ -1746,10 +1793,7 @@ fn void js_light_set(
 		return;
 	}
 
-	self.pass.light[0] = x;
-	self.pass.light[1] = y;
-	self.pass.light[2] = z;
-	self.pass.light[3] = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+	self.set_light({ x, y, z, math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f) });
 }
 
 <*
@@ -1892,26 +1936,28 @@ fn void js_shadow_set(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	ShadowMap* shadows = &self.pass.shadows;
-	shadows.enabled = arg_float(&js, argc, args, 0) != 0.0f;
+	ShadowSettings settings;
+	settings.enabled = arg_float(&js, argc, args, 0) != 0.0f;
 
 	uint wanted = (uint)math::clamp(arg_float(&js, argc, args, 1), (float)SHADOW_MIN_SIZE, (float)SHADOW_MAX_SIZE);
 	uint rounded = SHADOW_MIN_SIZE;
 	while (rounded * 2 <= wanted) rounded *= 2;
-	shadows.size = rounded;
+	settings.size = rounded;
 
 	// The bias has no upper bound worth inventing — past a certain size every
 	// shadow simply disappears, which is a visible answer to a value somebody
 	// typed. It is floored at zero because a negative one is acne on purpose.
 	float bias = arg_float(&js, argc, args, 2);
-	shadows.bias = bias > 0.0f ? bias : 0.0f;
-	shadows.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+	settings.bias = bias > 0.0f ? bias : 0.0f;
+	settings.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
 	// Floored at zero, where zero means "derive one from the orbit distance" —
 	// see `ShadowMap.reach`. There is no ceiling: a distance past the far plane
 	// is silently the far plane, because the fit takes the smaller of the two,
 	// and refusing a number that already behaves sensibly would be noise.
 	float reach = arg_float(&js, argc, args, 4);
-	shadows.distance = reach > 0.0f ? reach : 0.0f;
+	settings.distance = reach > 0.0f ? reach : 0.0f;
+
+	self.set_shadow(settings);
 }
 
 fn void js_camera_get(

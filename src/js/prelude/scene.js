@@ -54,11 +54,10 @@ export class Scene extends Object3D {
 	// brings the world back exactly as it was. Nothing is freed here — that is
 	// `dispose()`.
 	//
-	// What does go back to its default is everything that describes the world
-	// being *shown* rather than the scene itself: the background, the light, the
-	// shadow settings and the camera's attachment. A scene that sets a background
-	// and a scene that does not have to render the same first frame, so set those
-	// after activating rather than before.
+	// The look comes back with it: the background, the light and the shadow
+	// settings belong to the scene, so a level looks the way it looked when it
+	// was last on screen. What does not come back is the camera's attachment —
+	// the follow named an object in the scene being left, so it is dropped.
 	activate() {
 		this._check();
 		H.sceneActivate(this._sid);
@@ -128,7 +127,7 @@ export class Scene extends Object3D {
 	// back through.
 	get background() {
 		this._check();
-		return H.backgroundGet();
+		return H.backgroundGet(this._sid);
 	}
 
 	set background(v) {
@@ -136,7 +135,7 @@ export class Scene extends Object3D {
 		const c = v === null || v === undefined
 			? DEFAULT_BACKGROUND
 			: readColor(v, 'scene.background');
-		H.backgroundSet(c[0], c[1], c[2]);
+		H.backgroundSet(this._sid, c[0], c[1], c[2]);
 	}
 
 	// Empty the scene and give back everything nothing else holds — the
