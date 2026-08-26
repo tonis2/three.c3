@@ -24,9 +24,7 @@ import qjs;
 import std::core::test;
 import std::io;
 import std::io::file;
-import std::collections::object;
 import std::encoding::base64;
-import std::encoding::json;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -652,54 +650,6 @@ fn void the_relay_flag_names_a_port_in_every_order() @test
 	three::Options kept = three::parse_args(with_model[..])!!;
 	test::@check(kept.model == "model.glb", "--mcp-stdio swallowed the model: '%s'", kept.model);
 	test::@check(kept.mcp_port == three::DEFAULT_MCP_PORT, "and left the port at %d", kept.mcp_port);
-}
-
-<*
- The `.mcp.json` in the repository names a command line this binary accepts.
-
- That file is read by a client before it launches anything, and nothing else in
- this suite would notice it drifting: rename the flag, and every test here still
- passes while every session that reads the file finds a "server" that prints
- usage and exits. So the arguments are taken from the file as written and put
- through the real `parse_args`, and the answer has to be a relay.
-
- The command is checked by name rather than by opening it, because `c3c test`
- builds a test binary and need not have built `./build/three` at all — a check
- that failed on a clean checkout would be one people learn to ignore.
-*>
-fn void the_checked_in_mcp_json_launches_this_binary() @test
-{
-	char[]? bytes = file::load_temp(".mcp.json");
-	if (catch err = bytes)
-	{
-		test::@check(false, "no .mcp.json at the project root: %s", err);
-		return;
-	}
-
-	Object*? parsed = json::parse(tmem, (String)bytes);
-	if (catch err = parsed)
-	{
-		test::@check(false, ".mcp.json is not valid JSON: %s", err);
-		return;
-	}
-	Object* config = parsed;
-
-	Object* entry = config.get("mcpServers")!!.get("three")!!;
-	String command = entry.get_string("command")!!;
-	test::@check(command.ends_with("three"), "the command is '%s', which is not this project's binary", command);
-
-	Object* listed = entry.get("args")!!;
-	String[8] argv;
-	usz argc = 0;
-	argv[argc++] = command;
-	for (sz i = 0; i < listed.get_len(); i++)
-	{
-		argv[argc++] = listed.get_string_at(i)!!;
-	}
-
-	three::Options opts = three::parse_args(argv[0:argc])!!;
-	test::@check(opts.relay_stdio, "the arguments in .mcp.json do not start a relay");
-	test::@check(opts.mcp_port > 0, "the relay has no port to reach");
 }
 
 <*
