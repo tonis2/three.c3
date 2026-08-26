@@ -245,13 +245,15 @@ const uint NOT_DRAWN = uint::max;
  source and compiles it — which is why editing `shaders/mesh.slang` and re-running
  now shows the change with no build step of any kind in between.
 
- The path is `find_shader`'s and there is no way to override it. There used to be
- a `--shader <path>` parameter here, and it could only ever name *this* template:
- `material.slang`, `post.slang`, `shadow.slang` and `skin.slang` are looked up by
- the same search path from four other places, so a run that pointed one of the
- five somewhere else got as far as the first `ShaderMaterial` and then failed
- with `SHADER_NOT_FOUND`. One search path for all five is the honest version of
- what the flag was promising.
+ The source is `shader_source`'s — the search path when there is a checkout, the
+ copy embedded in the binary when there is not. There used to be a
+ `--shader <path>` parameter here, and it could only ever name *this* template:
+ `material.slang`, `post.slang`, `shadow.slang` and `skin.slang` are looked up
+ the same way from four other places, so a run that pointed one of the five
+ somewhere else got as far as the first `ShaderMaterial` and then failed with
+ `SHADER_NOT_FOUND`. One lookup for all five is the honest version of what the
+ flag was promising, and embedding is what stopped a shipped binary needing a
+ `shaders/` beside it at all.
 *>
 fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 {
@@ -273,9 +275,13 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 
 	@pool()
 	{
-		String path = find_shader("mesh.slang", tmem)!;
-
-		String source = load_source(path, tmem)!;
+		// The name rather than a path: the template may have come from the
+		// search path or from the copy in the binary, and what `acquire` wants
+		// it for is a cache key and a diagnostic label. A key that changed with
+		// where the file happened to be found would miss the cache for the same
+		// bytes.
+		String source = shader_source("mesh.slang", tmem)!;
+		String path = "mesh.slang";
 		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE)!;
 
 		// The line pipeline is the same shader over a different fixed-function
@@ -1566,10 +1572,10 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 *>
 fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 {
-	String path = find_shader("skin.slang", mem)!;
-	defer path.free(mem);
+	String source = shader_source("skin.slang", mem)!;
+	defer source.free(mem);
 
-	ShaderModule mod = compile_shader_file(path, SKIN_ENTRIES[..], "skin.slang")!;
+	ShaderModule mod = compile_slang(source, "skin.slang", SKIN_ENTRIES[..])!;
 	defer mod.free();
 	if (!mod.ok)
 	{

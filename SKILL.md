@@ -14,6 +14,54 @@ scripts. Read *Traps* below before writing one.
 tool) is the authoritative API reference and is embedded in the binary — when
 this file and the docs disagree, the docs are right.
 
+## What has to be next to the binary
+
+`three` is one executable and the native libraries it loads beside it. The
+shader templates used to be a third thing — read from `shaders/` relative to the
+**working directory** — and they are compiled into the binary now, so a bundle
+is the executable plus its libraries and `three` runs from any directory.
+
+| What | Looked for in | A missing one looks like |
+|---|---|---|
+| the Slang compiler library | next to the executable (macOS: `@executable_path`, then `@executable_path/../lib/slang.c3l/lib/<platform>`) | `dyld: Library not loaded` — the process never starts |
+| the Slang **glslang** library | beside the compiler library | shadows only — see below |
+| a Vulkan driver (macOS) | `@executable_path` first, then the loader's own ICD discovery | no device, or a silent fall through to whatever else is installed |
+
+**A checkout still overrides.** `shader_source` reads the search path first —
+`shaders/<name>` then `build/shaders/<name>` — and falls back to the embedded
+copy. So editing `shaders/mesh.slang` and re-running shows the change with no
+rebuild, exactly as before; a shipped binary with no `shaders/` beside it uses
+what it carries. A *broken* shader on that path wins too, and reports a Slang
+error with a line and a column rather than being quietly ignored.
+
+### The one that fails quietly
+
+A missing glslang library breaks **only the shadow shader**. The run prints
+
+```
+three: the shadow shader would not compile: error[E00100]: failed to load
+       downstream compiler 'spirv-opt'
+three: the shadow shader could not be built — shadows are off
+```
+
+on stdout, renders every frame unshadowed and **exits 0**. Nothing about the
+exit status or the PNG says a library is missing rather than that you forgot to
+turn shadows on. From a script, the tell is that `three.light.shadow.enabled`
+**reads back `false` on the next frame after you set it `true`**, and
+`three.stats().shadowDraws` stays 0:
+
+```js
+three.light.shadow = true;
+// ...one frame later...
+if (!three.light.shadow.enabled) console.log('the shadow shader did not build');
+```
+
+`three.light.shadow.fit.live` is not the check: it describes the *last frame
+drawn*, so it reads false on frame 1 whether or not anything is wrong.
+
+`three` also writes its compiled-shader cache to `./build/shader-cache`, again
+relative to the working directory, so it creates a `build/` wherever it runs.
+
 ## Two ways to work
 
 **MCP — the interactive loop.** `three --mcp` serves three tools on
@@ -75,6 +123,9 @@ three --headless model.glb --screenshot m.png --camera 45,20,12 --width 640 --he
 # boot a game directory (evaluates game/main.js) for 120 frames
 three --headless --assets ./game --frames 120 --screenshot 'run-%03d.png'
 
+# play a level with nobody at the keyboard — the scene presses its own keys
+three --headless --assets ./game --frames 1800 --screenshot 'run-%02d.png' --every 300
+
 # serve the agent tools (windowed), or headless on a build box
 three --mcp
 three --mcp 8808 --headless
@@ -125,9 +176,17 @@ Takes no view arguments; move `three.camera` from a script instead.
   in full, the stats block, and the names of every class and function
 - `{ search: "..." }` → grep over the whole surface
 - `{ section: "classes.ShaderMaterial" }` → one entry or one whole section
-- `{ path: "api.md" }` → write ~180 KB of Markdown to a file and grep it
-  yourself; this is usually the right move
-- `{ all: true }` → everything at once (~113 KB of JSON)
+- `{ path: "api.md" }` → **currently writes nothing.** It answers with the
+  index and no file appears, for a relative path or an absolute one. Until it
+  does, the way to get a file to grep is to log it and redirect — note that a
+  script's `return` value is not printed on the CLI path, only `console.log`:
+
+      echo 'console.log(JSON.stringify(three.getApiDocs({ all: true })))' > d.js
+      three --headless --script d.js --frames 1 | grep -m1 '^{' > api.json
+
+  `grep -m1 '^{'` rather than `head`, because the run prints a line of its own
+  before the script's output.
+- `{ all: true }` → everything at once (~176 KB of JSON)
 
 ## The JavaScript API
 
@@ -213,6 +272,71 @@ and `three.nav.field`.
 damp/smoothDamp`, `three.seed(n)`/`three.hash`, `three.catmullRom`, `Vector3`,
 `Random`.
 
+## When the character stops
+
+A screenshot cannot tell *standing on the summit* from *wedged against it* —
+both are a character next to a platform, and both look correct. Two habits
+close that gap, and reaching for them first is the difference between ten
+minutes and an afternoon.
+
+**`moveAndSlide` hands you the diagnosis, not just a position.** `r.grounded`
+is whether it is standing, `r.ground` is *what* it is standing on, `r.hit` is
+what stopped it, and `r.remaining` is the motion it could not spend. Name every
+mesh you place and log `r.hit.name`: a character that will not climb its own
+staircase prints `hit=summit`, which names the offending object outright and
+turns "the movement is broken" into "that cap is too wide".
+
+**Print, do not look.** A batch run that only writes a PNG every 300 frames
+tells you nothing about the other 299. A trace system costs nothing and is the
+whole debugging loop:
+
+```js
+let acc = 0;
+three.systems.add('trace', dt => {
+    acc += dt; if (acc < 4) return; acc = 0;
+    console.log(`t=${three.clock.time.toFixed(0)}s at (${ctl.x.toFixed(1)}, `
+        + `${ctl.y.toFixed(1)}, ${ctl.z.toFixed(1)}) grounded=${ctl.grounded} `
+        + `on=${ctl.on} hit=${ctl.blocked}`);
+}, { phase: 'fixed', order: 90 });
+```
+
+**Prefer two numbers next to each other to a jump arc.** A climb whose rise is
+0.5 against a `moveAndSlide` `step` of 0.55 is walkable *by construction*. A
+climb made of jumps is walkable only if the arc happens to land inside the
+platform, and the arithmetic is worse than it looks: the apex is `v² / 2g`, and
+for any height below it there are **two** horizontal distances that land there,
+one on the way up and one on the way down. So "jump when you are close" lands
+on the near edge, the far edge or neither, depending on the approach speed.
+Step a route out from the previous element with a fixed rise and a fixed chord
+and reachability stops being a thing to test for.
+
+## Driving a scene with no keyboard
+
+`--headless` has no keyboard, so `three.input.press(key)` is the only way to
+exercise an input-driven scene in a batch run — and it is worth building the
+level's own attract mode out of it, because then every headless run is a
+playtest that says whether the level can still be finished.
+
+A scripted press goes through the same path a real one does, so the scene
+cannot tell them apart. Keep the set of keys you pressed yourself; a key that
+is down and *not* in that set is a person taking the controls:
+
+```js
+const mine = new Set();
+const press = k => { if (!mine.has(k)) { three.input.press(k); mine.add(k); } };
+const lift  = k => { if (mine.has(k))  { three.input.release(k); mine.delete(k); } };
+
+for (const k of ['w', 'a', 's', 'd', 'space'])
+    if (three.input.isDown(k) && !mine.has(k)) auto = false;   // somebody is playing
+```
+
+An edge is once a **frame** and the fixed loop runs zero to eight times a
+frame, so a key held across several fixed steps is still one `pressed()`. To
+jump a second time you have to `release()` in between — hold for a step or two,
+then let go. And drive movement through `three.camera.planarMove()` the way a
+player does: aiming the camera at a target and holding `w` exercises the same
+code path the human uses, where writing a velocity directly does not.
+
 ## Traps
 
 These are the differences that actually break scripts.
@@ -241,3 +365,17 @@ These are the differences that actually break scripts.
   batching step to invoke and no way to write an unbatched scene.
 - **Shadows are off by default**, there is one light and one shadow map, and
   turning it on costs a second draw per caster.
+- **A platform wider than the route beneath it is a lid.** Every drawable mesh
+  is collision geometry, so a summit cap laid over the top of a spiral
+  staircase seals it — and the picture shows a cap and a staircase, both
+  exactly as designed. `r.hit` is what says which of the two is in the way.
+- **A ledge exactly as tall as `step` is not climbable.** `step` is how high a
+  ledge *may* be, so a 0.6 lip against a `step` of 0.55 is a dead stop that
+  looks identical to a wall. Make the geometry flush — a cap whose top is level
+  with the last stair — rather than making `step` generous, because a generous
+  `step` climbs things that were meant to be walls.
+- **The follow camera does not collide.** `three.camera.attach` puts the eye
+  where `distance` and the orbit say, through whatever is in between, so
+  standing on a platform can put the camera inside it and the character behind
+  geometry. There is no occlusion pass; shorten `distance` yourself if it
+  matters.

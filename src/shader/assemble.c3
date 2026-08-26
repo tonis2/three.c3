@@ -286,7 +286,7 @@ fn uint append_lines(DString* out, String text) @private
  generate, because the messages are the half a caller acts on and they are not
  shared.
 
- @param template_name : `A file name, looked up by find_shader — shaders/ first, then build/shaders/.`
+ @param template_name : `A file name, looked up by shader_source — the search path first, then the copy embedded in the binary.`
  @param fragment : `The agent's body, appended verbatim between the two #line directives.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see MATERIAL_BINDING_FIRST.`
@@ -316,8 +316,7 @@ fn String? assemble_shader(
 {
 	@pool()
 	{
-		String path = find_shader(template_name, tmem)!;
-		String template = load_source(path, tmem)!;
+		String template = shader_source(template_name, tmem)!;
 
 		DString out;
 		out.tinit(template.len + 1024);
