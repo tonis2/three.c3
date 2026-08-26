@@ -643,9 +643,10 @@ fn Material*? MeshPass.editable(&self, uint index)
 <*
  Loads a `.glb` and puts one node on screen for each mesh in it.
 
- The flat placement is deliberate: this is the CLI's "show me this file", not a
- scene author's `add`. Anything with a hierarchy comes from JS, through the same
- `Scene.add_mesh` this uses.
+ A fixture loader, and the flat placement is what says so: no hierarchy and no
+ handle back. Nothing on the command line reaches it — a script loads through
+ `three.load`, which uploads and then answers with the object — so what is left
+ is the tests, which want a file on screen in one line.
 *>
 fn void? MeshPass.load(&self, Gpu* gpu, String path)
 {

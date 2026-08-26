@@ -580,9 +580,8 @@ fn void the_flags_that_went_are_refused_rather_than_ignored() @test
  The flag exists so a person can run what an agent would paste into
  `run_script`, and the three cases below are the three shapes that has: alone,
  which is the whole point; with `--mcp`, where the boot happens and *then* the
- server comes up over the scene it built; and beside a model, which is the trap
- `--mcp` already documents from the other side — a flag that swallowed the
- positional argument would boot the script and then report no file.
+ server comes up over the scene it built; and with nothing after it, which is a
+ value nothing can invent.
 *>
 fn void the_script_flag_names_a_file_beside_everything_else() @test
 {
@@ -594,11 +593,6 @@ fn void the_script_flag_names_a_file_beside_everything_else() @test
 	String[*] served = { "three", "--mcp", "--script", "examples/vfx.js" };
 	three::Options both = three::parse_args(served[..])!!;
 	test::@check(both.script == "examples/vfx.js" && both.mcp_port > 0, "--mcp --script does both");
-
-	String[*] with_model = { "three", "--script", "boot.js", "model.glb" };
-	three::Options kept = three::parse_args(with_model[..])!!;
-	test::@check(kept.script == "boot.js", "the script is '%s'", kept.script);
-	test::@check(kept.model == "model.glb", "and the model is '%s'", kept.model);
 
 	// A value it has no way to invent. The alternative — treating a bare
 	// `--script` as "no script" — is a command line that opens the built-in
@@ -623,7 +617,8 @@ fn void the_script_flag_names_a_file_beside_everything_else() @test
 
  The last case is the trap `--mcp` already documents. The port is optional, so a
  following argument is consumed only when it really is one; without that,
- `three --mcp-stdio model.glb` would relay to nowhere and report no file.
+ `three --mcp-stdio --headless` would relay to nowhere and lose the flag beside
+ it.
 *>
 fn void the_relay_flag_names_a_port_in_every_order() @test
 {
@@ -647,9 +642,9 @@ fn void the_relay_flag_names_a_port_in_every_order() @test
 	three::Options carried = three::parse_args(own[..])!!;
 	test::@check(carried.relay_stdio && carried.mcp_port == 9300, "--mcp-stdio 9300 went to %d", carried.mcp_port);
 
-	String[*] with_model = { "three", "--mcp-stdio", "model.glb" };
-	three::Options kept = three::parse_args(with_model[..])!!;
-	test::@check(kept.model == "model.glb", "--mcp-stdio swallowed the model: '%s'", kept.model);
+	String[*] with_flag = { "three", "--mcp-stdio", "--headless" };
+	three::Options kept = three::parse_args(with_flag[..])!!;
+	test::@check(kept.headless, "--mcp-stdio swallowed the flag beside it");
 	test::@check(kept.mcp_port == three::DEFAULT_MCP_PORT, "and left the port at %d", kept.mcp_port);
 }
 

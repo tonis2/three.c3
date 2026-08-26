@@ -88,7 +88,6 @@ than a conversation.
 
 | Flag | Meaning |
 |---|---|
-| `[file.glb]` | Positional. Load and display a model. |
 | `--headless` | No window, no surface, no swapchain. Required on a machine with no display. |
 | `--script <f.js>` | Run one script, then keep running. |
 | `--assets <dir>` | Boot a game: evaluate `<dir>/main.js` as a module. Paths in `three.load` become relative to `<dir>` and cannot climb out. |
@@ -107,7 +106,9 @@ How they interact:
 - `--mcp` **cancels** `--screenshot` and `--frames` — a server that renders one
   frame and exits is not a server.
 - `--screenshot` with no `--frames` means one frame.
-- Unknown `-flags` are an error; a bare word is taken as the model path.
+- Every argument is a flag: unknown ones and bare words are both errors. There
+  is no positional file — a model is loaded from a script, with
+  `three.load('model.glb')`, which is what hands it back as an object.
 
 ### ⚠ The one that will hang you
 
