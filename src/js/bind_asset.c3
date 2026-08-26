@@ -945,6 +945,30 @@ fn void js_export(
 	};
 }
 
+<*
+ `checkAsset(index, generation)` — raise if that handle no longer names an asset.
+
+ `arg_asset`'s staleness check with nothing else attached to it, so that
+ `new three.Mesh(ref)` can make it at the line naming the handle instead of
+ leaving it to the `scene.add()` two lines later. It answers with nothing: the
+ only thing a caller wants from it is the throw.
+
+ The sentence is `arg_asset`'s own rather than a second one written beside it.
+ One message means one place to keep it right, and an agent that hits it at the
+ constructor reads exactly what it would have read at the add — including the
+ recovery, which is the half that matters.
+*>
+fn void js_check_asset(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	// The handle itself is discarded: the pending throw is the whole answer.
+	if (!arg_asset(self, &js, argc, args, 0, out).is_set()) return;
+}
+
 fn void js_asset_path(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 )

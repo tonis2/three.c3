@@ -48,17 +48,6 @@ somebody has one.
       to `wasm/bridge.c3` and the JavaScript beside it rather than a function in
       the backend.
 
-## 2. Deferred by design
-
-- [ ] **A material nobody disposes is immortal**, exactly as a texture nobody
-      disposes is. `material.dispose()` exists; a script that never calls it
-      accumulates one pipeline per distinct shader source. **Trigger:** evidence
-      that scripts in practice do not dispose — and the answer is then probably a
-      warning naming the count, not a `FinalizationRegistry`.
-- [ ] **A stale asset handle is refused at `add()`, not at `new three.Mesh()`.**
-      Documented rather than hidden; not a task unless somebody finds it
-      confusing in practice.
-
 ## 3. Skinning
 
 - [ ] **Blending / crossfade between clips.** §17 has the two answers — ordinary

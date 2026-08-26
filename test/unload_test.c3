@@ -867,6 +867,116 @@ fn void a_collected_material_slot_is_reused() @test
 }
 
 <*
+ `stats().materials` counts what a script built and has not had collected.
+
+ The number behind the warning `plan.md` §2 asked for. A material an agent
+ compiled holds a `VkPipeline` until `material.dispose()` gives it back, and
+ `MAX_UNUSED_PIPELINES` cannot help with that: an entry a live material names has
+ a reference and is never one of the unused ones the cache is allowed to evict.
+ So a script that builds materials and drops the handles grows device memory
+ monotonically, exactly as a script that never unloaded an asset used to — and
+ this is the counterpart of `stats().assets`, which is how that one is watched.
+
+ It counts *collections* and not disposals, which is the half worth pinning: a
+ disposed material a mesh still draws with is still holding its pipeline, and a
+ count that fell at the `dispose()` would tell a script it had given back what it
+ had not. The middle of this test is that case.
+
+ The two built-in materials are not in it. They are claimed in `MeshPass.init`,
+ they cannot be disposed, and a permanent 2 in front of the one number this
+ exists to watch would be noise standing where the signal goes.
+
+ **Proved by injection.**
+
+ - **`live_materials` counted from the built-ins rather than reset after them:**
+   "nothing a script built is live yet: 2".
+ - **The decrement moved from `free_material` to `dispose_material`:** "the mesh
+   still draws with it, so it is still live: 0".
+*>
+fn void the_live_material_count_is_what_a_script_watches() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		three::Scene* scene = &pass.scene;
+
+		test::@check(pass.stats().materials == 0,
+			"nothing a script built is live yet: %d", pass.stats().materials);
+
+		uint material = pass.create_texture_material(three::NO_TEXTURE)!!;
+		test::@check(pass.stats().materials == 1, "one built: %d", pass.stats().materials);
+
+		// Named by a mesh, so the dispose is a release and not a collection.
+		three::AssetId box = pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+		three::NodeId node = scene.add_mesh(box, 0);
+		scene.set_material(node, material);
+
+		pass.dispose_material(&renderer.gpu, material)!!;
+		test::@check(pass.stats().materials == 1,
+			"the mesh still draws with it, so it is still live: %d", pass.stats().materials);
+
+		scene.remove(node);
+		renderer.pass.frame_camera();
+		renderer.render_offscreen()!!;
+		test::@check(pass.stats().materials == 0,
+			"the mesh went, the material was collected, and the count followed: %d",
+			pass.stats().materials);
+	};
+}
+
+<*
+ The count is what earns a word about disposing, and the next word costs twice.
+
+ `MATERIAL_WARN_AT` is the trigger `plan.md` §2 wrote down: the answer to "a
+ material nobody disposes is immortal" is a warning naming the count rather than
+ a `FinalizationRegistry`, because a collector-driven free would make device
+ memory depend on when QuickJS felt like collecting — which is the property
+ `three.unloadUnused()` exists so that assets do not have.
+
+ The doubling is the part worth a test. A line per creation past the threshold
+ would bury the one that mattered under the loop that caused it, and a threshold
+ that did not move would say the same sentence forever. Read before and compared
+ after, so this pins the behaviour and not the constant.
+
+ `create_texture_material` rather than `create_material`, because this needs a
+ lot of materials and none of them needs a compile: it takes a reference on a
+ pipeline the pass already holds. What is being counted is materials, and every
+ one of them holds a pipeline whether Slang ran for it or not.
+
+ **Proved by injection.** `note_material_claimed` returning before the doubling:
+ "the next word waits for twice the count: 64 then 64" — and every creation from
+ then on prints.
+*>
+fn void the_material_warning_waits_for_twice_the_count() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		uint threshold = pass.material_warn_at;
+		test::@check(threshold > 0, "there is a threshold to cross: %d", threshold);
+		// The two built-in materials are claimed by `init` and go through the same
+		// counter. They must not have warned about *themselves* on the way in,
+		// which they did until the threshold was set before those two claims
+		// rather than after them — a fresh scene printed two lines about holding
+		// one material and then two.
+		test::@check(pass.live_materials == 0, "the built-ins are not counted: %d", pass.live_materials);
+		test::@check(threshold == three::MATERIAL_WARN_AT,
+			"and nothing has fired yet: %d", threshold);
+
+		while (pass.live_materials < threshold - 1)
+		{
+			pass.create_texture_material(three::NO_TEXTURE)!!;
+		}
+		test::@check(pass.material_warn_at == threshold,
+			"nothing said below it: %d", pass.material_warn_at);
+
+		pass.create_texture_material(three::NO_TEXTURE)!!;
+		test::@check(pass.material_warn_at == threshold * 2,
+			"the next word waits for twice the count: %d then %d", threshold, pass.material_warn_at);
+	};
+}
+
+<*
  A disposed material gives its image back too.
 
  The material holds one reference to the texture slot it names — the one
