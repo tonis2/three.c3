@@ -34,19 +34,30 @@ rebuild, exactly as before; a shipped binary with no `shaders/` beside it uses
 what it carries. A *broken* shader on that path wins too, and reports a Slang
 error with a line and a column rather than being quietly ignored.
 
+### The glslang library, and what it actually breaks
+
+`libslang-glslang` is not a second compiler. It is `spirv-opt`, which Slang
+loads as a *downstream tool* on the SPIR-V path and finds by name beside its own
+dylib. Remove it from a bundle and **every** shader compile fails — measured on
+a cold cache, from an assembled bundle:
+
+```
+error[E00100]: failed to load downstream compiler 'spirv-opt'
+note[E99996]: failed to load dynamic library 'slang-glslang-2026.12.2'
+
+three: three::SHADER_COMPILE_FAILED
+```
+
+No frame is drawn and no PNG is written, so this one is loud. (An earlier note
+here said it broke only the shadow shader and exited 0 — that was true of an
+older configuration and is not what happens now.)
+
 ### The one that fails quietly
 
-A missing glslang library breaks **only the shadow shader**. The run prints
-
-```
-three: the shadow shader would not compile: error[E00100]: failed to load
-       downstream compiler 'spirv-opt'
-three: the shadow shader could not be built — shadows are off
-```
-
-on stdout, renders every frame unshadowed and **exits 0**. Nothing about the
-exit status or the PNG says a library is missing rather than that you forgot to
-turn shadows on. From a script, the tell is that `three.light.shadow.enabled`
+A shadow shader that will not build for any *other* reason still leaves the run
+alive: it renders every frame unshadowed and **exits 0**, and nothing about the
+exit status or the PNG says so rather than that you forgot to turn shadows on.
+From a script, the tell is that `three.light.shadow.enabled`
 **reads back `false` on the next frame after you set it `true`**, and
 `three.stats().shadowDraws` stays 0:
 

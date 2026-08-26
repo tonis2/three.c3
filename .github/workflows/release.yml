@@ -7,15 +7,33 @@
 #   push a tag v*        build every platform, publish a GitHub release
 #   run it by hand       build every platform, keep the zips as artifacts
 #
-# ## The bundle is smoke-tested, not just built
+# ## What is checked here, and what is deliberately NOT
 #
-# Every failure this pipeline exists to prevent is invisible to the compiler:
-# `shaders/` left out of the zip, a libslang symlink copied as a symlink, the
-# glslang library forgotten. That last one is the reason for the assertion step
-# rather than a plain `--frames 1`: a missing glslang breaks ONLY the shadow
-# shader, prints a warning, renders an unshadowed frame and **exits 0**. So the
-# check greps stdout for a sentinel the scene prints, and runs from inside the
-# assembled bundle rather than from the build tree — what is tested is the zip.
+# **Nothing renders on a GitHub runner, on purpose.** None of the three images
+# is a machine three.c3 is meant to draw on: the Linux one has no GPU and would
+# be drawing on lavapipe, the Windows one has no ICD at all, and the macOS ones
+# are VMs — `macos-26` loads the bundled KosmicKrisp and then answers
+# `VK_ERROR_INITIALIZATION_FAILED`, because a paravirtualised GPU is not what a
+# Metal 4 driver wants. A red release because a runner has no graphics card is
+# noise, and a green one drawn by a software rasteriser proves nothing about the
+# hardware path anyway.
+#
+# So what runs below is what a GPU-less machine can honestly say about a zip:
+#
+#   the bundle STARTS         `--help` prints its usage from inside the bundle,
+#                             which is the whole linkage test — a library that
+#                             is not beside the exe makes the process fail
+#                             before `main`, printing nothing (0xC0000135 on
+#                             Windows, a dyld/ld.so line on the others)
+#   the driver is SHIPPABLE   macOS only: the dylib is in the zip, is arm64, and
+#                             exports the ICD entry point vk/driver.c3 dlsyms
+#
+# **Rendering is verified by hand before a release**, with `packaging/smoke.js`
+# on a real machine — that script is still the check for "the embedded shader
+# templates resolved and the shadow shader built", and it is the one thing CI
+# cannot stand in for: a shadow shader that does not build prints a warning,
+# renders an unshadowed frame and **exits 0**, so nothing but an assertion on
+# what was drawn finds it.
 name: release
 
 on:
@@ -40,9 +58,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Windows is marked experimental not because slang.c3l lacks a target any
     # more — it has one — but because nothing has yet linked it on a real
-    # Windows toolchain, and because the runner has no Vulkan device, so its
-    # smoke test can only prove the binary LOADS (see that step). A red leg here
-    # must not withhold the macOS and Linux zips from a release.
+    # Windows toolchain. A red leg here must not withhold the macOS and Linux
+    # zips from a release.
     continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
@@ -51,14 +68,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-26, not the older image: KosmicKrisp is a **Metal 4** driver.
-          # `otool -l libvulkan_kosmickrisp.dylib` reports `minos 26.0` and it
-          # names MTL4* classes, so dyld refuses to open it on anything earlier
-          # — and `vk::findBundledDriver` treats a failed dlopen as "no bundled
-          # driver", falls back to the loader's own ICD discovery, finds nothing
-          # (macOS has no system Vulkan) and reports E_ERROR_INCOMPATIBLE_DRIVER.
-          # Nothing in that message mentions the OS version, which is why the
-          # "runner is new enough for the driver" step below exists.
+          # macos-26 rather than macos-14, which is deprecated anyway: nothing
+          # here has to RUN the bundled driver, but the image should not be
+          # older than the thing it is packaging. KosmicKrisp is a Metal 4
+          # driver — `otool -l libvulkan_kosmickrisp.dylib` says `minos 26.0`
+          # and its undefined symbols are `_OBJC_CLASS_$_MTL4*` — so the zip
+          # carries a macOS 26 floor that the engine itself does not.
           - bundle: three-macos-arm64
             runner: macos-26
             c3c_asset: c3-macos.zip
@@ -69,20 +84,19 @@ jobs:
             c3c_asset: c3-linux-static.tar.gz
             target: linux-x64
             exe: three
-          # `--cc gcc` because this is the one leg with a NATIVE Windows
-          # toolchain, and c3c hands `c-sources` to whatever `--cc` names —
-          # MSVC's cl.exe by default here. quickjs.c3l's cflags are the GNU
-          # spellings and cl rejects the first of them outright
-          # ("D8021: invalid numeric argument '/Wno-unused-parameter'"). The
-          # archive beside the shim is mingw-built anyway (see that manifest),
-          # so mingw is the compiler this target is meant to be built with, and
-          # the runner image ships gcc 14 on PATH.
+          # This is the one leg with a NATIVE Windows toolchain, so c3c hands
+          # quickjs.c3l's `c-sources` to MSVC unless told otherwise — and that
+          # manifest's cflags are the GNU spellings, which cl rejects outright
+          # ("D8021: invalid numeric argument '/Wno-unused-parameter'"). mingw
+          # is the compiler this target is designed around (the archive beside
+          # the shim is mingw-built; see that manifest), and the image ships
+          # gcc 14. The Build step below is what points c3c at it — and why it
+          # cannot be a bare `--cc gcc` here.
           - bundle: three-windows-x64
             runner: windows-2022
             c3c_asset: c3-windows.zip
             target: windows-x64
             exe: three.exe
-            cc_flag: --cc gcc
             experimental: true
 
     steps:
@@ -190,10 +204,32 @@ jobs:
       # `--trust=full` is the documented invocation — a manifest that needs to
       # exec is silently skipped without it, which reports success and builds
       # the wrong thing. `--safe=no -O3` is claude.md's "the fast one", and a
-      # release binary is exactly what it is for. `cc_flag` is empty everywhere
-      # but Windows — see the matrix.
+      # release binary is exactly what it is for.
+      #
+      # **`--cc` must be a PATH, with the `.exe`, on Windows.** c3c 0.8.3 checks
+      # the compiler it was handed with `file_executable_in_path`, which appends
+      # no extension — so a bare `--cc gcc` fails that check on Windows and the
+      # compiler falls back to `default_c_compiler()`, i.e. MSVC, *silently*.
+      # The symptom is the D8021 above with no mention of --cc having been
+      # ignored. A name containing a slash takes the plain `file_exists` branch
+      # instead, which is why the resolved path works.
       - name: Build
-        run: c3c build --trust=full --safe=no -O3 ${{ matrix.cc_flag }}
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" != Windows ]; then
+            c3c build --trust=full --safe=no -O3
+            exit 0
+          fi
+          cc="$(command -v gcc || true)"
+          test -n "$cc" || {
+            echo "::error::no gcc on PATH — the runner image is expected to ship mingw."
+            exit 1; }
+          case "$cc" in *.exe) ;; *) cc="$cc.exe" ;; esac
+          test -f "$cc" || { echo "::error::$cc does not exist"; exit 1; }
+          cc="$(cygpath -w "$cc")"
+          echo "C compiler: $cc"
+          "$cc" --version | head -1
+          c3c build --trust=full --safe=no -O3 --cc "$cc"
 
       - name: Show what was built
         run: ls -la build/
@@ -241,78 +277,56 @@ jobs:
           ls -la "$out"
           du -sh "$out"
 
-      # ----------------------------------------------------- driver / OS floor --
-      # The one thing the smoke test cannot say for itself. dyld will not open a
-      # dylib whose LC_BUILD_VERSION is newer than the running OS, and the only
-      # symptom three.c3 can produce for that is E_ERROR_INCOMPATIBLE_DRIVER —
-      # the same message a machine with no Vulkan at all gets, because from the
-      # loader's side the two are the same situation. Asking otool directly is
-      # the difference between "this runner is too old" and half an hour.
-      #
-      # Comparing majors is enough: KosmicKrisp is built against a whole macOS
-      # release, and `minos` has never carried a minor that mattered.
-      - name: Check the runner is new enough for the bundled driver
+      # ------------------------------------------------------------- verify --
+      # Two checks, neither of which needs a GPU. See the header for why there
+      # is no third one that draws.
+
+      # A library that is not beside the executable makes the process die
+      # before `main` — 0xC0000135 on Windows, a dyld or ld.so line on the
+      # others — and in every case it prints nothing of its own. So usage text
+      # coming back IS the linkage test, and it is run from INSIDE the bundle
+      # so that what is tested is the zip rather than the build tree.
+      - name: Check the bundle starts and its libraries resolve
+        run: |
+          set -euo pipefail
+          cd "${{ steps.assemble.outputs.out }}"
+          # `|| true` so that the dynamic loader's own complaint — which is the
+          # only thing a failure here prints, and goes to stderr — reaches the
+          # log instead of being swallowed by `set -e` one line early.
+          ./${{ matrix.exe }} --help > help.log 2>&1 || true
+          cat help.log
+          grep -q -- '--headless' help.log || {
+            echo "::error::${{ matrix.exe }} did not start — a library is missing from the bundle"
+            exit 1; }
+          rm -f help.log
+          echo "::warning::CI verifies that this bundle LOADS. Rendering, the embedded shader templates and glslang are NOT verified here — run packaging/smoke.js on a real GPU before shipping."
+
+      # The macOS-only half, and the only thing about the driver a machine with
+      # no GPU can still be sure of. `vk/driver.c3` dlopens this file and dlsyms
+      # exactly one symbol out of it; both halves are checkable statically, and
+      # the failure they guard is a packaging one — a driver missing from the
+      # zip, staged for the wrong architecture, or replaced by something that is
+      # not an ICD. `minos` is printed rather than asserted: it is the bundle's
+      # OS floor (notes.md §10) and belongs in the log of the build that shipped
+      # it, but nothing on this runner has to satisfy it any more.
+      - name: Check the bundled driver is one
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           driver="${{ steps.assemble.outputs.out }}/libvulkan_kosmickrisp.dylib"
-          minos="$(otool -l "$driver" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos/{print $2; exit}')"
-          os="$(sw_vers -productVersion)"
-          echo "runner macOS $os; KosmicKrisp built for macOS $minos"
-          test -n "$minos" || { echo "::error::no LC_BUILD_VERSION in $driver"; exit 1; }
-          [ "${os%%.*}" -ge "${minos%%.*}" ] || {
-            echo "::error::this runner is macOS $os and the bundled KosmicKrisp needs $minos."
-            echo "::error::dyld refuses the dylib, vk::findBundledDriver reads that as"
-            echo "::error::'no bundled driver', the loader finds no ICD, and the run dies"
-            echo "::error::with E_ERROR_INCOMPATIBLE_DRIVER. Raise the macOS runner image."
+          test -f "$driver" || {
+            echo "::error::no libvulkan_kosmickrisp.dylib in the bundle — setup.sh's"
+            echo "::error::driver step was skipped, or stage-libs.sh did not copy it."
             exit 1; }
-
-      # ----------------------------------------------------------- smoke test --
-      # From INSIDE the bundle: this tests the zip, not the build tree.
-      - name: Smoke test the bundle
-        if: runner.os != 'Windows'
-        run: |
-          set -euo pipefail
-          bundle="$PWD/${{ steps.assemble.outputs.out }}"
-          # From a directory that is NOT the bundle and has no shaders/ in it:
-          # that is the whole claim the embedding makes, and running from inside
-          # the bundle would pass either way.
-          mkdir -p /tmp/elsewhere && cd /tmp/elsewhere
-          # A scene that throws still exits 0, and so does a missing glslang, so
-          # the log is the only witness. Tee it and assert on it.
-          "$bundle/${{ matrix.exe }}" --headless --script "$GITHUB_WORKSPACE/packaging/smoke.js" \
-            --frames 6 --screenshot smoke.png 2>&1 | tee smoke.log
-          echo "--- asserting ---"
-          grep -q 'SMOKE OK' smoke.log \
-            || { echo "::error::the bundle did not render a shadowed frame"; cat smoke.log; exit 1; }
-          # Should be unreachable now that the templates are embedded — kept as
-          # the regression guard for exactly that.
-          if grep -q 'SHADER_NOT_FOUND' smoke.log; then
-            echo "::error::the embedded shader templates did not resolve"; exit 1
-          fi
-          test -s smoke.png \
-            || { echo "::error::no PNG was written — no Vulkan device?"; exit 1; }
-          echo "bundle renders from outside itself: $(wc -c < smoke.png) bytes of PNG"
-
-      # Windows runners have no Vulkan ICD, so there is nothing to render on and
-      # the assertion above cannot run. What CAN be proved here is the half that
-      # the bundle is actually likely to get wrong: a DLL that is not beside the
-      # exe makes the process fail to START (0xC0000135), printing nothing — so
-      # `--help` returning its usage text IS the linkage test.
-      #
-      # Stated rather than skipped quietly: this leg does NOT verify that a
-      # frame renders, or that shaders/ and glslang are correct.
-      - name: Smoke test the bundle (load only — no GPU on this runner)
-        if: runner.os == 'Windows'
-        run: |
-          set -euo pipefail
-          cd "${{ steps.assemble.outputs.out }}"
-          ./${{ matrix.exe }} --help > help.log 2>&1
-          cat help.log
-          grep -q -- '--headless' help.log \
-            || { echo "::error::three.exe did not start — a DLL is probably missing from the bundle"; exit 1; }
-          echo "::warning::Windows bundle verified to LOAD only; no Vulkan device on this runner, so rendering, shaders/ and glslang are unverified."
-          rm -f help.log
+          file "$driver"
+          lipo -archs "$driver" | grep -q arm64 || {
+            echo "::error::the bundled driver is not arm64"; exit 1; }
+          nm -gU "$driver" | grep -q _vk_icdGetInstanceProcAddr || {
+            echo "::error::the bundled driver exports no vk_icdGetInstanceProcAddr,"
+            echo "::error::which is the one symbol vk::loadDriver looks for."
+            exit 1; }
+          minos="$(otool -l "$driver" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos/{print $2; exit}')"
+          echo "driver ok: exports the ICD entry point, built for macOS ${minos:-unknown}"
 
       # ------------------------------------------------------------------ zip --
       - name: Zip
