@@ -51,8 +51,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-26, not the older image: KosmicKrisp is a **Metal 4** driver.
+          # `otool -l libvulkan_kosmickrisp.dylib` reports `minos 26.0` and it
+          # names MTL4* classes, so dyld refuses to open it on anything earlier
+          # — and `vk::findBundledDriver` treats a failed dlopen as "no bundled
+          # driver", falls back to the loader's own ICD discovery, finds nothing
+          # (macOS has no system Vulkan) and reports E_ERROR_INCOMPATIBLE_DRIVER.
+          # Nothing in that message mentions the OS version, which is why the
+          # "runner is new enough for the driver" step below exists.
           - bundle: three-macos-arm64
-            runner: macos-14
+            runner: macos-26
             c3c_asset: c3-macos.zip
             target: macos-aarch64
             exe: three
@@ -61,11 +69,20 @@ jobs:
             c3c_asset: c3-linux-static.tar.gz
             target: linux-x64
             exe: three
+          # `--cc gcc` because this is the one leg with a NATIVE Windows
+          # toolchain, and c3c hands `c-sources` to whatever `--cc` names —
+          # MSVC's cl.exe by default here. quickjs.c3l's cflags are the GNU
+          # spellings and cl rejects the first of them outright
+          # ("D8021: invalid numeric argument '/Wno-unused-parameter'"). The
+          # archive beside the shim is mingw-built anyway (see that manifest),
+          # so mingw is the compiler this target is meant to be built with, and
+          # the runner image ships gcc 14 on PATH.
           - bundle: three-windows-x64
             runner: windows-2022
             c3c_asset: c3-windows.zip
             target: windows-x64
             exe: three.exe
+            cc_flag: --cc gcc
             experimental: true
 
     steps:
@@ -125,13 +142,58 @@ jobs:
       - name: setup.sh
         run: ./setup.sh
 
+      # quickjs.c3l ships lib/linux-x64/libquickjs.a prebuilt, and that archive
+      # was built without -fPIC. ELF x86-64 forbids the relocations non-PIC code
+      # emits from inside a PIE, and `cc` links a PIE by default on every
+      # current distro, so the *consumer* dies at the link naming a file it does
+      # not own:
+      #
+      #   libquickjs.a(quickjs.o): relocation R_X86_64_32S against `.rodata'
+      #   can not be used when making a PIE object
+      #
+      # macOS and Windows are unaffected — only ELF x86-64 has that constraint,
+      # which is why this went unnoticed until a Linux leg existed.
+      #
+      # The real fix is `-fPIC` in quickjs.c3l's own native/build-quickjs.sh
+      # plus a rebuilt archive committed there; that flag is now in the script
+      # but the committed .a predates it. Rebuilding here is cheap (~5 s for
+      # four translation units), needs nothing but the runner's own cc, and the
+      # flag list is READ OUT OF the script rather than repeated, so the two
+      # cannot drift. Drop this step once the archive in quickjs.c3l is PIC.
+      - name: Rebuild the quickjs archive as PIC (the committed one is not)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cd lib/quickjs.c3l
+          common="$(sed -n 's/^COMMON="\(.*\)"$/\1/p' native/build-quickjs.sh)"
+          test -n "$common" || {
+            echo "::error::could not read COMMON out of native/build-quickjs.sh —"
+            echo "::error::the script changed shape; update this step or drop it."
+            exit 1; }
+          echo "cflags: $common -fPIC"
+          work="$(mktemp -d)"
+          objs=""
+          for unit in dtoa libregexp libunicode quickjs; do
+            echo "  cc $unit.c"
+            # shellcheck disable=SC2086
+            cc -c "vendor/quickjs-ng/$unit.c" -Ivendor/quickjs-ng -Inative \
+               -o "$work/$unit.o" $common -fPIC
+            objs="$objs $work/$unit.o"
+          done
+          rm -f lib/linux-x64/libquickjs.a
+          # shellcheck disable=SC2086
+          ar rcs lib/linux-x64/libquickjs.a $objs
+          rm -rf "$work"
+          ls -la lib/linux-x64/
+
       # ---------------------------------------------------------------- build --
       # `--trust=full` is the documented invocation — a manifest that needs to
       # exec is silently skipped without it, which reports success and builds
       # the wrong thing. `--safe=no -O3` is claude.md's "the fast one", and a
-      # release binary is exactly what it is for.
+      # release binary is exactly what it is for. `cc_flag` is empty everywhere
+      # but Windows — see the matrix.
       - name: Build
-        run: c3c build --trust=full --safe=no -O3
+        run: c3c build --trust=full --safe=no -O3 ${{ matrix.cc_flag }}
 
       - name: Show what was built
         run: ls -la build/
@@ -179,8 +241,33 @@ jobs:
           ls -la "$out"
           du -sh "$out"
 
+      # ----------------------------------------------------- driver / OS floor --
+      # The one thing the smoke test cannot say for itself. dyld will not open a
+      # dylib whose LC_BUILD_VERSION is newer than the running OS, and the only
+      # symptom three.c3 can produce for that is E_ERROR_INCOMPATIBLE_DRIVER —
+      # the same message a machine with no Vulkan at all gets, because from the
+      # loader's side the two are the same situation. Asking otool directly is
+      # the difference between "this runner is too old" and half an hour.
+      #
+      # Comparing majors is enough: KosmicKrisp is built against a whole macOS
+      # release, and `minos` has never carried a minor that mattered.
+      - name: Check the runner is new enough for the bundled driver
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          driver="${{ steps.assemble.outputs.out }}/libvulkan_kosmickrisp.dylib"
+          minos="$(otool -l "$driver" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos/{print $2; exit}')"
+          os="$(sw_vers -productVersion)"
+          echo "runner macOS $os; KosmicKrisp built for macOS $minos"
+          test -n "$minos" || { echo "::error::no LC_BUILD_VERSION in $driver"; exit 1; }
+          [ "${os%%.*}" -ge "${minos%%.*}" ] || {
+            echo "::error::this runner is macOS $os and the bundled KosmicKrisp needs $minos."
+            echo "::error::dyld refuses the dylib, vk::findBundledDriver reads that as"
+            echo "::error::'no bundled driver', the loader finds no ICD, and the run dies"
+            echo "::error::with E_ERROR_INCOMPATIBLE_DRIVER. Raise the macOS runner image."
+            exit 1; }
+
       # ----------------------------------------------------------- smoke test --
-      # From INSIDE the bundle: this tests the zip, not the build tree.
       # From INSIDE the bundle: this tests the zip, not the build tree.
       - name: Smoke test the bundle
         if: runner.os != 'Windows'

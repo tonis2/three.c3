@@ -289,6 +289,15 @@ fn int main(String[] args)
 		{
 			io::printn("  No supported Vulkan driver. three.c3 renders through KosmicKrisp,");
 			io::printn("  which vulkan.c3l bundles; MoltenVK is not supported.");
+			// The bundled driver failing to *open* looks identical to no driver
+			// at all — `vk::findBundledDriver` reads a refused dlopen as "there
+			// is none" and falls back — and the commonest reason it is refused
+			// is the OS being older than the dylib. KosmicKrisp is built on
+			// Metal 4, so the bundle carries a macOS 26 floor that nothing else
+			// in it does. Cost a CI run to find; see notes.md §10.
+			$if env::DARWIN:
+				io::printn("  It is a Metal 4 driver: macOS 26 or newer, on Apple Silicon.");
+			$endif
 		}
 		return 1;
 	}
