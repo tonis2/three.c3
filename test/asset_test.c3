@@ -429,7 +429,7 @@ fn void an_instantiated_tree_puts_its_meshes_where_the_file_says() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, HIERARCHY)!!;
 		scene.instantiate(id, scene.root, "prop");
@@ -474,7 +474,7 @@ fn void instantiating_twice_is_two_subtrees_over_one_upload() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = assets.load(&renderer.gpu, HIERARCHY)!!;
 		uint meshes = (uint)assets.slot(id).meshes.len();
@@ -567,7 +567,7 @@ fn void placing_one_mesh_of_a_kit_uploads_one() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = assets.load(&renderer.gpu, SHARED)!!;
 		int wanted = assets.find_mesh(id, "piece_2");
@@ -609,7 +609,7 @@ fn void a_piece_of_a_kit_unloads_while_the_kit_stays() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = assets.load(&renderer.gpu, SHARED)!!;
 		three::NodeId keep = scene.add_mesh(id, 0, scene.root, "kept");

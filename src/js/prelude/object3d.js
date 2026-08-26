@@ -7,6 +7,17 @@ const H = globalThis.__three;
 // -----------------------------------------------------------------------
 // Object3D
 
+// The Scene an object hangs under, or null for one that is not in a graph yet.
+//
+// By the `_isScene` marker rather than `instanceof Scene`, for the reason the
+// check inside `add` uses it: the class lives in a module that extends this one.
+function sceneOf(object) {
+	for (let up = object; up; up = up.parent) {
+		if (up._isScene === true) return up;
+	}
+	return null;
+}
+
 export class Object3D {
 	constructor() {
 		this._position = new Vector3(this, 0, 0, 0);
@@ -285,6 +296,18 @@ export class Object3D {
 			// A cycle would make the world-matrix walk recur forever.
 			for (let up = this; up; up = up.parent) {
 				if (up === o) throw new TypeError(`that would make ${o._name || 'an object'} its own ancestor`);
+			}
+			// Two scenes are two node pools, so moving between them would mean
+			// destroying the subtree and rebuilding it under the other root — which
+			// is exactly what re-parenting is documented NOT to do, because a
+			// rebuild invalidates every handle into something that never left the
+			// graph. The host refuses this too, and that refusal is the backstop
+			// rather than the check: it arrives after the lines below have already
+			// moved the object in the JavaScript tree.
+			const from = sceneOf(o);
+			const to = sceneOf(this);
+			if (from !== null && to !== null && from !== to) {
+				throw new TypeError('an object cannot be moved between scenes — rebuild it in the one you want it in');
 			}
 
 			if (o.parent) {

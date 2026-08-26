@@ -455,7 +455,7 @@ fn void js_set_transforms(
 		if (node == null) continue;
 		// The same refusal `setTransform` makes — see `PHYSICS_OWNS_TRANSFORM`.
 		// Skipped rather than raised, per the header.
-		if (self.physics.owns_transform(id)) continue;
+		if (self.pass.scene.physics.owns_transform(id)) continue;
 
 		sz at = i * stride;
 		node.position = { data[at], data[at + 1], data[at + 2] };

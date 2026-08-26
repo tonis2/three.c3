@@ -31,11 +31,10 @@ import std::time;
 macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))
 {
 	three::MeshPass pass;
-	pass.scene.init();
 	pass.assets.init();
-	pass.scene.attach_assets(&pass.assets);
+	pass.init_scenes();
 	pass.camera = three::default_camera();
-	defer pass.scene.free();
+	defer pass.free_scenes();
 	defer pass.assets.free(null);
 
 	three::JsRuntime runtime;
@@ -461,16 +460,21 @@ fn void a_callback_that_returns_a_promise_is_stopped() @test
 }
 
 <*
- The callback outlives `new three.Scene()`, and is stopped by the handles it
- kept rather than by the reset.
+ The callback outlives `new three.Scene()` and keeps writing to the scene it was
+ built for.
 
- The loop belongs to the host, as Three.js's does to the renderer, so a script
- that rebuilds the scene does not silently lose its animation. What it does lose
- is every handle it captured, and the stale-handle throw is exactly the sentence
- that says so — which is better than a callback that keeps running against
- nothing.
+ **The regression this exists for is a callback that dies at a level boundary.**
+ The loop belongs to the host, as Three.js's does to the renderer, and a second
+ `new three.Scene()` no longer frees the first — so a handle the callback
+ captured is still a live node in a scene that still exists. It moves something
+ nobody is looking at, which is the honest consequence of the scene it belongs to
+ not being the one on screen, and it is a script's own business to stop it.
+
+ Proved by injection: have `js_scene_create` empty the active scene the way the
+ old reset did, and the third tick comes back false with the stale-handle
+ sentence in `frame_error`.
 *>
-fn void a_callback_holding_the_old_scene_is_stopped_not_ignored() @test
+fn void a_callback_holding_an_older_scene_keeps_running() @test
 {
 	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
 	{
@@ -478,21 +482,27 @@ fn void a_callback_holding_the_old_scene_is_stopped_not_ignored() @test
 			const scene = new three.Scene();
 			const g = new three.Group();
 			scene.add(g);
+			globalThis.first = scene;
+			globalThis.g = g;
 			three.setAnimationLoop(() => { g.position.x += 1; });
 		`);
 		test::@check(run.tick(0), "it ran against the scene it was built for");
 
 		@ok(run, "new three.Scene();");
 		test::@check(run.tick(16), "it ran once more");
-		test::@check(!run.tick(32), "and was stopped");
+		test::@check(run.tick(32), "and again, because its scene is still there");
 
-		three::RunResult result = run.run("return 1;");
-		defer result.free();
-		test::@check(
-			result.frame_error.contains("no longer in the scene"),
-			"with the stale-handle sentence: '%s'",
-			result.frame_error
+		three::RunResult result = run.run(
+			"return [globalThis.g.position.x, globalThis.first.isActive, three.stats().scenes];"
 		);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// Three ticks of `+= 1`, in a scene that is no longer the rendered one, and
+		// both scenes still resident because nothing disposed the first.
+		test::@check(result.value == "[3,false,2]",
+			"the callback kept moving its own scene's node; got %s", result.value);
+		test::@check(result.frame_error.len == 0,
+			"and nothing was raised: '%s'", result.frame_error);
 	};
 }
 

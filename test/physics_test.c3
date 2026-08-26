@@ -66,6 +66,120 @@ fn void a_dropped_body_lands_on_the_floor() @test
 	};
 }
 
+<*
+ A level's bodies can be built before the level is shown, and they wait.
+
+ **The regression this exists for is a transition that has to rebuild its
+ physics.** A world belongs to its scene, so the next level's floor and its
+ falling things are standing up while the current level is still on screen —
+ and the swap costs nothing. The other half is the honest cost of that: the
+ frame steps ONE world, so a body in a scene nobody is looking at is correct and
+ motionless. A script that expected it to be simulating would otherwise find out
+ by the physics being wrong rather than by being told.
+
+ Proved by injection: step every scene in `frame_loop.c3` and `waited` comes back
+ well below 6; put the world back on `JsRuntime` and the `next.physics.add` calls
+ land in the world the first scene is using, so `count` reads 4.
+*>
+fn void bodies_built_before_a_swap_wait_for_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const here = new three.Scene();
+			const wall = new three.Mesh(new three.BoxGeometry(4, 4, 4));
+			here.add(wall);
+			here.physics.add(wall, { shape: 'box', mass: 0 });
+
+			// The next level, built while the first is the one being rendered.
+			const next = new three.Scene();
+			next.activate();
+			here.activate();
+
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;
+			next.add(floor);
+			next.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const ball = new three.Mesh(new three.SphereGeometry(0.5, 16, 8));
+			ball.position.set(0, 6, 0);
+			next.add(ball);
+			next.physics.add(ball, { shape: 'sphere', mass: 1 });
+
+			globalThis.here = here;
+			globalThis.next = next;
+			globalThis.ball = ball;
+			// Two worlds, not one: the wall is not in the next level's.
+			return [here.physics.count, next.physics.count];
+		`);
+		defer built.free();
+		test::@check(built.ok, "the two scenes built: %s", built.error);
+		test::@check(built.value == "[1,2]", "each scene has its own bodies, got '%s'", built.value);
+
+		// Two seconds of frames with the OTHER scene active. Nothing in `next`
+		// may move.
+		for (int i = 1; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult waited = run.run("return globalThis.ball.position.y;");
+		defer waited.free();
+		test::@check(waited.ok, "read the ball back: %s", waited.error);
+		test::@check(waited.value == "6", "it has not moved, y = %s", waited.value);
+
+		three::RunResult swapped = run.run("globalThis.next.activate(); return 1;");
+		defer swapped.free();
+		test::@check(swapped.ok, "the swap ran: %s", swapped.error);
+
+		for (int i = 121; i <= 240; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult fell = run.run("return globalThis.ball.position.y;");
+		defer fell.free();
+		test::@check(fell.ok, "read the ball back: %s", fell.error);
+		double y = fell.value.to_double() ?? 999.0;
+		test::@check(y < 1.0, "and now it falls on a floor that was already there, y = %s", fell.value);
+		test::@check(y > 0.0, "rather than through it, y = %s", fell.value);
+	};
+}
+
+<*
+ Disposing a scene gives its bodies back.
+
+ **The regression this exists for is a collider per body left on the heap.** A
+ `PhysicsBody` owns one allocation that nothing else points at, and the scene is
+ the only thing that knows the world exists — so a `Scene.free` that forgot
+ `physics.close()` would leak one per body with nothing to notice. The assertion
+ is the leak checker the `-D DEBUG` suite runs, not a number here.
+
+ Proved by injection: drop `self.physics.close()` from `Scene.free` and the run
+ reports the colliders and the world's own lists as leaked.
+*>
+fn void disposing_a_scene_gives_its_bodies_back() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const doomed = new three.Scene();
+			for (let i = 0; i < 8; i++) {
+				const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				box.position.set(i * 2, 4, 0);
+				doomed.add(box);
+				doomed.physics.add(box, { shape: 'box', mass: 1 });
+			}
+			const had = doomed.physics.count;
+
+			const after = new three.Scene();
+			doomed.dispose();
+			return [had, after.stats().scenes, three.physics.count];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// Eight bodies gone with their scene, one scene left, and the new one has
+		// a world of its own with nothing in it.
+		test::@check(result.value == "[8,1,0]",
+			"the bodies went with the scene; got %s", result.value);
+	};
+}
+
 // G5/S6. The solver owns a dynamic body's transform, and says so rather than
 // letting a script and the world take turns writing it.
 fn void the_solver_refuses_a_write_to_what_it_owns() @test

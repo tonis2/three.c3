@@ -124,7 +124,7 @@ fn void playing_reads_one_clips_curves() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -159,7 +159,7 @@ fn void a_clip_that_is_not_there_answers_no() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
 
@@ -188,7 +188,7 @@ fn void a_linear_channel_interpolates_between_keys() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -241,7 +241,7 @@ fn void a_rotation_channel_takes_the_spherical_path() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -279,7 +279,7 @@ fn void a_step_channel_does_not_interpolate() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -322,7 +322,7 @@ fn void two_copies_animate_at_different_phases() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId one = scene.instantiate(id, scene.root, "one");
@@ -364,7 +364,7 @@ fn void a_player_dies_with_its_subtree() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId one = scene.instantiate(id, scene.root, "one");
@@ -400,7 +400,7 @@ fn void an_asset_with_no_clips_costs_no_player() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, "test/fixtures/textured.glb")!!;
 		scene.instantiate(id, scene.root, "crate");
@@ -428,7 +428,7 @@ fn void a_loop_wraps_to_the_same_pose() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -464,7 +464,7 @@ fn void a_finished_clip_stops_where_it_ended() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -507,7 +507,7 @@ fn void playing_poses_the_instance_at_once() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -535,7 +535,7 @@ fn void stopping_holds_the_pose() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
@@ -566,7 +566,7 @@ fn void a_sampled_transform_reaches_the_frame() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId prop = scene.instantiate(id, scene.root, "prop");

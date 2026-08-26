@@ -1,34 +1,95 @@
-// three.c3 — the one live Scene, and the lookups that resolve host handles
-// against it.
+// three.c3 — the Scene class, the one that is rendered, and the lookups that
+// resolve host handles against it.
 
 import { Vector3, DEFAULT_BACKGROUND, readColor, readVector } from './math.js';
 import { Object3D } from './object3d.js';
+import { makeScenePhysics } from './physics.js';
+import { makeSceneNav } from './nav.js';
 
 const H = globalThis.__three;
 
-// The one live Scene, or null before the first `new three.Scene()`. There is
-// only ever one — a second replaces the first and the epoch check above says
-// so — which is what makes "the current scene" a thing a click can be
-// resolved against without the host being told which scene to use.
+// The Scene being rendered, or null before the first `new three.Scene()`.
+//
+// There can be several — `new three.Scene()` makes one and shows it without
+// destroying the one before it — but only one is drawn, stepped and queried at
+// a time, and this is that one. It is what makes "the current scene" a thing a
+// click can be resolved against without the host being told which scene to use.
 export let liveScene = null;
 
 export class Scene extends Object3D {
 	constructor() {
 		super();
-		liveScene = this;
 		// What Object3D.add checks for — see the note there.
 		this._isScene = true;
-		this._e = H.reset();
-		const [i, g] = H.root();
+		const [sid, i, g] = H.sceneCreate();
+		this._sid = sid;
 		this._i = i;
 		this._g = g;
 		this._name = 'Scene';
+		this.physics = makeScenePhysics(this);
+		this.nav = makeSceneNav(this);
+		liveScene = this;
 	}
 
 	_check() {
-		if (this._e !== H.epoch()) {
-			throw new Error('this Scene was replaced by a later new three.Scene() — there is one scene at a time');
+		if (!H.sceneAlive(this._sid)) {
+			throw new Error('this Scene was disposed — its objects, its bodies and its nav bake are gone');
 		}
+	}
+
+	// Whether this is the Scene being rendered.
+	//
+	// Only one is: a scene that is not active is drawn by nothing, stepped by
+	// nothing and queried by nothing, which is exactly what makes building the
+	// next level while the current one runs cost the frame nothing.
+	get isActive() {
+		this._check();
+		return H.sceneActive() === this._sid;
+	}
+
+	// Show this Scene, and stop showing whichever one was.
+	//
+	// The switch, and what it does *not* do is the point: the scene being left
+	// keeps its objects, its bodies and its nav bake, so activating it again
+	// brings the world back exactly as it was. Nothing is freed here — that is
+	// `dispose()`.
+	//
+	// What does go back to its default is everything that describes the world
+	// being *shown* rather than the scene itself: the background, the light, the
+	// shadow settings and the camera's attachment. A scene that sets a background
+	// and a scene that does not have to render the same first frame, so set those
+	// after activating rather than before.
+	activate() {
+		this._check();
+		H.sceneActivate(this._sid);
+		liveScene = this;
+		return this;
+	}
+
+	// Free this Scene and everything in it — the level boundary.
+	//
+	// Its nodes go, its physics bodies go, its nav bake goes, and the asset
+	// references its meshes held are given back. What is actually reclaimed then
+	// depends on what else is holding those assets: two scenes over one kit means
+	// disposing either frees nothing, which is right.
+	//
+	// The active Scene cannot be disposed — activate another one first. A frame
+	// with no scene to draw is a black window, which reads as the renderer being
+	// broken rather than as the script having freed the world it was looking at.
+	//
+	// Answers with what the sweep gave back, the same report `unload()` does.
+	dispose() {
+		this._check();
+		if (this.isActive) {
+			throw new Error(
+				'the Scene being rendered cannot be disposed — call activate() on another one first'
+			);
+		}
+		H.sceneDispose(this._sid);
+		this.children.length = 0;
+		this._i = -1;
+		this._g = -1;
+		return H.unloadUnused();
 	}
 
 	add(...objects) {
@@ -41,9 +102,11 @@ export class Scene extends Object3D {
 		return super.remove(...objects);
 	}
 
+	// This scene's numbers, which is not always the rendered one's: a script
+	// building the next level can watch it grow before showing it.
 	stats() {
 		this._check();
-		return H.stats();
+		return H.stats(this._sid);
 	}
 
 	// The colour every frame starts on.
@@ -91,7 +154,8 @@ export class Scene extends Object3D {
 	// confirmation.
 	//
 	// An asset you loaded but never added has no references either, so it
-	// goes too. Load the next level after this call, not before it.
+	// goes too. To load the next level first, build it in a Scene of its own —
+	// its nodes are what hold its assets, so this sweep cannot take them.
 	unload() {
 		this._check();
 		for (const child of [...this.children]) this.remove(child);
@@ -312,7 +376,7 @@ export function lazyObject(target, key, pairs, at) {
 // from the command line.
 export function objectsForHandles(pairs, count) {
 	if (count <= 0) return [];
-	if (liveScene === null || liveScene._e !== H.epoch()) return new Array(count).fill(null);
+	if (liveScene === null || !liveScene.isActive) return new Array(count).fill(null);
 
 	const wanted = new Map();
 	for (let i = 0; i < count; i++) {
@@ -344,7 +408,7 @@ export function objectsForHandles(pairs, count) {
 // would have to be kept in step with every add, remove and re-parent.
 export function objectForHandle(handle) {
 	if (!handle) return null;
-	if (liveScene === null || liveScene._e !== H.epoch()) return null;
+	if (liveScene === null || !liveScene.isActive) return null;
 	const [i, g] = handle;
 	let found = null;
 	liveScene.traverse(o => { if (found === null && o._i === i && o._g === g) found = o; });

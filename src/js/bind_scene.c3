@@ -77,9 +77,11 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "exportScene", &js_export, 1);
 
 	// The graph
-	self.bind(host, "root", &js_root, 0);
-	self.bind(host, "reset", &js_reset, 0);
-	self.bind(host, "epoch", &js_epoch, 0);
+	self.bind(host, "sceneCreate", &js_scene_create, 0);
+	self.bind(host, "sceneActivate", &js_scene_activate, 1);
+	self.bind(host, "sceneDispose", &js_scene_dispose, 1);
+	self.bind(host, "sceneAlive", &js_scene_alive, 1);
+	self.bind(host, "sceneActive", &js_scene_active, 0);
 	self.bind(host, "add", &js_add, 6);
 	self.bind(host, "remove", &js_remove, 2);
 	self.bind(host, "setParent", &js_set_parent, 4);
@@ -121,7 +123,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_nav_verbs(host);
 
 	// The frame
-	self.bind(host, "stats", &js_stats, 0);
+	self.bind(host, "stats", &js_stats, 1);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
@@ -288,98 +290,238 @@ fn qjs::Value aabb_value(qjs::Context* js, collision::Aabb3 box)
 }
 
 <*
+ A resolved handle: the node, and the scene it turned out to be in.
+
+ A pair rather than a `NodeId` on purpose. There is more than one scene now, so
+ "which graph does this verb operate on" is an answer a verb has to be *given*
+ rather than one it can assume — and a verb that reached for `self.pass.scene`
+ instead would write into whichever world happened to be on screen. Making
+ `arg_handle` answer with a type that is not a `NodeId` is what turns every one
+ of those into a compile error rather than into a silent wrong-scene write.
+*>
+struct NodeRef
+{
+	Scene* scene;
+	NodeId id;
+}
+
+<*
  Read `(index, generation)` from `args[at]` and `args[at + 1]` and resolve it.
 
- @return `The id, or NO_NODE with a JS exception left pending, in which case the caller must write out and return immediately.`
+ Searched across every scene, active one first, because a script holding an
+ object from the level it is building has a perfectly good handle and the verb
+ should work. The search is safe because node generations come from one
+ process-wide counter — see `next_node_generation` — so a handle matches in at
+ most one scene, and a handle into a disposed scene matches in none.
+
+ Linear over the scene list, which is a handful of pointers and two bounds checks
+ apiece. A game has one scene; a transition has two.
+
+ @return `The node and its scene, or a null scene with a JS exception left pending, in which case the caller must write out and return immediately.`
 *>
-fn NodeId arg_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
+fn NodeRef arg_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
 {
 	NodeId id = {
 		.index = (uint)arg_int(js, argc, args, at),
 		.generation = (uint)arg_int(js, argc, args, at + 1),
 	};
-	if (self.pass == null || self.pass.scene.node(id) == null)
+	if (self.pass != null)
 	{
-		*out = js.raise(
-			"that object is no longer in the scene — it was removed, or a later new three.Scene() replaced it"
-		);
-		return NO_NODE;
+		if (self.pass.scene != null && self.pass.scene.node(id) != null)
+		{
+			return { .scene = self.pass.scene, .id = id };
+		}
+		foreach (each : self.pass.scenes)
+		{
+			if (each.node(id) != null) return { .scene = each, .id = id };
+		}
 	}
-	return id;
+	*out = js.raise(
+		"that object is no longer in the scene — it was removed, or the scene it was in was disposed"
+	);
+	return { };
+}
+
+<*
+ Read a scene id from `args[at]` and resolve it.
+
+ For the verbs that are about a whole scene rather than about a node in one —
+ gravity, the body count, a nav bake. Those have no handle to find the scene
+ from, so the id crosses explicitly.
+
+ @return `The scene, or null with a JS exception left pending.`
+*>
+fn Scene* arg_scene(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
+{
+	uint id = (uint)arg_int(js, argc, args, at);
+	Scene* found = self.pass == null ? null : self.pass.scene_by_id(id);
+	if (found == null)
+	{
+		*out = js.raise("that Scene was disposed — its objects, its bodies and its nav bake are gone");
+		return null;
+	}
+	return found;
+}
+
+<*
+ The same, refused unless the node is in the scene being rendered.
+
+ For the verbs that are about the frame rather than about the graph — physics,
+ the camera follow, the spatial index. Those reach for one world per frame, and
+ a handle from a scene that is not being drawn has no answer they could give that
+ would not be a lie.
+*>
+fn NodeRef arg_live_handle(
+	JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out, String verb
+)
+{
+	NodeRef ref = arg_handle(self, js, argc, args, at, out);
+	if (ref.scene == null) return ref;
+	if (ref.scene != self.pass.scene)
+	{
+		*out = js.raise(string::tformat(
+			"%s needs an object in the scene being rendered — call scene.activate() on the one it is in first",
+			verb
+		));
+		return { };
+	}
+	return ref;
 }
 
 // ============================================================================
 // The graph
 // ============================================================================
 
-fn void js_root(
+<*
+ A new scene, made active — `new three.Scene()`.
+
+ Three.js's meaning, and the divergence this removes: the scene that was active
+ stays exactly as it was, with its nodes, its bodies and its asset references. A
+ script holding it can go on building it, and `scene.activate()` shows it again.
+
+ What that costs is a world nobody frees, so `SceneStats.scenes` counts them and
+ `MeshPass.note_scene_created` says something when the count starts to look like
+ a level transition that forgot `scene.dispose()`.
+
+ @return `The triple [sceneId, rootIndex, rootGeneration]. The root comes back with the id because a Scene needs both, and asking twice would be two crossings.`
+*>
+fn void js_scene_create(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
-	if (!self.pass.scene.started) self.pass.scene.init();
-	*out = handle_value(&js, self.pass.scene.root);
+
+	Scene* fresh = self.pass.claim_scene();
+	self.activate_scene(fresh);
+
+	qjs::Value triple = js.array();
+	js.set_index(triple, 0, qjs::number_value((double)fresh.id));
+	js.set_index(triple, 1, qjs::number_value((double)fresh.root.index));
+	js.set_index(triple, 2, qjs::number_value((double)fresh.root.generation));
+	*out = triple;
 }
 
 <*
- Empty the scene and answer with the new epoch — `new three.Scene()`.
+ Makes a scene the one being rendered — `scene.activate()`.
 
- The root survives, so a `Scene` is never left without somewhere to add to, and
- the epoch is what makes the previous `Scene` object throw rather than quietly
- operate on this one's nodes.
+ The switch, and the whole of what it resets. Everything that belongs to a scene
+ travels with it: the nodes, the physics world, the nav bake. Everything that is
+ a property of *the world being shown* rather than of the scene goes back to its
+ default, so that a script which sets a background and a script which does not
+ render the same first frame — the rule `new three.Scene()` has always followed,
+ kept here because this is now where the change of world happens.
+
+ @return `false if the id names no live scene.`
 *>
-fn void js_reset(
+fn void js_scene_activate(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (!self.pass.scene.started) self.pass.scene.init();
-	// `Scene.remove` releases every asset reference under the root on its own
-	// since G2 — see `Scene.attach_assets`. This used to walk the subtree here
-	// as well, which was a second implementation of the count and is exactly
-	// what stopped being safe once the count decides what gets freed.
-	self.pass.scene.remove(self.pass.scene.root);
-	// The bodies named nodes that have just gone. Emptied rather than left to
-	// throw one frame later, which is the same rule handles into the previous
-	// scene follow.
-	self.physics.close();
-	// And the navigation bake, for the same reason and a sharper one: it was
-	// voxelized out of triangles that have just gone, and an agent that walks
-	// confidently through where a wall used to be reads as the pathfinder being
-	// broken rather than as the mesh being stale.
-	self.drop_nav();
+	Scene* target = self.pass.scene_by_id((uint)arg_int(&js, argc, args, 0));
+	if (target == null)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
+	self.activate_scene(target);
+	*out = qjs::bool_value(true);
+}
+
+<*
+ Frees a scene and everything it owns — `scene.dispose()`.
+
+ Refuses the active one; `MeshPass.dispose_scene` has the argument. The asset
+ references its nodes held go back here, so a `three.unloadUnused()` afterwards
+ is what actually reclaims memory — and two scenes over one kit means this frees
+ nothing, which is right.
+
+ @return `false if the id names nothing, or names the scene being rendered.`
+*>
+fn void js_scene_dispose(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	*out = qjs::bool_value(self.pass.dispose_scene((uint)arg_int(&js, argc, args, 0)));
+}
+
+// Whether a scene id still names a scene. What `Scene._check()` in the prelude
+// asks before every call, in place of the epoch comparison it used to make.
+fn void js_scene_alive(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	*out = qjs::bool_value(self.pass.scene_by_id((uint)arg_int(&js, argc, args, 0)) != null);
+}
+
+// The id of the scene being rendered.
+fn void js_scene_active(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value(self.pass.scene == null ? 0 : (double)self.pass.scene.id);
+}
+
+<*
+ Points the frame at a scene and defaults everything that is not the scene's own.
+
+ One function because there is one list, and it is the same argument
+ `Scene.invalidate` makes: a switch that remembered two of these three would be a
+ bug that only shows in the one it forgot.
+*>
+fn void JsRuntime.activate_scene(&self, Scene* target)
+{
+	self.pass.scene = target;
 	// The background goes back to the default, unlike materials and assets, which
-	// survive a reset on purpose. It is a property of the Scene in Three.js and
-	// this keeps that true: `new three.Scene()` starts on the default sky rather
-	// than on whatever the last scene painted, so a script that sets a background
-	// and a script that does not render the same first frame.
+	// survive a switch on purpose. It is a property of the Scene in Three.js and
+	// this keeps that true: a scene starts on the default sky rather than on
+	// whatever the last one painted, so a script that sets a background and a
+	// script that does not render the same first frame.
 	if (self.renderer != null) self.renderer.clear = DEFAULT_CLEAR;
 	// And the light, for exactly the same reason: a scene that sets one and a
 	// scene that does not have to render the same first frame, or "it looked
 	// right when I ran it alone" becomes a thing people say.
 	self.pass.light = DEFAULT_LIGHT;
 	// The shadow settings with it, and for the third time the same reason. Off is
-	// the default, so `new three.Scene()` turns shadows off — which is right for
-	// the "same first frame" rule and is worth knowing before a script rebuilds
-	// its scene and wonders where the shadows went. The image and the pipeline are
-	// **not** freed: they are the expensive half, they are correct for whatever
-	// comes next, and `ShadowMap.ensure` hands the same one back the moment
-	// anything turns shadows on again.
+	// the default, so activating a scene turns shadows off — worth knowing before
+	// a script swaps levels and wonders where the shadows went. The image and the
+	// pipeline are **not** freed: they are the expensive half, they are correct
+	// for whatever comes next, and `ShadowMap.ensure` hands the same one back the
+	// moment anything turns shadows on again.
 	self.pass.shadows.defaults();
-
-	self.epoch += 1;
-	*out = qjs::number_value(self.epoch);
-}
-
-fn void js_epoch(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::number_value(self.epoch);
+	// The camera stops tracking a node in a scene it is no longer looking at. The
+	// follow names a `NodeId`, and one from the outgoing scene would resolve to
+	// nothing every frame — a camera that silently stopped following rather than
+	// one that said so.
+	self.pass.follow = { };
 }
 
 <*
@@ -399,8 +541,11 @@ fn void js_add(
 	int index = arg_int(&js, argc, args, 0);
 	int mesh = arg_int(&js, argc, args, 2);
 
-	NodeId parent = arg_handle(self, &js, argc, args, 3, out);
-	if (!parent.is_set()) return;
+	// The parent's handle is what names the scene — an object is added to the
+	// graph its parent is in, which is what lets a script build the next level
+	// while the current one is on screen.
+	NodeRef parent = arg_handle(self, &js, argc, args, 3, out);
+	if (parent.scene == null) return;
 
 	@pool()
 	{
@@ -408,7 +553,7 @@ fn void js_add(
 
 		if (index < 0)
 		{
-			*out = handle_value(&js, self.pass.scene.add_group(parent, name));
+			*out = handle_value(&js, parent.scene.add_group(parent.id, name));
 			return;
 		}
 
@@ -423,7 +568,7 @@ fn void js_add(
 
 		// No retain here since G2: `Scene.create_slot` takes the reference, so
 		// the count has one implementation rather than one per caller.
-		*out = handle_value(&js, self.pass.scene.add_mesh(asset, (uint)mesh, parent, name));
+		*out = handle_value(&js, parent.scene.add_mesh(asset, (uint)mesh, parent.id, name));
 	};
 }
 
@@ -434,17 +579,18 @@ fn void js_remove(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	// The root is the scene itself; emptying it is `new three.Scene()`.
-	if (id == self.pass.scene.root)
+	// The root is the scene itself; emptying it is `scene.unload()` and freeing it
+	// is `scene.dispose()`.
+	if (ref.id == ref.scene.root)
 	{
-		*out = js.raise("the Scene cannot be removed — make a new three.Scene() to empty it");
+		*out = js.raise("the Scene cannot be removed — scene.unload() empties it, scene.dispose() frees it");
 		return;
 	}
 
-	self.pass.scene.remove(id);
+	ref.scene.remove(ref.id);
 }
 
 fn void js_set_parent(
@@ -454,12 +600,22 @@ fn void js_set_parent(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-	NodeId parent = arg_handle(self, &js, argc, args, 2, out);
-	if (!parent.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+	NodeRef parent = arg_handle(self, &js, argc, args, 2, out);
+	if (parent.scene == null) return;
 
-	self.pass.scene.set_parent(id, parent);
+	// Two scenes are two node pools, so this would have to destroy the subtree and
+	// rebuild it under the other root — which is exactly what re-parenting is
+	// documented *not* to do, since a rebuild invalidates every handle into
+	// something that never left the graph. Refused rather than half-done.
+	if (ref.scene != parent.scene)
+	{
+		*out = js.raise("an object cannot be moved between scenes — rebuild it in the one you want it in");
+		return;
+	}
+
+	ref.scene.set_parent(ref.id, parent.id);
 }
 
 <*
@@ -477,21 +633,22 @@ fn void js_set_transform(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+	NodeId id = ref.id;
 
 	// `game.md` G5/S6. The camera resolves a script and a drag by
 	// last-writer-wins because both describe the same intent; a solver and a
 	// script writing the same transform every frame describe two, and the
 	// result is jitter rather than a compromise. So this is a refusal and not
 	// a merge.
-	if (self.physics.owns_transform(id))
+	if (ref.scene.physics.owns_transform(id))
 	{
 		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
 		return;
 	}
 
-	Node* node = self.pass.scene.node(id);
+	Node* node = ref.scene.node(id);
 	node.position = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
 	// Euler in, quaternion stored — the one-way conversion `node.c3`'s header
 	// describes. JavaScript keeps the triple it sent, so nothing converts back.
@@ -500,7 +657,7 @@ fn void js_set_transform(
 	// Not `node.dirty = true`: the flag alone stopped being enough in §19.5, when
 	// the world-matrix walk gained the right to skip itself. See
 	// `Scene.mark_moved`.
-	self.pass.scene.mark_moved(id);
+	ref.scene.mark_moved(id);
 }
 
 <*
@@ -524,19 +681,19 @@ fn void js_set_quaternion(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	// The same refusal `js_set_transform` makes, and it has to be here too: a
 	// script that only ever wrote `.quaternion` would otherwise fight the
 	// solver through the one door that was left open.
-	if (self.physics.owns_transform(id))
+	if (ref.scene.physics.owns_transform(ref.id))
 	{
 		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
 		return;
 	}
 
-	self.pass.scene.set_quaternion(id, {
+	ref.scene.set_quaternion(ref.id, {
 		arg_float(&js, argc, args, 2),
 		arg_float(&js, argc, args, 3),
 		arg_float(&js, argc, args, 4),
@@ -569,8 +726,8 @@ fn void js_bind_animation(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId root = arg_handle(self, &js, argc, args, 0, out);
-	if (!root.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	AssetId asset = arg_asset(self, &js, argc, args, 2, out);
 	if (!asset.is_set()) return;
@@ -599,7 +756,7 @@ fn void js_bind_animation(
 	// skeleton, and a skeleton that drives nothing would be the read-only version
 	// of the flag rather than the useful one. See `AnimationPlayer.live_skin`.
 	bool live_skin = argc > 5 ? arg_truth(&js, argc, args, 5) : false;
-	self.pass.scene.bind_player(asset, root, sources.array_view(), nodes.array_view(), live_skin);
+	ref.scene.bind_player(asset, ref.id, sources.array_view(), nodes.array_view(), live_skin);
 }
 
 <*
@@ -618,8 +775,8 @@ fn void js_play_animation(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId root = arg_handle(self, &js, argc, args, 0, out);
-	if (!root.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	@pool()
 	{
@@ -630,7 +787,7 @@ fn void js_play_animation(
 		// binding was written: a hundred characters on one walk cycle at a hundred
 		// phases are a hundred values of this over one baked clip.
 		float time = argc > 5 ? arg_float(&js, argc, args, 5) : 0;
-		*out = qjs::bool_value(self.pass.scene.play(root, name, loop, speed, time));
+		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time));
 	};
 }
 
@@ -653,13 +810,13 @@ fn void js_bind_skin(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	int skin = argc > 2 ? (int)arg_float(&js, argc, args, 2) : -1;
-	self.pass.scene.set_skin(id, skin);
+	ref.scene.set_skin(ref.id, skin);
 
-	Node* node = self.pass.scene.node(id);
+	Node* node = ref.scene.node(ref.id);
 	if (node != null) node.preskinned = skin >= 0 && argc > 3 && arg_truth(&js, argc, args, 3);
 }
 
@@ -673,10 +830,10 @@ fn void js_stop_animation(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId root = arg_handle(self, &js, argc, args, 0, out);
-	if (!root.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	*out = qjs::bool_value(self.pass.scene.stop(root));
+	*out = qjs::bool_value(ref.scene.stop(ref.id));
 }
 
 fn void js_set_visible(
@@ -686,10 +843,10 @@ fn void js_set_visible(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	self.pass.scene.set_visible(id, arg_truth(&js, argc, args, 2));
+	ref.scene.set_visible(ref.id, arg_truth(&js, argc, args, 2));
 }
 
 <*
@@ -705,10 +862,10 @@ fn void js_set_collides(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	self.pass.scene.set_collides(id, arg_truth(&js, argc, args, 2));
+	ref.scene.set_collides(ref.id, arg_truth(&js, argc, args, 2));
 }
 
 <*
@@ -727,10 +884,10 @@ fn void js_set_static(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	*out = qjs::bool_value(self.pass.scene.set_static_caster(id, arg_truth(&js, argc, args, 2)));
+	*out = qjs::bool_value(ref.scene.set_static_caster(ref.id, arg_truth(&js, argc, args, 2)));
 }
 
 fn void js_set_name(
@@ -741,12 +898,12 @@ fn void js_set_name(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	@pool()
 	{
-		self.pass.scene.set_name(id, arg_text(&js, argc, args, 2, tmem));
+		ref.scene.set_name(ref.id, arg_text(&js, argc, args, 2, tmem));
 	};
 }
 
@@ -769,10 +926,10 @@ fn void js_set_color(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	self.pass.scene.set_color(id, {
+	ref.scene.set_color(ref.id, {
 		arg_float(&js, argc, args, 2),
 		arg_float(&js, argc, args, 3),
 		arg_float(&js, argc, args, 4),
@@ -795,11 +952,11 @@ fn void js_set_variant(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	int variant = arg_int(&js, argc, args, 2);
-	self.pass.scene.set_variant(id, variant < 0 ? 0 : (uint)variant);
+	ref.scene.set_variant(ref.id, variant < 0 ? 0 : (uint)variant);
 }
 
 <*
@@ -817,11 +974,11 @@ fn void js_world_position(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	self.pass.scene.update_world_matrices();
-	*out = vec3_value(&js, self.pass.scene.node(id).world_position());
+	ref.scene.update_world_matrices();
+	*out = vec3_value(&js, ref.scene.node(ref.id).world_position());
 }
 
 <*
@@ -843,11 +1000,11 @@ fn void js_object_bounds(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	bool found = false;
-	collision::Aabb3 box = self.pass.scene.subtree_bounds(&self.pass.assets, id, &found);
+	collision::Aabb3 box = ref.scene.subtree_bounds(&self.pass.assets, ref.id, &found);
 	*out = found ? aabb_value(&js, box) : qjs::null_value();
 }
 
@@ -1015,18 +1172,37 @@ fn void js_stats(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	SceneStats stats = self.pass.stats();
+	// `stats(sceneId)`, or `stats()` for the rendered one. The scene being asked
+	// about is not always the one being rendered: a script building the next level
+	// wants to know how big it has got before it shows it. `three.stats()` passes
+	// nothing and means the frame's.
+	Scene* scene = self.pass.scene;
+	if (argc > 0)
+	{
+		scene = arg_scene(self, &js, argc, args, 0, out);
+		if (scene == null) return;
+	}
+
+	SceneStats stats = self.pass.stats(scene);
 
 	qjs::Value object = js.object();
 	js.set_property(object, "drawCalls", qjs::int_value((int)stats.draw_calls));
 	js.set_property(object, "uniqueMeshes", qjs::int_value((int)stats.unique_meshes));
 	js.set_property(object, "instances", qjs::int_value((int)stats.instances));
 	js.set_property(object, "nodes", qjs::int_value((int)stats.nodes));
+	// Beside `nodes` rather than beside `drawCalls`, because the pair is the point:
+	// the gap between them is what a level's author has said `collides = false`
+	// about. `SceneStats.colliders` has the rest.
+	js.set_property(object, "colliders", qjs::int_value((int)stats.colliders));
 	js.set_property(object, "assets", qjs::int_value((int)stats.assets));
 	js.set_property(object, "triangles", qjs::int_value((int)stats.triangles));
 	js.set_property(object, "vertices", qjs::int_value((int)stats.vertices));
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
+	// Beside `assets` and not beside `nodes`, because it is the same kind of number
+	// as `assets` and `materials`: something a script has to hand back. See
+	// `SceneStats.scenes`.
+	js.set_property(object, "scenes", qjs::int_value((int)stats.scenes));
 	// The other resource a script has to give back by hand — `SceneStats.materials`
 	// has why it is beside `assets` and not beside `drawCalls`.
 	js.set_property(object, "materials", qjs::int_value((int)stats.materials));
@@ -1851,8 +2027,13 @@ fn void js_camera_attach(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId node = arg_handle(self, &js, argc, args, 0, out);
-	if (node == NO_NODE) return;
+	// The rendered scene's, and refused otherwise: the follow is read once per
+	// frame against one graph, and a handle from a scene that is not being drawn
+	// would resolve to nothing every frame — a camera that silently stopped
+	// following rather than one that said so.
+	NodeRef ref = arg_live_handle(self, &js, argc, args, 0, out, "three.camera.attach(object)");
+	if (ref.scene == null) return;
+	NodeId node = ref.id;
 
 	float lag = arg_float(&js, argc, args, 6);
 	if (lag < 0.0f)

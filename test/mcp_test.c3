@@ -307,7 +307,8 @@ fn void get_api_docs_answers_with_an_index() @test
 
 		test::@check(response.contains("drawCalls"), "the stats block is in there");
 		test::@check(response.contains("three.Mesh"), "and the differences");
-		test::@check(response.contains("one scene at a time"), "and the divergences: %s", response);
+		test::@check(response.contains("Exactly one scene is rendered at a time"),
+			"and the divergences: %s", response);
 		test::@check(response.contains("ShaderMaterial"), "the class NAMES are there");
 		test::@check(
 			!response.contains("Read a .glb or .gltf"),

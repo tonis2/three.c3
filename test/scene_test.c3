@@ -391,7 +391,7 @@ fn void a_thousand_instances_are_one_draw_call() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		for (uint i = 0; i < 1000; i++)
 		{
 			three::NodeId node = scene.add_mesh(TRIANGLE, 0);
@@ -420,7 +420,7 @@ fn void interleaved_meshes_still_bucket() @test
 	{
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		for (uint i = 0; i < 20; i++)
 		{
 			three::NodeId node = scene.add_mesh(TRIANGLE, i % 2);
@@ -462,7 +462,7 @@ fn void one_mesh_under_two_materials_is_two_draws_and_one_mesh() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
 		three::NodeId second = scene.add_mesh(TRIANGLE, 0);
 		three::NodeId third = scene.add_mesh(TRIANGLE, 0);
@@ -511,7 +511,7 @@ fn void a_reused_slot_does_not_inherit_a_material() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
 		scene.set_material(first, 3);
@@ -557,7 +557,7 @@ fn void a_colour_per_copy_costs_no_draw_call() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::NodeId[100] made;
 		for (uint i = 0; i < 100; i++)
@@ -631,7 +631,7 @@ fn void culling_drops_what_is_off_screen() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId far_away = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(far_away, { 1000, 0, 0 });
 
@@ -688,7 +688,7 @@ fn void stats_reports_what_the_last_frame_culled() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId far_away = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(far_away, { 1000, 0, 0 });
 
@@ -779,7 +779,7 @@ fn void stats_stays_camera_free_with_transparency() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		// Two transparent materials over one mesh. `NO_TEXTURE` is deliberate: the
 		// picture is not under test, the ordering is, and this way the fixture
 		// needs no image and no shader compile.
@@ -884,7 +884,7 @@ fn void a_transparent_scene_sorts_without_moving_instances() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		// Nearer first, so that the lower material index is the one that must sort
 		// second. See the doc block.
 		uint nearer = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
@@ -1000,7 +1000,7 @@ fn void sorting_transparency_does_not_depend_on_culling() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		uint nearer = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
 		uint farther = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
 
@@ -1075,7 +1075,7 @@ fn void a_rendered_frame_learns_which_materials_blend() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		uint glass = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
 		uint wall = renderer.pass.create_texture_material(three::NO_TEXTURE, three::SIDE_FRONT, three::BLENDING_NONE)!!;
@@ -1171,7 +1171,7 @@ fn void a_ray_hits_the_nearer_instance() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId behind = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(behind, { 0, 0, -5 });
 
@@ -1208,7 +1208,7 @@ fn void picking_respects_an_instance_scale() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId only = scene.buckets.len() >= 0 ? scene.add_mesh(TRIANGLE, 0) : three::NO_NODE;
 		scene.set_visible(scene.root, true);
 
@@ -1258,7 +1258,7 @@ fn void a_ray_through_the_screen_centre_hits_what_is_centred() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		// `place` instantiates into a group since G3, so the drawing node is a
 		// level further down than it was.
 		three::NodeId placed = scene.node(scene.root).children[0];
@@ -1384,7 +1384,7 @@ fn void the_instance_buffer_grows_and_stays_stable() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		for (uint i = 0; i < 200; i++)
 		{
 			three::NodeId node = scene.add_mesh(TRIANGLE, 0);
@@ -1451,7 +1451,7 @@ fn void the_shader_rotates_normals_per_instance() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId towards = scene.node(scene.root).children[0];
 		three::NodeId away = scene.add_mesh(TRIANGLE, 0);
 
@@ -1512,7 +1512,7 @@ fn void instances_land_where_their_transforms_say() @test
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId left = scene.node(scene.root).children[0];
 		three::NodeId right = scene.add_mesh(TRIANGLE, 0);
 		scene.set_position(left, { -2, 0, 0 });
@@ -1581,7 +1581,7 @@ fn void two_draws_with_different_textures_do_not_bleed() @test
 		renderer.pass.load(&renderer.gpu, FIXTURE)!!;
 		three::AssetId triangle = renderer.pass.assets.load_triangle(&renderer.gpu)!!;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::NodeId tri = scene.add_mesh(triangle, 0);
 		scene.set_position(tri, { 0, 2.2, 0 });
 
@@ -1923,7 +1923,7 @@ fn void the_bounds_cache_notices_every_way_a_scene_moves() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 		three::Assets* assets = &renderer.pass.assets;
 
 		three::NodeId first = scene.add_mesh(TRIANGLE, 0);
@@ -1973,7 +1973,7 @@ fn void stats_counts_without_writing_the_instance_array() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		renderer.pass.load_triangle(&renderer.gpu)!!;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		for (uint i = 0; i < 100; i++)
 		{

@@ -206,6 +206,7 @@ arguments and detail.
 
 **Scene and objects**
 `new three.Scene()` · `scene.add/remove` · `scene.unload()` ·
+`scene.activate()` / `scene.dispose()` / `scene.isActive` for more than one ·
 `scene.pick(x, y)` · `scene.raycast(origin, direction)` · `scene.export(path)`
 writes a .glb · `new three.Group()` for belonging ·
 `object.position/rotation/scale` · `object.visible` · `object.name` ·
@@ -267,17 +268,22 @@ builds a compound mesh from a description.
 **Terrain and navigation** — `TerrainGeometry` + `Field` (`field.fill/carve/
 stroke/sample`), `three.scatter(options)` places a hundred trees,
 `three.nav.bake(options)` **after** the level is built, then `three.nav.path`
-and `three.nav.field`.
+and `three.nav.field`. A bake belongs to its scene — `scene.nav` is the one that
+does, `three.nav` is whichever scene is active — so the next level's paths can be
+solved before it is shown.
 
 **Physics** — `three.physics.add(object, { shape, mass, kinematic, trigger })`;
 `mass: 0` is static. Steer with `setVelocity`, push with `applyImpulse`.
 `three.onTrigger/onContact`. Physics **owns the transform** of a body it holds.
+The world belongs to its scene — `scene.physics` — so bodies for the next level
+can be built early, but only the active scene's world is stepped.
 
 **Post** — `three.setPost({ fragment, uniforms, textures })` runs one Slang
 `float3 post(Post p)` over the finished frame; `three.addPass` chains them.
 
 **Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
-`three.renderSize()`. Nothing is freed until you say so.
+`three.renderSize()`. Nothing is freed until you say so — a scene included:
+`scene.dispose()`, and `stats().scenes` is how many are still resident.
 
 **Math** — `three.clamp/smoothstep/pingpong/moveTowards/wrapAngle/mixColor/
 damp/smoothDamp`, `three.seed(n)`/`three.hash`, `three.catmullRom`, `Vector3`,
@@ -352,13 +358,20 @@ code path the human uses, where writing a velocity directly does not.
 
 These are the differences that actually break scripts.
 
-- **One scene at a time.** `new three.Scene()` empties the previous one, and
-  handles into it then throw.
-- **Handles go stale.** Unloading an asset frees its slot; placing an old handle
-  throws at the `scene.add()`, not at the `new three.Mesh()`. Load again for a
-  fresh one.
+- **`new three.Scene()` does not free the scene before it.** It makes a second
+  world and shows it; the first keeps its objects, its bodies and its nav bake
+  until you `dispose()` it. That is what lets you build the next level while the
+  current one is on screen — `activate()` swaps, then `dispose()` the old one,
+  then `three.unloadUnused()`. Only the active scene is drawn, queried and
+  **stepped**, so bodies in a scene nobody is looking at stand still; a nav bake
+  is the exception and works ahead of time. `stats().scenes` is the count a
+  transition has to bring back down.
+- **Handles go stale.** Unloading an asset frees its slot; naming an old handle
+  throws at the `new three.Mesh()`. Load again for a fresh one.
 - **Nothing is freed automatically.** No GC for resources — `scene.unload()` or
-  `three.unloadUnused()`, and watch `stats().assets`.
+  `three.unloadUnused()`, and watch `stats().assets`. A material is the same:
+  `material.dispose()` or it holds its pipeline forever, and `stats().materials`
+  is the count.
 - **`run_script` runs in its own function scope.** Use `globalThis` to keep
   state between calls.
 - **The animation callback must be synchronous**, and is stopped *for good* if
@@ -371,7 +384,8 @@ These are the differences that actually break scripts.
   throws.
 - **Colours are sRGB** and there is no colour management.
 - **Every drawable mesh is collision geometry.** A pickup lying on a path is a
-  bollard until you set `collides = false`.
+  bollard until you set `collides = false`; `stats().colliders` beside
+  `stats().nodes` is how many meshes every sweep is testing.
 - **Instancing is automatic.** Same asset reference = one draw call; there is no
   batching step to invoke and no way to write an unbatched scene.
 - **Shadows are off by default**, there is one light and one shadow map, and

@@ -32,10 +32,11 @@ const H = globalThis.__three;
 // field is one float per walkable cell — tens of thousands for a town — and
 // hanging that off a JavaScript object whose collection the host cannot see is
 // exactly the lifetime this API refuses everywhere else. It is freed by
-// `dispose()` and by `new three.Scene()`, and a disposed one answers
-// "unreachable" rather than reading released memory.
+// `dispose()` and by disposing the scene it belongs to, and a disposed one
+// answers "unreachable" rather than reading released memory.
 export class NavField {
-	constructor(handle) {
+	constructor(sceneId, handle) {
+		this._sid = sceneId;
 		this._h = handle;
 	}
 
@@ -49,7 +50,7 @@ export class NavField {
 	// `three.steer`, which answers for all of them in one crossing.
 	direction(point) {
 		const [x, y, z] = readVector(point, 'field.direction(point)');
-		const d = H.navDirection(this._h, x, y, z);
+		const d = H.navDirection(this._sid, this._h, x, y, z);
 		return new Vector3(null, d[0], d[1], d[2]);
 	}
 
@@ -58,7 +59,7 @@ export class NavField {
 	// compares against when deciding to give up.
 	cost(point) {
 		const [x, y, z] = readVector(point, 'field.cost(point)');
-		const value = H.navCost(this._h, x, y, z);
+		const value = H.navCost(this._sid, this._h, x, y, z);
 		// The host sends -1 for unreachable — see bind_nav.c3. A cost is a
 		// distance and can never be negative, so the sentinel is unambiguous
 		// and C3 has no infinity constant to send in its place.
@@ -110,6 +111,7 @@ export class NavField {
 			throw new TypeError(`${where}: directions is a Float32Array of THREE floats per agent`);
 		}
 		return H.navSample(
+			this._sid,
 			this._h,
 			positions.buffer, positions.byteOffset, positions.length,
 			costs === null ? positions.buffer : costs.buffer,
@@ -122,7 +124,7 @@ export class NavField {
 
 	dispose() {
 		if (this._h < 0) return false;
-		const freed = H.navFieldFree(this._h);
+		const freed = H.navFieldFree(this._sid, this._h);
 		this._h = -1;
 		return freed;
 	}
@@ -143,7 +145,14 @@ function readGoals(goals, where) {
 	return flat;
 }
 
-export const nav = {
+// One scene's navigation verbs. Called by the `Scene` constructor.
+//
+// Bound to a scene rather than global, because a bake is voxelized out of one
+// scene's triangles and a field handle indexes that scene's own list. It is also
+// the half of the level transition that genuinely works ahead of time: baking
+// needs no frame, so the next level's paths can be solved before anybody sees it.
+export function makeSceneNav(scene) {
+	return {
 	// Voxelize the scene's standing room.
 	//
 	// `{ cell, radius, height, slope, bounds }` — all properties of the AGENT
@@ -177,6 +186,7 @@ export const nav = {
 			six = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
 		}
 		return H.navBake(
+			scene._sid,
 			cell,
 			+(options?.radius ?? 0.35),
 			+(options?.height ?? 1.8),
@@ -204,10 +214,10 @@ export const nav = {
 	// (0, 0, 0) for every agent on the wrong side of the break. Anything above
 	// 1 means "there is no path" is the honest answer for some pairs of points
 	// in this level — usually a `cell` too coarse for the geometry.
-	stats() { return H.navStats(); },
+	stats() { return H.navStats(scene._sid); },
 
 	// Throw the bake and every field over it away.
-	clear() { H.navClear(); },
+	clear() { H.navClear(scene._sid); },
 
 	// Solve towards one or more goals and keep the answer.
 	//
@@ -220,8 +230,8 @@ export const nav = {
 	// or inside a wall, or outside the baked region.
 	field(goals) {
 		const flat = readGoals(goals, 'three.nav.field(goals)');
-		const handle = H.navField(flat.buffer, flat.byteOffset, flat.length);
-		return handle < 0 ? null : new NavField(handle);
+		const handle = H.navField(scene._sid, flat.buffer, flat.byteOffset, flat.length);
+		return handle < 0 ? null : new NavField(scene._sid, handle);
 	},
 
 	// One agent, one route, shortened against the geometry.
@@ -241,12 +251,13 @@ export const nav = {
 		const [tx, ty, tz] = readVector(to, 'three.nav.path(from, to)');
 		const limit = Math.max(2, Math.floor(+(options?.limit ?? 64)));
 		const out = new Float32Array(limit * 3);
-		const count = H.navPath(fx, fy, fz, tx, ty, tz, out.buffer, out.byteOffset, out.length);
+		const count = H.navPath(scene._sid, fx, fy, fz, tx, ty, tz, out.buffer, out.byteOffset, out.length);
 		const points = [];
 		for (let i = 0; i < count; i++) points.push(new Vector3(null, out[i * 3], out[i * 3 + 1], out[i * 3 + 2]));
 		return points;
 	},
-};
+	};
+}
 
 // Fill `velocities` with a desired velocity per agent — the crowd verb.
 //
@@ -298,7 +309,11 @@ export function steer(positions, velocities, options = null) {
 		throw new TypeError(`${where} wants either a field or a goal — with neither there is nowhere to steer`);
 	}
 
+	// The field's scene, because the field is the only thing here that names one.
+	// With no field there is nothing per-scene to read, so the rendered scene is
+	// as good an answer as any.
 	return H.steer(
+		handle < 0 ? H.sceneActive() : field._sid,
 		positions.buffer, positions.byteOffset, positions.length,
 		velocities.buffer, velocities.byteOffset, velocities.length,
 		handle, gx, gy, gz,

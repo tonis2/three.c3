@@ -222,7 +222,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// JavaScript's — an accumulator in the callback would run inside the script
 	// budget, so a spiral of death would trip the budget and stop the callback for
 	// good rather than merely stutter.
-	self.physics.step(&self.pass.scene, delta_ms);
+	self.pass.scene.physics.step(self.pass.scene, delta_ms);
 	self.report_diverged_bodies();
 
 	// Last of everything, on every path out of this function, which is what the

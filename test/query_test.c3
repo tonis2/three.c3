@@ -348,6 +348,50 @@ fn void a_non_colliding_drawable_is_drawn_and_not_queried() @test
 }
 
 <*
+ `stats().colliders` is how many meshes every sweep is testing.
+
+ **The regression this exists for is a level that is mostly scenery and does not
+ look like one.** `collides` defaults to on, so decoration joins the index
+ without anybody asking; `nodes` cannot show that, because a mesh out of the
+ index is still a node.
+
+ Proved by injection: count from `QueryIndex.entries` instead of from the nodes
+ and `before`/`counted` both come back 0 — this script never runs a query, so
+ the index has never been built. Drop the `collides` test out of
+ `Scene.stats` and `after` stays at 2.
+*>
+fn void the_collider_count_is_what_a_script_watches() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const empty = scene.stats().colliders;
+
+			const floor = new three.Mesh(new three.BoxGeometry(40, 1, 40));
+			scene.add(floor);
+			const group = new three.Group();
+			scene.add(group);
+			const pickup = new three.Mesh(new three.SphereGeometry(0.6, 12, 8));
+			group.add(pickup);
+
+			// Nothing has queried, so the index behind these does not exist yet.
+			const counted = scene.stats().colliders;
+			const nodes = scene.stats().nodes;
+
+			pickup.collides = false;
+
+			return [empty, counted, nodes, scene.stats().colliders, scene.stats().nodes];
+		`, "the collider-count script ran");
+
+		// Two meshes and no Group among them, the Group and the root still nodes,
+		// and saying so about the pickup moves one number and not the other.
+		test::@check(value == "[0,2,4,1,4]",
+			"colliders counts the index and nodes counts the scene; got %s", value);
+	};
+}
+
+<*
  Hiding a node does not cost the index, and moving one does not rebuild it.
 
  There is no clock a script can read, so this checks the two things that are
@@ -726,6 +770,75 @@ fn void a_bake_finds_the_floor_and_not_the_wall() @test
 
 		test::@check(value == "[true,true,true,false,false]",
 			"a bake, walkable cells, a reachable floor, and nothing inside the wall or in the sky; got %s", value);
+	};
+}
+
+<*
+ The next level's paths can be solved before the level is shown.
+
+ **The regression this exists for is a loading stall at a level boundary.** A
+ bake is voxelization over one scene's own triangles and needs no frame at all,
+ which is the half of per-scene ownership that genuinely works ahead of time —
+ unlike a physics world, which is correct but motionless until its scene is the
+ one being stepped. So the swap is `activate()` and nothing else: the field is
+ already solved and answers the same distances after it as before.
+
+ Proved by injection: put `nav` and `nav_fields` back on `JsRuntime` and the
+ second bake overwrites the first, so `costBefore` and `costAfter` disagree and
+ the shown level walks the hidden one's grid.
+*>
+fn void a_bake_on_a_scene_that_is_not_shown_is_ready_when_it_is() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			// The level on screen: a floor with a wall across it.
+			const here = new three.Scene();
+			const hereFloor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			hereFloor.position.y = -0.5;
+			here.add(hereFloor);
+			const wall = new three.Mesh(new three.BoxGeometry(1, 4, 12));
+			wall.position.set(0, 2, 0);
+			here.add(wall);
+			const hereBake = here.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
+
+			// The next one, built and baked while the first is still the one being
+			// rendered.
+			const next = new three.Scene();
+			next.activate();
+			here.activate();
+
+			const nextFloor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			nextFloor.position.y = -0.5;
+			next.add(nextFloor);
+			const nextBake = next.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
+			const field = next.nav.field([[8, 0, 0]]);
+			const costBefore = field.cost([-8, 0, 0]);
+
+			// Baking the hidden level did not touch the shown one.
+			const stillHere = here.nav.stats() !== null;
+			const hereField = here.nav.field([[8, 0, 0]]);
+			const wallStillBlocks = !Number.isFinite(hereField.cost([0, 2, 0]));
+
+			next.activate();
+			const costAfter = field.cost([-8, 0, 0]);
+
+			const answer = [
+				hereBake !== null,
+				nextBake !== null,
+				stillHere,
+				wallStillBlocks,
+				Number.isFinite(costBefore),
+				costAfter === costBefore,
+			];
+			hereField.dispose();
+			field.dispose();
+			here.dispose();
+			return answer;
+		`, "the two-scene bake script ran");
+
+		test::@check(value == "[true,true,true,true,true,true]",
+			"both scenes baked, neither touched the other, and the field survived the swap; got %s", value);
 	};
 }
 
