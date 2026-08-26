@@ -348,6 +348,22 @@ Live, all of them. Each cost real time and none is visible in a diff.
   the buffer is gone. Cost two landmines in the physics world — one crashed
   inside a hash table, the other looked like physics that ran without moving
   anything. Bind collections explicitly.
+- **A driver that will not `dlopen` is indistinguishable from no driver.**
+  `vk::findBundledDriver` tries a list of paths and returns `DRIVER_NOT_LOADED`
+  if none opens — which is the *normal* outcome on a machine developing against
+  an installed SDK, so it is not an error and nothing prints. The loader then
+  does its own ICD discovery, macOS has no system Vulkan to discover, and
+  `vkCreateInstance` answers `VK_ERROR_INCOMPATIBLE_DRIVER`. Every reason the
+  bundled driver might be refused arrives wearing that one message. The reason
+  that has actually happened: **KosmicKrisp is a Metal 4 driver and carries a
+  macOS 26 floor** — `otool -l libvulkan_kosmickrisp.dylib` says `minos 26.0`
+  and its undefined symbols are `_OBJC_CLASS_$_MTL4*` — so dyld refuses it on
+  anything older. The release pipeline was on the `macos-14` image and the whole
+  failure was three lines about MoltenVK. The bundle therefore has an OS floor
+  that the engine does not, `.github/workflows/release.yml` compares `sw_vers`
+  against the dylib's `minos` before the smoke test rather than after, and
+  `main.c3` names the floor in the message. **When a fallback is silent, the
+  thing it falls back to has to say what it did not find.**
 - **`SomeEnum::values`** (`::`, not `.`) is how c3c spells enum reflection.
 - **Querying an optional feature is not the same as falling back.** Decide
   whether an extension is baseline for the devices this targets — KosmicKrisp and

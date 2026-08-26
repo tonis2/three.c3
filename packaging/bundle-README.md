@@ -47,8 +47,12 @@ Nothing is linked against Vulkan: `three` opens the loader with `dlopen` at
 startup and the loader finds your GPU's driver itself. What that means per
 platform:
 
-**macOS (Apple Silicon)** — nothing to install. The loader and the driver are
-both in this folder and are tried before anything on the system.
+**macOS (Apple Silicon), 26 or newer** — nothing to install. The loader and the
+driver are both in this folder and are tried before anything on the system. The
+version floor is the driver's, not the engine's: KosmicKrisp is built on Metal
+4, so macOS 15 and earlier cannot load it at all, and what you see there is
+`E_ERROR_INCOMPATIBLE_DRIVER` — the same message as a machine with no Vulkan,
+because from the loader's side it is the same situation.
 
 **Linux** — nothing to install on a machine that can already run 3D
 applications. `libvulkan.so.1` and your GPU's ICD both come with the graphics
