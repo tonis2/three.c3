@@ -711,10 +711,10 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 {
 	if (self.pipeline_ready) return;
 
-	String path = find_shader("shadow.slang", mem)!;
-	defer path.free(mem);
+	String source = shader_source("shadow.slang", mem)!;
+	defer source.free(mem);
 
-	ShaderModule mod = compile_shader_file(path, SHADOW_ENTRIES[..], "shadow.slang")!;
+	ShaderModule mod = compile_slang(source, "shadow.slang", SHADOW_ENTRIES[..])!;
 	defer mod.free();
 	if (!mod.ok)
 	{

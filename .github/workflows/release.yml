@@ -1,0 +1,265 @@
+# Build a downloadable bundle of three for each platform.
+#
+# What a user gets is a zip they extract and run: the binary, the five shader
+# templates it reads at startup, the Slang libraries it links, and — on macOS —
+# the Vulkan driver. Nothing to install and nothing to build.
+#
+#   push a tag v*        build every platform, publish a GitHub release
+#   run it by hand       build every platform, keep the zips as artifacts
+#
+# ## The bundle is smoke-tested, not just built
+#
+# Every failure this pipeline exists to prevent is invisible to the compiler:
+# `shaders/` left out of the zip, a libslang symlink copied as a symlink, the
+# glslang library forgotten. That last one is the reason for the assertion step
+# rather than a plain `--frames 1`: a missing glslang breaks ONLY the shadow
+# shader, prints a warning, renders an unshadowed frame and **exits 0**. So the
+# check greps stdout for a sentinel the scene prints, and runs from inside the
+# assembled bundle rather than from the build tree — what is tested is the zip.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a GitHub release (tag builds do this anyway)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  C3C_VERSION: v0.8.3
+
+jobs:
+  build:
+    name: ${{ matrix.bundle }}
+    runs-on: ${{ matrix.runner }}
+    # Windows is marked experimental not because slang.c3l lacks a target any
+    # more — it has one — but because nothing has yet linked it on a real
+    # Windows toolchain, and because the runner has no Vulkan device, so its
+    # smoke test can only prove the binary LOADS (see that step). A red leg here
+    # must not withhold the macOS and Linux zips from a release.
+    continue-on-error: ${{ matrix.experimental == true }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: three-macos-arm64
+            runner: macos-14
+            c3c_asset: c3-macos.zip
+            target: macos-aarch64
+            exe: three
+          - bundle: three-linux-x64
+            runner: ubuntu-22.04
+            c3c_asset: c3-linux-static.tar.gz
+            target: linux-x64
+            exe: three
+          - bundle: three-windows-x64
+            runner: windows-2022
+            c3c_asset: c3-windows.zip
+            target: windows-x64
+            exe: three.exe
+            experimental: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ---------------------------------------------------------------- c3c --
+      - name: Install c3c
+        run: |
+          set -euo pipefail
+          url="https://github.com/c3lang/c3c/releases/download/${C3C_VERSION}/${{ matrix.c3c_asset }}"
+          echo "fetching $url"
+          curl -fsSL -o c3c-dist "$url"
+          mkdir -p "$HOME/c3c"
+          case "${{ matrix.c3c_asset }}" in
+            *.zip)     unzip -q c3c-dist -d "$HOME/c3c" ;;
+            *.tar.gz)  tar -xzf c3c-dist -C "$HOME/c3c" ;;
+          esac
+          # The archives put everything under a single directory whose name has
+          # changed between releases, so find the binary rather than assume it.
+          c3c_bin="$(find "$HOME/c3c" -type f \( -name c3c -o -name c3c.exe \) | head -1)"
+          test -n "$c3c_bin" || { echo "no c3c in the archive"; find "$HOME/c3c" -maxdepth 2; exit 1; }
+          chmod +x "$c3c_bin" || true
+          echo "$(dirname "$c3c_bin")" >> "$GITHUB_PATH"
+
+      - name: c3c version
+        run: c3c --version
+
+      # ------------------------------------------------------ system packages --
+      # This is a property of the RUNNER, not a requirement of the bundle: a
+      # GitHub Linux image has no GPU and no graphics stack, so there is neither
+      # a `libvulkan.so.1` for `vk::init` to dlopen nor an ICD to render on.
+      # lavapipe is Mesa's software rasteriser and is what the smoke test draws
+      # with. An ordinary Linux desktop already has both and installs nothing —
+      # see packaging/bundle-README.md.
+      - name: Install Vulkan loader and a software driver (runner has no GPU)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools zip
+
+      # ------------------------------------------------------------- staging --
+      # Fails early and by name. Without this the Windows leg dies in the linker
+      # with "library not found for -lslang", which does not say that the
+      # binding has no target for this platform.
+      - name: Check Slang staging supports this target
+        run: |
+          set -euo pipefail
+          if ! grep -q '"${{ matrix.target }}"' lib/slang.c3l/manifest.json; then
+            echo "::error::lib/slang.c3l/manifest.json has no '${{ matrix.target }}' target."
+            echo "::error::Add one there, plus asset_for_target/sha_for cases in"
+            echo "::error::lib/slang.c3l/native/stage-slang.sh, before this platform can build."
+            exit 1
+          fi
+
+      - name: setup.sh
+        run: ./setup.sh
+
+      # ---------------------------------------------------------------- build --
+      # `--trust=full` is the documented invocation — a manifest that needs to
+      # exec is silently skipped without it, which reports success and builds
+      # the wrong thing. `--safe=no -O3` is claude.md's "the fast one", and a
+      # release binary is exactly what it is for.
+      - name: Build
+        run: c3c build --trust=full --safe=no -O3
+
+      - name: Show what was built
+        run: ls -la build/
+
+      # -------------------------------------------------------------- assemble --
+      - name: Assemble the bundle
+        id: assemble
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          case "$version" in
+            v*) version="${version#v}" ;;
+            *)  version="0.0.0-dev+$(git rev-parse --short HEAD)" ;;
+          esac
+          name="${{ matrix.bundle }}-${version}"
+          out="dist/${name}"
+          mkdir -p "$out"
+
+          cp "build/${{ matrix.exe }}" "$out/"
+          chmod +x "$out/${{ matrix.exe }}" || true
+
+          # No shaders/ and no launcher. src/shader/load.c3 carries the five
+          # templates in the binary now, so `three` runs from any directory and
+          # the bundle is the executable plus the libraries it loads.
+
+          # Those directories hold SYMLINKS into a per-machine SDK, and on macOS
+          # three of the four slang names resolve to the same 27 MB file — so
+          # this is not `cp -RL`, which ships it three times. See the script.
+          echo "slang libraries:"
+          ./packaging/stage-libs.sh "lib/slang.c3l/lib/${{ matrix.target }}" "$out"
+
+          # macOS arm64 is the only platform that bundles a driver; setup.sh
+          # skips the fetch everywhere else and Linux/Windows use the system's.
+          if [ -d "lib/vulkan.c3l/${{ matrix.target }}" ]; then
+            echo "vulkan driver:"
+            ./packaging/stage-libs.sh "lib/vulkan.c3l/${{ matrix.target }}" "$out"
+          fi
+
+          cp SKILL.md LICENSE "$out/" 2>/dev/null || true
+          cp packaging/bundle-README.md "$out/README.md"
+
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "out=$out"   >> "$GITHUB_OUTPUT"
+          echo "--- bundle contents ---"
+          ls -la "$out"
+          du -sh "$out"
+
+      # ----------------------------------------------------------- smoke test --
+      # From INSIDE the bundle: this tests the zip, not the build tree.
+      # From INSIDE the bundle: this tests the zip, not the build tree.
+      - name: Smoke test the bundle
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          bundle="$PWD/${{ steps.assemble.outputs.out }}"
+          # From a directory that is NOT the bundle and has no shaders/ in it:
+          # that is the whole claim the embedding makes, and running from inside
+          # the bundle would pass either way.
+          mkdir -p /tmp/elsewhere && cd /tmp/elsewhere
+          # A scene that throws still exits 0, and so does a missing glslang, so
+          # the log is the only witness. Tee it and assert on it.
+          "$bundle/${{ matrix.exe }}" --headless --script "$GITHUB_WORKSPACE/packaging/smoke.js" \
+            --frames 6 --screenshot smoke.png 2>&1 | tee smoke.log
+          echo "--- asserting ---"
+          grep -q 'SMOKE OK' smoke.log \
+            || { echo "::error::the bundle did not render a shadowed frame"; cat smoke.log; exit 1; }
+          # Should be unreachable now that the templates are embedded — kept as
+          # the regression guard for exactly that.
+          if grep -q 'SHADER_NOT_FOUND' smoke.log; then
+            echo "::error::the embedded shader templates did not resolve"; exit 1
+          fi
+          test -s smoke.png \
+            || { echo "::error::no PNG was written — no Vulkan device?"; exit 1; }
+          echo "bundle renders from outside itself: $(wc -c < smoke.png) bytes of PNG"
+
+      # Windows runners have no Vulkan ICD, so there is nothing to render on and
+      # the assertion above cannot run. What CAN be proved here is the half that
+      # the bundle is actually likely to get wrong: a DLL that is not beside the
+      # exe makes the process fail to START (0xC0000135), printing nothing — so
+      # `--help` returning its usage text IS the linkage test.
+      #
+      # Stated rather than skipped quietly: this leg does NOT verify that a
+      # frame renders, or that shaders/ and glslang are correct.
+      - name: Smoke test the bundle (load only — no GPU on this runner)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          cd "${{ steps.assemble.outputs.out }}"
+          ./${{ matrix.exe }} --help > help.log 2>&1
+          cat help.log
+          grep -q -- '--headless' help.log \
+            || { echo "::error::three.exe did not start — a DLL is probably missing from the bundle"; exit 1; }
+          echo "::warning::Windows bundle verified to LOAD only; no Vulkan device on this runner, so rendering, shaders/ and glslang are unverified."
+          rm -f help.log
+
+      # ------------------------------------------------------------------ zip --
+      - name: Zip
+        run: |
+          set -euo pipefail
+          cd dist
+          if command -v zip >/dev/null 2>&1; then
+            zip -qry "${{ steps.assemble.outputs.name }}.zip" "${{ steps.assemble.outputs.name }}"
+          else
+            # Windows runners have bsdtar, which writes zip with -a.
+            tar -a -c -f "${{ steps.assemble.outputs.name }}.zip" "${{ steps.assemble.outputs.name }}"
+          fi
+          ls -la *.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.assemble.outputs.name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- release --
+  publish:
+    needs: build
+    # `always()` so a red experimental leg still ships the platforms that built.
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.publish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
