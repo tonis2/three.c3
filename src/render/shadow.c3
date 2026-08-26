@@ -237,18 +237,15 @@ const uint CASTERS_STATIC = 1;
 const uint CASTERS_DYNAMIC = 2;
 
 <*
- One directional shadow map: what a script asked for, the device objects that
- answer it, and this frame's fit.
+ The five numbers a script set, apart from everything that answers them.
 
- Everything above `image` is a setting and survives everything below it — a size
- change destroys and rebuilds the image and leaves `bias` and `intensity` alone,
- which makes the four properties independent at the JS boundary rather than four
- ways to invalidate one another.
+ Split out of `ShadowMap` because they belong to a scene and the device objects
+ do not: a `Scene` keeps a copy of these — see `SceneLook` — so that activating
+ it again brings its shadows back, while the image, the pipeline and the cached
+ half stay with the renderer and are reused by whichever scene is on screen.
 *>
-struct ShadowMap
+struct ShadowSettings
 {
-	// ---- what a script set ----
-
 	// Off until something turns it on, and off is not merely "intensity zero": no
 	// image is allocated, no shader is compiled and the pass records nothing, so a
 	// project that never asks for shadows pays for none of this.
@@ -280,6 +277,33 @@ struct ShadowMap
 	// floor, 0 is no shadow at all. Doubles as the shader's "is there a shadow
 	// pass this frame" flag — see `params`.
 	float intensity;
+}
+
+// The settings a shadow map starts on, and the ones a fresh `Scene` carries.
+const ShadowSettings DEFAULT_SHADOW = {
+	.enabled = false,
+	.distance = 0,
+	.size = SHADOW_DEFAULT_SIZE,
+	.bias = 0.0,
+	.intensity = 1.0,
+};
+
+<*
+ One directional shadow map: what a script asked for, the device objects that
+ answer it, and this frame's fit.
+
+ Everything in `settings` survives everything below it — a size change destroys
+ and rebuilds the image and leaves `bias` and `intensity` alone, which makes the
+ four properties independent at the JS boundary rather than four ways to
+ invalidate one another.
+
+ `settings` is `inline`, so `shadows.enabled` still reads the field it always
+ did; what the split buys is a `Scene` being able to hold five numbers without
+ holding a Vulkan image.
+*>
+struct ShadowMap
+{
+	inline ShadowSettings settings;
 
 	// ---- the device objects ----
 
@@ -422,31 +446,37 @@ fn bool same_matrix(Matrix4f a, Matrix4f b) @local
 }
 
 <*
- The settings a shadow map starts at, and the ones `new three.Scene()` restores.
+ Puts a scene's shadow settings on, and forgets what the last one's fit meant.
 
- A function rather than a constant because `MeshPass.init` and the scene reset
- both need it, and two spellings of a default drift.
+ `activate()` and `MeshPass.init` are the two callers, and everything below the
+ assignment is what stops being true when the world changes underneath the
+ image: the fit was a projection of a scene that is no longer on screen, and the
+ cached half is a picture of it.
+
+ The image and the pipeline are **not** freed — they are the expensive part,
+ they are correct for whatever comes next, and `ensure` hands the same one back
+ the moment anything turns shadows on again.
 *>
-fn void ShadowMap.defaults(&self)
+fn void ShadowMap.apply(&self, ShadowSettings settings)
 {
-	self.enabled = false;
-	self.size = SHADOW_DEFAULT_SIZE;
-	self.distance = 0;
-	self.bias = 0.0;
-	self.intensity = 1.0;
+	self.settings = settings;
 	self.light_view_projection = matrix::IDENTITY4{float};
 	self.live = false;
 	self.draws = 0;
-	// The cached half is forgotten rather than freed: `new three.Scene()` empties
-	// the graph, so whatever is in the static image is a picture of a world that no
-	// longer exists. The image itself is worth keeping — the next scene will want
-	// one the same size — and it is rebuilt on the first frame that needs it.
+	// The cached half is forgotten rather than freed: the static image is a picture
+	// of the scene that was on screen, and the one coming on is a different world.
+	// The image itself is worth keeping — the next scene will want one the same
+	// size — and it is rebuilt on the first frame that needs it.
 	self.invalidate_static();
 	self.static_draws = 0;
 	self.sample_static = false;
 	self.plan = SHADOW_PLAN_FULL;
 	self.has_fit = false;
 }
+
+// The settings a shadow map starts at. One spelling of a default, so that
+// `MeshPass.init` and a fresh `Scene` cannot drift apart.
+fn void ShadowMap.defaults(&self) => self.apply(DEFAULT_SHADOW);
 
 <*
  Says that the cached image is a picture of something that is no longer true.

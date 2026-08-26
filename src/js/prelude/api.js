@@ -511,11 +511,11 @@ const camera = {
 // that takes the mouse for a mode is the script that gives it back when the
 // mode ends.
 //
-// **It survives `new three.Scene()`,** following the camera rather than the
-// background. The three things a rebuild resets — background, light,
-// shadow — are reset so that two scripts render the same first frame, and
-// this changes no pixel; what it would change is a game that took the mouse
-// for its own camera losing it at every level boundary.
+// **It survives `new three.Scene()` and `activate()`,** following the camera
+// rather than the background. The background, the light and the shadow
+// settings belong to a scene and travel with it; the mouse does not belong
+// to a scene at all, and a game that took it for its own camera would lose
+// it at every level boundary.
 
 const controls = {
 	get enabled() { return H.controlsGet(); },

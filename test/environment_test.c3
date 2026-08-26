@@ -350,6 +350,108 @@ fn void a_new_scene_starts_on_the_default_background() @test
 }
 
 <*
+ A scene brings its background, its light and its shadow settings back with it.
+
+ **The regression this exists for is a level that does not look like itself the
+ second time.** These three used to be the renderer's alone and went back to
+ their defaults on every `activate()`, so a game that swapped to a menu scene and
+ back came home to the default sky, the default light and shadows switched off —
+ a scene that had been set up correctly rendering wrongly, with nothing in the
+ script to point at. They live on `Scene.look` now and the renderer keeps the
+ live copy of whichever scene is on screen.
+
+ The `fresh` half is the other side of it, and it is what stops the fix from
+ becoming "the last scene's look leaks into the next one": a scene nobody has set
+ up still starts on the defaults.
+
+ Proved by injection: put `DEFAULT_CLEAR`, `DEFAULT_LIGHT` and
+ `shadows.defaults()` back into `activate_scene` and everything after `fresh`
+ comes back as the default rather than as what the first scene set.
+*>
+fn void a_scene_brings_its_look_back_when_activated() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			first.background = [1, 0, 0];
+			three.light.set([0, 1, 0], 0.9);
+			three.light.shadow.enabled = true;
+			three.light.shadow.size = 512;
+
+			// A second scene is a second world, and it starts on the defaults
+			// rather than on the first one's look.
+			const second = new three.Scene();
+			const fresh = [
+				second.background.map(v => Math.round(v * 255))[0] < 128,
+				three.light.shadow.enabled,
+				three.light.shadow.size,
+			];
+
+			first.activate();
+			const d = three.light.direction;
+			return {
+				fresh,
+				background: first.background.map(v => Math.round(v * 255)),
+				direction: [d.x, d.y, d.z],
+				ambient: Math.round(three.light.ambient * 100),
+				shadow: [three.light.shadow.enabled, three.light.shadow.size],
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"fresh":[true,false,2048],"background":[255,0,0],"direction":[0,1,0],"ambient":90,"shadow":[true,512]}`,
+			"the first scene's look came back with it, got '%s'",
+			result.value
+		);
+	};
+}
+
+<*
+ Setting the background of a scene nobody is looking at paints nothing.
+
+ **The regression this exists for is the level being built repainting the level
+ on screen.** `scene.background` names a scene in the script, and it used to
+ write the renderer's one clear colour whichever scene it was spelled on — so
+ dressing the next level while the current one runs changed the sky the player
+ was under, one frame after the assignment and with nothing to say why.
+
+ Proved by injection: drop the `scene == self.pass.scene` test in
+ `JsRuntime.set_clear` and the middle pixel comes back red.
+*>
+fn void a_background_set_on_an_inactive_scene_does_not_paint_the_frame() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			const second = new three.Scene();
+			// first is not the scene being rendered.
+			first.background = 0xff0000;
+			second.background = 0x2060a0;
+			three.render(second);
+			return first.background.map(v => Math.round(v * 255));
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[255,0,0]", "the inactive scene kept its own red, got '%s'", result.value);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+
+		char[3] px = centre_pixel(&shot);
+		test::@check(
+			math::abs((int)px[0] - 0x20) <= 1 && math::abs((int)px[1] - 0x60) <= 1
+				&& math::abs((int)px[2] - 0xa0) <= 1,
+			"the frame is the active scene's colour, got %d, %d, %d", px[0], px[1], px[2]
+		);
+	};
+}
+
+<*
  The number reached the pixel.
 
  Everything above proves a value round-tripped through the host. This is the one

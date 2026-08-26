@@ -538,7 +538,50 @@ struct Scene
 	*>
 	NavMesh nav;
 	List{NavFieldSlot} nav_fields;
+
+	<*
+	 How this scene is lit and what it clears to — see `SceneLook`.
+
+	 Kept here so that `activate()` brings a world back the way it was rather than
+	 the way a fresh scene starts. The renderer holds one live copy of each of
+	 these, because there is one frame; this is the copy that survives not being
+	 the one on screen.
+	*>
+	SceneLook look;
 }
+
+<*
+ The look of a scene: the colour it clears to, its light, and its shadows.
+
+ One struct because there is one moment they all change — `activate()` — and a
+ switch that carried two of the three would be a bug that only shows in the one
+ it forgot.
+
+ What is *not* here is the machine: the assets, the materials, the camera, the
+ post chain and the shadow map's image and pipeline all belong to the renderer
+ and are reused by whichever scene is on screen. The line is whether two scenes
+ could sensibly disagree about it.
+*>
+struct SceneLook
+{
+	// `scene.background`, already clamped, with alpha pinned at one —
+	// `js_background_set` has why there is no alpha to set.
+	float[4] clear;
+	// `three.light`: xyz is surface-to-light in world space, w is the ambient
+	// floor. The active scene's is the one that shades the frame.
+	float[4] light;
+	// `three.light.shadow`, the five settings and none of the device objects.
+	ShadowSettings shadow;
+}
+
+// What a scene starts on, and what `new three.Scene()` therefore shows: the
+// renderer's own defaults, so a script that sets a background and a script that
+// does not render the same first frame.
+const SceneLook DEFAULT_LOOK = {
+	.clear = DEFAULT_CLEAR,
+	.light = DEFAULT_LIGHT,
+	.shadow = DEFAULT_SHADOW,
+};
 
 <*
  Where every node generation in the process comes from.
@@ -552,8 +595,16 @@ struct Scene
  raises the stale-handle error that is already written.
 
  Wraps after 2^32 node creations. At that point a handle held across the wrap
- could collide; it is roughly four billion `scene.add()` calls and the
- alternative is a wider handle at the JavaScript boundary.
+ could collide — and only if the same slot index comes back with the same number
+ on it, so the wrap is the precondition rather than the failure. It is roughly
+ four billion `scene.add()` calls.
+
+ **Widening it is not the cheap fix it looks like.** A handle is two `int`s at
+ the JavaScript boundary and the bulk paths hand a script the raw pair as an
+ `Int32Array` — `query.handles`, `cast.handles` — which is documented surface a
+ script indexes into. A 53-bit generation would fit a double exactly and would
+ break every one of those, so the trade is a documented limit against a
+ documented format.
 *>
 uint next_node_generation @local = 1;
 
@@ -580,6 +631,7 @@ fn Scene* Scene.init(&self)
 	self.nav_fields.init(mem, 4);
 
 	self.id = next_scene_id++;
+	self.look = DEFAULT_LOOK;
 	self.cull = true;
 	self.started = true;
 	self.root = self.create_slot(NO_NODE, NO_ASSET, NO_MESH, "root");
