@@ -1,7 +1,7 @@
 <*
  three.c3 — boot, CLI, the window loop, and the MCP server.
 
-	three [file.glb] [options]
+	three [options]
 
 	--mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
 	--mcp-stdio [port]    relay stdin/stdout to a three that is already serving
@@ -14,6 +14,12 @@
 	--frames <n>          run n frames, then stop. Implies --headless
 	--every <n>           with --frames, also shoot every n frames — see frame_path
 	--camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
+
+ There is no file argument. A model is loaded from JavaScript — `three.load`
+ hands the script an object it can place, parent and dispose — and a model the
+ command line put on screen was none of those things: nothing named it, nothing
+ could free it, and it sat in a scene of its own for the life of the process.
+ `--script` and `--assets` are the two ways in.
 
  The window is a viewer and also a control: drag to orbit, right-drag to pan,
  scroll to zoom. It writes the same `pass.camera` a script writes through
@@ -47,7 +53,6 @@ const String VERSION = "0.1.0";
 
 struct Options
 {
-	String model;
 	// The game directory: `.js` to run, `.glb` to describe.
 	String assets;
 	// One `.js` file, run the way `run_script` runs one — see `boot_script`.
@@ -127,7 +132,7 @@ fn Options? parse_args(String[] args)
 			case "--mcp":
 				// The port is optional, so a following argument is consumed only
 				// when it actually looks like one — otherwise `three --mcp
-				// model.glb` would swallow the model and then report no file.
+				// --headless` would swallow the flag beside it.
 				opts.mcp_port = DEFAULT_MCP_PORT;
 				if (i + 1 < args.len)
 				{
@@ -152,12 +157,21 @@ fn Options? parse_args(String[] args)
 					}
 				}
 			default:
+				// Everything on the line is a flag. A bare path used to be loaded
+				// and displayed, which is the one thing this cannot offer a script:
+				// no handle to it, no way to dispose it, and a scene of its own for
+				// the rest of the run. Loading is `three.load` inside a script.
 				if (arg.starts_with("-"))
 				{
 					io::printfn("unknown option: %s", arg);
-					return BAD_ARGUMENT~;
 				}
-				opts.model = arg;
+				else
+				{
+					io::printfn("three takes no file argument: %s", arg);
+					io::printn("  A model is loaded from a script: three.load(\"model.glb\").");
+					io::printn("  --script <file.js> runs one; --assets <dir> boots <dir>/main.js.");
+				}
+				return BAD_ARGUMENT~;
 		}
 	}
 
@@ -190,7 +204,7 @@ fn void usage()
 	io::printn("three.c3 — a Three.js-shaped scene API over C3 and Vulkan");
 	io::printfn("version %s", VERSION);
 	io::printn("");
-	io::printn("  three [file.glb] [options]");
+	io::printn("  three [options]");
 	io::printn("");
 	io::printn("  --mcp [port]          serve the agent tools on 127.0.0.1 (default 8808)");
 	io::printn("  --mcp-stdio [port]    be the stdio end of a three that is already serving");
@@ -204,6 +218,9 @@ fn void usage()
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  -h, --help            this");
+	io::printn("");
+	io::printn("  There is no file argument: a model is loaded from a script, with");
+	io::printn("  three.load(\"model.glb\"), which is what hands it back as an object.");
 	io::printn("");
 	// Which binary this is, rather than a flag for changing it. The layers moved to
 	// `-D DEBUG` and the shader search path to `shaders/`, so the two things the
@@ -336,11 +353,7 @@ fn void? run(Options opts)
 	// for the shader either.
 	renderer.pass.init(&renderer.gpu, &renderer.target)!;
 
-	if (opts.model.len > 0)
-	{
-		renderer.pass.load(&renderer.gpu, opts.model)!;
-	}
-	else if (opts.script.len == 0 && opts.assets.len == 0)
+	if (opts.script.len == 0 && opts.assets.len == 0)
 	{
 		// The placeholder for "nothing was given", and only then. A script or a
 		// game builds its own scene, and since `new three.Scene()` stopped emptying
@@ -355,8 +368,7 @@ fn void? run(Options opts)
 	SceneStats stats = renderer.pass.stats();
 	io::printfn(
 		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
-		opts.model.len > 0 ? opts.model
-			: (opts.script.len > 0 || opts.assets.len > 0 ? "empty scene" : "built-in triangle"),
+		opts.script.len > 0 || opts.assets.len > 0 ? "empty scene" : "built-in triangle",
 		stats.draw_calls,
 		stats.instances,
 		stats.unique_meshes,

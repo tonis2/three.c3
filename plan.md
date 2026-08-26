@@ -299,10 +299,6 @@ What it left open:
       motionless. Stepping every world every frame would charge a game for the
       levels it is not playing, so if this changes it should be opt-in per scene
       rather than the default.
-- [ ] **The scene the command line loads a model into cannot be disposed.** A
-      script never gets a handle to it. `claim_scene` takes it over when it is
-      empty, which covers every run that is only a script; a `three model.glb
-      --script x.js` run holds it for the process's life.
 - [ ] **Node generations come from one process-wide counter** — `next_node_generation`
       — which is what makes a handle from another scene fail rather than resolve.
       It wraps after 2^32 node creations.

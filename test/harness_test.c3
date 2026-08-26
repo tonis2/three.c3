@@ -65,6 +65,37 @@ fn void the_camera_override_is_carried_verbatim() @test
 	test::@check(opts.every == 60);
 }
 
+<*
+ A bare word on the command line is refused, and named in the refusal.
+
+ **The regression this exists for is a model on screen that no script can
+ reach.** `three model.glb` used to load and display a file, and the scene that
+ put it there was one nothing had a handle to: nothing could add to it, nothing
+ could dispose it, and — since `new three.Scene()` stopped emptying the one
+ before it — it stayed live for the rest of the process. Loading is `three.load`
+ inside a script, which is the version that hands the model back as an object.
+
+ The third case is the other half: what is refused is the word, not the line it
+ was on.
+
+ Proved by injection: restore the `opts.model = arg` default case and both
+ parses succeed, so `@catch` comes back false.
+*>
+fn void a_bare_word_is_not_a_file_to_load() @test
+{
+	String[*] alone = { "three", "model.glb" };
+	three::Options? only = three::parse_args(alone[..]);
+	test::@check(@catch(only), "a bare path was accepted");
+
+	String[*] beside = { "three", "--script", "boot.js", "model.glb" };
+	three::Options? trailing = three::parse_args(beside[..]);
+	test::@check(@catch(trailing), "a bare path beside --script was accepted");
+
+	String[*] flags = { "three", "--script", "boot.js", "--headless" };
+	three::Options opts = three::parse_args(flags[..])!!;
+	test::@check(opts.script == "boot.js" && opts.headless, "the flags stopped parsing");
+}
+
 // The numbering, which is what makes `--every` a flipbook rather than one file
 // written N times. A path with no specifier is returned unchanged — that is the
 // property that keeps a plain `--screenshot out.png` writing `out.png`.
