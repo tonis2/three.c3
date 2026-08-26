@@ -1,0 +1,243 @@
+---
+name: three
+description: Build, run and screenshot 3D scenes with the `three` CLI — a Three.js-shaped JavaScript scene API over Vulkan. Use when writing or debugging scene scripts, driving `three --headless` for batch renders and flipbooks, booting a game with `--assets`, or talking to its MCP server (run_script / screenshot / get_api_docs).
+---
+
+# three
+
+A single binary that renders a scene described in JavaScript. The API is
+Three.js-shaped — `three.Scene`, `three.Mesh`, `position/rotation/scale`,
+`add/remove` — but it is **not** Three.js, and the differences are what break
+scripts. Read *Traps* below before writing one.
+
+`three --help` lists the flags. `three.getApiDocs()` (or the `get_api_docs` MCP
+tool) is the authoritative API reference and is embedded in the binary — when
+this file and the docs disagree, the docs are right.
+
+## Two ways to work
+
+**MCP — the interactive loop.** `three --mcp` serves three tools on
+`http://127.0.0.1:8808/mcp`. You send a script, you get back what it logged,
+what it returned, the scene's stats, and a PNG of the frame. Use this when
+iterating on a scene.
+
+**CLI — the batch loop.** `three --headless --script s.js --screenshot out.png`
+renders and exits. Use this in tests, in CI, and any time you want a file rather
+than a conversation.
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `[file.glb]` | Positional. Load and display a model. |
+| `--headless` | No window, no surface, no swapchain. Required on a machine with no display. |
+| `--script <f.js>` | Run one script, then keep running. |
+| `--assets <dir>` | Boot a game: evaluate `<dir>/main.js` as a module. Paths in `three.load` become relative to `<dir>` and cannot climb out. |
+| `--screenshot <path>` | Write a PNG. Implies `--headless`. |
+| `--frames <n>` | Run exactly n frames and exit. Implies `--headless`. |
+| `--every <n>` | With `--frames`, shoot every n frames. |
+| `--width <n>` / `--height <n>` | Offscreen size. Default 1280×720. |
+| `--camera <yaw,pitch,distance>` | Override the camera, over whatever the script set. |
+| `--mcp [port]` | Serve the agent tools on 127.0.0.1. Default port 8808. |
+| `--mcp-stdio [port]` | Be the stdio end of a `three` that is already serving. |
+| `-h`, `--help` | Usage. |
+
+How they interact:
+
+- `--screenshot` and `--frames` each imply `--headless`.
+- `--mcp` **cancels** `--screenshot` and `--frames` — a server that renders one
+  frame and exits is not a server.
+- `--screenshot` with no `--frames` means one frame.
+- Unknown `-flags` are an error; a bare word is taken as the model path.
+
+### ⚠ The one that will hang you
+
+`--script` and `--assets` keep running after the script returns — that is the
+point of them. **Without `--frames` or `--screenshot`, the process never
+exits.** In any non-interactive context always bound the run:
+
+```bash
+three --headless --script s.js --frames 1 --screenshot out.png
+```
+
+## Recipes
+
+```bash
+# one frame of a script
+three --headless --script scene.js --screenshot out.png
+
+# a flipbook: 6 frames, shoot every 2nd -> fb-000.png, fb-001.png, fb-002.png
+three --headless --script spin.js --screenshot 'fb-%03d.png' --frames 6 --every 2
+
+# look at a model from a fixed angle, at a fixed size
+three --headless model.glb --screenshot m.png --camera 45,20,12 --width 640 --height 360
+
+# boot a game directory (evaluates game/main.js) for 120 frames
+three --headless --assets ./game --frames 120 --screenshot 'run-%03d.png'
+
+# serve the agent tools (windowed), or headless on a build box
+three --mcp
+three --mcp 8808 --headless
+```
+
+`%d` / `%03d` in the `--screenshot` path is replaced with the **shot index**
+(0, 1, 2…). Without it every shot overwrites the same file. The line it prints
+(`wrote fb-001.png (frame 4)`) reports the *frame* number, which is a different
+count when `--every` is in play.
+
+Batch runs are deterministic: the same `--frames` count means the same thing on
+every machine, which is exactly what a vsynced window takes away.
+
+### What the CLI prints
+
+- `console.log` from the script goes to stdout.
+- A script that throws prints `three: <path> did not run: <error>` with a stack
+  and **still exits 0**. Only a bad flag or an unreadable `--script` path exits
+  1. So in a test, assert on stdout or on the PNG — not on the exit code.
+- A script's `return` value is **not** printed on the CLI path. It only comes
+  back as `value` from the `run_script` MCP tool. Use `console.log` in batch.
+
+## The MCP tools
+
+Connect over HTTP (`"type": "http"`, `"url": "http://127.0.0.1:8808/mcp"`) or
+have the client spawn `three --mcp-stdio`. The stdio relay answers the handshake
+from a local catalog even when no app is up, so tools list before the app
+starts; the HTTP transport needs the server already running.
+
+**`run_script`** — takes `{ source }`. Runs as an async function body, so
+top-level `await` and `return` both work. Answers with two content blocks,
+**whether or not the script succeeded**:
+
+1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw
+2. a PNG of the frame
+
+`stats` is `drawCalls, uniqueMeshes, instances, nodes, assets, triangles,
+vertices, textures, textureBytes, culledLastFrame, shadowCulled` plus six
+timings — `gpuMs` is the frame and `prepareMs / shadowMs / sceneMs / postMs /
+presentMs` are what it was spent on. The `...Ms` fields measure the last frame
+drawn, so they move when nothing about the scene has.
+
+**`screenshot`** — takes `{ path }` (optional). Renders and returns the PNG.
+Takes no view arguments; move `three.camera` from a script instead.
+
+**`get_api_docs`** — the reference. Call it before writing a script.
+- no arguments → the index: summary, every deliberate difference from Three.js
+  in full, the stats block, and the names of every class and function
+- `{ search: "..." }` → grep over the whole surface
+- `{ section: "classes.ShaderMaterial" }` → one entry or one whole section
+- `{ path: "api.md" }` → write ~180 KB of Markdown to a file and grep it
+  yourself; this is usually the right move
+- `{ all: true }` → everything at once (~113 KB of JSON)
+
+## The JavaScript API
+
+`three` is a global. So is `Vector3`. One line each; ask `get_api_docs` for
+arguments and detail.
+
+**Scene and objects**
+`new three.Scene()` · `scene.add/remove` · `scene.unload()` ·
+`scene.pick(x, y)` · `scene.raycast(origin, direction)` · `scene.export(path)`
+writes a .glb · `new three.Group()` for belonging ·
+`object.position/rotation/scale` · `object.visible` · `object.name` ·
+`object.collides = false` takes one mesh out of the spatial index while it still
+draws · `object.boundingBox()` world-space, `object.boundsInParent()` works
+before `add()`.
+
+**Loading** — `three.load(path)` reads a .glb/.gltf and is **synchronous**;
+`asset.mesh(name)` gives a `MeshRef`, `.bounds` is a `Box3` read from the JSON
+so it costs no upload. `three.inventory()` lists what's available under
+`--assets`.
+
+**Geometry** — `Box, Sphere, Plane, Cylinder, Cone, Torus, Convex, Terrain,
+Ribbon` + `Geometry`. `geometry.bounds` measures it.
+
+**Materials** — `MeshLambertMaterial`, `ShaderMaterial` (Slang fragment +
+`material.uniforms.<name>`), `LayeredMaterial`. `mesh.color` and `mesh.variant`
+are the per-instance knobs. A mesh with **no** material draws with whatever its
+glTF material carried. `three.texture(path)`, `DataTexture`, `texture.read()`.
+
+**Camera** — one camera, a **turntable**: `three.camera.orbit(yaw, pitch,
+distance)`, `frameAll()`, `lookAt()`. Read-only accessors `yaw/pitch/distance/
+fov/near/far`; `position()/forward()/right()` give world vectors;
+`planarMove(fwd, strafe)` turns W/A/S/D into a world direction.
+`three.camera.attach(object, { offset, distance, lag })` follows something —
+`distance: 0` is first person. There is no `camera.position` to assign.
+
+**Light** — one directional light. `three.light.set(direction, color)`,
+`three.light.shadow`. Shadows are **off by default** and cost a draw.
+
+**The loop** — `three.setAnimationLoop(fn)` for drawing,
+`three.setFixedLoop(fn)` for gameplay (60 Hz, same `dt` every call — put
+gameplay here, not in an accumulator of your own). The clock is
+`three.clock.dt / .time / .timeScale / .advance()`; `timeScale = 0` stops the
+**world**, not just your arithmetic. `three.systems.add(name, fn)` is the
+ordered registry when one callback isn't enough — it makes nothing faster, it
+makes a slow frame attributable.
+
+**Input** — `three.input.isDown/pressed(key)`, `three.input.keys()`,
+`three.input.pointer`, `three.onKeyDown/onClick`, `three.controls.enabled`.
+`three.input.press(key)` / `release()` let a **script** press keys, which is the
+only way to exercise an input-driven scene headlessly.
+
+**Queries and movement** — `three.query.sphere/box/raycastAll/sweep`. Every verb
+has two forms: allocating (right for a one-off) and filling a
+`three.query.buffer(n)` and answering with a count (right for a loop).
+`three.moveAndSlide(position, motion, options)` is the character controller —
+it takes a position and answers with a position, owns nothing, so gravity and
+the jump stay yours. Pass the character's **Group** as `ignore` or it collides
+with its own chest.
+
+**Crowds** — `three.moveAndSlideAll`, `three.steer`, `field.sample` and
+`three.batch(objects).flush()` each act on a whole column in one crossing.
+Measured at 200 agents: 2.20 ms with the single verbs, 0.51 ms with these.
+`three.cast(options)` stores n things of one kind as columns; `three.kind(name,
+spec)` is the same idea addressed by object identity; `three.assemble(parts)`
+builds a compound mesh from a description.
+
+**Terrain and navigation** — `TerrainGeometry` + `Field` (`field.fill/carve/
+stroke/sample`), `three.scatter(options)` places a hundred trees,
+`three.nav.bake(options)` **after** the level is built, then `three.nav.path`
+and `three.nav.field`.
+
+**Physics** — `three.physics.add(object, { shape, mass, kinematic, trigger })`;
+`mass: 0` is static. Steer with `setVelocity`, push with `applyImpulse`.
+`three.onTrigger/onContact`. Physics **owns the transform** of a body it holds.
+
+**Post** — `three.setPost({ fragment, uniforms, textures })` runs one Slang
+`float3 post(Post p)` over the finished frame; `three.addPass` chains them.
+
+**Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
+`three.renderSize()`. Nothing is freed until you say so.
+
+**Math** — `three.clamp/smoothstep/pingpong/moveTowards/wrapAngle/mixColor/
+damp/smoothDamp`, `three.seed(n)`/`three.hash`, `three.catmullRom`, `Vector3`,
+`Random`.
+
+## Traps
+
+These are the differences that actually break scripts.
+
+- **One scene at a time.** `new three.Scene()` empties the previous one, and
+  handles into it then throw.
+- **Handles go stale.** Unloading an asset frees its slot; placing an old handle
+  throws at the `scene.add()`, not at the `new three.Mesh()`. Load again for a
+  fresh one.
+- **Nothing is freed automatically.** No GC for resources — `scene.unload()` or
+  `three.unloadUnused()`, and watch `stats().assets`.
+- **`run_script` runs in its own function scope.** Use `globalThis` to keep
+  state between calls.
+- **The animation callback must be synchronous**, and is stopped *for good* if
+  it throws or overruns 100 ms in one frame. What it logs arrives with the
+  **next** `run_script`, tagged `[animation loop]`.
+- **Measure, never guess.** A kit piece's origin is wherever its exporter left
+  it. A size table typed into a script is the thing that goes stale and sinks
+  pieces into walls — use `.bounds` / `boundingBox()`.
+- **The camera is a turntable and read-only.** Assigning `yaw/pitch/distance`
+  throws.
+- **Colours are sRGB** and there is no colour management.
+- **Every drawable mesh is collision geometry.** A pickup lying on a path is a
+  bollard until you set `collides = false`.
+- **Instancing is automatic.** Same asset reference = one draw call; there is no
+  batching step to invoke and no way to write an unbatched scene.
+- **Shadows are off by default**, there is one light and one shadow map, and
+  turning it on costs a second draw per caster.
