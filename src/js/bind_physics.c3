@@ -36,9 +36,9 @@ fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
 {
 	self.bind(host, "physicsAdd", &js_physics_add, 7);
 	self.bind(host, "physicsRemove", &js_physics_remove, 2);
-	self.bind(host, "physicsGravitySet", &js_physics_gravity_set, 3);
-	self.bind(host, "physicsGravityGet", &js_physics_gravity_get, 0);
-	self.bind(host, "physicsCount", &js_physics_count, 0);
+	self.bind(host, "physicsGravitySet", &js_physics_gravity_set, 4);
+	self.bind(host, "physicsGravityGet", &js_physics_gravity_get, 1);
+	self.bind(host, "physicsCount", &js_physics_count, 1);
 	self.bind(host, "physicsTransform", &js_physics_transform, 2);
 	self.bind(host, "physicsVelocityGet", &js_physics_velocity_get, 2);
 	self.bind(host, "physicsLinearSet", &js_physics_linear_set, 5);
@@ -63,8 +63,8 @@ fn void js_physics_add(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	@pool()
 	{
@@ -106,8 +106,11 @@ fn void js_physics_add(
 		float friction = arg_float(&js, argc, args, 5);
 		float restitution = arg_float(&js, argc, args, 6);
 
-		if (catch err = self.physics.add(
-			&self.pass.scene, &self.pass.assets, id, kind, shape, mass, friction, restitution
+		// The scene the object is in, not the one being rendered: bodies for the
+		// next level are built while it is still off screen, which is most of what
+		// owning a world per scene is for.
+		if (catch err = ref.scene.physics.add(
+			ref.scene, &self.pass.assets, ref.id, kind, shape, mass, friction, restitution
 		))
 		{
 			*out = js.raise(physics_add_message(err, shape_name));
@@ -156,10 +159,10 @@ fn void js_physics_remove(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	*out = qjs::bool_value(self.physics.remove(id));
+	*out = qjs::bool_value(ref.scene.physics.remove(ref.id));
 }
 
 fn void js_physics_gravity_set(
@@ -169,10 +172,13 @@ fn void js_physics_gravity_set(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	self.physics.set_gravity({
-		arg_float(&js, argc, args, 0),
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	scene.physics.set_gravity({
 		arg_float(&js, argc, args, 1),
 		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
 	});
 }
 
@@ -183,9 +189,12 @@ fn void js_physics_gravity_get(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
 	// Reported before the world is opened too, so reading gravity is not the thing
 	// that creates a world.
-	Vec3 gravity = self.physics.opened ? self.physics.world.gravity : PHYSICS_GRAVITY;
+	Vec3 gravity = scene.physics.opened ? scene.physics.world.gravity : PHYSICS_GRAVITY;
 
 	qjs::Value triple = js.array();
 	js.set_index(triple, 0, qjs::number_value((double)gravity.x));
@@ -215,10 +224,10 @@ fn void js_physics_transform(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	Node* node = self.pass.scene.node(id);
+	Node* node = ref.scene.node(ref.id);
 	if (node == null)
 	{
 		*out = qjs::null_value();
@@ -256,10 +265,11 @@ fn collision::Rigidbody* pushable(
 	JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, qjs::Value* out, String verb
 ) @local
 {
-	NodeId id = arg_handle(self, js, argc, args, 0, out);
-	if (!id.is_set()) return null;
+	NodeRef ref = arg_handle(self, js, argc, args, 0, out);
+	if (ref.scene == null) return null;
+	NodeId id = ref.id;
 
-	PhysicsBody* body = self.physics.body_for(id);
+	PhysicsBody* body = ref.scene.physics.body_for(id);
 	if (body == null)
 	{
 		*out = js.raise(string::tformat("%s needs a body — three.physics.add(object) first", verb));
@@ -287,13 +297,13 @@ fn collision::Rigidbody* pushable(
 		return null;
 	}
 
-	collision::Rigidbody* rigid = self.physics.rigidbody_for(id);
+	collision::Rigidbody* rigid = ref.scene.physics.rigidbody_for(id);
 	if (rigid == null)
 	{
 		*out = js.raise(string::tformat("%s found the body's record but not the solver's, which should not happen", verb));
 		return null;
 	}
-	self.physics.wake(rigid);
+	ref.scene.physics.wake(rigid);
 	return rigid;
 }
 
@@ -319,10 +329,10 @@ fn void js_physics_velocity_get(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
-	collision::Rigidbody* rigid = self.physics.rigidbody_for(id);
+	collision::Rigidbody* rigid = ref.scene.physics.rigidbody_for(ref.id);
 	if (rigid == null)
 	{
 		*out = qjs::null_value();
@@ -453,7 +463,12 @@ fn void js_physics_count(
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::int_value((int)self.physics.bodies.len());
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	*out = qjs::int_value((int)scene.physics.bodies.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +550,9 @@ fn void JsRuntime.clear_physics_handlers(&self)
 	}
 }
 
-fn void JsRuntime.drop_physics_events(&self) => self.physics.drop_events();
+// The rendered scene's, in all three of these: they are the frame's half of
+// physics, and the frame steps one world — see `Scene.physics`.
+fn void JsRuntime.drop_physics_events(&self) => self.pass.scene.physics.drop_events();
 
 <*
  Says when a body left the simulation, rather than letting it vanish.
@@ -546,9 +563,9 @@ fn void JsRuntime.drop_physics_events(&self) => self.physics.drop_events();
 *>
 fn void JsRuntime.report_diverged_bodies(&self)
 {
-	sz count = self.physics.diverged.len();
+	sz count = self.pass.scene.physics.diverged.len();
 	if (count == 0) return;
-	self.physics.diverged.clear();
+	self.pass.scene.physics.diverged.clear();
 
 	self.report_frame_failure(string::tformat(
 		"%d object%s left the simulation and had its body removed. A body that starts inside "
@@ -567,9 +584,9 @@ fn void JsRuntime.report_diverged_bodies(&self)
 *>
 fn void JsRuntime.dispatch_physics_events(&self)
 {
-	if (self.physics.trigger_events.len() > 0 && self.trigger_active)
+	if (self.pass.scene.physics.trigger_events.len() > 0 && self.trigger_active)
 	{
-		foreach (hit : self.physics.trigger_events)
+		foreach (hit : self.pass.scene.physics.trigger_events)
 		{
 			if (self.timed_out) break;
 			if (!self.call_physics_handler(self.trigger_fn, self.trigger_event_value(hit), "trigger"))
@@ -581,9 +598,9 @@ fn void JsRuntime.dispatch_physics_events(&self)
 		}
 	}
 
-	if (self.physics.contact_events.len() > 0 && self.contact_active)
+	if (self.pass.scene.physics.contact_events.len() > 0 && self.contact_active)
 	{
-		foreach (hit : self.physics.contact_events)
+		foreach (hit : self.pass.scene.physics.contact_events)
 		{
 			if (self.timed_out) break;
 			if (!self.call_physics_handler(self.contact_fn, self.contact_event_value(hit), "contact"))
@@ -595,7 +612,7 @@ fn void JsRuntime.dispatch_physics_events(&self)
 		}
 	}
 
-	self.physics.drop_events();
+	self.pass.scene.physics.drop_events();
 }
 
 <*

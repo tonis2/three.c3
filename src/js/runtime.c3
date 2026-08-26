@@ -113,6 +113,7 @@ const char[*] PRELUDE_FIELD = $embed("prelude/field.js");
 const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
 const char[*] PRELUDE_QUERY = $embed("prelude/query.js");
 const char[*] PRELUDE_NAV = $embed("prelude/nav.js");
+const char[*] PRELUDE_PHYSICS = $embed("prelude/physics.js");
 const char[*] PRELUDE_SYSTEMS = $embed("prelude/systems.js");
 const char[*] PRELUDE_CAST = $embed("prelude/cast.js");
 const char[*] PRELUDE_KIND = $embed("prelude/kind.js");
@@ -133,7 +134,7 @@ const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[22] parts;
+	static qjs::EmbeddedModule[23] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -150,6 +151,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },
 		{ "three:query.js", (char[])PRELUDE_QUERY[..] },
 		{ "three:nav.js", (char[])PRELUDE_NAV[..] },
+		{ "three:physics.js", (char[])PRELUDE_PHYSICS[..] },
 		{ "three:systems.js", (char[])PRELUDE_SYSTEMS[..] },
 		{ "three:cast.js", (char[])PRELUDE_CAST[..] },
 		{ "three:kind.js", (char[])PRELUDE_KIND[..] },
@@ -262,10 +264,6 @@ struct JsRuntime
 	bool settled;
 	bool rejected;
 
-	// Bumped by `new three.Scene()`. A Scene object stamped with an older one
-	// throws instead of silently operating on the newer scene's nodes.
-	double epoch;
-
 	// The animation loop, all of it owned by `js/frame_loop.c3`. `frame_fn` is a
 	// retained reference and is only meaningful while `frame_active`; releasing it
 	// is the one piece of cleanup that has to happen before the context closes
@@ -332,28 +330,14 @@ struct JsRuntime
 	// keeps its own, and the type stays independent of both.
 	Controls controls;
 
-	// The physics world, owned by `scene/physics.c3` and stepped by `tick`. On the
-	// runtime rather than on the scene because it is the frame that advances it,
-	// and `new three.Scene()` empties it for the same reason it empties everything
-	// else: the bodies named nodes that are gone.
-	Physics physics;
-	// The event handlers physics dispatches into — `js/bind_physics.c3`.
+	// The event handlers physics dispatches into — `js/bind_physics.c3`. The world
+	// itself is on the `Scene` — a body names a `NodeId` and the node pool those
+	// index into is per scene — and these are here because a handler is a property
+	// of the script, not of the world it happens to be watching.
 	qjs::Value trigger_fn;
 	bool trigger_active;
 	qjs::Value contact_fn;
 	bool contact_active;
-
-	<*
-	 The baked navigation grid and the solved flow fields over it —
-	 `js/bind_nav.c3`.
-
-	 On the runtime beside `physics` and for its reason: it is voxelized out of the
-	 scene's triangles, so `new three.Scene()` drops it the same way it drops the
-	 bodies. Not on the scene because a script owns when it is baked; nothing here
-	 bakes one on its own.
-	*>
-	NavMesh nav;
-	List{NavFieldSlot} nav_fields;
 
 	// `import`, wired up by `js/modules.c3` over `quickjs.c3l`'s loader. An empty
 	// root means no `--assets` boot and no disk imports at all, which is what a
@@ -394,14 +378,10 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.frame_log.init(mem, 512);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
-	// Heap-backed explicitly, for the reason every other list in this file is: a
-	// zero-valued List binds itself to the temp arena on its first push.
-	self.nav_fields.init(mem, 4);
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
-	self.epoch = 1;
 	self.ready = true;
 
 	self.install_console();
@@ -437,13 +417,7 @@ fn void JsRuntime.close(&self)
 	self.clear_click_handler();
 	self.clear_physics_handlers();
 	self.js.close();
-	self.physics.close();
-	// The bake and every field over it — `js/bind_nav.c3`. Both are plain heap
-	// arrays with no engine reference in them, so the order relative to the
-	// context does not matter; they are beside `physics` because they are the
-	// other thing a script builds that outlives the scene it was built from.
-	self.drop_nav();
-	self.nav_fields.free();
+	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
 	self.value.free();
 	self.error.free();

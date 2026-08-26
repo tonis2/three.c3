@@ -459,12 +459,12 @@ fn void a_prop_on_a_bone_keeps_its_chain() @test
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId root = renderer.pass.scene.instantiate(id);
 
-		int prop = find_named(&renderer.pass.scene, root, "Prop");
+		int prop = find_named(renderer.pass.scene, root, "Prop");
 		test::@check(prop >= 0, "the prop survives a default instantiation");
 
 		// And the joint holding it, because otherwise the prop would be parented to
 		// the character's root and would not follow the hand at all.
-		int mid = find_named(&renderer.pass.scene, root, "Mid");
+		int mid = find_named(renderer.pass.scene, root, "Mid");
 		test::@check(mid >= 0, "and so does the joint it hangs off");
 	};
 }
@@ -490,10 +490,10 @@ fn void the_skeleton_flag_decides_what_exists() @test
 		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 
 		three::NodeId lean = renderer.pass.scene.instantiate(id);
-		uint without = count_subtree(&renderer.pass.scene, lean);
+		uint without = count_subtree(renderer.pass.scene, lean);
 
 		three::NodeId full = renderer.pass.scene.instantiate(id, name: "", skeleton: true);
-		uint with = count_subtree(&renderer.pass.scene, full);
+		uint with = count_subtree(renderer.pass.scene, full);
 
 		test::@check(with >= without, "keeping the skeleton produces at least as many nodes (%d vs %d)", with, without);
 
@@ -501,11 +501,11 @@ fn void the_skeleton_flag_decides_what_exists() @test
 		// whichever way it was instantiated: glTF ignores a skinned mesh node's own
 		// transform, and saying that in the graph is what leaves `Instance.model`
 		// with no special case.
-		int character = find_named(&renderer.pass.scene, lean, "Character");
+		int character = find_named(renderer.pass.scene, lean, "Character");
 		test::@check(character >= 0, "the character node exists");
 		if (character < 0) return;
 
-		three::Node* node = renderer.pass.scene.node(node_at(&renderer.pass.scene, lean, "Character"));
+		three::Node* node = renderer.pass.scene.node(node_at(renderer.pass.scene, lean, "Character"));
 		if (node == null) return;
 		test::@check(node.parent == lean, "and it sits directly under the group it was instantiated as");
 		test::@check(node.skin == 0, "and it names skin 0, got %d", node.skin);
@@ -529,7 +529,7 @@ fn void an_unplayed_character_points_at_its_rest_pose() @test
 		three::Asset* asset = renderer.pass.assets.slot(id);
 		if (asset == null || asset.skins.len() == 0) return;
 
-		three::Node* node = renderer.pass.scene.node(node_at(&renderer.pass.scene, root, "Character"));
+		three::Node* node = renderer.pass.scene.node(node_at(renderer.pass.scene, root, "Character"));
 		test::@check(node != null, "the character node exists");
 		if (node == null) return;
 
@@ -717,7 +717,7 @@ fn void a_crowd_at_different_phases_is_one_draw_call() @test
 		uint[COPIES] seen;
 		for (uint i = 0; i < COPIES; i++)
 		{
-			three::NodeId character = node_at(&renderer.pass.scene, roots[i], "Character");
+			three::NodeId character = node_at(renderer.pass.scene, roots[i], "Character");
 			three::Node* node = renderer.pass.scene.node(character);
 			if (node == null) continue;
 
@@ -766,7 +766,7 @@ fn void writing_a_bone_moves_a_live_skin() @test
 
 		// A quarter turn about +Z on the joint the clip would have driven. Nothing
 		// is playing: this is a script moving a bone.
-		three::NodeId mid = node_at(&renderer.pass.scene, live, "Mid");
+		three::NodeId mid = node_at(renderer.pass.scene, live, "Mid");
 		test::@check(mid.is_set(), "skeleton: true materialised the joint");
 		if (!mid.is_set()) return;
 
@@ -809,7 +809,7 @@ fn void writing_a_bone_does_not_move_a_baked_skin() @test
 		Silhouette before = measure(&before_shot, renderer.clear);
 		before_shot.free();
 
-		three::NodeId mid = node_at(&renderer.pass.scene, baked, "Mid");
+		three::NodeId mid = node_at(renderer.pass.scene, baked, "Mid");
 		if (mid.is_set())
 		{
 			three::Node* bone = renderer.pass.scene.node(mid);

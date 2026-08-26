@@ -428,7 +428,7 @@ fn void a_material_map_reaches_the_screen() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
 		uint material = renderer.pass.create_texture_material(texture)!!;
@@ -466,7 +466,7 @@ fn void a_material_map_wins_over_the_image_the_mesh_brought() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId textured = assets.load(&renderer.gpu, TEXTURED)!!;
 		three::NodeId node = scene.add_mesh(textured, 0);
@@ -796,7 +796,7 @@ fn void a_hull_wears_its_map() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
 		uint material = renderer.pass.create_texture_material(texture)!!;
@@ -948,7 +948,7 @@ fn void reading_a_texture_leaves_it_in_the_layout_it_was_found_in() @test
 
 	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
 	three::Assets* assets = &renderer.pass.assets;
-	three::Scene* scene = &renderer.pass.scene;
+	three::Scene* scene = renderer.pass.scene;
 
 	int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
 	uint material = renderer.pass.create_texture_material(texture)!!;
@@ -1061,7 +1061,7 @@ fn void a_repeat_tiles_the_image_across_the_surface() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
 		uint material = renderer.pass.create_texture_material(texture)!!;
@@ -1102,7 +1102,7 @@ fn void an_offset_slides_the_image_without_rescaling_it() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		int texture = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
 		uint material = renderer.pass.create_texture_material(texture)!!;
@@ -1429,7 +1429,7 @@ fn void a_linear_texture_is_not_gamma_decoded_on_the_way_in() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		int as_picture = upload_solid(renderer, 4, 4, 128, 128, 128);
 		int as_numbers = upload_solid(renderer, 4, 4, 128, 128, 128, three::ColorSpace.LINEAR);
@@ -1731,7 +1731,7 @@ fn void building_a_mip_chain_leaves_no_level_in_the_wrong_layout() @test
 
 	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
 	three::Assets* assets = &renderer.pass.assets;
-	three::Scene* scene = &renderer.pass.scene;
+	three::Scene* scene = renderer.pass.scene;
 
 	// Armed before anything is uploaded, so the chain is built inside the window.
 	renderer.gpu.begin_capture();

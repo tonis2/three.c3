@@ -766,8 +766,8 @@ fn void js_set_material(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	NodeId id = arg_handle(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
 
 	uint material = (uint)arg_int(&js, argc, args, 2);
 	if (self.pass.material(material) == null)
@@ -776,7 +776,9 @@ fn void js_set_material(
 		return;
 	}
 
-	self.pass.scene.set_material(id, material);
+	// Materials are the pass's and are shared by every scene, so only the node
+	// side of this needs the scene it came from.
+	ref.scene.set_material(ref.id, material);
 }
 
 <*

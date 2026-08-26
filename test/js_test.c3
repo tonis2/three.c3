@@ -34,11 +34,10 @@ const String FIXTURE = "test/fixtures/textured.glb";
 macro @with_js(; @body(three::JsRuntime* run))
 {
 	three::MeshPass pass;
-	pass.scene.init();
 	pass.assets.init();
-	pass.scene.attach_assets(&pass.assets);
+	pass.init_scenes();
 	pass.camera = three::default_camera();
-	defer pass.scene.free();
+	defer pass.free_scenes();
 	// Null device, which `Assets.free` only ever reaches through a texture or a
 	// pool — and with nothing loaded there are none of either.
 	defer pass.assets.free(null);
@@ -278,7 +277,8 @@ fn void the_docs_describe_the_surface() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("drawCalls"), "the stats block is described");
-		test::@check(result.value.contains("one scene at a time"), "and so is every divergence from Three.js");
+		test::@check(result.value.contains("Exactly one scene is rendered at a time"),
+			"and so is every divergence from Three.js");
 	};
 }
 
@@ -358,13 +358,20 @@ fn void a_handle_into_a_removed_object_throws() @test
 }
 
 <*
- Replacing the scene is loud rather than silent.
+ A second `new three.Scene()` does not touch the first.
 
- There is one host scene, so a second `new three.Scene()` empties the first — and
- the divergence from Three.js is made to say so, because the alternative is the
- older Scene quietly operating on the newer one's nodes.
+ **The regression this exists for is a level transition that empties the world it
+ was building.** `new three.Scene()` used to be a reset — one host scene, so a
+ second call freed the first and every handle into it started throwing. It is
+ Three.js's meaning now: an independent scene, shown instead of the one before
+ it, which is what makes building the next level while the current one is on
+ screen possible at all.
+
+ Proved by injection: have `js_scene_create` empty the active scene before
+ claiming, or have `arg_handle` search only `pass.scene`, and `stillTakesAdd`
+ comes back false with the stale-handle sentence in `said`.
 *>
-fn void a_replaced_scene_says_so() @test
+fn void two_scenes_are_independent() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -372,17 +379,175 @@ fn void a_replaced_scene_says_so() @test
 			const first = new three.Scene();
 			first.add(new three.Group());
 			const second = new three.Scene();
+			second.add(new three.Group(), new three.Group());
+
+			let said = '';
+			let stillTakesAdd = true;
 			try {
 				first.add(new three.Group());
-				return "no throw";
 			} catch (e) {
-				return e.message;
+				said = e.message;
+				stillTakesAdd = false;
 			}
+
+			return {
+				said,
+				stillTakesAdd,
+				// The root plus what each was given, counted per scene: two node
+				// pools, not one.
+				first: first.stats().nodes,
+				second: second.stats().nodes,
+				active: [first.isActive, second.isActive],
+				scenes: second.stats().scenes,
+			};
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value.contains("replaced"), "the older Scene refused; got %s", result.value);
+		test::@check(
+			result.value == `{"said":"","stillTakesAdd":true,"first":3,"second":3,"active":[false,true],"scenes":2}`,
+			"the older Scene kept its own nodes and the newer one is the live one; got %s", result.value);
+	};
+}
+
+<*
+ A handle from a scene that is not being rendered reaches its own scene.
+
+ **The regression this exists for is a write landing in the wrong world.**
+ Two scenes are two node pools, so index 1 exists in both — and a verb that
+ reached for the rendered scene instead of the one the handle came from would
+ move the wrong object, silently, with every number still looking right. What
+ stops it is that node generations come from one process-wide counter, so a
+ handle matches in at most one scene and `arg_handle` can say which.
+
+ Proved by injection: give `create_slot` back its per-slot generation and both
+ objects come back at x = 5, because the second scene's node 1 answers to the
+ first scene's handle.
+*>
+fn void a_handle_from_an_inactive_scene_reaches_its_own_scene() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			const a = new three.Group();
+			a.name = 'in the first';
+			first.add(a);
+
+			const second = new three.Scene();
+			const b = new three.Group();
+			b.name = 'in the second';
+			second.add(b);
+
+			// first is not the scene being rendered, and this still moves its
+			// object rather than the live scene's.
+			a.position.x = 5;
+
+			return {
+				moved: a.getWorldPosition().x,
+				untouched: b.getWorldPosition().x,
+				handlesClash: a._i === b._i,
+				generationsDiffer: a._g !== b._g,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"moved":5,"untouched":0,"handlesClash":true,"generationsDiffer":true}`,
+			"the write landed in the handle's own scene; got %s", result.value);
+	};
+}
+
+<*
+ An object cannot be moved from one scene to another.
+
+ **The regression this exists for is a re-parent that half-happens.** Two scenes
+ are two node pools, so this would mean destroying the subtree and rebuilding it
+ under the other root — which is exactly what `reparenting_keeps_the_same_node`
+ says re-parenting does not do, because a rebuild invalidates every handle into
+ something that never left the graph. Refused, with the rebuild named as the
+ thing to do instead.
+
+ Proved by injection: drop the `ref.scene != parent.scene` test in
+ `js_set_parent` and `said` comes back empty with the object silently
+ re-parented under a root in another pool.
+*>
+fn void an_object_cannot_be_moved_between_scenes() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			const g = new three.Group();
+			first.add(g);
+			const second = new three.Scene();
+
+			let said = '';
+			try {
+				second.add(g);
+			} catch (e) {
+				said = e.message;
+			}
+			return { said, stillFirst: first.children.length, stillSecond: second.children.length };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("cannot be moved between scenes"),
+			"it was refused and said why; got %s", result.value);
+		test::@check(result.value.contains(`"stillFirst":1`),
+			"and the object stayed where it was; got %s", result.value);
+	};
+}
+
+<*
+ A disposed Scene refuses, and the one being rendered refuses to be disposed.
+
+ **The regression this exists for is a black window.** Freeing the active scene
+ leaves the frame with nothing to draw, which reads as the renderer being broken
+ rather than as the script having freed the world it was looking at — so the
+ answer is no, and the sentence names the recovery. The other half is the
+ ordinary one: a handle into a scene that *was* freed has to say so rather than
+ resolve into a reused slot.
+
+ Proved by injection: let `MeshPass.dispose_scene` free the active scene and the
+ first `try` returns "no throw" with the next `stats()` reading a freed pointer.
+*>
+fn void a_disposed_scene_says_so_and_the_live_one_refuses() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			const g = new three.Group();
+			first.add(g);
+			const second = new three.Scene();
+
+			let live = 'no throw';
+			try { second.dispose(); } catch (e) { live = e.message; }
+
+			first.dispose();
+
+			let gone = 'no throw';
+			try { first.add(new three.Group()); } catch (e) { gone = e.message; }
+
+			let stale = 'no throw';
+			try { g.position.x = 1; } catch (e) { stale = e.message; }
+
+			return { live, gone, stale, scenes: second.stats().scenes };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("cannot be disposed"),
+			"the rendered scene refused; got %s", result.value);
+		test::@check(result.value.contains("was disposed"),
+			"and the freed one says so; got %s", result.value);
+		test::@check(result.value.contains("no longer in the scene"),
+			"and so does a handle into it; got %s", result.value);
+		test::@check(result.value.contains(`"scenes":1`),
+			"and the count came back down; got %s", result.value);
 	};
 }
 
@@ -3051,13 +3216,129 @@ fn void consecutive_push_descriptor_draws_each_keep_their_own_state() @test
 // ============================================================================
 
 <*
+ The whole level transition, in the order a game does it.
+
+ **The regression this exists for is a stall, or a leak, at a level boundary.**
+ It is the one thing every other test here checks a piece of: the next level is
+ loaded and built while the current one is on screen — which used to be
+ impossible, because `scene.unload()` frees anything nothing references and
+ `new three.Scene()` freed the world before it — then shown, then the old one is
+ given back.
+
+ `duringAssets` is the number that says it worked: two levels resident at once,
+ on purpose and briefly. `afterAssets` is the number that says it finished.
+
+ Proved by injection: have `js_scene_create` empty the active scene the way the
+ old reset did, and `duringAssets` stays at 1 with the first level already gone.
+ Skip the `unloadUnused()` and `afterAssets` stays at 2.
+*>
+fn void a_level_transition_holds_two_levels_and_then_one() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const here = new three.Scene();
+			const first = three.load('test/fixtures/textured.glb');
+			for (const name of first.meshes) here.add(new three.Mesh(first.mesh(name)));
+			const start = here.stats();
+
+			// The next level, loaded and built while the first one is on screen.
+			// Its NODES are what hold its assets, so nothing can sweep them away.
+			const next = new three.Scene();
+			next.activate();
+			here.activate();
+			const second = three.load('test/fixtures/shared_material.glb');
+			for (const name of second.meshes) next.add(new three.Mesh(second.mesh(name)));
+			const during = here.stats();
+
+			// The swap, and then giving the old level back.
+			next.activate();
+			const freed = here.dispose();
+			const after = next.stats();
+
+			return {
+				startAssets: start.assets,
+				startScenes: start.scenes,
+				duringAssets: during.assets,
+				duringScenes: during.scenes,
+				freedAssets: freed.assets,
+				afterAssets: after.assets,
+				afterScenes: after.scenes,
+				// The level that is now on screen still draws.
+				afterDraws: after.drawCalls > 0,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"startAssets":1`), "one level resident: %s", result.value);
+		test::@check(result.value.contains(`"startScenes":1`), "in one scene: %s", result.value);
+		test::@check(result.value.contains(`"duringAssets":2`),
+			"both levels resident across the boundary: %s", result.value);
+		test::@check(result.value.contains(`"duringScenes":2`), "in two scenes: %s", result.value);
+		test::@check(result.value.contains(`"freedAssets":1`),
+			"disposing the old one gave its asset back: %s", result.value);
+		test::@check(result.value.contains(`"afterAssets":1`), "and only the new level is left: %s", result.value);
+		test::@check(result.value.contains(`"afterScenes":1`), "in one scene again: %s", result.value);
+		test::@check(result.value.contains(`"afterDraws":true`), "which still draws: %s", result.value);
+	};
+}
+
+<*
+ Two scenes over one kit: disposing either frees nothing.
+
+ **The regression this exists for is a shared kit freed by whichever level let go
+ of it first.** `Asset.refs` is counted per node, so a wall placed in two scenes
+ is two references over one upload — and that is exactly what makes a transition
+ between levels built from the same kit cost no reload. A sweep that looked at
+ scenes rather than at references would take the geometry out from under the
+ level still using it.
+
+ Proved by injection: have `Scene.free` skip `kill` for its nodes and
+ `afterDispose` drops to 0, or have it free the asset outright and the surviving
+ scene draws nothing.
+*>
+fn void two_scenes_over_one_kit_share_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load('test/fixtures/textured.glb');
+
+			const here = new three.Scene();
+			here.add(new three.Mesh(kit.meshAt(0)));
+
+			const next = new three.Scene();
+			next.add(new three.Mesh(kit.meshAt(0)));
+
+			const both = next.stats().assets;
+			here.dispose();
+			const afterDispose = next.stats().assets;
+			three.unloadUnused();
+
+			return {
+				both,
+				afterDispose,
+				afterSweep: next.stats().assets,
+				stillDraws: next.stats().drawCalls,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"both":1,"afterDispose":1,"afterSweep":1,"stillDraws":1}`,
+			"one upload, two scenes, and disposing one freed nothing; got %s", result.value);
+	};
+}
+
+<*
  `scene.unload()` empties the scene and gives the assets back.
 
  The verb a level transition is written in. Asserted through `stats()` on both
  sides, because "the assets went" is the claim and `stats().assets` is the only
  thing a script — or an agent watching one — can read it off.
 
- The Scene survives, which is what separates this from `new three.Scene()`: the
+ The Scene survives, which is what separates this from `scene.dispose()`: the
  same object is still usable afterwards, and the check adds to it again to prove
  it rather than only asserting that nothing threw.
 *>

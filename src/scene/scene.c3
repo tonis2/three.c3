@@ -207,6 +207,41 @@ struct SceneStats
 	 held.
 	*>
 	uint materials;
+	<*
+	 How many drawable nodes are collision geometry.
+
+	 What `object.collides = false` is for, seen from the other side. Every mesh
+	 counted here is a box in the spatial index and a box tested by every sweep and
+	 every raycast; the ones that are not counted cost a query nothing at all,
+	 because `rebuild_query_index` files them out rather than rejecting them.
+
+	 Counted with the index's own predicate — alive, drawable, `collides`, and a
+	 mesh with a BVH — rather than read off `QueryIndex.entries`, because the index
+	 is built by the first query after an invalidation and a scene that has not
+	 asked one yet has no entries. Reading the list would answer 0 for a scene full
+	 of walls, which is the wrong kind of wrong for a number whose job is to say
+	 "this is bigger than you think".
+
+	 The number to watch when a sweep gets slow. Decoration defaults to collision
+	 geometry, so a scene grows this without being asked to, and the gap between
+	 this and `nodes` is what a level's author has said out loud.
+	*>
+	uint colliders;
+
+	<*
+	 How many scenes exist right now, including this one.
+
+	 Filled in by `MeshPass.stats` rather than here, for `materials`' reason: the
+	 list is on the pass and a scene cannot see it.
+
+	 The number a level transition has to bring back down, and the only thing that
+	 says so. `new three.Scene()` shows a new world without freeing the one before
+	 it — that is what makes building the next level early possible — so a game
+	 that never calls `scene.dispose()` reads as correct in every other number
+	 here while holding a node pool, a physics world and a set of asset references
+	 per level it has ever shown.
+	*>
+	uint scenes;
 	// From the last `update`, not from this call — `stats()` rebuilds with culling
 	// off, so there is nothing to count during it. Zero until the first `update`,
 	// and zero again after any `update` made with `Scene.cull` false: nothing was
@@ -466,7 +501,64 @@ struct Scene
 	// count rather than a bool because it has to go back down: a scene that marked
 	// a wall static and then removed the wall has nothing to cache.
 	uint static_nodes;
+
+	<*
+	 What names this scene from JavaScript, and it is never reused.
+
+	 A `Scene` in a script is a host scene plus this number. It has to outlive the
+	 scene itself: a disposed scene's id must keep answering "no such scene" rather
+	 than coming back as somebody else, which is the same argument `NodeId` makes
+	 for its generation and the reason this counts up rather than indexing
+	 `MeshPass.scenes`.
+	*>
+	uint id;
+
+	<*
+	 This scene's physics world — `scene/physics.c3`.
+
+	 Here rather than on the runtime because a body names a `NodeId`, and the node
+	 pool those index into is on this struct. It is what makes a level's bodies
+	 survive the switch to it: they are built while the scene is off screen, and
+	 `activate` shows a world that is already standing up.
+
+	 **Only the active scene is stepped.** `frame_loop.c3` advances one world per
+	 frame, so bodies in a scene nobody is looking at are correct and motionless.
+	 Stepping every world would charge a game for the levels it is not playing.
+	*>
+	Physics physics;
+
+	<*
+	 This scene's navigation bake and the flow fields over it — `scene/nav.c3`.
+
+	 Beside `physics` and for its reason, with one difference worth knowing: a bake
+	 is CPU voxelization over this scene's own triangles and needs no frame at all,
+	 so a scene that is not active bakes exactly as well as one that is. That is
+	 the larger half of what owning these buys — the next level's pathfinding can
+	 be solved before anybody sees it.
+	*>
+	NavMesh nav;
+	List{NavFieldSlot} nav_fields;
 }
+
+<*
+ Where every node generation in the process comes from.
+
+ Global rather than per-slot, and that is what makes more than one scene safe.
+ `Scene.node` rejects a handle whose generation disagrees with the slot's — but
+ two scenes both starting at zero would have a node 5 generation 0 each, and a
+ handle from one would resolve to the other's node with nothing to say so. Drawn
+ from here, no two live nodes anywhere share a `(index, generation)` pair, so a
+ handle used against the wrong scene fails the check that already exists and
+ raises the stale-handle error that is already written.
+
+ Wraps after 2^32 node creations. At that point a handle held across the wrap
+ could collide; it is roughly four billion `scene.add()` calls and the
+ alternative is a wider handle at the JavaScript boundary.
+*>
+uint next_node_generation @local = 1;
+
+// Scene ids, from the same kind of counter and for `Scene.id`'s reason.
+uint next_scene_id @local = 1;
 
 <*
  An empty scene with a root node.
@@ -485,7 +577,9 @@ fn Scene* Scene.init(&self)
 	self.draws.init(mem, 64);
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
+	self.nav_fields.init(mem, 4);
 
+	self.id = next_scene_id++;
 	self.cull = true;
 	self.started = true;
 	self.root = self.create_slot(NO_NODE, NO_ASSET, NO_MESH, "root");
@@ -603,8 +697,25 @@ fn AnimationPlayer* Scene.player(&self, NodeId root)
 	return null;
 }
 
+<*
+ Frees the whole scene, the physics world and the nav bake with it.
+
+ The two of those are the reason this is not just a list of lists: a collider is
+ one heap allocation per body and a bake is a voxel grid, and neither is reachable
+ from anywhere else once the scene is gone. `scene.dispose()` from a script ends
+ here.
+*>
 fn void Scene.free(&self)
 {
+	// The asset references first, through the same `kill` every other way out of a
+	// scene goes through — `Scene.attach_assets` has why there is only one. Freeing
+	// the node list without this drops the count silently, and the file the scene
+	// was holding stays resident for the life of the process with nothing naming
+	// it: a `scene.dispose()` that frees the graph and not the geometry.
+	if (self.started) self.remove(self.root);
+	self.physics.close();
+	self.drop_nav();
+	self.nav_fields.free();
 	foreach (&node : self.nodes)
 	{
 		node.children.free();
@@ -1051,10 +1162,12 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 
 	Node* node = &self.nodes[index];
 
-	// Everything but `children` and `generation`: the child list is reused rather
-	// than freed and rebuilt, and the generation must keep climbing or a stale id
-	// would come back valid the moment its slot was reused.
-	uint generation = node.generation;
+	// Everything but `children`: the child list is reused rather than freed and
+	// rebuilt. The generation is not reused either — it comes from
+	// `next_node_generation`, so a recycled slot gets a number no live node
+	// anywhere has, which is what makes a handle from another scene fail rather
+	// than resolve.
+	uint generation = next_node_generation++;
 	node.children.clear();
 
 	node.name = name.len > 0 ? name.copy(mem) : "";
@@ -1177,8 +1290,9 @@ fn void Scene.kill(&self, NodeId id)
 	if (node.static_caster) self.static_nodes--;
 	node.static_caster = false;
 
-	// The bump is what makes every outstanding id to this slot stale.
-	node.generation++;
+	// `alive` is what makes every outstanding id to this slot stale from here, and
+	// the fresh number `create_slot` draws is what keeps it stale once the slot is
+	// reused. Nothing to bump.
 	self.free_slots.push(id.index);
 }
 
@@ -2177,7 +2291,17 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 
 	foreach (&node : self.nodes)
 	{
-		if (node.alive) stats.nodes++;
+		if (!node.alive) continue;
+		stats.nodes++;
+
+		// The same four conditions `rebuild_query_index` files on, in the same
+		// order. Kept in step by hand: they are four lines apiece and a shared
+		// helper would have to take the `Assets*` and the node and answer a bool,
+		// which is what this is.
+		if (!node.collides || !node.asset.is_set() || node.mesh == NO_MESH) continue;
+		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
+		if (mesh == null || mesh.bvh == null) continue;
+		stats.colliders++;
 	}
 
 	foreach (bucket : self.buckets)

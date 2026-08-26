@@ -118,7 +118,7 @@ fn void a_level_loads_and_unloads_a_hundred_times() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		uint resident_before = assets.resident();
 		uint textures_before = assets.texture_count();
@@ -195,7 +195,7 @@ fn void an_unload_queues_its_buffers_rather_than_waiting_for_the_device() @test
 	{
 		three::Gpu* gpu = &renderer.gpu;
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId level = assets.load(gpu, FIXTURE)!!;
 		three::NodeId group = scene.add_group(scene.root, "level");
@@ -337,7 +337,7 @@ fn void every_node_is_one_reference() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId level = assets.load(&renderer.gpu, FIXTURE)!!;
 		test::@check(assets.slot(level).refs == 0, "a freshly loaded asset already had %d references",
@@ -378,7 +378,7 @@ fn void an_asset_a_node_still_names_survives_the_sweep() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId kept = assets.load(&renderer.gpu, FIXTURE)!!;
 		scene.add_mesh(kept, 0, scene.root, "kept");
@@ -477,7 +477,7 @@ fn void an_image_two_files_share_outlives_the_first_of_them() @test
 		@with_pass(; three::Renderer* renderer)
 		{
 			three::Assets* assets = &renderer.pass.assets;
-			three::Scene* scene = &renderer.pass.scene;
+			three::Scene* scene = renderer.pass.scene;
 
 			three::AssetId one = assets.load(&renderer.gpu, FIXTURE)!!;
 			three::AssetId two = assets.load(&renderer.gpu, FIXTURE_COPY)!!;
@@ -548,7 +548,7 @@ fn void an_image_four_meshes_share_survives_losing_half_of_them() @test
 		@with_pass(; three::Renderer* renderer)
 		{
 			three::Assets* assets = &renderer.pass.assets;
-			three::Scene* scene = &renderer.pass.scene;
+			three::Scene* scene = renderer.pass.scene;
 
 			three::AssetId one = assets.load(&renderer.gpu, SHARED)!!;
 			three::AssetId two = assets.load(&renderer.gpu, SHARED_COPY)!!;
@@ -600,7 +600,7 @@ fn void a_freed_texture_slot_is_reused() @test
 	{
 		three::Assets* assets = &renderer.pass.assets;
 
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId first = assets.load(&renderer.gpu, FIXTURE)!!;
 		scene.instantiate(first, scene.root, "level");
@@ -643,7 +643,7 @@ fn void stats_reports_resident_assets_rather_than_slots() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::AssetId level = assets.load(&renderer.gpu, FIXTURE)!!;
 		three::NodeId group = scene.add_group(scene.root, "level");
@@ -677,7 +677,7 @@ fn void a_generated_shape_unloads_like_a_file() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::Assets* assets = &renderer.pass.assets;
-		three::Scene* scene = &renderer.pass.scene;
+		three::Scene* scene = renderer.pass.scene;
 
 		three::Primitive box = { .kind = three::PrimitiveKind.BOX, .a = 1, .b = 1, .c = 1, .u = 1, .v = 1, .w = 1 };
 		three::AssetId first = assets.primitive(&renderer.gpu, box)!!;
@@ -795,7 +795,7 @@ fn void a_disposed_material_survives_the_mesh_that_draws_with_it() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::MeshPass* pass = &renderer.pass;
-		three::Scene* scene = &pass.scene;
+		three::Scene* scene = pass.scene;
 
 		uint material;
 		@pool()
@@ -898,7 +898,7 @@ fn void the_live_material_count_is_what_a_script_watches() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::MeshPass* pass = &renderer.pass;
-		three::Scene* scene = &pass.scene;
+		three::Scene* scene = pass.scene;
 
 		test::@check(pass.stats().materials == 0,
 			"nothing a script built is live yet: %d", pass.stats().materials);
@@ -921,6 +921,49 @@ fn void the_live_material_count_is_what_a_script_watches() @test
 		test::@check(pass.stats().materials == 0,
 			"the mesh went, the material was collected, and the count followed: %d",
 			pass.stats().materials);
+	};
+}
+
+<*
+ The live-scene warning waits for twice the count, the material one's way.
+
+ **The regression this exists for is a level transition that leaks a world per
+ level, silently.** `new three.Scene()` stopped freeing the scene before it —
+ that is what makes building the next level early possible — so a game that never
+ calls `scene.dispose()` holds a node pool, a physics world, a nav bake and a set
+ of asset references per level it has ever shown. Nothing else says so: those
+ scenes are not drawn, not stepped and not queried, so every frame number stays
+ exactly as healthy as it was.
+
+ Doubling rather than warning per scene, and never resetting downwards, for the
+ three reasons `note_material_claimed` gives.
+
+ Proved by injection: fold the threshold bump out of `note_scene_created` and the
+ last check reads the same number twice.
+*>
+fn void the_scene_warning_waits_for_twice_the_count() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		uint threshold = pass.scene_warn_at;
+		test::@check(threshold == three::SCENE_WARN_AT, "nothing has fired yet: %d", threshold);
+		// The one `init` built. It is a real scene and is counted, which is what
+		// `claim_scene` exists to keep from reading as two.
+		test::@check(pass.scenes.len() == 1, "a pass starts with one scene: %d", pass.scenes.len());
+
+		while (pass.scenes.len() < (sz)(threshold - 1)) pass.new_scene();
+		test::@check(pass.scene_warn_at == threshold,
+			"nothing said below it: %d", pass.scene_warn_at);
+
+		pass.new_scene();
+		test::@check(pass.scene_warn_at == threshold * 2,
+			"the next word waits for twice the count: %d then %d", threshold, pass.scene_warn_at);
+
+		// And they all go back. `MeshPass.free` frees every scene, not just the
+		// active one — the leak checker in the `-D DEBUG` run is the assertion.
+		test::@check(pass.scenes.len() == (sz)threshold,
+			"the scenes are all still there to be freed: %d", pass.scenes.len());
 	};
 }
 

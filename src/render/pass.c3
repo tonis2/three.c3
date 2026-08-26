@@ -93,7 +93,25 @@ struct MeshPass
 	// survive that exactly as a loaded `.glb` does.
 	List{Material} materials;
 	Assets assets;
-	Scene scene;
+	<*
+	 The scene being rendered, and every scene that exists.
+
+	 One is drawn, culled, queried and stepped; the rest are worlds a script has
+	 built and is holding on to — the next level, a sandbox. `new three.Scene()`
+	 makes one and activates it and does *not* free the one it replaced, which is
+	 Three.js's meaning and is why `SceneStats.scenes` and `note_scene_created`
+	 exist: the cost of the ones nobody is looking at has to be visible.
+
+	 Pointers, and each scene is its own allocation, because `arg_handle` hands a
+	 `Scene*` to every verb that names a node and a `List` that reallocated on its
+	 next push would leave those pointing into freed memory.
+	*>
+	Scene* scene;
+	List{Scene*} scenes;
+	// The scene `init` built, until a script's first `new three.Scene()` takes it
+	// over — see `claim_scene`. Null afterwards, and null in a process where the
+	// command line put something in it.
+	Scene* bootstrap;
 	Camera camera;
 	// What the camera is tracking, if anything — `scene/camera.c3`. Beside the
 	// camera rather than on the runtime, because it names a `NodeId` and the scene
@@ -124,6 +142,8 @@ struct MeshPass
 	// The count the next warning is waiting for, doubling each time one fires —
 	// see `note_material_claimed`.
 	uint material_warn_at;
+	// The same again for scenes — see `note_scene_created`.
+	uint scene_warn_at;
 
 	// Per frame in flight — see the header.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
@@ -330,12 +350,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	self.live_materials = 0;
 
 	self.assets.init(gpu);
-	self.scene.init();
-	// The scene counts references against this table from here on — see
-	// `Scene.attach_assets`. Wired at construction rather than at first load,
-	// because a node created before the wiring would never be counted and the asset
-	// it named could then be swept out from under it.
-	self.scene.attach_assets(&self.assets);
+	self.init_scenes();
 	self.camera = default_camera();
 	self.light = DEFAULT_LIGHT;
 	// The first `frame_camera` can run before any frame has been recorded — the CLI
@@ -358,6 +373,151 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// buckets returns, so this is not a weaker guard than what it replaces.
 	self.ready = true;
 	return *self;
+}
+
+<*
+ A new, empty scene, counted and attached to this pass's asset table.
+
+ Does *not* activate it — `js_scene_activate` is the only thing that moves
+ `self.scene`, so that the switch and everything it resets live in one place.
+
+ @return `The scene. Owned by this pass, and freed by dispose_scene or by free.`
+*>
+fn Scene* MeshPass.new_scene(&self)
+{
+	Scene* fresh = mem::new(Scene);
+	fresh.init();
+	// The scene counts references against this table from here on — see
+	// `Scene.attach_assets`. Wired at construction rather than at first load,
+	// because a node created before the wiring would never be counted and the asset
+	// it named could then be swept out from under it.
+	fresh.attach_assets(&self.assets);
+	self.scenes.push(fresh);
+	self.note_scene_created();
+	return fresh;
+}
+
+<*
+ The scene list, with one empty scene in it.
+
+ Split out of `init` because the test harnesses build a `MeshPass` by hand — a
+ pipeline wants a GPU and the scene layer does not — and a second spelling of
+ "how a pass gets its first scene" is how one of the two ends up not counting.
+
+ `Assets.init` first, so that the scene attaches to a table that exists.
+*>
+fn Scene* MeshPass.init_scenes(&self)
+{
+	self.scenes.init(mem, 4);
+	self.scene_warn_at = SCENE_WARN_AT;
+	self.scene = self.new_scene();
+	self.bootstrap = self.scene;
+	return self.scene;
+}
+
+// Every scene, not just the active one: a scene a script never disposed still
+// owns a node pool, a physics world and a nav bake.
+fn void MeshPass.free_scenes(&self)
+{
+	foreach (each : self.scenes)
+	{
+		each.free();
+		mem::free(each);
+	}
+	self.scenes.free();
+	self.scene = null;
+	self.bootstrap = null;
+}
+
+<*
+ The scene a `new three.Scene()` gets.
+
+ A pass has a scene before any script runs — the command line can load a model
+ into one — so a run that never claimed it would report two scenes for a script
+ holding one, and would warn about a leak that is the pass's own bootstrap.
+ The first `new three.Scene()` takes it over instead.
+
+ Only while it is empty. A model loaded from the command line is a scene somebody
+ built, and `new three.Scene()` does not empty a scene any more — so that case
+ gets a fresh one and the loaded model stays exactly where it is.
+
+ Once, whatever happens. A second `new three.Scene()` is always a second scene,
+ because two empty scenes a script asked for separately have to be separate: the
+ alternative is `a.add(...)` landing in `b`.
+*>
+fn Scene* MeshPass.claim_scene(&self)
+{
+	Scene* first = self.bootstrap;
+	self.bootstrap = null;
+	if (first == null) return self.new_scene();
+
+	Node* root = first.node(first.root);
+	if (root == null || root.children.len() > 0) return self.new_scene();
+	return first;
+}
+
+fn Scene* MeshPass.scene_by_id(&self, uint id)
+{
+	foreach (each : self.scenes)
+	{
+		if (each.id == id) return each;
+	}
+	return null;
+}
+
+<*
+ Frees a scene and everything it owns.
+
+ Refuses the active one. A frame with no scene to draw is a black window, which
+ reads as the renderer being broken rather than as the script having freed the
+ world it was looking at — so the answer is no, and the caller is told to
+ activate another first.
+
+ The asset references its nodes held are given back by `Scene.free` through
+ `kill`, so a sweep afterwards is what actually reclaims memory. Two scenes over
+ one kit means disposing either frees nothing, which is the right answer.
+
+ @return `false if the id names nothing, or names the active scene.`
+*>
+fn bool MeshPass.dispose_scene(&self, uint id)
+{
+	if (self.scene != null && self.scene.id == id) return false;
+	foreach (i, each : self.scenes)
+	{
+		if (each.id != id) continue;
+		each.free();
+		mem::free(each);
+		self.scenes.remove_at(i);
+		return true;
+	}
+	return false;
+}
+
+const uint SCENE_WARN_AT = 4;
+
+<*
+ Says something the first time the number of live scenes looks like a leak.
+
+ `new three.Scene()` no longer frees the scene it replaced — that is what makes
+ building the next level while the current one is on screen possible, and it is
+ also what makes a game that transitions eight times hold eight worlds. Nothing
+ else would say so: the old scene is not drawn, not stepped and not queried, so
+ it costs frame time nothing and memory everything.
+
+ Doubling, to stderr, and never reset downwards — `note_material_claimed` has
+ the argument for all three.
+*>
+fn void MeshPass.note_scene_created(&self)
+{
+	if (self.scenes.len() < self.scene_warn_at) return;
+
+	io::eprintfn(
+		"three: %d live scenes. new three.Scene() no longer empties the one before "
+		"it — each keeps its nodes, its bodies and its asset references until "
+		"scene.dispose(). stats().scenes is the number to watch.",
+		self.scenes.len()
+	);
+	self.scene_warn_at *= 2;
 }
 
 <*
@@ -1585,10 +1745,13 @@ fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 <*
  Numbers an agent can read its own cost off. Computed with culling off — see
  `Scene.stats`.
+
+ @param scene : `Which scene to measure, or null for the one being rendered.`
 *>
-fn SceneStats MeshPass.stats(&self)
+fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 {
-	SceneStats stats = self.scene.stats(&self.assets);
+	if (scene == null) scene = self.scene;
+	SceneStats stats = scene.stats(&self.assets);
 	// Filled in here rather than by `Scene`, because whether a bucket casts is a
 	// property of its material and of the pass — see `casts_shadow`. It is last
 	// frame's number, like `culled_last_frame` beside it, and for the same reason:
@@ -1599,6 +1762,9 @@ fn SceneStats MeshPass.stats(&self)
 	// frame: the count is maintained at the two ends of a material's life rather
 	// than swept for here.
 	stats.materials = self.live_materials;
+	// A fact about the pass and not about the scene being asked, which is the
+	// point of it: the number exists so that a scene nobody replaced shows up.
+	stats.scenes = (uint)self.scenes.len();
 	return stats;
 }
 
@@ -2090,7 +2256,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.shadows.free(gpu);
 	self.posed_offsets.free();
 	self.draw_indices.free();
-	self.scene.free();
+	self.free_scenes();
 	// Before `assets.free`, which frees every texture slot outright: releasing
 	// afterwards would decrement counts in a freed list. The device is idle by the
 	// time a pass is torn down, so no wait is needed here as it is in

@@ -340,8 +340,12 @@ fn void? run(Options opts)
 	{
 		renderer.pass.load(&renderer.gpu, opts.model)!;
 	}
-	else
+	else if (opts.script.len == 0 && opts.assets.len == 0)
 	{
+		// The placeholder for "nothing was given", and only then. A script or a
+		// game builds its own scene, and since `new three.Scene()` stopped emptying
+		// the one before it, a triangle put here would be a scene nothing draws and
+		// nothing can dispose — counted by `stats().scenes` for the rest of the run.
 		renderer.pass.load_triangle(&renderer.gpu)!;
 	}
 
@@ -351,7 +355,8 @@ fn void? run(Options opts)
 	SceneStats stats = renderer.pass.stats();
 	io::printfn(
 		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
-		opts.model.len > 0 ? opts.model : "built-in triangle",
+		opts.model.len > 0 ? opts.model
+			: (opts.script.len > 0 || opts.assets.len > 0 ? "empty scene" : "built-in triangle"),
 		stats.draw_calls,
 		stats.instances,
 		stats.unique_meshes,

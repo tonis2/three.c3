@@ -27,50 +27,22 @@ import std::math::vector;
 import collision;
 import qjs;
 
-<*
- One solved flow field, with the slot reuse that keeps handles small.
-
- `live` rather than removing the entry, because a handle is the index: shifting
- the list would silently repoint every handle a script is holding.
-*>
-struct NavFieldSlot
-{
-	float[] values;
-	bool live;
-}
-
 fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "navBake", &js_nav_bake, 11);
-	self.bind(host, "navStats", &js_nav_stats, 0);
-	self.bind(host, "navClear", &js_nav_clear, 0);
-	self.bind(host, "navField", &js_nav_field, 3);
-	self.bind(host, "navFieldFree", &js_nav_field_free, 1);
-	self.bind(host, "navDirection", &js_nav_direction, 4);
-	self.bind(host, "navCost", &js_nav_cost, 4);
-	self.bind(host, "navSample", &js_nav_sample, 10);
-	self.bind(host, "navPath", &js_nav_path, 9);
-	self.bind(host, "steer", &js_steer, 14);
-}
-
-<*
- Frees the bake and every field over it.
-
- Called by `three.nav.clear()`, by a re-bake, and by `new three.Scene()`. The
- fields go with the mesh and not one at a time: they are sized to the grid's cell
- count, so a field kept across a re-bake would be the wrong length, and the
- length check in `NavMesh.solve` would silently make it unusable — a bug that
- looks like the pathfinder finding nothing.
-*>
-fn void JsRuntime.drop_nav(&self)
-{
-	foreach (&slot : self.nav_fields)
-	{
-		if (slot.values.len > 0) mem::free(slot.values);
-		*slot = {};
-	}
-	self.nav_fields.clear();
-	self.nav.free();
+	// Every one of these takes the scene id first. A bake belongs to a scene — it
+	// is voxelized out of that scene's triangles — and a field handle indexes that
+	// scene's own list, so a verb that assumed the active one would solve the wrong
+	// level's paths the moment a script baked ahead of a transition.
+	self.bind(host, "navBake", &js_nav_bake, 12);
+	self.bind(host, "navStats", &js_nav_stats, 1);
+	self.bind(host, "navClear", &js_nav_clear, 1);
+	self.bind(host, "navField", &js_nav_field, 4);
+	self.bind(host, "navFieldFree", &js_nav_field_free, 2);
+	self.bind(host, "navDirection", &js_nav_direction, 5);
+	self.bind(host, "navCost", &js_nav_cost, 5);
+	self.bind(host, "navSample", &js_nav_sample, 11);
+	self.bind(host, "navPath", &js_nav_path, 10);
+	self.bind(host, "steer", &js_steer, 15);
 }
 
 <*
@@ -87,63 +59,69 @@ fn void js_nav_bake(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
 	NavSettings settings = default_nav_settings();
-	float cell = arg_float(&js, argc, args, 0);
+	float cell = arg_float(&js, argc, args, 1);
 	if (cell > 0.0f) settings.cell = cell;
-	settings.agent_radius = math::max(arg_float(&js, argc, args, 1), 0.0f);
-	settings.agent_height = math::max(arg_float(&js, argc, args, 2), 0.0f);
-	settings.slope_limit = arg_float(&js, argc, args, 3);
-	settings.has_bounds = arg_truth(&js, argc, args, 4);
+	settings.agent_radius = math::max(arg_float(&js, argc, args, 2), 0.0f);
+	settings.agent_height = math::max(arg_float(&js, argc, args, 3), 0.0f);
+	settings.slope_limit = arg_float(&js, argc, args, 4);
+	settings.has_bounds = arg_truth(&js, argc, args, 5);
 	if (settings.has_bounds)
 	{
 		settings.bounds = {
-			{ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) },
-			{ arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) },
+			{ arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8) },
+			{ arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10), arg_float(&js, argc, args, 11) },
 		};
 		settings.bounds.fix();
 	}
 
-	// Everything over the old grid goes first — see `drop_nav`.
-	self.drop_nav();
+	// Everything over the old grid goes first — see `Scene.drop_nav`.
+	scene.drop_nav();
 
-	if (!self.pass.scene.bake_nav(&self.pass.assets, settings, &self.nav))
+	// This scene's triangles, which is the point: a level baked while it is off
+	// screen is a level that costs nothing to switch to.
+	if (!scene.bake_nav(&self.pass.assets, settings, &scene.nav))
 	{
 		*out = qjs::null_value();
 		return;
 	}
-	*out = nav_stats_value(self, &js);
+	*out = nav_stats_value(scene, &js);
 }
 
-fn qjs::Value nav_stats_value(JsRuntime* self, qjs::Context* js) @local
+fn qjs::Value nav_stats_value(Scene* scene, qjs::Context* js) @local
 {
-	if (!self.nav.usable()) return qjs::null_value();
+	NavMesh* nav = &scene.nav;
+	if (!nav.usable()) return qjs::null_value();
 
 	qjs::Value value = js.object();
-	js.set_property(value, "cell", qjs::number_value(self.nav.settings.cell));
-	js.set_property(value, "radius", qjs::number_value(self.nav.settings.agent_radius));
-	js.set_property(value, "height", qjs::number_value(self.nav.settings.agent_height));
-	js.set_property(value, "slope", qjs::number_value(self.nav.settings.slope_limit));
+	js.set_property(value, "cell", qjs::number_value(nav.settings.cell));
+	js.set_property(value, "radius", qjs::number_value(nav.settings.agent_radius));
+	js.set_property(value, "height", qjs::number_value(nav.settings.agent_height));
+	js.set_property(value, "slope", qjs::number_value(nav.settings.slope_limit));
 	// The three counts and the time are what decide whether baking is a
 	// level-boundary operation or a loading-screen one, answerable for the
 	// caller's own level rather than for a reference one.
-	js.set_property(value, "voxels", qjs::number_value((double)self.nav.voxels));
-	js.set_property(value, "solid", qjs::number_value((double)self.nav.solid_cells));
-	js.set_property(value, "floor", qjs::number_value((double)self.nav.floor_cells));
-	js.set_property(value, "walkable", qjs::number_value((double)self.nav.walkable_cells));
+	js.set_property(value, "voxels", qjs::number_value((double)nav.voxels));
+	js.set_property(value, "solid", qjs::number_value((double)nav.solid_cells));
+	js.set_property(value, "floor", qjs::number_value((double)nav.floor_cells));
+	js.set_property(value, "walkable", qjs::number_value((double)nav.walkable_cells));
 	// The two that say whether the bake is *usable* rather than what it cost.
 	// Every counter above is a total, and a total cannot tell a level an agent can
 	// cross from the same level cut into islands — see `NavMesh.components`.
 	// `components > 1` is the signal a caller wants at bake time rather than after
 	// the third agent stands still for no reason.
-	js.set_property(value, "components", qjs::number_value((double)self.nav.components));
-	js.set_property(value, "largest", qjs::number_value((double)self.nav.largest_component));
-	js.set_property(value, "bakeMs", qjs::number_value(self.nav.bake_ms));
+	js.set_property(value, "components", qjs::number_value((double)nav.components));
+	js.set_property(value, "largest", qjs::number_value((double)nav.largest_component));
+	js.set_property(value, "bakeMs", qjs::number_value(nav.bake_ms));
 	js.set_property(value, "bounds", aabb_value(js, (collision::Aabb3) {
-		self.nav.grid.origin,
-		self.nav.grid.origin + (Vec3) {
-			(float)(self.nav.grid.nx - 1) * self.nav.grid.cell,
-			(float)(self.nav.grid.ny - 1) * self.nav.grid.cell,
-			(float)(self.nav.grid.nz - 1) * self.nav.grid.cell,
+		nav.grid.origin,
+		nav.grid.origin + (Vec3) {
+			(float)(nav.grid.nx - 1) * nav.grid.cell,
+			(float)(nav.grid.ny - 1) * nav.grid.cell,
+			(float)(nav.grid.nz - 1) * nav.grid.cell,
 		},
 	}));
 	return value;
@@ -155,7 +133,11 @@ fn void js_nav_stats(
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
-	*out = nav_stats_value(self, &js);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	*out = nav_stats_value(scene, &js);
 }
 
 fn void js_nav_clear(
@@ -163,7 +145,12 @@ fn void js_nav_clear(
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
-	self.drop_nav();
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	scene.drop_nav();
 	*out = qjs::undefined_value();
 }
 
@@ -180,27 +167,30 @@ fn void js_nav_field(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (!self.nav.usable())
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	if (!scene.nav.usable())
 	{
 		*out = js.raise("three.nav.field() needs a baked mesh — call three.nav.bake() first");
 		return;
 	}
 
-	float[] goals = float_view(&js, argc, args, 0);
+	float[] goals = float_view(&js, argc, args, 1);
 	if (goals.len < 3)
 	{
 		*out = js.raise("three.nav.field(goals) wants at least one [x, y, z]");
 		return;
 	}
 
-	float[] values = mem::new_array(float, self.nav.field_size());
+	float[] values = mem::new_array(float, scene.nav.field_size());
 	@pool()
 	{
 		sz count = goals.len / 3;
 		Vec3[] points = mem::temp_array(Vec3, count);
 		for (sz i = 0; i < count; i++) points[i] = { goals[i * 3], goals[i * 3 + 1], goals[i * 3 + 2] };
 
-		if (!self.nav.solve(points, values))
+		if (!scene.nav.solve(points, values))
 		{
 			mem::free(values);
 			*out = qjs::int_value(-1);
@@ -210,7 +200,7 @@ fn void js_nav_field(
 
 	// A dead slot before a new one, so a script that makes and disposes a field
 	// every few seconds does not walk the handle space upward for ever.
-	foreach (i, &slot : self.nav_fields)
+	foreach (i, &slot : scene.nav_fields)
 	{
 		if (slot.live) continue;
 		*slot = { .values = values, .live = true };
@@ -218,8 +208,8 @@ fn void js_nav_field(
 		return;
 	}
 
-	self.nav_fields.push({ .values = values, .live = true });
-	*out = qjs::int_value((int)(self.nav_fields.len() - 1));
+	scene.nav_fields.push({ .values = values, .live = true });
+	*out = qjs::int_value((int)(scene.nav_fields.len() - 1));
 }
 
 <*
@@ -228,7 +218,7 @@ fn void js_nav_field(
  Null covers a handle out of range, a disposed one, and — the case worth having
  the length check for — one that outlived the bake it was sized to.
 *>
-fn float[] JsRuntime.nav_field_of(&self, int handle)
+fn float[] Scene.nav_field_of(&self, int handle)
 {
 	if (handle < 0 || (sz)handle >= self.nav_fields.len()) return {};
 	NavFieldSlot slot = self.nav_fields[(sz)handle];
@@ -244,10 +234,13 @@ fn void js_nav_field_free(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int handle = arg_int(&js, argc, args, 0);
-	if (handle < 0 || (sz)handle >= self.nav_fields.len()) { *out = qjs::bool_value(false); return; }
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
 
-	NavFieldSlot* slot = &self.nav_fields[(sz)handle];
+	int handle = arg_int(&js, argc, args, 1);
+	if (handle < 0 || (sz)handle >= scene.nav_fields.len()) { *out = qjs::bool_value(false); return; }
+
+	NavFieldSlot* slot = &scene.nav_fields[(sz)handle];
 	if (!slot.live) { *out = qjs::bool_value(false); return; }
 	if (slot.values.len > 0) mem::free(slot.values);
 	*slot = {};
@@ -270,10 +263,13 @@ fn void js_nav_direction(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float[] field = self.nav_field_of(arg_int(&js, argc, args, 0));
-	Vec3 point = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
 
-	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : self.nav.direction_at(field, point);
+	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
+	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+
+	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 	*out = vec3_value(&js, direction);
 }
 
@@ -294,11 +290,14 @@ fn void js_nav_cost(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float[] field = self.nav_field_of(arg_int(&js, argc, args, 0));
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
 	if (field.len == 0) { *out = qjs::number_value(-1.0); return; }
 
-	Vec3 point = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
-	float cost = self.nav.cost_at(field, point);
+	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	float cost = scene.nav.cost_at(field, point);
 	*out = qjs::number_value(cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost);
 }
 
@@ -340,10 +339,13 @@ fn void js_nav_sample(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float[] field = self.nav_field_of(arg_int(&js, argc, args, 0));
-	float[] positions = float_view(&js, argc, args, 1);
-	float[] costs = float_view(&js, argc, args, 4);
-	float[] directions = float_view(&js, argc, args, 7);
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
+	float[] positions = float_view(&js, argc, args, 2);
+	float[] costs = float_view(&js, argc, args, 5);
+	float[] directions = float_view(&js, argc, args, 8);
 
 	sz count = positions.len / 3;
 	if (costs.len > 0 && costs.len < count) count = costs.len;
@@ -357,12 +359,12 @@ fn void js_nav_sample(
 
 		if (costs.len > 0)
 		{
-			float cost = field.len == 0 ? collision::VOXEL_UNREACHED : self.nav.cost_at(field, point);
+			float cost = field.len == 0 ? collision::VOXEL_UNREACHED : scene.nav.cost_at(field, point);
 			costs[i] = cost >= collision::VOXEL_UNREACHED ? -1.0f : cost;
 		}
 		if (directions.len > 0)
 		{
-			Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : self.nav.direction_at(field, point);
+			Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 			directions[at] = direction.x;
 			directions[at + 1] = direction.y;
 			directions[at + 2] = direction.z;
@@ -396,36 +398,39 @@ fn void js_nav_path(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (!self.nav.usable())
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	if (!scene.nav.usable())
 	{
 		*out = js.raise("three.nav.path() needs a baked mesh — call three.nav.bake() first");
 		return;
 	}
 
-	Vec3 from = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 to = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 from = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
+	Vec3 to = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
 
-	float[] slots = float_view(&js, argc, args, 6);
+	float[] slots = float_view(&js, argc, args, 7);
 	if (slots.len < 3) { *out = qjs::int_value(0); return; }
 
 	@pool()
 	{
-		float[] field = mem::temp_array(float, self.nav.field_size());
+		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!self.nav.solve(&goals, field)) { *out = qjs::int_value(0); return; }
+		if (!scene.nav.solve(&goals, field)) { *out = qjs::int_value(0); return; }
 
 		// The raw walk is one point per cell, so it can be as long as the reachable
 		// set. Bounded by the caller's slice times a factor, because shortening is
 		// what turns hundreds of cells into a handful of corners and a caller
 		// asking for eight waypoints still needs the cells between them walked.
-		sz raw_limit = math::min((sz)self.nav.field_size(), (sz)(slots.len / 3) * 64 + 64);
+		sz raw_limit = math::min((sz)scene.nav.field_size(), (sz)(slots.len / 3) * 64 + 64);
 		Vec3[] raw = mem::temp_array(Vec3, raw_limit);
-		uint count = self.nav.walk(field, from, raw);
+		uint count = scene.nav.walk(field, from, raw);
 		if (count == 0) { *out = qjs::int_value(0); return; }
 
 		Vec3[] tight = mem::temp_array(Vec3, (sz)(slots.len / 3));
-		uint kept = self.pass.scene.shorten_path(
-			&self.pass.assets, &self.nav, raw[:(sz)count], count, tight, {});
+		uint kept = scene.shorten_path(
+			&self.pass.assets, &scene.nav, raw[:(sz)count], count, tight, {});
 
 		for (uint i = 0; i < kept; i++)
 		{
@@ -456,21 +461,24 @@ fn void js_steer(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float[] positions = float_view(&js, argc, args, 0);
-	float[] velocities = float_view(&js, argc, args, 3);
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	float[] positions = float_view(&js, argc, args, 1);
+	float[] velocities = float_view(&js, argc, args, 4);
 	if (positions.len < 3 || velocities.len < 3) { *out = qjs::int_value(0); return; }
 
-	int handle = arg_int(&js, argc, args, 6);
-	float[] field = self.nav_field_of(handle);
+	int handle = arg_int(&js, argc, args, 7);
+	float[] field = scene.nav_field_of(handle);
 
 	SteerOptions options;
-	options.goal = { arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9) };
+	options.goal = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
 	options.has_goal = handle < 0;
-	options.max_speed = arg_float(&js, argc, args, 10);
-	options.arrive_radius = arg_float(&js, argc, args, 11);
-	options.separation_radius = arg_float(&js, argc, args, 12);
-	options.separation_weight = arg_float(&js, argc, args, 13);
+	options.max_speed = arg_float(&js, argc, args, 11);
+	options.arrive_radius = arg_float(&js, argc, args, 12);
+	options.separation_radius = arg_float(&js, argc, args, 13);
+	options.separation_weight = arg_float(&js, argc, args, 14);
 
-	steer_agents(positions, velocities, field.len == 0 ? null : &self.nav, field, options);
+	steer_agents(positions, velocities, field.len == 0 ? null : &scene.nav, field, options);
 	*out = qjs::int_value((int)math::min(positions.len / 3, velocities.len / 3));
 }

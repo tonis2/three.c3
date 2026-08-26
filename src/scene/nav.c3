@@ -146,6 +146,38 @@ struct NavMesh
 	uint largest_component;
 }
 
+<*
+ One solved flow field, with the slot reuse that keeps handles small.
+
+ `live` rather than removing the entry, because a handle is the index: shifting
+ the list would silently repoint every handle a script is holding.
+*>
+struct NavFieldSlot
+{
+	float[] values;
+	bool live;
+}
+
+<*
+ Frees this scene's bake and every field over it.
+
+ Called by `three.nav.clear()`, by a re-bake, and by `Scene.free`. The fields go
+ with the mesh and not one at a time: they are sized to the grid's cell count, so
+ a field kept across a re-bake would be the wrong length, and the length check in
+ `NavMesh.solve` would silently make it unusable — a bug that looks like the
+ pathfinder finding nothing.
+*>
+fn void Scene.drop_nav(&self)
+{
+	foreach (&slot : self.nav_fields)
+	{
+		if (slot.values.len > 0) mem::free(slot.values);
+		*slot = {};
+	}
+	self.nav_fields.clear();
+	self.nav.free();
+}
+
 fn void NavMesh.free(&self)
 {
 	self.grid.free();
