@@ -2,47 +2,42 @@
  Baking a rigged asset's clips into joint matrices, once, for the GPU to key
  into.
 
- `plan.md` §3. The milestone anticipated a **live palette** — every skinned
- instance's joint matrices recomputed and uploaded every frame, which it costed
- at ~192 KB a frame for fifty characters. This is the other design, and the
- difference is what a hundred characters cost:
+ The obvious alternative is a live palette: every skinned instance's joint
+ matrices recomputed and uploaded every frame, about 192 KB a frame for fifty
+ characters. This does the opposite:
 
- - A clip is sampled at a fixed rate **once**, at the moment the first skinned
-   mesh of the file uploads, and the result is a device-local buffer that never
-   changes again.
- - An instance names a frame with **one `uint`** — `Instance.pose`, an offset in
+ - A clip is sampled at a fixed rate once, when the first skinned mesh of the
+   file uploads, into a device-local buffer that never changes again.
+ - An instance names a frame with one `uint` — `Instance.pose`, an offset in
    matrices. A hundred zombies mid-stride at a hundred different phases disagree
-   about that number and about nothing else, so they stay one bucket and one
-   `vkCmdDrawIndexed`, and the per-frame cost of the crowd is a hundred integers.
+   about that number and nothing else, so they stay one bucket and one
+   `vkCmdDrawIndexed`, and the crowd costs a hundred integers a frame.
 
- So the trade is memory against per-frame work, and the memory is small: sixty
- joints at thirty frames a second is 115 KB per second of clip, and a character
- with ten clips of animation is a megabyte that is uploaded once.
+ The trade is memory against per-frame work, and the memory is small: sixty
+ joints at thirty frames a second is 115 KB per second of clip, so a character
+ with ten clips is a megabyte uploaded once.
 
- **It also cannot tear.** `gpu/buffer.c3` records that "crig's pose palette tore
- for exactly this reason" — a host-visible buffer rewritten while the GPU was
- still reading last frame's copy. A baked table is written before anything draws
- and read for the life of the asset, so the failure is not mitigated here, it is
- absent.
+ It also cannot tear. A host-visible palette rewritten while the GPU is still
+ reading last frame's copy is the classic failure here; a baked table is written
+ before anything draws and read for the life of the asset.
 
- ## What it gives up, and where that is answered
+ ## What it gives up
 
- Quantised time, no blending between clips, and no way to move a bone. All three
- are the same limitation seen from different sides: the pose is a table lookup, so
- nothing can influence it that was not sampled at bake time. `MeshPass` writes a
- **live** palette into the same shader contract for characters instantiated with
- a skeleton, and `Instance.pose`'s top bit is which of the two buffers a copy
- reads — so the two kinds of character can share a draw call, and a script that
+ Quantised time, no blending between clips, and no way to move a bone — all the
+ same limitation from different sides: the pose is a table lookup, so nothing can
+ influence it that was not sampled at bake time. `MeshPass` writes a *live*
+ palette into the same shader contract for characters instantiated with a
+ skeleton, and `Instance.pose`'s top bit says which of the two buffers a copy
+ reads, so the two kinds of character still share a draw call and a script that
  needs a look-at asks for the expensive one by name.
 
  ## The rest pose is not a special case
 
  Every skin's segment zero is its bind pose, baked like any other frame, and a
  skinned node starts pointing at it. So a character that has never played
- anything draws correctly with no branch anywhere in the shader and no "is
- something playing" question in the draw loop — and the check that segment is
- exactly the identity is what proves the inverse bind matrices and the node
- transforms agree, which every other number here is built on.
+ anything draws correctly with no branch in the shader and no "is something
+ playing" question in the draw loop — and checking that segment is exactly the
+ identity is what proves the inverse bind matrices and the node transforms agree.
 *>
 module three;
 
@@ -59,14 +54,12 @@ import vk;
  Where one clip's frames sit in an asset's pose buffer.
 
  `frame_offset` and `joint_count` are both in matrices, so frame `f` of this
- segment starts at `frame_offset + f * joint_count` — which is the whole of the
- arithmetic that reaches an instance.
+ segment starts at `frame_offset + f * joint_count`.
 
  `frame_count` includes the endpoint at `t = duration`, so a one-second clip at
- thirty frames a second is thirty-one frames and not thirty. Dropping it would
- make a looping clip skip from the frame before the end back to the start,
- which reads as a hitch once per loop and is the kind of thing that gets blamed
- on the animation.
+ thirty frames a second is thirty-one frames and not thirty. Dropping it makes a
+ looping clip skip from the frame before the end back to the start, which reads
+ as a hitch once per loop and gets blamed on the animation.
 *>
 struct BakedPose
 {
@@ -81,17 +74,16 @@ struct BakedPose
 <*
  How finely a clip is sampled.
 
- Thirty is what the reference implementation this was modelled on uses, and it is
- the rate at which the quantisation stops being visible on ordinary locomotion.
- It is a constant rather than a parameter because the memory it decides is
- per asset and the number that would want tuning — a slow, close-up performance
+ Thirty is the rate at which the quantisation stops being visible on ordinary
+ locomotion. A constant rather than a parameter because the memory it decides is
+ per asset, and the case that would want tuning — a slow, close-up performance
  that shows the stepping — is better answered by the live palette than by baking
  the whole file finer.
 *>
 const float BAKE_FPS = 30.0;
 
-// One node's transform while a frame is being posed. The three channels have to
-// be carried separately rather than as a matrix, because a clip may drive one of
+// One node's transform while a frame is being posed. The three channels are
+// carried separately rather than as a matrix, because a clip may drive one of
 // them and leave the other two at the file's own values.
 struct PosedNode @local
 {
@@ -101,23 +93,22 @@ struct PosedNode @local
 }
 
 <*
- Bake every clip of every skin of an asset into one device-local buffer.
+ Bakes every clip of every skin of an asset into one device-local buffer.
 
  Called from `Assets.ensure_uploaded` the first time a skinned primitive of the
  file reaches the device, so a file that describes a skeleton and never draws it
- bakes nothing — G3/S3's rule, one level up from where `ensure_clip` applies it.
+ bakes nothing.
 
- **Every clip at once, rather than one at a time.** Baking lazily per clip would
- mean growing a device-local buffer, which is a copy command and a barrier or a
- CPU mirror of the whole table; and a character's clips *are* the character —
- nobody ships a walk cycle they do not intend to play. So the first play of
- anything pays for all of it, once, and every offset handed out afterwards stays
- valid for the life of the asset.
+ Every clip at once rather than one at a time. Baking lazily per clip would mean
+ growing a device-local buffer — a copy command and a barrier, or a CPU mirror of
+ the whole table — and a character's clips *are* the character: nobody ships a
+ walk cycle they do not intend to play. So the first play of anything pays for
+ all of it once, and every offset handed out afterwards stays valid for the life
+ of the asset.
 
  Failure is not fatal to the asset. A skin whose inverse bind accessor will not
  read leaves the buffer unbuilt, every skinned node keeps `pose == 0`, and the
- mesh draws its bind pose — which is the same answer `ensure_uploaded` gives for
- a primitive that would not upload.
+ mesh draws its bind pose.
 *>
 fn void? Assets.ensure_poses(&self, Gpu* gpu, AssetId id)
 {
@@ -155,18 +146,17 @@ fn void? Assets.ensure_poses(&self, Gpu* gpu, AssetId id)
 }
 
 <*
- Read one skin's inverse bind matrices, and the bind matrices that undo them.
+ Reads one skin's inverse bind matrices, and the bind matrices that undo them.
 
- **No transpose.** glTF stores a MAT4 column-major and C3's `Matrix4f` is
+ No transpose. glTF stores a MAT4 column-major and C3's `Matrix4f` is
  column-major — `to_matrix` in gltf.c3l puts the translation at m[12..14] and
  `Node.world_position` reads it back from there — so the accessor's bytes are the
  matrix. `gltf.c3l`'s `@build_skin_matrixes` transposes twice on the way through,
  which is right for a consumer that wants row-major and is not this one.
 
- That is a claim worth a check rather than a comment, and it has one:
- `the_rest_pose_is_the_identity` fails on a transposed read, because a
- transposed `translate(0, -1, 0)` puts its -1 in the bottom row where it becomes
- a projective term instead of cancelling the joint's own translation.
+ `the_rest_pose_is_the_identity` fails on a transposed read: a transposed
+ `translate(0, -1, 0)` puts its -1 in the bottom row, where it becomes a
+ projective term instead of cancelling the joint's own translation.
 
  A skin with no accessor gets identity matrices, which is what the specification
  says an absent `inverseBindMatrices` means: the mesh is already in each joint's
@@ -210,13 +200,14 @@ fn void read_inverse_binds(Asset* asset, uint index) @local
 }
 
 <*
- Decide where every segment goes, and return how many matrices the buffer needs.
+ Decides where every segment goes, and returns how many matrices the buffer
+ needs.
 
- Rest poses first, all of them, so that a skin's rest offset is small and stable
- and does not move when a clip is added. Then one segment per (skin, clip): a
- clip is baked per skin because a joint matrix is only meaningful against the
- inverse bind pose it was folded through, so two skins playing one clip are two
- different sets of matrices.
+ Rest poses first, all of them, so a skin's rest offset is small and stable and
+ does not move when a clip is added. Then one segment per (skin, clip): a clip is
+ baked per skin because a joint matrix is only meaningful against the inverse
+ bind pose it was folded through, so two skins playing one clip are two different
+ sets of matrices.
 *>
 fn uint plan_segments(Asset* asset) @local
 {
@@ -256,9 +247,9 @@ fn uint plan_segments(Asset* asset) @local
 <*
  How many frames a clip of this length bakes to, endpoint included.
 
- A zero-length clip — a pose rather than an animation, which is a legal thing for
- a file to contain — is one frame, not zero: a segment with no frames is an offset
- nothing can key, and the instance keying it would read whatever sat there.
+ A zero-length clip — a pose rather than an animation, which a file may legally
+ contain — is one frame, not zero: a segment with no frames is an offset nothing
+ can key, and the instance keying it would read whatever sat there.
 *>
 fn uint frame_count_of(float duration) @local
 {
@@ -267,18 +258,17 @@ fn uint frame_count_of(float duration) @local
 }
 
 <*
- Fill the planned buffer: every rest pose, then every frame of every segment.
+ Fills the planned buffer: every rest pose, then every frame of every segment.
 
- **Public, and that is for the tests.** What matters about a bake is the numbers
- in it, and they are on the device a moment after this returns — checking them
- through a picture would mean a render test for every arithmetic mistake, and a
- readback would mean a staging buffer built for nothing else. So the function
- that fills the array is callable with an array of the caller's own, and
- `the_rest_pose_is_the_identity` and `a_bent_joint_puts_the_tip_where_the_maths_says`
- run it over the same inputs the upload ran it over.
+ Public for the tests. What matters about a bake is the numbers in it, and they
+ are on the device a moment after this returns — checking them through a picture
+ would mean a render test for every arithmetic mistake, and a readback would mean
+ a staging buffer built for nothing else. So this is callable with an array of
+ the caller's own, and `the_rest_pose_is_the_identity` and
+ `a_bent_joint_puts_the_tip_where_the_maths_says` run it over the same inputs the
+ upload ran it over.
 
- Deterministic in both directions: same asset, same output, which is what makes
- that a check rather than a coincidence.
+ Deterministic: same asset, same output.
 
  @param poses : `At least Asset.pose_matrices long, which plan_segments decided.`
 *>
@@ -297,8 +287,7 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 	}
 
 	// The rest poses. `null` for the clip means "the file's own node transforms",
-	// which is the bind pose, so every matrix here should come out the identity —
-	// see `the_rest_pose_is_the_identity`.
+	// which is the bind pose, so every matrix here should come out the identity.
 	pose_at(asset, null, 0, scratch, locals, world);
 	foreach (&skin : asset.skins)
 	{
@@ -312,8 +301,8 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 
 		for (uint frame = 0; frame < segment.frame_count; frame++)
 		{
-			// The clip's own numbers: glTF times are absolute and need not start at
-			// zero, so a frame is measured from `start` rather than from zero.
+			// The clip's own numbers: glTF times are absolute and need not start
+			// at zero, so a frame is measured from `start` rather than from zero.
 			float time = clip.start + (float)frame / segment.fps;
 			pose_at(asset, clip, time, scratch, locals, world);
 
@@ -324,14 +313,14 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 }
 
 <*
- Put the asset's nodes into the pose a clip holds at `time`, and compose their
+ Puts the asset's nodes into the pose a clip holds at `time`, and composes their
  world matrices.
 
  The same two halves `AnimationPlayer` runs per frame on the live scene graph,
  done here on the asset's own copy of the hierarchy — which is why nothing about
  baking needs a `Scene`, and why a hundred instances share one bake.
 
- `clip` may be null, which means the file's own transforms: the bind pose.
+ `clip` may be null, meaning the file's own transforms: the bind pose.
 *>
 fn void pose_at(
 	Asset* asset,
@@ -401,10 +390,10 @@ fn void compose_from(Asset* asset, uint index, Matrix4f parent, Matrix4f[] local
 <*
  One skin's joint matrices for a pose that has already been composed.
 
- `world * inverse_bind` and in that order: the inverse bind takes a vertex out of
+ `world * inverse_bind`, in that order: the inverse bind takes a vertex out of
  the mesh's bind pose and into the joint's own space, and the world matrix then
- puts it wherever that joint has moved to. Reversing them is the mistake that
- produces a mesh turned inside out around its own root rather than a posed one.
+ puts it wherever that joint has moved to. Reversing them produces a mesh turned
+ inside out around its own root rather than a posed one.
 *>
 fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[] out) @local
 {
@@ -428,9 +417,9 @@ fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[]
  and that is the right direction to be wrong in: too big keeps a draw the frustum
  could have skipped, too small drops a character the camera can see.
 
- The alternative, an exact bound, is a pass over every vertex of every frame, and
- buys back a handful of draw calls in exchange for the bake becoming the slow part
- of loading a character.
+ An exact bound would be a pass over every vertex of every frame, buying back a
+ handful of draw calls in exchange for the bake becoming the slow part of loading
+ a character.
 *>
 fn void measure_skinned_bounds(Asset* asset, Matrix4f[] poses) @local
 {

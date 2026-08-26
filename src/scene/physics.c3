@@ -29,22 +29,21 @@ const String PHYSICS_OWNS_TRANSFORM =
 	"yourself, or three.physics.remove(object) first.";
 
 // The fixed tick. Not a setting: two worlds stepped at different rates are two
-// different simulations, and the determinism `PhysicsWorld.state_hash` offers
-// is worth more than a knob.
+// different simulations, and the determinism `PhysicsWorld.state_hash` offers is
+// worth more than a knob.
 const double PHYSICS_STEP_MS = 1000.0 / 60.0;
 
-// The most steps one frame may run to catch up. Past this the backlog is
-// dropped rather than run, which is the whole difference between a stutter and
-// a spiral: every frame that ran long would otherwise ask the next one to run
-// longer still.
+// The most steps one frame may run to catch up. Past this the backlog is dropped
+// rather than run, which is the difference between a stutter and a spiral: every
+// frame that ran long would otherwise ask the next one to run longer still.
 const int PHYSICS_MAX_STEPS = 5;
 
-// How far a body may get from the origin before it is treated as lost rather
-// than merely falling. Ten kilometres of world units: past anything a scene
-// means, and well short of where float precision stops describing a position.
+// How far a body may get from the origin before it is treated as lost rather than
+// merely falling. Ten kilometres of world units: past anything a scene means, and
+// well short of where float precision stops describing a position.
 const float DIVERGED_DISTANCE_SQ = 10_000.0f * 10_000.0f;
 
-// Y-up. See the header — this is the only place a gravity direction is chosen.
+// Y-up. The only place a gravity direction is chosen.
 const Vec3 PHYSICS_GRAVITY = { 0, -9.8, 0 };
 
 enum BodyKind : char
@@ -65,15 +64,13 @@ enum ColliderShape : char
 	 The terrain itself — the grid of heights a `TerrainGeometry` was built from,
 	 handed to the solver as one shape.
 
-	 **Only for a node whose mesh is a terrain**, because it is the only mesh that
-	 has a grid; anything else is refused by name at `build_collider` rather than
-	 being approximated into something that would look right and behave wrongly.
+	 Only for a node whose mesh is a terrain, because that is the only mesh with a
+	 grid; anything else is refused by name at `build_collider` rather than
+	 approximated into something that would look right and behave wrongly.
 
-	 `plan.md` §20.4 is why it exists. The alternative, and what the level before
-	 it actually shipped, is a chain of invisible box colliders — 81 of them for
-	 one corridor, and a path that had to be dead flat at y = 0 for its whole
-	 length because a flat floor is the only shape a chain of axis-aligned boxes
-	 can be.
+	 The alternative is a chain of invisible box colliders — 81 of them for one
+	 corridor, and a path that has to be dead flat at y = 0 for its whole length,
+	 because a flat floor is the only shape a chain of axis-aligned boxes can be.
 	*>
 	HEIGHTFIELD,
 }
@@ -90,15 +87,15 @@ struct PhysicsBody
 
 	// The collider, on the heap and owned here.
 	//
-	// **The address is the point.** `TransformedShape.shape` is an interface
-	// value pointing straight at this allocation, so a `List` of shapes that
-	// reallocated on its next push would leave every body already in the world
-	// pointing into freed memory. One allocation per body, released in `drop`.
+	// The address is the point. `TransformedShape.shape` is an interface value
+	// pointing straight at this allocation, so a `List` of shapes that reallocated
+	// on its next push would leave every body already in the world pointing into
+	// freed memory. One allocation per body, released in `drop`.
 	void* collider; //CollisionShape
 }
 
 <*
- Give back the one allocation a body owns.
+ Gives back the one allocation a body owns.
 
  Typed on the way out because a `collision::Mesh` has lists of its own and
  `mem::free` on the outer pointer would leak both of them.
@@ -124,11 +121,11 @@ fn void PhysicsBody.drop(&self)
 <*
  A trigger overlap starting or ending, in the terms a script thinks in.
 
- **Nodes rather than body ids, resolved here rather than at dispatch.** The
- whole point of `remove_body` emitting EXIT is that a body destroyed inside a
- trigger is still seen to leave it — and by the time the handler runs, that body
- is gone from `bodies` and its id resolves to nothing. Whatever a script is told
- has to be captured while the body still exists.
+ Nodes rather than body ids, resolved here rather than at dispatch. The point of
+ `remove_body` emitting EXIT is that a body destroyed inside a trigger is still
+ seen to leave it — and by the time the handler runs, that body is gone from
+ `bodies` and its id resolves to nothing. Whatever a script is told has to be
+ captured while the body still exists.
 *>
 struct TriggerHit
 {
@@ -138,8 +135,8 @@ struct TriggerHit
 }
 
 <*
- Two bodies touching or coming apart. `normal` and `point` mean something only
- on a start, which is the library's rule and is repeated in the doc the prelude
+ Two bodies touching or coming apart. `normal` and `point` mean something only on
+ a start, which is the library's rule and is repeated in the doc the prelude
  hands out rather than papered over here.
 *>
 struct ContactHit
@@ -162,14 +159,14 @@ struct Physics
 	// Drained off the world after every step *and* after every removal, and
 	// emptied by the dispatch in `js/bind_physics.c3`.
 	//
-	// Held here rather than read straight off the world because `run_step`
-	// clears the world's own lists at the top: a body removed between frames
-	// would otherwise have its EXIT events wiped before anything saw them.
+	// Held here rather than read straight off the world because `run_step` clears
+	// the world's own lists at the top: a body removed between frames would
+	// otherwise have its EXIT events wiped before anything saw them.
 	List{TriggerHit} trigger_events;
 	List{ContactHit} contact_events;
 
-	// Bodies the solver lost control of, taken out of the world and waiting to
-	// be reported. See `Physics.evict_diverged`.
+	// Bodies the solver lost control of, taken out of the world and waiting to be
+	// reported. See `Physics.evict_diverged`.
 	List{NodeId} diverged;
 
 	bool opened;
@@ -179,32 +176,29 @@ fn void Physics.open(&self)
 {
 	if (self.opened) return;
 	self.world = collision::DEFAULT_PHYSICS_WORLD;
-	// **On the heap, explicitly.** A zero-valued C3 map or list initializes
-	// itself into the *temp* allocator on first use, and a world that outlives
-	// a frame cannot have its storage in a pool that is released at the end of
-	// one. Measured the hard way: it crashes inside a hash table, several
-	// frames from anything that mentions physics.
+	// On the heap, explicitly. A zero-valued C3 map or list initializes itself
+	// into the *temp* allocator on first use, and a world that outlives a frame
+	// cannot have its storage in a pool released at the end of one. The crash
+	// lands inside a hash table, several frames from anything that mentions
+	// physics.
 	self.world.init(mem);
 	self.world.gravity = PHYSICS_GRAVITY;
 
-	// **And this side's lists too, for the same reason.** A bare C3 list binds
-	// itself to the temp allocator on its first push, so `bodies` would live in
-	// whichever frame's pool happened to be open when the first body was added
-	// and be freed under the world at the end of it. What that looks like is
-	// worth writing down: `len()` keeps answering, because the count is in the
-	// struct and only the buffer is gone, so the world goes on stepping while
-	// every body reads as garbage and nothing is written back. It looks like
-	// physics that runs but does not move anything.
+	// And this side's lists too, for the same reason. A bare C3 list binds itself
+	// to the temp allocator on its first push, so `bodies` would live in whichever
+	// frame's pool happened to be open when the first body was added. What that
+	// looks like: `len()` keeps answering, because the count is in the struct and
+	// only the buffer is gone, so the world goes on stepping while every body
+	// reads as garbage and nothing is written back — physics that runs but does
+	// not move anything.
 	self.bodies.init(mem);
 	self.trigger_events.init(mem);
 	self.contact_events.init(mem);
 	self.diverged.init(mem);
-	// **Single-threaded, deliberately** — `game.md` G5/S8. `plan.md`'s design
-	// rests on handlers, scene and device all being touched from one thread, so
-	// nothing needs a lock. The solver's pool is confined to the inside of
-	// `run_step` and joined before it returns, but a body count that fits in a
-	// scene an agent builds is not where a thread pool pays for itself, and one
-	// thread is the version whose failure modes are all already understood.
+	// Single-threaded, deliberately. Handlers, scene and device are all touched
+	// from one thread, so nothing needs a lock. The solver's pool is confined to
+	// the inside of `run_step` and joined before it returns, but a body count that
+	// fits in a scene an agent builds is not where a thread pool pays for itself.
 	self.world.thread_count = 1;
 	self.next_id = 1;
 	self.opened = true;
@@ -227,8 +221,8 @@ fn void Physics.close(&self)
  The body on a node, or null.
 
  A linear scan, and the early return is what makes it free: a scene with no
- bodies pays nothing, and that is the common case for the transform-write check
- in `bind_scene.c3` which asks this on every write a script makes.
+ bodies pays nothing, which is the common case for the transform-write check in
+ `bind_scene.c3` that asks this on every write a script makes.
 *>
 fn PhysicsBody* Physics.body_for(&self, NodeId node)
 {
@@ -243,11 +237,11 @@ fn PhysicsBody* Physics.body_for(&self, NodeId node)
 <*
  The solver's body for a node, or null.
 
- `Physics.body_for` answers with this side's record — the node, the collider,
- the kind. This answers with the *solver's*, which is where the velocity lives
- and where an impulse has to land. Two lookups rather than one field because the
- solver owns its own storage and hands out a pointer that a later `add_body`
- could move; taking it fresh at each call is what makes that safe.
+ `Physics.body_for` answers with this side's record — the node, the collider, the
+ kind. This answers with the *solver's*, which is where the velocity lives and
+ where an impulse has to land. Two lookups rather than one field because the
+ solver owns its own storage and hands out a pointer a later `add_body` could
+ move; taking it fresh at each call is what makes that safe.
 *>
 fn collision::Rigidbody* Physics.rigidbody_for(&self, NodeId node)
 {
@@ -263,18 +257,18 @@ fn collision::Rigidbody* Physics.rigidbody_for(&self, NodeId node)
 <*
  Whether a script may set this node's velocity or push it with an impulse.
 
- **Dynamic only, and the two refusals are different mistakes.** A static body
- has an inverse mass of zero, so an impulse is arithmetically a no-op and a
- velocity written onto it is overwritten by the next integration — the script
- would see nothing happen and have nothing to read. A kinematic body has its
- transform driven from the script every step by `set_kinematic_target`, so a
- velocity written here is discarded a fraction of a step later, which is worse
- than the static case because it *sometimes* appears to work.
+ Dynamic only, and the two refusals are different mistakes. A static body has an
+ inverse mass of zero, so an impulse is arithmetically a no-op and a velocity
+ written onto it is overwritten by the next integration — the script sees nothing
+ happen and has nothing to read. A kinematic body has its transform driven from
+ the script every step by `set_kinematic_target`, so a velocity written here is
+ discarded a fraction of a step later, which is worse because it *sometimes*
+ appears to work.
 
- Both are refused by name at the binding rather than silently absorbed here.
- That is the same call `Scene.set_position` makes for a dynamic body's transform,
- pointing the other way: each kind of body has exactly one way to be moved, and
- the other one throws.
+ Both are refused by name at the binding rather than silently absorbed here — the
+ same call `Scene.set_position` makes for a dynamic body's transform, pointing
+ the other way: each kind of body has exactly one way to be moved, and the other
+ one throws.
 *>
 fn bool Physics.can_be_pushed(&self, NodeId node)
 {
@@ -283,37 +277,22 @@ fn bool Physics.can_be_pushed(&self, NodeId node)
 }
 
 <*
- Wake a body that an impulse or a velocity is about to reach.
+ Wakes a body that an impulse or a velocity is about to reach.
 
- The obvious reason first: a body at rest for half a second is asleep, and a
- sleeping body is skipped by integration entirely, so an impulse applied to one
- changes a number nothing will ever read. Without this the same line of script
- works on a rolling crate and does nothing at all to a settled one, which reads
- as the verb being unreliable rather than as sleep. The *island* rather than the
- body alone, because whatever this one is resting on has to start being
- integrated too, or the push drives it into a neighbour that is not moving yet.
+ A body at rest for half a second is asleep, and a sleeping body is skipped by
+ integration entirely, so an impulse applied to one changes a number nothing will
+ ever read. Without this the same line of script works on a rolling crate and
+ does nothing to a settled one, which reads as the verb being unreliable rather
+ than as sleep. The *island* rather than the body alone, because whatever this
+ one is resting on has to start being integrated too, or the push drives it into
+ a neighbour that is not moving yet.
 
- **It is not an optimisation.** Removing these two lines turns
- `an_impulse_wakes_a_settled_body_and_moves_it` red: a settled ball given a
- six-unit impulse travels -0.003 units, because the push landed in a velocity
- the integrator never reads. That is exactly the state a binding which only
- wrote `linear_velocity` would leave behind on its very first call.
-
- So a script cannot be trusted to wake a body itself, and this cannot be moved
- to the prelude: `an_impulse_wakes_a_settled_body_and_moves_it` says so.
-
- **This entry used to claim the injection produced a hang rather than a red
- check, and blamed the solver's island bookkeeping. That was wrong**, and the
- way it was wrong is worth keeping. The hang was real but second-order: a
- failing check `longjmp`s out of the test, which skips every `defer` and so
- skipped `Physics.close`, leaving the solver's worker thread parked on a mutex
- inside the abandoned test's stack frame — which the *next* physics test then
- reused for its own world. The pool has been fixed to hold that state in a
- heap block the workers own (`collision.c3l`'s `PoolState`, and
- `collision_tests::pool::an_abandoned_pool_does_not_capture_the_next_one`), so
- the injection now reports itself as the red check above. Sleep and the thread
- pool were never connected; a check that fails loudly is the only reason it
- ever looked as though they were.
+ Not an optimisation: removing these two lines turns
+ `an_impulse_wakes_a_settled_body_and_moves_it` red — a settled ball given a
+ six-unit impulse travels -0.003 units, because the push landed in a velocity the
+ integrator never reads. That is exactly the state a binding which only wrote
+ `linear_velocity` would leave behind on its first call, which is why this cannot
+ be moved to the prelude.
 *>
 fn void Physics.wake(&self, collision::Rigidbody* rigid)
 {
@@ -336,14 +315,14 @@ fn bool Physics.owns_transform(&self, NodeId node)
 }
 
 <*
- Build the collider a body will carry, from the mesh the node draws.
+ Builds the collider a body will carry, from the mesh the node draws.
 
- `game.md` G5/S4: the collider comes from the asset. A box and a sphere are the
- mesh's own bounds, which every mesh slot carries from the moment its glTF was
- parsed; a hull is `collision::quickhull` over the positions the picking tree
- already keeps, which is **exactly what `ConvexGeometry` does** — so a convex
- rock's collider is its own geometry, computed by the same function, and is
- exact rather than an approximation of itself.
+ The collider comes from the asset. A box and a sphere are the mesh's own bounds,
+ which every mesh slot carries from the moment its glTF was parsed; a hull is
+ `collision::quickhull` over the positions the picking tree already keeps, which
+ is exactly what `ConvexGeometry` does — so a convex rock's collider is its own
+ geometry, computed by the same function, and is exact rather than an
+ approximation of itself.
 
  Answers null when the node draws nothing, because there is then no size to take
  and guessing one is worse than saying so.
@@ -395,10 +374,10 @@ fn void*? Physics.build_collider(
 			return capsule;
 
 		case HULL:
-			// `hull_positions` is the picking tree's, and it exists from the
-			// mesh's upload — which `scene.add()` triggers, so a node in the
-			// scene has one. A mesh that never reached the device has not got
-			// one, and a box of the right size beats a hull of nothing.
+			// `hull_positions` is the picking tree's, and it exists from the mesh's
+			// upload — which `scene.add()` triggers, so a node in the scene has one.
+			// A mesh that never reached the device has not, and a box of the right
+			// size beats a hull of nothing.
 			if (slot.hull_positions.len == 0) return MESH_HAS_NO_HULL~;
 
 			collision::Mesh hull = collision::quickhull(slot.hull_positions);
@@ -412,9 +391,9 @@ fn void*? Physics.build_collider(
 			return heap;
 
 		case HEIGHTFIELD:
-			// **The grid the geometry was built from, not a reconstruction of
-			// it.** A terrain asset keeps its `Heightfield`, so the collider is
-			// the same numbers the vertices came out of — which is what makes
+			// The grid the geometry was built from, not a reconstruction of it. A
+			// terrain asset keeps its `Heightfield`, so the collider is the same
+			// numbers the vertices came out of — which makes
 			// `terrain.heightAt(x, z)` and the ground a body rests on the same
 			// surface by construction rather than by two derivations agreeing.
 			Heightfield* field = assets.terrain_field(node.asset);
@@ -426,17 +405,16 @@ fn void*? Physics.build_collider(
 <*
  A `collision::Heightmap` from a terrain's own grid.
 
- **The one thing that is not a straight copy is the cell size.** A
- `collision::Heightmap` has one, and a `Heightfield` has two — `width /
- segments` and `depth / segments` — which are the same number only for a square
- terrain. Rather than refuse a rectangular one, or grow the library's shape a
- second cell size that nothing else would ever set, the heights are resampled
- onto a square grid at the finer of the two spacings.
+ The one thing that is not a straight copy is the cell size. A
+ `collision::Heightmap` has one, and a `Heightfield` has two — `width / segments`
+ and `depth / segments` — which are the same number only for a square terrain.
+ Rather than refuse a rectangular one, or grow the library's shape a second cell
+ size nothing else would set, the heights are resampled onto a square grid at the
+ finer of the two spacings.
 
- **For a square terrain that resampling is exact and free**: the sample points
- land on the original grid points, and `height_at` at a grid point returns that
- sample. It is the rectangular case that pays, and it pays in memory rather than
- in accuracy.
+ For a square terrain that resampling is exact and free: the sample points land
+ on the original grid points, and `height_at` at a grid point returns that
+ sample. The rectangular case pays, and it pays in memory rather than in accuracy.
 
  @return `A heap Heightmap the body owns, freed by PhysicsBody.drop.`
 *>
@@ -448,13 +426,12 @@ fn collision::Heightmap* build_heightmap(Heightfield* field)
 	uint nx = (uint)math::ceil(field.width / cell) + 1;
 	uint nz = (uint)math::ceil(field.depth / cell) + 1;
 
-	// **On the heap, explicitly.** A zero-valued C3 list binds itself to the
-	// *temp* allocator on its first push, and this one outlives every pool there
-	// is — it is owned by a body. The failure that causes is not a crash: the
-	// pool is released, the heights become whatever is there now, and bodies
-	// start falling through terrain or being flung out of the world by a
-	// correction computed from garbage. Same trap, and the same fix, as
-	// `SpatialHash3D.cell`.
+	// On the heap, explicitly. A zero-valued C3 list binds itself to the *temp*
+	// allocator on its first push, and this one is owned by a body and outlives
+	// every pool there is. The failure is not a crash: the pool is released, the
+	// heights become whatever is there now, and bodies start falling through
+	// terrain or being flung out of the world by a correction computed from
+	// garbage.
 	collision::Heights heights;
 	heights.init(mem, (usz)nx * (usz)nz);
 
@@ -478,7 +455,7 @@ fn collision::Heightmap* build_heightmap(Heightfield* field)
 }
 
 <*
- Hand the collider to the world as the interface value it wants.
+ Hands the collider to the world as the interface value it wants.
 
  The cast back is unavoidable: `PhysicsBody` keeps a `void*` because the four
  shapes have four types and one field, and the interface value has to be built
@@ -505,7 +482,7 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
 }
 
 <*
- Give a node a body.
+ Gives a node a body.
 
  Adding twice replaces rather than stacks, which is what a script re-running its
  own setup does and the only behaviour that does not slowly fill the world with
@@ -523,9 +500,9 @@ fn void? Physics.add(
 	Node* node = scene.node(node_id);
 	if (node == null) return NODE_HAS_NO_MESH~;
 
-	// World space, so the parent has to be what world space is measured from.
-	// See the header: the alternative is writing a world transform into a
-	// nested node's local slot every frame and calling the result physics.
+	// World space, so the parent has to be what world space is measured from. The
+	// alternative is writing a world transform into a nested node's local slot
+	// every frame and calling the result physics.
 	if (!(node.parent == scene.root)) return NODE_IS_NOT_TOP_LEVEL~;
 
 	self.remove(node_id);
@@ -570,7 +547,7 @@ fn void? Physics.add(
 }
 
 <*
- Take a node's body away. False when it had none, so removing twice is not an
+ Takes a node's body away. False when it had none, so removing twice is not an
  error — the same answer `PhysicsWorld.remove_body` gives for the same reason.
 *>
 fn bool Physics.remove(&self, NodeId node)
@@ -582,11 +559,10 @@ fn bool Physics.remove(&self, NodeId node)
 		if (!(body.node == node)) continue;
 
 		self.world.remove_body(body.id);
-		// **Drained here rather than at the next step.** `run_step` clears the
-		// world's event lists at the top, so the EXIT and END events
-		// `remove_body` just emitted — for a body destroyed inside a trigger,
-		// which is the case that matters — would be gone before anything read
-		// them.
+		// Drained here rather than at the next step. `run_step` clears the world's
+		// event lists at the top, so the EXIT and END events `remove_body` just
+		// emitted — for a body destroyed inside a trigger, which is the case that
+		// matters — would be gone before anything read them.
 		self.harvest();
 
 		body.drop();
@@ -597,7 +573,7 @@ fn bool Physics.remove(&self, NodeId node)
 }
 
 <*
- Move the world's events somewhere `run_step` will not clear them from.
+ Moves the world's events somewhere `run_step` will not clear them from.
 *>
 fn void Physics.harvest(&self)
 {
@@ -624,11 +600,11 @@ fn void Physics.harvest(&self)
 }
 
 <*
- Forget what nobody is going to be told.
+ Forgets what nobody is going to be told.
 
- Called on the frames that dispatch nothing — no animation loop means no
- handlers run, exactly as it does for keys and clicks — so a world stepping
- under a scene with no callback cannot grow a list forever.
+ Called on the frames that dispatch nothing — no animation loop means no handlers
+ run, exactly as for keys and clicks — so a world stepping under a scene with no
+ callback cannot grow a list forever.
 *>
 fn void Physics.drop_events(&self)
 {
@@ -637,8 +613,8 @@ fn void Physics.drop_events(&self)
 }
 
 <*
- The node a body id belongs to, or NO_NODE. What event dispatch needs: the
- solver speaks in body ids and a script has only ever seen objects.
+ The node a body id belongs to, or NO_NODE. What event dispatch needs: the solver
+ speaks in body ids and a script has only ever seen objects.
 *>
 fn NodeId Physics.node_of(&self, sz id)
 {
@@ -650,19 +626,18 @@ fn NodeId Physics.node_of(&self, sz id)
 }
 
 <*
- Set the world's gravity. Y-up, in world units per second squared.
+ Sets the world's gravity. Y-up, in world units per second squared.
 *>
 fn void Physics.set_gravity(&self, Vec3 gravity)
 {
 	self.open();
 	self.world.gravity = gravity;
 
-	// **The wake is the half that is easy to leave out.** A settled scene has
-	// put its bodies to sleep, and a sleeping body is skipped by the integrator
-	// — so gravity changes and nothing falls, which reads as the setting having
-	// been ignored. The library has no gravity setter to hide this in, so it is
-	// done here: everything that is not static gets woken, since the new pull
-	// is a different pull on all of it.
+	// The wake is the half that is easy to leave out. A settled scene has put its
+	// bodies to sleep, and a sleeping body is skipped by the integrator — so
+	// gravity changes and nothing falls, which reads as the setting having been
+	// ignored. The library has no gravity setter to hide this in, so everything
+	// that is not static gets woken: the new pull is a different pull on all of it.
 	collision::RigidBodyIterator iter = self.world.bodies.value_iter();
 	while (iter.next())
 	{
@@ -674,7 +649,7 @@ fn void Physics.set_gravity(&self, Vec3 gravity)
 }
 
 <*
- Push whatever a script wrote onto the kinematic bodies, before the step.
+ Pushes whatever a script wrote onto the kinematic bodies, before the step.
 
  `set_kinematic_target` derives a velocity from the delta, which is what lets a
  dynamic body bounce off a moving platform correctly instead of being teleported
@@ -694,7 +669,7 @@ fn void Physics.drive_kinematic(&self, Scene* scene)
 }
 
 <*
- Copy the solver's answer back onto the nodes it owns.
+ Copies the solver's answer back onto the nodes it owns.
 
  Dynamic only. A static body never moved, and a kinematic one is already where
  the script put it — writing back over that would undo the very thing kinematic
@@ -714,23 +689,22 @@ fn void Physics.write_back(&self, Scene* scene)
 
 		node.position = rigid.collider.translation;
 		node.rotation = rigid.collider.rotation;
-		// Not `node.dirty = true`: the flag alone stopped being enough in §19.5,
-		// when the world-matrix walk gained the right to skip itself. See
-		// `Scene.mark_moved`.
+		// Not `node.dirty = true`: the flag alone is not enough now that the
+		// world-matrix walk may skip itself. See `Scene.mark_moved`.
 		scene.mark_moved(body.node);
 	}
 }
 
 <*
- Take out any body the solver has lost control of.
+ Takes out any body the solver has lost control of.
 
- **A scene an agent built will contain interpenetrating geometry**, because
+ A scene an agent built will contain interpenetrating geometry, because
  describing a scene in a script is exactly how a box ends up spawned inside a
- wall. XPBD answers a deep overlap with a correspondingly deep correction, and
- a few substeps of that produces a transform with no finite value in it. The
- next `spatial_map.update` then trips a `@require` and takes the process with
- it — which is the worst possible outcome for an API whose whole point is that
- an agent can try something, look at the picture and correct it.
+ wall. XPBD answers a deep overlap with a correspondingly deep correction, and a
+ few substeps of that produces a transform with no finite value in it. The next
+ `spatial_map.update` then trips a `@require` and takes the process with it —
+ the worst possible outcome for an API whose point is that an agent can try
+ something, look at the picture and correct it.
 
  So the check is here, before the step, and a body that has gone non-finite or
  implausibly far is removed and reported rather than stepped again. It cannot
@@ -759,9 +733,9 @@ fn sz Physics.evict_diverged(&self)
 			&& math::is_finite(rigid.collider.rotation.k)
 			&& math::is_finite(rigid.collider.rotation.l);
 
-		// The bound is generous on purpose: a body that has fallen off the
-		// world is a game's business and not a failure, so only something that
-		// has plainly left the simulation is taken.
+		// The bound is generous on purpose: a body that has fallen off the world is
+		// a game's business and not a failure, so only something that has plainly
+		// left the simulation is taken.
 		bool in_range = finite && at.x * at.x + at.y * at.y + at.z * at.z < DIVERGED_DISTANCE_SQ;
 
 		if (!in_range)
@@ -775,7 +749,7 @@ fn sz Physics.evict_diverged(&self)
 }
 
 <*
- One frame's worth of physics — `game.md` G5/S1.
+ One frame's worth of physics.
 
  The accumulator is the whole of it: whatever the frame took, the world advances
  in fixed 60 Hz steps and keeps the remainder. `PHYSICS_MAX_STEPS` is where a

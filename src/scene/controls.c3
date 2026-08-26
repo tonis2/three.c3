@@ -1,23 +1,20 @@
 <*
  A hand on the window, turned into camera movement.
 
- Left drag orbits, right or middle drag pans, the wheel zooms — the gestures
- Three.js's `OrbitControls` uses, against the turntable `camera.c3` already has.
- There is no new camera model here and there is not meant to be: orbit *is*
- yaw, pitch and distance, which is why this file is short.
+ Left drag orbits, right or middle drag pans, the wheel zooms — Three.js's
+ `OrbitControls` gestures against the turntable `camera.c3` already has. There is
+ no new camera model: orbit *is* yaw, pitch and distance, which is why this file
+ is short.
 
- **Nothing in here knows what a window is.** `PointerState` is four numbers and
- two flags, filled in by `main.c3` from `c3w` and by the tests from nothing at
- all. That split is the only reason any of this is testable: the whole suite
- runs headless, and a control scheme that could only be exercised by a person
- dragging a mouse would be verified by nobody, ever.
+ Nothing here knows what a window is. `PointerState` is four numbers and two
+ flags, filled in by `main.c3` from `c3w` and by the tests from nothing at all.
+ That split is why any of this is testable — the whole suite runs headless.
 
- **It is not a JS API, and one field of it is.** A script reaches the camera
- through `three.camera`, which writes the same fields; last writer wins, frame
- by frame, and neither side needs to know about the other. The exception is
- `enabled`, reached as `three.controls.enabled`, and it exists because
- last-writer-wins is not a scheme two things can share sixty times a second
- when one of them means to hold the camera *still*. See `plan.md` §17.
+ A script reaches the camera through `three.camera`, which writes the same
+ fields; last writer wins, frame by frame, and neither side needs to know about
+ the other. The exception is `enabled`, reached as `three.controls.enabled`,
+ because last-writer-wins is not a scheme two things can share sixty times a
+ second when one of them means to hold the camera *still*.
 *>
 module three;
 
@@ -28,15 +25,13 @@ import std::math::vector;
  What the window has to say about the pointer this frame.
 
  `x` and `y` are in whatever units the platform reports the cursor in — points
- on macOS, pixels elsewhere — and `Controls` only ever takes differences of
- them, so the unit cancels. It matters in exactly one place: `viewport_height`
- has to be in the same unit, or a pan moves by the wrong amount on a retina
- display. `main.c3` divides the surface extent by the window's backing scale
- for that reason.
+ on macOS, pixels elsewhere — and `Controls` only ever takes differences, so the
+ unit cancels. It matters in exactly one place: `viewport_height` has to be in
+ the same unit, or a pan moves by the wrong amount on a retina display, which is
+ why `main.c3` divides the surface extent by the window's backing scale.
 
- **`y` grows upward.** That is Cocoa's origin, not a choice, and it is why
- orbit adds the vertical delta to pitch where a top-left convention would
- subtract it.
+ `y` grows upward. That is Cocoa's origin, and it is why orbit adds the vertical
+ delta to pitch where a top-left convention would subtract it.
 *>
 struct PointerState
 {
@@ -61,27 +56,24 @@ struct Controls
 {
 	// Whether the hand on the window reaches the camera at all.
 	//
-	// **A script that drives its own camera has to be able to say so.** A follow
+	// A script that drives its own camera has to be able to say so. A follow
 	// camera or a first-person look writes yaw, pitch and target every frame,
 	// and the turntable writes them again from whatever the mouse did — two
 	// things fighting over one matrix at sixty hertz, which reads as a camera
-	// that shudders rather than as a control scheme that is wrong. `plan.md` §9
-	// asked whether a script should be allowed to turn this off and §17 answered
-	// yes, because the camera work it gates cannot be designed around an
-	// undecided one.
+	// that shudders rather than as a control scheme that is wrong.
 	//
-	// **It takes the mouse away and nothing else.** `three.camera.orbit()` still
+	// It takes the mouse away and nothing else: `three.camera.orbit()` still
 	// moves the camera, because a script writing the camera on purpose was never
-	// what this is protecting anything from.
+	// what this protects anything from.
 	bool enabled;
 
 	// Whether a button was down *last* frame, and where the cursor was when it
 	// was. Together they are the entire state machine, and `dragging` is the
 	// load-bearing half: without it the first frame of a drag applies the
-	// distance from wherever the cursor happened to be when the button was last
-	// released, which on a wide window is most of a turn. The camera jumps once
-	// and then tracks perfectly, so it reads as a one-off glitch rather than as
-	// a missing state bit.
+	// distance from wherever the cursor was when the button was last released,
+	// which on a wide window is most of a turn. The camera jumps once and then
+	// tracks perfectly, so it reads as a one-off glitch rather than a missing
+	// state bit.
 	bool dragging;
 	float last_x;
 	float last_y;
@@ -101,8 +93,8 @@ struct Controls
 	// matrix degenerates, and there is no scroll direction that gets back out.
 	float min_distance;
 	// The coast's time constant: the velocity falls to 1/e of itself every this
-	// many milliseconds. Zero turns the coast off entirely and the scene stops
-	// the moment the button is released.
+	// many milliseconds. Zero turns the coast off and the scene stops the moment
+	// the button is released.
 	float damping_ms;
 }
 
@@ -114,12 +106,11 @@ const Controls DEFAULT_CONTROLS = {
 	.orbit_degrees_per_point = 0.4,
 	.zoom_per_scroll_point = 0.01,
 	.min_distance = 0.01,
-	// Short. A hard flick is around 0.6 degrees per millisecond, and this
-	// buys it another thirty-odd degrees over a third of a second — enough
-	// to read as weight rather than as a camera that will not settle. Most
-	// drags end slowly anyway, which is exactly why the velocity is measured
-	// from the *last* frame of the drag: a hand that decelerates before it
-	// lets go is saying it wants to stop there.
+	// Short. A hard flick is around 0.6 degrees per millisecond, and this buys
+	// it another thirty-odd degrees over a third of a second — enough to read as
+	// weight rather than as a camera that will not settle. Most drags end slowly
+	// anyway, which is why the velocity is measured from the *last* frame of the
+	// drag: a hand that decelerates before it lets go wants to stop there.
 	.damping_ms = 60,
 };
 
@@ -138,43 +129,40 @@ const float MAX_SPIN_STEP_MS = 100.0;
 const float MIN_SPIN_DEGREES_PER_MS = 0.002;
 
 <*
- Fold one frame of pointer state into the camera.
+ Folds one frame of pointer state into the camera.
 
  Called once per frame with whatever the window reported, whether or not
- anything happened — the no-op case is the common one and has to be cheap and
- silent.
+ anything happened — the no-op case is the common one and has to be cheap.
 
- **Orbit wins when both buttons are down.** Both gestures read the same delta,
- so applying both would move the camera twice for one hand movement; picking
- one is arbitrary but predictable, which is the property that matters.
+ Orbit wins when both buttons are down. Both gestures read the same delta, so
+ applying both would move the camera twice for one hand movement; picking one is
+ arbitrary but predictable, which is the property that matters.
 
  ## The coast
 
  An orbit that stopped the instant the button came up would be the one gesture
- here that has no weight, and a turntable is exactly the thing people expect to
- keep turning. So the last frame's angular velocity is kept and decayed — see
- `damping_ms` — and `apply` keeps answering `true` until it has run out, which
- is what tells the loop it is not idle yet.
+ here with no weight, and a turntable is exactly the thing people expect to keep
+ turning. So the last frame's angular velocity is kept and decayed (see
+ `damping_ms`), and `apply` keeps answering `true` until it runs out, which tells
+ the loop it is not idle yet.
 
- **The velocity is the last frame's, not the whole drag's average.** A hand that
- slows down before it lets go is saying where it wants the scene to stop, and an
- average would throw it past that; a hand that stops dead and then releases sets
- it to zero, which is the same statement made more firmly.
+ The velocity is the last frame's, not the whole drag's average. A hand that
+ slows before letting go is saying where it wants the scene to stop, and an
+ average would throw it past that; a hand that stops dead sets it to zero, which
+ is the same statement made more firmly.
 
  ## Disabled
 
- Every gesture is off, and the state a gesture leaves behind goes with them.
- The anchor would otherwise hold the cursor's position from before the script
- took the mouse — the one-frame jump `dragging` exists to prevent, arriving at
- whatever moment the controls came back — and the spin would be a flick the
- scene had already stopped acknowledging. `released` is cleared for the reason
- the latch guard below gives: a button held across the moment the controls
- return is a button whose press this scheme never saw.
+ Every gesture is off, and the state a gesture leaves behind goes with them. The
+ anchor would otherwise hold the cursor's position from before the script took
+ the mouse — the one-frame jump `dragging` exists to prevent, arriving whenever
+ the controls came back — and the spin would be a flick the scene had already
+ stopped acknowledging. `released` is cleared because a button held across the
+ moment the controls return is a button whose press this scheme never saw.
 
- It is cleared on every disabled frame rather than on the transition to one.
- Detecting the edge would need a second bit remembering the last answer, and the
- whole state here is four fields that are already zero by the second frame — a
- transition nobody has to notice is a transition nobody can get wrong.
+ It is cleared on every disabled frame rather than on the transition to one:
+ detecting the edge would need a second bit remembering the last answer, and the
+ whole state here is four fields that are already zero by the second frame.
 
  @param viewport_height : `Viewport height in the pointer's own units. Pan is skipped when it is not yet known.`
  @param dt_ms : `Milliseconds since the last call. Zero means the caller keeps no clock, and then there is no coast — which is every check that predates one.`
@@ -193,23 +181,20 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 
 	bool held = pointer.orbit || pointer.pan;
 
-	// **A held button is only believed once it has been seen released.**
+	// A held button is only believed once it has been seen released.
 	//
 	// Mouse state arrives as a latch — a flag set by a down event and cleared by
 	// the matching up — and the up does not always come. AppKit runs an event
-	// loop of its own while a window is being dragged by its title bar and
-	// swallows the release, so the flag stays set for the rest of the session.
-	// Every later mouse *movement* is then read as a drag with no button held,
-	// and the scene turns on its own whenever the cursor crosses the window.
+	// loop of its own while a window is dragged by its title bar and swallows the
+	// release, so the flag stays set for the rest of the session. Every later
+	// mouse *movement* is then read as a drag with no button held, and the scene
+	// turns on its own whenever the cursor crosses the window.
 	//
-	// Measured, not theorised: it is what the very first windowed run of this
-	// file did, and no headless test could have found it, because the fault is
-	// in what the window reports rather than in what is done with it.
-	//
-	// Waiting for one button-free frame costs nothing when the mouse is behaving
-	// — the loop renders hundreds of them before anyone reaches the window — and
-	// makes a stuck latch heal at the user's next real click rather than lasting
-	// until the process is restarted.
+	// No headless test can find this: the fault is in what the window reports
+	// rather than in what is done with it. Waiting for one button-free frame
+	// costs nothing when the mouse is behaving — the loop renders hundreds
+	// before anyone reaches the window — and makes a stuck latch heal at the
+	// user's next real click rather than lasting until the process restarts.
 	if (!held) self.released = true;
 	bool dragging = held && self.released;
 
@@ -225,10 +210,9 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 
 	// The anchor is re-set on the press frame — the one frame the guard above
 	// skips — and left alone while nothing is held. Keeping it current with the
-	// cursor at all times would work equally well and was the first version of
-	// this; it was removed because it makes the guard *unnecessary* rather than
-	// merely redundant, and a second mechanism that hides the failure of the
-	// first is a line no test can ever motivate.
+	// cursor at all times works equally well, and was removed because it makes
+	// the guard *unnecessary* rather than merely redundant: a second mechanism
+	// hiding the failure of the first is a line no test can motivate.
 	self.dragging = dragging;
 	if (dragging)
 	{
@@ -244,8 +228,7 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 		// eye left, so the geometry appears to travel right with the cursor.
 		// Getting either backwards is not a crash and not a warning — it is a
 		// control scheme that feels wrong and cannot be argued with, so the
-		// direction is asserted in `controls_test.c3` rather than left to
-		// whoever tries it next.
+		// direction is asserted in `controls_test.c3`.
 		float turn = -dx * self.orbit_degrees_per_point;
 		float tilt = dy * self.orbit_degrees_per_point;
 
@@ -259,14 +242,14 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 
 		// Recorded on every frame of the drag, zero included — including the
 		// press frame, whose delta is deliberately zero. That is what makes a
-		// hand stopping before it lets go stop the scene, and what makes
-		// grabbing a coasting scene catch it.
+		// hand stopping before it lets go stop the scene, and what makes grabbing
+		// a coasting scene catch it.
 		self.remember_spin(turn, tilt, dt_ms);
 	}
 	else if (dragging)
 	{
-		// A pan is a hand on the window too, so it catches the coast even
-		// though it does not feed it.
+		// A pan is a hand on the window too, so it catches the coast even though
+		// it does not feed it.
 		self.yaw_velocity = 0.0f;
 		self.pitch_velocity = 0.0f;
 
@@ -291,9 +274,9 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 	if (pointer.scroll != 0.0f)
 	{
 		// Exponential, not linear. A fixed step per notch is unusable at both
-		// ends at once — either it crawls when the camera is far away or it
-		// slams through the model when it is close — because what a person means
-		// by "closer" is a fraction of where they are, not a number of metres.
+		// ends at once — either it crawls when the camera is far away or it slams
+		// through the model when it is close — because what a person means by
+		// "closer" is a fraction of where they are, not a number of metres.
 		camera.distance = math::max(
 			camera.distance * math::exp(-pointer.scroll * self.zoom_per_scroll_point),
 			self.min_distance
@@ -309,18 +292,15 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 }
 
 <*
- Keep how fast the orbit was going, for the coast to spend.
+ Keeps how fast the orbit was going, for the coast to spend.
 
  Answering in degrees per millisecond rather than per frame is what makes the
  coast independent of the frame rate: the same flick throws the scene the same
  distance on a 60 Hz display and a 120 Hz one, which is not true of anything
- that decays by a fixed fraction per frame.
+ decaying by a fixed fraction per frame.
 
- **`damping_ms` is not read here.** How fast the hand was going is a fact and
- whether to spend it is a policy, and the policy has one owner — `coast`, below.
- Checking it in both places would work and would mean that removing either check
- changed nothing, which is how a guard stops being load-bearing without anybody
- noticing.
+ `damping_ms` is not read here. How fast the hand was going is a fact and whether
+ to spend it is a policy, and the policy has one owner — `coast`, below.
 *>
 fn void Controls.remember_spin(&self, float turn, float tilt, float dt_ms)
 {
@@ -339,7 +319,7 @@ fn void Controls.remember_spin(&self, float turn, float tilt, float dt_ms)
 }
 
 <*
- Spend one frame of the coast, and decay what is left.
+ Spends one frame of the coast, and decays what is left.
 
  @return `true while the scene is still turning, which is also "do not go idle yet".`
 *>
@@ -347,7 +327,7 @@ fn bool Controls.coast(&self, Camera* camera, float dt_ms)
 {
 	// The one place `damping_ms` is read, and the one place a caller with no
 	// clock is refused — the second because answering "yes, it moved" for a
-	// frame that moved nothing is what would keep the window awake forever.
+	// frame that moved nothing would keep the window awake forever.
 	if (self.damping_ms <= 0.0f || dt_ms <= 0.0f) return false;
 	if (!self.spinning()) return false;
 

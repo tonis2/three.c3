@@ -1,14 +1,11 @@
 <*
- The mesh pipeline: one pipeline, one descriptor layout, one push block — and at
- M4, none of the three declared by hand.
+ The mesh pipeline: one pipeline, one descriptor layout, one push block — and
+ none of the three declared by hand.
 
- M1 has no material model, and that is deliberate — `base_stage.md` says one
- shader, a base colour texture and a hardcoded directional light, and calls
- anything more "M1 scope creep dressed as polish". The permutation explosion
- that usually follows a material system is avoided here by a different trick:
- the texture binding is *always* present and carries a 1x1 opaque white image
- when the material has none, so an untextured mesh and a textured one are the
- same pipeline.
+ The permutation explosion a material system usually brings is avoided by one
+ trick: the texture binding is *always* present and carries a 1x1 opaque white
+ image when the material has none, so an untextured mesh and a textured one are
+ the same pipeline.
 
  ## The push block
 
@@ -18,43 +15,36 @@
 	instances    8     8      -> Instance[], already offset to this bucket
 	draw        16     8      -> DrawRecord*, this bucket's own = 24 bytes
 
- **That table is `MESH_PUSH_FIELDS` below, and it is checked against the shader
- on every pipeline build.** Until M4 it was only a comment, and a comment is
- exactly as good as a `slangc` line in a manifest — `plan.md` §6 has that trap
- already, from the time `-force-glsl-scalar-layout` was in one and not the other.
- Slang reflects the real offsets out of the module that is about to run, so a
- field added to one side and not the other is now a sentence at startup instead
- of geometry read at the wrong address.
+ That table is `MESH_PUSH_FIELDS` below, and it is checked against the shader on
+ every pipeline build. As a comment it would be exactly as good as a `slangc`
+ line in a manifest. Slang reflects the real offsets out of the module that is
+ about to run, so a field added to one side and not the other is a sentence at
+ startup instead of geometry read at the wrong address.
 
- **128 bytes is the budget and it is not a coincidence** — it is the push
- constant size every Vulkan implementation is required to offer, so this pass
- can never be refused by a device. crig's block grew to 192 and needed a
- `check_push_limit` that turns some machines away. When something new wants to
- ride in here, it goes in a buffer instead.
+ 128 bytes is the budget and it is not a coincidence — it is the push constant
+ size every Vulkan implementation is required to offer, so this pass can never be
+ refused by a device. When something new wants to ride in here, it goes in a
+ buffer instead.
 
- That rule has now been obeyed twice, and the second time is why the table above
- is three lines rather than eight. M2 was the first: the old block spent 64 of
- its 128 bytes on a per-draw `mvp`, which left no room for the instance-array
- pointer instancing needs — 124 + 8 is 132 — so the view-projection and the light
- moved into a `FrameBlock` written once a frame and reached through one pointer.
+ That rule has been obeyed twice. First, the old block spent 64 of its 128 bytes
+ on a per-draw `mvp`, which left no room for the instance-array pointer
+ instancing needs — so the view-projection and the light moved into a
+ `FrameBlock` written once a frame and reached through one pointer.
 
- The second is `DrawRecord`. The mesh contract had grown to 76 bytes across eight
- fields, every one of them per-draw and none of them able to move to a
- per-*frame* block, which left material uniforms 52 bytes and made every future
- vertex stream an argument about who pays for it. So the whole contract moved
- into a buffer and the push block carries its address: what is pushed is 24 bytes
- that never grow again, and what a stream costs is 8 bytes of a buffer sized by
- the frame's bucket count. `plan.md` §2 names this as the way past the budget for
- both halves; this is that, arrived at from the geometry side.
+ Second, `DrawRecord`. The mesh contract had grown to 76 bytes across eight
+ fields, every one per-draw and none able to move to a per-*frame* block, which
+ left material uniforms 52 bytes and made every future vertex stream an argument
+ about who pays for it. So the whole contract moved into a buffer and the push
+ block carries its address: what is pushed is 24 bytes that never grow again, and
+ what a stream costs is 8 bytes of a buffer sized by the frame's bucket count.
 
  ## The descriptor set layout is derived
 
  `shader/reflect.c3` reads the bindings out of the compiled module and this file
  hands them to `vkCreateDescriptorSetLayout` unchanged. Nothing here names
- `base_color_map` or knows it is a combined image sampler. That is M4's done
- condition and it is what makes M5's `ShaderMaterial` possible: an agent-written
- shader that declares a different binding gets a layout for the binding it
- declared.
+ `base_color_map` or knows it is a combined image sampler, which is what makes an
+ agent-written `ShaderMaterial` possible: a shader that declares a different
+ binding gets a layout for the binding it declared.
 *>
 module three;
 
@@ -88,19 +78,19 @@ const uint FLAG_PRESKINNED  = 16;
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so
- that a script can drive a look-at or an IK chain. Clear means the asset's baked
- table, which is every character that is just playing a clip.
+ a script can drive a look-at or an IK chain. Clear means the asset's baked table,
+ which is every character that is just playing a clip.
 
- **One bit rather than a second field or a second bucket.** The alternative was a
- palette pointer per bucket, which would have forced a live character and a baked
- one that share a mesh and a material into two draw calls — and the whole reason
- the pose is a buffer is that they should not be.
+ One bit rather than a second field or a second bucket. A palette pointer per
+ bucket would force a live character and a baked one that share a mesh and a
+ material into two draw calls — and the whole reason the pose is a buffer is that
+ they should not be.
 *>
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
 
-// The size every implementation must offer. Treated as a budget, not a limit
-// to grow into.
+// The size every implementation must offer. Treated as a budget, not a limit to
+// grow into.
 const uint PUSH_BUDGET = 128;
 
 // The entry points `mesh.slang` is required to contain, and the stages they are
@@ -120,10 +110,10 @@ const ShaderEntry[*] SKIN_ENTRIES = {
 <*
  `shaders/shadow.slang`'s one entry point.
 
- **One, and a vertex one.** A depth-only pipeline needs no fragment stage —
- there is nothing to write but the depth the rasteriser already produced — so
- this list has a single element and `MeshPipeline.init_shadow` builds a pipeline
- with one `VkPipelineShaderStageCreateInfo`. That is also why the entry list is a
+ One, and a vertex one. A depth-only pipeline needs no fragment stage — there is
+ nothing to write but the depth the rasteriser already produced — so this list
+ has a single element and `MeshPipeline.init_shadow` builds a pipeline with one
+ `VkPipelineShaderStageCreateInfo`. That is also why the entry list is a
  parameter of `build_layouts` rather than a constant inside it: `MESH_ENTRIES`
  would fail this module for missing a `fragmentMain` it is right not to have.
 *>
@@ -145,45 +135,40 @@ struct FrameBlock
 	Matrix4f view_projection;
 	float[4] light; // xyz surface-to-light (world), w ambient floor
 	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
-	// frame with no live character, which is every frame of a scene that has no
-	// skeletons in it.
+	// frame with no live character.
 	//
-	// **Here rather than in the draw record**, and that is the field's whole
-	// argument: the record is per bucket, and a single palette pointer there would
-	// have split a live character away from the baked copies it shares a mesh and
-	// a material with. One buffer per frame keeps them in one draw.
+	// Here rather than in the draw record, and that is the field's whole argument:
+	// the record is per bucket, and a single palette pointer there would split a
+	// live character away from the baked copies it shares a mesh and a material
+	// with. One buffer per frame keeps them in one draw.
 	ulong live_poses; // Matrix4f*
 	<*
 	 The light's own view-projection, as `render/shadow.c3` fitted it this frame.
 
 	 Identity in a frame with no shadow pass, and unread in one — `shadow[3]` is
-	 what says which. Written here rather than pushed because both ends need it
-	 and they are different pipelines: `shaders/shadow.slang` rasterises the map
-	 with it and both shading shaders read the map back with it, so one fit
-	 reaching one buffer is what keeps the two from disagreeing.
+	 what says which. Written here rather than pushed because both ends need it and
+	 they are different pipelines: `shaders/shadow.slang` rasterises the map with
+	 it and both shading shaders read the map back with it, so one fit reaching one
+	 buffer is what keeps the two from disagreeing.
 	*>
 	Matrix4f light_view_projection;
 	<*
 	 x texel size in uv, y depth bias in ndc, z normal offset in world units,
-	 w intensity — and **w is zero when no shadow pass ran this frame**.
+	 w intensity — and w is zero when no shadow pass ran this frame.
 
 	 One number for "off" and for "as dark as the shadows are" because the shader
 	 cannot tell the two apart and should not have to: an intensity of zero and a
-	 white 1x1 map are both "nothing is occluded". `shaders/mesh.slang` carries
-	 the full account of what each of the four does.
+	 white 1x1 map are both "nothing is occluded".
 	*>
 	float[4] shadow;
 	<*
 	 The debug view, as `three.debug.view` set it. x is the mode — 0 draws the
-	 scene, 1 the shadow factor, 2 what the shadow lookup would read — and yzw
-	 are room for a view that needs an argument.
+	 scene, 1 the shadow factor, 2 what the shadow lookup would read — and yzw are
+	 room for a view that needs an argument.
 
-	 **A whole float4 for one number**, because the block is already aligned to
-	 one: a scalar here costs the same sixteen bytes and would have to be
-	 repacked the first time a second view wanted a parameter.
-
-	 `shaders/mesh.slang` carries the account of what each mode draws and why
-	 they are in the shading pass rather than in post.
+	 A whole float4 for one number, because the block is already aligned to one: a
+	 scalar here costs the same sixteen bytes and would have to be repacked the
+	 first time a second view wanted a parameter.
 	*>
 	float[4] debug;
 }
@@ -203,15 +188,13 @@ struct SkinnedVertex
 <*
  One bucket's geometry and surface, as `shaders/mesh.slang`'s `Draw` declares it.
 
- **Written per bucket per frame into a host-visible buffer**, which is the
- difference between this and everything above it: `FrameBlock` is one per frame
- and `Instance` is one per copy, and this is one per *draw*. `MeshPass.record`
- fills it as it walks the buckets and pushes the address of the one it just
- filled.
+ Written per bucket per frame into a host-visible buffer, which is the difference
+ between this and everything above it: `FrameBlock` is one per frame and
+ `Instance` is one per copy, and this is one per *draw*. `MeshPass.record` fills
+ it as it walks the buckets and pushes the address of the one it just filled.
 
  Scalar layout, so it packs the way the C3 struct does — 8-byte pointers, then
- two float4s at 4-byte alignment, then the flags. Nothing here is padded except
- the tail, and the tail is padding the shader never reads:
+ two float4s at 4-byte alignment, then the flags:
 
 	positions      0     8
 	normals        8     8
@@ -236,19 +219,14 @@ struct DrawRecord
 	ulong positions;
 	ulong normals;
 	ulong uvs;
-	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`.
-	// **The first field added since the record replaced the push block**, and the
-	// whole of what it cost is this line and 8 bytes per bucket per frame. Under
-	// the old contract it was 8 bytes of the 128 every device offers, taken off
-	// what a material's uniforms could spend.
+	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`. The
+	// first field added since the record replaced the push block, and the whole of
+	// what it cost is this line and 8 bytes per bucket per frame.
 	ulong colors;
-	// glTF's JOINTS_0 and WEIGHTS_0, and the asset's baked joint matrices.
-	//
-	// **The three fields §15 said this record existed to make possible.** Its
-	// header predicted them by name — "tangents, a second uv set and joints all
-	// become bookkeeping rather than a trade" — and they cost exactly what it said
-	// they would: 24 bytes of a buffer sized by the frame's bucket count, and
-	// nothing at all from the 128 the material uniforms are still spending.
+	// glTF's JOINTS_0 and WEIGHTS_0, and the asset's baked joint matrices — the
+	// three fields this record exists to make possible. They cost 24 bytes of a
+	// buffer sized by the frame's bucket count, and nothing at all from the 128 the
+	// material uniforms are still spending.
 	ulong joints;
 	ulong weights;
 	ulong palette;
@@ -261,10 +239,10 @@ struct DrawRecord
 	// between one instance's posed copy and the next. Zero otherwise.
 	uint skin_stride;
 	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
-	// the uv before the sample. Added when it turned out that a surface mapping
-	// its texture exactly once makes texel density a function of how big the mesh
-	// is: `examples/village` covered its ground with 484 separate plane meshes
-	// purely so one 128px grass texture would not stretch across 132 units.
+	// the uv before the sample. Added when it turned out that a surface mapping its
+	// texture exactly once makes texel density a function of how big the mesh is:
+	// `examples/village` covered its ground with 484 separate plane meshes purely
+	// so one 128px grass texture would not stretch across 132 units.
 	float[4] uv_transform;
 }
 
@@ -279,9 +257,9 @@ struct MeshPush
  What one compute-skinning dispatch is handed, as `shaders/skin.slang`'s
  `SkinPush` declares it.
 
- **Its own 128 bytes.** A compute pass has no material and no uniforms appended to
+ Its own 128 bytes. A compute pass has no material and no uniforms appended to
  the tail, so this can be eleven fields where the draw path had to move its
- geometry contract into a buffer to make room. Nothing here competes with anything.
+ geometry contract into a buffer to make room.
 *>
 struct SkinPush
 {
@@ -316,12 +294,11 @@ const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
 
-// **The C3 structs against their tables, at compile time.** `check_push_block`
-// holds the *shader* to these; `@layout_matches` holds this side to them, so
-// neither declaration is the definition of the other and a field added to one
-// alone does not build. `POST_PUSH_FIELDS` has no counterpart here — a post pass
-// pushes no struct this file declares — which is why there are four of these and
-// five tables.
+// The C3 structs against their tables, at compile time. `check_push_block` holds
+// the *shader* to these; `@layout_matches` holds this side to them, so neither
+// declaration is the definition of the other and a field added to one alone does
+// not build. `POST_PUSH_FIELDS` has no counterpart here — a post pass pushes no
+// struct this file declares.
 $assert @layout_matches(MeshPush, MESH_PUSH_FIELDS) : "MeshPush no longer lays out the way MESH_PUSH_FIELDS says";
 $assert @layout_matches(SkinPush, SKIN_PUSH_FIELDS) : "SkinPush no longer lays out the way SKIN_PUSH_FIELDS says";
 $assert @layout_matches(DrawRecord, DRAW_RECORD_FIELDS) : "DrawRecord no longer lays out the way DRAW_RECORD_FIELDS says";
@@ -339,7 +316,7 @@ $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/ski
  One field of the push block as this side lays it out.
 
  The `$assert`s above check the C3 struct against itself; this checks it against
- the *shader*, through reflection, which is the half that was a comment until M4.
+ the *shader*, through reflection.
 *>
 struct PushFieldLayout
 {
@@ -351,11 +328,10 @@ struct PushFieldLayout
 <*
  Does this C3 struct lay out exactly the way this table says it does?
 
- **The half of every contract below that used to be measured at runtime.**
  `Type::members` reports each member's name, offset and size at compile time, so
- the C3 side of a wire format is a `$assert` and not a test — which is strictly
- better than a check that has to be run: a struct that stopped matching its table
- no longer builds, and it names the field.
+ the C3 side of a wire format is a `$assert` and not a test — strictly better
+ than a check that has to be run: a struct that stopped matching its table no
+ longer builds, and it names the field.
 
  Order matters and is part of the claim. The table is walked against the members
  in declaration order, so a field moved rather than resized still fails.
@@ -386,17 +362,16 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  The frame block's own contract, in the same terms and for the same reason as
  `DRAW_RECORD_FIELDS`.
 
- **Added when the shadow pass doubled the number of readers.** `FrameBlock` is
- reached through a pointer, so Slang does not reflect it and nothing compared it
- against the C3 struct — which was survivable while `mesh.slang` and
+ `FrameBlock` is reached through a pointer, so Slang does not reflect it and
+ nothing compares it against the C3 struct — survivable while `mesh.slang` and
  `material.slang` were the only two files declaring it and both were edited
- together. `shaders/shadow.slang` is a third, it reads `light_view_projection`
- at offset 88, and a field inserted above that in two files out of three is a
- shadow map rendered with whatever sixteen floats happen to sit there.
+ together. `shaders/shadow.slang` is a third, it reads `light_view_projection` at
+ offset 88, and a field inserted above that in two files out of three is a shadow
+ map rendered with whatever sixteen floats happen to sit there.
 
- `the_frame_block_matches_the_shader` closes it exactly the way the draw record's
- check does: the declaration is cut out of `shaders/mesh.slang` and compiled *as*
- a push block, which is a layout Slang will report.
+ `the_frame_block_matches_the_shader` closes it the way the draw record's check
+ does: the declaration is cut out of `shaders/mesh.slang` and compiled *as* a
+ push block, which is a layout Slang will report.
 
 	view_projection          0    64
 	light                   64    16
@@ -417,23 +392,18 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 <*
  The draw record's own contract, in the same terms and for the same reason.
 
- **This is what `MESH_PUSH_FIELDS` used to say.** When the geometry contract moved
- out of the push block it took its reflection check with it: Slang reflects a push
- block and does not reflect the type behind a pointer, so nothing would have
- compared `Draw` against `DrawRecord` and a field added to one and not the other
- would be geometry read at the wrong address — the exact failure the push table
- exists to prevent, one indirection further down.
+ Slang reflects a push block and does not reflect the type behind a pointer, so
+ without this nothing would compare `Draw` against `DrawRecord` and a field added
+ to one and not the other would be geometry read at the wrong address.
 
  `the_draw_record_matches_the_shader` closes that by cutting the `struct Draw`
- declaration out of `shaders/mesh.slang` and compiling it *as* a push block, which
- is a layout Slang will reflect. Both are scalar-layout structs under
+ declaration out of `shaders/mesh.slang` and compiling it *as* a push block,
+ which is a layout Slang will reflect. Both are scalar-layout structs under
  `-force-glsl-scalar-layout`, so what comes back is what the record has.
 
- **The C3 half is the `$assert` below**, not part of that test. It measured the
- addresses of a real `DrawRecord`'s fields at runtime until it turned out that
- `Type::members` reports name, offset and size at compile time — so the two sides
- are still checked independently, and the side that can be checked without
- running anything now is.
+ The C3 half is the `$assert` below, not part of that test — so the two sides are
+ checked independently, and the side that can be checked without running anything
+ is.
 *>
 const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "positions",     0,  8 },
@@ -458,11 +428,11 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
  and the agent's uniforms after those. So `POST_PUSH_START` is 24 and the budget
  is the other 104.
 
- **It shares nothing with `MESH_PUSH_FIELDS` and that is deliberate.** A post
- pass has no geometry, no instances and no frame block, so a contract that
- required `positions` would be requiring a pointer nothing could supply. Which
- list a pipeline is checked against is the argument `check_push_block` now
- takes, rather than a second copy of the check.
+ It shares nothing with `MESH_PUSH_FIELDS` and that is deliberate: a post pass
+ has no geometry, no instances and no frame block, so a contract requiring
+ `positions` would be requiring a pointer nothing could supply. Which list a
+ pipeline is checked against is the argument `check_push_block` takes, rather
+ than a second copy of the check.
 *>
 const PushFieldLayout[*] POST_PUSH_FIELDS = {
 	{ "info", 0, 16 },
@@ -473,29 +443,26 @@ const PushFieldLayout[*] POST_PUSH_FIELDS = {
  How a material's colour reaches the attachment: not at all, over what is there,
  or added to it.
 
- **A field rather than a command, and that was measured rather than assumed**
- (`plan.md` §10). KosmicKrisp on this machine advertises
- `VK_EXT_extended_dynamic_state3` and reports every one of its colour-blend
- feature bits false — `ColorBlendEnable`, `ColorBlendEquation` and
- `ColorWriteMask` all zero — because Metal carries blending inside
- `MTLRenderPipelineColorAttachmentDescriptor`, in the compiled pipeline state,
- with no encoder command that can change it mid-pass. So `vkCmdSetColorBlendEnableEXT`
- is unusable here and a blend mode has to be baked in.
+ A field rather than a command, and that was measured rather than assumed.
+ KosmicKrisp on this machine advertises `VK_EXT_extended_dynamic_state3` and
+ reports every one of its colour-blend feature bits false — `ColorBlendEnable`,
+ `ColorBlendEquation` and `ColorWriteMask` all zero — because Metal carries
+ blending inside `MTLRenderPipelineColorAttachmentDescriptor`, in the compiled
+ pipeline state, with no encoder command that can change it mid-pass. So
+ `vkCmdSetColorBlendEnableEXT` is unusable here and a blend mode has to be baked
+ in.
 
- That is the exact inverse of the topology case above, where the bit says no and
- the driver honours the switch anyway — which is why neither direction is worth
+ That is the exact inverse of the topology case, where the bit says no and the
+ driver honours the switch anyway — which is why neither direction is worth
  guessing at.
 
  The cost is small and bounded, unlike the cull mode's: this is a closed set of
  three values shared by every material that asks for one, so it is a handful of
- `VkPipeline` objects for the life of the process and **no extra Slang call at
- all** — `PipelineCache` keys the compile on the source and the pipeline on the
- state. `material.side`, by contrast, is an axis an agent varies freely, which is
- exactly why it went dynamic.
+ `VkPipeline` objects for the life of the process and no extra Slang call at all
+ — `PipelineCache` keys the compile on the source and the pipeline on the state.
+ `material.side`, by contrast, is an axis an agent varies freely.
 
- `NONE` is first so that C3's zero fill spells "opaque": `SOLID_STATE` and
- `LINE_STATE` name no blend and mean the behaviour every pipeline in this project
- had before this enum existed.
+ `NONE` is first so C3's zero fill spells "opaque".
 *>
 enum BlendMode : char
 {
@@ -512,41 +479,35 @@ enum BlendMode : char
 
  Four things vary across the pipelines this project needs: topology, cull mode,
  and the two depth flags. All four are settable dynamically on a Vulkan 1.3
- device — `vkCmdSetCullMode`, `vkCmdSetPrimitiveTopology`,
- `vkCmdSetDepthTestEnable` and `vkCmdSetDepthWriteEnable` are core with no
- feature bit. So in principle none of them needs a pipeline of its own.
+ device, so in principle none of them needs a pipeline of its own.
 
- **Topology is the exception, and it was measured rather than assumed.** With
+ Topology is the exception, and it was measured rather than assumed. With
  `dynamicPrimitiveTopologyUnrestricted` false — which is what this machine's
  device reports — `vkCmdSetPrimitiveTopology` may only pick a topology in the
  same *class* as the one the pipeline was built with, and triangles and lines are
  different classes. The bundled KosmicKrisp honours the switch anyway, pixel for
- pixel, because Metal takes the primitive type at draw time and has nothing baked
- in to conflict with. It is still undefined behaviour, and the validation layer
- names it on every single draw:
+ pixel, because Metal takes the primitive type at draw time. It is still
+ undefined behaviour, and the validation layer names it on every draw:
 
 	VUID-vkCmdDrawIndexed-dynamicPrimitiveTopologyUnrestricted-07500
 
  A validation error on every frame is how a real one gets missed, so the line
  pass gets a pipeline and topology stays here.
 
- **The cull mode went dynamic**, and that is where the saving was. It is the one
- of the four a *script* varies — `material.side` — so under a static cull mode
- every distinct side an agent asked for was another `VkPipeline`, built at the
- line that asked for it. It is now `vk::cmdSetCullMode` per bucket, which costs
- one command and no pipeline, and it puts the field where it belongs: topology
- and depth describe the pass, the cull mode describes the material.
+ The cull mode went dynamic, and that is where the saving was. It is the one of
+ the four a *script* varies — `material.side` — so under a static cull mode every
+ distinct side an agent asked for was another `VkPipeline`. It is now
+ `vk::cmdSetCullMode` per bucket, which costs one command and no pipeline, and it
+ puts the field where it belongs: topology and depth describe the pass, the cull
+ mode describes the material.
 
  The depth flags could go the same way and deliberately have not. They would save
- nothing — the line pass differs in topology regardless, so it is a second
- pipeline either way — and a pipeline that no longer states its own depth
- behaviour is harder to read for no gain.
+ nothing — the line pass differs in topology regardless — and a pipeline that no
+ longer states its own depth behaviour is harder to read for no gain.
 
  Everything left in here is core Vulkan with no capability bit behind it. That is
- also why a wireframe is a **line-list index buffer** rather than
- `POLYGON_MODE_LINE`: `fillModeNonSolid` is false on the bundled KosmicKrisp, and
- so is `wideLines`, so lines are one pixel and there is no raster state to ask
- for (`plan.md` §1).
+ also why a wireframe is a line-list index buffer rather than `POLYGON_MODE_LINE`:
+ `fillModeNonSolid` is false on the bundled KosmicKrisp, and so is `wideLines`.
 *>
 struct PipelineState
 {
@@ -570,17 +531,16 @@ const PipelineState SOLID_STATE = {
 };
 
 <*
- What debug geometry draws with: line segments, no culling, and **no depth test
- at all**.
+ What debug geometry draws with: line segments, no culling, and no depth test at
+ all.
 
  The depth part is the one worth defending, because Three.js's helpers are
  depth-tested and these are not.
 
  A debug line exists to answer "where is this thing", and the times that question
  is asked are exactly the times the thing is somewhere it should not be — inside
- a wall, behind the terrain, buried in the masonry. The town-square session lost
- a render to a window that had sunk into the stone it was mounted on, and a box
- helper that was also hidden by that stone would have been no help at all.
+ a wall, behind the terrain, buried in the masonry. A box helper hidden by the
+ same stone that swallowed the window it was drawn around would be no help at all.
 
  It also removes the one hard case for free. A wireframe drawn over its own mesh
  is exactly coplanar with it, and coplanar depth is a speckle rather than a line —
@@ -599,29 +559,25 @@ const PipelineState LINE_STATE = {
 
 <*
  What a transparent material draws with: solid triangles that blend over what is
- behind them, depth **tested** but not **written**.
-
- ## Why the depth write is off, which is the only real decision here
+ behind them, depth *tested* but not *written*.
 
  Reading depth is what keeps glass behind a wall behind the wall, so the test
  stays on. Writing it is the half that has to go, and the reason is this
  renderer's central claim rather than a convention borrowed from elsewhere.
 
- A bucket here is `(asset, mesh, material)` drawn as one instanced call, and the
- copies inside it are **not sortable against each other** — they are one
+ A bucket is `(asset, mesh, material)` drawn as one instanced call, and the
+ copies inside it are not sortable against each other — they are one
  `vkCmdDrawIndexed` and the hardware picks the order. If such a draw wrote depth,
  two overlapping copies of one mesh would each occlude the other depending on
  which the rasteriser reached first: the picture would change between runs, or
  between drivers, with nothing in the scene having moved. Not writing depth makes
  the overlap *blend* instead, which is order-dependent in colour but never in
- visibility, and is the same answer Three.js's `depthWrite: false` default for
- transparent materials gives for the same reason.
+ visibility — the same answer Three.js's `depthWrite: false` default gives.
 
  What it costs is the case a depth write would have got right: a transparent
- surface that is behind another transparent surface of the *same* bucket is not
- hidden by it. `Scene.build_draw_list` sorts the buckets back to front, which
- fixes it between buckets and cannot fix it within one — the honest limitation,
- documented in `getApiDocs` rather than papered over.
+ surface behind another transparent surface of the *same* bucket is not hidden by
+ it. `Scene.build_draw_list` sorts the buckets back to front, which fixes it
+ between buckets and cannot fix it within one.
 *>
 const PipelineState ALPHA_STATE = {
 	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
@@ -635,10 +591,9 @@ const PipelineState ALPHA_STATE = {
  share of it: fire, sparks, glows — anything that only ever brightens.
 
  Same depth behaviour and the same argument for it. The difference is entirely in
- the blend factors, and it is the one blend mode where ordering genuinely does
- not matter — addition is commutative, so an additive bucket looks the same
- whichever order its copies land in. It is sorted with the rest anyway, because
- it still has to land *after* the opaque geometry it brightens.
+ the blend factors, and it is the one blend mode where ordering genuinely does not
+ matter — addition is commutative. It is sorted with the rest anyway, because it
+ still has to land *after* the opaque geometry it brightens.
 *>
 const PipelineState ADDITIVE_STATE = {
 	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
@@ -652,9 +607,9 @@ fn ulong PipelineState.hash(self)
 	return ((ulong)self.topology * 0xbf58476d1ce4e5b9)
 		^ (self.depth_test ? 0x94d049bb133111ebUL : 0)
 		^ (self.depth_write ? 0x2545f4914f6cdd1dUL : 0)
-		// Multiplied rather than xor'd with a constant per value, so the three
-		// modes are three different numbers and `NONE` still contributes nothing —
-		// every state written before blending existed hashes exactly as it did.
+		// Multiplied rather than xor'd with a constant per value, so the three modes
+		// are three different numbers and `NONE` still contributes nothing — every
+		// state written before blending existed hashes exactly as it did.
 		^ ((ulong)self.blend.ordinal * 0x9e3779b97f4a7c15);
 }
 
@@ -674,37 +629,35 @@ struct MeshPipeline
 	vk::PipelineLayout layout;
 	vk::DescriptorSetLayout descriptor_layout;
 	// What the shader said it wants: bindings by name, push fields by name. Owned
-	// by the pipeline and freed with it — see `MeshPipeline.init`, which moves it
-	// out of the `ShaderModule` it was compiled from.
+	// by the pipeline and freed with it — see `MeshPipeline.init`.
 	ShaderLayout shader;
 }
 
 <*
- Check the shader's push block against the contract a pipeline draws under.
+ Checks the shader's push block against the contract a pipeline draws under.
 
- Every field the contract expects must be present at the same offset and the
- same size. Extra fields in the shader are not an error — a field this side never
+ Every field the contract expects must be present at the same offset and the same
+ size. Extra fields in the shader are not an error — a field this side never
  reads is harmless, and refusing it would mean a shader cannot carry anything the
  pass does not use. That is what makes a material's uniforms legal: they are
- exactly such extra fields, appended past `uv_transform`.
+ exactly such extra fields.
 
- **The contract is a parameter as of Phase D**, because there are now two:
- `MESH_PUSH_FIELDS` for anything that draws geometry and `POST_PUSH_FIELDS` for
- the pass that draws one triangle over the frame. A second copy of this function
- would be a second place for the budget check to be forgotten.
+ The contract is a parameter because there are two: `MESH_PUSH_FIELDS` for
+ anything that draws geometry and `POST_PUSH_FIELDS` for the pass that draws one
+ triangle over the frame. A second copy of this function would be a second place
+ for the budget check to be forgotten.
 
  @param fields : `The push contract to hold the shader to — MESH_PUSH_FIELDS or POST_PUSH_FIELDS.`
  @return? PUSH_BLOCK_MISMATCH : `The shader's push block does not lay out the way the contract does. The offending field is printed, because "they disagree" is not something anyone can act on.`
 *>
 fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 {
-	// Against the budget, not against `MeshPush::size`. The doc comment above has
-	// always said extra fields are allowed, but until M5 this line capped the
-	// whole block at the 64 bytes the mesh struct occupies, which left exactly
-	// four spare and made a material uniform impossible. What the cap is actually
-	// for is that `MeshPass.record` pushes into a `PUSH_BUDGET`-sized staging
-	// block — so the budget is the real bound, and the device's own limit is
-	// checked separately in `MeshPipeline.init`.
+	// Against the budget, not against `MeshPush::size`. Extra fields are allowed —
+	// capping the whole block at the mesh struct's size would leave four spare
+	// bytes and make a material uniform impossible. What the cap is actually for
+	// is that `MeshPass.record` pushes into a `PUSH_BUDGET`-sized staging block, so
+	// the budget is the real bound and the device's own limit is checked separately
+	// in `MeshPipeline.init`.
 	if (layout.push_size > PUSH_BUDGET)
 	{
 		io::eprintfn(
@@ -739,7 +692,7 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 }
 
 <*
- Check the module contains the entry points that will be named at pipeline
+ Checks the module contains the entry points that will be named at pipeline
  creation.
 
  `spAddEntryPoint` already fails loudly for a name that is not in the source, so
@@ -775,8 +728,7 @@ fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTR
  Vulkan objects, and a module is a module. What the two constructors differ by is
  entirely below: attachments, depth, blending and culling.
 
- The one thing that varies here is which push contract the shader is held to,
- which is exactly the parameter `check_push_block` takes.
+ The one thing that varies here is which push contract the shader is held to.
 
  @param fields : `MESH_PUSH_FIELDS or POST_PUSH_FIELDS — see check_push_block.`
  @param entries : `Which entry points the module must contain. Defaults to the two a shading pipeline has; the shadow pass passes SHADOW_ENTRIES, which is a vertex stage alone.`
@@ -794,10 +746,10 @@ fn void? MeshPipeline.build_layouts(
 )
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
-	// The *shader's* block, not `MeshPush::size`. Since M5 a material appends its
-	// uniforms to the tail, so what gets pushed is no longer bounded by the C3
-	// struct — checking the struct would have let a 128-byte material block
-	// through on a device offering 64.
+	// The *shader's* block, not `MeshPush::size`. A material appends its uniforms
+	// to the tail, so what gets pushed is not bounded by the C3 struct — checking
+	// the struct would let a 128-byte material block through on a device offering
+	// 64.
 	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
 
 	check_entry_points(mod, entries)!;
@@ -809,9 +761,8 @@ fn void? MeshPipeline.build_layouts(
 		return SHADER_TOO_MANY_SETS~;
 	}
 
-	// **Derived, not declared.** Until M4 this array was a literal naming
-	// binding 0 as a combined image sampler in the fragment stage; now every
-	// field of it comes out of the module that is about to be loaded.
+	// Derived, not declared: every field of this array comes out of the module
+	// that is about to be loaded.
 	@pool()
 	{
 		List{vk::DescriptorSetLayoutBinding} bindings;
@@ -834,16 +785,14 @@ fn void? MeshPipeline.build_layouts(
 		// `PUSH_DESCRIPTOR_BIT` makes this a layout that is never allocated from.
 		// Sets for it are specified inline by `cmdPushDescriptorSetKHR` at draw
 		// time, which is why `Assets` has no pool, no set list and — the part that
-		// mattered — no reason to know a pipeline exists. See `scene/asset.c3`.
+		// mattered — no reason to know a pipeline exists.
 		//
-		// **A module with no bindings still gets a layout, and `setBindings` is
-		// what has to be skipped rather than the layout.** The builder takes the
-		// address of the slice's first element, so an empty slice faults inside the
-		// binding rather than producing the empty layout it looks like it would —
-		// which is how `shaders/shadow.slang`, the first module here to declare no
-		// samplers at all, found this. An empty descriptor set layout is legal and
-		// keeps the pipeline layout and `free` a single shape for all three
-		// constructors.
+		// A module with no bindings still gets a layout, and `setBindings` is what
+		// has to be skipped rather than the layout: the builder takes the address of
+		// the slice's first element, so an empty slice faults inside the binding
+		// rather than producing the empty layout it looks like it would. An empty
+		// descriptor set layout is legal and keeps the pipeline layout and `free` a
+		// single shape for all three constructors.
 		vk::DescriptorSetLayoutCreateInfo set_layout = vk::descriptorSetLayoutCreateInfo()
 			.setFlags(DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT);
 		if (bindings.len() > 0) set_layout = set_layout.setBindings(bindings.array_view());
@@ -853,11 +802,10 @@ fn void? MeshPipeline.build_layouts(
 	vk::PushConstantRange push_range = {
 		.stageFlags = mod.layout.stages,
 		.offset = 0,
-		// The shader's own size rather than `MeshPush::size`: reflection reports
-		// the 60 bytes that are used, not the 64 the C3 struct occupies with its
-		// tail padding, and a range longer than the block is a validation error
-		// on some drivers. `check_push_block` has already proved they agree
-		// field for field.
+		// The shader's own size rather than `MeshPush::size`: reflection reports the
+		// bytes that are used, not what the C3 struct occupies with its tail
+		// padding, and a range longer than the block is a validation error on some
+		// drivers. `check_push_block` has already proved they agree field for field.
 		.size = mod.layout.push_size,
 	};
 
@@ -896,8 +844,8 @@ struct GraphicsPipelineDesc
 	vk::CullModeFlags cull;
 	// Declare `DYNAMIC_STATE_CULL_MODE` and let `MeshPass.record` set the
 	// material's own per bucket. Off for the post and shadow passes, deliberately:
-	// each runs on a path where an inherited dynamic value would decide whether
-	// the frame appears at all, and both say so in their headers.
+	// each runs on a path where an inherited dynamic value would decide whether the
+	// frame appears at all.
 	bool dynamic_cull;
 	bool depth_test;
 	bool depth_write;
@@ -920,24 +868,21 @@ const GraphicsPipelineDesc GRAPHICS_PIPELINE = {
  The half of a graphics pipeline that is the same whatever the pass rasterises.
 
  `build_layouts` is the other shared half — the module's declarations turned into
- Vulkan objects — and this is the fixed-function description that used to be
- written out three times, once per constructor, agreeing in about forty lines and
- differing in the eight `GraphicsPipelineDesc` carries. The fourth pass that
- arrives is a `desc`, not a fourth copy.
+ Vulkan objects — and this is the fixed-function description that would otherwise
+ be written out three times, once per constructor, agreeing in about forty lines
+ and differing in the eight `GraphicsPipelineDesc` carries.
 
- **Counter-clockwise, the same as glTF's own convention, and the negative
- viewport does not change that.** It is tempting to reason that
- `gpu/target.c3`'s negative-height viewport mirrors the image and therefore
- reverses the winding. It does not, and getting this backwards culls exactly the
- faces that should be visible — which looks like a broken pipeline rather than a
- raster setting, because validation is perfectly happy and the screen is empty.
- The negative viewport exists to *undo* Vulkan's Y-down NDC so a glm-convention
- projection works unchanged; undoing a flip is not a flip.
+ Counter-clockwise, the same as glTF's own convention, and the negative viewport
+ does not change that. It is tempting to reason that `gpu/target.c3`'s
+ negative-height viewport mirrors the image and therefore reverses the winding.
+ It does not, and getting this backwards culls exactly the faces that should be
+ visible — which looks like a broken pipeline rather than a raster setting,
+ because validation is perfectly happy and the screen is empty. The negative
+ viewport exists to *undo* Vulkan's Y-down NDC; undoing a flip is not a flip.
 
  `POLYGON_MODE_FILL` only, whatever the topology: `fillModeNonSolid` is false on
  the bundled driver, which is why `LINE_STATE` reaches lines through
- `PRIMITIVE_TOPOLOGY_LINE_LIST` and an index buffer of pairs rather than through
- a raster state (`plan.md` §1).
+ `PRIMITIVE_TOPOLOGY_LINE_LIST` and an index buffer of pairs.
 
  The depth compare op is always `LESS_OR_EQUAL`. Vulkan ignores it when
  `depthTestEnable` is false, so the post pass carrying it costs nothing and the
@@ -995,9 +940,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.setLayout(self.layout)
 		.build(gpu.handle, gpu.driver_cache.handle)!;
 
-	// A copy, not a move. Until the pipeline cache learned to keep modules this
-	// took the module's own layout and left it empty, which was right while a
-	// module produced exactly one pipeline. It now produces one per render state —
+	// A copy, not a move. A module now produces one pipeline per render state —
 	// the line pass and the solid pass are one `mesh.slang`, and a material's two
 	// sides are one source — so the module has to survive with its layout intact.
 	//
@@ -1009,17 +952,11 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 }
 
 <*
- Build the mesh pipeline from a compiled Slang module.
+ Builds the mesh pipeline from a compiled Slang module.
 
- No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment
- formats are declared here through `PipelineRenderingCreateInfo` and the
- attachments themselves at record time.
-
- **The module's `ShaderLayout` is moved into the pipeline**, which then owns it.
- The caller's `ShaderModule` keeps the SPIR-V and the diagnostic and is still
- theirs to free; its `layout` is left empty, and freeing an empty one is a no-op.
- The alternative — a pointer into the module — would make the pipeline outlive
- what it points at the first time a caller freed the module after building.
+ No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment formats
+ are declared here through `PipelineRenderingCreateInfo` and the attachments
+ themselves at record time.
 
  @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
  @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
@@ -1043,17 +980,16 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		.setColorAttachmentFormats((vk::Format[]) { target.color_format })
 		.setDepthAttachmentFormat(target.depth_format);
 
-	// **Baked in, because it cannot be anything else on this device.** Every
+	// Baked in, because it cannot be anything else on this device. Every
 	// colour-blend bit of `VK_EXT_extended_dynamic_state3` is false on the
 	// KosmicKrisp build this targets — Metal keeps blending inside the compiled
-	// pipeline state — so unlike the cull mode, which `dynamic_cull` below turns
-	// into a command per bucket, this is a pipeline per mode. `plan.md` §10 has the probe that
-	// says so and `BlendMode` has the consequences.
+	// pipeline state — so unlike the cull mode, which `dynamic_cull` turns into a
+	// command per bucket, this is a pipeline per mode. See `BlendMode`.
 	//
 	// `vk::defaultColorBlendAttachment` is *already* standard alpha —
-	// SRC_ALPHA / ONE_MINUS_SRC_ALPHA over ONE / ONE_MINUS_SRC_ALPHA
-	// (`lib/Vulkan.c3l/vk/helpers.c3`) — so the `ALPHA` case is the helper
-	// unchanged and the opaque case is the one that has to turn something off.
+	// SRC_ALPHA / ONE_MINUS_SRC_ALPHA over ONE / ONE_MINUS_SRC_ALPHA — so the
+	// `ALPHA` case is the helper unchanged and the opaque case is the one that has
+	// to turn something off.
 	vk::PipelineColorBlendAttachmentState blend = vk::defaultColorBlendAttachment();
 	switch (state.blend)
 	{
@@ -1081,10 +1017,10 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 		.rendering = &rendering,
 		.color_blend = &color_blend,
 		.topology = state.topology,
-		// **Ignored**, because `dynamic_cull` is set just below and
-		// `MeshPass.record` supplies the material's own per bucket. Written as the
-		// old default rather than left as the struct's `CULL_MODE_NONE`, because a
-		// reader who missed the dynamic state would take that zero for a choice.
+		// Ignored, because `dynamic_cull` is set just below and `MeshPass.record`
+		// supplies the material's own per bucket. Written as the old default rather
+		// than left as the struct's `CULL_MODE_NONE`, because a reader who missed
+		// the dynamic state would take that zero for a choice.
 		.cull = CULL_MODE_BACK_BIT,
 		.dynamic_cull = true,
 		.depth_test = state.depth_test,
@@ -1093,46 +1029,38 @@ fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule
 }
 
 <*
- Build the post-processing pipeline from a compiled Slang module.
+ Builds the post-processing pipeline from a compiled Slang module.
 
  The same object as `init` produces, so `Gpu.retire_pipeline` and
- `MeshPipeline.free` cover it with no new machinery — swapping the post shader
- while frames are in flight is the deletion queue's ordinary case rather than a
- mechanism of its own. Four things differ, and each of them would be a bug if it
- did not:
+ `MeshPipeline.free` cover it with no new machinery. Four things differ, and each
+ would be a bug if it did not:
 
- - **No depth attachment, no depth test and no depth write.** Dynamic rendering
+ - No depth attachment, no depth test and no depth write. Dynamic rendering
    matches the pipeline's declared depth format against the one the attachment
    actually carries, so declaring a depth format and then beginning a pass
    without one is a validation error rather than a wasted attachment.
-   `PostPass.record` begins with colour alone, and this is the other half of it.
- - **No blending.** A post pass writes every pixel of the frame from the image
-   it just sampled; blending it over the previous contents would compose it with
-   an attachment that is about to be cleared anyway.
- - **`CULL_MODE_NONE`, statically.** The fullscreen triangle is clockwise on
-   screen, which is the opposite of everything else this project draws, and
+ - No blending. A post pass writes every pixel of the frame from the image it
+   just sampled; blending it over the previous contents would compose it with an
+   attachment that is about to be cleared anyway.
+ - `CULL_MODE_NONE`, statically. The fullscreen triangle is clockwise on screen,
+   the opposite of everything else this project draws, and
    `DYNAMIC_STATE_CULL_MODE` is deliberately *not* declared: the post draw
    follows `MeshPass.record`, which sets the cull mode per bucket, so an
    inherited dynamic value would decide whether the frame appears. Getting this
-   wrong is an empty frame with no validation message — `shaders/post.slang`
-   says so too.
- - **`POST_PUSH_FIELDS`, not the mesh contract.** There is no geometry to point
-   at, so a shader required to declare `positions` could not be written.
+   wrong is an empty frame with no validation message.
+ - `POST_PUSH_FIELDS`, not the mesh contract. There is no geometry to point at,
+   so a shader required to declare `positions` could not be written.
 
- ## The colour format is a parameter, and that is the chain's doing
+ ## The colour format is a parameter
 
- It used to be `target.color_format` unconditionally, because there was one post
- pass and it wrote the target. In a chain every pass a script writes reads float
- and writes float, and the engine's own tonemap is the only thing that writes
- `target.color` — so there are exactly two answers, `POST_CHAIN_FORMAT` and the
- target's, and which one a pipeline was built with is not something the pipeline
- can be asked afterwards.
+ In a chain every pass a script writes reads float and writes float, and the
+ engine's own tonemap is the only thing that writes `target.color` — so there are
+ exactly two answers, `POST_CHAIN_FORMAT` and the target's, and which one a
+ pipeline was built with is not something the pipeline can be asked afterwards.
 
- **Passing it is what keeps it out of the cache key.** The alternative is deriving
- it from the pass's position, at which point the same body at slot 3 and at slot N
- is two `VkPipeline`s, output format enters the key, and reordering a chain is a
- recompile. `plan.md` §13 has the argument; `render/post.c3` is where the two
- callers are.
+ Passing it is what keeps it out of the cache key. Deriving it from the pass's
+ position would make the same body at slot 3 and at slot N two `VkPipeline`s,
+ put output format in the key, and turn reordering a chain into a recompile.
 
  @param mod : `A module from post_source + compile_slang_cached. Its layout is copied, not moved.`
  @param color_format : `What this pass writes — POST_CHAIN_FORMAT for a chain pass, target.color_format for the tonemap. Dynamic rendering checks it against the attachment, so a wrong one is a validation error rather than a wrong colour.`
@@ -1152,8 +1080,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 
 	// Colour only. `setDepthAttachmentFormat` is absent rather than set to
 	// FORMAT_UNDEFINED for readability; the zero the struct starts with is
-	// FORMAT_UNDEFINED, which is what "there is no depth attachment" is spelled
-	// as in `VkPipelineRenderingCreateInfo`.
+	// FORMAT_UNDEFINED, which is how "there is no depth attachment" is spelled.
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
 		.setColorAttachmentFormats((vk::Format[]) { color_format });
 
@@ -1163,9 +1090,9 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
 
-	// No depth of any kind, and `CULL_MODE_NONE` statically — both are the
-	// header's argument, and `dynamic_cull` staying false is the half that keeps
-	// an inherited cull mode from deciding whether the frame appears.
+	// No depth of any kind, and `CULL_MODE_NONE` statically — both are the header's
+	// argument, and `dynamic_cull` staying false keeps an inherited cull mode from
+	// deciding whether the frame appears.
 	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
 		.stages = stages[..],
 		.rendering = &rendering,
@@ -1174,41 +1101,33 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 }
 
 <*
- Build the shadow pass's pipeline from a compiled `shaders/shadow.slang`.
+ Builds the shadow pass's pipeline from a compiled `shaders/shadow.slang`.
 
  The third constructor on this type, and the one that draws no colour at all. It
- shares `build_layouts` with the other two — the module's declarations turned
- into Vulkan objects is the same job whatever the pass rasterises — and differs
- in five places, each of which would be a validation error or a wrong picture if
- it did not:
+ shares `build_layouts` with the other two and differs in five places, each of
+ which would be a validation error or a wrong picture if it did not:
 
- - **One shader stage.** A depth-only pipeline is allowed to have no fragment
-   shader, and this one does not have one. `SHADOW_ENTRIES` is what
-   `build_layouts` is held to instead of `MESH_ENTRIES`, so a module with a
-   `fragmentMain` is not required and a module without one is not refused.
- - **No colour attachment, and a depth format that is not the target's.** The
-   shadow map is its own image at its own extent, created by `render/shadow.c3`,
-   and dynamic rendering checks the declared formats against the attachments the
-   pass actually begins with. Declaring `target.color_format` here and then
-   beginning a pass with depth alone is the error `init_post` describes pointing
-   the other way.
- - **`CULL_MODE_NONE`, statically.** Two reasons, and they point the same way. A
-   closed mesh is unaffected — its back faces are further from the light and lose
-   the depth test to its front ones — while an open one, a plane or a leaf card,
-   casts nothing at all with either face culled from *some* light direction. And
-   `DYNAMIC_STATE_CULL_MODE` is deliberately absent for `init_post`'s reason: the
-   main pass sets the cull mode per bucket, and this pass runs before it, so a
-   dynamic value here would be one more thing that has to be set on a path where
-   getting it wrong is a shadow that silently is not there.
- - **Depth tested and written, which is the whole output.** `SOLID_STATE`'s two
+ - One shader stage. A depth-only pipeline is allowed to have no fragment shader.
+   `SHADOW_ENTRIES` is what `build_layouts` is held to instead of `MESH_ENTRIES`,
+   so a module with a `fragmentMain` is not required and one without it is not
+   refused.
+ - No colour attachment, and a depth format that is not the target's. The shadow
+   map is its own image at its own extent, and dynamic rendering checks the
+   declared formats against the attachments the pass actually begins with.
+ - `CULL_MODE_NONE`, statically. Two reasons pointing the same way: a closed mesh
+   is unaffected — its back faces are further from the light and lose the depth
+   test — while an open one, a plane or a leaf card, casts nothing at all with
+   either face culled from *some* light direction. And
+   `DYNAMIC_STATE_CULL_MODE` is absent for `init_post`'s reason.
+ - Depth tested and written, which is the whole output. `SOLID_STATE`'s two
    trues, spelled out here rather than taken from it, because `PipelineState`
    also carries a topology and a blend mode and neither means anything to a pass
    with no colour attachment.
- - **`MESH_PUSH_FIELDS`, the same contract the shading pipelines are held to.**
-   That is not a coincidence to be tidied away: the shadow pass reads the same
+ - `MESH_PUSH_FIELDS`, the same contract the shading pipelines are held to. That
+   is not a coincidence to be tidied away: the shadow pass reads the same
    instance array and the same draw record the main pass reads, out of the same
-   buffers, which is exactly what makes a skinned character's shadow the shadow
-   of the pose it is actually in.
+   buffers, which is what makes a skinned character's shadow the shadow of the
+   pose it is actually in.
 
  @param mod : `A module from compile_slang containing vertexMain. Its layout is copied, not moved.`
  @param depth_format : `The shadow map's format — see ShadowMap.ensure, which picks one the device will both render to and sample.`
@@ -1228,18 +1147,17 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 
 	// Depth alone. `setColorAttachmentFormats` is not called rather than being
 	// called with an empty slice, for the reason `init_post` leaves the depth
-	// format out: the zero the struct starts with already spells "there is none"
-	// and a reader should not have to work out that an empty array means the same.
+	// format out: the zero the struct starts with already spells "there is none".
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
 		.setDepthAttachmentFormat(depth_format);
 
 	// Zero attachments, which is legal precisely because the rendering info above
-	// declares none. Passed rather than left null so that nothing has to reason
-	// about which of the two spellings a driver accepts.
+	// declares none. Passed rather than left null so nothing has to reason about
+	// which of the two spellings a driver accepts.
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::pipelineColorBlendStateCreateInfo();
 
-	// Depth tested and written is the whole output; `CULL_MODE_NONE` statically
-	// for the two reasons in the header.
+	// Depth tested and written is the whole output; `CULL_MODE_NONE` statically for
+	// the two reasons in the header.
 	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
 		.stages = stages[..],
 		.rendering = &rendering,
@@ -1265,12 +1183,11 @@ fn void MeshPipeline.free(&self, Gpu* gpu)
 <*
  The pipeline `shaders/skin.slang` becomes.
 
- **The first compute pipeline in the project**, and the only thing it has in
- common with `MeshPipeline` is the push-block check: there is no vertex input
- state to leave empty, no attachment format to declare, no blend mode, no cull
- mode, and no `PipelineState` to key a cache on. One shader, one pipeline, built
- once when a character first asks to be skinned this way and kept for the life
- of the pass.
+ The only compute pipeline in the project, and the only thing it has in common
+ with `MeshPipeline` is the push-block check: there is no vertex input state to
+ leave empty, no attachment format to declare, no blend mode, no cull mode, and
+ no `PipelineState` to key a cache on. One shader, one pipeline, built once when
+ a character first asks to be skinned this way.
 
  No descriptor set layout either. The mesh path needs one for its texture; this
  reads nothing but buffer device addresses, so its pipeline layout is a push
@@ -1285,11 +1202,11 @@ struct SkinPipeline
 }
 
 <*
- Compile the skinning shader and build the compute pipeline from it.
+ Compiles the skinning shader and builds the compute pipeline from it.
 
  The same runtime compile every other shader here goes through — `compile_slang`
  takes the entry points it wants by name and stage, and `slang::STAGE_COMPUTE` is
- one of them, so nothing about the compile path needed to change for this.
+ one of them.
 
  @param mod : `A module from compile_slang containing computeMain.`
  @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, and so does everything else here.`
@@ -1356,38 +1273,33 @@ fn void SkinPipeline.free(&self, Gpu* gpu)
 <*
  One compiled shader the cache is keeping, and the source that produced it.
 
- ## Why this is a level of its own
+ A pipeline is `(source, render state)`. A *compile* is source alone — Slang
+ emits byte-identical SPIR-V for a line pipeline and a solid one, because
+ topology, cull mode and the depth flags are `VkGraphicsPipelineCreateInfo`
+ fields the shader never sees.
 
- A pipeline is `(source, render state)`. A *compile* is source alone — Slang emits
- byte-identical SPIR-V for a line pipeline and a solid one, because topology, cull
- mode and the depth flags are `VkGraphicsPipelineCreateInfo` fields the shader
- never sees.
-
- Until M6 nothing asked for two states over one source, so the cache keyed both
- levels together and nobody paid for it. Debug lines and `material.side` both ask,
- and under the single key each of them called Slang again on source it had already
- compiled: measured at `compiles=2, hits=0` for a `MeshPass.init` that builds one
- shader. The header below states the ratio that makes that matter — roughly 17 ms
- for the compile against 1 ms for the pipeline — so splitting the levels is worth
- seventeen eighteenths of the cost, and dynamic state would have been worth the
- other eighteenth.
+ Keying both levels together costs nothing until something asks for two states
+ over one source. Debug lines and `material.side` both ask, and under a single
+ key each called Slang again on source it had already compiled: measured at
+ `compiles=2, hits=0` for a `MeshPass.init` that builds one shader. Roughly 17 ms
+ for the compile against 1 ms for the pipeline, so splitting the levels is worth
+ seventeen eighteenths of the cost.
 *>
 struct CachedModule
 {
 	ulong hash;
 	// The source that produced it, kept so a hash *hit* can be confirmed rather
-	// than trusted. `gpu/texture.c3` compares dimensions before believing its
-	// content hash for the same reason, and `plan.md` §6 states the rule
-	// generally: compare identity, not a proxy for it. A 64-bit collision here
-	// would build a pipeline out of a different shader, which renders something
-	// plausible and wrong.
+	// than trusted — the same rule `gpu/texture.c3` follows when it compares
+	// dimensions before believing its content hash. A 64-bit collision here would
+	// build a pipeline out of a different shader, which renders something plausible
+	// and wrong.
 	String source;
 	ShaderModule mod;
 	// How many `CachedPipeline` entries were built from it. Not how many callers
-	// asked: two render states over one source are two entries and one module,
-	// and the SPIR-V has to outlive both of them. At zero the module is freed
-	// outright rather than kept warm, because a source with no pipeline left is
-	// exactly the accumulation eviction exists to stop.
+	// asked: two render states over one source are two entries and one module, and
+	// the SPIR-V has to outlive both. At zero the module is freed outright rather
+	// than kept warm, because a source with no pipeline left is exactly the
+	// accumulation eviction exists to stop.
 	uint refs;
 }
 
@@ -1395,9 +1307,9 @@ struct CachedModule
  One pipeline the cache is keeping: which module, and over which state.
 
  The module is a pointer rather than a copy because a `CachedModule` holds the
- SPIR-V. It is borrowed from `PipelineCache.modules`, whose entries are
- heap-boxed for the same reason the pipelines are — a later `acquire` that grows
- either list must not move something already in use.
+ SPIR-V. It is borrowed from `PipelineCache.modules`, whose entries are heap-boxed
+ for the same reason the pipelines are — a later `acquire` that grows either list
+ must not move something already in use.
 *>
 struct CachedPipeline
 {
@@ -1405,23 +1317,22 @@ struct CachedPipeline
 	PipelineState state;
 	MeshPipeline pipeline;
 	// How many live borrows there are. `acquire` hands one out, `retain` takes
-	// another, `release` gives one back — and **an entry at zero is not yet
-	// freed**, it is merely evictable. See `PipelineCache.trim`.
+	// another, `release` gives one back — and an entry at zero is not yet freed,
+	// only evictable. See `PipelineCache.trim`.
 	uint refs;
-	// The cache's own ordinal at the moment `refs` last reached zero, which is
-	// what makes the eviction order least-recently-released rather than
-	// whichever the scan reached first. Meaningless while `refs > 0`.
+	// The cache's own ordinal at the moment `refs` last reached zero, which makes
+	// the eviction order least-recently-released rather than whichever the scan
+	// reached first. Meaningless while `refs > 0`.
 	ulong released_at;
 }
 
 <*
  Pipelines by content hash.
 
- `plan.md` §3: an agent iterating on a shader in a loop will otherwise create
- hundreds of `VkPipeline` objects in a session, and **a hit must skip the Slang
- call entirely, not just the pipeline creation, because compilation is the
- expensive half** — measured at about 17 ms per compile against roughly 1 ms for
- the pipeline on this machine.
+ An agent iterating on a shader in a loop would otherwise create hundreds of
+ `VkPipeline` objects in a session, and a hit must skip the Slang call entirely
+ rather than just the pipeline creation, because compilation is the expensive
+ half — about 17 ms per compile against roughly 1 ms for the pipeline.
 
  That ratio is why there are two levels rather than one key. A shader compiles
  once; a pipeline is built once per render state over it. See `CachedModule`.
@@ -1437,26 +1348,23 @@ struct PipelineCache
 	List{CachedPipeline*} entries;
 	// How many times Slang was actually invoked, and how many acquires were
 	// answered without it. Not diagnostics: `the_pipeline_cache_skips_the_compile`
-	// asserts on these, because "the same pointer came back" would also be true
-	// of a cache that recompiled and threw the result away.
+	// asserts on these, because "the same pointer came back" would also be true of
+	// a cache that recompiled and threw the result away.
 	uint compiles;
 	uint hits;
-	// How many modules came off `shader/disk_cache.c3` instead — a miss here and
-	// a hit there, which is the case the disk cache exists for and the one the
+	// How many modules came off `shader/disk_cache.c3` instead — a miss here and a
+	// hit there, which is the case the disk cache exists for and the one the
 	// in-memory counters above cannot see.
 	//
-	// **`compiles` keeps meaning "Slang ran"**, which is why this is a counter of
-	// its own rather than a second way into `compiles`. Every existing test that
-	// asserts on `compiles` is asserting about *Slang*, and a disk hit that
-	// incremented it would turn all of them into tests of the wrong cache. The
-	// tests that read either counter say which cache they mean by pointing
-	// `shader_cache_set_dir` somewhere first; see `the_pipeline_cache_skips_the_compile`.
+	// `compiles` keeps meaning "Slang ran", which is why this is a counter of its
+	// own. Every existing test that asserts on `compiles` is asserting about
+	// *Slang*, and a disk hit that incremented it would turn all of them into tests
+	// of the wrong cache.
 	uint disk_hits;
-	// How many `VkPipeline` objects were built. Separate from `compiles` since the
-	// split, because they are no longer the same number and the whole point of the
-	// split is that the cheap one can happen without the expensive one — a test
-	// that only watched `compiles` would pass on a cache that had stopped caching
-	// pipelines at all.
+	// How many `VkPipeline` objects were built. Separate from `compiles` because
+	// they are no longer the same number, and the whole point of the split is that
+	// the cheap one can happen without the expensive one — a test that only watched
+	// `compiles` would pass on a cache that had stopped caching pipelines at all.
 	uint builds;
 	// How many entries have been evicted and their pipelines retired. Asserted on
 	// for the same reason `compiles` is: "the cache did not grow" would also be
@@ -1470,20 +1378,19 @@ struct PipelineCache
 <*
  How many unreferenced entries the cache keeps before it starts evicting.
 
- **Not zero, and that is the whole design.** Dropping an entry the instant its
- last borrow goes would make this a refcounted allocator rather than a cache: a
- script that disposes a material and builds the same one again — which is what
- an agent iterating on a scene does every run — would pay to rebuild a pipeline
- it had just given back. Keeping a few costs a handful of driver objects and
- makes that case free.
+ Not zero, and that is the whole design. Dropping an entry the instant its last
+ borrow goes would make this a refcounted allocator rather than a cache: a script
+ that disposes a material and builds the same one again — what an agent iterating
+ on a scene does every run — would pay to rebuild a pipeline it had just given
+ back.
 
- **Not unbounded, which is what it was.** `plan.md` §1: an agent iterating on a
- shader accumulated one `VkPipeline` per distinct source for the life of the
- process, because nothing ever came off this list.
+ Not unbounded either, which is where it started: an agent iterating on a shader
+ accumulated one `VkPipeline` per distinct source for the life of the process.
 
  Eight is one bucket per material an interactive scene plausibly cycles through,
- and it is not a number anybody measured. `the_pipeline_cache_evicts_what_nothing_uses`
- pins the behaviour rather than the constant.
+ and it is not a number anybody measured.
+ `the_pipeline_cache_evicts_what_nothing_uses` pins the behaviour rather than the
+ constant.
 *>
 const uint MAX_UNUSED_PIPELINES = 8;
 
@@ -1515,10 +1422,10 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 		return existing;
 	}
 
-	// Through the disk cache, so the *first* compile in a process can be free
-	// too — the one level the in-memory cache above cannot reach. Everything
-	// below this line is unchanged by which side answered, the diagnostic
-	// included: a stored module carries the warning it was compiled with.
+	// Through the disk cache, so the *first* compile in a process can be free too —
+	// the one level the in-memory cache above cannot reach. Everything below this
+	// line is unchanged by which side answered, the diagnostic included: a stored
+	// module carries the warning it was compiled with.
 	bool ran = false;
 	ShaderModule mod = compile_slang_cached(source, name, MESH_ENTRIES[..], &ran)!;
 	if (ran)
@@ -1536,9 +1443,9 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 
 	if (!mod.ok)
 	{
-		// Printed only when nobody took delivery. `plan.md` §6: a compile that
-		// fails quietly is the runtime version of the `$embed` trap, so the text
-		// has to reach *someone* on every path.
+		// Printed only when nobody took delivery: a compile that fails quietly is
+		// the worst possible outcome, so the text has to reach *someone* on every
+		// path.
 		if (diagnostic == null) io::eprintn(mod.diagnostic);
 		// Freed rather than kept. A cached failure would be handed to the next
 		// caller as though it were a shader, and the next caller is usually the
@@ -1559,18 +1466,10 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 <*
  The pipeline for this source and this render state, compiling it if it is new.
 
- ## Who gets the diagnostic
-
- Until M5 this printed the Slang diagnostic to stderr and returned a bare fault,
- which threw the text away for every caller. That was right while the only shader
- was `mesh.slang` and the only reader was whoever started the process; it is
- wrong the moment an agent's own fragment body is what failed, because
- `plan.md` §5's done condition for M5 is a JS error *carrying* the diagnostic.
-
- So `diagnostic`, when non-null, receives the text — on failure and on success
- alike, since a warning arrives with `ok == true` and is worth surfacing too.
- The caller owns the string. Passing null keeps the old behaviour exactly, which
- is what the CLI and the built-in mesh pipeline still want.
+ `diagnostic`, when non-null, receives Slang's text — on failure and on success
+ alike, since a warning arrives with `ok == true` and is worth surfacing. The
+ caller owns the string. Passing null prints to stderr instead, which is what the
+ CLI and the built-in mesh pipeline want.
 
  @param name : `What diagnostics call the source.`
  @param state : `Topology, cull mode and depth behaviour. Part of the key, so two states over one source are two pipelines and one compile.`
@@ -1587,14 +1486,14 @@ fn MeshPipeline*? PipelineCache.acquire(
 	String* diagnostic = null
 )
 {
-	// The module first, and by source alone. A state this cache has not seen
-	// before must not reach Slang: `CachedModule` has the measurement.
+	// The module first, and by source alone. A state this cache has not seen before
+	// must not reach Slang: `CachedModule` has the measurement.
 	CachedModule* compiled = self.module_for(source, name, diagnostic)!;
 
 	foreach (entry : self.entries)
 	{
-		// Pointer identity is exact here in a way a hash is not — both entries
-		// came out of `module_for`, which has already confirmed the source.
+		// Pointer identity is exact here in a way a hash is not — both entries came
+		// out of `module_for`, which has already confirmed the source.
 		if (entry.compiled != compiled || !entry.state.equals(state)) continue;
 		// A hit takes a borrow like a miss does, so the caller's `release` is the
 		// same call either way and does not have to know which it got.
@@ -1616,7 +1515,7 @@ fn MeshPipeline*? PipelineCache.acquire(
 	// The module is kept alive by its pipelines and by nothing else. A build that
 	// failed on the line above leaves a freshly compiled module at zero — cached,
 	// so the retry is free, and released at `free` rather than by eviction, which
-	// only ever runs off an entry. That is a driver-level failure and one module.
+	// only ever runs off an entry.
 	compiled.refs++;
 
 	self.entries.push(entry);
@@ -1640,11 +1539,11 @@ fn CachedPipeline* PipelineCache.entry_for(&self, MeshPipeline* pipeline)
 }
 
 <*
- Take another borrow of a pipeline `acquire` already handed out.
+ Takes another borrow of a pipeline `acquire` already handed out.
 
- For a second holder of one pointer that did not go through `acquire` to get it
- — `MeshPass.create_texture_material` copies `MeshPass.pipeline` rather than
- asking the cache for the built-in shader again, because it knows the answer.
+ For a second holder of one pointer that did not go through `acquire` to get it —
+ `MeshPass.create_texture_material` copies `MeshPass.pipeline` rather than asking
+ the cache for the built-in shader again, because it knows the answer.
 
  A pointer this cache never handed out is ignored rather than faulted on. There
  is exactly one caller and it cannot produce one; a fault path here would be an
@@ -1658,13 +1557,12 @@ fn void PipelineCache.retain(&self, MeshPipeline* pipeline)
 }
 
 <*
- Give a borrow back.
+ Gives a borrow back.
 
- **Not a free.** At zero the entry becomes *evictable*, which is the same
- distinction `texture.dispose()` draws and for the same reason: the thing goes
- when nothing wants it and the cache has run out of room to be generous, not the
- instant one holder lets go. `MAX_UNUSED_PIPELINES` is where that room is
- argued.
+ Not a free. At zero the entry becomes *evictable*, the same distinction
+ `texture.dispose()` draws and for the same reason: the thing goes when nothing
+ wants it and the cache has run out of room to be generous, not the instant one
+ holder lets go. `MAX_UNUSED_PIPELINES` is where that room is argued.
 
  @param gpu : `The device the pipeline was built on, for the retire. Null defers the trim to the next release that has one — a pipeline cannot be destroyed without the device that made it, and holding an extra entry is the cheaper half of that trade.`
 *>
@@ -1681,7 +1579,7 @@ fn void PipelineCache.release(&self, Gpu* gpu, MeshPipeline* pipeline)
 }
 
 <*
- Evict least-recently-released entries until the unused ones fit in the cap.
+ Evicts least-recently-released entries until the unused ones fit in the cap.
 
  Linear in the number of entries, per eviction, which is the right shape here:
  the list is bounded by the cap plus whatever is live, and the alternative — a
@@ -1713,12 +1611,11 @@ fn void PipelineCache.trim(&self, Gpu* gpu)
 }
 
 <*
- Drop one entry: off the list, into the deletion queue, and its module with it if
- that was the last pipeline holding it.
+ Drops one entry: off the list, into the deletion queue, and its module with it
+ if that was the last pipeline holding it.
 
  The pipeline is copied out before the entry is freed, and retired rather than
- destroyed — a command buffer submitted two frames ago may still bind it, which
- is the hazard `gpu/retire.c3` exists for.
+ destroyed — a command buffer submitted two frames ago may still bind it.
 *>
 fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
 {
@@ -1733,7 +1630,7 @@ fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
 		compiled.refs--;
 		// Freed outright rather than kept warm. A module whose pipelines have all
 		// been evicted is SPIR-V for a source nothing draws with, and holding it
-		// would leave half of what §1 called a leak still accumulating.
+		// would leave half of the accumulation still accumulating.
 		if (compiled.refs == 0) self.drop_module(compiled);
 	}
 
@@ -1742,7 +1639,7 @@ fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
 }
 
 <*
- Free a module and take it off the list. Its last pipeline is already gone.
+ Frees a module and takes it off the list. Its last pipeline is already gone.
 *>
 fn void PipelineCache.drop_module(&self, CachedModule* compiled)
 {

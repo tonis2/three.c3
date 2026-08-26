@@ -2,25 +2,20 @@
  A material, as a string: the agent's fragment body and everything Slang needs
  around it.
 
- `plan.md` §4's tier 2 is one sentence — "three.c3 supplies the vertex stage, the
- `Surface` struct, the descriptor layout and the uniform block; the agent writes
- the shading body" — and this file is the half of it that is not the compiler.
- Nothing here compiles, creates a pipeline or touches the GPU. It reads
- `shaders/material.slang`, replaces three marker lines, and hands back a
- self-contained module.
+ three.c3 supplies the vertex stage, the `Surface` struct, the descriptor layout
+ and the uniform block; the agent writes the shading body. Nothing here compiles,
+ creates a pipeline or touches the GPU — it reads `shaders/material.slang`,
+ replaces three marker lines, and hands back a self-contained module.
 
- **The marker walk itself lives in `shader/assemble.c3`**, which
- `shaders/post.slang` goes through as well. What stays here is everything a
- *material* is: the mesh contract it appends to, the uniform table, the reserved
- names and the budget. What moved is the line counting, because it is the one
- half of the two that must not exist twice.
+ The marker walk itself lives in `shader/assemble.c3`, which `shaders/post.slang`
+ goes through as well. What stays here is everything a *material* is: the mesh
+ contract it appends to, the uniform table, the reserved names and the budget.
 
  ## Why the line numbers are the interesting part
 
- The agent wrote four lines and gets back a four-hundred-line module. A
- diagnostic that says `material.slang:312` names a file the agent has never seen,
- at a line it did not write, and the loop that `plan.md` §4 calls "the whole
- contract" stalls on the agent trying to find line 312.
+ The agent writes four lines and gets back a four-hundred-line module. A
+ diagnostic saying `material.slang:312` names a file the agent has never seen, at
+ a line it did not write.
 
  So the body is bracketed by `#line` directives:
 
@@ -38,20 +33,9 @@
  the agent's. Suppressing that note would be worse — it is usually the half that
  says "expected 2".
 
- Three things about `#line` were established by experiment rather than assumed,
- and each of them is a way to get this wrong:
-
- - The filename **must** be a double-quoted string literal. `#line 1 material`
-   is `E15102`, a hard preprocessor error that kills the compile. Nothing
-   interpolated into a directive can contain a quote or a backslash, which is one
-   of the things `MATERIAL_RESERVED`'s identifier check is really for.
- - The directive numbers the line that *follows* it, so the body starts at `1`
-   and not `0`. `0` is accepted and faithfully reported as `:0:`.
- - The restore number is the physical line of the text after the directive,
-   which nothing but the assembler can know — it is counted rather than
-   computed, because every marker replacement changes it.
-
- All three are now stated where they are implemented, in `shader/assemble.c3`.
+ The three subtleties of `#line` — quoted filename required, the directive
+ numbers the line *after* it, and the restore number has to be counted rather
+ than computed — are stated where they are implemented, in `shader/assemble.c3`.
 *>
 module three;
 
@@ -64,9 +48,9 @@ faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY,
 
  There is no width, no type and no binding index here, and each absence is the
  point. A texture is a `Sampler2D` because that is the only image kind this
- project binds; and its binding index is **generated from the position of this
- entry in the array** rather than carried on it, which is what keeps the number
- out of every layer above `shader/assemble.c3`. See `MATERIAL_BINDING_FIRST`.
+ project binds, and its binding index is generated from the position of this
+ entry in the array rather than carried on it — which keeps the number out of
+ every layer above `shader/assemble.c3`.
 
  So a material's textures are, end to end, a list of names: the script writes
  them, the assembler numbers them, reflection reads the numbers back, and
@@ -81,16 +65,16 @@ struct MaterialTexture
 <*
  One material uniform, as the JS side described it.
 
- `rows` is what makes a uniform a **column of a table** rather than a single
- value: one row is `float3 tint;` and three rows are `float3 tint[3];`, indexed
- in the body by `s.variant` — the per-instance row selector in `scene/scene.c3`.
- That is the whole of "one material, many appearances, one draw call": the
- pipeline and the push block are bucket state and cannot vary per copy, so the
- variation has to be a *lookup* the copies do rather than a value they carry.
+ `rows` is what makes a uniform a *column of a table* rather than a single value:
+ one row is `float3 tint;` and three rows are `float3 tint[3];`, indexed in the
+ body by `s.variant` — the per-instance row selector. That is the whole of "one
+ material, many appearances, one draw call": the pipeline and the push block are
+ bucket state and cannot vary per copy, so the variation has to be a *lookup* the
+ copies do rather than a value they carry.
 
  Every column of one material must have the same number of rows. It is a table,
- not a bag of arrays — and it is also what makes `s.variant`'s clamp exact, since
- there is then one row count to clamp against instead of one per column.
+ not a bag of arrays — which is also what makes `s.variant`'s clamp exact, since
+ there is one row count to clamp against instead of one per column.
 *>
 struct MaterialUniform
 {
@@ -104,26 +88,22 @@ struct MaterialUniform
 
  128 is the push size every Vulkan implementation must offer and `PUSH_BUDGET`
  treats it as a budget rather than a limit to grow into; the three fields
- `MESH_PUSH_FIELDS` pins take 24 of it. What is left is what a material may
- spend, and it is spelled here as a number rather than derived from
- `MeshPush::size` on purpose — the two agree today and have not always, `MeshPush`
- having carried four bytes of C3 tail padding that the shader's layout did not
- contain, and deriving it would have quietly handed those out.
+ `MESH_PUSH_FIELDS` pins take 24 of it.
 
- **This was 68, then 52, and is now 104.** It fell when `uv_transform` was pinned
- into the mesh contract and it doubled when the contract left the push block
- altogether: geometry, base colour, flags and the uv transform are a `DrawRecord`
- in a buffer as of the draw buffer, so the only things still pushed are three
- pointers. 104 bytes is six rows of four floats and two over, and the ceiling on
- a material's uniforms is now a number nothing is competing for — a new vertex
+ Spelled here as a number rather than derived from `MeshPush::size` on purpose:
+ deriving it would hand out that struct's C3 tail padding, which the shader's
+ layout does not contain.
+
+ It was 68, then 52, and is now 104 — it fell when `uv_transform` was pinned into
+ the mesh contract and doubled when the contract left the push block altogether.
+ Geometry, base colour, flags and the uv transform are a `DrawRecord` in a
+ buffer, so the only things still pushed are three pointers, and a new vertex
  stream costs 8 bytes of `DrawRecord` rather than 8 bytes of this.
 
- That is `plan.md` §2's way past the budget — a device buffer behind a BDA in the
- push block — taken from the geometry side rather than the uniform side. Taking
- it from this side as well would move these bytes into the record too and end the
- idea of a budget; the reason not to yet is that reflection puts a material's
- uniforms at offsets in *this* block, and a script writing one is a memcpy into
- `Material.block` with nothing to invalidate.
+ Taking the same trick on the uniform side — moving these bytes into the record
+ too — would end the idea of a budget; the reason not to yet is that reflection
+ puts a material's uniforms at offsets in *this* block, and a script writing one
+ is a memcpy into `Material.block` with nothing to invalidate.
 *>
 const uint MATERIAL_UNIFORM_BUDGET = 104;
 
@@ -133,8 +113,8 @@ const uint MATERIAL_UNIFORM_BUDGET = 104;
 
  A name rather than a binding index, because it is a *field of the push block*
  and reflection resolves it there — `shader/reflect.c3` follows exactly this one
- pointer and nothing else, which is what keeps `FrameBlock`, `Instance` and `Draw`
- out of the field list. In `MATERIAL_RESERVED` for the usual reason.
+ pointer and nothing else, which keeps `FrameBlock`, `Instance` and `Draw` out of
+ the field list. In `MATERIAL_RESERVED` for the usual reason.
 *>
 const String MATERIAL_TABLE_FIELD = "material_table";
 const String MATERIAL_TABLE_TYPE = "MaterialTable";
@@ -142,21 +122,17 @@ const String MATERIAL_TABLE_TYPE = "MaterialTable";
 <*
  How large a spilled uniform table may be.
 
- `plan.md` §2: "a table of hundreds still needs a device buffer behind a BDA,
- which is now a thing this codebase does once and could do twice." This is the
- second time. Past the push block's 104 bytes a material's **array** columns move
- into a device buffer and the push block carries a pointer to them, so the ceiling
- stops being a push-constant limit and starts being a memory one.
+ Past the push block's 104 bytes a material's *array* columns move into a device
+ buffer and the push block carries a pointer to them, so the ceiling stops being
+ a push-constant limit and starts being a memory one.
 
  256 KiB is 4096 rows of four `float4` columns, and it is a bound on a mistake
- rather than a budget: the buffer is written **per bucket per frame** — see
- `MeshPass.build_draw_records` — so a table this size is a quarter of a megabyte
- of memcpy per draw, which is a cost worth refusing before somebody discovers it
- as a frame time.
+ rather than a budget: the buffer is written per bucket per frame (see
+ `MeshPass.build_draw_records`), so a table this size is a quarter of a megabyte
+ of memcpy per draw.
 
- The **scalar** uniforms never spill. They stay in the push block where
- reflection puts them and where `set_uniform` is a memcpy with nothing to
- invalidate, which is the property the old entry said was worth keeping; what
+ The *scalar* uniforms never spill. They stay in the push block where reflection
+ puts them and where `set_uniform` is a memcpy with nothing to invalidate; what
  moves is the part that wanted to be large, which was always the table.
 *>
 const uint MATERIAL_TABLE_BUDGET = 256 * 1024;
@@ -169,7 +145,7 @@ const uint MATERIAL_TABLE_BUDGET = 256 * 1024;
  the generated source and the C3 side cannot disagree about which shape a
  material is.
 
- **The whole list, not the table half.** A material whose scalars alone overflow
+ The whole list, not the table half. A material whose scalars alone overflow
  spills too, and then fails the scalar check below; deciding on the table's size
  would make "your scalars do not fit" reachable only for a material that also had
  a table.
@@ -198,9 +174,9 @@ fn uint material_table_bytes(MaterialUniform[] uniforms)
  What stays in the push block when a material spills: the scalars, plus the
  8-byte pointer to the table.
 
- The pointer is declared **first**, before the scalars, so that it lands at
- `MATERIAL_PUSH_START` — 24, a multiple of 8 — and scalar layout has no
- alignment padding to insert in front of it. Declared after a `float` it would.
+ The pointer is declared *first*, before the scalars, so it lands at
+ `MATERIAL_PUSH_START` — 24, a multiple of 8 — and scalar layout has no alignment
+ padding to insert in front of it. Declared after a `float` it would.
 *>
 fn uint material_pushed_bytes(MaterialUniform[] uniforms)
 {
@@ -216,25 +192,21 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
  How many samplers of its own a material may declare, on top of `map`.
 
  A budget rather than a device limit, the same way `PUSH_BUDGET` is. The real
- ceiling is `maxPushDescriptors`, which every implementation that offers the
+ ceiling is `maxPushDescriptors`, which every implementation offering the
  extension must report as at least 32 — so eight plus the base colour map cannot
- be refused by a device, and nothing here has to query anything or have a
- fallback path for a machine that says a smaller number.
+ be refused by a device, and nothing here has to query anything.
 
- **This was four and is now eight, and the thing that moved it is a layer
- stack.** Four was chosen against what a hand-written effect uses — a pattern, a
- ramp and a mask, with the fourth there so three was not a cap anybody hit on
- their first attempt. A `LayeredMaterial` is not hand-written: `js/prelude/layers.js`
- generates one sampler per layer plus one for the packed mask, so four bought
+ It was four, chosen against what a hand-written effect uses: a pattern, a ramp
+ and a mask, with the fourth so three was not a cap anybody hit on their first
+ attempt. A `LayeredMaterial` is not hand-written — `js/prelude/layers.js`
+ generates one sampler per layer plus one for the packed mask — so four bought
  three layers over the base and no room for a normal map on any of them. Eight
- buys a mask, up to seven detail maps, or a mix of maps and normals — which is
- the difference between the extension being representable and being *usable*.
+ buys a mask, up to seven detail maps, or a mix of maps and normals.
 
- What it costs is real and is per draw: the descriptors are pushed **per
- bucket**, so every declared sampler is command traffic on every material that
- declares one. Eight is still short of the 32 floor, and a material wanting more
- images than this wants an atlas or a texture array — both of which are one
- binding, and neither of which exists here yet.
+ The cost is per draw: the descriptors are pushed per bucket, so every declared
+ sampler is command traffic on every material that declares one. A material
+ wanting more images than this wants an atlas or a texture array — both of which
+ are one binding, and neither of which exists here yet.
 *>
 const uint MATERIAL_TEXTURE_LIMIT = 8;
 
@@ -245,9 +217,8 @@ const String MATERIAL_TEMPLATE = "material.slang";
 <*
  What the agent's own lines are called in a diagnostic.
 
- Short and lower case because it is read by whoever wrote the body, not by
- whoever wrote the compiler: `material:3:24` is a coordinate in the string the
- agent typed.
+ Short and lower case because it is read by whoever wrote the body:
+ `material:3:24` is a coordinate in the string the agent typed.
 *>
 const String MATERIAL_BODY_NAME = "material";
 
@@ -255,10 +226,8 @@ const String MATERIAL_BODY_NAME = "material";
  What the agent's *vertex* lines are called in a diagnostic.
 
  A second name rather than a second file: both bodies are spliced into one module
- and Slang reports one coordinate, so `vertex:3:12` against `material:3:12` is the
- only thing that says which of the two an error is in. An agent that wrote both
- and got `material:3` for a mistake in its vertex body would look at the wrong
- four lines.
+ and Slang reports one coordinate, so `vertex:3:12` against `material:3:12` is
+ the only thing that says which of the two an error is in.
 *>
 const String MATERIAL_VERTEX_NAME = "vertex";
 
@@ -267,28 +236,26 @@ const String MATERIAL_VERTEX_NAME = "vertex";
 
  Deliberately self-describing rather than short. Slang's `candidate:` notes point
  into the preamble whatever the body did, and an agent that sees
- `three.material:141` can tell at a glance that the line is not one of its own —
- which is the only thing it needs to conclude from it.
+ `three.material:141` can tell at a glance that the line is not one of its own.
 *>
 const String MATERIAL_PREAMBLE_NAME = "three.material";
 
 <*
  Names a material uniform may not take.
 
- Two groups, and they are refused for different reasons. The first is everything
+ Two groups, refused for different reasons. The first is everything
  `shaders/material.slang` declares or names in a line the `#define`s can reach: a
  uniform called `shade` or `push` produces a substitution that breaks the
  template, and the resulting diagnostic points at generated code the agent cannot
- see. The second is Slang and HLSL's own vocabulary, where `#define float ...`
- is legal, silent, and turns the rest of the module into something no error
- message will explain.
+ see. The second is Slang and HLSL's own vocabulary, where `#define float ...` is
+ legal, silent, and turns the rest of the module into something no error message
+ will explain.
 
  The list is not complete and cannot be — Slang's standard library is thousands
  of names, and reserving all of them would refuse `time` and `tint` along the
- way. It covers what the template touches and the keywords worth a sentence, and
+ way. It covers what the template touches and the keywords worth a sentence;
  anything past it fails as an ordinary Slang diagnostic at `material:<line>`,
- which is where the agent can act on it. That is the trade: a short list of
- collisions turned into a good message, and a long tail turned into a normal one.
+ which is where the agent can act on it.
 *>
 const String[*] MATERIAL_RESERVED @local = {
 	// What the template declares.
@@ -314,7 +281,7 @@ const String[*] MATERIAL_RESERVED @local = {
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
 	// no longer share a scope with a uniform — they stay refused because the
-	// template still declares them and a name it declares is one this list covers.
+	// template still declares them.
 	"frame", "instances", "draw", "Draw",
 	"positions", "normals", "uvs", "colors", "base_color", "flags", "uv_transform",
 	// Types.
@@ -335,22 +302,18 @@ const String[*] MATERIAL_RESERVED @local = {
 <*
  The field names of `Surface` and `Vertex`, which a uniform may not take either.
 
- **A different refusal from `MATERIAL_RESERVED`, because it is a different
- mistake and it breaks in a place the reserved list's message would not explain.**
- A uniform is a `#define` live across the agent's own lines, so a uniform called
- `normal` rewrites the `s.normal` *in the body that declared it* into
- `s.(push.normal)` — a syntax error inside generated code, reported at a line in
- the preamble, about a member access the agent wrote correctly.
+ A different refusal from `MATERIAL_RESERVED`, because it is a different mistake
+ and it breaks where the reserved list's message would not explain. A uniform is
+ a `#define` live across the agent's own lines, so a uniform called `normal`
+ rewrites the `s.normal` *in the body that declared it* into `s.(push.normal)` —
+ a syntax error inside generated code, reported at a line in the preamble, about
+ a member access the agent wrote correctly.
 
- It is worth its own sentence for the same reason: "the shader already uses it" is
- true and useless here, because the thing using it is the struct the agent is
- reading five characters away.
-
- This was live before the vertex stage existed and had no test — `uniforms: { time
- : 1 }` on a post pass, which is the single most likely uniform anybody writes,
- failed with `three.post:134` under a caret pointing at a `#define`. The vertex
- body only made it easier to hit, because `Vertex` has seven fields and a body
- touches most of them.
+ It is worth its own sentence for the same reason: "the shader already uses it"
+ is true and useless here, because the thing using it is the struct the agent is
+ reading five characters away. `uniforms: { time: 1 }` on a post pass, the single
+ most likely uniform anybody writes, failed with `three.post:134` under a caret
+ pointing at a `#define`.
 *>
 const String[*] MATERIAL_CONTRACT_FIELDS @local = {
 	// Surface. `shadow` is here rather than in `MATERIAL_RESERVED` because it
@@ -370,11 +333,10 @@ usz material_message_len @local;
 <*
  What the last `material_source` refused, in words.
 
- **A value rather than a line on stderr**, which is the same decision
- `compile_slang` made about Slang's diagnostics and for the same reason:
- `plan.md` §4 wants the text inside the thrown JS exception, and a script cannot
- read a file descriptor. A fault on its own says which rule was broken and
- nothing about which uniform broke it, which is not something an agent can fix.
+ A value rather than a line on stderr, the same decision `compile_slang` made
+ about Slang's diagnostics: the text has to be inside the thrown JS exception,
+ and a script cannot read a file descriptor. A fault on its own says which rule
+ was broken and nothing about which uniform broke it.
 
  A fixed buffer rather than an allocation because the caller reads this on the
  failure path, where there is no owned value to free and no allocator in scope to
@@ -392,11 +354,11 @@ fn void material_note(String message) @local
 <*
  What the uniforms cost in the push block.
 
- `sum(components) * 4`, and no alignment arithmetic: the compile passes
+ `sum(components) * 4`, with no alignment arithmetic: the compile passes
  `-force-glsl-scalar-layout`, under which a float3 is twelve bytes at four-byte
- alignment and every field here is a multiple of four. **The offsets are still
- not computed anywhere** — reflection reads them back off the module that will
- run, which is the only version of them that cannot be wrong.
+ alignment and every field here is a multiple of four. The offsets are still not
+ computed anywhere — reflection reads them back off the module that will run,
+ which is the only version of them that cannot be wrong.
 *>
 fn uint material_uniform_bytes(MaterialUniform[] uniforms)
 {
@@ -521,9 +483,9 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 		}
 
 		// After the uniforms, because a texture name is checked *against* them:
-		// the collision that matters most here is a sampler sharing a uniform's
-		// name, and `texture_problem` can only report it once both lists are known
-		// to be individually sound.
+		// the collision that matters most is a sampler sharing a uniform's name,
+		// and `texture_problem` can only report it once both lists are known to be
+		// individually sound.
 		String texture_note = texture_problem(
 			MATERIAL_BODY_NAME, textures, uniforms, MATERIAL_RESERVED[..], MATERIAL_TEXTURE_LIMIT
 		);
@@ -532,21 +494,21 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			material_note(texture_note);
 			// The count is its own fault because it is the one a caller fixes
 			// differently — every other sentence here is answered by renaming
-			// something, and this one is answered by asking for fewer images.
+			// something, and this one by asking for fewer images.
 			return textures.len > MATERIAL_TEXTURE_LIMIT ? MATERIAL_TOO_MANY_TEXTURES~ : MATERIAL_NAME_INVALID~;
 		}
 
-		// **Two shapes, and this is where a material is told which one it is.**
-		// Everything that fits the push block stays in it, byte for byte as it
-		// always was. Past that the array columns move to a device buffer and the
-		// block carries a pointer — see `MATERIAL_TABLE_BUDGET`.
+		// Two shapes, and this is where a material is told which one it is.
+		// Everything that fits the push block stays in it, byte for byte. Past that
+		// the array columns move to a device buffer and the block carries a
+		// pointer — see `MATERIAL_TABLE_BUDGET`.
 		if (material_spills(uniforms))
 		{
 			uint table = material_table_bytes(uniforms);
-			// **Nothing to move.** A material of plain uniforms that overflows has
-			// no array column to spill, so the answer is the one it always was and
-			// the sentence is too — telling it about a table's pointer would be
-			// telling it about a thing it does not have.
+			// Nothing to move. A material of plain uniforms that overflows has no
+			// array column to spill, so the answer is the one it always was — and
+			// telling it about a table's pointer would be telling it about a thing
+			// it does not have.
 			if (table == 0)
 			{
 				material_note(string::tformat(
@@ -585,7 +547,7 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 }
 
 <*
- Assemble the full Slang module for a material.
+ Assembles the full Slang module for a material.
 
  The result is self-contained: it declares its own `PushData`, its own binding
  and both entry points, so it goes to `compile_slang` as a string with nothing
@@ -606,10 +568,9 @@ fn String? material_source(
 	String fragment,
 	MaterialUniform[] uniforms,
 	alloc::Allocator allocator = mem,
-	// **After the allocator**, which reads wrong and is deliberate: every caller
-	// that predates textures passes the allocator positionally, and putting this
-	// where it belongs would silently turn one of those into a texture list. The
-	// project already makes this trade for `create_material`'s `diagnostic`.
+	// After the allocator, which reads wrong and is deliberate: every caller that
+	// predates textures passes the allocator positionally, and putting this where
+	// it belongs would silently turn one of those into a texture list.
 	MaterialTexture[] textures = {},
 	String vertex = ""
 )

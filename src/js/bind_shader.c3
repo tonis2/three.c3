@@ -1,24 +1,22 @@
 <*
  The material verbs: compiling a fragment body, and pointing a node at the result.
 
- `plan.md`'s source tree has carried a line for this file since M0 —
- "js/bind_shader.c3, the material/shader surface (tier 2, §4)". It is the same
- flat-verb layer as `bind_scene.c3`: numbers and strings in, numbers out, and
- every Three.js-ism written in JavaScript where the language has them.
+ The same flat-verb layer as `bind_scene.c3`: numbers and strings in, numbers
+ out, and every Three.js-ism written in JavaScript where the language has them.
 
  ## Why the uniforms cross as two joined strings
 
  `new three.ShaderMaterial({ uniforms: { tint: [1, 0.5, 0.2], time: 0 }, ... })`
  hands the prelude an object, and the object cannot come here: the QuickJS shim
  this project vendors exposes `qjs_get_prop` by name and nothing that enumerates
- keys — no `JS_GetOwnPropertyNames`, no atom iteration. A host verb can read
- `uniforms.tint` only if it already knows the word "tint".
+ keys. A host verb can read `uniforms.tint` only if it already knows the word
+ "tint".
 
  So `prelude.js` does the enumerating, in the language that can, and crosses with
- `("tint,time", "3,1")`. That is the same shape as `setTransform` taking eleven
- scalars rather than three objects, and for the same reason. Comma is a safe
- separator because a uniform name that is not `[A-Za-z_][A-Za-z0-9_]*` is
- refused by `material_source` before it can reach a shader.
+ `("tint,time", "3,1")` — the same shape as `setTransform` taking eleven scalars
+ rather than three objects. Comma is a safe separator because a uniform name that
+ is not `[A-Za-z_][A-Za-z0-9_]*` is refused by `material_source` before it can
+ reach a shader.
 *>
 module three;
 
@@ -27,7 +25,7 @@ import std::io;
 import qjs;
 
 <*
- Register the material verbs on the host object.
+ Registers the material verbs on the host object.
 
  Called from `install_bindings` rather than being installed separately, so there
  is exactly one place that lists what JavaScript can reach.
@@ -51,7 +49,7 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 }
 
 <*
- Split a comma-joined list into slices of the original.
+ Splits a comma-joined list into slices of the original.
 
  No copies: every slice points into `text`, which the caller owns for as long as
  the result is used. Empty input is an empty list rather than one empty field,
@@ -59,8 +57,7 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
  answering `[""]` would invent one called nothing.
 
  `@private` rather than `@local` because `bind_post.c3` splits the same two
- joined strings for the same reason — one post pass's uniforms cross exactly as
- one material's do.
+ joined strings for the same reason.
 *>
 fn void split_commas(String text, List{String}* out) @private
 {
@@ -79,10 +76,9 @@ fn void split_commas(String text, List{String}* out) @private
 <*
  `three.ShaderMaterial` — compile a fragment body and answer with its index.
 
- Needs a device, because a material *is* a pipeline and there is no pipeline
- without one. Unlike `raycast`, there is no meaningful answer to give without it:
- a material that compiled nothing would fail later, somewhere else, which is the
- shape of error this milestone exists to remove.
+ Needs a device, because a material *is* a pipeline. Unlike `raycast`, there is
+ no meaningful answer without one: a material that compiled nothing would fail
+ later, somewhere else.
 *>
 fn void js_create_material(
 	qjs::ContextRef ctx,
@@ -108,10 +104,9 @@ fn void js_create_material(
 		String names = arg_text(&js, argc, args, 1, tmem);
 		String widths = arg_text(&js, argc, args, 2, tmem);
 		// A third joined list, for the same reason as the second: the shape of a
-		// uniform is now two numbers, and a table's row count has to cross with
-		// its width or the shader declares a scalar where the script wrote a
-		// column. Absent means every uniform is one row, which is what every
-		// material written before tables existed meant.
+		// uniform is two numbers, and a table's row count has to cross with its
+		// width or the shader declares a scalar where the script wrote a column.
+		// Absent means every uniform is one row.
 		String rows = arg_text(&js, argc, args, 3, tmem);
 
 		List{String} name_list;
@@ -167,27 +162,25 @@ fn void js_create_material(
 			});
 		}
 
-		// The diagnostic is the product here, not a side effect. `plan.md` §5's
-		// done condition for M5 is that a bad shader throws a JS error carrying
-		// the Slang text — so it is collected whether the compile failed or only
-		// warned, and the warning path logs rather than throws.
-		// Absent means `SIDE_FRONT`, which is what every material meant before a
-		// side could be named — `cull_for_side` maps anything it does not know
-		// there too, and the prelude has already refused an unknown value by name.
+		// The diagnostic is the product here, not a side effect: a bad shader has
+		// to throw a JS error carrying the Slang text, so it is collected whether
+		// the compile failed or only warned, and the warning path logs rather than
+		// throws.
+		//
+		// Absent `side` means `SIDE_FRONT`, which is what every material meant
+		// before a side could be named — `cull_for_side` maps anything it does not
+		// know there too, and the prelude has already refused an unknown value.
 		int side = argc > 4 ? arg_int(&js, argc, args, 4) : SIDE_FRONT;
 		// Absent means `BLENDING_NONE`, which is what every material meant before
-		// one could ask to blend — and is what `Material._resolveBlending` answers
-		// for a script that named neither `transparent` nor `blending`. `blend_for`
-		// maps anything it does not know there too.
+		// one could ask to blend — and what `Material._resolveBlending` answers for
+		// a script that named neither `transparent` nor `blending`.
 		int blending = argc > 5 ? arg_int(&js, argc, args, 5) : BLENDING_NONE;
 
 		// The samplers, as a fourth and fifth joined list: the names the body
-		// declares, and the texture each one starts bound to. They cross the same
-		// way the uniforms do and for the same reason — the QuickJS shim can read
-		// a property by name and cannot enumerate one — and they are two lists
-		// rather than one because a name with no image is legal here. `-1` is
-		// `NO_TEXTURE`, which is what `textures: { noise_map: null }` means: the
-		// sampler exists, the body may read it, and white is what comes back.
+		// declares, and the texture each one starts bound to. Two lists rather than
+		// one because a name with no image is legal here — `-1` is `NO_TEXTURE`,
+		// which is what `textures: { noise_map: null }` means: the sampler exists,
+		// the body may read it, and white is what comes back.
 		String texture_names = arg_text(&js, argc, args, 6, tmem);
 		String texture_ids = arg_text(&js, argc, args, 7, tmem);
 
@@ -209,9 +202,8 @@ fn void js_create_material(
 		foreach (name : texture_name_list) textures.push({ .name = name });
 
 		// The vertex body and how far it moves things. Absent means the identity
-		// and a margin of zero, which is what every material written before there
-		// was a vertex stage meant — and the pair travels together because a
-		// displacement nobody declared a bound for is geometry that culls wrong.
+		// and a margin of zero. The pair travels together because a displacement
+		// nobody declared a bound for is geometry that culls wrong.
 		String vertex = argc > 8 ? arg_text(&js, argc, args, 8, tmem) : "";
 		float bounds = argc > 9 ? arg_float(&js, argc, args, 9) : 0;
 
@@ -226,8 +218,8 @@ fn void js_create_material(
 			textures.array_view(),
 			vertex,
 			bounds,
-			// Named, so that an argument arriving between the bounds and the
-			// diagnostic does not have to be threaded through here.
+			// Named, so an argument arriving between the bounds and the diagnostic
+			// does not have to be threaded through here.
 			diagnostic: &diagnostic
 		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
@@ -235,8 +227,8 @@ fn void js_create_material(
 		if (catch err = made)
 		{
 			// Only built on the failure path, and only to be quoted back — see
-			// `material_failure`'s note on the one diagnostic that is not enough
-			// on its own.
+			// `material_failure`'s note on the one diagnostic that is not enough on
+			// its own.
 			DString declared;
 			declared.tinit();
 			foreach (uniform : uniforms)
@@ -259,9 +251,9 @@ fn void js_create_material(
 		// compiled module knows: the names went in as a list and come back as a
 		// reflected layout, and `set_material_texture` is the join.
 		//
-		// **A failure here disposes the material it just made.** The script is
-		// about to be thrown at, so nothing will ever hold the handle — and a
-		// material nobody can name still holds a pipeline until the process ends.
+		// A failure here disposes the material it just made. The script is about to
+		// be thrown at, so nothing will ever hold the handle — and a material nobody
+		// can name still holds a pipeline until the process ends.
 		foreach (i, name : texture_name_list)
 		{
 			int texture = texture_id_list[i].to_int() ?? NO_TEXTURE;
@@ -282,15 +274,13 @@ fn void js_create_material(
 }
 
 <*
- Turn a sampler fault into a sentence an agent can act on.
+ Turns a sampler fault into a sentence an agent can act on.
 
  The `MATERIAL_SAMPLER_UNKNOWN` case is the one worth the words. It has two
- causes that look identical from here — a name that is not in the body at all, and
- a name that is in the body and never sampled, which Slang is free to drop from
- the module before reflection sees it — and the fix differs: one is a typo and the
- other is a line of shader that has to actually read the texture. Naming both is
- the difference between an agent fixing it and an agent trying the same spelling
- twice.
+ causes that look identical from here — a name that is not in the body at all,
+ and a name that is in the body and never sampled, which Slang is free to drop
+ from the module before reflection sees it — and the fix differs: one is a typo
+ and the other is a line of shader that has to actually read the texture.
 *>
 fn String material_texture_failure(fault err, String name) @local
 {
@@ -313,11 +303,10 @@ fn String material_texture_failure(fault err, String name) @local
  `material.textures.<name> = texture` — put an image in one of the samplers the
  body declared.
 
- `js_set_map` for the bindings above zero. The verb is separate from `setMap`
- rather than `setMap` growing a name argument, because the two resolve
- differently: binding 0 is the template's and is reached through the property
- Three.js already calls `map`, while these are the agent's own and are reached by
- the name the agent wrote.
+ `js_set_map` for the bindings above zero. A separate verb rather than `setMap`
+ growing a name argument, because the two resolve differently: binding 0 is the
+ template's and is reached through the property Three.js already calls `map`,
+ while these are the agent's own and are reached by the name the agent wrote.
 *>
 fn void js_set_material_texture(
 	qjs::ContextRef ctx,
@@ -351,35 +340,32 @@ fn void js_set_material_texture(
 }
 
 <*
- Turn a material fault into a sentence an agent can act on.
+ Turns a material fault into a sentence an agent can act on.
 
  The Slang diagnostic goes through verbatim when there is one — it already names
- the file, the line and the column, and `#line` has already been used to make
- that line the one the agent wrote rather than one in the generated preamble.
- Rewording it would only lose information. The validation faults have no
- diagnostic behind them, so they carry their own sentence.
+ the file, the line and the column, and `#line` has already made that line the
+ one the agent wrote rather than one in the generated preamble. The validation
+ faults have no diagnostic behind them, so they carry their own sentence.
 
- ## The one case where verbatim is not enough — §18.5
+ ## The one case where verbatim is not enough
 
- A diagnostic that still points at `three.material` after all that arithmetic is
- pointing at a line the agent did not write, and there is exactly one ordinary
- way to make that happen: **every uniform is spliced in as
- `#define <name> (push.<name>)`, live across the whole module**, so a helper's
- parameter, or a local, named after one of the material's own uniforms is
- rewritten and the error lands on the `#define`.
+ A diagnostic that still points at `three.material` is pointing at a line the
+ agent did not write, and there is exactly one ordinary way to make that happen:
+ every uniform is spliced in as `#define <name> (push.<name>)`, live across the
+ whole module, so a helper's parameter or a local named after one of the
+ material's own uniforms is rewritten and the error lands on the `#define`.
 
- The measured instance is in `plan.md` §18.5 — a helper written
- `float3 ripple(float2 q, float t)` in a material with a `t` uniform, reported as
- `error[E20001]: unexpected token --> three.material:512:16 | #define t (push.t)`,
- which names a line the author never typed and a construct they never wrote. The
- refusals in `material_source.c3` cannot catch it: they check the *uniform's* name
- against the shader's own vocabulary, and this is the agent's own vocabulary
- colliding with the uniform, which needs the body parsed to see.
+ The measured instance: a helper written `float3 ripple(float2 q, float t)` in a
+ material with a `t` uniform, reported as `error[E20001]: unexpected token -->
+ three.material:512:16 | #define t (push.t)` — a line the author never typed and
+ a construct they never wrote. The refusals in `material_source.c3` cannot catch
+ it: they check the *uniform's* name against the shader's own vocabulary, and
+ this is the agent's own vocabulary colliding with the uniform, which needs the
+ body parsed to see.
 
  So the diagnostic is kept whole and a sentence is added after it, naming the
  uniforms this material actually declares. It costs nothing on every other
- failure, because every other failure has already been mapped onto the agent's
- own lines and does not mention the preamble at all.
+ failure, because those have already been mapped onto the agent's own lines.
 *>
 fn String material_failure(fault err, String diagnostic, String uniforms = "") @local
 {
@@ -399,9 +385,9 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
 		return diagnostic;
 	}
 
-	// `material_source` leaves a sentence naming what it refused and why —
-	// which uniform, which byte count — and that is strictly better than
-	// re-deriving one from the fault alone.
+	// `material_source` leaves a sentence naming what it refused and why — which
+	// uniform, which byte count — and that is strictly better than re-deriving one
+	// from the fault alone.
 	String noted = material_diagnostic();
 	if (noted.len > 0) return noted;
 
@@ -412,10 +398,9 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
 		case MATERIAL_NAME_INVALID:
 			return "a uniform name must be a plain identifier and must not shadow the shader's own";
 		case MATERIAL_TOO_MANY_UNIFORMS:
-			// Spelled from the constant rather than written out, which `post_failure`
-			// already does: this said "68 bytes, 17 floats" for as long as the budget
-			// had been 52, because a number in a sentence has nothing to keep it
-			// honest.
+			// Spelled from the constant rather than written out: this said "68
+			// bytes, 17 floats" for as long as the budget had been 52, because a
+			// number in a sentence has nothing to keep it honest.
 			return string::tformat(
 				"those uniforms do not fit the push block — a material has %d bytes, %d floats",
 				MATERIAL_UNIFORM_BUDGET,
@@ -436,9 +421,9 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
  Arity nine: material, name, four floats, the count of them, and the row and row
  count for a table column. The count is passed rather than inferred from trailing
  zeroes, because `[0, 0, 0]` is a perfectly ordinary colour and guessing would
- make it a one-component write; the row count is passed for `Material.set_uniform`'s
- reason — it is what keeps the width check exact once a field can hold more than
- one value.
+ make it a one-component write; the row count is passed for
+ `Material.set_uniform`'s reason — it is what keeps the width check exact once a
+ field can hold more than one value.
 *>
 fn void js_set_uniform(
 	qjs::ContextRef ctx,
@@ -476,9 +461,9 @@ fn void js_set_uniform(
 			return;
 		}
 
-		// Absent means the plain case, so a caller that predates tables — a
-		// script reaching for `__three.setUniform` itself — still writes the one
-		// value it means to.
+		// Absent means the plain case, so a caller that predates tables — a script
+		// reaching for `__three.setUniform` itself — still writes the one value it
+		// means to.
 		int row = argc > 7 ? arg_int(&js, argc, args, 7) : 0;
 		int rows = argc > 8 ? arg_int(&js, argc, args, 8) : 1;
 		if (rows < 1) rows = 1;
@@ -509,9 +494,8 @@ fn void js_set_uniform(
 
  A verb rather than a uniform because which faces survive is render state and not
  a byte in the push block — but it needs no device and can build nothing, because
- the cull mode is dynamic. `PipelineState` has that argument; the short version
- is that a material's side is one `vk::cmdSetCullMode` at record time, so
- flipping it in an animation callback costs nothing at all.
+ the cull mode is dynamic. A material's side is one `vk::cmdSetCullMode` at
+ record time, so flipping it in an animation callback costs nothing.
 *>
 fn void js_set_side(
 	qjs::ContextRef ctx,
@@ -544,15 +528,14 @@ fn void js_set_side(
  time. So it is free to animate — no pipeline, no device, no rebuild — which is
  the whole reason it is settable while `blending` is not.
 
- **It does nothing unless the material was built transparent.** An opaque
- pipeline discards the alpha the fragment writes, so setting this on a material
- that never asked to blend changes a number and no pixels. That is the hardware's
- answer rather than a rule anybody chose, and it is Three.js's behaviour as well;
+ It does nothing unless the material was built transparent. An opaque pipeline
+ discards the alpha the fragment writes, so setting this on a material that never
+ asked to blend changes a number and no pixels. That is the hardware's answer
+ rather than a rule anybody chose, and it is Three.js's behaviour as well;
  refusing the write instead would make the two APIs disagree about a line an
  agent is very likely to write from memory.
 
- The prelude has already refused a value outside 0..1 by name, so what reaches
- here is a number in range or a caller that went around the prelude.
+ The prelude has already refused a value outside 0..1 by name.
 *>
 fn void js_set_opacity(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -564,9 +547,9 @@ fn void js_set_opacity(
 	uint index = (uint)arg_int(&js, argc, args, 0);
 	if (catch self.pass.set_material_opacity(index, arg_float(&js, argc, args, 1)))
 	{
-		// `js_dispose_material`'s sentence, because it is the same pair of
-		// mistakes: an index this context never handed out, or one of the two
-		// built-ins, which belong to every node that never asked for a material.
+		// `js_dispose_material`'s sentence, because it is the same pair of mistakes:
+		// an index this context never handed out, or one of the two built-ins, which
+		// belong to every node that never asked for a material.
 		*out = js.raise(
 			"that material is not in this context, or it is a built-in one that every node shares"
 		);
@@ -600,11 +583,9 @@ fn void js_get_opacity(
  them separately would be two host crossings to write two halves of the same
  sixteen bytes.
 
- The reason this is a material property rather than a texture property is at
- `MeshPass.set_material_uv`, and it is not the reason Three.js has: it is that
- textures here are deduplicated by content across every file, so a transform on
- the texture would reach every unrelated surface that happened to use the same
- image.
+ It is a material property rather than a texture property because textures here
+ are deduplicated by content across every file, so a transform on the texture
+ would reach every unrelated surface that happened to use the same image.
 *>
 fn void js_set_material_uv(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -678,8 +659,7 @@ fn void js_create_texture_material(
 	// Absent means `SIDE_FRONT`, matching `js_create_material`.
 	int side = argc > 1 ? arg_int(&js, argc, args, 1) : SIDE_FRONT;
 	// And absent means `BLENDING_NONE`, for the same reason. The pass has all
-	// three variants of the built-in pipeline built already, so this stays the
-	// list push and retain its doc block promises whichever one arrives.
+	// three variants of the built-in pipeline built already.
 	int blending = argc > 2 ? arg_int(&js, argc, args, 2) : BLENDING_NONE;
 
 	uint? made = self.pass.create_texture_material(texture, side, blending);
@@ -698,10 +678,9 @@ fn void js_create_texture_material(
  `material.dispose()` — give back the reference the script's handle holds.
 
  The prelude has already refused a second call on the same handle, so what
- reaches here is either a live material or a mistake. The mistake it can still
- be is a built-in one, and that is refused with `setSide`'s sentence for
- `setSide`'s reason: `DEFAULT_MATERIAL` belongs to every node that never asked
- for a material, and it is not a script's to give back.
+ reaches here is either a live material or a mistake. The mistake it can still be
+ is a built-in one, refused with `setSide`'s sentence for `setSide`'s reason:
+ `DEFAULT_MATERIAL` belongs to every node that never asked for a material.
 
  What this does *not* do is free anything on its own. See
  `MeshPass.dispose_material`.
@@ -735,9 +714,7 @@ fn void js_dispose_material(
 
  The two refusals are told apart in the message rather than flattened into one,
  because they are different mistakes: a built-in material is one a script may not
- texture at all, and a dead texture is one it may not texture *with*. Answering
- "that material is not in this context" to the second would send an agent
- looking at the wrong object.
+ texture at all, and a dead texture is one it may not texture *with*.
 *>
 fn void js_set_map(
 	qjs::ContextRef ctx,
@@ -772,10 +749,10 @@ fn void js_set_map(
  `mesh.material = mat` — point a node at a material.
 
  The material index is validated here rather than in `Scene.set_material`: the
- scene graph has no view of `MeshPass.materials` and giving it one would put the
+ scene graph has no view of `MeshPass.materials`, and giving it one would put the
  render pass inside the scene. The draw loop skips a bucket whose material does
  not resolve, so an index that slipped through would be silence rather than a
- crash — which is exactly the failure this check exists to turn into a sentence.
+ crash.
 *>
 fn void js_set_material(
 	qjs::ContextRef ctx,
@@ -806,8 +783,6 @@ fn void js_set_material(
  `beginMaterialLayers(material, sharedMask)` — start recording what a
  `LayeredMaterial` *is*.
 
- ## Why a shader has to be told what it means
-
  Everything else on this file's surface crosses in one direction: a description
  goes in and a compiled pipeline comes out, and the description is not needed
  again. A layer stack is the exception, because `scene.export` has to write the
@@ -817,18 +792,15 @@ fn void js_set_material(
 
  So the stack crosses twice: once as a shader, through `createMaterial`, and once
  as a description, through this and `addMaterialLayer`. `ScriptLayer` in
- `scene/material.c3` is what the second crossing builds and why it stores
- bindings rather than images.
+ `scene/material.c3` is what the second crossing builds.
 
- **Only `LayeredMaterial` calls this**, and it calls it for every stack including
- an empty one. A hand-written `ShaderMaterial` that happens to sample four
- textures is not a layer stack and does not claim to be one.
+ Only `LayeredMaterial` calls this, and it calls it for every stack including an
+ empty one. A hand-written `ShaderMaterial` that happens to sample four textures
+ is not a layer stack and does not claim to be one.
 
  `sharedMask` is the sampler several layers read a channel of, or `""` for a
  stack where no two share one. `baseNormal` is the stack's base normal map, which
- becomes the glTF material's own `normalTexture` rather than any layer's — it is
- the one under all of them, and the only normal map anything in this renderer
- has, since the core materials carry no such property.
+ becomes the glTF material's own `normalTexture` rather than any layer's.
 *>
 fn void js_begin_material_layers(
 	qjs::ContextRef ctx,
@@ -864,23 +836,20 @@ fn void js_begin_material_layers(
  `addMaterialLayer(material, name, samplers, blend, maskSource, maskChannel,
  invert, opacity, r, g, b, er, eg, eb)` — one layer of the stack.
 
- ## The samplers cross as one joined string
-
  `samplers` is `"map,normal,emissive,mask,params"`, each field a sampler name the
  generator chose or empty for a slot the layer does not use — the same shape the
- uniforms take two functions up, and safe for the same reason: these are names
+ uniforms take, and safe for the same reason: these are names
  `js/prelude/layers.js` generates as `layer3_map`, so a comma cannot appear in
  one. The layer's own `name` is a separate argument precisely because it *is*
  free text, and joining it with the rest is how a layer called "rock, wet" would
  have become two fields.
 
- **Names rather than binding numbers**, because the resolution belongs on this
- side: `Material.binding_of_texture` asks the material's own reflected pipeline,
- which is the only thing that actually knows, and `MATERIAL_BINDING_FIRST` stays
- a number the prelude never has to spell.
+ Names rather than binding numbers, because the resolution belongs on this side:
+ `Material.binding_of_texture` asks the material's own reflected pipeline, which
+ is the only thing that actually knows.
 
  `params` is the uniform holding an `animated` layer's tint and opacity, resolved
- to a push offset once here and read live at export — `ScriptLayer` argues both.
+ to a push offset once here and read live at export.
 
  The blend mode, mask source and mask channel arrive as `gltf.c3l`'s own
  ordinals, untranslated, exactly as `meshLayers` hands them the other way.

@@ -1,5 +1,5 @@
 <*
- The physics verbs — `game.md` G5/S3, S6, S7.
+ The physics verbs.
 
 	mesh.body = { shape: 'box', mass: 1, friction: 0.5, restitution: 0.2 }
 	three.physics.add(mesh)
@@ -10,23 +10,18 @@
 	three.onTrigger(e => ...)
 	three.onContact(e => ...)
 
- **Velocity and impulse are what make a character possible**, and until they
- were bound there was no combination of the verbs above that both walks and
- collides: a dynamic body could be dropped and watched but never steered, and a
- kinematic one was steered but never stopped. The solver had
- `apply_linear_impulse` and `linear_velocity` all along
- (`collision.c3l` `solver/resolver.c3`); nothing here reached them, so
- `examples/village` walked its character with 123 hand-registered circles and
- rectangles resolved in JavaScript every frame.
+ Velocity and impulse are what make a character possible: without them no
+ combination of the verbs above both walks and collides — a dynamic body can be
+ dropped and watched but never steered, and a kinematic one is steered but never
+ stopped.
 
- **Events reuse the keyboard's machinery** (G5/S7), which is the whole of this
- file's second half: same registration shape, same "a handler that throws is
- stopped for good" policy, same frame log. A solver event and a keypress are the
- same kind of thing from a script's side — something that happened, delivered
- once, inside the frame.
+ Events reuse the keyboard's machinery, which is the whole of this file's second
+ half: same registration shape, same "a handler that throws is stopped for good"
+ policy, same frame log. A solver event and a keypress are the same kind of thing
+ from a script's side — something that happened, delivered once, inside the frame.
 
- **The solver owns a dynamic body's transform** (G5/S6), and the refusal for
- that lives in `bind_scene.c3` where the writes arrive rather than here.
+ The solver owns a dynamic body's transform, and the refusal for that lives in
+ `bind_scene.c3` where the writes arrive rather than here.
 *>
 module three;
 
@@ -125,7 +120,7 @@ fn void js_physics_add(
  A sentence for each way `Physics.add` refuses, rather than the fault's name.
 
  Each of these is a thing a script did, and each has a different next step —
- which is the whole reason they are separate faults and not one.
+ which is the reason they are separate faults and not one.
 *>
 fn String physics_add_message(fault err, String shape_name) @local
 {
@@ -188,8 +183,8 @@ fn void js_physics_gravity_get(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	// Reported before the world is opened too, so reading gravity is not the
-	// thing that creates a world.
+	// Reported before the world is opened too, so reading gravity is not the thing
+	// that creates a world.
 	Vec3 gravity = self.physics.opened ? self.physics.world.gravity : PHYSICS_GRAVITY;
 
 	qjs::Value triple = js.array();
@@ -203,15 +198,15 @@ fn void js_physics_gravity_get(
  `physicsTransform(index, generation)` — where the solver has put a node, as
  `[px, py, pz, ex, ey, ez]`.
 
- **The read-back door, and the only one there is.** `prelude.js` holds a node's
- transform as JavaScript numbers and pushes them on write, which is exactly
- right while a script is the only writer — and leaves `mesh.position` reporting
- where a script last put a falling body rather than where it fell to. So a
- solver-owned object refreshes through here before it answers.
+ The read-back door, and the only one there is. `prelude.js` holds a node's
+ transform as JavaScript numbers and pushes them on write, which is right while a
+ script is the only writer — and leaves `mesh.position` reporting where a script
+ last put a falling body rather than where it fell to. So a solver-owned object
+ refreshes through here before it answers.
 
- Euler rather than the quaternion the node actually stores, because `rotation`
- is an Euler triple on the JavaScript side and `euler_from_quat` is already the
- one place that converts backwards for exactly this reason.
+ Euler rather than the quaternion the node stores, because `rotation` is an Euler
+ triple on the JavaScript side and `euler_from_quat` is already the one place that
+ converts backwards for exactly this reason.
 *>
 fn void js_physics_transform(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -249,10 +244,10 @@ fn void js_physics_transform(
 // island before touching anything. Skipping the wake is the failure worth naming
 // twice — a sleeping body absorbs an impulse into a number nothing reads, so the
 // same line of script works on a rolling crate and does nothing at all to a
-// settled one, which reads as the verb being unreliable rather than as sleep.
+// settled one.
 
 <*
- Resolve a node to a body that may be pushed, or raise saying why not.
+ Resolves a node to a body that may be pushed, or raises saying why not.
 
  Three different refusals rather than one, because they are three different
  mistakes and the fix for each is a different line of script.
@@ -305,9 +300,9 @@ fn collision::Rigidbody* pushable(
 <*
  `physicsVelocityGet(index, generation)` — `[lx, ly, lz, ax, ay, az]`, or null.
 
- Null rather than a raise for the same reason `physicsTransform` answers null: a
- getter is asked in a loop over things that may or may not have bodies, and
- making that a throw would mean writing the check twice in every such loop.
+ Null rather than a raise for `physicsTransform`'s reason: a getter is asked in a
+ loop over things that may or may not have bodies, and making that a throw would
+ mean writing the check twice in every such loop.
 
  Both velocities in one array rather than two crossings, because a script that
  wants one usually wants the other in the same breath — a character reads linear
@@ -315,7 +310,7 @@ fn collision::Rigidbody* pushable(
 
  Answers for every kind of body, unlike the setters. Reading a kinematic body's
  velocity is how a script finds out how fast the transform it is writing is
- actually carrying the thing, which is a real question with a real answer.
+ actually carrying the thing.
 *>
 fn void js_physics_velocity_get(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -347,17 +342,16 @@ fn void js_physics_velocity_get(
 <*
  `physicsLinearSet(index, generation, x, y, z)` — units per second, world space.
 
- **Assignment, not addition**, and that is the difference from an impulse that
+ Assignment, not addition, and that is the difference from an impulse that
  matters at a call site. A character sets its velocity every frame from the keys
- that are down, because what it wants is a speed; a explosion applies an impulse,
- because what it wants is a change to whatever the speed already was. Getting
- this backwards gives a character that accelerates forever.
+ that are down, because what it wants is a speed; an explosion applies an
+ impulse, because what it wants is a change to whatever the speed already was.
+ Getting this backwards gives a character that accelerates forever.
 
  The solver reconstructs `linear_velocity` from the position delta at the end of
- every step (`resolver.c3`'s `body.linear_velocity = (position - prev) * inv_dt`),
- so what is written here survives exactly one integration and then becomes
- whatever actually happened — which is the right behaviour and the reason a
- character sets it again next frame rather than once.
+ every step, so what is written here survives exactly one integration and then
+ becomes whatever actually happened — which is why a character sets it again next
+ frame rather than once.
 *>
 fn void js_physics_linear_set(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -397,15 +391,15 @@ fn void js_physics_angular_set(
  `physicsImpulse(index, generation, x, y, z, px, py, pz)` — a push, in
  mass-times-velocity, at an offset from the body's centre.
 
- **The offset is what makes it spin.** `apply_impulse` splits into a linear term
+ The offset is what makes it spin. `apply_impulse` splits into a linear term
  scaled by the inverse mass and an angular one from `point.cross(impulse)`, so an
  offset of zero is a pure shove and an offset out at the rim is a shove that also
  tumbles the thing. The prelude passes zero when the script gave no point, so
  there is one verb here rather than two that differ by a cross product.
 
  The offset is relative to the body's centre and in world axes — not a world
- position, which would be the same numbers meaning something completely
- different for anything not sitting at the origin.
+ position, which would be the same numbers meaning something completely different
+ for anything not sitting at the origin.
 *>
 fn void js_physics_impulse(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -437,8 +431,7 @@ fn void js_physics_impulse(
 
  Separate from the offset form of `physicsImpulse` because "make this rotate" and
  "hit this off-centre" are different intentions, and expressing the first as the
- second means solving for an offset and a force that produce a wanted spin —
- arithmetic nobody should have to do to turn a wheel.
+ second means solving for an offset and a force that produce a wanted spin.
 *>
 fn void js_physics_torque_impulse(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -464,7 +457,7 @@ fn void js_physics_count(
 }
 
 // ---------------------------------------------------------------------------
-// The handlers — G5/S7, on the keyboard's machinery.
+// The handlers, on the keyboard's machinery.
 
 <*
  `onTrigger(fn)` / `onContact(fn)`, or null to unbind.
@@ -525,9 +518,8 @@ fn void js_on_contact(
 }
 
 <*
- Let both handlers go. Same rule as `clear_key_handlers` and for the same
- reason: a retained reference released after the context is gone has nothing to
- be released into.
+ Lets both handlers go. Same rule as `clear_key_handlers`: a retained reference
+ released after the context is gone has nothing to be released into.
 *>
 fn void JsRuntime.clear_physics_handlers(&self)
 {
@@ -546,11 +538,11 @@ fn void JsRuntime.clear_physics_handlers(&self)
 fn void JsRuntime.drop_physics_events(&self) => self.physics.drop_events();
 
 <*
- Say when a body left the simulation, rather than letting it vanish.
+ Says when a body left the simulation, rather than letting it vanish.
 
  An object that stops falling and starts not existing is the kind of thing
- somebody debugs for an hour. Reported through the frame log, which is where an
- agent already looks for what went wrong inside a frame.
+ somebody debugs for an hour. Reported through the frame log, where an agent
+ already looks for what went wrong inside a frame.
 *>
 fn void JsRuntime.report_diverged_bodies(&self)
 {
@@ -568,10 +560,10 @@ fn void JsRuntime.report_diverged_bodies(&self)
 }
 
 <*
- Deliver the step's events, and empty the lists either way.
+ Delivers the step's events, and empties the lists either way.
 
- **Emptied even with no handler bound**, which is what keeps a world stepping
- under a scene nobody is listening to from growing a list forever.
+ Emptied even with no handler bound, which is what keeps a world stepping under a
+ scene nobody is listening to from growing a list forever.
 *>
 fn void JsRuntime.dispatch_physics_events(&self)
 {
@@ -642,7 +634,7 @@ fn qjs::Value node_handle_or_null(qjs::Context* js, NodeId id) @local
 
 
 <*
- Call one handler with one event. False when it must be unbound — it threw, it
+ Calls one handler with one event. False when it must be unbound — it threw, it
  timed out, or it answered with a promise it cannot keep inside a frame.
 
  The three failures the keyboard and the click handler already treat alike, and

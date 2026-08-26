@@ -1,61 +1,52 @@
 <*
- Bulk spatial queries, and the broad phase that makes them worth having —
- `notes.md` §17, which is where the entry's account went once it was built.
+ Bulk spatial queries, and the broad phase that makes them worth having.
 
- ## What was wrong
+ ## What it replaces
 
- `Scene.raycast` walked **every node in the scene**, transformed its mesh box by
- its world matrix and tested the ray against it, before it reached any BVH:
- 42 ns per node, linear in the node count and completely independent of what the
- ray could possibly hit. `notes.md` §17 measured one cast at 21 µs in a 500-node
- scene, and named the consequence — a hundred agents each casting one ground ray
- is 2.1 ms, a quarter of a frame, in a scene small enough to be a demo.
+ Without an index, `Scene.raycast` walks *every node in the scene*, transforms
+ its mesh box by its world matrix and tests the ray against it before reaching
+ any BVH: 42 ns per node, linear in the node count and completely independent of
+ what the ray could possibly hit. One cast measures 21 µs in a 500-node scene, so
+ a hundred agents each casting one ground ray is 2.1 ms — a quarter of a frame,
+ in a scene small enough to be a demo.
 
- That is the entry this file pays off, and it pays it twice: the same index
- answers `overlapSphere`, `queryBox`, `raycastAll` and `sweep`, which are the
- verbs a game reaches for and none of which existed.
+ The same index answers `overlapSphere`, `queryBox`, `raycastAll` and `sweep`.
 
  ## The index is built on demand, never per frame
 
- **A frame that asks nothing pays nothing.** The index is rebuilt by the first
- query after anything in the scene moved, and not by the tick — so the cost is
- borne by whoever actually wants it, once, and every query after it in the same
- burst is a cell walk. A hundred ground rays are now one rebuild plus a hundred
- lookups.
+ A frame that asks nothing pays nothing. The index is rebuilt by the first query
+ after anything in the scene moved, and not by the tick — so the cost is borne by
+ whoever wants it, once, and every query after it in the same burst is a cell
+ walk. A hundred ground rays are one rebuild plus a hundred lookups.
 
  That is also why it is a *rebuild* rather than an incremental
- insert/update/remove against `collision::SpatialHash3D`, which is what the plan
- originally called for and what the solver's broad phase does. Incremental
- maintenance is the right shape for a set of bodies that is mutated one at a time
- and queried every step; it is the wrong shape here, because a world box is only
- knowable after `update_world_matrices`. A rebuild needs no signal at all: it
- reads what is true now.
+ insert/update/remove against `collision::SpatialHash3D`, which is what the
+ solver's broad phase does. Incremental maintenance is right for a set of bodies
+ mutated one at a time and queried every step; it is wrong here, because a world
+ box is only knowable after `update_world_matrices`. A rebuild needs no signal at
+ all: it reads what is true now.
 
- The rebuild costs what one old raycast cost — the same per-node box transform,
- over the same nodes — so the break-even is the *second* query in a burst, and
- everything past it is free.
+ The rebuild costs what one un-indexed raycast cost — the same per-node box
+ transform, over the same nodes — so the break-even is the *second* query in a
+ burst.
 
  ## A move is re-filed; a structural change is not
 
- **What that argument got wrong was the frequency of a move.** The paragraph
- above used to end by saying the scene has no per-node "this one moved" signal
- to hang an update on, so everything was a rebuild — and a gameplay step that
- legitimately moved a character and then swept from its new position paid four
- hundred and thirty re-filings for one moved box, once per sweep. `plan.md` §17
- measured 6.8 ms a step against 0.65 ms for the same eleven characters with
- every write deferred to the animation callback, which made "never write between
- two queries" a rule a script had to know and could not always keep.
+ Rebuilding on every move is the right answer at the wrong price: one moved node
+ re-files all four hundred and thirty of them, so a gameplay step that moves
+ eleven characters and then sweeps from their new positions measures 6.8 ms
+ against 0.65 ms for the same step with every write deferred to the animation
+ callback. That makes "never write between two queries" a rule a script has to
+ know and cannot always keep.
 
- So there is a signal now, and it is narrow on purpose. `Scene.mark_moved`
- hands `Scene.invalidate` the id it already had, `QueryIndex.note_moved`
- remembers it, and the next query re-files that subtree's boxes and leaves those
- entries in `loose` — a short list every query scans, which the stamp keeps from
- double-reporting against the cells they are still filed in. Past
- `QUERY_MAX_LOOSE` it gives up and rebuilds, because a linear scan stops being
- the cheaper answer.
+ So there is a narrow signal. `Scene.mark_moved` hands `Scene.invalidate` the id
+ it already had, `QueryIndex.note_moved` remembers it, and the next query re-files
+ that subtree's boxes and leaves those entries in `loose` — a short list every
+ query scans, with the stamp keeping them from being double-reported against the
+ cells they are still filed in. Past `QUERY_MAX_LOOSE` it gives up and rebuilds.
 
- Everything that is *not* one subtree moving still rebuilds, and that list is
- the whole of the contract: adding a node, removing one, re-parenting one, and
+ Everything that is *not* one subtree moving still rebuilds, and that list is the
+ whole of the contract: adding a node, removing one, re-parenting one, and
  `Node.collides` changing. Toggling `Node.visible` costs nothing at all — see
  `Scene.query_node`, which tests it when it answers.
 
@@ -76,7 +67,7 @@
  A ground plane, a terrain mesh or a level shell covers the whole world, and
  smearing its index across every cell would make every query find it in every
  cell and discard all but one. Those go in `oversized` and are tested once per
- query — the same split `SpatialHash3D.is_large` makes, and for the same reason.
+ query.
 *>
 module three;
 
@@ -90,9 +81,8 @@ import collision;
  One drawable node and the world box that bounds it.
 
  The box is the mesh's local bounds through the node's world matrix — the
- transformed corners, not the transformed vertices. Conservative, which is what
- a broad phase wants: see `Scene.rebuild_query_index` for the measurement that
- chose it.
+ transformed corners, not the transformed vertices. Conservative, which is what a
+ broad phase wants; see `Scene.rebuild_query_index` for the measurement.
 *>
 struct QueryEntry
 {
@@ -110,19 +100,19 @@ struct QueryEntry
 const uint QUERY_MAX_CELLS = 64;
 
 // Per axis, and a total. Both are there so that a scene with one node a
-// kilometre from the rest cannot ask for a billion cells: the cell size is
-// grown until the grid fits instead.
+// kilometre from the rest cannot ask for a billion cells: the cell size is grown
+// until the grid fits instead.
 const int QUERY_MAX_DIM = 128;
 const int QUERY_MAX_TOTAL = 1 << 18;
 
 <*
  How many entries may be loose before a rebuild is the cheaper answer.
 
- Every query scans the loose list from end to end, where a rebuild is paid once
- and then costs queries nothing. A hundred is well inside the range where the
- scan wins — the case this exists for is a handful of characters sweeping
- between writes — and well short of the crowd that should be moved with
- `three.batch` and asked about afterwards.
+ Every query scans the loose list end to end, where a rebuild is paid once and
+ then costs queries nothing. A hundred is well inside the range where the scan
+ wins — the case this exists for is a handful of characters sweeping between
+ writes — and well short of the crowd that should be moved with `three.batch`
+ and asked about afterwards.
 *>
 const sz QUERY_MAX_LOOSE = 128;
 
@@ -150,9 +140,9 @@ struct QueryIndex
 
 	 A stamp rather than a cleared bool array: clearing is O(entries) per query
 	 and the whole point of the grid is that a query is O(what is near). The
-	 counter is a `uint` and is bumped once per query, so it wraps after four
-	 billion queries — at which point the first query after the wrap may miss a
-	 duplicate. `rebuild` resets it, which in practice happens constantly.
+	 counter is a `uint` bumped once per query, so it wraps after four billion
+	 queries — at which point the first query after the wrap may miss a duplicate.
+	 `rebuild` resets it.
 	*>
 	List{uint} stamp;
 	uint stamp_now;
@@ -160,19 +150,11 @@ struct QueryIndex
 	<*
 	 Entries whose node moved since the last rebuild, scanned linearly.
 
-	 **The dirty set `plan.md` §17 asked for.** A rebuild is the right *answer*
-	 to a node moving — the entry really does have a new box — at the wrong
-	 *price*: one moved node re-filed all four hundred and thirty of them, so a
-	 fixed step that moved eleven characters between its sweeps cost 29.2 ms
-	 against 5.9 ms for the same step with every write deferred. That is a rule
-	 a script should not have to know, and it breaks down the moment gameplay
-	 legitimately has to move something and then ask about it.
-
-	 A moved entry has its box rewritten in place and its index pushed here. It
-	 is left filed in the cells it used to cover, which is safe in both
-	 directions: a cell it no longer overlaps rejects it on the box test, and a
-	 cell it now overlaps but is not filed in is reached by this scan. The stamp
-	 above is what stops it being reported twice.
+	 A moved entry has its box rewritten in place and its index pushed here. It is
+	 left filed in the cells it used to cover, which is safe in both directions: a
+	 cell it no longer overlaps rejects it on the box test, and a cell it now
+	 overlaps but is not filed in is reached by this scan. The stamp above stops
+	 it being reported twice.
 
 	 Linear, so it is only cheaper than a rebuild while it is short — see
 	 `QUERY_MAX_LOOSE`, which is where it gives up and rebuilds instead.
@@ -182,15 +164,15 @@ struct QueryIndex
 	// entry in `loose` rather than five.
 	List{char} is_loose;
 
-	// The nodes `Scene.invalidate` was told moved, and have not been re-filed
-	// yet. Subtree roots: moving a group moves everything under it, and the
-	// setter was only shown the group.
+	// The nodes `Scene.invalidate` was told moved, and have not been re-filed yet.
+	// Subtree roots: moving a group moves everything under it, and the setter was
+	// only shown the group.
 	List{NodeId} moved;
 
-	// Entry index per node slot, or -1. What turns "this node moved" into
-	// "re-file entry 214" without a search. Rebuilt with the entries, and only
-	// ever read while `current` holds — every path that can add, remove or
-	// recycle a slot drops the index outright.
+	// Entry index per node slot, or -1. What turns "this node moved" into "re-file
+	// entry 214" without a search. Rebuilt with the entries, and only ever read
+	// while `current` holds — every path that can add, remove or recycle a slot
+	// drops the index outright.
 	List{int} slot_entry;
 
 	float cell;
@@ -204,9 +186,8 @@ struct QueryIndex
 fn void QueryIndex.init(&self)
 {
 	if (self.open) return;
-	// Heap-backed explicitly, for the reason `Scene.init` spells out: a
-	// zero-valued List binds itself to the temp arena on its first push, and
-	// this one outlives every pool in the process.
+	// Heap-backed explicitly: a zero-valued List binds itself to the temp arena on
+	// its first push, and this one outlives every pool in the process.
 	self.entries.init(mem, 64);
 	self.starts.init(mem, 64);
 	self.items.init(mem, 64);
@@ -236,13 +217,12 @@ fn void QueryIndex.free(&self)
 }
 
 <*
- Throw the index away: the next query rebuilds from scratch.
+ Throws the index away: the next query rebuilds from scratch.
 
- One place, so that "the index is stale" and "there is nothing pending to
- re-file" are set together. A rebuild subsumes every outstanding move, and a
- `moved` list left behind it would re-file entries the rebuild had just filed
- correctly — against a `slot_entry` map that no longer describes the same
- entries.
+ One place, so "the index is stale" and "there is nothing pending to re-file" are
+ set together. A rebuild subsumes every outstanding move, and a `moved` list left
+ behind it would re-file entries the rebuild had just filed correctly — against a
+ `slot_entry` map that no longer describes the same entries.
 *>
 fn void QueryIndex.drop(&self)
 {
@@ -251,11 +231,11 @@ fn void QueryIndex.drop(&self)
 }
 
 <*
- Remember that this node's subtree moved, or give up and rebuild.
+ Remembers that this node's subtree moved, or gives up and rebuilds.
 
  Called by `Scene.invalidate` for the changes whose extent is one subtree — a
- transform setter, the animation player, the physics write-back. Anything
- whose extent is not one subtree drops the index instead; see `Scene.invalidate`.
+ transform setter, the animation player, the physics write-back. Anything whose
+ extent is not one subtree drops the index instead.
 *>
 fn void QueryIndex.note_moved(&self, NodeId id)
 {
@@ -298,8 +278,8 @@ fn int QueryIndex.key(&self, int x, int y, int z) @inline
  `count` zeroes in a list that already exists, without freeing its storage.
 
  `List` has `reserve` and `push` and no `resize`, and a rebuild wants a slot per
- cell filled with a count of zero. Reserving first is what keeps this from being
- a doubling walk on every rebuild.
+ cell filled with a count of zero. Reserving first keeps this from being a
+ doubling walk on every rebuild.
 *>
 fn void zero_fill(List{uint}* list, sz count)
 {
@@ -309,22 +289,22 @@ fn void zero_fill(List{uint}* list, sz count)
 }
 
 <*
- Bring the index up to date, if it is not.
+ Brings the index up to date, if it is not.
 
- Cheap when nothing moved — one bool — which is what makes it safe to call at
- the top of every query rather than making callers remember to.
+ Cheap when nothing moved — one bool — which makes it safe to call at the top of
+ every query rather than making callers remember to.
 
- **Three states rather than two since §17's fixes.** The index is current; or
- some nodes moved and their entries can be re-filed, which is what a gameplay
- step that moves a character and then asks about it does; or it is gone and has
- to be rebuilt. The last case is what every structural change — an add, a
- removal, a re-parenting, a node joining the query set — still costs.
+ Three states rather than two. The index is current; or some nodes moved and
+ their entries can be re-filed, which is what a gameplay step that moves a
+ character and then asks about it does; or it is gone and has to be rebuilt. The
+ last case is what every structural change — an add, a removal, a re-parenting, a
+ node joining the query set — costs.
 
  The `matrices_current` test is a backstop rather than the mechanism. Every
  writer that clears it goes through `invalidate`, which either drops this index
  or records the move, so reaching this line with the index current and the
- matrices stale means a fourth writer appeared that neither of those knows
- about — and rebuilding is the answer that is merely slow rather than wrong.
+ matrices stale means a fourth writer appeared that neither knows about — and
+ rebuilding is the answer that is merely slow rather than wrong.
 *>
 fn void Scene.ensure_query_index(&self, Assets* assets)
 {
@@ -342,25 +322,25 @@ fn void Scene.ensure_query_index(&self, Assets* assets)
 }
 
 <*
- Rewrite the boxes of everything that moved, and leave those entries loose.
+ Rewrites the boxes of everything that moved, and leaves those entries loose.
 
- The cheap half of `ensure_query_index` — see `QueryIndex.loose` for why
- leaving them out of the grid rather than re-bucketing them is both correct and
- the point. Cost is the moved subtrees, not the scene.
+ The cheap half of `ensure_query_index` — see `QueryIndex.loose` for why leaving
+ them out of the grid rather than re-bucketing them is both correct and the
+ point. Cost is the moved subtrees, not the scene.
 *>
 fn void Scene.refile_moved(&self, Assets* assets)
 {
-	// Not optional and not free the first time: the boxes about to be written
-	// are `node.world` through the mesh bounds, and `node.world` is what this
-	// walk produces. It is the same walk the rebuild would have done.
+	// Not optional and not free the first time: the boxes about to be written are
+	// `node.world` through the mesh bounds, and `node.world` is what this walk
+	// produces. It is the same walk the rebuild would have done.
 	self.update_world_matrices();
 
 	QueryIndex* index = &self.query;
 	if (assets != null)
 	{
-		// Copied out: `refile_branch` takes `&self` and the list is a field of
-		// it, so iterating it in place is the habit that stops being safe the
-		// day something pushes to it mid-walk.
+		// Copied out: `refile_branch` takes `&self` and the list is a field of it,
+		// so iterating it in place is the habit that stops being safe the day
+		// something pushes to it mid-walk.
 		sz count = index.moved.len();
 		for (sz i = 0; i < count; i++) self.refile_branch(assets, index.moved[i]);
 	}
@@ -375,8 +355,8 @@ fn void Scene.refile_branch(&self, Assets* assets, NodeId id)
 	self.refile_entry(assets, id, node);
 
 	// Read through `self.nodes` per step for `update_branch`'s reason: the
-	// recursion takes `&self`, so a pointer taken before it is not one to
-	// index through afterwards.
+	// recursion takes `&self`, so a pointer taken before it is not one to index
+	// through afterwards.
 	sz count = node.children.len();
 	for (sz i = 0; i < count; i++) self.refile_branch(assets, self.nodes[id.index].children[i]);
 }
@@ -441,26 +421,24 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	{
 		if (!node.alive) continue;
 		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
-		// **Where `collides` is spent** — `plan.md` §17. Filed out here rather
-		// than tested at answer time the way `visible` is, because the two are
-		// different kinds of flag: visibility is toggled per frame by gameplay
-		// and the index must survive it, where this one says what a piece of
-		// geometry *is* and is set when it is authored. Keeping decoration out
-		// of the index entirely is what makes a hundred grass tufts free rather
-		// than merely rejected a hundred times.
+		// Where `collides` is spent. Filed out here rather than tested at answer
+		// time the way `visible` is, because the two are different kinds of flag:
+		// visibility is toggled per frame by gameplay and the index must survive
+		// it, where this one says what a piece of geometry *is* and is set when it
+		// is authored. Keeping decoration out of the index entirely is what makes
+		// a hundred grass tufts free rather than merely rejected a hundred times.
 		if (!node.collides) continue;
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
-		// No tree is no narrow phase, and a broad-phase hit nothing can refine
-		// is worse than an absence: `raycast` skipped these already.
+		// No tree is no narrow phase, and a broad-phase hit nothing can refine is
+		// worse than an absence: `raycast` skipped these already.
 		if (mesh == null || mesh.bvh == null) continue;
 
 		// `mesh.bounds.transform_matrix`, not `world_mesh_bounds`. The second
 		// transforms every *vertex* and is what `Scene.bounds` needs, because a
-		// shadow fit around a conservative box wastes texels; a broad phase
-		// wants the cheap one, and a box that is slightly too big costs a
-		// narrow-phase test that rejects. Measured: 65 ns a node against 12,
-		// on the rebuild that a moving scene pays once per query burst.
+		// shadow fit around a conservative box wastes texels; a broad phase wants
+		// the cheap one, and a box that is slightly too big costs a narrow-phase
+		// test that rejects. Measured: 65 ns a node against 12.
 		collision::Aabb3 box = mesh.bounds.transform_matrix(node.world);
 		index.slot_entry[slot] = (int)index.entries.len();
 		index.entries.push({ .node = { .index = (uint)slot, .generation = node.generation }, .box = box });
@@ -482,9 +460,9 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	}
 
 	// The cell size. Two floors, and both matter: an average object's own size,
-	// because a cell smaller than the things in it puts every object in many
-	// cells for no selectivity; and the span divided by the per-axis cap, which
-	// is what stops one far-flung node from asking for a grid nobody can hold.
+	// because a cell smaller than the things in it puts every object in many cells
+	// for no selectivity; and the span divided by the per-axis cap, which stops one
+	// far-flung node from asking for a grid nobody can hold.
 	Vec3 span = world.size();
 	Vec3 mean = extent_total * (1.0f / (float)count);
 	float cell = math::max(math::max(mean.x, math::max(mean.y, mean.z)), 1e-4f);
@@ -495,8 +473,8 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	int[<3>] dims;
 	// Grown rather than clamped, so the grid always covers the whole world: a
 	// clamped dimension would leave nodes outside the array with nowhere to be
-	// filed, and they would be invisible to every query rather than merely
-	// coarsely filed.
+	// filed, and they would be invisible to every query rather than merely coarsely
+	// filed.
 	while (true)
 	{
 		dims = {
@@ -521,7 +499,7 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	zero_fill(&index.starts, (sz)cells + 1);
 
 	// Pass two: count. An entry that covers too many cells is set aside here and
-	// counted nowhere, which is what keeps it out of `items` in pass four.
+	// counted nowhere, which keeps it out of `items` in pass four.
 	foreach (i, entry : index.entries)
 	{
 		int[<3>] lo = index.clamp_cell(index.cell_of(entry.box.min));
@@ -541,14 +519,14 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 		}
 	}
 
-	// Pass three: the prefix sum, which turns the counts into where each cell's
-	// run begins.
+	// Pass three: the prefix sum, which turns the counts into where each cell's run
+	// begins.
 	for (sz i = 1; i < index.starts.len(); i++) index.starts[i] += index.starts[i - 1];
 
 	zero_fill(&index.items, (sz)index.starts[index.starts.len() - 1]);
 
-	// Pass four: place. `fill` walks the same counts a second time, using a copy
-	// of the starts as a moving cursor — which is why the cursor is read out of
+	// Pass four: place. `fill` walks the same counts a second time, using a copy of
+	// the starts as a moving cursor — which is why the cursor is read out of
 	// `starts` and written back, and why `starts` is one longer than the cell
 	// count: the run for cell k is `starts[k] .. starts[k + 1]` and stays so.
 	List{uint} cursor;
@@ -582,19 +560,14 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
  Re-resolved through `Scene.node` rather than trusted, because the index is a
  snapshot: a node killed since the last rebuild has a bumped generation and this
  is where that is caught. Invisible nodes are skipped here rather than at build
- time, so toggling `visible` never costs a rebuild — see `Scene.raycast` for why
- invisible means "not found".
+ time, so toggling `visible` never costs a rebuild.
 
- **That sentence was a lie until §17's fix**, and it is worth saying which half
- was wrong: this end was always right, and `Scene.set_visible` went through
- `mark_moved` and threw the index away anyway. Measured at 32.7 ms a fixed step
- against 5.9 ms, on eleven characters that hid themselves around each sweep
- because `IgnoreSet` did not exist yet. `Scene.set_visible` now propagates
- `world_visible` itself and leaves this index alone, which is what makes the
- answer-time test here worth having.
+ That only holds because `Scene.set_visible` propagates `world_visible` itself
+ and leaves this index alone. Routing it through `mark_moved` instead measured
+ 32.7 ms a fixed step against 5.9 ms, on eleven characters that hid themselves
+ around each sweep.
 
- `collides` is deliberately *not* tested here — see `rebuild_query_index` for
- why that one is filed out at build time instead.
+ `collides` is deliberately *not* tested here — see `rebuild_query_index`.
 *>
 fn Node* Scene.query_node(&self, QueryEntry entry)
 {
@@ -607,17 +580,16 @@ fn Node* Scene.query_node(&self, QueryEntry entry)
 <*
  Every drawable node whose world box overlaps `box`.
 
- **Writes into a slice the caller owns and answers with how many it wrote**,
- which is the shape `notes.md` §17 measured as the only one whose cost stays
- flat as the count grows. A slice that is too short is filled and the count is
- the slice's length — the caller is told what fits, never handed a partial
- answer that reads as a complete one, because the count and the slice length
- being equal is exactly the signal "there may be more".
+ Writes into a slice the caller owns and answers with how many it wrote, which is
+ the only shape whose cost stays flat as the count grows. A slice that is too
+ short is filled and the count is the slice's length — the caller is told what
+ fits, never handed a partial answer that reads as a complete one, because the
+ count and the slice length being equal is exactly the signal "there may be more".
 
- The test is box against box, so this is a *broad-phase* answer: a node whose
- box overlaps and whose triangles do not is reported. That is the honest
- semantic for the question — "what is around here" — and the narrow phase, if
- one is wanted, is `raycast` or `sweep`.
+ The test is box against box, so this is a *broad-phase* answer: a node whose box
+ overlaps and whose triangles do not is reported. That is the honest semantic for
+ "what is around here"; the narrow phase, if one is wanted, is `raycast` or
+ `sweep`.
 *>
 macro void Scene.@each_in_box(&self, Assets* assets, collision::Aabb3 box; @body(NodeId node, collision::Aabb3 world))
 {
@@ -634,9 +606,9 @@ macro void Scene.@each_in_box(&self, Assets* assets, collision::Aabb3 box; @body
 		@body(entry.node, entry.box);
 	}
 
-	// The entries that moved since the last rebuild, before the grid walk so
-	// the stamp keeps the walk from reporting them a second time out of the
-	// cells they used to be filed in. See `QueryIndex.loose`.
+	// The entries that moved since the last rebuild, before the grid walk so the
+	// stamp keeps the walk from reporting them a second time out of the cells they
+	// used to be filed in. See `QueryIndex.loose`.
 	foreach (i : index.loose)
 	{
 		if (index.stamp[(sz)i] == index.stamp_now) continue;
@@ -683,10 +655,9 @@ fn uint Scene.query_box(&self, Assets* assets, collision::Aabb3 box, NodeId[] ou
 	self.@each_in_box(assets, box; NodeId node, collision::Aabb3 world)
 	{
 		// The slice is filled and then ignored rather than the walk being cut
-		// short: a macro body cannot break its caller's loop, and a cell walk
-		// that has already found more than was asked for is a few cell reads,
-		// not a narrow phase. The count still stops at the slice's length,
-		// which is the contract.
+		// short: a macro body cannot break its caller's loop, and a cell walk that
+		// has already found more than was asked for is a few cell reads, not a
+		// narrow phase. The count still stops at the slice's length.
 		if (found < out.len) out[found++] = node;
 	};
 	return found;
@@ -711,22 +682,19 @@ fn uint Scene.overlap_sphere(&self, Assets* assets, Vec3 centre, float radius, N
 	collision::Aabb3 box = { centre - reach, centre + reach };
 	float r_sq = r * r;
 
-	// One pass, with the exact test where the box is already in hand. Written
-	// as a filter over `query_box`'s answer first, which needed the world box
-	// back for each hit and so had to find it again — a linear scan of the
-	// entry list per candidate, which is quadratic in a scene where the query
-	// is wide. The macro yields the box because this is the caller that needs
-	// it, and it costs nothing to hand over what has just been tested.
+	// One pass, with the exact test where the box is already in hand. Written as a
+	// filter over `query_box`'s answer first, which needed the world box back for
+	// each hit and so had to find it again — a linear scan of the entry list per
+	// candidate, which is quadratic in a scene where the query is wide.
 	uint found = 0;
 	self.@each_in_box(assets, box; NodeId node, collision::Aabb3 world)
 	{
 		if (found < out.len)
 		{
 			// The closest point on the box to the centre: the exact
-			// box-versus-sphere test, rather than the box-versus-box one the
-			// cell walk did. Without it a query of radius r reports everything
-			// in a 2r cube, and the corners of that cube are 73% further away
-			// than the radius asked for.
+			// box-versus-sphere test, rather than the box-versus-box one the cell
+			// walk did. Without it a query of radius r reports everything in a 2r
+			// cube, whose corners are 73% further away than the radius asked for.
 			Vec3 nearest = math::min(math::max(centre, world.min), world.max);
 			if ((nearest - centre).length_sq() <= r_sq) out[found++] = node;
 		}
@@ -737,9 +705,8 @@ fn uint Scene.overlap_sphere(&self, Assets* assets, Vec3 centre, float radius, N
 <*
  The ray-versus-one-instance narrow phase, lifted out of `Scene.raycast`.
 
- Every word of the transform argument that used to live inline in `raycast` is
- still in that function's doc block; this is the same arithmetic, called from
- three places now instead of one.
+ The transform argument is in that function's doc block; this is the same
+ arithmetic, called from three places now instead of one.
 
  @param limit : `Ignore hits further than this along the ray. float::max for no limit.`
  @return `Whether it hit, with the hit written to out.`
@@ -780,29 +747,29 @@ fn bool Scene.ray_hits_node(&self, Assets* assets, NodeId id, collision::Ray ray
 }
 
 <*
- Walk the cells a ray passes through, nearest first.
+ Walks the cells a ray passes through, nearest first.
 
- Amanatides and Woo's 3D DDA. **The order is the whole point**: a raycast that
- wants only the closest hit can stop at the end of the first cell that produced
- one, because nothing in a later cell can be nearer than the near wall of that
- cell — which is what turns a query that is linear in the scene into one that is
- linear in the *distance travelled*. A ground ray from a character's feet
- touches two or three cells whatever else is in the level.
+ Amanatides and Woo's 3D DDA. The order is the whole point: a raycast that wants
+ only the closest hit can stop at the end of the first cell that produced one,
+ because nothing in a later cell can be nearer than the near wall of that cell —
+ which turns a query that is linear in the scene into one that is linear in the
+ *distance travelled*. A ground ray from a character's feet touches two or three
+ cells whatever else is in the level.
 
  The body is run once per candidate entry index, possibly more than once for an
  entry that straddles cells; the caller stamps.
 
- `@body(uint entry, float cell_near)` — `cell_near` is the ray parameter at
- which this cell was entered, so a caller can stop once its best hit is nearer
- than the cell it is about to look at.
+ `@body(uint entry, float cell_near)` — `cell_near` is the ray parameter at which
+ this cell was entered, so a caller can stop once its best hit is nearer than the
+ cell it is about to look at.
 *>
 macro void QueryIndex.@walk_ray(&self, collision::Ray ray, float max_distance; @body(uint entry, float cell_near))
 {
 	if (self.dims.x != 0)
 	{
-		// Clip the ray to the grid first. Starting the DDA outside it would
-		// step through empty space one cell at a time until it arrived, which
-		// for a camera ray in a small scene is most of the loop's iterations.
+		// Clip the ray to the grid first. Starting the DDA outside it would step
+		// through empty space one cell at a time until it arrived, which for a
+		// camera ray in a small scene is most of the loop's iterations.
 		float enter = 0.0f;
 		float leave = max_distance;
 		Vec3 grid_min = {
@@ -883,29 +850,28 @@ macro void QueryIndex.@walk_ray(&self, collision::Ray ray, float max_distance; @
 		}
 	}
 
-	// The big things, after the walk rather than before it: they are tested
-	// against the whole ray, so they have no cell to be ordered by and a caller
-	// stopping early must have seen them. `float::max` says "no ordering
-	// information", which every caller reads as "cannot be skipped".
+	// The big things, after the walk rather than before it: they are tested against
+	// the whole ray, so they have no cell to be ordered by and a caller stopping
+	// early must have seen them.
 	foreach (i : self.oversized) @body(i, 0.0f);
-	// The moved ones, for the same reason and with the same disclaimer: they
-	// are filed in the cells they used to cover, so the walk cannot be trusted
-	// to have reached them. The caller's stamp is what stops the ones it did
-	// reach being tested twice.
+	// The moved ones, for the same reason and with the same disclaimer: they are
+	// filed in the cells they used to cover, so the walk cannot be trusted to have
+	// reached them. The caller's stamp stops the ones it did reach being tested
+	// twice.
 	foreach (i : self.loose) @body(i, 0.0f);
 }
 
 <*
  Every drawable node the ray hits, in no particular order.
 
- `raycastAll`, and the verb a script wants when the nearest hit is not the
- answer — shooting through a window, listing what is under the cursor, a laser
- that stops at the first *solid* thing rather than at the first thing.
+ `raycastAll`, and the verb a script wants when the nearest hit is not the answer
+ — shooting through a window, listing what is under the cursor, a laser that
+ stops at the first *solid* thing rather than at the first thing.
 
- Sorted by distance is deliberately **not** promised: sorting means holding
- every hit before answering, which is the shape this whole file exists to avoid.
- A caller that wants the nearest calls `raycast`, which is cheaper than sorting
- because it can stop.
+ Sorted by distance is deliberately not promised: sorting means holding every hit
+ before answering, which is the shape this whole file exists to avoid. A caller
+ that wants the nearest calls `raycast`, which is cheaper than sorting because it
+ can stop.
 
  @param max_distance : `How far along the ray to look, in world units. Zero or less means no limit.`
 *>
@@ -944,15 +910,14 @@ fn uint Scene.raycast_all(&self, Assets* assets, collision::Ray ray, float max_d
 <*
  What a swept capsule ran into.
 
- `fraction` is where along the motion it happened, in [0, 1], which is the
- number a caller integrating a movement wants: the safe position is
- `from + (to - from) * fraction`. `distance` is the same thing in world units,
- for a caller who was thinking in metres.
+ `fraction` is where along the motion it happened, in [0, 1], which is the number
+ a caller integrating a movement wants: the safe position is
+ `from + (to - from) * fraction`. `distance` is the same thing in world units.
 
- `normal` points **out of the surface, towards the capsule** — the direction a
+ `normal` points *out of the surface, towards the capsule* — the direction a
  slide projects against and the direction a ground test compares with up. It is
- derived from the closest pair rather than from the triangle's winding, so a
- mesh with inconsistent winding still slides the right way.
+ derived from the closest pair rather than from the triangle's winding, so a mesh
+ with inconsistent winding still slides the right way.
 *>
 struct SweepHit
 {
@@ -967,7 +932,7 @@ struct SweepHit
 <*
  How many advancement steps a sweep may take before giving up.
 
- With the directional bound below the loop converges in a handful of steps for
+ With the directional bound below, the loop converges in a handful of steps for
  anything a character does, so the cap is a backstop rather than a budget. Past
  it the sweep answers "no hit", which is the safe direction — the caller moves
  the whole way and the next frame's depenetration catches it — where answering
@@ -982,36 +947,35 @@ const int SWEEP_MAX_STEPS = 24;
 const float SWEEP_CLOSING_EPSILON = 1e-4f;
 
 <*
- How close to the clearance counts as touching it, relative to the length of
- the motion.
+ How close to the clearance counts as touching it, relative to the length of the
+ motion.
 
- **Without a tolerance here the loop never terminates on a hit.** Each step
- advances by exactly the gap, so the capsule approaches contact asymptotically
- in floating point and the test `distance <= clearance` is left one ulp short —
- for ever, or rather for `SWEEP_MAX_STEPS`, after which the sweep answers "no
- hit" for a wall it is a ten-thousandth of a millimetre from. The failure is
- not subtle when it happens (a character walks through a wall) and it is
- completely invisible in the arithmetic, which is why the constant is named.
+ Without a tolerance here the loop never terminates on a hit. Each step advances
+ by exactly the gap, so the capsule approaches contact asymptotically in floating
+ point and the test `distance <= clearance` is left one ulp short — for ever, or
+ rather for `SWEEP_MAX_STEPS`, after which the sweep answers "no hit" for a wall
+ it is a ten-thousandth of a millimetre from. The failure is not subtle (a
+ character walks through a wall) and is completely invisible in the arithmetic.
 
  Scaled by the motion, because the arithmetic's own noise floor is: a
- hundred-metre sweep resolves its position to about a millimetre in float, and
- a fixed absolute tolerance below that is no tolerance at all.
+ hundred-metre sweep resolves its position to about a millimetre in float, and a
+ fixed absolute tolerance below that is no tolerance at all.
 *>
 const float SWEEP_TOUCH = 1e-5f;
 
 <*
  The closest pair between a segment and a triangle.
 
- The five candidates that a segment-versus-triangle minimum can be attained at:
- each endpoint against the triangle (vertex-face, and vertex-edge and
- vertex-vertex as its degenerate cases), and the segment against each of the
- three edges (edge-edge). That set is exhaustive for two convex polytopes that
- do not intersect, which is the case conservative advancement keeps it in.
+ The five candidates a segment-versus-triangle minimum can be attained at: each
+ endpoint against the triangle (vertex-face, with vertex-edge and vertex-vertex
+ as its degenerate cases), and the segment against each of the three edges. That
+ set is exhaustive for two convex polytopes that do not intersect, which is the
+ case conservative advancement keeps it in.
 
  Intersection is handled separately and first, because none of the five sees it:
- a segment that passes clean through the triangle has both endpoints away from
- it and every edge pair positive, so the minimum comes back positive and the
- sweep would step straight through.
+ a segment that passes clean through the triangle has both endpoints away from it
+ and every edge pair positive, so the minimum comes back positive and the sweep
+ would step straight through.
 *>
 struct SegmentTriangle
 {
@@ -1026,8 +990,8 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 	Vec3 v1 = tri[1];
 	Vec3 v2 = tri[2];
 
-	// Does the segment cross the triangle? The plane test first, because it is
-	// two dot products and rejects almost every triangle a sweep looks at.
+	// Does the segment cross the triangle? The plane test first, because it is two
+	// dot products and rejects almost every triangle a sweep looks at.
 	Vec3 face = (v1 - v0).cross(v2 - v0);
 	float area_sq = face.length_sq();
 	if (area_sq > 1e-16f)
@@ -1039,11 +1003,10 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 			float t = da / (da - db);
 			Vec3 crossing = a + (b - a) * t;
 			Vec3 inside = collision::closest_point_on_triangle(crossing, v0, v1, v2);
-			// The plane crossing is inside the triangle exactly when the
-			// triangle's own closest point to it is itself. The tolerance is
-			// squared and generous: a crossing a micron outside an edge is
-			// caught by the edge candidates below at a distance of a micron,
-			// which is the same answer.
+			// The plane crossing is inside the triangle exactly when the triangle's
+			// own closest point to it is itself. The tolerance is squared and
+			// generous: a crossing a micron outside an edge is caught by the edge
+			// candidates below at a distance of a micron, which is the same answer.
 			if ((inside - crossing).length_sq() < 1e-12f)
 			{
 				return { .distance = 0.0f, .on_segment = crossing, .on_triangle = crossing };
@@ -1081,25 +1044,22 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
  Small on purpose. This is "the thing moving, and the two or three things it is
  allowed to pass through" — a crowd of exceptions is a `collides` flag or a
  layer, not an argument. Fixed rather than a list so an `IgnoreSet` is a value
- with no allocator and no lifetime, which is what lets it be a `MoveOptions`
- field and be copied down four call frames per sweep without anyone thinking
- about it.
+ with no allocator and no lifetime, which lets it be a `MoveOptions` field and be
+ copied down four call frames per sweep without anyone thinking about it.
 *>
 const usz MAX_IGNORED = 8;
 
 <*
  The nodes a sweep leaves out, and everything under them.
 
- **A set of subtrees rather than one node** — `plan.md` §17. `gather_triangles`
- took a single `NodeId`, which is right only for a character that is one mesh:
- a character built out of a body, a head, two arms and two legs collided with
- its own chest, `hit` came back as one of its own boxes, and the capsule was
- thrown out along that normal — which reads as the controller being broken
- rather than as the contract being too narrow. Hiding the whole group for the
- duration of the move was the only workaround, and it cost the query index.
+ A set of subtrees rather than one node. A single `NodeId` is right only for a
+ character that is one mesh: a character built out of a body, a head, two arms
+ and two legs collides with its own chest, `hit` comes back as one of its own
+ boxes, and the capsule is thrown out along that normal — which reads as the
+ controller being broken rather than as the contract being too narrow.
 
- Subtrees rather than nodes because that is what a character *is*, and because
- a leaf node is its own subtree — so one id in a set of one is exactly the old
+ Subtrees rather than nodes because that is what a character *is*, and because a
+ leaf node is its own subtree, so one id in a set of one is exactly the old
  behaviour.
 *>
 struct IgnoreSet
@@ -1144,8 +1104,8 @@ fn IgnoreSet ignore_list(NodeId[] ids)
 
  Up the parent chain rather than down every ignored subtree, so the cost is the
  node's depth times the set's size — a handful of comparisons on the nodes a
- sweep actually reached — rather than anything in the size of what is ignored.
- `Scene.set_parent` refuses to make a cycle, so the walk terminates.
+ sweep actually reached. `Scene.set_parent` refuses to make a cycle, so the walk
+ terminates.
 *>
 fn bool Scene.ignored(&self, NodeId id, IgnoreSet set)
 {
@@ -1163,19 +1123,18 @@ fn bool Scene.ignored(&self, NodeId id, IgnoreSet set)
 }
 
 <*
- Every triangle of every drawable node overlapping `box`, in **world** space.
+ Every triangle of every drawable node overlapping `box`, in *world* space.
 
- The triangles are transformed rather than the query shape being pushed into
- each mesh's local space, and that is the decision worth stating: a capsule is
- not a capsule any more under a non-uniform scale, so a sweep done in local
- space against a mesh scaled `(2, 1, 1)` would be testing an ellipsoid against
- the triangles and calling it a capsule. A triangle survives any affine
- transform as a triangle.
+ The triangles are transformed rather than the query shape being pushed into each
+ mesh's local space: a capsule is not a capsule any more under a non-uniform
+ scale, so a sweep done in local space against a mesh scaled `(2, 1, 1)` would be
+ testing an ellipsoid against the triangles and calling it a capsule. A triangle
+ survives any affine transform as a triangle.
 
- The cost is per triangle rather than per mesh, which is the right way round
- here: a sweep gathers tens of triangles out of a tree, where the local-space
- version would have been one matrix inverse and then an answer that is wrong on
- exactly the meshes a level is built from.
+ The cost is per triangle rather than per mesh, which is the right way round: a
+ sweep gathers tens of triangles out of a tree, where the local-space version
+ would have been one matrix inverse and then an answer that is wrong on exactly
+ the meshes a level is built from.
 
  @param out : `Appended to, not cleared. The caller owns the list and its allocator.`
  @param skip : `Nodes to leave out, subtrees included — the character's own body. An empty set for none.`
@@ -1197,11 +1156,11 @@ fn void Scene.gather_triangles(
 				GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 				if (mesh != null && mesh.bvh != null)
 				{
-					// The world box pulled back into the mesh's own space. An
-					// AABB through an inverse is conservative — it is the box
-					// around the transformed corners — which is exactly what a
-					// tree query wants: too many triangles is a slower narrow
-					// phase and too few is a wall walked through.
+					// The world box pulled back into the mesh's own space. An AABB
+					// through an inverse is conservative — the box around the
+					// transformed corners — which is what a tree query wants: too
+					// many triangles is a slower narrow phase and too few is a wall
+					// walked through.
 					Matrix4f inverse_world = invert(node.world);
 					collision::Aabb3 local = box.transform_matrix(inverse_world);
 
@@ -1224,24 +1183,24 @@ fn void Scene.gather_triangles(
 }
 
 <*
- Sweep a vertical capsule from `from` to `to` and answer with the first thing it
- touches.
+ Sweeps a vertical capsule from `from` to `to` and answers with the first thing
+ it touches.
 
- **This is the narrow phase the character controller is built out of**, which is
- why it lives here rather than beside the controller: `three.query.sweep` and
- `three.moveAndSlide` are then one implementation, and a wall a sweep reports
- and a wall the controller slides along cannot be two different walls.
+ This is the narrow phase the character controller is built out of, which is why
+ it lives here: `three.query.sweep` and `three.moveAndSlide` are then one
+ implementation, and a wall a sweep reports and a wall the controller slides
+ along cannot be two different walls.
 
  ## Conservative advancement, not a closed-form time of impact
 
- The loop is: measure the clearance between the capsule where it is and every
- triangle near it, move by the clearance, repeat. It can never tunnel — moving
- by the clearance cannot close a gap of the clearance, whatever direction the
- motion is in — and it needs no per-shape algebra, which is what makes it work
- unchanged against a triangle soup, a terrain and a scaled mesh.
+ Measure the clearance between the capsule where it is and every triangle near
+ it, move by the clearance, repeat. It can never tunnel — moving by the clearance
+ cannot close a gap of the clearance, whatever direction the motion is in — and
+ it needs no per-shape algebra, which is what makes it work unchanged against a
+ triangle soup, a terrain and a scaled mesh.
 
- What it costs is iterations along a grazing path; see `SWEEP_MAX_STEPS` for
- what happens at the cap and why "no hit" is the safe answer there.
+ What it costs is iterations along a grazing path; see `SWEEP_MAX_STEPS` for what
+ happens at the cap and why "no hit" is the safe answer there.
 
  ## The capsule is upright, and that is a decision
 
@@ -1249,9 +1208,8 @@ fn void Scene.gather_triangles(
  capsule is `2 * (half_height + radius)` tall overall. There is no orientation
  argument: everything this is for — a character, an agent, a probe — stands up,
  and an arbitrary axis would have to be carried through the ground test, the
- step-up and the slide, none of which mean anything for a capsule lying down.
- A `half_height` of zero is a sphere, and that is what `three.query.sweep` with
- no height asks for.
+ step-up and the slide, none of which mean anything for a capsule lying down. A
+ `half_height` of zero is a sphere.
 
  @param radius : `The capsule's radius. Zero or less makes this a ray, and Scene.raycast is the faster way to ask that.`
  @param skin : `Extra clearance kept from every surface, in world units. A character uses a millimetre or two so it never rests exactly on a face.`
@@ -1272,10 +1230,10 @@ fn SweepHit Scene.sweep_capsule(
 	Vec3 travel = to - from;
 	float length = travel.length();
 
-	// The box around the whole motion, both hemispheres and the clearance. Wide
-	// by design: it is gathered once and reused for every step of the loop, so a
-	// box that is too tight is a triangle that appears halfway through the sweep
-	// and is never seen.
+	// The box around the whole motion, both hemispheres and the clearance. Wide by
+	// design: it is gathered once and reused for every step of the loop, so a box
+	// that is too tight is a triangle that appears halfway through the sweep and is
+	// never seen.
 	Vec3 reach = { clearance, clearance + half, clearance };
 	collision::Aabb3 box = { math::min(from, to) - reach, math::max(from, to) + reach };
 
@@ -1300,9 +1258,9 @@ fn SweepHit Scene.sweep_capsule(
 			Vec3 head = centre + (Vec3) { 0, half, 0 };
 			Vec3 tail = centre - (Vec3) { 0, half, 0 };
 
-			// The smallest distance the capsule may travel before *some*
-			// triangle could be within reach. Conservative, per triangle, and
-			// the minimum of them is the safe step.
+			// The smallest distance the capsule may travel before *some* triangle
+			// could be within reach. Conservative, per triangle, and the minimum of
+			// them is the safe step.
 			float soonest = float::max;
 			bool blocked = false;
 			SegmentTriangle best;
@@ -1313,8 +1271,8 @@ fn SweepHit Scene.sweep_capsule(
 			{
 				SegmentTriangle pair = segment_triangle_closest(tail, head, tri);
 
-				// The separating axis: the unit direction from the capsule to
-				// the triangle. This is what makes the bound directional.
+				// The separating axis: the unit direction from the capsule to the
+				// triangle. This is what makes the bound directional.
 				Vec3 axis;
 				if (pair.distance > 1e-6f)
 				{
@@ -1323,31 +1281,29 @@ fn SweepHit Scene.sweep_capsule(
 				else
 				{
 					// Touching exactly, or already through, so there is no
-					// separating direction left to measure. The triangle's own
-					// plane is what remains, signed so it points the way the
-					// capsule would have to go to reach it.
+					// separating direction left to measure. The triangle's own plane
+					// is what remains, signed so it points the way the capsule would
+					// have to go to reach it.
 					axis = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
 					float n = axis.length();
 					axis = n > 1e-9f ? axis / n : (Vec3) { 0, -1, 0 };
 					if (axis.dot(direction) < 0.0f) axis = -axis;
 				}
 
-				// How fast the gap closes per unit travelled. For two convex
-				// shapes the distance can shrink no faster than this, which is
-				// what makes the step below safe.
+				// How fast the gap closes per unit travelled. For two convex shapes
+				// the distance can shrink no faster than this, which is what makes
+				// the step below safe.
 				float closing = still ? 0.0f : direction.dot(axis);
 
 				if (pair.distance <= touch)
 				{
-					// **Within reach, but only a contact the motion is pushing
-					// INTO actually stops anything.** This is the line that
-					// lets a character walk: a capsule resting on a floor is
-					// permanently within the clearance of it, and a sweep that
-					// called that a hit would consume the whole motion at
-					// fraction zero, every frame, for ever. A floor underfoot
-					// has a closing rate of nought for a horizontal step and is
-					// therefore not in the way; a wall ahead has a positive one
-					// and is.
+					// Within reach, but only a contact the motion is pushing *into*
+					// actually stops anything. This is the line that lets a
+					// character walk: a capsule resting on a floor is permanently
+					// within the clearance of it, and a sweep that called that a hit
+					// would consume the whole motion at fraction zero, every frame,
+					// for ever. A floor underfoot has a closing rate of nought for a
+					// horizontal step; a wall ahead has a positive one.
 					if (still || closing > SWEEP_CLOSING_EPSILON)
 					{
 						blocked = true;
@@ -1375,8 +1331,8 @@ fn SweepHit Scene.sweep_capsule(
 					.fraction = still ? 0.0f : math::clamp(at / length, 0.0f, 1.0f),
 					.distance = at,
 					.point = best.on_triangle,
-					// Out of the surface, towards the capsule — the direction a
-					// slide projects against and a ground test compares with up.
+					// Out of the surface, towards the capsule — the direction a slide
+					// projects against and a ground test compares with up.
 					.normal = -best_axis,
 				};
 			}
@@ -1384,10 +1340,10 @@ fn SweepHit Scene.sweep_capsule(
 			// Nothing can be reached at all, or nothing before the motion ends.
 			if (soonest >= float::max || at + soonest >= length) return miss;
 
-			// The whole bound, not a fraction of it: it can never overshoot the
-			// true time of impact, so taking less of it only costs iterations —
-			// and taking 95% of it, which this did until the resting-contact
-			// case was found, leaves a geometric series that never arrives.
+			// The whole bound, not a fraction of it: it can never overshoot the true
+			// time of impact, so taking less of it only costs iterations — and
+			// taking 95% of it leaves a geometric series that never arrives, which
+			// is what the resting-contact case exposed.
 			at += soonest;
 		}
 

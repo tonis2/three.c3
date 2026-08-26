@@ -4,44 +4,38 @@
 
  Three decisions here are cheap now and expensive later:
 
- - **One uploaded mesh per glTF primitive. Never a soup.** crig's
-   `gltf/source.c3` deliberately welds a whole scene into a single triangle
-   soup, because a rigger wants one mesh. three.c3 wants the exact opposite: the
-   thesis is that an instance is an immutable asset reference plus a transform,
-   so `Scene` has to be able to name a mesh and place N copies of it.
+ - One uploaded mesh per glTF primitive, never a soup. An instance is an
+   immutable asset reference plus a transform, so `Scene` has to be able to name
+   a mesh and place N copies of it — the exact opposite of welding a scene into a
+   single triangle soup, which is what a rigging tool wants.
 
- - **Textures deduplicated by content hash across every asset already loaded**
-   (`plan.md` §2), not merely within one file. Two kit pieces exported from the
-   same source share their images, and the whole point is that a scene built out
-   of a kit uploads each image once. That is why the texture list and the 1x1
-   white stand-in live on `Assets` rather than on `Asset`.
+ - Textures deduplicated by content hash across every asset already loaded, not
+   merely within one file. Two kit pieces exported from the same source share
+   their images, and a scene built out of a kit uploads each image once. That is
+   why the texture list and the 1x1 white stand-in live on `Assets` rather than
+   on `Asset`.
 
- - **A `TriBVH` per unique mesh, built at upload.** It is not read until
-   `scene/pick.c3` needs it, but it is per *mesh* rather than per instance —
-   a thousand copies of a wall cost one tree — and building it here is what makes
-   that true without a second pass over the file. The cost is honest and worth
-   stating: the positions and a triangle index array stay resident on the CPU
-   for the life of the asset, because the tree points at them.
+ - A `TriBVH` per unique mesh, built at upload. It is not read until
+   `scene/pick.c3` needs it, but it is per *mesh* rather than per instance — a
+   thousand copies of a wall cost one tree — and building it here is what makes
+   that true without a second pass over the file. The cost is honest: the
+   positions and a triangle index array stay resident on the CPU for the life of
+   the asset, because the tree points at them.
 
  ## There are no descriptor pools
 
- There were, until M5: one pool sized for exactly the textures a single `load`
- added, plus a one-set pool for the white stand-in, with a `sets` list running
- parallel to `textures`. All of it is gone. `VK_KHR_push_descriptor` lets the
- draw loop specify the image and sampler inline in the command buffer, so there
- is no set to allocate, no pool to size, and no lifetime to keep in step with the
- texture list.
+ `VK_KHR_push_descriptor` lets the draw loop specify the image and sampler inline
+ in the command buffer, so there is no set to allocate, no pool to size, and no
+ lifetime to keep in step with the texture list.
 
- What that bought is not the deleted code, it is the deleted *coupling*:
- `Assets.load` used to take a `MeshPipeline*` for the sole purpose of allocating
- sets against its descriptor layout, which meant the asset table knew what a
- pipeline was and every texture set was bound to one particular layout. Materials
- made that actively uncomfortable — a set baked against the mesh pipeline's
+ What that buys is not deleted code but deleted *coupling*: allocating sets means
+ `Assets.load` needs a `MeshPipeline*`, which means the asset table knows what a
+ pipeline is and every texture set is bound to one particular layout. Materials
+ make that actively uncomfortable — a set baked against the mesh pipeline's
  layout, bound into a material pipeline's, is legal only by an argument about
- layout compatibility that a future shader could quietly break. Now the question
- does not arise.
+ layout compatibility that a future shader could quietly break.
 
- The extension is required, not probed-and-worked-around, exactly as
+ The extension is required rather than probed-and-worked-around, exactly as
  `VK_KHR_dynamic_rendering` is: `Gpu.limits.push_descriptor` is queried and a
  device without it is refused with a sentence. Both are baseline on every driver
  this targets.
@@ -72,16 +66,15 @@ faultdef
 <*
  A handle to a loaded asset: which slot, and which occupant of it.
 
- The same two fields as `NodeId` (`scene/node.c3`), for the same reason and by
- deliberate mirroring. Until G2 an asset index was a promise the table never
- broke — nothing was ever freed, so slot 7 meant one file forever and a bare
- `uint` was the whole truth. Unloading breaks that promise: slot 7 is handed to
- the next load, and a script still holding the old index would place somebody
- else's mesh with nothing anywhere reporting an error.
+ The same two fields as `NodeId`, for the same reason. Without unloading, an
+ asset index is a promise the table never breaks — nothing is ever freed, so slot
+ 7 means one file forever. Unloading breaks that promise: slot 7 is handed to the
+ next load, and a script still holding the old index would place somebody else's
+ mesh with nothing anywhere reporting an error.
 
- The generation is what turns that silence into a sentence. `free_slot` climbs
- it, so `Assets.slot` can tell "the asset that is there now" from "the asset that
- was there when you asked", and the verb that asked says the asset was unloaded.
+ The generation turns that silence into a sentence. `free_slot` climbs it, so
+ `Assets.slot` can tell "the asset that is there now" from "the asset that was
+ there when you asked".
 
  Nothing in the renderer compares generations in a hot loop: `bucket_key` packs
  the index alone, because two *live* nodes naming the same slot necessarily agree
@@ -105,15 +98,14 @@ fn bool AssetId.equals(self, AssetId other) @operator(==) => self.index == other
 
  The extension's `MaterialLayer` as this renderer can actually use it, which is
  deliberately less than the file carries: the PBR half — metallic, roughness,
- subsurface — is dropped here rather than stored, because `lambert()` is the whole
- of the built-in light and `plan.md` §12 is explicit that a field nothing evaluates
- is worse than an absence. Height and bump go the same way and for the same reason.
- What is left is what the generated shading body reads.
+ subsurface — is dropped rather than stored, because `lambert()` is the whole of
+ the built-in light and a field nothing evaluates is worse than an absence.
+ Height and bump go the same way.
 
- The texture fields are indices into `Assets.textures`, or -1, and **each holds one
- reference for as long as this record does** — released by `GpuMesh.release_layers`
- beside the base colour map's own release. `mask_texture` is -1 when the layer reads
- a channel of the material's shared mask instead of carrying one of its own.
+ The texture fields are indices into `Assets.textures`, or -1, and each holds one
+ reference for as long as this record does — released by `GpuMesh.release_layers`
+ beside the base colour map's own release. `mask_texture` is -1 when the layer
+ reads a channel of the material's shared mask instead of carrying one of its own.
 *>
 struct GpuLayer
 {
@@ -141,18 +133,16 @@ struct GpuLayer
 <*
  A material's whole layer stack, as one mesh resolved it.
 
- `present` is false for the overwhelming majority of meshes — every primitive whose
- material never carried the extension — and everything else is then empty, so this
- costs a bool on a struct that already has fifteen fields.
+ `present` is false for the overwhelming majority of meshes — every primitive
+ whose material never carried the extension — and everything else is then empty.
 
- **Resolved per `GpuMesh` rather than per glTF material**, which is the decision
- worth stating. Several primitives may share one material, and resolving once per
- material would be fewer walks; it would also mean a stack outliving the meshes that
- named it, a second refcount to say when it may go, and a lifetime that is not the
- one `GpuMesh.texture` already has. Per mesh, each primitive holds its own
- references to the same slots exactly as it already does for the base colour map,
- and `ImageMemo` still collapses the *uploads* — which is where the cost actually
- was.
+ Resolved per `GpuMesh` rather than per glTF material. Several primitives may
+ share one material, and resolving once per material would be fewer walks; it
+ would also mean a stack outliving the meshes that named it, a second refcount to
+ say when it may go, and a lifetime that is not the one `GpuMesh.texture` already
+ has. Per mesh, each primitive holds its own references to the same slots exactly
+ as it does for the base colour map, and `ImageMemo` still collapses the
+ *uploads* — which is where the cost actually was.
 *>
 struct GpuLayers
 {
@@ -169,18 +159,15 @@ struct GpuLayers
 
  ## Why this is a record and not a Material
 
- `plan.md` §2 called this "per-material glTF loading has no unit to load into",
- and the reason it stayed open is that a `Material` here would be a *modelling*
- decision — what a glTF material becomes on this side — before it is a loading
- one. It still is. So this is not a material: it is **what the file said**, with
- the images uploaded and their colourspaces right, handed to the script through
- `ref.material` the way `ref.layers` hands over a layer stack. The script decides
- what to build from it, through the same constructors a hand-written material goes
- through.
+ A `Material` here would be a *modelling* decision — what a glTF material becomes
+ on this side — before it is a loading one. So this is not a material: it is what
+ the file said, with the images uploaded and their colourspaces right, handed to
+ the script through `ref.material` the way `ref.layers` hands over a layer stack.
+ The script decides what to build from it, through the same constructors a
+ hand-written material goes through.
 
- That closes the asymmetry the entry was actually about. A normal map was
- reachable from a script and unreachable from a `.glb`; now the `.glb` carries one
- across, in linear, at the same slot a script would have put it in.
+ That closes an asymmetry: a normal map is reachable from a script and would
+ otherwise be unreachable from a `.glb`.
 
  ## The four maps, and what shades them
 
@@ -188,11 +175,10 @@ struct GpuLayers
 	            `normal` — the same path a hand-written one takes.
 	 emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
 	 occlusion  nothing built in. A `shade` body multiplies by it in one line.
-	 metallic-  nothing built in, and blocked rather than missing: `plan.md`
-	 roughness  §12's specular term is what a roughness value would feed, and
-	            there is no specular term. Loaded anyway, because a `shade` body
-	            is free to do something else with it and "we parsed it and threw
-	            it away" was the previous answer.
+	 metallic-  nothing built in, and blocked rather than missing: a roughness
+	 roughness  value feeds a specular term, and there is no specular term.
+	            Loaded anyway, because a `shade` body is free to do something
+	            else with it and "we parsed it and threw it away" is worse.
 
  ## The colourspaces are the load-bearing part
 
@@ -206,14 +192,13 @@ struct GpuLayers
 
  `alpha_mode` and `alpha_cutoff` are carried and nothing here acts on them, for
  the reason above: blending is a property of a *pipeline*, so it is a property of
- the material a script builds, and this is the file talking. It was written on
- export and ignored on import; now it crosses, and `asset.instantiate({ materials:
- true })` is the door that acts on it.
+ the material a script builds, and this is the file talking.
+ `asset.instantiate({ materials: true })` is the door that acts on it.
 *>
 struct GpuMaterial
 {
-	// False for a primitive that names no material at all, which is a real glTF
-	// and means "the default material" — `bool` rather than a sentinel index for
+	// False for a primitive that names no material at all, which is a real glTF and
+	// means "the default material" — `bool` rather than a sentinel index for
 	// `GpuLayers.present`'s reason: the zero fill is then the right answer.
 	bool present;
 	// `gltf::AlphaMode.ordinal` — OPAQUE, MASK or BLEND.
@@ -245,10 +230,9 @@ struct GpuMaterial
 *>
 struct GpuMesh
 {
-	// **Owned.** `gltf::Mesh.name` is freed by `GltfStream.close`, so keeping
-	// the pointer would leave every mesh named by freed memory — invisible until
-	// something actually reads a name, which is exactly what `Assets.find_mesh`
-	// does.
+	// Owned. `gltf::Mesh.name` is freed by `GltfStream.close`, so keeping the
+	// pointer would leave every mesh named by freed memory — invisible until
+	// something actually reads a name, which is what `Assets.find_mesh` does.
 	String name;
 
 	// Streams, tightly packed. `positions` is the only one that must exist.
@@ -259,8 +243,7 @@ struct GpuMesh
 	// Uploaded only for a file that carries the attribute, which is a small
 	// minority of them — and read only by a material body, since no built-in
 	// shading here has a use for it. `layers.js` is what asked for it: the
-	// extension lets a layer take its mask from a colour attribute, and until this
-	// stream existed that was refused rather than drawn.
+	// extension lets a layer take its mask from a colour attribute.
 	vk::Memory colors;
 	// glTF's JOINTS_0 and WEIGHTS_0: four influences per vertex, naming joints by
 	// their position in the skin's own array. Uploaded as `uint[4]` and `float[4]`
@@ -275,58 +258,55 @@ struct GpuMesh
 	bool has_normals;
 	bool has_uvs;
 	bool has_colors;
-	// Both skin streams are present and cover every vertex. The skin *itself* is
-	// on the node rather than here (`AssetNode.skin`), because that is where glTF
-	// puts it; this only says the geometry can be posed at all.
+	// Both skin streams are present and cover every vertex. The skin *itself* is on
+	// the node rather than here (`AssetNode.skin`), because that is where glTF puts
+	// it; this only says the geometry can be posed at all.
 	bool has_skin;
 	float[4] base_color;
 	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
 	int texture;
-	// `CUSTOM_materials_layers`, if this primitive's material carried it. Empty
-	// and `present == false` otherwise, which is every mesh in every file that
-	// was not authored with the extension — see `GpuLayers`.
+	// `CUSTOM_materials_layers`, if this primitive's material carried it. Empty and
+	// `present == false` otherwise, which is every mesh in every file that was not
+	// authored with the extension.
 	//
-	// **Unlike `texture`, the zero fill is correct here**, because the field that
+	// Unlike `texture`, the zero fill is correct here, because the field that
 	// decides whether anything is read is a bool rather than an index: a
 	// construction site that forgets this gets `present == false` and a mesh with
-	// no stack, which is exactly what a mesh with no stack should be. That is the
-	// second of the three strategies `scene/material.c3`'s header lays out —
-	// encode "unset" as a value that cannot be confused with a real one.
+	// no stack, which is exactly what a mesh with no stack should be.
 	GpuLayers layers;
 	// What the glTF material said beyond the base colour — see `GpuMaterial`.
 	GpuMaterial material;
 	collision::Aabb3 bounds;
 
-	// Picking, in mesh-local space. The tree holds raw pointers into the two
-	// arrays beside it, so all three live and die together.
+	// Picking, in mesh-local space. The tree holds raw pointers into the two arrays
+	// beside it, so all three live and die together.
 	Vec3[] hull_positions;
 	collision::Triangle[] hull_triangles;
 	collision::TriBVHNode* bvh;
 
-	// ---- Lazily uploaded, since G3/S3 ------------------------------------
+	// ---- Lazily uploaded ------------------------------------------------
 	//
 	// `Assets.load` describes a file rather than uploading it, so a mesh slot
 	// exists from the moment the JSON is parsed and everything above this line
 	// except `name`, `bounds` and `vertex_count` is empty until something draws
-	// it. Those three come out of the JSON: a POSITION accessor's `count` and
-	// its required `min`/`max`, which is the same reading `inventory.c3` does.
+	// it. Those three come out of the JSON: a POSITION accessor's `count` and its
+	// required `min`/`max`, the same reading `inventory.c3` does.
 
-	// How many live nodes name this mesh. **Per mesh rather than per file**,
-	// which is what lets one unused piece of a kit go while its neighbours stay
-	// — `Scene.create_slot` and `Scene.kill` maintain it, the same two places
-	// that maintain `Asset.refs`, which is now the sum of these.
+	// How many live nodes name this mesh. Per mesh rather than per file, which is
+	// what lets one unused piece of a kit go while its neighbours stay —
+	// `Scene.create_slot` and `Scene.kill` maintain it, the same two places that
+	// maintain `Asset.refs`, which is the sum of these.
 	uint refs;
 
 	// Whether the streams above are on the device. A mesh with `refs > 0` and
-	// `uploaded == false` is one whose upload failed; it draws nothing and does
-	// not pick, which is the same answer a material whose texture would not
-	// decode gets, and for the same reason.
+	// `uploaded == false` is one whose upload failed; it draws nothing and does not
+	// pick, which is the same answer a material whose texture would not decode gets.
 	bool uploaded;
 
-	// Where to read it from when that happens: indices into the file's own
-	// `meshes` and that mesh's `primitives`. Meaningless for a generated shape,
-	// which has no file and is uploaded at the moment it is built.
+	// Where to read it from when that happens: indices into the file's own `meshes`
+	// and that mesh's `primitives`. Meaningless for a generated shape, which has no
+	// file and is uploaded at the moment it is built.
 	int gltf_mesh;
 	int gltf_primitive;
 }
@@ -352,16 +332,15 @@ struct AssetInstance
 <*
  One glTF node: a local transform, the meshes it draws, and its children.
 
- **The thing `Assets.load` used to throw away.** Until G3 the loader produced a
- flat list of primitives and `MeshPass.place` dropped every one of them at the
- origin, which is correct for a file that bakes its transforms into the vertices
- and silently wrong for one that does not — a kit exported with each piece
- positioned by its node renders as a heap. Nothing caught it because both
- fixtures had identity nodes.
+ Without this the loader produces a flat list of primitives and every one of them
+ is dropped at the origin — correct for a file that bakes its transforms into the
+ vertices and silently wrong for one that does not, so a kit exported with each
+ piece positioned by its node renders as a heap. Two fixtures with identity nodes
+ catch nothing.
 
- Two other things need this and neither could have it: `asset.instantiate()`
- wants a hierarchy to instantiate, and a glTF animation channel addresses a
- **node index**, so without the tree there is nothing for G3/S4 to animate.
+ Two other things need it: `asset.instantiate()` wants a hierarchy to
+ instantiate, and a glTF animation channel addresses a *node index*, so without
+ the tree there is nothing to animate.
 
  Transforms are stored decomposed rather than as the matrix, because that is what
  a `three::Node` holds and what an animation channel writes into. glTF lets a
@@ -385,15 +364,15 @@ struct AssetNode
 
 	// The half-open range of `Asset.meshes` this node draws. A glTF *mesh* is a
 	// list of primitives and every primitive became its own `GpuMesh`, so a node
-	// naming one glTF mesh can draw several — which is why this is a range and
-	// not an index. `mesh_count == 0` is a group.
+	// naming one glTF mesh can draw several — which is why this is a range and not
+	// an index. `mesh_count == 0` is a group.
 	uint first_mesh;
 	uint mesh_count;
 
 	// Which of `Asset.skins` poses this node's mesh, or -1 for the ordinary node
 	// that is placed by its own transform.
 	//
-	// **On the node and not on the mesh**, because that is where glTF puts it: the
+	// On the node and not on the mesh, because that is where glTF puts it: the
 	// vertex attributes name joints by position in *this* skin's array, so the same
 	// primitive under two nodes with two skins is two different poses of one piece
 	// of geometry. Nothing downstream has to resolve that — the pose offset is per
@@ -408,15 +387,15 @@ struct AssetNode
  One glTF skin: which nodes are its joints, and how each one gets from the mesh's
  bind pose into its own space.
 
- **Read at `Assets.load` from the JSON chunk, except for the matrices.** The joint
- list is JSON and costs nothing; `inverse_bind` is an accessor and has to be
- paged in, which `Assets.ensure_poses` does at the same moment it bakes — a file
- that describes a skeleton and never draws it reads no matrices.
+ Read at `Assets.load` from the JSON chunk, except for the matrices. The joint
+ list is JSON and costs nothing; `inverse_bind` is an accessor and has to be paged
+ in, which `Assets.ensure_poses` does at the same moment it bakes — so a file that
+ describes a skeleton and never draws it reads no matrices.
 
- `bind` is the inverse of `inverse_bind`, kept because recovering a *bone's* world
- transform out of a baked pose needs it: the table holds `world * inverse_bind`,
- so `pose * bind` is the bone. Nothing reads it yet; it is one matrix per joint
- and it is the whole of what a socket API would need.
+ `bind` is the inverse of `inverse_bind`, kept because recovering a *bone's*
+ world transform out of a baked pose needs it: the table holds
+ `world * inverse_bind`, so `pose * bind` is the bone. Nothing reads it yet; it is
+ one matrix per joint and it is the whole of what a socket API would need.
 *>
 struct AssetSkin
 {
@@ -427,8 +406,8 @@ struct AssetSkin
 	List{Matrix4f} bind;
 
 	// Where this skin's rest pose sits in `Asset.poses`, in matrices. Valid from
-	// the moment the buffer is baked, and what a skinned node's `pose` starts at
-	// so that a character that has never played draws its bind pose.
+	// the moment the buffer is baked, and what a skinned node's `pose` starts at so
+	// a character that has never played draws its bind pose.
 	uint rest_offset;
 
 	// Whether `inverse_bind` and `bind` have been read. False until the bake.
@@ -445,13 +424,13 @@ struct Asset
 	// none. `AssetNode.skin` indexes this.
 	List{AssetSkin} skins;
 
-	// ---- The baked poses, since skinning -------------------------------------
+	// ---- The baked poses -----------------------------------------------------
 	//
 	// Every clip of every skin, sampled at a fixed rate and folded through the
-	// inverse bind pose. **Device-local and immutable**, which is the whole reason
-	// a crowd is affordable: a hundred characters at a hundred phases read a
-	// hundred different offsets of this and nothing is written per frame. See
-	// `scene/skin.c3`, and `Assets.ensure_poses` for when it is filled.
+	// inverse bind pose. Device-local and immutable, which is the whole reason a
+	// crowd is affordable: a hundred characters at a hundred phases read a hundred
+	// different offsets of this and nothing is written per frame. See
+	// `scene/skin.c3`.
 
 	vk::Memory poses;
 	List{BakedPose} baked;
@@ -461,63 +440,60 @@ struct Asset
 
 	// The union, over every baked frame and joint, of the asset's bind-pose box
 	// transformed by that joint's matrix. What a skinned node is culled against,
-	// because a character with its arms up does not fit the box its bind pose
-	// drew — and computing it here costs a walk of numbers the bake already has,
-	// where computing it per frame would cost a pass over every vertex.
+	// because a character with its arms up does not fit the box its bind pose drew
+	// — and computing it here costs a walk of numbers the bake already has, where
+	// computing it per frame would cost a pass over every vertex.
 	collision::Aabb3 skinned_bounds;
 
 	// The file's node hierarchy, and the indices into it that nothing is a child
 	// of. Empty for an asset with no nodes at all — a generated primitive, or a
-	// glTF that declares meshes and no scene — and `Assets.flatten` falls back
-	// to listing the meshes flat when it is.
+	// glTF that declares meshes and no scene — and `Assets.flatten` falls back to
+	// listing the meshes flat when it is.
 	List{AssetNode} nodes;
 	List{uint} roots;
 
 	// How a generated shape was described, for the exporter and for nothing else.
-	// `Primitive.build` regenerates its positions, normals and uvs from these
-	// eight numbers, which is why they are kept and the CPU streams are not —
-	// thirty-two bytes per asset against twenty per vertex. `has_primitive` is
-	// false for a file, a convex hull and a line shape; `scene/export.c3` says
-	// what each of those does instead.
+	// `Primitive.build` regenerates its positions, normals and uvs from these eight
+	// numbers, which is why they are kept and the CPU streams are not — thirty-two
+	// bytes per asset against twenty per vertex. `has_primitive` is false for a
+	// file, a convex hull and a line shape.
 	Primitive primitive;
 	bool has_primitive;
 
-	// The grid behind a `TerrainGeometry`, and the reason it is kept where
-	// `primitive` is kept: both are how a generated shape was described. The
-	// difference is what reads them — `primitive` exists for the exporter, and
-	// this exists because `heightAt` is the whole point of the shape. Owned, and
-	// freed by `free_slot` with the meshes. `scene/terrain.c3`.
+	// The grid behind a `TerrainGeometry`, kept where `primitive` is kept: both are
+	// how a generated shape was described. The difference is what reads them —
+	// `primitive` exists for the exporter, and this exists because `heightAt` is
+	// the whole point of the shape. Owned, and freed by `free_slot` with the
+	// meshes.
 	Heightfield terrain;
 	bool has_terrain;
 
-	// The file, still open. `Assets.load` parses the JSON and stops, so the
-	// document and its mmapped buffer have to stay until the last mesh in them
-	// is uploaded or the asset is freed — which is what `game.md` G3/S3 calls
-	// the real work in the step, and it is this field plus `free_slot` closing
-	// it. `has_stream` is false for a generated shape, which never had a file.
+	// The file, still open. `Assets.load` parses the JSON and stops, so the document
+	// and its mmapped buffer have to stay until the last mesh in them is uploaded
+	// or the asset is freed. `has_stream` is false for a generated shape.
 	gltf::GltfStream stream;
 	bool has_stream;
 
-	// The decode memo, which now outlives one `load` for the same reason the
-	// stream does: two meshes sharing a material may be uploaded an hour apart.
+	// The decode memo, which outlives one `load` for the same reason the stream
+	// does: two meshes sharing a material may be uploaded an hour apart.
 	List{ImageMemo} images;
 
-	// The file's animation clips, named and measured at load and with their
-	// curves read on first play — `scene/animation.c3`. On the asset because
-	// keyframes are immutable data a hundred copies of a character share; the
-	// *player* is per instance and lives on `Scene`.
+	// The file's animation clips, named and measured at load and with their curves
+	// read on first play — `scene/animation.c3`. On the asset because keyframes are
+	// immutable data a hundred copies of a character share; the *player* is per
+	// instance and lives on `Scene`.
 	List{AnimationClip} clips;
 
-	// The number of live `Mesh` nodes pointing here (`plan.md` §2), maintained
-	// by `Scene.create_slot` and `Scene.kill` — the two places a node can start
-	// or stop naming an asset — so that there is one implementation of it
-	// rather than one per caller.
+	// The number of live `Mesh` nodes pointing here, maintained by
+	// `Scene.create_slot` and `Scene.kill` — the two places a node can start or
+	// stop naming an asset — so there is one implementation of it rather than one
+	// per caller.
 	//
-	// **Zero means unloadable, and it means it completely.** In Three.js you
-	// need an explicit `.dispose()` because anything can hold a hidden reference
-	// to a buffer; here nothing can, because there is no accessor from an asset
-	// to its data. That is the same refusal that made every expressible scene
-	// one draw call per mesh, paying for a second thing.
+	// Zero means unloadable, and it means it completely. In Three.js you need an
+	// explicit `.dispose()` because anything can hold a hidden reference to a
+	// buffer; here nothing can, because there is no accessor from an asset to its
+	// data. That is the same refusal that made every expressible scene one draw
+	// call per mesh, paying for a second thing.
 	uint refs;
 
 	// Slot bookkeeping, mirroring `Node`. `generation` climbs when the slot is
@@ -532,14 +508,14 @@ fn collision::Aabb3 Asset.aabb(&self) => self.bounds;
  A deduplicated texture, and how many `GpuMesh`es name it.
 
  The count is what lets an image outlive the file that first uploaded it and die
- with the last file that uses it — which is the case that actually happens,
- because the dedup is across *files*: two kit pieces share an image, one of them
- unloads, and the image has to stay for the other.
+ with the last file that uses it — the case that actually happens, because the
+ dedup is across *files*: two kit pieces share an image, one of them unloads, and
+ the image has to stay for the other.
 
- Wrapped rather than counted in a second list beside `textures`. The header
- above says there is nothing parallel to the texture list any more, and a
- refcount array running alongside it would put that back — the exact shape the
- descriptor-set list had, and the exact way it went wrong.
+ Wrapped rather than counted in a second list beside `textures`. There is nothing
+ parallel to the texture list any more, and a refcount array running alongside it
+ would put that back — the exact shape the descriptor-set list had, and the exact
+ way it went wrong.
 *>
 struct SharedTexture
 {
@@ -555,13 +531,13 @@ struct SharedTexture
  `load_material_texture` is called once per *primitive*, and the content-hash
  dedup that stops a duplicate upload only runs after the PNG has been decoded,
  converted to RGBA and hashed. So a kit atlased into one image and cut into two
- hundred pieces decoded that image two hundred times and uploaded it once —
+ hundred pieces decodes that image two hundred times and uploads it once —
  correct output, and all of the work. This is the index consulted before the
  decoder rather than after it.
 
- It does not replace the hash. The hash answers a question this cannot see:
- two *different* images, in the same file or in different files, that happen to
- hold the same picture. This one only knows about a file's own indices, which is
+ It does not replace the hash, which answers a question this cannot see: two
+ *different* images, in the same file or in different files, that happen to hold
+ the same picture. This one only knows about a file's own indices, which is
  exactly why it is cheap enough to check first.
 
  `texture` is -1 for an image the decoder refused, and that is worth memoising
@@ -570,16 +546,15 @@ struct SharedTexture
 
  ## The colourspace is part of the key, and it has to be
 
- `claim_texture` says it plainly: the same PNG asked for as `SRGB` and as `LINEAR`
- is two images in two Vulkan formats, because the space is the format rather than
- a setting on it. So the same glTF image used as a base colour map by one material
- and as a layer's *mask* by another is genuinely two uploads.
+ The same PNG asked for as `SRGB` and as `LINEAR` is two images in two Vulkan
+ formats, because the space is the format rather than a setting on it. So the
+ same glTF image used as a base colour map by one material and as a layer's
+ *mask* by another is genuinely two uploads.
 
  A memo keyed on the image index alone would answer the second caller with the
  first one's slot — and the picture would be right, so nothing would look wrong
  until a weight read 0.21 where the file stored 0.5 and every layer came out
- faint. That is the same failure `mapped_normal`'s header warns about for normal
- maps, arriving through a cache instead of through a script.
+ faint.
 *>
 struct ImageMemo
 {
@@ -592,16 +567,16 @@ struct ImageMemo
  What one call to `unload_unused` gave back.
 
  Reported rather than merely done, because an agent that cannot watch the number
- go down has no way to believe any of this works — `game.md` G2/S6. The bytes are
- texture bytes, which is the half that actually moves the device's memory number;
+ go down has no way to believe any of this works. The bytes are texture bytes,
+ which is the half that actually moves the device's memory number;
  `texture_bytes` computes it the same way `stats()` does, so the two agree.
 *>
 struct UnloadReport
 {
 	uint assets;
-	// Meshes given back *without* their file going with them — the per-mesh half
-	// of the sweep, which is what G3/S3's refcount-per-mesh bought. A file whose
-	// every mesh went is counted in `assets` instead, not twice.
+	// Meshes given back *without* their file going with them — the per-mesh half of
+	// the sweep, which is what a refcount per mesh buys. A file whose every mesh
+	// went is counted in `assets` instead, not twice.
 	uint meshes;
 	uint textures;
 	usz bytes;
@@ -611,12 +586,12 @@ struct UnloadReport
  An asset's node tree, flattened into creation order: one entry per node that
  should exist, each naming its parent by position in the same list.
 
- **Where the "what does a glTF node become" policy lives, once.** Two things
- build a scene out of an asset — `Scene.instantiate` on the host and
- `asset.instantiate()` in JavaScript, which builds `Object3D`s and lets the
- normal `add` path materialize them — and the two producing different trees for
- one file would be a bug nobody would look for. So neither of them decides
- anything: `Assets.flatten` decides, and they both walk its answer.
+ Where the "what does a glTF node become" policy lives, once. Two things build a
+ scene out of an asset — `Scene.instantiate` on the host and `asset.instantiate()`
+ in JavaScript, which builds `Object3D`s and lets the normal `add` path
+ materialize them — and the two producing different trees for one file would be a
+ bug nobody would look for. So neither decides anything: `Assets.flatten` decides,
+ and they both walk its answer.
 
  Parents always precede their children, because the walk is depth-first from the
  roots. That is what lets a consumer create nodes in one pass with no fixups.
@@ -631,24 +606,23 @@ struct PlacedNode
 	int parent;
 	// Index into `Asset.meshes`, or -1 for a group.
 	int mesh;
-	// The glTF node this came from, or -1 for an entry the walk *synthesized* —
-	// the per-primitive children of a node whose mesh has several. An animation
-	// channel targets a glTF node index, so this is what lets `Scene.instantiate`
-	// build the map a player needs, and the -1s are exactly the nodes no channel
-	// can name.
+	// The glTF node this came from, or -1 for an entry the walk *synthesized* — the
+	// per-primitive children of a node whose mesh has several. An animation channel
+	// targets a glTF node index, so this is what lets `Scene.instantiate` build the
+	// map a player needs, and the -1s are exactly the nodes no channel can name.
 	int gltf_node;
 
 	Vec3 position;
 	Quaternionf rotation;
 	Vec3 scale;
 
-	// Straight into `Node.color`. `NO_TINT` for every entry that came from a
-	// plain glTF node — only `EXT_mesh_gpu_instancing`'s `_COLOR_0` puts anything
-	// else here, which is how a per-copy colour survives a round trip without
-	// becoming a material per copy.
+	// Straight into `Node.color`. `NO_TINT` for every entry that came from a plain
+	// glTF node — only `EXT_mesh_gpu_instancing`'s `_COLOR_0` puts anything else
+	// here, which is how a per-copy colour survives a round trip without becoming a
+	// material per copy.
 	float[4] color;
 
-	// Which of the asset's skins poses this entry, or -1. Carried so that the two
+	// Which of the asset's skins poses this entry, or -1. Carried so the two
 	// consumers can seed `Node.pose` with the skin's rest offset without either of
 	// them having to look the node back up in the file.
 	int skin;
@@ -659,8 +633,6 @@ struct PlacedNode
 
  A `GpuMesh*` or `Asset*` handed out from here is valid only until the next
  `load` — the pools are `List`s and growing one moves its contents.
-
- ## Slots are reused, which is why handles carry a generation
 
  Both pools keep a free list and hand dead slots back out, so a game that cycles
  through a hundred levels holds as many slots as its largest level rather than as
@@ -676,35 +648,33 @@ struct Assets
 	List{Asset} assets;
 	List{uint} free_slots;
 
-	// Shared across every asset. Since M5 there is nothing parallel to this:
-	// the image and its sampler are pushed straight into the command buffer at
-	// draw time, so a texture is a texture and not also a descriptor set.
+	// Shared across every asset. There is nothing parallel to this: the image and
+	// its sampler are pushed straight into the command buffer at draw time, so a
+	// texture is a texture and not also a descriptor set.
 	List{SharedTexture} textures;
 	List{uint} free_textures;
 
 	Texture white;
 	bool has_white;
 
-	// How many times encoded image bytes have been handed to the decoder, over
-	// the life of this table. Kept because `ImageMemo` is otherwise invisible:
-	// texture counts, draw calls and pixels are all identical with the memo and
-	// without it, so a test asserting on any of those passes just as happily
-	// when the memo is deleted. This is the one number that moves.
+	// How many times encoded image bytes have been handed to the decoder, over the
+	// life of this table. Kept because `ImageMemo` is otherwise invisible: texture
+	// counts, draw calls and pixels are all identical with the memo and without it,
+	// so a test asserting on any of those passes just as happily when the memo is
+	// deleted. This is the one number that moves.
 	uint decodes;
 
 	// The device, for the one path that cannot be handed one: `Assets.retain` is
-	// called from `Scene.create_slot`, which has no `Gpu*` and should not grow
-	// one — a scene is not a renderer — and since G3/S3 retaining a mesh is what
-	// uploads it.
+	// called from `Scene.create_slot`, which has no `Gpu*` and should not grow one
+	// — a scene is not a renderer — and retaining a mesh is what uploads it.
 	//
-	// **Only the lazy-upload path reads this.** Every other method still takes
-	// the device as a parameter, which is what keeps "who owns the device" a
-	// question with one answer. Null in a scene-math runtime, where there is
-	// nothing to upload to and `ensure_uploaded` therefore does nothing.
+	// Only the lazy-upload path reads this. Every other method still takes the
+	// device as a parameter, which keeps "who owns the device" a question with one
+	// answer. Null in a scene-math runtime, where there is nothing to upload to.
 	Gpu* gpu;
 
-	// Set once an image the decoder does not handle has been reported, so a
-	// file with ninety KTX2 textures says so once rather than ninety times.
+	// Set once an image the decoder does not handle has been reported, so a file
+	// with ninety KTX2 textures says so once rather than ninety times.
 	bool warned_unsupported_image;
 	// The same, for a primitive whose upload failed.
 	bool warned_upload_failed;
@@ -712,15 +682,14 @@ struct Assets
 }
 
 <*
- Give every list the heap before anything is pushed into it.
+ Gives every list the heap before anything is pushed into it.
 
  A List left zero-initialised has a null allocator, and `list_ensure_capacity`
  resolves null to `tmem`: the first push would back the list with temp-arena
  memory, and any `@pool()` open up the stack would free it on the way out.
  Nothing faults there — the entries turn into garbage and the crash lands
  wherever the list is next walked, which for an asset is at draw time or at
- teardown, a long way from the cause. vulkan.c3l's MemoryAllocator carries the
- same note for the same reason.
+ teardown, a long way from the cause.
 *>
 fn Assets* Assets.init(&self, Gpu* gpu = null)
 {
@@ -765,7 +734,7 @@ fn GpuMesh* Assets.mesh(&self, AssetId asset, uint mesh)
 }
 
 <*
- Find a mesh inside an asset by its glTF name — `kit.mesh("wall_corner_02")`.
+ Finds a mesh inside an asset by its glTF name — `kit.mesh("wall_corner_02")`.
 
  A glTF mesh with several primitives produced several `GpuMesh` entries sharing
  one name; this returns the first, which is the one a caller naming a mesh means.
@@ -784,17 +753,17 @@ fn int Assets.find_mesh(&self, AssetId asset, String name)
 }
 
 <*
- One more live node draws this mesh — and, since G3/S3, the moment the mesh is
- put on the device.
+ One more live node draws this mesh — and the moment the mesh is put on the
+ device.
 
- **Retaining is what uploads.** `Assets.load` describes a file and stops, so a
- mesh slot has a name, a vertex count and bounds and nothing else until something
+ Retaining is what uploads. `Assets.load` describes a file and stops, so a mesh
+ slot has a name, a vertex count and bounds and nothing else until something
  starts drawing it. `Scene.create_slot` is the one place a node can begin naming
  a mesh, it calls this, and this is therefore the one place "first use" is
  defined. The symmetry with `release` is the point: uploaded when something
  begins drawing it, freed when nothing does.
 
- The count is per mesh and `Asset.refs` is their sum, kept here so that
+ The count is per mesh and `Asset.refs` is their sum, kept here so
  `unload_unused`'s "is this whole file unused" test stays one comparison.
 
  @param mesh : `An index into the asset's meshes, or NO_MESH for a group — which retains nothing, because a group draws nothing.`
@@ -811,9 +780,8 @@ fn void Assets.retain(&self, AssetId asset, uint mesh)
 
 <*
  One fewer. The mesh's buffers are not freed here — `unload_unused` is the only
- thing that frees, for G2/S3's reason: a collector-driven free would make the
- resident number depend on when nodes happened to die, and a level boundary is
- an explicit moment.
+ thing that frees: a collector-driven free would make the resident number depend
+ on when nodes happened to die, and a level boundary is an explicit moment.
 *>
 fn void Assets.release(&self, AssetId asset, uint mesh)
 {
@@ -830,8 +798,8 @@ fn void Assets.release(&self, AssetId asset, uint mesh)
 
  Counted rather than stored, because `assets.len()` is the number of *slots* the
  table has ever needed and this is the number a game watches. They differ by
- exactly the free list, and conflating them would make a working unload look
- like a leak.
+ exactly the free list, and conflating them would make a working unload look like
+ a leak.
 *>
 fn uint Assets.resident(&self)
 {
@@ -859,11 +827,11 @@ fn uint Assets.texture_count(&self)
 <*
  How much device memory the baked poses hold, across every resident asset.
 
- **The one number a rigged file costs that an unrigged one does not**, and the
- trade the whole design is: a character's clips are sampled once into this and
- nothing is uploaded per frame afterwards, so what would have been ~192 KB every
- frame for fifty characters (`plan.md` §3/S2's costing of the design that was not
- built) is instead a fixed number here, shared by every copy in the scene.
+ The one number a rigged file costs that an unrigged one does not, and the trade
+ the whole design is: a character's clips are sampled once into this and nothing
+ is uploaded per frame afterwards, so what would have been ~192 KB every frame
+ for fifty characters is instead a fixed number here, shared by every copy in the
+ scene.
 
  Exact rather than estimated: a segment's extent is decided by `plan_segments`
  and `pose_matrices` is what was allocated.
@@ -883,15 +851,14 @@ fn usz Assets.pose_bytes(&self)
  What every unique texture costs on the device, as `stats()` reports it.
 
  Counted off the deduplicated list, so two kit pieces sharing an image are
- counted once — which is the number worth showing an agent, because it is the
- one that changes when the sharing breaks.
+ counted once — the number worth showing an agent, because it is the one that
+ changes when the sharing breaks.
 
- **The mip chain is counted too**, by summing the levels rather than by
- multiplying the top one by four thirds. The closed form is only right for a
- square power of two: a 1024x16 has eleven levels of which seven are 16 pixels
- tall or less, and the ratio is nothing like 1.33. Reporting a texture budget a
- third smaller than it is would be the kind of wrong that only shows up as an
- out-of-memory on someone else's device.
+ The mip chain is counted too, by summing the levels rather than multiplying the
+ top one by four thirds. The closed form is only right for a square power of two:
+ a 1024x16 has eleven levels of which seven are 16 pixels tall or less, and the
+ ratio is nothing like 1.33. Reporting a texture budget a third smaller than it
+ is would only show up as an out-of-memory on someone else's device.
 *>
 fn usz Assets.texture_bytes(&self)
 {
@@ -915,20 +882,19 @@ fn usz Assets.texture_bytes(&self)
  The texture a mesh draws with: its own, or the white stand-in.
 
  Answers with the `Texture` rather than a descriptor set because there are no
- descriptor sets any more — `MeshPass.record` pushes the image and sampler into
- the command buffer directly. The white fallback is unchanged and still does the
- same job: the binding is always occupied, so a textured mesh and an untextured
- one are the same pipeline and there is no shader permutation to manage.
+ descriptor sets — `MeshPass.record` pushes the image and sampler into the
+ command buffer directly. The white fallback does the same job it always did: the
+ binding is always occupied, so a textured mesh and an untextured one are the
+ same pipeline and there is no shader permutation to manage.
 *>
 fn Texture* Assets.texture_for(&self, GpuMesh* mesh) => self.texture_at(mesh.texture);
 
 <*
  A texture by index, or the white stand-in when there is not one.
 
- `texture_for`'s body, lifted out when a *material* became able to name a
- texture as well as a mesh. Both callers want the same two things — the image,
- and something valid when there is no image — so this is one function rather
- than a mesh-shaped one and a material-shaped one that would drift.
+ `texture_for`'s body, lifted out when a *material* became able to name a texture
+ as well as a mesh. Both callers want the same two things — the image, and
+ something valid when there is no image.
 
  An out-of-range index and a dead slot both answer white. From a live mesh
  neither is reachable, because a texture is only freed when nothing names it, so

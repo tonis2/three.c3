@@ -1,20 +1,17 @@
 <*
  Getting the scene back out: a `.glb` writer over the scene graph.
 
- `plan.md` §5 scopes this as "one `mesh` per unique asset and one `node` per
- instance, with materials and textures deduplicated by content hash across every
- source file", and it is the third of M6's three things — the one that makes the
- scene readable from outside rather than merely measurable from inside.
+ One `mesh` per unique asset and one `node` per instance, with materials and
+ textures deduplicated by content hash across every source file.
 
  ## The dedup is the asset system's, not a second one
 
- The interesting claim in the plan is the content-hash dedup, and it needed no
- hashing here at all. `GpuMesh.texture` is already an index into `Assets.textures`,
- which is deduplicated by a hash of the *decoded* image across every loaded
- file — so two kit packs that share an atlas already point at one slot, and
- keying the exported image on that index is that dedup, reused. A second hash
- over the encoded bytes would have been a second answer to a question that was
- already settled, and the two could disagree.
+ The content-hash dedup needs no hashing here at all. `GpuMesh.texture` is
+ already an index into `Assets.textures`, which is deduplicated by a hash of the
+ *decoded* image across every loaded file — so two kit packs that share an atlas
+ already point at one slot, and keying the exported image on that index is that
+ dedup, reused. A second hash over the encoded bytes would be a second answer to
+ a question already settled, and the two could disagree.
 
  Geometry is deduplicated the same way, on `(asset, mesh)`, which is the pair the
  renderer buckets on. A thousand walls placed from one kit are a thousand nodes
@@ -24,90 +21,76 @@
 
  Nothing is read back off the device. Three sources, in this order:
 
- 1. **A mesh out of a file** is re-read from the file, which is still open —
+ 1. A mesh out of a file is re-read from the file, which is still open —
     `Assets.load` parses the JSON and keeps the stream, so the accessors are
     right there. This is exact: the normals and uvs written out are the bytes
     that were read in.
- 2. **A generated shape** is tessellated again from the `Primitive` the asset
-    kept. Thirty-two bytes per asset, against the twenty per vertex that keeping
-    the streams would have cost every scene whether or not it ever exported.
- 3. **A convex hull** is rebuilt from `hull_positions`/`hull_triangles`, the CPU
-    copy the picking tree already holds. Its normals are per face and its
-    vertices are split per face, so recomputing them from the triangles gives
-    back exactly what `build_convex` produced — including its uvs, which are a
-    per-face planar projection and so are recomputed from the face rather than
-    stored.
+ 2. A generated shape is tessellated again from the `Primitive` the asset kept.
+    Thirty-two bytes per asset, against the twenty per vertex that keeping the
+    streams would cost every scene whether or not it ever exported.
+ 3. A convex hull is rebuilt from `hull_positions`/`hull_triangles`, the CPU copy
+    the picking tree already holds. Its normals are per face and its vertices are
+    split per face, so recomputing them from the triangles gives back exactly
+    what `build_convex` produced — including its uvs, which are a per-face planar
+    projection and so are recomputed from the face rather than stored.
 
  ## What is deliberately not in the file
 
- **The export is what the frame shows.** Helpers and hidden subtrees are not in
- it — a `.glb` with the debug boxes baked in is a file nobody wants, and a node
- whose subtree is switched off is not part of the picture being exported. One
- rule, two consequences.
+ The export is what the frame shows. Helpers and hidden subtrees are not in it —
+ a `.glb` with the debug boxes baked in is a file nobody wants, and a node whose
+ subtree is switched off is not part of the picture being exported.
 
- **A `ShaderMaterial` is not exported, and cannot be.** It is a Slang pipeline;
- glTF describes surfaces, not programs. A mesh drawn under one exports with the
- base colour and texture its geometry carries, which is what a consumer will
- render it with. Nothing is silently dropped that a script cannot see: the report
- names the count.
+ A `ShaderMaterial` is not exported, and cannot be: it is a Slang pipeline, and
+ glTF describes surfaces rather than programs. A mesh drawn under one exports
+ with the base colour and texture its geometry carries. Nothing is silently
+ dropped that a script cannot see — the report names the count.
 
- **Lines are not in it yet.** A line mesh has no CPU copy of its vertices —
- `upload_built` skips `build_bvh` for one, and `build_bvh` is what keeps the
- copy — and a script's `three.lines()` is indistinguishable from a helper, since
- both draw with `LINE_MATERIAL`, which is the test above. Both are fixable and
- neither is fixed; the format has `mode: LINES` waiting.
+ Lines are not in it yet. A line mesh has no CPU copy of its vertices
+ (`upload_built` skips `build_bvh`, and `build_bvh` is what keeps the copy) and a
+ script's `three.lines()` is indistinguishable from a helper, since both draw
+ with `LINE_MATERIAL`. Both are fixable and neither is fixed; the format has
+ `mode: LINES` waiting.
 
  ## The scene around the meshes
 
  A file holding the right geometry still opens wrong if it opens pointing
  somewhere else, unlit. So the camera and the light go in too, as one glTF camera
- and one `KHR_lights_punctual` directional light, each on a node of its own —
- `write_camera` and `write_light`, which carry the aiming arithmetic and the one
- thing that cannot cross, the ambient floor.
+ and one `KHR_lights_punctual` directional light, each on a node of its own.
 
- The materials carry what they always could and the writer previously could not
- state: `doubleSided` from `material.side`, `KHR_texture_transform` from
- `material.repeat` and `material.offset` — a tiling floor is the most ordinary
- thing a script builds and its texture used to arrive stretched once across the
- whole surface — and the normal, occlusion and emissive maps of the source
- material, which were being dropped for no reason at all beyond nothing having
- produced them when the writer was written.
+ The materials carry `doubleSided` from `material.side`, `KHR_texture_transform`
+ from `material.repeat` and `material.offset` — a tiling floor is the most
+ ordinary thing a script builds, and its texture would otherwise arrive stretched
+ once across the whole surface — and the normal, occlusion and emissive maps of
+ the source material.
 
- **Not the metallic-roughness half.** `plan.md` §12: there is no specular term
- here, so those describe an equation nothing evaluates, and a number in the file
- that never affected a pixel is worse than its absence.
+ Not the metallic-roughness half: there is no specular term here, so those
+ describe an equation nothing evaluates, and a number in the file that never
+ affected a pixel is worse than its absence.
 
- ## Material layers, the one thing recovered from the file rather than the frame
+ ## Material layers, recovered from the file rather than the frame
 
  `CUSTOM_materials_layers` is the exception to "the export is what the frame
  shows", and it has to be. A layer stack reaches the frame as a *generated*
- `ShaderMaterial` — `plan.md` §14 — so under the rule above it would be lost like
- any other program, and a terrain would come back as a flat quad in its base
- colour.
+ `ShaderMaterial`, so under that rule it would be lost like any other program and
+ a terrain would come back as a flat quad in its base colour.
 
  It is written from the source document instead: `Assets.load` keeps the stream
  open, so the material's parsed `layers_ext` is still there, complete and in the
- file's own arrangement. That is lossless where the renderer's own copy is not.
+ file's own arrangement. That is lossless where the renderer's own copy is not —
  `GpuLayers` drops the PBR half and the height data, rearranges the masks through
- `hoist_shared_mask`, and exists only after an upload this path never performs —
- `Exporter.source_material_of` has the argument in full.
+ `hoist_shared_mask`, and exists only after an upload this path never performs.
 
- So a stack that came from a `.glb` goes back into one, PBR half and all.
-
- **A `LayeredMaterial` a script built goes back too**, by the other door.
+ A `LayeredMaterial` a script built goes back too, by the other door.
  `js/prelude/layers.js` sends the description across at construction beside the
- shader it generates — `Material.script_layers` — because a shader cannot be read
+ shader it generates (`Material.script_layers`), because a shader cannot be read
  back: "this layer multiplies" is a choice of expression by the time the Slang
- exists. That path is lossless for its own reason rather than the source
- document's: a script stack has no PBR half and no height data to lose, because
- the JS API refuses both by name (`plan.md` §12). Its images have no file behind
- them, so they are read off the device and encoded, which is `texture_for`'s
- second source used on its own.
+ exists. That path is lossless for its own reason — a script stack has no PBR
+ half and no height data to lose, because the JS API refuses both by name. Its
+ images have no file behind them, so they are read off the device and encoded.
 
- The script's stack wins when a node has both — `script_material_index` argues
- it — and either kind leaves the material counted in `shaded`, because it is
- still a program glTF cannot hold. `layers` is what says the stack itself
- survived.
+ The script's stack wins when a node has both, and either kind leaves the
+ material counted in `shaded`, because it is still a program glTF cannot hold.
+ `layers` is what says the stack itself survived.
 
  One consequence for the vertices: a layer may take its mask from a vertex colour
  rather than an image, so `COLOR_0` is written whenever the source mesh carried
@@ -116,77 +99,68 @@
 
  ## Per-copy colour, and the instanced nodes that carry it
 
- **`mesh.color` is per instance and free in the frame** — it rides in the
- `Instance` record and is read by `SV_InstanceID`, so a thousand colours are one
- draw call. Core glTF has no per-instance channel at all: a material belongs to a
- primitive, a primitive to a mesh, and a node points at a mesh. Written that way
- a thousand colours are a thousand materials, a thousand `mesh` entries and — on
- reload — a thousand draw calls, which is the frame's central claim thrown away
- at the door.
+ `mesh.color` is per instance and free in the frame — it rides in the `Instance`
+ record and is read by `SV_InstanceID`, so a thousand colours are one draw call.
+ Core glTF has no per-instance channel at all: a material belongs to a primitive,
+ a primitive to a mesh, and a node points at a mesh. Written that way a thousand
+ colours are a thousand materials, a thousand `mesh` entries and — on reload — a
+ thousand draw calls.
 
  `EXT_mesh_gpu_instancing` is the channel. One node carries an array of
  transforms and draws its mesh once per entry, and the extension's `attributes`
  dictionary takes application-specific names beside `TRANSLATION`/`ROTATION`/
  `SCALE`, underscore-prefixed by convention. `_COLOR_0` is that: a fourth
- accessor, read by the same instance index, holding what `mesh.color` was. The
- index is the extension's own — there is nothing to correlate and nothing to
- keep in step beyond the counts, which the extension requires to be equal.
+ accessor, read by the same instance index, holding what `mesh.color` was.
 
- **A reader that does not know `_COLOR_0` skips the key** and gets the transforms
- and the material's own colour, which is a scene in one colour rather than a
- scene in the wrong place. That is the whole reason the tint is not folded into
- the material here: the untinted material *is* the fallback.
+ A reader that does not know `_COLOR_0` skips the key and gets the transforms and
+ the material's own colour — a scene in one colour rather than a scene in the
+ wrong place. That is why the tint is not folded into the material here: the
+ untinted material *is* the fallback.
 
  ## What gets collapsed, and what keeps its name
 
  Sibling nodes drawing the same `(asset, mesh, material)` — the frame's own
- bucket key — are written as one instanced node, but only when there are **two or
- more of them**. A batch of one is one draw call whichever way it is written, so
- a lone node keeps its name, its place in the tree and its own tinted material,
- and pays nothing for it. What collapses is the mass-produced copy, whose name is
- `crate.012` and whose loss is not one.
+ bucket key — are written as one instanced node, but only when there are two or
+ more of them. A batch of one is one draw call whichever way it is written, so a
+ lone node keeps its name, its place in the tree and its own tinted material.
+ What collapses is the mass-produced copy, whose name is `crate.012`.
 
- **The material is in that key and the tint is not**, and the two look alike from
- a distance. A tint is `mesh.color`, one `Vec4` per copy, and it rides in the
- instance array. A material is a blend mode, a cull mode, a UV transform, a map
- and a layer stack, none of which the extension has a channel for and none of
- which can be averaged — so copies that disagree about it are different buckets
- in the frame and different nodes here. `ExportBatch` argues the case.
+ The material is in that key and the tint is not, and the two look alike from a
+ distance. A tint is `mesh.color`, one `Vec4` per copy, riding in the instance
+ array. A material is a blend mode, a cull mode, a UV transform, a map and a
+ layer stack, none of which the extension has a channel for and none of which can
+ be averaged — so copies that disagree about it are different buckets in the
+ frame and different nodes here.
 
  A node with children of its own is never collapsed: instancing replicates a
- node's mesh, not its subtree, so there would be nowhere for the children to go.
- Groups are therefore untouched, and the hierarchy an author built survives —
- what flattens is a run of leaves under one parent, into one node beneath that
- same parent.
+ node's mesh, not its subtree. Groups are therefore untouched, and what flattens
+ is a run of leaves under one parent, into one node beneath that same parent.
 
- **Instance transforms are relative to the node that carries them**, so the
- instanced node sits at identity under the shared parent and each copy's own
- local TRS goes in unchanged. Nothing is baked into world space and nothing has
- to be un-baked on the way back in.
+ Instance transforms are relative to the node that carries them, so the instanced
+ node sits at identity under the shared parent and each copy's own local TRS goes
+ in unchanged. Nothing is baked into world space.
 
  ## `flatten`, and the case the sibling rule cannot reach
 
- Copies placed with `asset.instantiate()` are not siblings. Each one arrives
- wrapped in a group of its own — that is what an instantiated subtree *is* — so
- a hundred crates from one kit are a hundred groups holding one crate each, and
- no two crates share a parent. The rule above never compares them.
+ Copies placed with `asset.instantiate()` are not siblings. Each arrives wrapped
+ in a group of its own — that is what an instantiated subtree *is* — so a hundred
+ crates from one kit are a hundred groups holding one crate each, and no two
+ share a parent.
 
  Untinted that costs nothing: geometry is deduplicated on `(asset, mesh)` across
- the whole scene regardless of parentage, so the hundred crates already share one
- `mesh` entry and reload as one bucket. What it costs is the *tint*, which is the
- one thing that has to travel per copy: six colours become six materials, six
- `mesh` entries and six buckets, exactly as before any of this.
+ the whole scene regardless of parentage. What it costs is the *tint*, the one
+ thing that has to travel per copy: six colours become six materials, six `mesh`
+ entries and six buckets.
 
- `flatten` is the way out, and it is a parameter rather than the default because
- it trades something real. It abandons the hierarchy: every drawing node in the
- scene is taken in **world space**, batched by shape and material wherever it
- sits, and written as a handful of instanced nodes under one root. The groups go, and so do the names of
+ `flatten` is the way out, and a parameter rather than the default because it
+ trades something real. It abandons the hierarchy: every drawing node is taken in
+ *world space*, batched by shape and material wherever it sits, and written as a
+ handful of instanced nodes under one root. The groups go, and so do the names of
  the copies inside them. What comes back is the same picture in the same number
  of draw calls, and no longer a scene anybody can navigate in a viewer.
 
  So: leave it off for a file a person will open, turn it on for a file that is a
- payload. Nothing about the default changed — an export that does not ask for it
- walks the tree exactly as it did.
+ payload.
 *>
 module three;
 
@@ -216,18 +190,17 @@ struct ExportReport
 	// Distinct `(asset, mesh)` pairs whose vertices were written. The number that
 	// should match `stats().uniqueMeshes` for a scene using no per-copy colour.
 	uint meshes;
-	// `mesh` entries in the document, which is one per `(geometry, material)`
-	// pair — the same as `meshes` until two copies of one shape disagree about
-	// their colour. See the header.
+	// `mesh` entries in the document, which is one per `(geometry, material)` pair
+	// — the same as `meshes` until two copies of one shape disagree about their
+	// colour. See the header.
 	uint entries;
 	uint materials;
 	uint images;
-	// Every node written, groups and instanced nodes included. No longer one per
-	// copy: a batch of a thousand is one entry here and a thousand in `instances`.
+	// Every node written, groups and instanced nodes included. Not one per copy: a
+	// batch of a thousand is one entry here and a thousand in `instances`.
 	uint nodes;
-	// Every copy that draws, counted whether it got a node of its own or a slot
-	// in an instanced node's arrays. The number to compare against
-	// `stats().instances`.
+	// Every copy that draws, counted whether it got a node of its own or a slot in
+	// an instanced node's arrays. The number to compare against `stats().instances`.
 	uint instances;
 	// How many of `nodes` are instanced nodes. Zero for a scene with no two
 	// siblings sharing a shape *and* a material, which is how a script tells
@@ -239,10 +212,10 @@ struct ExportReport
 	// file with their glTF material; this is how many lost a custom shader.
 	uint shaded;
 	// `CUSTOM_materials_layers` records written, summed over every material that
-	// carried a stack. Zero for a scene whose materials are all plain, which is
-	// how a script tells "this file had no layers" from "the layers were lost" —
-	// the distinction `shaded` alone could not make, since a layered material
-	// reaches the frame as a generated `ShaderMaterial` and is counted there too.
+	// carried a stack. Zero for a scene whose materials are all plain, which is how
+	// a script tells "this file had no layers" from "the layers were lost" — the
+	// distinction `shaded` alone cannot make, since a layered material reaches the
+	// frame as a generated `ShaderMaterial` and is counted there too.
 	uint layers;
 	usz bytes;
 }
@@ -264,14 +237,13 @@ struct ExportGeometry @local
 <*
  Everything about a node that decides which glTF material it needs.
 
- **The whole of it is the dedup key**, which is why it is one struct rather than
+ The whole of it is the dedup key, which is why it is one struct rather than
  eight arguments to `material_for`. Every field here is something two nodes can
- disagree about while agreeing on all the others, and each one that were left out
- of the key would collapse two materials into one and give both whichever was
- walked first. `transparent` is the oldest example — an opaque wall that comes
- back see-through, or glass that comes back solid, depending on walk order — and
- `double_sided`, `uv_transform` and the two stack identities fail exactly the
- same way.
+ disagree about while agreeing on all the others, and each one left out of the
+ key would collapse two materials into one and give both whichever was walked
+ first. `transparent` is the oldest example — an opaque wall that comes back
+ see-through, or glass that comes back solid, depending on walk order — and
+ `double_sided`, `uv_transform` and the two stack identities fail the same way.
 
  The identities are indices rather than resolved contents deliberately: two nodes
  naming one material of one asset have the same maps and the same layers by
@@ -291,18 +263,17 @@ struct ExportSurface @local
 	float[4] uv_transform;
 	bool transparent;
 	// `material.side` — `DoubleSide` is the only one glTF has a word for, and the
-	// two single-sided values differ in which face they keep, which glTF cannot
-	// say at all. `FrontSide` and `BackSide` therefore both write `false`.
+	// two single-sided values differ in which face they keep, which glTF cannot say
+	// at all. `FrontSide` and `BackSide` therefore both write `false`.
 	bool double_sided;
-	// The three core maps, **already resolved to this document's texture indices**
+	// The three core maps, already resolved to this document's texture indices
 	// rather than named by where they came from.
 	//
 	// That is the difference between a key that dedups and one that does not. Two
 	// source materials of two different files can name two different images whose
 	// bytes are identical; `ExportImage` collapses those to one exported texture,
 	// and a key holding the source material's *index* would then keep two glTF
-	// materials that are byte-for-byte the same. Keying on what is written is the
-	// only thing that stays in step with the image dedup underneath it.
+	// materials that are byte-for-byte the same.
 	gltf::WriteTextureRef normal;
 	gltf::WriteTextureRef occlusion;
 	gltf::WriteTextureRef emissive;
@@ -311,11 +282,9 @@ struct ExportSurface @local
 	// asset, and the index of the material inside that asset's own document.
 	// `NO_ASSET`/-1 for a material with no layers.
 	//
-	// The one thing here that is an identity rather than a resolved value, because
-	// a stack is a list of eighteen-field records and comparing two field by field
-	// would be a deep compare to answer a question two integers already answer:
-	// two nodes naming one material of one asset have the same layers by
-	// construction.
+	// An identity rather than a resolved value, because a stack is a list of
+	// eighteen-field records and two nodes naming one material of one asset have
+	// the same layers by construction.
 	AssetId layers_asset;
 	int layers_material;
 	// The `MeshPass.materials` index of the `three.LayeredMaterial` this draws
@@ -357,26 +326,19 @@ struct ExportMaterial @local
  A run of sibling nodes drawing one shape with one material, to be written as a
  single instanced node.
 
- **Keyed on `(asset, mesh, material)`, which is `Scene.Bucket`'s key.** That is
- the point: a batch is the file's word for what the frame calls a bucket, so a
- run that is one draw call in the frame is one instanced node in the document and
- one bucket again when the file is read back.
+ Keyed on `(asset, mesh, material)`, which is `Scene.Bucket`'s key. That is the
+ point: a batch is the file's word for what the frame calls a bucket, so a run
+ that is one draw call in the frame is one instanced node in the document and one
+ bucket again when the file is read back.
 
- This key used to be `(asset, mesh)` alone, on the argument that the material
- follows from the mesh — `base_color` and `texture` being the `GpuMesh`'s, and
- the per-copy tint being exactly what moves into the instance arrays. The tint
- half is still true and is why `_COLOR_0` exists. The rest was wrong the moment a
- node could name a material of its own: `surface_for` reads the *node's* material
- for its opacity, its blend mode, its cull mode, its UV transform, its layer
- stack and — through `texture_slot` — its map, and every one of those is a thing
- two siblings can disagree about while drawing one mesh.
-
- What that cost is worth naming, because it is the failure this file is written
- to prevent: the batch was written with `members[0]`'s material and the rest
- inherited it. A wall and a window cut from one pane mesh exported as two copies
- of whichever was added first — right in the count, right in the instance total,
- and wrong in the viewer. Since blending landed it took `alphaMode` with it, so
- the window came back opaque.
+ Keying on `(asset, mesh)` alone — on the argument that the material follows from
+ the mesh — is wrong the moment a node can name a material of its own:
+ `surface_for` reads the *node's* material for its opacity, blend mode, cull
+ mode, UV transform, layer stack and map, and every one of those is a thing two
+ siblings can disagree about while drawing one mesh. The batch would be written
+ with `members[0]`'s material and the rest would inherit it: a wall and a window
+ cut from one pane mesh export as two copies of whichever was added first —
+ right in the count, right in the instance total, and wrong in the viewer.
 
  A run that splits here is not a run that lost anything: two materials over one
  mesh are two buckets in the frame already, and writing them as two instanced
@@ -387,10 +349,10 @@ struct ExportBatch @local
 	AssetId asset;
 	uint mesh;
 	// `Node.material` — the `MeshPass.materials` index, not the document's. A
-	// resolved surface would dedup two identical materials into one batch and
-	// this does not, which is a split that costs a node and never a wrong colour.
+	// resolved surface would dedup two identical materials into one batch and this
+	// does not, which is a split that costs a node and never a wrong colour.
 	// `surface_for` is a `.glb` read and an image encode deep; running it during
-	// batching to save a node in a scene nobody has written is the wrong trade.
+	// batching to save a node is the wrong trade.
 	uint material;
 	List{NodeId} members;
 }
@@ -410,9 +372,9 @@ struct ExportImage @local
 {
 	int device;
 	// The document's *texture* index rather than its image index, because that is
-	// what a material references. glTF splits the two so that one image can be
-	// sampled two ways; nothing here samples anything two ways, so the image and
-	// the texture are one-to-one and one memo covers both.
+	// what a material references. glTF splits the two so one image can be sampled
+	// two ways; nothing here samples anything two ways, so the image and the
+	// texture are one-to-one and one memo covers both.
 	uint texture;
 }
 
@@ -420,18 +382,16 @@ struct ExportImage @local
  An image a material *layer* named, keyed on where it sits in the source document
  rather than on a device slot.
 
- **A second key beside `ExportImage.device`, and it has to be.** A layer's images
- are read straight out of the file the layer was read out of — see
- `Exporter.layer_texture_for` — so on this path there is no device slot to key
- on: a layer that was never uploaded has none, and one that was has a slot the
- exporter cannot walk back to an image index.
+ A second key beside `ExportImage.device`, and it has to be. A layer's images are
+ read straight out of the file the layer was read out of, so on this path there
+ is no device slot to key on: a layer that was never uploaded has none, and one
+ that was has a slot the exporter cannot walk back to an image index.
 
  The consequence is that an image named both as a mesh's base colour map and as a
  layer's mask is written into the file twice. That is the answer the renderer
  gives too — `Assets` uploads it twice, once as `SRGB` and once as `LINEAR`,
  because a picture and a weight are not the same image even when they are the
- same bytes. `layers_test.c3`'s `one_image_used_as_a_colour_and_as_a_mask_is_two_uploads`
- is that claim on the loading side.
+ same bytes.
 *>
 struct ExportLayerImage @local
 {
@@ -455,7 +415,7 @@ struct Exporter @local
 }
 
 <*
- Write the scene to a `.glb`.
+ Writes the scene to a `.glb`.
 
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
@@ -489,16 +449,16 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 	// hoisted, because a Scene is an Object3D here — moving it moves everything,
 	// and hoisting would drop that transform on the floor. Flattened, that
 	// transform is already inside every world matrix, so the root written there is
-	// at identity instead — see `flatten_scene`.
+	// at identity instead.
 	int root = flatten ? state.flatten_scene()! : state.walk(self.scene.root)!;
 	if (root < 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
 	builder.add_root((uint)root);
 
 	if (state.report.instances == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
 
-	// After the scene and only when there was one to write: a file with nothing
-	// in it should be refused above rather than come back holding a camera and a
-	// light pointed at nothing.
+	// After the scene and only when there was one to write: a file with nothing in
+	// it should be refused above rather than come back holding a camera and a light
+	// pointed at nothing.
 	state.write_camera();
 	state.write_light();
 
@@ -521,8 +481,8 @@ fn int? Exporter.walk(&self, NodeId id)
 	if (node == null) return -1;
 
 	// The two exclusions, and both are the same rule: the file is what the frame
-	// shows. A helper is drawn over the scene rather than in it, and a subtree
-	// that is switched off is not being looked at.
+	// shows. A helper is drawn over the scene rather than in it, and a subtree that
+	// is switched off is not being looked at.
 	if (node.material == LINE_MATERIAL || !node.visible)
 	{
 		self.report.skipped++;
@@ -540,6 +500,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	// A node's own children may all have dropped out; it is still written when it
 	// draws, and dropped when it does not, so an exported document has no groups
 	// standing over nothing.
+	//
 	// Heap-backed rather than `tmem`: this recurses, and a temp allocation per
 	// level of a deep hierarchy is not freed until the enclosing pool exits —
 	// which for a caller that opened none is never.
@@ -570,7 +531,7 @@ fn int? Exporter.walk(&self, NodeId id)
 }
 
 <*
- Write a node's children into `into`, as instanced nodes where they repeat.
+ Writes a node's children into `into`, as instanced nodes where they repeat.
 
  Two passes over the same list. The first sorts the collapsible children into
  batches by the shape they draw; the second walks the children in order and, at
@@ -578,15 +539,14 @@ fn int? Exporter.walk(&self, NodeId id)
  therefore emitted where its copies began rather than appended after everything
  else, so document order still tracks the order things were added to the scene.
 
- **A batch of one is not a batch.** It falls through to `walk` and is written as
- an ordinary node with its own name and its own tinted material, which costs no
- draw call — see the header.
+ A batch of one is not a batch. It falls through to `walk` and is written as an
+ ordinary node with its own name and its own tinted material, which costs no draw
+ call.
 
  A shape whose vertices cannot be written never forms a batch at all, so its
- nodes go through `walk` and drop out there, exactly as they did before. That is
- what the `geometry_for` call in the first pass is for, and it is not wasted
- work: the accessors it writes are the ones the batch is about to reference, and
- the memo means the second pass costs a list scan.
+ nodes go through `walk` and drop out there. That is what the `geometry_for` call
+ in the first pass is for, and it is not wasted work: the accessors it writes are
+ the ones the batch is about to reference.
 *>
 fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 {
@@ -676,19 +636,19 @@ fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh, uint mater
 }
 
 <*
- Write one batch as a single node drawing its mesh once per member.
+ Writes one batch as a single node drawing its mesh once per member.
 
  The node itself is at identity: instance transforms are relative to it, and it
  sits where the copies' shared parent already is, so each member's own local TRS
  goes into the arrays untouched.
 
- **`TRANSLATION` is always written**, even for the pathological batch whose
- copies are all in the same place. It is what carries the instance count — the
- extension has no length field of its own — and a reader that finds no attribute
- it recognises has been handed a node that draws an unknown number of times.
+ `TRANSLATION` is always written, even for the pathological batch whose copies
+ are all in the same place. It is what carries the instance count — the extension
+ has no length field of its own — and a reader that finds no attribute it
+ recognises has been handed a node that draws an unknown number of times.
  `ROTATION`, `SCALE` and `_COLOR_0` are written only when some member differs
- from the identity, which is what keeps the ordinary case — a grid of copies that
- only ever moved — at twelve bytes each rather than forty-four.
+ from the identity, which keeps the ordinary case at twelve bytes each rather
+ than forty-four.
 
  @param world : `Whether to take each copy's world transform rather than its local one. What a flattened export needs, because its copies no longer share a parent to be relative to.`
  @return `The document's node index, or -1 if the mesh entry could not be written.`
@@ -701,8 +661,7 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	// copy's. The tints go in the array below.
 	//
 	// Reading it off `members[0]` is exact rather than a sample, because the batch
-	// key holds the material: every member resolves to the same surface, so any of
-	// them would answer this. See `ExportBatch`, and the bug that was.
+	// key holds the material: every member resolves to the same surface.
 	int entry = self.mesh_entry(first, NO_TINT)!;
 	if (entry < 0) return -1;
 
@@ -771,20 +730,18 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 
  `walk`'s alternative, and the header says when to want it. Everything that draws
  is gathered by shape, wherever it sits in the tree, and written under one root
- that is deliberately at **identity**: the scene root's own transform is already
+ that is deliberately at *identity*: the scene root's own transform is already
  inside every world matrix, and writing it again would apply it twice.
 
- **The world matrices are recomputed first.** `Node.world` is only valid after
- the walk that fills it, and an export is not a frame — a script that builds a
- scene and exports it without ever rendering has never run that walk, and every
- world matrix in it is whatever it was initialised to. This is the same call the
- renderer makes and it has the same effect, so a scene that *was* up to date pays
- a traversal and changes by nothing.
+ The world matrices are recomputed first. `Node.world` is only valid after the
+ walk that fills it, and an export is not a frame — a script that builds a scene
+ and exports it without ever rendering has never run that walk. This is the same
+ call the renderer makes, so a scene that *was* up to date pays a traversal and
+ changes by nothing.
 
  A shape with one copy is still written as an ordinary node rather than a batch
- of one, keeping its name and its tinted material for the reason it always did.
- Its transform is the world one, because there is no longer a parent to be
- relative to.
+ of one, keeping its name and its tinted material. Its transform is the world one,
+ because there is no longer a parent to be relative to.
 
  @return `The document's root node index, or -1 for a scene with nothing to write.`
 *>
@@ -823,11 +780,10 @@ fn int? Exporter.flatten_scene(&self)
 }
 
 <*
- Collect everything that draws, by shape, wherever it is in the tree.
+ Collects everything that draws, by shape, wherever it is in the tree.
 
- `walk`'s two exclusions apply unchanged and for the same reason, including that
- a hidden subtree is one `skipped` rather than one per node in it: the recursion
- stops there, so nothing below it is counted or looked at.
+ `walk`'s two exclusions apply unchanged, including that a hidden subtree is one
+ `skipped` rather than one per node in it: the recursion stops there.
 
  A node that draws *and* has children contributes itself and is still descended
  into. Nothing is lost by that here — every child ends up in world space too, so
@@ -905,20 +861,17 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	// multiplies the base colour texture the same way — so the product is exactly
 	// what the pixel was.
 	//
-	// **The two halves are in different spaces and only one is converted.**
+	// The two halves are in different spaces and only one is converted.
 	// `base_color` is already linear, because that is what glTF's
-	// `baseColorFactor` is and what the shaders now use it as. The tint is
-	// `mesh.color`, which is a script's sRGB value, and it goes through the same
-	// decode the shader applies to it. Multiplying them raw was the old
-	// behaviour, and it is why baking a stand-in colour used to mean choosing
-	// between matching this engine and matching a colour-managed viewer — two
-	// numbers that should be one, and now are.
+	// `baseColorFactor` is. The tint is `mesh.color`, a script's sRGB value, and it
+	// goes through the same decode the shader applies to it. Multiplying them raw
+	// means baking a stand-in colour is a choice between matching this engine and
+	// matching a colour-managed viewer.
 	//
-	// **Opacity is the third factor**, and it is in the product for the same
-	// reason the other two are: `MeshPass.record` multiplies `material.opacity()`
-	// into `base_color.a` before the draw, so the alpha the file states is only
-	// the alpha the frame had if it carries all three. A material with no opacity
-	// set answers 1 and the product is what it always was.
+	// Opacity is the third factor, for the same reason: `MeshPass.record`
+	// multiplies `material.opacity()` into `base_color.a` before the draw, so the
+	// alpha the file states is only the alpha the frame had if it carries all
+	// three.
 	Material* material_of = self.pass.material(node.material);
 	float opacity = material_of == null ? 1.0f : material_of.opacity();
 	float[4] linear_tint = srgb_to_linear_rgb(tint);
@@ -931,8 +884,7 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	// A null material is one whose slot was collected while a node still named it,
 	// which `MeshPass.record` draws as nothing at all. Every answer below has the
 	// same shape for it: opaque, single-sided, the identity transform — which is
-	// what every material meant before any of those existed, and what the zero
-	// fill spells.
+	// what every material meant before any of those existed.
 	int material = self.material_for(self.surface_for(node, material_of, color)!);
 
 	foreach (&known : self.entries)
@@ -948,8 +900,8 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 	attributes[count++] = { .name = "POSITION", .accessor = (uint)streams.positions };
 	if (streams.normals >= 0) attributes[count++] = { .name = "NORMAL", .accessor = (uint)streams.normals };
 	if (streams.uvs >= 0) attributes[count++] = { .name = "TEXCOORD_0", .accessor = (uint)streams.uvs };
-	// Written whenever the source carried one, not only when a layer reads it.
-	// That is the condition the renderer uploads it on, and it is the attribute a
+	// Written whenever the source carried one, not only when a layer reads it. That
+	// is the condition the renderer uploads it on, and it is the attribute a
 	// `VERTEX_COLOR` mask names — without it such a layer would come back naming
 	// something the file does not have.
 	if (streams.colors >= 0) attributes[count++] = { .name = "COLOR_0", .accessor = (uint)streams.colors };
@@ -988,9 +940,9 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 		.colors = -1,
 		.indices = (int)self.out.add_indices(streams.indices.array_view()),
 	};
-	// Short is absent, which is the same test `upload_primitive` applies: a
-	// normals array that does not cover every vertex is one a consumer would read
-	// past the end of.
+	// Short is absent, which is the same test `upload_primitive` applies: a normals
+	// array that does not cover every vertex is one a consumer would read past the
+	// end of.
 	if (streams.normals.len() == streams.positions.len())
 	{
 		written.normals = (int)self.out.add_vec3(streams.normals.array_view());
@@ -999,11 +951,10 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 	{
 		written.uvs = (int)self.out.add_vec2(streams.uvs.array_view());
 	}
-	// **Float VEC4, whatever width the file stored it at.** glTF allows COLOR_0
-	// as normalized bytes or shorts as well, and `@each_color` has already
-	// widened whichever it was; narrowing it again to guess at the original
-	// spelling would be a lossy step taken for the sake of matching a detail
-	// nothing reads back. `Assets` uploads it as float4 for the same reason.
+	// Float VEC4, whatever width the file stored it at. glTF allows COLOR_0 as
+	// normalized bytes or shorts as well, and `@each_color` has already widened
+	// whichever it was; narrowing it again to guess at the original spelling would
+	// be a lossy step for the sake of a detail nothing reads back.
 	if (streams.colors.len() == streams.positions.len())
 	{
 		written.colors = (int)self.out.add_vec4(streams.colors.array_view());
@@ -1017,16 +968,15 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 <*
  Whether writing this node loses something the file cannot carry.
 
- **A `ShaderMaterial` and nothing else.** This used to be
- `node.material != DEFAULT_MATERIAL`, which counted a `MeshLambertMaterial` too
- — and glTF describes one of those perfectly well: a base colour, a texture and a
- side are exactly what a glTF material is. The result was `scene.export`
- reporting `shaded: 3025` of 3029 for `examples/village`, a number that says
- "almost everything lost its shading" about a file where almost nothing had.
+ A `ShaderMaterial` and nothing else. Testing `node.material != DEFAULT_MATERIAL`
+ instead would count a `MeshLambertMaterial` too — and glTF describes one of
+ those perfectly well: a base colour, a texture and a side are exactly what a
+ glTF material is. That reported `shaded: 3025` of 3029 for `examples/village`, a
+ number that says "almost everything lost its shading" about a file where almost
+ nothing had.
 
  The distinction is the fragment body: a material with one is a Slang pipeline,
- and glTF describes surfaces rather than programs. A material with none is a
- texture and a colour, which is a thing the format has.
+ and glTF describes surfaces rather than programs.
 *>
 fn bool Exporter.loses_its_shader(&self, uint material)
 {
@@ -1038,11 +988,10 @@ fn bool Exporter.loses_its_shader(&self, uint material)
 <*
  Which device texture slot a node actually draws with.
 
- **The material's map beats the mesh's own image**, which is the rule
- `MeshPass.record` follows and the one the exporter used to ignore: it read
- `GpuMesh.texture` and never looked at the material at all, so a script that put
- an image on a shape with `new three.MeshLambertMaterial({ map })` exported the
- shape untextured, or textured with whatever its glTF had brought.
+ The material's map beats the mesh's own image, which is the rule
+ `MeshPass.record` follows: reading `GpuMesh.texture` and never looking at the
+ material means a script that put an image on a shape with
+ `new three.MeshLambertMaterial({ map })` exports the shape untextured.
 *>
 fn int Exporter.texture_slot(&self, Node* node)
 {
@@ -1060,37 +1009,31 @@ fn int Exporter.texture_slot(&self, Node* node)
  The exported texture this node samples, or -1.
 
  Keyed on the device slot — which is deduplicated by a hash of the decoded image
- across every loaded file, so two kit packs sharing an atlas write it once, and
- so a `.png` on disk and the identical image inside a `.glb` are one entry in the
+ across every loaded file, so two kit packs sharing an atlas write it once, and a
+ `.png` on disk and the identical image inside a `.glb` are one entry in the
  written file as well as one upload on the device.
 
- ## Two ways to get the bytes, and the second one is why this exists
+ ## Two ways to get the bytes
 
- **From the source file, when there is one.** A mesh that came from a `.glb`
- carries its image's encoded bytes in that file's buffer, and copying them across
+ From the source file, when there is one: a mesh that came from a `.glb` carries
+ its image's encoded bytes in that file's buffer, and copying them across
  preserves whatever compression the artist chose — re-encoding a JPEG as a PNG
  would multiply the file size by five for no gain.
 
- **Off the device, when there is not.** A `DataTexture` has no file behind it, and
- neither does `three.texture(path)` once it is uploaded — both go straight into
- the shared table. Before `Texture.read_pixels` existed there was nothing to
- write, so `scene.export` reported `images: 0` on `examples/village`, a scene
- whose entire character is eleven generated textures, and reloading it gave a
- village of flat colours. Now the pixels come back off the device and
- `png::save_bytes` encodes them, which is a call rather than a project because
- `image.c3l` was already linked for the screenshot path.
+ Off the device, when there is not. A `DataTexture` has no file behind it, and
+ neither does `three.texture(path)` once it is uploaded. Without this,
+ `scene.export` reports `images: 0` on a scene whose entire character is eleven
+ generated textures, and reloading it gives a village of flat colours. The pixels
+ come back off the device and `png::save_bytes` encodes them.
 
  The readback is the expensive half — a queue idle per distinct texture — and it
  happens once per *device slot* rather than once per mesh, which is what the
  cache above it is for.
 
- **The image is written without a name.** A glTF image name is decorative, and
- the source file's is not readable this late: `gltf::Image.name` is a slice into
- the JSON document, which does not outlive the load — the same borrow that makes
- `Assets.load` copy every mesh name the moment it has one. Reading it here
- produced nine bytes of fill pattern inside a JSON string and a file nothing
- could parse, which is a good argument for not carrying decoration across a
- lifetime boundary.
+ The image is written without a name. A glTF image name is decorative, and the
+ source file's is not readable this late: `gltf::Image.name` is a slice into the
+ JSON document, which does not outlive the load. Reading it here produced nine
+ bytes of fill pattern inside a JSON string and a file nothing could parse.
 *>
 fn int? Exporter.texture_for(&self, Node* node)
 {
@@ -1108,8 +1051,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 
 	// The source-file path, and only when the slot really is the one this mesh's
 	// own glTF brought. A material's map is a different image entirely, and
-	// reaching for the mesh's source bytes for it would write the wrong picture
-	// — which is worse than writing none.
+	// reaching for the mesh's source bytes for it would write the wrong picture.
 	GpuMesh* gpu_mesh = self.pass.assets.mesh(node.asset, node.mesh);
 	Asset* asset = self.pass.assets.slot(node.asset);
 	if (gpu_mesh != null && slot == gpu_mesh.texture && asset != null && asset.has_stream && gpu_mesh.gltf_mesh >= 0)
@@ -1149,8 +1091,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 
  PNG rather than JPEG because the pixels are exact and should stay exact: a
  generated texture is often a pattern with hard edges — a checker, a brick
- course, a tile grid — and those are what JPEG is worst at. It is also what
- `image.c3l` can write.
+ course, a tile grid — and those are what JPEG is worst at.
 
  @return `The encoded bytes, owned by the caller.`
 *>
@@ -1222,27 +1163,20 @@ fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
  Where the normal, occlusion and emissive maps come from, and where an imported
  `CUSTOM_materials_layers` stack lives.
 
- ## Read out of the source document, not off the device
-
- For the layer stack, `GpuMesh.layers` is the other candidate and it is the wrong
- one, three times over. It is deliberately lossy — `Assets.load_material_layers`
- drops `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`,
- `subsurface`, `heightTexture` and `bump`, because `lambert()` is the whole of
- the built-in light and a field nothing evaluates is worse than an absence — so
- writing it back would state a document the file never contained. It is
- rearranged: `hoist_shared_mask` moves a mask every layer reads into a slot of
- the stack's own, which is right for the bindings budget and wrong for a file,
- where the sharing is spelled by each layer naming the same texture. And it
- exists only after `ensure_uploaded`, which this path deliberately never calls —
- an export needs no device, and a mesh that has been added but not yet drawn
- would otherwise export as a mesh with no layers, which is a wrong answer that
- looks like a file without the extension.
+ `GpuMesh.layers` is the other candidate for the stack and is the wrong one,
+ three times over. It is deliberately lossy — `Assets.load_material_layers` drops
+ `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`, `subsurface`,
+ `heightTexture` and `bump`, because `lambert()` is the whole of the built-in
+ light — so writing it back would state a document the file never contained. It
+ is rearranged: `hoist_shared_mask` moves a mask every layer reads into a slot of
+ the stack's own, which is right for the bindings budget and wrong for a file. And
+ it exists only after `ensure_uploaded`, which this path deliberately never calls
+ — a mesh that has been added but not yet drawn would export as a mesh with no
+ layers, a wrong answer that looks like a file without the extension.
 
  The parsed document has none of those problems. `Assets.load` keeps the stream
  open for as long as the asset lives, so the whole material is sitting there
- already parsed, complete, and in the file's own arrangement. The maps are there
- for the same reason and were being thrown away for no reason at all: a
- normal-mapped kit used to round-trip flat.
+ already parsed, complete, and in the file's own arrangement.
 
  @return `The index of the material inside the asset's own document, or -1 for a mesh with no file behind it. The index rather than the material, because it is also part of the dedup key — see ExportSurface.`
 *>
@@ -1261,11 +1195,9 @@ fn int Exporter.source_material_of(&self, Node* node)
  The exported texture for one image of one source document, or -1.
 
  The layer half of `texture_for`, and it has only that function's *first* source:
- the bytes come out of the file the layer was read out of, with whatever
- compression the artist chose. There is no fallback to a device readback,
- because there is nothing to read back — a layer's images reach the device
- through slots this path cannot walk back to, and a generated layer stack does
- not exist (see `source_material_of`).
+ the bytes come out of the file the layer was read out of. There is no fallback
+ to a device readback, because there is nothing to read back — a layer's images
+ reach the device through slots this path cannot walk back to.
 
  @param image : `Index into the source document's images array.`
 *>
@@ -1296,7 +1228,7 @@ fn int Exporter.layer_texture_for(&self, AssetId id, int image)
 }
 
 <*
- Turn one parsed stack back into a written one, image indices and all.
+ Turns one parsed stack back into a written one, image indices and all.
 
  The one place the two vocabularies meet. A parsed `TextureInfo.source` is an
  *image* index — `layer_texture` resolved it through the textures array on the
@@ -1359,17 +1291,14 @@ fn gltf::WriteTextureRef Exporter.write_layer_texture(&self, AssetId id, gltf::T
  Whether the material this node draws with is a `three.LayeredMaterial`, and its
  index if it is.
 
- The other half of `source_material_of`. A stack a *script* wrote has no
- source document to be read out of — it never came from a file — so it is read
- from `Material.script_layers`, the description `js/prelude/layers.js` sends
- across at construction beside the shader it generated.
+ The other half of `source_material_of`. A stack a *script* wrote has no source
+ document to be read out of, so it is read from `Material.script_layers`, the
+ description `js/prelude/layers.js` sends across at construction.
 
- **This beats an imported stack when a node has both**, which is the rule
- `texture_slot` already follows one function up: the material's map beats the
- mesh's own image, because the material is what the frame drew with. A script
- that loads a layered terrain and then puts its own `LayeredMaterial` on it has
- replaced the stack, and writing the file's would export a picture the frame did
- not show.
+ This beats an imported stack when a node has both, which is the rule
+ `texture_slot` already follows one function up: the material is what the frame
+ drew with. A script that loads a layered terrain and then puts its own
+ `LayeredMaterial` on it has replaced the stack.
 
  @return `The index into MeshPass.materials, or -1. The index rather than the stack, because it is also the dedup key — see ExportMaterial.`
 *>
@@ -1386,17 +1315,16 @@ fn int Exporter.script_material_index(&self, Node* node)
  A script's stack, written out.
 
  The mirror of `write_layers`, and the differences are all consequences of where
- the description came from rather than choices made here.
+ the description came from.
 
- **No height map and no bump**, because `LayeredMaterial` refuses both by name —
- there is no parallax in this renderer, so a script cannot state one and there is
- nothing to write. The same goes for the PBR half: `metalness` and `roughness`
- are refused for `plan.md` §12's reason, so a script stack has no metallic factor
- to lose. That is why this is lossless where writing `GpuLayers` back would not
- be: the description is the whole of what the script said, not a reduction of a
- file.
+ No height map and no bump, because `LayeredMaterial` refuses both by name —
+ there is no parallax in this renderer, so a script cannot state one. The same
+ goes for the PBR half: `metalness` and `roughness` are refused because nothing
+ evaluates them. That is why this is lossless where writing `GpuLayers` back
+ would not be: the description is the whole of what the script said, not a
+ reduction of a file.
 
- **The tint and the opacity are read now, not remembered.** `Material.layer_params`
+ The tint and the opacity are read now, not remembered. `Material.layer_params`
  answers with the shader's baked literals for a plain layer and with the live
  push block for one that asked to be `animated`, so a tint a script has been
  animating exports as whatever it is at the moment of the export.
@@ -1406,9 +1334,8 @@ fn int Exporter.script_material_index(&self, Node* node)
  that round-trips to the numbers that went in — putting the opacity in the alpha
  instead would come back the same in the product and wrong in both fields.
 
- **Every layer here is enabled.** `LayeredMaterial` drops `enabled: false` before
- it generates anything, so a disabled layer never reaches the host at all. What
- is written is what the shader draws.
+ Every layer here is enabled: `LayeredMaterial` drops `enabled: false` before it
+ generates anything, so a disabled layer never reaches the host.
 *>
 fn void Exporter.write_script_layers(&self, uint material, Material* source)
 {
@@ -1432,12 +1359,12 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 		written.mask = {
 			.source = (gltf::LayerMaskSource)layer.mask_source,
 			.channel = (gltf::LayerMaskChannel)layer.mask_channel,
-			// A layer with no mask sampler of its own reads a channel of the
-			// stack's shared one, which is the arrangement the generator produces
-			// and the one the extension's per-layer `channel` field exists for.
-			// Written per layer because that is how the file spells the sharing —
-			// several layers naming one textureInfo — which is exactly what
-			// `hoist_shared_mask` undoes on the way back in.
+			// A layer with no mask sampler of its own reads a channel of the stack's
+			// shared one, which is the arrangement the generator produces and the one
+			// the extension's per-layer `channel` field exists for. Written per layer
+			// because that is how the file spells the sharing — several layers naming
+			// one textureInfo — which is what `hoist_shared_mask` undoes on the way
+			// back in.
 			.texture = layer.mask_binding != 0
 				? self.script_layer_texture(source, layer.mask_binding)
 				: gltf::texture_ref(self.device_texture_for(shared_mask)),
@@ -1459,16 +1386,14 @@ fn gltf::WriteTextureRef Exporter.script_layer_texture(&self, Material* source, 
 <*
  The exported texture for a device slot, read back off the device.
 
- `texture_for`'s second source, on its own, because a script's image has no
- first: a `LayeredMaterial`'s maps are `three.texture(path)` and `DataTexture`
- handles, which go straight into the shared table with no file behind them that
- this could copy bytes out of.
+ `texture_for`'s second source on its own, because a script's image has no first:
+ a `LayeredMaterial`'s maps are `three.texture(path)` and `DataTexture` handles,
+ which go straight into the shared table with no file behind them.
 
  It shares `texture_for`'s memo rather than the layer one, and that is the point:
- the key is the device slot, which is already content-deduplicated across every
- loaded file, so a stack whose base map and whose first layer sample one image
- write it once. The layer memo exists for the *imported* path, where there is no
- device slot to key on — `ExportLayerImage` says so there.
+ the key is the device slot, which is already content-deduplicated, so a stack
+ whose base map and whose first layer sample one image write it once. The layer
+ memo exists for the *imported* path, where there is no device slot to key on.
 
  @return `The document's texture index, or -1 when there is no device, the slot is dead, or the readback failed.`
 *>
@@ -1512,8 +1437,8 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 	// `BLEND` rather than `MASK`, because that is what this renderer does: the
 	// alpha is a blend factor, not a cutoff, and `alpha_cutoff` is left at its
 	// default because `BLEND` does not read it. An opaque material stays `OPAQUE`
-	// rather than being written as `BLEND` with an alpha of 1 — the two render
-	// the same and only one of them tells a viewer it may skip the sort.
+	// rather than being written as `BLEND` with an alpha of 1 — the two render the
+	// same and only one of them tells a viewer it may skip the sort.
 	uint written = self.out.add_material(
 		"",
 		{ surface.base_color[0], surface.base_color[1], surface.base_color[2], surface.base_color[3] },
@@ -1533,8 +1458,8 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		}
 	);
 
-	// After `add_material`, because the stack hangs off the material that was
-	// just added and `add_material_layers` takes its index.
+	// After `add_material`, because the stack hangs off the material that was just
+	// added and `add_material_layers` takes its index.
 	if (surface.script_material >= 0)
 	{
 		Material* source = self.pass.material((uint)surface.script_material);
@@ -1560,21 +1485,18 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 <*
  Everything about a node that decides its glTF material, resolved.
 
- **The maps are resolved here rather than in `material_for`**, which is what lets
- the dedup key be what gets written. Resolving one writes its image into the
- document on the first call and answers from the memo afterwards, so doing it
- before the dedup check costs nothing: an image any material references has to be
- in the file, and two materials that turn out to be one reference the same one.
+ The maps are resolved here rather than in `material_for`, which is what lets the
+ dedup key be what gets written. Resolving one writes its image into the document
+ on the first call and answers from the memo afterwards, so doing it before the
+ dedup check costs nothing: an image any material references has to be in the
+ file, and two materials that turn out to be one reference the same one.
 
- **The script's material wins over the source document's.** A node drawing a
- file's mesh under its own `LayeredMaterial` shows the script's stack and the
- script's base normal; writing the file's would be a picture the frame did not
- draw. Same rule as `texture_slot`'s, one level up.
+ The script's material wins over the source document's. A node drawing a file's
+ mesh under its own `LayeredMaterial` shows the script's stack and the script's
+ base normal; writing the file's would be a picture the frame did not draw.
 
- **Not the metallic-roughness map, and not the two factors.** `plan.md` §12: this
- renderer has no specular term, so those describe an equation nothing here
- evaluates. Writing a roughness the renderer ignored would put a number in the
- file that never affected a pixel.
+ Not the metallic-roughness map, and not the two factors: this renderer has no
+ specular term, so those describe an equation nothing evaluates.
 *>
 fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color)
 {
@@ -1582,9 +1504,8 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		.base_color = color,
 		.texture = self.texture_for(node)!,
 		// A null material is one whose slot was collected while a node still named
-		// it, which `MeshPass.record` draws as nothing at all. Every answer here
-		// has the same shape for it — opaque, single-sided, the identity transform
-		// — which is what every material meant before any of those existed.
+		// it, which `MeshPass.record` draws as nothing at all. Every answer here has
+		// the same shape for it — opaque, single-sided, the identity transform.
 		.uv_transform = material_of == null ? UV_IDENTITY : material_of.uv_transform_or_identity(),
 		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
 		.double_sided = material_of != null && material_of.cull == CULL_MODE_NONE,
@@ -1641,11 +1562,10 @@ fn gltf::WriteTextureRef Exporter.source_texture_ref(&self, AssetId id, gltf::Te
 <*
  A base colour map carrying `material.repeat` and `material.offset`.
 
- The renderer applies these in the fragment stage before a material body runs
- (`shaders/material.slang`), so they are part of what the frame showed and belong
- in the file. `KHR_texture_transform` is the only place core glTF has for them —
- without it a tiling floor exports with its texture stretched once across the
- whole surface, which is not a subtle difference.
+ The renderer applies these in the fragment stage before a material body runs, so
+ they are part of what the frame showed and belong in the file.
+ `KHR_texture_transform` is the only place core glTF has for them — without it a
+ tiling floor exports with its texture stretched once across the whole surface.
 
  `Material.uv_transform_or_identity` has already turned the all-zero "unset" into
  the identity, and the identity writes no extension.
@@ -1692,7 +1612,7 @@ fn bool Assets.read_geometry(&self, AssetId id, uint mesh, GeometryBuilder* out)
 }
 
 <*
- Re-read a primitive out of the file it was loaded from.
+ Re-reads a primitive out of the file it was loaded from.
 
  The `@each_*` macros rather than a memcpy for `upload_primitive`'s reason: a
  glTF buffer view may be strided, and these are what know the stride. What comes
@@ -1710,16 +1630,15 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 
 	asset.stream.@each_normal(primitive; Vec3 normal, sz i) { out.normals.push(normal); };
 	asset.stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { out.uvs.push(uv); };
-	// Set 0 only. `CUSTOM_materials_layers` lets a mask name an attribute, and
-	// every attribute it can name that this renderer reads is COLOR_0 —
+	// Set 0 only. `CUSTOM_materials_layers` lets a mask name an attribute, and every
+	// attribute it can name that this renderer reads is COLOR_0 —
 	// `Assets.load_material_layers` uploads one colour stream per mesh.
 	asset.stream.@each_color(primitive, 0; Vec4 color, sz i) { out.colors.push(color); };
 
 	read_indices(&asset.stream, primitive, &out.indices);
 	// A primitive with no index accessor is a plain vertex list, and glTF lets a
 	// primitive be written the same way — but the writer's dedup and the reader's
-	// bucket both key on an index accessor being there, so it is filled in for the
-	// reason `upload_primitive` fills it in.
+	// bucket both key on an index accessor being there.
 	if (out.indices.len() == 0)
 	{
 		for (uint i = 0; i < out.positions.len(); i++) out.indices.push(i);
@@ -1731,15 +1650,15 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
  A hull, out of the CPU copy the picking tree holds.
 
  Its normals and its uvs are recomputed rather than stored, and that is exact
- rather than approximate: `build_convex` splits a vertex per face, so every vertex
- here belongs to exactly one triangle. The accumulated normal is therefore that
- triangle's, and the uv is that triangle's own planar projection through the same
- `face_basis` the builder used — `scene/convex.c3` has the rule.
+ rather than approximate: `build_convex` splits a vertex per face, so every
+ vertex here belongs to exactly one triangle. The accumulated normal is therefore
+ that triangle's, and the uv is that triangle's own planar projection through the
+ same `face_basis` the builder used.
 
  Two passes over the triangles rather than one, because the uv needs a *unit*
  normal and the normals are only unit after the accumulate. The cost is one more
- walk of a list that is already in cache; the alternative is normalising each face
- twice.
+ walk of a list that is already in cache; the alternative is normalising each
+ face twice.
 *>
 fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 {
@@ -1796,14 +1715,13 @@ fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 <*
  The camera, as a glTF camera on a node of its own.
 
- **Without this an exported scene opens wherever the viewer decides**, which for
- most viewers is a framing of the bounding box — so a scene composed for a
- particular angle arrives pointing somewhere else. glTF has a camera; three has
- one; nothing was carrying it across.
+ Without this an exported scene opens wherever the viewer decides, which for most
+ viewers is a framing of the bounding box — so a scene composed for a particular
+ angle arrives pointing somewhere else.
 
  The orbit camera reduces to a placement cleanly: `Camera.eye` is where it is and
  `Camera.orbit_dir` is the direction from the target back to the eye, which is
- the node's +Z — because a glTF camera looks down **-Z**, and -Z is therefore the
+ the node's +Z — because a glTF camera looks down *-Z*, and -Z is therefore the
  direction from the eye toward the target.
 
  `fov` is degrees here and radians in the file; `aspectRatio` is deliberately not
@@ -1833,19 +1751,18 @@ fn void Exporter.write_camera(&self)
 <*
  The light, as a directional `KHR_lights_punctual` on a node of its own.
 
- `MeshPass.light` is `float[4]`: xyz is the **surface-to-light** direction and w
- is the ambient floor. A glTF directional light shines along its node's -Z, and
- the direction light *travels* is the negation of surface-to-light — so the
- node's +Z is the vector as stored, and no negation appears here at all. Getting
- that backwards lights the far side of everything, which reads as the exporter
- having the normals wrong.
+ `MeshPass.light` is `float[4]`: xyz is the *surface-to-light* direction and w is
+ the ambient floor. A glTF directional light shines along its node's -Z, and the
+ direction light *travels* is the negation of surface-to-light — so the node's +Z
+ is the vector as stored, and no negation appears here at all. Getting that
+ backwards lights the far side of everything, which reads as the exporter having
+ the normals wrong.
 
- **The ambient floor cannot be written.** `KHR_lights_punctual` has no ambient
- light — it was removed from the extension before ratification, and there is no
- other standard slot for one. A scene with a high floor therefore reloads darker
- in a viewer than it looked here. That is a real loss and there is nowhere
- standard to put it; the alternative was to fold it into the directional light's
- intensity, which would be a different picture rather than the same one.
+ The ambient floor cannot be written. `KHR_lights_punctual` has no ambient light
+ — it was removed from the extension before ratification — and there is no other
+ standard slot for one. A scene with a high floor therefore reloads darker in a
+ viewer than it looked here. Folding it into the directional light's intensity
+ would be a different picture rather than the same one.
 
  White at intensity 1 because three's light has neither a colour nor a strength
  of its own — the direction is the whole of it.
@@ -1853,8 +1770,8 @@ fn void Exporter.write_camera(&self)
 fn void Exporter.write_light(&self)
 {
 	Vec3 to_light = { self.pass.light[0], self.pass.light[1], self.pass.light[2] };
-	// A light of zero length points nowhere, and normalising it would put NaNs
-	// into the node's rotation. Nothing is written rather than something wrong.
+	// A light of zero length points nowhere, and normalising it would put NaNs into
+	// the node's rotation. Nothing is written rather than something wrong.
 	if (to_light.length() < 1e-6f) return;
 
 	uint written = self.out.add_light("light", gltf::LightType.DIRECTIONAL);
@@ -1871,10 +1788,10 @@ fn void Exporter.write_light(&self)
  a directional light are aimed by their -Z, so the vector handed in is already
  the +Z and the basis is completed around it.
 
- The up axis flips near the pole for `Camera.pitch`'s reason, one file over: with
- `up` parallel to `forward` the cross product is zero, the basis is degenerate
- and the quaternion comes back full of NaN. Nothing errors — the camera simply
- renders nothing — so the case is handled rather than asserted.
+ The up axis flips near the pole for `Camera.pitch`'s reason: with `up` parallel
+ to `forward` the cross product is zero, the basis is degenerate and the
+ quaternion comes back full of NaN. Nothing errors — the camera simply renders
+ nothing — so the case is handled rather than asserted.
 *>
 fn Quaternionf rotation_towards(Vec3 forward) @local
 {

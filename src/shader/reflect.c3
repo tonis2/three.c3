@@ -1,40 +1,34 @@
 <*
- Slang reflection, turned into the two things Vulkan asks for.
+ Slang reflection, turned into the two things Vulkan asks for: a descriptor set
+ layout and a name → offset map for the push block.
 
- `plan.md` §3 is direct about why this file is the actual requirement and not the
- compiler: what makes Three.js's `ShaderMaterial` feel effortless is that it
- introspects the shader and wires the uniforms up for you. Without the
- equivalent, every agent-written shader needs a hand-authored descriptor
- declaration beside it, and "just write the shader" dies on contact.
+ This is what makes an agent-written shader work without a hand-authored
+ descriptor declaration beside it. Both outputs are read out of the same compile
+ that produced the SPIR-V, so they cannot describe a different module than the
+ one that runs.
 
- So: a descriptor set layout derived from the module, and a name → offset map for
- the push block. Both are read out of the same compile that produced the SPIR-V,
- so they cannot describe a different module than the one that runs.
+ ## Three views of the same parameter, and only one is enough
 
- ## Three views of the same parameter, and only one of them is enough
-
- A `Sampler2D` and a `Texture2D` are indistinguishable at two of the three levels
- Slang exposes:
+ A `Sampler2D` and a `Texture2D` are indistinguishable at two of the three
+ levels Slang exposes:
 
 	type kind           RESOURCE for both
 	parameter category  DESCRIPTOR_TABLE_SLOT for both
 	binding range type  COMBINED_TEXTURE_SAMPLER vs TEXTURE
 
  Only the third says which. Deriving a set layout from the first two produces a
- `SAMPLED_IMAGE` where the shader wants a `COMBINED_IMAGE_SAMPLER`, which is a
- validation error at best and a black screen at worst — `plan.md` §7 names
- exactly this: "getting this wrong produces a black screen, not an error".
+ `SAMPLED_IMAGE` where the shader wants a `COMBINED_IMAGE_SAMPLER` — a
+ validation error at best and a black screen at worst.
 
- The binding *index* comes from a fourth view again — the descriptor-set one —
- because that is the view that knows about `[vk::binding(n, m)]`. The binding
- range's own index is its position in the declaration order, which is the same
+ The binding *index* comes from a fourth view again, the descriptor-set one,
+ because that is the view that knows about `[vk::binding(n, m)]`. A binding
+ range's own index is its position in declaration order, which is the same
  number often enough to look correct.
 
- ## The push block is not a descriptor
-
- It reflects as a constant buffer, like `ConstantBuffer<T>` does, and the only
- thing separating them is the parameter category. Putting a push block into a set
- layout is a validation error naming a binding the shader never declared.
+ A push block is not a descriptor. It reflects as a constant buffer like
+ `ConstantBuffer<T>` does, and only the parameter category separates them;
+ putting one into a set layout is a validation error naming a binding the shader
+ never declared.
 *>
 module three;
 
@@ -66,9 +60,9 @@ struct ShaderField
 	String name;
 	uint offset;
 	uint size;
-	// True for a uniform that lives in the **table buffer** rather than in the
-	// push block — `offset` is then within that buffer. `MATERIAL_TABLE_FIELD` is
-	// the pointer these hang off, and `scene/material.c3` has why a table spills
+	// True for a uniform that lives in the table buffer rather than in the push
+	// block; `offset` is then within that buffer. `MATERIAL_TABLE_FIELD` is the
+	// pointer these hang off, and `scene/material.c3` has why a table spills
 	// there at all.
 	bool indirect;
 }
@@ -95,16 +89,14 @@ struct ShaderLayout
 <*
  A deep copy, names included.
 
- Exists because one compiled module now serves several pipelines — the line pass
- and the solid pass are the same `mesh.slang` over two fixed-function states, and
- `material.side` is the same material source over two cull modes. `PipelineCache`
- keeps the module and hands each pipeline one of these.
+ One compiled module serves several pipelines — the line pass and the solid pass
+ are the same `mesh.slang` over two fixed-function states, and `material.side`
+ is one material source over two cull modes. `PipelineCache` keeps the module
+ and hands each pipeline one of these.
 
- **A copy rather than a shared pointer**, which is the choice `MeshPipeline`'s
- own comment argues: a pipeline holding a pointer into the module would outlive
- what it points at the moment a caller freed the module, and a layout is a few
- dozen short strings — the price of getting that wrong is far higher than the
- price of copying it.
+ A copy rather than a shared pointer: a pipeline holding a pointer into the
+ module outlives what it points at the moment a caller frees the module, and a
+ layout is only a few dozen short strings.
 *>
 fn ShaderLayout ShaderLayout.copy(&self)
 {
@@ -143,7 +135,7 @@ fn void ShaderLayout.free(&self)
 }
 
 <*
- Find a binding by the name it has in the shader.
+ Finds a binding by the name it has in the shader.
 
  @return `A pointer into the list, or null. Invalid after the layout is freed.`
 *>
@@ -154,7 +146,7 @@ fn ShaderBinding* ShaderLayout.binding_of(&self, String name)
 }
 
 <*
- Find a push-constant field by name — the map a material layer writes uniforms
+ Finds a push-constant field by name — the map a material layer writes uniforms
  through.
 
  @return `A pointer into the list, or null. Invalid after the layout is freed.`
@@ -177,11 +169,10 @@ const vk::DescriptorType DESCRIPTOR_TYPE_UNBINDABLE = (vk::DescriptorType)0xFFFF
 <*
  Which Vulkan descriptor a Slang binding range is.
 
- Anything not listed arrives as `DESCRIPTOR_TYPE_UNBINDABLE`, which is refused by
- `MeshPipeline.init` with the parameter's name attached. That
- is the deliberate choice: a shader declaring an acceleration structure is not
- something this pass can bind, and guessing `STORAGE_BUFFER` for it would fail
- later and further away.
+ Anything not listed arrives as `DESCRIPTOR_TYPE_UNBINDABLE` and is refused by
+ `MeshPipeline.init` with the parameter's name attached. A shader declaring an
+ acceleration structure is not something this pass can bind, and guessing
+ `STORAGE_BUFFER` for it would fail later and further away.
 *>
 fn vk::DescriptorType descriptor_type_of(uint binding_type)
 {
@@ -228,13 +219,11 @@ fn vk::ShaderStageFlags stage_flag_of(uint stage)
 <*
  Every stage the module contains, as one flag set.
 
- **This is the union, not the per-binding truth**, and that is on purpose.
- `spIsParameterLocationUsed` would say precisely which stages touch which
- binding, and being wrong about it in the tight direction is a descriptor the
- shader reads and the layout does not declare — undefined behaviour, reported by
- nothing. A stage flag wider than necessary is legal, costs nothing at draw time,
- and cannot be wrong. It is still *derived* — the entry points come from
- reflection — which is what M4 is about.
+ The union, not the per-binding truth. `spIsParameterLocationUsed` would say
+ precisely which stages touch which binding, and being wrong in the tight
+ direction is a descriptor the shader reads and the layout does not declare —
+ undefined behaviour, reported by nothing. A stage flag wider than necessary is
+ legal, costs nothing at draw time, and cannot be wrong.
 *>
 fn vk::ShaderStageFlags stage_union(ShaderEntry[] entries)
 {
@@ -244,7 +233,7 @@ fn vk::ShaderStageFlags stage_union(ShaderEntry[] entries)
 }
 
 <*
- Walk a compiled program's reflection into a `ShaderLayout`.
+ Walks a compiled program's reflection into a `ShaderLayout`.
 
  The result owns copies of every name, because the reflection they point into
  dies with the compile request.
@@ -282,8 +271,8 @@ fn ShaderLayout reflect_layout(slang::Reflection reflection, ShaderEntry[] entri
 		List{slang::Field} fields;
 		fields.tinit(8);
 		// `MATERIAL_TABLE_FIELD` is followed wherever it appears, which is a
-		// generated material whose uniform table did not fit the push block. Every
-		// other module has no field by that name and the walk is what it was.
+		// generated material whose uniform table did not fit the push block.
+		// Every other module has no field by that name and the walk is unchanged.
 		out.push_size = reflection.push_block(&fields, MATERIAL_TABLE_FIELD);
 		foreach (field : fields)
 		{

@@ -3,14 +3,14 @@
 
  ## The thesis, as code
 
- `plan.md`'s central claim is that an instance is an immutable asset reference
- plus a transform, and that this makes every scene the API can express optimized
- by construction. `build_draw_list` is where that stops being a claim: a
- traversal produces one `Instance` record per drawn node, records sharing an
- `(asset, mesh)` key land next to each other, and each run of them becomes one
- `vkCmdDrawIndexed` with an instance count. A thousand copies of a wall are a
- thousand 128-byte transforms and one draw. There is no fast path and no
- batching heuristic — there is no other path.
+ An instance is an immutable asset reference plus a transform, and that is what
+ makes every scene the API can express optimised by construction.
+ `build_draw_list` is where that stops being a claim: a traversal produces one
+ `Instance` record per drawn node, records sharing an `(asset, mesh)` key land
+ next to each other, and each run of them becomes one `vkCmdDrawIndexed` with an
+ instance count. A thousand copies of a wall are a thousand 148-byte transforms
+ and one draw. There is no fast path and no batching heuristic — there is no
+ other path.
 
  ## Three passes, and why they are separate
 
@@ -18,18 +18,18 @@
 	build_draw_list         traverse, cull, sort by bucket key, write instances
 	MeshPass.record         upload, bind, draw
 
- The first is the only one that touches the hierarchy, and it is the only one
- that can be skipped — a scene where nothing moved does not walk at all, which
- matters because a frame asks for it three to five times (`Scene.matrices_current`,
- and `plan.md` §19.5). The second is rebuilt every frame because culling depends
- on the camera. The third is in `render/pass.c3` and knows nothing about nodes.
+ The first is the only one that touches the hierarchy, and the only one that can
+ be skipped — a scene where nothing moved does not walk at all, which matters
+ because a frame asks for it three to five times (see `Scene.matrices_current`).
+ The second is rebuilt every frame because culling depends on the camera. The
+ third is in `render/pass.c3` and knows nothing about nodes.
 
  ## Culling is on by default and it changes the numbers
 
- An instance outside the frustum is dropped from the draw list, so
- `stats()` deliberately does *not* read the last frame's list — it rebuilds with
- culling off, so that "1000 instances is 1 draw call" is a statement about the
- scene rather than about where the camera happened to be pointing.
+ An instance outside the frustum is dropped from the draw list, so `stats()`
+ deliberately does *not* read the last frame's list — it rebuilds with culling
+ off, so that "1000 instances is 1 draw call" is a statement about the scene
+ rather than about where the camera happened to be pointing.
 *>
 module three;
 
@@ -52,20 +52,16 @@ import collision;
 
  ## Why `color` and `variant` are here rather than in the material
 
- **This is the only per-copy channel a draw call has.** Everything else a mesh
- draws with — the pipeline, the uniforms, the texture — is bucket state, pushed
- once for the whole `vkCmdDrawIndexed`, so two copies that disagree about any of
- it are two buckets and two draws. These two disagree for free: they are read
- out of this array by `SV_InstanceID`, so a thousand differently coloured copies
- of one mesh stay one draw call.
+ This is the only per-copy channel a draw call has. Everything else a mesh draws
+ with — the pipeline, the uniforms, the texture — is bucket state, pushed once for
+ the whole `vkCmdDrawIndexed`, so two copies that disagree about any of it are two
+ buckets and two draws. These two disagree for free: they are read out of this
+ array by `SV_InstanceID`, so a thousand differently coloured copies of one mesh
+ stay one draw call. The alternative is two materials, which is two pipelines'
+ worth of bucket state.
 
- That is the shape the API needs, because before this the only way to give two
- boxes different colours was two materials, which is two pipelines' worth of
- bucket state and two draws. `a_thousand_colours_are_still_one_draw_call` is the
- check.
-
- `variant` selects a row of the material's uniform table (`shader/material_source.c3`)
- and is nothing at all to the default shader. `color` multiplies albedo in both.
+ `variant` selects a row of the material's uniform table and is nothing at all to
+ the default shader. `color` multiplies albedo in both.
 *>
 struct Instance
 {
@@ -75,16 +71,16 @@ struct Instance
 	// opaque pipeline does not blend with it.
 	float[4] color;
 	// Which row of the material's table. Clamped in the shader against the row
-	// count the material declared, so a variant past the end is the last row
-	// rather than a read off the end of the push block.
+	// count the material declared, so a variant past the end is the last row rather
+	// than a read off the end of the push block.
 	uint variant;
 	// Where this copy's joint matrices start, in matrices, with `POSE_LIVE` in the
 	// top bit saying which buffer they are in.
 	//
-	// **The field a crowd is affordable because of.** A hundred characters mid-
-	// stride at a hundred different phases disagree about this one uint and about
-	// nothing else, so they key a hundred different frames out of one baked table
-	// and stay a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
+	// The field a crowd is affordable because of. A hundred characters mid-stride
+	// at a hundred different phases disagree about this one uint and about nothing
+	// else, so they key a hundred different frames out of one baked table and stay
+	// a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
 	uint pose;
 }
 
@@ -107,12 +103,11 @@ struct Bucket
 	<*
 	 How many of `count` the camera can see, and they are the first ones.
 
-	 **Two passes read one instance array, and this is the whole of how.** The
-	 shadow pass draws `[first, first + count)` — every copy that can throw a
-	 shadow into the frame — and the colour pass draws `[first, first + visible)`.
-	 A copy the camera cannot see but the light can sits in the tail and is
-	 rasterised into the map only, which is what `render/shadow.c3:38` asked for
-	 and what `culledLastFrame` reading 0 used to be the absence of.
+	 Two passes read one instance array, and this is the whole of how. The shadow
+	 pass draws `[first, first + count)` — every copy that can throw a shadow into
+	 the frame — and the colour pass draws `[first, first + visible)`. A copy the
+	 camera cannot see but the light can sits in the tail and is rasterised into
+	 the map only.
 
 	 It is a prefix and not a mask because `vkCmdDrawIndexed` takes a first and a
 	 count: two ranges out of one array means one of them is contiguous from
@@ -120,8 +115,7 @@ struct Bucket
 	 `build_draw_list` — the tiebreak sits *after* `preskinned`, so it orders
 	 copies within a bucket rather than splitting one in two.
 
-	 Equal to `count` in every frame with no shadow pass, so an unshadowed frame
-	 draws exactly the range it always drew.
+	 Equal to `count` in every frame with no shadow pass.
 	*>
 	uint visible;
 
@@ -129,10 +123,9 @@ struct Bucket
 	 Where this bucket's static casters start, counted from `first`, and how many
 	 there are.
 
-	 **The second partition of one instance array, and the order is the whole
-	 trick.** `visible` needs a prefix and the static set needs a run, and two
-	 independent halves cannot both be prefixes — so the sort lays a bucket out in
-	 four cells:
+	 The second partition of one instance array, and the order is the whole trick.
+	 `visible` needs a prefix and the static set needs a run, and two independent
+	 halves cannot both be prefixes — so the sort lays a bucket out in four cells:
 
 		[ visible dynamic | visible static | hidden static | hidden dynamic ]
 		 <----------- visible ----------->
@@ -140,18 +133,16 @@ struct Bucket
 		                   ^ static_first
 
 	 Visible is still exactly the prefix `record` has always drawn. The static run
-	 is contiguous and `record_shadow` draws it alone when it is rebuilding the
-	 cached half of the map. The *dynamic* casters are the two ends, which is the
-	 one thing this ordering gives up: a bucket that holds both static and hidden
-	 dynamic copies costs the dynamic shadow pass two `vkCmdDrawIndexed` instead
-	 of one. Movers are the small half by construction — that is what makes the
-	 cache worth having — so the split is paid on a handful of buckets and the
-	 alternative was giving up the visible prefix, which every colour draw depends
-	 on.
+	 is contiguous and `record_shadow` draws it alone when rebuilding the cached
+	 half of the map. The *dynamic* casters are the two ends, which is the one
+	 thing this ordering gives up: a bucket holding both static and hidden dynamic
+	 copies costs the dynamic shadow pass two `vkCmdDrawIndexed` instead of one.
+	 Movers are the small half by construction, so the split is paid on a handful
+	 of buckets — and the alternative was giving up the visible prefix, which every
+	 colour draw depends on.
 
-	 With nothing marked static the middle two cells are empty, the layout is
-	 `[visible | hidden]` exactly as it was before §19.3, `static_first` equals
-	 `visible` and `static_count` is zero.
+	 With nothing marked static the middle two cells are empty and the layout is
+	 `[visible | hidden]`.
 
 	 A pre-skinned bucket is never static: its vertices come out of a buffer the
 	 compute pass wrote this frame, indexed from the bucket's own first copy, so
@@ -164,31 +155,26 @@ struct Bucket
 	<*
 	 Whether the compute pass poses these copies before the render pass reads them.
 
-	 **Part of what makes two draws two draws.** Everything else a bucket keys on
-	 is about *what* is drawn; this is about where the vertices are read from, and
-	 a pre-skinned copy reads a buffer the compute pass wrote while its neighbour
+	 Part of what makes two draws two draws. Everything else a bucket keys on is
+	 about *what* is drawn; this is about where the vertices are read from, and a
+	 pre-skinned copy reads a buffer the compute pass wrote while its neighbour
 	 reads the mesh's own stream. They cannot share a `DrawRecord`, so they cannot
 	 share a bucket.
 
-	 That is the honest cost of the flag and it is worth stating plainly: routing
-	 one character of a crowd through compute splits it off into a draw call of its
-	 own. It is not a switch to flip on a hundred copies of a zombie.
+	 That is the honest cost of the flag: routing one character of a crowd through
+	 compute splits it off into a draw call of its own. It is not a switch to flip
+	 on a hundred copies of a zombie.
 	*>
 	bool preskinned;
 }
 
 <*
- What an agent reads its own cost off (`plan.md`'s second thesis).
+ What an agent reads its own cost off.
 
- `draw_calls` and `unique_meshes` were the same number from M2 to M4 and the
- header said they would stop being so "the moment one mesh can be drawn under two
- materials". M5 is that moment. `draw_calls` is the bucket count; `unique_meshes`
- counts distinct (asset, mesh) pairs across those buckets, so one mesh drawn under
- two materials is now two draws and one mesh.
-
- Reporting them separately before they diverged is what made this a one-line
- change rather than a wire-format change — the day they diverged was not the day
- the field was added.
+ `draw_calls` and `unique_meshes` are the same number until one mesh can be drawn
+ under two materials. `draw_calls` is the bucket count; `unique_meshes` counts
+ distinct (asset, mesh) pairs across those buckets, so one mesh drawn under two
+ materials is two draws and one mesh.
 *>
 struct SceneStats
 {
@@ -198,47 +184,43 @@ struct SceneStats
 	uint nodes;
 	uint triangles;
 	uint vertices;
-	// How many assets are resident, which is the number a level transition has
-	// to bring back down — see `Assets.resident`. Not the size of the asset
-	// table: the free list is the difference, and a working unload that grew the
-	// table would otherwise read as a leak.
+	// How many assets are resident, which is the number a level transition has to
+	// bring back down — see `Assets.resident`. Not the size of the asset table: the
+	// free list is the difference, and a working unload that grew the table would
+	// otherwise read as a leak.
 	uint assets;
 	uint textures;
 	usz texture_bytes;
-	// From the last `update`, not from this call — `stats()` rebuilds with
-	// culling off, so there is nothing to count during it. Zero until the first
-	// `update`, and zero again after any `update` made with `Scene.cull` false:
-	// nothing was dropped, and reporting the frame before it would be a stale
-	// number wearing a live one's name.
+	// From the last `update`, not from this call — `stats()` rebuilds with culling
+	// off, so there is nothing to count during it. Zero until the first `update`,
+	// and zero again after any `update` made with `Scene.cull` false: nothing was
+	// dropped, and reporting the frame before it would be a stale number wearing a
+	// live one's name.
 	//
-	// **It means the camera again, in a shadowed frame too.** From the day shadows
-	// landed until §18.2 this read 0 whenever the pass was on, because the frame
-	// built one uncalled list for both passes; it was honest and it said nothing,
-	// and it is what sent the investigation in plan.md §18 down the wrong path
-	// first.
+	// It means the camera in a shadowed frame too. A frame that built one unculled
+	// list for both passes reported 0 here whenever the pass was on — honest, and
+	// saying nothing.
 	uint culled_last_frame;
-	// What the light's box dropped, over the same frame. Copies rejected by
-	// **both** frustums, so it is what neither pass drew rather than the
-	// difference between the two lists — `Scene.shadow_culled` has why. Zero in a
-	// frame with no shadow pass, where there is no second box to be outside of.
+	// What the light's box dropped, over the same frame. Copies rejected by *both*
+	// frustums, so it is what neither pass drew rather than the difference between
+	// the two lists — `Scene.shadow_culled` has why. Zero in a frame with no shadow
+	// pass, where there is no second box to be outside of.
 	uint shadow_culled_last_frame;
 
 	<*
 	 What skinning costs, reported apart from everything else.
 
-	 `plan.md` §3/S3 asked for this and asked for it in the opposite direction: it
-	 assumed a live palette and warned that reporting a skinned bucket like an
-	 instanced one would hide a per-frame upload. This design has no per-frame
-	 upload for a baked character — the whole point of it — so the lie would now be
-	 the other way round, and hiding it would tell an agent that a rigged file
-	 costs what an unrigged one does.
+	 A design with a live palette would want this to warn about a per-frame upload.
+	 This design has no per-frame upload for a baked character — the whole point of
+	 it — so the lie would be the other way round, and hiding the cost would tell
+	 an agent that a rigged file costs what an unrigged one does.
 
 	 What it actually costs is here: how many draws are skinned, how many copies
-	 those cover, and the pose memory that was uploaded once and is held for as long
-	 as the assets are. `preskinned_instances` is called out separately because it
-	 is the expensive one — a compute-routed copy holds a posed mesh of its own,
-	 per frame in flight, and it is the only one of the three paths whose cost
-	 grows with the vertex count rather than with the joint count.
+	 those cover, and the pose memory that was uploaded once and is held for as
+	 long as the assets are. `preskinned_instances` is called out separately
+	 because it is the expensive one — a compute-routed copy holds a posed mesh of
+	 its own, per frame in flight, and it is the only one of the three paths whose
+	 cost grows with the vertex count rather than with the joint count.
 	*>
 	uint skinned_draws;
 	uint skinned_instances;
@@ -246,15 +228,14 @@ struct SceneStats
 	usz pose_bytes;
 
 	<*
-	 How many draw calls the last shadow pass made, and 0 in a frame that had
-	 none.
+	 How many draw calls the last shadow pass made, and 0 in a frame that had none.
 
-	 **The one number in here that is about the frame rather than about the
-	 scene**, and it has to be: whether a bucket casts is a property of its
-	 material and of the pass, not of the graph, so `Scene` cannot work it out and
-	 `MeshPass.stats` fills it in afterwards. It is also the only way a script can
-	 see that turning shadows on roughly doubled its draw calls — `draw_calls`
-	 counts the scene pass alone and always has.
+	 The one number in here that is about the frame rather than about the scene,
+	 and it has to be: whether a bucket casts is a property of its material and of
+	 the pass, not of the graph, so `Scene` cannot work it out and `MeshPass.stats`
+	 fills it in afterwards. It is also the only way a script can see that turning
+	 shadows on roughly doubled its draw calls — `draw_calls` counts the scene pass
+	 alone.
 	*>
 	uint shadow_draws;
 
@@ -263,13 +244,12 @@ struct SceneStats
 	 frame that did not rebuild it — which is most frames, and is the number worth
 	 watching.
 
-	 `shadow_draws` beside it is what the frame paid; this is what the rebuild
-	 cost on the frames there was one. A script that sees this stay at zero while
-	 a character walks about is seeing §19.3 work: the village was rasterised into
-	 the map once, and the frames since have drawn the character and copied the
-	 rest. A script that sees it equal to the caster count every frame has
-	 something invalidating the cache — a camera that has not settled, most
-	 likely, or a node marked static that something is still moving.
+	 `shadow_draws` beside it is what the frame paid; this is what the rebuild cost
+	 on the frames there was one. A script that sees this stay at zero while a
+	 character walks about is seeing the cache work. A script that sees it equal to
+	 the caster count every frame has something invalidating it — a camera that has
+	 not settled, most likely, or a node marked static that something is still
+	 moving.
 
 	 Zero in every frame with no static caster at all, which is a frame with no
 	 cached map to rebuild rather than a cheap one.
@@ -286,39 +266,36 @@ struct SceneStats
 // `order` leads the sort and is the material index for everything that is not
 // blended or a line, so consecutive buckets share a pipeline wherever they can —
 // which is what keeps the per-bucket `cmdBindPipeline` from thrashing once a
-// scene uses more than one material. The two bands above it buy correctness with
-// exactly as much of that locality as they have to; see `draw_order`.
+// scene uses more than one material. See `draw_order`.
 struct Draw @local
 {
 	uint material;
 	ulong key;
 	uint slot;
 	// Where this draw sits in the frame — `draw_order`'s answer, not the material
-	// index. **Computed at push time because the comparator cannot compute it**:
+	// index. Computed at push time because the comparator cannot compute it:
 	// `quicksort` takes a captureless function pointer, so the sort has no way to
-	// reach a table saying which materials are transparent, and the only place
-	// that knowledge exists is the loop below that was handed it.
+	// reach a table saying which materials are transparent.
 	uint order;
 	// Signed distance from the near plane to the world-bounds centre, for the
 	// back-to-front sort. Zero for an opaque draw, which never pays for it: the
-	// blended pipelines write no depth, so ordering is what stands in for the
-	// depth buffer, and only the draws that lost the depth buffer need it.
+	// blended pipelines write no depth, so ordering is what stands in for the depth
+	// buffer, and only the draws that lost the depth buffer need it.
 	float depth;
-	// Whether the camera can see this copy, as opposed to whether the light can.
-	// A draw is in the list if *either* is true; this says which range of its
-	// bucket it belongs in. Always true in a frame with no shadow pass, because
-	// then nothing but the camera keeps a draw at all.
+	// Whether the camera can see this copy, as opposed to whether the light can. A
+	// draw is in the list if *either* is true; this says which range of its bucket
+	// it belongs in. Always true in a frame with no shadow pass.
 	bool visible;
-	// Whether the compute pass poses this copy. **A field beside the key rather
-	// than a bit inside it**, for `material`'s reason one line up: `bucket_key`
-	// spends all 64 bits on two full-range uints, and stealing one would be a
-	// silent wrap rather than an error. It is a tiebreaker in the sort so that
-	// copies routed the same way stay adjacent and coalesce.
+	// Whether the compute pass poses this copy. A field beside the key rather than
+	// a bit inside it, for `material`'s reason: `bucket_key` spends all 64 bits on
+	// two full-range uints, and stealing one would be a silent wrap. It is a
+	// tiebreaker in the sort so that copies routed the same way stay adjacent and
+	// coalesce.
 	bool preskinned;
 	// Whether this copy belongs to the half of the shadow map that is drawn once
-	// and kept — `Node.static_caster`. Beside `visible` rather than in the key
-	// for the same reason `visible` is: it decides where a copy sits inside its
-	// bucket, not which bucket it lands in. `Bucket.static_first` has the layout.
+	// and kept — `Node.static_caster`. Beside `visible` rather than in the key for
+	// the same reason `visible` is: it decides where a copy sits inside its bucket,
+	// not which bucket it lands in.
 	bool is_static;
 }
 
@@ -326,11 +303,10 @@ struct Draw @local
  Where a copy sits inside its bucket: the last key of the sort, and the only one
  that is not about which bucket it lands in.
 
- Four cells, ordered so that the camera-visible copies are a prefix and the
- static casters are a run — see `Bucket.static_first` for the diagram and for why
- both have to be true at once. Everything is cell 0 in a frame with no shadow
- pass and nothing marked static, which is the arrangement that existed before
- either feature and is the one this degrades to.
+ Four cells, ordered so the camera-visible copies are a prefix and the static
+ casters are a run — see `Bucket.static_first` for the diagram and for why both
+ have to be true at once. Everything is cell 0 in a frame with no shadow pass and
+ nothing marked static.
 *>
 fn uint draw_cell(bool visible, bool is_static) @local @inline
 {
@@ -349,11 +325,11 @@ struct Scene
 	Assets* assets;
 
 	// One per instantiated subtree of an asset that has animation clips —
-	// `scene/animation.c3`. **The first per-instance state that is not a
-	// transform**, which is why it is a list beside the nodes rather than a
-	// field on one: a `Node` is an asset reference plus a matrix, and paying a
-	// player's worth of bytes on every node of every scene to animate a dozen
-	// of them is the wrong trade.
+	// `scene/animation.c3`. The first per-instance state that is not a transform,
+	// which is why it is a list beside the nodes rather than a field on one: a
+	// `Node` is an asset reference plus a matrix, and paying a player's worth of
+	// bytes on every node of every scene to animate a dozen of them is the wrong
+	// trade.
 	List{AnimationPlayer} players;
 
 	// Rebuilt by `update`; read by `MeshPass.record`.
@@ -362,27 +338,25 @@ struct Scene
 	List{Bucket} buckets;
 
 	bool cull;
-	// The working counter, zeroed at the top of every `build_draw_list`. It is
-	// zero for the whole of a `stats()` call, because that call rebuilds with no
-	// frustum on purpose — which is why the number `SceneStats` reports is the
-	// one below and not this one.
+	// The working counter, zeroed at the top of every `build_draw_list`. It is zero
+	// for the whole of a `stats()` call, because that call rebuilds with no frustum
+	// on purpose — which is why the number `SceneStats` reports is the one below.
 	uint culled;
 	// What the last `update` culled. Two fields rather than one because the two
 	// callers of `build_draw_list` ask different questions: a frame wants to know
-	// what the camera dropped, and `stats()` deliberately rebuilds with culling
-	// off so its instance count cannot depend on where the camera points. Sharing
-	// one field means that rebuild erases the frame's answer on its way past, and
-	// the reported number is then zero forever — which is what it was until this
-	// was split.
+	// what the camera dropped, and `stats()` deliberately rebuilds with culling off
+	// so its instance count cannot depend on where the camera points. Sharing one
+	// field means that rebuild erases the frame's answer on its way past, and the
+	// reported number is then zero forever.
 	uint culled_last_frame;
-	// The same pair again for the *light's* box. Counted only in a frame that has
-	// a shadow pass, because in every other frame there is no second frustum and
-	// zero is the honest answer rather than a number about a box nobody built.
+	// The same pair again for the *light's* box. Counted only in a frame that has a
+	// shadow pass, because in every other frame there is no second frustum and zero
+	// is the honest answer.
 	//
-	// A drawable is in the shadow list unless **both** frustums rejected it, so
-	// this counts the copies that are in neither pass — not the difference
-	// between the two lists. `culled` above is still "what the camera dropped",
-	// and the two overlap by exactly the copies the light kept for its own pass.
+	// A drawable is in the shadow list unless *both* frustums rejected it, so this
+	// counts the copies that are in neither pass — not the difference between the
+	// two lists. `culled` above is still "what the camera dropped", and the two
+	// overlap by exactly the copies the light kept for its own pass.
 	uint shadow_culled;
 	uint shadow_culled_last_frame;
 	bool started;
@@ -390,48 +364,46 @@ struct Scene
 	<*
 	 Whether every node's `world` is the one its local transform implies.
 
-	 **The flag that makes the second and third `update_world_matrices` of a frame
-	 free**, which `plan.md` §19.5 measured as three to five walks per frame: one
-	 for `Scene.bounds`, one for `follow_camera`, one inside `Scene.update`, and
-	 more if a script asks for a bounding box. `dirty` already saved the matrix
-	 arithmetic on the repeats; it never saved the traversal, the per-node
-	 validation or the 64-byte `parent_world` copy per recursion, which is what is
-	 actually left when a scene is standing still.
+	 The flag that makes the second and third `update_world_matrices` of a frame
+	 free — three to five walks per frame: one for `Scene.bounds`, one for
+	 `follow_camera`, one inside `Scene.update`, and more if a script asks for a
+	 bounding box. `dirty` already saved the matrix arithmetic on the repeats; it
+	 never saved the traversal, the per-node validation or the 64-byte
+	 `parent_world` copy per recursion, which is what is left when a scene is
+	 standing still.
 
-	 **Set in exactly one place and cleared in exactly one place.** `update_world_
-	 matrices` sets it; `invalidate` clears it, and every mutation that sets a
-	 `Node.dirty` anywhere goes through `invalidate` — the setters here, and the
-	 three writers outside this file that reach for `Node.dirty` directly
+	 Set in exactly one place and cleared in exactly one place.
+	 `update_world_matrices` sets it; `invalidate` clears it, and every mutation
+	 that sets a `Node.dirty` anywhere goes through `invalidate` — the setters here,
+	 and the three writers outside this file that reach for `Node.dirty` directly
 	 (`AnimationPlayer.apply`, `Physics.write_back`, `setTransform` at the JS
-	 boundary). That is the whole contract, and the cost of getting it wrong is a
-	 node drawn at its previous transform, so `Scene.touch` is now what makes a
-	 hand-written `node.position = ...` land rather than a nicety.
+	 boundary). The cost of getting it wrong is a node drawn at its previous
+	 transform, so `Scene.touch` is what makes a hand-written `node.position = ...`
+	 land rather than a nicety.
 	*>
 	bool matrices_current;
 
 	<*
 	 `bounds`, as it last answered, and whether that answer is still good.
 
-	 **`Scene.bounds` is exact, not conservative** — it transforms every vertex of
-	 every drawable node, which `plan.md` §19.5 measured at 100k–370k vertex
-	 transforms on the reference village. It was called once per frame by the
-	 shadow fit and a second time per frame by any attached follow camera, for a
-	 value that changes only when the scene does.
+	 `Scene.bounds` is exact, not conservative — it transforms every vertex of
+	 every drawable node, which measures at 100k–370k vertex transforms on the
+	 reference village. It is called once per frame by the shadow fit and a second
+	 time per frame by any attached follow camera, for a value that changes only
+	 when the scene does.
 
 	 The invalidation is the whole of the risk, and it is stated plainly because a
 	 stale box is not a crash: it is a shadow fit around the wrong region and a
-	 camera framed on the wrong thing, both of which look like a tuning problem.
-	 So the flag is cleared by `invalidate` beside `matrices_current` and by
-	 nothing else — the two are invalidated by exactly the same events, because a
-	 box over world matrices cannot go stale without a world matrix going stale
-	 first.
+	 camera framed on the wrong thing, both of which look like a tuning problem. So
+	 the flag is cleared by `invalidate` beside `matrices_current` and by nothing
+	 else — the two are invalidated by exactly the same events, because a box over
+	 world matrices cannot go stale without a world matrix going stale first.
 
 	 The one thing outside this file that could move it is the asset table: a mesh
 	 that finished uploading after the box was taken would have hull positions the
-	 box was not fitted around. It cannot happen — `create_slot` retains the mesh
-	 it names and retaining is what uploads, so every node in a scene is past that
-	 point before the node exists. `world_mesh_bounds`' own header argues the same
-	 case from the other end.
+	 box was not fitted around. It cannot happen — `create_slot` retains the mesh it
+	 names and retaining is what uploads, so every node in a scene is past that
+	 point before the node exists.
 	*>
 	collision::Aabb3 bounds_box;
 	bool bounds_current;
@@ -440,23 +412,23 @@ struct Scene
 	 Bumped whenever something a *static* caster contributes to the shadow map
 	 could have changed.
 
-	 `render/shadow.c3` keeps a depth image of everything marked `Node.static_caster`
-	 and re-rasterises it only when this number moves — see `ShadowMap.static_fit`
-	 for the rest of the key — the light's projection and the map's size. It is deliberately separate from `matrices_current`:
-	 a walking character moves every frame and must not cost the village its cached
-	 map, which is the entire point of §19.3.
+	 `render/shadow.c3` keeps a depth image of everything marked
+	 `Node.static_caster` and re-rasterises it only when this number moves — see
+	 `ShadowMap.static_fit` for the rest of the key. It is deliberately separate
+	 from `matrices_current`: a walking character moves every frame and must not
+	 cost the village its cached map.
 
-	 **Two writers, and the interesting one is the walk.** `update_branch` bumps
-	 this whenever a static node's world matrix is recomputed, which is the only
-	 place that knows a node *actually* moved — a static wall under a dynamic group
-	 moves when the group does, and the setter that moved the group was never shown
-	 the wall. `invalidate` bumps it for the changes that are not a movement and so
-	 have no walk to be seen by: a node added or removed, a subtree re-parented, a
-	 material swapped, a node joining or leaving the static set.
+	 Two writers, and the interesting one is the walk. `update_branch` bumps this
+	 whenever a static node's world matrix is recomputed, which is the only place
+	 that knows a node *actually* moved — a static wall under a dynamic group moves
+	 when the group does, and the setter that moved the group was never shown the
+	 wall. `invalidate` bumps it for the changes that are not a movement: a node
+	 added or removed, a subtree re-parented, a material swapped, a node joining or
+	 leaving the static set.
 
-	 Bumped conservatively in both. Over-bumping costs a re-render of the static map
-	 and is invisible; under-bumping is a shadow of where a building used to be, and
-	 that failure looks like a lighting bug rather than like a stale cache.
+	 Bumped conservatively in both. Over-bumping costs a re-render of the static
+	 map and is invisible; under-bumping is a shadow of where a building used to
+	 be, which looks like a lighting bug rather than a stale cache.
 	*>
 	uint static_revision;
 
@@ -464,21 +436,19 @@ struct Scene
 	 The broad phase over drawable nodes — `scene/query.c3`.
 
 	 Beside the two caches above and invalidated by the same call, for the same
-	 reason: it is derived from the world matrices, and it cannot go stale
-	 without one of them going stale first. It differs from them in *when* it is
-	 rebuilt — `Scene.bounds` is refreshed by whoever asks and the shadow fit
-	 reads it every frame, where this one is rebuilt only by a query. A frame
-	 that asks nothing spatial pays nothing for it, which is what makes it safe
-	 to have at all.
+	 reason: it is derived from the world matrices and cannot go stale without one
+	 of them going stale first. It differs in *when* it is rebuilt — `Scene.bounds`
+	 is refreshed by whoever asks and the shadow fit reads it every frame, where
+	 this one is rebuilt only by a query. A frame that asks nothing spatial pays
+	 nothing for it.
 	*>
 	QueryIndex query;
 
 	// How many nodes are marked static right now. Maintained by the two writers of
 	// `Node.static_caster` and by `kill`, and read by `MeshPass.prepare` to decide
-	// whether the light's fit should hold still — see `ShadowMap.fit`'s `stable`.
-	// A count rather than a bool because it has to go back down: a scene that
-	// marked a wall static and then removed the wall is a scene with nothing to
-	// cache, and should be fitted as tightly as one that never marked anything.
+	// whether the light's fit should hold still — see `ShadowMap.fit`'s `stable`. A
+	// count rather than a bool because it has to go back down: a scene that marked
+	// a wall static and then removed the wall has nothing to cache.
 	uint static_nodes;
 }
 
@@ -490,10 +460,9 @@ struct Scene
 *>
 fn Scene* Scene.init(&self)
 {
-	// Heap-backed explicitly. A List left zero-initialised has a null allocator
-	// and `list_ensure_capacity` resolves null to `tmem`, so the first push
-	// backs it with temp-arena memory that any enclosing `@pool()` frees on the
-	// way out — see `Asset.init_lists`, which carries the same note.
+	// Heap-backed explicitly. A List left zero-initialised has a null allocator and
+	// `list_ensure_capacity` resolves null to `tmem`, so the first push backs it
+	// with temp-arena memory that any enclosing `@pool()` frees on the way out.
 	self.nodes.init(mem, 64);
 	self.free_slots.init(mem, 16);
 	self.players.init(mem, 4);
@@ -510,18 +479,17 @@ fn Scene* Scene.init(&self)
 <*
  Everything derived from the node pool is out of date as of now.
 
- **One function so that there is one list.** Three things are cached off the
+ One function so that there is one list. Three things are cached off the
  hierarchy — the world matrices, the bounding box, and the shadow map's static
  half — and they are invalidated by the same events, so a mutation that
  remembered two of the three would be a bug that only shows up in the one it
  forgot. Adding a fourth cache means adding a line here and nowhere else.
 
- **One of the four is not all-or-nothing since §17.** The query index can be
- told *what* moved and re-file that subtree instead of re-filing the scene, so
- `moved` is how a caller says "this change is one subtree and nothing else".
- Everything that is not — an add, a removal, a re-parenting, a node joining or
- leaving the query set — leaves it unset and pays for a rebuild, which is the
- conservative answer and the one that was always being paid.
+ One of the four is not all-or-nothing. The query index can be told *what* moved
+ and re-file that subtree instead of re-filing the scene, so `moved` is how a
+ caller says "this change is one subtree and nothing else". Everything that is
+ not — an add, a removal, a re-parenting, a node joining or leaving the query set
+ — leaves it unset and pays for a rebuild.
 
  @param node : `The node that changed, or null for a change that is not about one node — an add, a removal, a re-parenting. Only read to decide whether the static half of the shadow map has to be rebuilt; a null is treated as "it might have been static", which is the conservative answer.`
  @param moved : `The id of that node when the change is a movement of its transform and nothing else. NO_NODE otherwise, which drops the query index rather than re-filing.`
@@ -542,46 +510,41 @@ fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 }
 
 <*
- Mark a node's local transform as changed from outside the setters.
+ Marks a node's local transform as changed from outside the setters.
 
  Three callers write `Node.position` and friends directly and then set
  `Node.dirty` — `AnimationPlayer.apply`, `Physics.write_back`, and `setTransform`
- at the JS boundary — because each of them already has the node resolved and the
- setters would cost a second lookup per channel, per frame, per body. They call
- this instead of writing the flag, so that the caches in `invalidate` are not
- something a fourth such caller has to know about.
+ at the JS boundary — because each already has the node resolved and the setters
+ would cost a second lookup per channel, per frame, per body. They call this
+ instead of writing the flag, so the caches in `invalidate` are not something a
+ fourth such caller has to know about.
 
- `Scene.touch` is the same thing for a script that wrote the fields itself; it
- is now literally this function, because the handle is what the query index
- needs and every one of those three callers had one already.
+ `Scene.touch` is the same thing for a script that wrote the fields itself.
 *>
 fn void Scene.mark_moved(&self, NodeId id)
 {
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.dirty = true;
-	// The id as well as the pointer, and that is what the handle is for: it is
-	// what lets the query index re-file this subtree instead of the scene. See
-	// `Scene.invalidate`.
+	// The id as well as the pointer, and that is what the handle is for: it is what
+	// lets the query index re-file this subtree instead of the scene.
 	self.invalidate(node, id);
 }
 
 <*
- Point this scene at the asset table its nodes reference.
+ Points this scene at the asset table its nodes reference.
 
- **This is where `Asset.refs` comes from.** Every place a node can start naming
- an asset is `create_slot` and every place it can stop is `kill`, so counting
- there means there is one implementation of the count rather than one per caller
- — which matters now that being wrong by one means either a leak or a freed
- buffer, where before G2 it only meant a misleading number.
+ This is where `Asset.refs` comes from. Every place a node can start naming an
+ asset is `create_slot` and every place it can stop is `kill`, so counting there
+ means there is one implementation of the count rather than one per caller —
+ which matters because being wrong by one means either a leak or a freed buffer.
 
  Detached by default and a no-op then. A scene with no asset table is the
  scene-math test configuration: there is no device, nothing is uploaded, and
  there is nothing to count.
 
  The pointer is into the `MeshPass` that owns both, so a pass must not be copied
- after `init` — which nothing does, and which was already true of `Assets`'
- own interior pointers.
+ after `init`.
 *>
 fn void Scene.attach_assets(&self, Assets* assets)
 {
@@ -589,12 +552,11 @@ fn void Scene.attach_assets(&self, Assets* assets)
 }
 
 <*
- Forget the player rooted at `id`, if there is one.
+ Forgets the player rooted at `id`, if there is one.
 
  Called from `kill` for every node of a removed subtree, so it has to be cheap
  for the overwhelmingly common case of "this node roots nothing". The shift
- `remove_at` does is over a list with one entry per animated prop in the scene,
- which is not the list worth writing a swap-with-last for.
+ `remove_at` does is over a list with one entry per animated prop in the scene.
 *>
 fn void Scene.drop_player(&self, NodeId root)
 {
@@ -612,9 +574,9 @@ fn void Scene.drop_player(&self, NodeId root)
 
  Looked up by the subtree's root, which is the handle `instantiate` returned and
  the thing a script has in hand when it calls `play`. A linear scan because the
- list holds one entry per *animated prop in the scene* — a dozen, not a
- thousand — and a map keyed by `NodeId` would cost more to maintain than the
- scan costs to run.
+ list holds one entry per *animated prop in the scene* — a dozen, not a thousand
+ — and a map keyed by `NodeId` would cost more to maintain than the scan costs to
+ run.
 *>
 fn AnimationPlayer* Scene.player(&self, NodeId root)
 {
@@ -648,7 +610,7 @@ fn void Scene.free(&self)
 // ============================================================================
 
 <*
- Resolve a handle.
+ Resolves a handle.
 
  @return `The node, or null if the id is stale: the slot was freed and possibly reused. Valid only until the next add, which may reallocate the pool.`
 *>
@@ -661,7 +623,7 @@ fn Node* Scene.node(&self, NodeId id)
 }
 
 <*
- Add a group: a node that is traversed and transformed but never drawn.
+ Adds a group: a node that is traversed and transformed but never drawn.
 
  @param parent : `NO_NODE for the scene root.`
 *>
@@ -671,8 +633,8 @@ fn NodeId Scene.add_group(&self, NodeId parent = NO_NODE, String name = "")
 }
 
 <*
- Add a mesh: an asset reference plus a transform, which is the whole of what an
- instance is (`plan.md` §"What it is").
+ Adds a mesh: an asset reference plus a transform, which is the whole of what an
+ instance is.
 
  @param asset : `A handle from Assets.load, primitive or convex.`
  @param mesh : `Index into that asset's meshes.`
@@ -683,25 +645,23 @@ fn NodeId Scene.add_mesh(&self, AssetId asset, uint mesh, NodeId parent = NO_NOD
 }
 
 <*
- Place an asset's node hierarchy under `parent`, transforms and all.
+ Places an asset's node hierarchy under `parent`, transforms and all.
 
- This is Three.js's `gltf.scene`, and until G3 there was no equivalent: the
- loader flattened the file and `MeshPass.place` dropped every mesh at the origin.
- A file that bakes its transforms into the vertices rendered correctly and one
- that positions its pieces by node did not — a distinction nothing in the API
- could express, so nothing in the suite could catch.
+ This is Three.js's `gltf.scene`. Without it the loader flattens the file and
+ drops every mesh at the origin, so a file that bakes its transforms into the
+ vertices renders correctly and one that positions its pieces by node does not —
+ a distinction nothing in the API could express, so nothing in the suite could
+ catch.
 
- **What a glTF node becomes is `Assets.flatten`'s decision, not this
- function's.** JavaScript's `asset.instantiate()` reads the same walk and builds
- `Object3D`s from it, and the two producing different trees for one file would be
- a bug nobody would think to look for. This is one pass over that answer.
+ What a glTF node becomes is `Assets.flatten`'s decision, not this function's.
+ JavaScript's `asset.instantiate()` reads the same walk and builds `Object3D`s
+ from it, and the two producing different trees for one file would be a bug
+ nobody would think to look for.
 
- ## The references take care of themselves
-
- Every drawing node goes through `create_slot`, which retains the asset (G2). So
- a prop instantiated twice is two subtrees over one upload, and dropping one
- subtree releases exactly its own references — **the thesis at a level the API
- could not previously state**. Nothing here counts anything.
+ The references take care of themselves: every drawing node goes through
+ `create_slot`, which retains the asset. So a prop instantiated twice is two
+ subtrees over one upload, and dropping one subtree releases exactly its own
+ references. Nothing here counts anything.
 
  @return `The group everything was placed under, or NO_NODE if the handle names no asset.`
 *>
@@ -718,8 +678,8 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 	defer placed.free();
 	self.assets.flatten(asset, &placed, skeleton);
 
-	// Parents precede their children in the walk, so `created` always has the
-	// entry a child needs by the time the child is reached. One pass, no fixups.
+	// Parents precede their children in the walk, so `created` always has the entry
+	// a child needs by the time the child is reached. One pass, no fixups.
 	List{NodeId} created;
 	created.init(mem, placed.len() + 1);
 	defer created.free();
@@ -737,14 +697,14 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 		node.scale = entry.scale;
 		// White unless the file instanced this copy and gave it a `_COLOR_0`.
 		// Written unconditionally rather than only when it differs: `add_mesh`
-		// already left it white, so the branch would save an assignment and cost
-		// a comparison.
+		// already left it white, so the branch would save an assignment and cost a
+		// comparison.
 		node.color = entry.color;
-		// The rest pose, which is a baked frame like any other — so this node
-		// draws correctly before anything is played and needs no branch to.
+		// The rest pose, which is a baked frame like any other — so this node draws
+		// correctly before anything is played and needs no branch to.
 		self.set_skin(id, entry.skin);
-		// Routed per character, and it splits this copy off into a draw call of
-		// its own — `Node.preskinned` has the argument.
+		// Routed per character, and it splits this copy off into a draw call of its
+		// own — `Node.preskinned` has the argument.
 		node.preskinned = compute_skin && entry.skin >= 0;
 		node.dirty = true;
 
@@ -759,11 +719,11 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 }
 
 <*
- Tell a node which skin poses it, and point it at that skin's rest pose.
+ Tells a node which skin poses it, and points it at that skin's rest pose.
 
- **The one place `Node.skin` and `Node.pose` are set together**, because they are
- one fact: a node with a skin and no offset reads matrix zero of whatever buffer
- it finds, and a node with an offset and no skin is culled against the wrong box.
+ The one place `Node.skin` and `Node.pose` are set together, because they are one
+ fact: a node with a skin and no offset reads matrix zero of whatever buffer it
+ finds, and a node with an offset and no skin is culled against the wrong box.
  Two callers set them — `instantiate` here and `bindSkin` from JavaScript — and
  both go through this rather than writing the fields.
 
@@ -807,7 +767,7 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 
  Recursive over a freshly instantiated character, which is two nodes deep in the
  pruned case and a rig deep in the other — the same depth argument
- `Assets.flatten_node` makes, and the same reason a cycle cannot be reached.
+ `Assets.flatten_node` makes.
 *>
 fn void Scene.collect_skinned(&self, NodeId id, List{SkinnedTarget}* out)
 {
@@ -826,18 +786,18 @@ fn void Scene.collect_skinned(&self, NodeId id, List{SkinnedTarget}* out)
 }
 
 <*
- Give a freshly instantiated subtree its animation player, if the asset has
+ Gives a freshly instantiated subtree its animation player, if the asset has
  anything to play.
 
  The map from glTF node index to `NodeId` can only be built here: `flatten`
  carries the glTF index on each entry and this walk is the only thing that knows
- what each entry became. Nothing else in the codebase has both halves, which is
- why this is not a method on `Assets`.
+ what each entry became. Nothing else has both halves, which is why this is not a
+ method on `Assets`.
 
- **A player is created even though nothing is playing.** The alternative is
- building the map on the first `play`, which would mean walking the tree a second
- time — and `play` is called from an animation callback, where a hidden tree walk
- is the kind of cost that shows up as a stutter the first time a character moves.
+ A player is created even though nothing is playing. The alternative is building
+ the map on the first `play`, which would mean walking the tree a second time —
+ and `play` is called from an animation callback, where a hidden tree walk shows
+ up as a stutter the first time a character moves.
 
  Nothing happens for an asset with no clips, so a scene of ten thousand crates
  holds no players at all.
@@ -862,22 +822,18 @@ fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] place
 }
 
 <*
- Give a subtree an animation player from a map somebody else built.
+ Gives a subtree an animation player from a map somebody else built.
 
- Two callers and they arrive from opposite directions. `start_player` above has
- just walked `Assets.flatten` and knows which entry became which node.
+ Two callers, arriving from opposite directions. `start_player` above has just
+ walked `Assets.flatten` and knows which entry became which node.
  `asset.instantiate()` in JavaScript built the same tree as `Object3D`s and let
  the ordinary `add` path materialize them — so the host never saw the walk, and
  JavaScript is the only thing that knows the correspondence. Both end up here,
- which is why this takes the map as two plain arrays rather than anything
- either side would have to be taught about.
+ which is why this takes the map as two plain arrays.
 
  Replaces an existing player on the same root rather than adding a second: two
  players over one subtree would both write to the same nodes every frame, and
  which one won would depend on list order.
-
- Nothing happens for an asset with no clips, so a scene of ten thousand crates
- holds no players at all.
 
  @param gltf_nodes : `The glTF node index each node came from, one per entry and the same length as the node array.`
 *>
@@ -885,7 +841,7 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 {
 	if (self.assets == null) return;
 	Asset* loaded = self.assets.slot(asset);
-	// **Skins count as something to play.** A rigged character with no clips still
+	// Skins count as something to play. A rigged character with no clips still
 	// needs a player, because a player is what holds the map from the file's joint
 	// nodes to this instance's — which is what the live palette is computed
 	// through. Without this a `skeleton: true` character with no animation would
@@ -913,12 +869,12 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 
 	// The skinned meshes, found once here rather than searched for per frame.
 	//
-	// **A walk of the subtree rather than of `nodes`**, because `nodes` is the
-	// channel map and only covers entries that came from a glTF node. A mesh with
-	// several primitives becomes one child per primitive with no glTF node of its
-	// own — `PlacedNode.gltf_node` is -1 for exactly those — and every one of them
-	// is skinned. Scanning the map would pose the first primitive of a character
-	// and leave the rest in their bind pose.
+	// A walk of the subtree rather than of `nodes`, because `nodes` is the channel
+	// map and only covers entries that came from a glTF node. A mesh with several
+	// primitives becomes one child per primitive with no glTF node of its own —
+	// `PlacedNode.gltf_node` is -1 for exactly those — and every one of them is
+	// skinned. Scanning the map would pose the first primitive of a character and
+	// leave the rest in their bind pose.
 	player.skinned.init(mem, 1);
 	self.collect_skinned(root, &player.skinned);
 
@@ -926,15 +882,15 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 }
 
 <*
- Start a clip on an instantiated subtree.
+ Starts a clip on an instantiated subtree.
 
  The clip's curves are read here rather than at load — `Assets.ensure_clip`, and
- `game.md` G3/S3's rule one level up: a file describes itself cheaply and pays
- when it is used. A character with eleven clips reads the one that plays.
+ the rule one level up: a file describes itself cheaply and pays when it is used.
+ A character with eleven clips reads the one that plays.
 
- The instance is **posed immediately**, before any frame is stepped, so a prop
- placed and played in the same breath looks like its first frame rather than like
- its rest pose for one frame.
+ The instance is posed immediately, before any frame is stepped, so a prop placed
+ and played in the same breath looks like its first frame rather than like its
+ rest pose for one frame.
 
  @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
  @param time : `Seconds into the clip to start at, measured from its own start. What a crowd needs: a hundred characters playing one walk cycle at a hundred phases is a hundred different values of this and one baked clip.`
@@ -968,15 +924,15 @@ fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float spee
 	if (loop) player.time = (float)clip_loop_time(&self.assets.slot(player.asset).clips[found], player.time);
 
 	player.apply(self, &self.assets.slot(player.asset).clips[found]);
-	// And the skin, for `apply`'s own reason one level down: a character placed
-	// and played in the same breath should be posed at the frame it asked for
-	// rather than sitting in its bind pose until something steps the clock.
+	// And the skin, for `apply`'s own reason one level down: a character placed and
+	// played in the same breath should be posed at the frame it asked for rather
+	// than sitting in its bind pose until something steps the clock.
 	player.key_pose(self, self.assets.slot(player.asset), &self.assets.slot(player.asset).clips[found]);
 	return true;
 }
 
 <*
- Stop a clip where it is.
+ Stops a clip where it is.
 
  Deliberately not a rewind: a character that stops mid-stride and snaps to its
  rest pose is the thing `stop()` is usually reached for to *prevent*. Playing
@@ -991,11 +947,11 @@ fn bool Scene.stop(&self, NodeId root)
 }
 
 <*
- Advance every playing clip by `dt` seconds.
+ Advances every playing clip by `dt` seconds.
 
- `game.md` G3/S6: this runs in the host frame **before** the animation callback,
- so a callback can read where a character got to, and so animation runs with no
- `setAnimationLoop` registered at all.
+ Runs in the host frame *before* the animation callback, so a callback can read
+ where a character got to, and so animation runs with no `setAnimationLoop`
+ registered at all.
 
  @return `Whether anything is still playing, which the sleep condition in main.c3 has to know or the window sleeps in the middle of a walk cycle.`
 *>
@@ -1079,9 +1035,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 
 	Node* node = &self.nodes[index];
 
-	// Everything but `children` and `generation`: the child list is reused
-	// rather than freed and rebuilt, and the generation must keep climbing or a
-	// stale id would come back valid the moment its slot was reused.
+	// Everything but `children` and `generation`: the child list is reused rather
+	// than freed and rebuilt, and the generation must keep climbing or a stale id
+	// would come back valid the moment its slot was reused.
 	uint generation = node.generation;
 	node.children.clear();
 
@@ -1094,21 +1050,18 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.normal = matrix::IDENTITY4{float};
 	node.asset = asset;
 	node.mesh = mesh;
-	// Reset like everything else here, and for a sharper reason: this slot may
-	// have belonged to a node with a `ShaderMaterial`, and a new node inheriting
-	// it would draw with a stranger's shader. `a_reused_slot_does_not_inherit_a_material`
-	// is the check.
+	// Reset like everything else here, and for a sharper reason: this slot may have
+	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
+	// would draw with a stranger's shader.
 	node.material = DEFAULT_MATERIAL;
 	// White and row zero: the identity for both channels, so a node that never
 	// touches them draws exactly as it did before they existed. Reset here for
-	// `material`'s reason — a recycled slot must not hand a new node the last
-	// one's colour.
+	// `material`'s reason.
 	node.color = { 1, 1, 1, 1 };
 	node.variant = 0;
-	// Unskinned until somebody says otherwise, and reset for `material`'s reason:
-	// a recycled slot that kept a skin would pose a new node's mesh by a
-	// stranger's skeleton, reading joint matrices out of an asset it does not
-	// name. `Scene.set_skin` is the one thing that sets these.
+	// Unskinned until somebody says otherwise, and reset for `material`'s reason: a
+	// recycled slot that kept a skin would pose a new node's mesh by a stranger's
+	// skeleton, reading joint matrices out of an asset it does not name.
 	node.skin = -1;
 	node.pose = 0;
 	node.preskinned = false;
@@ -1126,21 +1079,21 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.alive = true;
 
 	// One of the two halves of `Asset.refs` — see `attach_assets`. Counted after
-	// the slot is fully written, so a table that somehow reads back into the
-	// scene sees a consistent node.
+	// the slot is fully written, so a table that somehow reads back into the scene
+	// sees a consistent node.
 	if (self.assets != null && asset.is_set()) self.assets.retain(asset, mesh);
 
 	// A fresh slot is dynamic — `static_caster` was reset a few lines up — so the
-	// static map does not have to be rebuilt for it. It is invalidated here all
-	// the same, because a node that is *about* to be marked static arrives
-	// through this door and `set_static_caster` bumps the revision itself.
+	// static map does not have to be rebuilt for it. It is invalidated here all the
+	// same, because a node that is *about* to be marked static arrives through this
+	// door and `set_static_caster` bumps the revision itself.
 	self.invalidate(node);
 
 	return { .index = index, .generation = generation };
 }
 
 <*
- Remove a node and everything under it.
+ Removes a node and everything under it.
 
  Removing the root empties the scene but keeps the root itself, so a `Scene` is
  never left without somewhere to add to.
@@ -1183,8 +1136,8 @@ fn void Scene.kill(&self, NodeId id)
 	NodeId[] children = node.children.to_tarray();
 	foreach (child : children) self.kill(child);
 
-	// Re-resolved: `to_tarray` allocated, and the recursion above touched the
-	// pool through `self`.
+	// Re-resolved: `to_tarray` allocated, and the recursion above touched the pool
+	// through `self`.
 	node = self.node(id);
 	if (node == null) return;
 
@@ -1194,10 +1147,9 @@ fn void Scene.kill(&self, NodeId id)
 	// dropped from.
 	if (self.assets != null && node.asset.is_set()) self.assets.release(node.asset, node.mesh);
 
-	// An instantiated subtree's player goes with the subtree's root. Guarded on
-	// the list being non-empty rather than searched unconditionally, because
-	// `kill` runs once per node of every removal and almost no scene has
-	// players at all.
+	// An instantiated subtree's player goes with the subtree's root. Guarded on the
+	// list being non-empty rather than searched unconditionally, because `kill`
+	// runs once per node of every removal and almost no scene has players at all.
 	if (self.players.len() > 0) self.drop_player(id);
 
 	if (node.name.len > 0) node.name.free(mem);
@@ -1215,7 +1167,7 @@ fn void Scene.kill(&self, NodeId id)
 }
 
 <*
- Re-parent, keeping the node's *local* transform.
+ Re-parents, keeping the node's *local* transform.
 
  Three.js's `add` does the same and it is worth being explicit about: the object
  does not stay where it was on screen, it stays where it was relative to its new
@@ -1277,8 +1229,8 @@ fn void Scene.set_position(&self, NodeId id, Vec3 position)
 }
 
 <*
- Euler angles in, quaternion stored. `node.c3`'s header has the why; the order
- is XYZ, Three.js's default.
+ Euler angles in, quaternion stored. `node.c3`'s header has the why; the order is
+ XYZ, Three.js's default.
 *>
 fn void Scene.set_rotation(&self, NodeId id, Vec3 rotation)
 {
@@ -1292,10 +1244,10 @@ fn void Scene.set_rotation(&self, NodeId id, Vec3 rotation)
  A rotation that did not come from Euler angles: a glTF node's TRS, or a sampled
  animation channel.
 
- Normalized on the way in rather than trusted. A file may store a quaternion
- that has drifted, and `to_matrix` normalizes anyway — doing it here means the
- node's own value is the one everything else reads back, instead of a
- nearly-unit quaternion that produces a correct matrix and a wrong slerp.
+ Normalized on the way in rather than trusted. A file may store a quaternion that
+ has drifted, and `to_matrix` normalizes anyway — doing it here means the node's
+ own value is the one everything else reads back, instead of a nearly-unit
+ quaternion that produces a correct matrix and a wrong slerp.
 *>
 fn void Scene.set_quaternion(&self, NodeId id, Quaternionf rotation)
 {
@@ -1314,18 +1266,16 @@ fn void Scene.set_scale(&self, NodeId id, Vec3 scale)
 }
 
 <*
- Hide or show this node, and everything under it.
+ Hides or shows this node, and everything under it.
 
- **This does not dirty the node and does not touch the query index** —
- `plan.md` §17, and it is a fix rather than an optimisation. `query_node` tests
- `world_visible` when it *answers*, and its doc block says in as many words
- that this is so toggling visibility never costs a rebuild; `set_visible` then
- went through `mark_moved` and threw the index away on every call. Design right,
- code wrong. Measured on eleven characters hiding themselves around each sweep:
+ This does not dirty the node and does not touch the query index. `query_node`
+ tests `world_visible` when it *answers*, which is what makes toggling visibility
+ free — routing this through `mark_moved` instead throws the index away on every
+ call, measured on eleven characters hiding themselves around each sweep at
  32.7 ms a fixed step against 5.9 ms.
 
- The reason it *looked* necessary is that `world_visible` is resolved in the
- world-matrix walk, so the only way to propagate a change used to be to make the
+ The reason that looks necessary is that `world_visible` is resolved in the
+ world-matrix walk, so the only obvious way to propagate a change is to make the
  walk run. `propagate_visible` does that one job directly instead. Nothing else
  about the node changed: the transform is where it was, so the matrices, the
  bounds and every entry's box are all still correct.
@@ -1340,22 +1290,22 @@ fn void Scene.set_visible(&self, NodeId id, bool visible)
 	if (node == null || node.visible == visible) return;
 	node.visible = visible;
 
-	// The parent's *resolved* visibility, so hiding a node under a hidden group
-	// is the no-op it should be. A missing parent is the root's case.
+	// The parent's *resolved* visibility, so hiding a node under a hidden group is
+	// the no-op it should be. A missing parent is the root's case.
 	Node* parent = self.node(node.parent);
 	self.propagate_visible(id, parent == null || parent.world_visible);
 }
 
 <*
- Carry a resolved visibility down a subtree.
+ Carries a resolved visibility down a subtree.
 
- The half of `update_branch` that is about visibility, on its own, so that a
- change to `visible` costs the subtree rather than the world-matrix walk and the
- caches hanging off it. Written unconditionally rather than stopping where the
- value already agrees: the walk is a bool store per node — hiding a whole
- four-hundred-node scene is cheaper than one query-index rebuild — and an early
- exit would have to reason about the one node whose `world_visible` is seeded
- optimistically by `create_slot`.
+ The half of `update_branch` that is about visibility, on its own, so a change to
+ `visible` costs the subtree rather than the world-matrix walk and the caches
+ hanging off it. Written unconditionally rather than stopping where the value
+ already agrees: the walk is a bool store per node — hiding a whole four-hundred-
+ node scene is cheaper than one query-index rebuild — and an early exit would
+ have to reason about the one node whose `world_visible` is seeded optimistically
+ by `create_slot`.
 
  Recursive and reading children through `self.nodes` for `update_branch`'s
  reasons; nothing may add or remove a node during it.
@@ -1378,12 +1328,12 @@ fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
 
  `Node.collides` has the argument. Off means the mesh is drawn and is not in the
  query index at all, so it costs a sweep nothing rather than being rejected by
- one — which is the difference between a pickup and a hundred grass tufts.
+ one — the difference between a pickup and a hundred grass tufts.
 
  The whole index is dropped, because this decides membership rather than an
- answer. That is the cost of the flag and the reason it is an authoring
- property: a script toggling it per frame is asking for the rebuild
- `set_visible` above no longer pays.
+ answer. That is the cost of the flag and the reason it is an authoring property:
+ a script toggling it per frame is asking for the rebuild `set_visible` above no
+ longer pays.
 *>
 fn void Scene.set_collides(&self, NodeId id, bool collides)
 {
@@ -1394,13 +1344,12 @@ fn void Scene.set_collides(&self, NodeId id, bool collides)
 }
 
 <*
- Draw this node with a different material.
+ Draws this node with a different material.
 
  No `dirty` flag, unlike `set_visible` and the transform setters. Those three
  feed the world-matrix walk, which caches its result; the material feeds the
  bucket key, and `build_draw_list` throws the whole draw list away and rebuilds
- it from scratch every frame. Setting a flag for it would be a flag nothing ever
- reads.
+ it from scratch every frame.
 
  The index is not validated here — `Scene` has no view of `MeshPass.materials`,
  and reaching for one would put the render pass inside the scene graph. The JS
@@ -1414,37 +1363,33 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	node.material = material;
 	// Not `mark_moved`: nothing about the node's transform changed and the world
 	// box is where it was. What *can* change is whether this copy casts at all —
-	// `MeshPass.casts_shadow` reads the material's blend mode — so a static
-	// caster changing material is a static map to rebuild.
+	// `MeshPass.casts_shadow` reads the material's blend mode — so a static caster
+	// changing material is a static map to rebuild.
 	if (node.static_caster) self.static_revision++;
 }
 
 <*
- Put this node in the half of the shadow map that is drawn once and kept.
+ Puts this node in the half of the shadow map that is drawn once and kept.
 
- `plan.md` §19.3: in a village the sun does not move and the buildings do not
- move, and the shadow pass was rasterising every one of them into an image
- identical to the previous frame's. This is the per-node bool that partitions the
- casters, and the promise it comes with is that **it does not split a draw
- bucket** — the flag orders copies *within* a bucket rather than keying one, so a
- wall marked static and its neighbour that is not are still one
- `vkCmdDrawIndexed` in the colour pass. `Bucket.static_first` is where that is
- spent.
+ In a village the sun does not move and the buildings do not move, and the shadow
+ pass would otherwise rasterise every one of them into an image identical to the
+ previous frame's. This is the per-node bool that partitions the casters, and it
+ comes with the promise that it does not split a draw bucket — the flag orders
+ copies *within* a bucket rather than keying one, so a wall marked static and its
+ neighbour that is not are still one `vkCmdDrawIndexed` in the colour pass.
 
  What it costs to be wrong: a node marked static that then moves leaves its old
  silhouette baked into the cached map until something else invalidates it. Moving
- one through the setters here is safe — they bump the revision and the map is
- rebuilt — so the failure needs a transform written by hand with no `touch`,
- which is the same failure that already draws the node in the wrong place.
+ one through the setters here is safe — they bump the revision — so the failure
+ needs a transform written by hand with no `touch`, which is the same failure
+ that already draws the node in the wrong place.
 
- **Refused on anything with a skin**, which is the one exclusion worth spelling
- out. A skinned node's silhouette is not its transform: it is `Node.pose`, an
- offset into a palette that `AnimationPlayer.key_pose` rewrites without touching
- a transform at all, and a compute-routed copy's vertices live in a buffer the
- dispatch refills every frame. Neither is something the setters here can see
- move, so "it does not move" cannot be made true of a character, and the request
- is refused rather than half-honoured. `Bucket.static_first` has the second
- reason for the compute case, which is about sub-ranges rather than about staleness.
+ Refused on anything with a skin. A skinned node's silhouette is not its
+ transform: it is `Node.pose`, an offset into a palette that
+ `AnimationPlayer.key_pose` rewrites without touching a transform at all, and a
+ compute-routed copy's vertices live in a buffer the dispatch refills every
+ frame. Neither is something the setters here can see move, so "it does not move"
+ cannot be made true of a character.
 
  @return `Whether the node is static now. False for a handle that names nothing and for a skinned node, which is a refusal rather than an error — see above.`
 *>
@@ -1463,13 +1408,13 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 }
 
 <*
- Tint one copy, without costing a draw call.
+ Tints one copy, without costing a draw call.
 
  Neither this nor `set_variant` marks the node dirty: `dirty` drives the
  world-matrix walk, and these two are copied into the instance record on every
- `build_draw_list` regardless. Marking it would be a wasted subtree traversal
- per colour change, which for a script recolouring a thousand nodes is a
- thousand of them.
+ `build_draw_list` regardless. Marking it would be a wasted subtree traversal per
+ colour change, which for a script recolouring a thousand nodes is a thousand of
+ them.
 
  @param color : `sRGB rgb and an alpha - the components a colour picker gives, not linear ones. The shaders decode it before it multiplies albedo, so 0xff8040 renders as 0xff8040 under a full light; see gpu/color.c3. The alpha reaches shade() untransferred - coverage is not a colour - and is still not blended with.`
 *>
@@ -1481,12 +1426,12 @@ fn void Scene.set_color(&self, NodeId id, float[4] color)
 }
 
 <*
- Point one copy at a row of its material's table.
+ Points one copy at a row of its material's table.
 
- Not validated against the material here, and deliberately: a node may be given
- a variant before it is given the material that gives the number meaning, and
- the shader clamps against the row count it was compiled with — so the failure
- mode is the last row rather than a refusal at the wrong moment.
+ Not validated against the material here, and deliberately: a node may be given a
+ variant before it is given the material that gives the number meaning, and the
+ shader clamps against the row count it was compiled with — so the failure mode
+ is the last row rather than a refusal at the wrong moment.
 *>
 fn void Scene.set_variant(&self, NodeId id, uint variant)
 {
@@ -1496,7 +1441,7 @@ fn void Scene.set_variant(&self, NodeId id, uint variant)
 }
 
 <*
- Rename a node.
+ Renames a node.
 
  The scene owns every name — `create_slot` copies what it is given and `kill`
  frees it — so this frees the old one before taking a copy of the new. Anything
@@ -1512,15 +1457,12 @@ fn void Scene.set_name(&self, NodeId id, String name)
 }
 
 <*
- Say that this node's local transform was written by hand.
+ Says that this node's local transform was written by hand.
 
- **No longer optional, and that is the change §19.5 made.** Writing
- `scene.node(id).position` directly and letting the next walk notice was always
- documented as needing this; until the walk could be skipped it also happened to
- work without it, because `update_world_matrices` re-descended the whole tree
- every time and read the `dirty` flag on arrival. It does not any more — see
- `Scene.matrices_current` — so a hand-written transform that is not touched is a
- node drawn where it used to be.
+ Not optional. Writing `scene.node(id).position` directly and letting the next
+ walk notice happens to work only while `update_world_matrices` re-descends the
+ whole tree every time; it does not — see `Scene.matrices_current` — so a
+ hand-written transform that is not touched is a node drawn where it used to be.
 *>
 fn void Scene.touch(&self, NodeId id)
 {
@@ -1528,11 +1470,11 @@ fn void Scene.touch(&self, NodeId id)
 }
 
 <*
- Run `#body` for every alive node under `id`, depth first, with the node's id
+ Runs `#body` for every alive node under `id`, depth first, with the node's id
  and a pointer to it.
 
- The pointer is invalid the moment anything is added, so a traversal that
- creates nodes has to collect ids first and add afterwards.
+ The pointer is invalid the moment anything is added, so a traversal that creates
+ nodes has to collect ids first and add afterwards.
 *>
 macro Scene.@traverse(&self, NodeId id; @body(NodeId child_id, Node* node))
 {
@@ -1556,21 +1498,21 @@ macro Scene.@traverse(&self, NodeId id; @body(NodeId child_id, Node* node))
 // ============================================================================
 
 <*
- Recompute the world matrix of every node whose local transform changed, and of
+ Recomputes the world matrix of every node whose local transform changed, and of
  everything below it.
 
  Depth-first and recursive: a scene deep enough to overflow the stack is a scene
  with tens of thousands of levels of parenting, which is not a shape this API
- encourages and would be a different bug. Nothing may add or remove a node
- during the walk — `node.children` is iterated in place.
+ encourages. Nothing may add or remove a node during the walk — `node.children`
+ is iterated in place.
 *>
 fn void Scene.update_world_matrices(&self)
 {
-	// **The repeat is free, which it was not before §19.5.** A frame walks this
-	// three to five times — `Scene.bounds` for the shadow fit, `follow_camera`,
-	// `Scene.update`, and once more for every bounding box a script asks for —
-	// and `Node.dirty` only ever saved the arithmetic, never the walk. See
-	// `Scene.matrices_current` for what has to hold for this line to be safe.
+	// The repeat is free. A frame walks this three to five times —
+	// `Scene.bounds` for the shadow fit, `follow_camera`, `Scene.update`, and once
+	// more for every bounding box a script asks for — and `Node.dirty` only ever
+	// saved the arithmetic, never the walk. See `Scene.matrices_current` for what
+	// has to hold for this line to be safe.
 	if (self.matrices_current) return;
 	if (!self.root.is_set()) return;
 	self.update_branch(self.root, matrix::IDENTITY4{float}, true, false);
@@ -1588,14 +1530,13 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
 		node.dirty = false;
-		// **Where the cached shadow map is really invalidated**, and it is here
-		// rather than in the setters because this is the only place that knows a
-		// node *actually* moved. A static wall parented to a dynamic group is the
-		// case that makes the difference: the setter was handed the group, which
-		// is not static, so nothing there would have said anything — and the wall's
-		// world matrix changed all the same. `changed` carries down the tree, so
-		// asking here catches the whole subtree of every move, however it was made
-		// and whichever node it was made on.
+		// Where the cached shadow map is really invalidated, and it is here rather
+		// than in the setters because this is the only place that knows a node
+		// *actually* moved. A static wall parented to a dynamic group is the case
+		// that makes the difference: the setter was handed the group, which is not
+		// static, so nothing there would have said anything — and the wall's world
+		// matrix changed all the same. `changed` carries down the tree, so asking
+		// here catches the whole subtree of every move.
 		if (node.static_caster) self.static_revision++;
 	}
 
@@ -1633,14 +1574,14 @@ struct Frustum
 <*
  The six clip planes of a view-projection matrix (Gribb & Hartmann).
 
- The near plane is row 2 alone rather than `w + z` because this projection is
- the Vulkan/D3D [0,1] depth convention, not OpenGL's [-1,1]. Using the OpenGL
- form here culls nothing that should be culled and is invisible until something
- far away disappears — which is why it is written down rather than inferred.
+ The near plane is row 2 alone rather than `w + z` because this projection is the
+ Vulkan/D3D [0,1] depth convention, not OpenGL's [-1,1]. Using the OpenGL form
+ culls nothing that should be culled and is invisible until something far away
+ disappears.
 
  `gpu/target.c3`'s negative-height viewport does not enter into this: it flips Y
- in the viewport transform, after clipping, so the planes derived from the
- matrix are the ones the hardware will actually use.
+ in the viewport transform, after clipping, so the planes derived from the matrix
+ are the ones the hardware will actually use.
 *>
 fn Frustum frustum_of(Matrix4f m)
 {
@@ -1709,8 +1650,8 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
  marginal. `ConeGeometry(1, 1, 4)` is a square pyramid whose base sits corner-on
  to the axes; turn it 45 degrees, which is exactly what makes it a hip roof, and
  re-bounding the box reports a half-extent of 1.414 where the truth is 0.707.
- Doubled. `examples/village` is full of that shape at that angle and its church
- reported a minimum z of -49 for a spire that stops at -45.8.
+ Doubled. A church full of that shape at that angle reported a minimum z of -49
+ for a spire that stops at -45.8.
 
  That number is not merely reported: `align`, `alignTo`, `frameAll` and
  `BoxHelper` all place things with it, so `align('y', 'min', 0)` on a rotated
@@ -1718,30 +1659,26 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
  check it agrees, because it is reading the same wrong box.
 
  So this bounds the transformed *vertices*. `hull_positions` is every position
- the mesh has, kept on the CPU for picking (see `GpuMesh.build_bvh`, which copies
- the lot rather than reducing to a hull), so the pass is exact and needs nothing
- uploaded or cached.
+ the mesh has, kept on the CPU for picking, so the pass is exact and needs
+ nothing uploaded or cached.
 
- ## The fallback, and why nothing in the public API reaches it
+ ## The fallback
 
  `hull_positions` is filled by `upload_primitive`, so a mesh that has not been
- uploaded has nothing to bound but its local AABB — the accessor's `min`/`max`
- and no more. This returns the conservative box in that case rather than
- pretending to an exactness it does not have.
+ uploaded has nothing to bound but its local AABB. This returns the conservative
+ box in that case rather than pretending to an exactness it does not have.
 
- **Every node in a scene is past that point.** `Scene.create_slot` retains the
- mesh it names, `Assets.retain` calls `ensure_uploaded`, and `boundingBox()`
- throws unless the object is in a scene. Generated shapes are further still:
- `Assets.primitive` builds and uploads in one step. So the fallback covers a
- device-less runtime and an upload that failed and was swallowed — the two states
- in which a wrong-but-valid box beats no box — and not a state a script can put
- an object into and then measure.
+ Every node in a scene is past that point: `Scene.create_slot` retains the mesh
+ it names, `Assets.retain` calls `ensure_uploaded`, and `boundingBox()` throws
+ unless the object is in a scene. So the fallback covers a device-less runtime
+ and an upload that failed and was swallowed — the two states in which a
+ wrong-but-valid box beats no box — and not a state a script can put an object
+ into and then measure.
 
  That matters because the alternative would have been to force an upload here,
- and that is the change that would have quietly cost something: `frame_camera`
- runs at startup, so measuring would have pulled every mesh in a file onto the
- device at load and `measuring_a_loaded_mesh_does_not_upload_it` would have gone
- red — which is exactly the assertion that exists to keep the loader lazy.
+ and `frame_camera` runs at startup — so measuring would pull every mesh in a
+ file onto the device at load, which is exactly what
+ `measuring_a_loaded_mesh_does_not_upload_it` exists to prevent.
 *>
 fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 {
@@ -1773,18 +1710,18 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 // ============================================================================
 
 <*
- Bring the world matrices up to date and rebuild the draw list for a camera.
+ Brings the world matrices up to date and rebuilds the draw list for a camera.
 
- The near plane goes in **whether or not culling is on**, and the two uses of the
- frustum are worth separating because they are now genuinely different questions.
- Culling asks whether a box is inside six planes and is a performance choice a
- script can turn off; the depth sort asks how far along the view direction a
- transparent draw sits, and turning that off would not make the frame faster, it
- would make it wrong. So `self.cull` gates the frustum pointer and nothing else.
+ The near plane goes in whether or not culling is on, and the two uses of the
+ frustum are worth separating because they are different questions. Culling asks
+ whether a box is inside six planes and is a performance choice a script can turn
+ off; the depth sort asks how far along the view direction a transparent draw
+ sits, and turning that off would not make the frame faster, it would make it
+ wrong. So `self.cull` gates the frustum pointer and nothing else.
 
  @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
- @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes; see MeshPass.record for why this crosses as a flat slice.`
- @param light_view_projection : `The light's clip matrix when a shadow pass will read this draw list, null otherwise. Its frustum keeps casters the camera cannot see — but as a second test beside the camera's rather than instead of it, so both passes get a cull. render/shadow.c3:38 asked for this and plan.md §18.2 has what it was worth.`
+ @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes.`
+ @param light_view_projection : `The light's clip matrix when a shadow pass will read this draw list, null otherwise. Its frustum keeps casters the camera cannot see — but as a second test beside the camera's rather than instead of it, so both passes get a cull.`
 *>
 fn void Scene.update(
 	&self,
@@ -1797,11 +1734,10 @@ fn void Scene.update(
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	// **Two frustums, and `cull` gates only the camera's.** A script turning
-	// culling off is asking for its own draws not to be dropped; it is not asking
-	// the shadow pass to rasterise the far side of the level, and a light box
-	// that is smaller than the scene would then be the only thing keeping the map
-	// affordable. So the light's test stands whether or not `cull` does.
+	// Two frustums, and `cull` gates only the camera's. A script turning culling
+	// off is asking for its own draws not to be dropped; it is not asking the
+	// shadow pass to rasterise the far side of the level, and a light box smaller
+	// than the scene would then be the only thing keeping the map affordable.
 	//
 	// Neither turns the *sort* off: `frustum.planes[4]` is the near plane and a
 	// transparent draw is ordered by it whether or not anything was culled.
@@ -1815,8 +1751,8 @@ fn void Scene.update(
 		margins,
 		light_view_projection != null ? &light : null
 	);
-	// Promoted here rather than inside `build_draw_list`, because this call is
-	// what "a frame happened" means and the other caller is a query. Assigned
+	// Promoted here rather than inside `build_draw_list`, because this call is what
+	// "a frame happened" means and the other caller is a query. Assigned
 	// unconditionally: with `cull` off nothing was dropped and zero is the honest
 	// answer, where holding the previous number would report a camera that has
 	// stopped being consulted.
@@ -1832,8 +1768,7 @@ fn void Scene.update(
  One band above every opaque material and one below the lines. A real material
  index colliding with it would need four billion materials in one context, which
  is several orders of magnitude past the point at which the `List{Material}`
- holding them stopped fitting in memory — so this is a reserved band rather than
- a value anything has to be checked against.
+ holding them stopped fitting in memory.
 *>
 const uint TRANSPARENT_ORDER = 0xfffffffe;
 
@@ -1847,17 +1782,15 @@ const uint TRANSPARENT_ORDER = 0xfffffffe;
  the scene it is drawn to explain.
 
  That would not look like an ordering bug. `LINE_STATE` writes no depth and tests
- none, so a line drawn first is simply painted over by the next opaque triangle
- and vanishes — which reads as "the helper did not work".
+ none, so a line drawn first is painted over by the next opaque triangle and
+ vanishes — which reads as "the helper did not work".
 
  Transparency takes the band just below it, and the two decisions are the same
- decision made twice. A blended pipeline writes no depth either (`ALPHA_STATE`
- has the argument), so a transparent draw recorded before an opaque one behind it
- is overwritten rather than blended with, and glass drawn before its own wall
- shows the clear colour through it. Lines stay above transparency deliberately: a
- debug helper is drawn to be *seen*, and one that disappears behind the glass it
- was drawn to explain is the same failure the line band already exists to
- prevent.
+ decision made twice. A blended pipeline writes no depth either, so a transparent
+ draw recorded before an opaque one behind it is overwritten rather than blended
+ with, and glass drawn before its own wall shows the clear colour through it.
+ Lines stay above transparency deliberately: a debug helper is drawn to be
+ *seen*.
 
  @param transparent : `Whether this material blends — MeshPass.record's table, not something Scene can work out for itself.`
 *>
@@ -1868,14 +1801,14 @@ fn uint draw_order(uint material, bool transparent) @local
 }
 
 <*
- Flatten, cull, sort by bucket key, and write one `Instance` per drawn node.
+ Flattens, culls, sorts by bucket key, and writes one `Instance` per drawn node.
 
  The sort is what makes the bucketing exact rather than approximate: after it,
- every node sharing an `(asset, mesh)` key is contiguous, so a single linear
- scan produces the buckets and there is no map, no hash and no per-bucket
- allocation. It also means the cost is `n log n` in *instances* rather than
- anything in unique meshes — a scene of ten thousand distinct meshes buckets as
- cheaply as a scene of one repeated ten thousand times.
+ every node sharing an `(asset, mesh)` key is contiguous, so a single linear scan
+ produces the buckets and there is no map, no hash and no per-bucket allocation.
+ It also means the cost is `n log n` in *instances* rather than anything in
+ unique meshes — a scene of ten thousand distinct meshes buckets as cheaply as a
+ scene of one repeated ten thousand times.
 
  @param transparent : `One bool per material index — whether that material blends. Empty is an opaque frame, and is what stats() passes.`
  @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
@@ -1889,7 +1822,7 @@ fn void Scene.build_draw_list(
 	bool[] transparent = {},
 	Plane* near = null,
 	// Indexed by material, exactly as `transparent` is, and empty when nobody has
-	// asked for one. See the growth below.
+	// asked for one.
 	float[] margins = {},
 	Frustum* light = null,
 	bool counts_only = false
@@ -1908,48 +1841,44 @@ fn void Scene.build_draw_list(
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
-		// Described but not on the device: since G3/S3 that means an upload that
-		// failed, because a node cannot exist without having retained the mesh
-		// and retaining is what uploads. It draws nothing, which is the same
-		// answer a material whose texture would not decode gets.
+		// Described but not on the device, which means an upload that failed: a node
+		// cannot exist without having retained the mesh, and retaining is what
+		// uploads. It draws nothing, the same answer a material whose texture would
+		// not decode gets.
 		if (!mesh.uploaded) continue;
 
-		// Read before the bounds because it decides whether the bounds are needed
-		// at all. An index past the end of the table is opaque: the table is exactly
-		// as long as `MeshPass.materials`, so past its end is an index that resolves
-		// to nothing and draws nothing anyway.
+		// Read before the bounds because it decides whether the bounds are needed at
+		// all. An index past the end of the table is opaque: the table is exactly as
+		// long as `MeshPass.materials`, so past its end is an index that resolves to
+		// nothing and draws nothing anyway.
 		bool is_transparent = node.material < transparent.len && transparent[node.material];
 
-		// The world box has two readers now and neither wants it unconditionally:
-		// the frustum test wants it when culling is on, and a transparent draw wants
-		// its centre for the depth sort whether culling is on or not. Computed once
-		// for both, and **not at all** in the case that has to stay free — an opaque
-		// draw in an unculled frame — so nothing about the opaque path costs more
-		// than it did before transparency existed.
+		// The world box has two readers and neither wants it unconditionally: the
+		// frustum test wants it when culling is on, and a transparent draw wants its
+		// centre for the depth sort whether culling is on or not. Computed once for
+		// both, and not at all in the case that has to stay free — an opaque draw in
+		// an unculled frame.
 		//
-		// **Conservative on purpose, unlike the measuring paths.** A box that is
-		// too big keeps a draw that could have been skipped; a box that is too
-		// small drops geometry the camera can see. `world_mesh_bounds` would be
-		// tighter and would cost a pass over every vertex of every node every
-		// frame to save a handful of draws, which is the trade backwards. The same
-		// slack is harmless in the sort: it moves a centre, and sorting centres is
-		// already an approximation of an order no per-object sort gets exactly
-		// right.
+		// Conservative on purpose, unlike the measuring paths. A box that is too big
+		// keeps a draw that could have been skipped; a box that is too small drops
+		// geometry the camera can see. `world_mesh_bounds` would be tighter and
+		// would cost a pass over every vertex of every node every frame to save a
+		// handful of draws. The same slack is harmless in the sort: it moves a
+		// centre, and sorting centres is already an approximation.
 		float depth = 0;
 		bool sorted = is_transparent && near != null;
 		// True until something rejects it, which is what makes an unculled frame
-		// cost nothing: with no frustum and no light there is no box to compute
-		// and no test to run.
+		// cost nothing: with no frustum and no light there is no box to compute and
+		// no test to run.
 		bool visible = true;
 		if (frustum != null || light != null || sorted)
 		{
-			// **A skinned node is measured by the poses it can reach, not by the
-			// pose it was authored in.** The bake unioned every joint matrix of
-			// every frame over the bind box (`scene/skin.c3`), and using
-			// `mesh.bounds` instead would cull a character the moment an animation
-			// took a limb outside the box the modeller drew around the rest pose —
-			// which looks like a character that vanishes at certain camera angles
-			// during certain frames, and is very hard to attribute.
+			// A skinned node is measured by the poses it can reach, not by the pose
+			// it was authored in. The bake unioned every joint matrix of every frame
+			// over the bind box, and using `mesh.bounds` instead would cull a
+			// character the moment an animation took a limb outside the box the
+			// modeller drew around the rest pose — which looks like a character that
+			// vanishes at certain camera angles during certain frames.
 			collision::Aabb3 local = mesh.bounds;
 			if (node.skin >= 0)
 			{
@@ -1960,11 +1889,11 @@ fn void Scene.build_draw_list(
 
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
-			// material says how far it moves things and the box grows by that
-			// much. Grown in *world* units after the transform rather than in
-			// object units before it, because the displacement in a body is
-			// world-space too: `v.position + something` is metres of scene,
-			// whatever the node is scaled by.
+			// material says how far it moves things and the box grows by that much.
+			// Grown in *world* units after the transform rather than in object units
+			// before it, because the displacement in a body is world-space too:
+			// `v.position + something` is metres of scene, whatever the node is
+			// scaled by.
 			//
 			// Zero for every material that has no vertex body, so the common case
 			// adds one compare and no arithmetic.
@@ -1976,13 +1905,12 @@ fn void Scene.build_draw_list(
 			visible = frustum == null || frustum.contains(box);
 			if (!visible) self.culled++;
 
-			// **The second test, and the reason a draw can survive the first
-			// rejection.** A caster the camera cannot see still throws a shadow
-			// into the frame, so the light's box gets its own say — but only for
-			// geometry that will actually be rasterised into the map. A blended
-			// material casts nothing (`MeshPass.casts_shadow`), so keeping a
-			// transparent draw the camera rejected would put an instance in the
-			// array that neither pass will ever read.
+			// The second test, and the reason a draw can survive the first rejection.
+			// A caster the camera cannot see still throws a shadow into the frame, so
+			// the light's box gets its own say — but only for geometry that will
+			// actually be rasterised into the map. A blended material casts nothing
+			// (`MeshPass.casts_shadow`), so keeping a transparent draw the camera
+			// rejected would put an instance in the array neither pass will read.
 			if (!visible)
 			{
 				bool casts = light != null && !is_transparent && light.contains(box);
@@ -2012,41 +1940,40 @@ fn void Scene.build_draw_list(
 
 	if (self.draws.len() == 0) return;
 
-	// **Sorted emit, not a permutation of finished buckets.** This one sort puts
-	// the draws in the order they will be recorded in, and the coalescing loop
-	// below is exactly the loop it was before transparency existed: it walks the
-	// sorted list and opens a bucket wherever (key, material) changes. So adjacent
-	// transparent draws sharing both still fuse into one instanced bucket, and
-	// depth-interleaved ones split into more — a wall of glass panes seen edge-on
-	// is one draw, and the same panes with something else woven between them is
-	// several. That cost is the honest one and it is three.js's too, whose
-	// per-object sort splits the same way; the alternative is sorting buckets after
-	// the fact, which cannot order two panes that landed in the same bucket.
+	// Sorted emit, not a permutation of finished buckets. This one sort puts the
+	// draws in the order they will be recorded in, and the coalescing loop below is
+	// exactly the loop it was before transparency existed: it walks the sorted list
+	// and opens a bucket wherever (key, material) changes. So adjacent transparent
+	// draws sharing both still fuse into one instanced bucket, and depth-interleaved
+	// ones split into more — a wall of glass panes seen edge-on is one draw, and the
+	// same panes with something else woven between them is several. That cost is
+	// three.js's too, whose per-object sort splits the same way; the alternative is
+	// sorting buckets after the fact, which cannot order two panes that landed in
+	// the same bucket.
 	//
 	// `order` and `depth` were computed at push time because this comparator is a
 	// captureless function pointer — see `Draw`.
 	//
-	// **Merge, not quick, and the reason is this data.** `std::sort::quicksort`
-	// pivots on `list[l]` with no median-of-three and no three-way partition, so
-	// a run of elements the comparator calls equal peels exactly one element per
-	// pass: a run of *k* costs *k²/2*. This list is the worst input that shape
-	// has — a few thousand draws over as many distinct keys as there are buckets,
-	// which is nine in the reference village, pushed in node-slot order and so
-	// already ascending whenever a script places one asset at a time. Measured on
-	// 4178 draws in 9 buckets: 8.7M comparisons and 20.4 ms against mergesort's
-	// 24.9k and 0.196 ms, for the same answer element for element. The sort was
-	// costing an order of magnitude more than the frame it was preparing.
+	// Merge, not quick, and the reason is this data. `std::sort::quicksort` pivots
+	// on `list[l]` with no median-of-three and no three-way partition, so a run of
+	// elements the comparator calls equal peels exactly one element per pass: a run
+	// of *k* costs *k²/2*. This list is the worst input that shape has — a few
+	// thousand draws over as many distinct keys as there are buckets, which is nine
+	// in the reference village, pushed in node-slot order and so already ascending
+	// whenever a script places one asset at a time. Measured on 4178 draws in 9
+	// buckets: 8.7M comparisons and 20.4 ms against mergesort's 24.9k and 0.196 ms,
+	// for the same answer element for element.
 	//
-	// Being stable is the second reason: draws the comparator cannot separate
-	// keep their slot order, so a bucket's instances land in the same sequence
-	// every frame instead of in whatever order a partition happened to leave.
+	// Being stable is the second reason: draws the comparator cannot separate keep
+	// their slot order, so a bucket's instances land in the same sequence every
+	// frame instead of in whatever order a partition happened to leave.
 	mergesort(self.draws.array_view(), fn int(Draw a, Draw b) {
 		if (a.order < b.order) return -1;
 		if (a.order > b.order) return 1;
 		// Farthest first, and only within the transparent band: everything else is
 		// depth-tested and depth-written, so its order is the hardware's business
 		// and sorting it would only scatter the pipeline binds. Material and key
-		// break the tie so that draws at equal depth still coalesce.
+		// break the tie so draws at equal depth still coalesce.
 		if (a.order == TRANSPARENT_ORDER)
 		{
 			if (a.depth > b.depth) return -1;
@@ -2060,26 +1987,26 @@ fn void Scene.build_draw_list(
 		// each other: they cannot share a bucket with copies that are not, and
 		// interleaving them would make four draws out of two.
 		if (a.preskinned != b.preskinned) return a.preskinned ? 1 : -1;
-		// **Last, and the position is the whole design.** Every key above this
-		// one decides which bucket a draw lands in; this one decides where it
-		// sits *inside* that bucket, so a bucket stays one bucket and its
-		// camera-visible copies are a prefix of it. Move this above `key` and
-		// every mesh with a partly-visible set of copies becomes two draw calls.
+		// Last, and the position is the whole design. Every key above this one
+		// decides which bucket a draw lands in; this one decides where it sits
+		// *inside* that bucket, so a bucket stays one bucket and its camera-visible
+		// copies are a prefix of it. Move this above `key` and every mesh with a
+		// partly-visible set of copies becomes two draw calls.
 		uint cell_a = draw_cell(a.visible, a.is_static);
 		uint cell_b = draw_cell(b.visible, b.is_static);
 		if (cell_a != cell_b) return cell_a < cell_b ? -1 : 1;
 		return 0;
 	});
 
-	// Deliberately not equal to the first draw, so the first iteration always
-	// opens a bucket. `open_material` has to be part of that sentinel now: two
-	// materials over one mesh are adjacent in the sort and share a key.
+	// Deliberately not equal to the first draw, so the first iteration always opens
+	// a bucket. `open_material` is part of that sentinel: two materials over one
+	// mesh are adjacent in the sort and share a key.
 	ulong open = self.draws[0].key + 1;
 	uint open_material = self.draws[0].material;
 	bool open_preskinned = self.draws[0].preskinned;
 	// Where the next copy goes, counted rather than read off `self.instances`,
-	// because in a counting build there is no instance array to read it off. The
-	// two are the same number in every build that writes one.
+	// because in a counting build there is no instance array to read it off. The two
+	// are the same number in every build that writes one.
 	uint placed = 0;
 	foreach (draw : self.draws)
 	{
@@ -2089,9 +2016,9 @@ fn void Scene.build_draw_list(
 			open = draw.key;
 			open_material = draw.material;
 			open_preskinned = draw.preskinned;
-			// Read off the node rather than unpacked from the key, which only
-			// carries the slot index. Every node in a bucket names the same
-			// live asset, so any of them supplies the generation.
+			// Read off the node rather than unpacked from the key, which only carries
+			// the slot index. Every node in a bucket names the same live asset, so
+			// any of them supplies the generation.
 			self.buckets.push({
 				.asset = node.asset,
 				.mesh = node.mesh,
@@ -2113,8 +2040,8 @@ fn void Scene.build_draw_list(
 				.color = node.color,
 				.variant = node.variant,
 				// The whole of what a hundred characters at a hundred phases disagree
-				// about. Zero on everything that is not skinned, which the shader reads
-				// as nothing because the bucket's flags say there is no skin.
+				// about. Zero on everything that is not skinned, which the shader
+				// reads as nothing because the bucket's flags say there is no skin.
 				.pose = node.pose,
 			});
 		}
@@ -2122,11 +2049,11 @@ fn void Scene.build_draw_list(
 
 		Bucket* bucket = &self.buckets[self.buckets.len() - 1];
 		bucket.count++;
-		// Correct as running totals only because the sort laid the four cells out
-		// in order: each of these counts wherever it finds one, and it is the
+		// Correct as running totals only because the sort laid the four cells out in
+		// order: each of these counts wherever it finds one, and it is the
 		// comparator that makes "how many" the same number as "how many at the
-		// front". `static_first` is the size of cell 0 — the visible copies that
-		// are not static — which is exactly where cell 1 begins.
+		// front". `static_first` is the size of cell 0 — the visible copies that are
+		// not static — which is exactly where cell 1 begins.
 		if (draw.visible) bucket.visible++;
 		if (draw.visible && !draw.is_static) bucket.static_first++;
 		if (draw.is_static) bucket.static_count++;
@@ -2138,10 +2065,8 @@ fn ulong bucket_key(uint asset, uint mesh) @inline => ((ulong)asset << 32) | (ul
 <*
  How many distinct meshes the buckets cover.
 
- Was `buckets.len()` until M5, when it stopped meaning that: one mesh drawn under
- two materials is two buckets and one mesh. `SceneStats`' own header predicted
- this — "they are reported separately now so that the day they diverge is not the
- day the field is added" — and the divergence is the point of the field.
+ Not `buckets.len()`: one mesh drawn under two materials is two buckets and one
+ mesh.
 
  A quadratic scan rather than a set, because the buckets are sorted
  material-major and (asset, mesh) pairs are therefore not adjacent, and because
@@ -2149,10 +2074,10 @@ fn ulong bucket_key(uint asset, uint mesh) @inline => ((ulong)asset << 32) | (ul
  thousand integer compares once per `stats()` call, which is not a number worth a
  hash table and an allocation.
 *>
-// How many copies the buckets cover. `build_draw_list` in counting mode writes
-// no instance array, so this is where the number comes from — and it is the same
-// number a writing build would have left in `instances.len()`, because every
-// draw increments exactly one bucket's count.
+// How many copies the buckets cover. `build_draw_list` in counting mode writes no
+// instance array, so this is where the number comes from — and it is the same
+// number a writing build would have left in `instances.len()`, because every draw
+// increments exactly one bucket's count.
 fn uint count_instances(Bucket[] buckets)
 {
 	uint total = 0;
@@ -2186,49 +2111,46 @@ fn uint count_unique_meshes(Bucket[] buckets)
  Deliberately not a read of the last frame's draw list: "1000 instances is one
  draw call" has to be a fact about the scene, not about where the camera was
  pointing when it was last asked. The side effect is that the draw list is left
- uncalled — the next `update` rebuilds it, which it would have done anyway.
+ unculled — the next `update` rebuilds it, which it would have done anyway.
 
  `culled_last_frame` is the one number here that is deliberately *not* computed
  fresh, for that same reason: this rebuild culls nothing, so counting during it
- reports zero however much the camera dropped. It is read off `Scene`'s record of
- the last `update` instead. That split is the whole of the fix for a field that
- answered zero from M2 until it was noticed.
+ would report zero however much the camera dropped. It is read off `Scene`'s
+ record of the last `update` instead.
 
  ## Transparency makes this an under-count, on purpose
 
  The rebuild passes neither the transparent table nor a near plane, so nothing
  here is depth-sorted — which means a frame with transparent materials in it may
- issue **more** draws than this reports. Depth interleaving can only ever split a
+ issue *more* draws than this reports. Depth interleaving can only ever split a
  bucket, never merge two, so the number below is a floor rather than an estimate.
 
  That is the same decision `cull` already forced, one axis further along. A
  depth-sorted count would answer a different number for every camera angle, and
- `draw_calls` would stop being a fact about the scene and start being a fact about
- where somebody was standing. `stats()` answers "what does this scene cost",
- not "what did this camera angle cost"; the second question is a profiler's and
- wants the frame, not the query.
+ `draw_calls` would stop being a fact about the scene. `stats()` answers "what
+ does this scene cost", not "what did this camera angle cost"; the second
+ question is a profiler's and wants the frame.
 *>
 fn SceneStats Scene.stats(&self, Assets* assets)
 {
 	self.update_world_matrices();
-	// **Counting, not writing.** Every number below is read off the *buckets*;
-	// nothing here has ever looked at an `Instance`, and building 148 bytes per
-	// drawable to throw them away is what `plan.md` §19.5 found this call doing —
-	// 635 KB of it on the reference village, after every script an agent runs.
-	// The buckets still need the sort that produces them, so this is not free; it
-	// is the write and the growth of a list a query has no reader for.
+	// Counting, not writing. Every number below is read off the *buckets*; nothing
+	// here has ever looked at an `Instance`, and building 148 bytes per drawable to
+	// throw them away is 635 KB on the reference village after every script an
+	// agent runs. The buckets still need the sort that produces them, so this is
+	// not free; what it saves is the write and the growth of a list a query has no
+	// reader for.
 	//
-	// The list is left empty rather than stale, which is the honest state: the
-	// next `update` rebuilds both halves, and it would have done that anyway —
-	// see the header on why this call deliberately leaves nothing behind.
+	// The list is left empty rather than stale, which is the honest state: the next
+	// `update` rebuilds both halves, and it would have done that anyway.
 	self.build_draw_list(assets, null, {}, null, {}, null, true);
 
 	SceneStats stats = {
 		.draw_calls = (uint)self.buckets.len(),
 		.unique_meshes = count_unique_meshes(self.buckets.array_view()),
 		// Summed over the buckets rather than read off `self.instances`, which the
-		// counting build above deliberately left empty. Same number: every draw
-		// that survived lands in exactly one bucket.
+		// counting build above deliberately left empty. Same number: every draw that
+		// survived lands in exactly one bucket.
 		.instances = count_instances(self.buckets.array_view()),
 		.assets = assets.resident(),
 		.textures = assets.texture_count(),
@@ -2264,16 +2186,16 @@ fn SceneStats Scene.stats(&self, Assets* assets)
  The world-space bounds of everything drawable in the scene.
 
  What the camera frames on. Derived from instance bounds rather than from the
- assets' own, because an asset placed a kilometre from the origin is a
- kilometre from the origin.
+ assets' own, because an asset placed a kilometre from the origin is a kilometre
+ from the origin.
 *>
 fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 {
-	// **Cached, because this is the most expensive query in the project.** Every
-	// vertex of every drawable node goes through a matrix here — `world_mesh_
-	// bounds` explains at length why it is exact rather than conservative — and
-	// `plan.md` §19.5 counted 100k to 370k of them per call on the reference
-	// village, twice a frame. `Scene.bounds_box` carries what invalidates it.
+	// Cached, because this is the most expensive query in the project. Every vertex
+	// of every drawable node goes through a matrix here — `world_mesh_bounds`
+	// explains why it is exact rather than conservative — which is 100k to 370k of
+	// them per call on the reference village, twice a frame. `Scene.bounds_box`
+	// carries what invalidates it.
 	if (self.bounds_current) return self.bounds_box;
 
 	self.update_world_matrices();
@@ -2300,8 +2222,8 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 	}
 
 	// The unit box is cached like any other answer. An empty scene is asked this
-	// question by every frame that has shadows on, and re-walking an empty node
-	// pool to be told the same thing is the same waste in miniature.
+	// question by every frame that has shadows on, and re-walking an empty node pool
+	// to be told the same thing is the same waste in miniature.
 	if (!found) total = { .min = { -1, -1, -1 }, .max = { 1, 1, 1 } };
 	self.bounds_box = total;
 	self.bounds_current = true;
@@ -2316,7 +2238,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
  piece's origin is wherever its exporter left it, so "put this window on that
  wall" is a question about where the piece's faces are, not about where its
  transform is. Without this the answer has to be carried into the script as a
- hand-copied table of sizes, which is a table that goes stale silently.
+ hand-copied table of sizes, which goes stale silently.
 
  Empty rather than unit-sized when nothing under `root` draws. `Scene.bounds`
  answers with a unit box in that case because the camera must point *somewhere*;

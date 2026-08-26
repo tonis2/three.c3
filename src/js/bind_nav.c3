@@ -1,27 +1,23 @@
 <*
- Navigation and steering, as JavaScript sees them — `notes.md` §17.
+ Navigation and steering, as JavaScript sees them.
 
  ## Why the field is a handle and not an object
 
- `three.nav.field(goals)` hands back a number and `three.nav.direction(handle,
- point)` takes it. That is deliberately not the shape the rest of this API uses,
- where a host thing is wrapped in a JavaScript class.
+ `three.nav.field(goals)` hands back a number and
+ `three.nav.direction(handle, point)` takes it — deliberately not the shape the
+ rest of this API uses, where a host thing is wrapped in a JavaScript class.
 
- A field is one `float[]` per walkable cell — tens of thousands of them for a
- town — and the two things a script does with it are *sample it* and *throw it
- away*. Wrapping it would mean either copying that array into the engine on
- every read, or hanging host memory off a JS object whose collection the host
- cannot see, which is exactly the lifetime `plan.md` §1 refuses everywhere else:
- nothing here is freed until a script says so. So a field is freed by
- `field.dispose()` and by `new three.Scene()`, and a handle to a freed one
- answers "unreachable" rather than reading released memory.
+ A field is one `float[]` per walkable cell — tens of thousands for a town — and
+ the two things a script does with it are sample it and throw it away. Wrapping
+ it would mean either copying that array into the engine on every read, or
+ hanging host memory off a JS object whose collection the host cannot see. So a
+ field is freed by `field.dispose()` and by `new three.Scene()`, and a handle to
+ a freed one answers "unreachable" rather than reading released memory.
 
- ## The bake is dropped by `new three.Scene()`
-
- For the reason the physics bodies are: it was voxelized out of triangles that
- are gone, and a stale nav mesh is worse than none — an agent walks confidently
- through where a wall used to be, which reads as the pathfinder being broken
- rather than as the mesh being stale.
+ The bake is dropped by `new three.Scene()` for the reason the physics bodies
+ are: it was voxelized out of triangles that are gone, and a stale nav mesh is
+ worse than none — an agent walks confidently through where a wall used to be,
+ which reads as the pathfinder being broken rather than as the mesh being stale.
 *>
 module three;
 
@@ -58,13 +54,13 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 }
 
 <*
- Free the bake and every field over it.
+ Frees the bake and every field over it.
 
  Called by `three.nav.clear()`, by a re-bake, and by `new three.Scene()`. The
- fields go with the mesh and not one at a time: they are sized to the grid's
- cell count, so a field kept across a re-bake would be the wrong length, and the
- length check in `NavMesh.solve` would silently make it unusable rather than
- wrong — which is a bug that looks like the pathfinder finding nothing.
+ fields go with the mesh and not one at a time: they are sized to the grid's cell
+ count, so a field kept across a re-bake would be the wrong length, and the
+ length check in `NavMesh.solve` would silently make it unusable — a bug that
+ looks like the pathfinder finding nothing.
 *>
 fn void JsRuntime.drop_nav(&self)
 {
@@ -81,8 +77,8 @@ fn void JsRuntime.drop_nav(&self)
  `navBake(cell, radius, height, slope, hasBounds, minX, minY, minZ, maxX, maxY, maxZ)`.
 
  Answers with the same object `navStats` does, or `null` when the region held no
- standing room — which is a real answer and not an error: an empty scene, a
- scene of walls, or a slope limit nothing in it is under.
+ standing room — a real answer and not an error: an empty scene, a scene of
+ walls, or a slope limit nothing in it is under.
 *>
 fn void js_nav_bake(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -127,19 +123,18 @@ fn qjs::Value nav_stats_value(JsRuntime* self, qjs::Context* js) @local
 	js.set_property(value, "radius", qjs::number_value(self.nav.settings.agent_radius));
 	js.set_property(value, "height", qjs::number_value(self.nav.settings.agent_height));
 	js.set_property(value, "slope", qjs::number_value(self.nav.settings.slope_limit));
-	// The three counts and the time are §17's "measure the bake cost
-	// first ... that number decides whether this is a level-boundary operation
-	// or a loading-screen one" — answerable for the caller's own level rather
-	// than for a reference one.
+	// The three counts and the time are what decide whether baking is a
+	// level-boundary operation or a loading-screen one, answerable for the
+	// caller's own level rather than for a reference one.
 	js.set_property(value, "voxels", qjs::number_value((double)self.nav.voxels));
 	js.set_property(value, "solid", qjs::number_value((double)self.nav.solid_cells));
 	js.set_property(value, "floor", qjs::number_value((double)self.nav.floor_cells));
 	js.set_property(value, "walkable", qjs::number_value((double)self.nav.walkable_cells));
-	// **The two that say whether the bake is usable rather than what it cost.**
-	// Every counter above is a total, and a total cannot tell a level an agent
-	// can cross from the same level cut into islands — see
-	// `NavMesh.components`. `components > 1` is the signal a caller wants at
-	// bake time rather than after the third agent stands still for no reason.
+	// The two that say whether the bake is *usable* rather than what it cost.
+	// Every counter above is a total, and a total cannot tell a level an agent can
+	// cross from the same level cut into islands — see `NavMesh.components`.
+	// `components > 1` is the signal a caller wants at bake time rather than after
+	// the third agent stands still for no reason.
 	js.set_property(value, "components", qjs::number_value((double)self.nav.components));
 	js.set_property(value, "largest", qjs::number_value((double)self.nav.largest_component));
 	js.set_property(value, "bakeMs", qjs::number_value(self.nav.bake_ms));
@@ -263,10 +258,10 @@ fn void js_nav_field_free(
  `navDirection(handle, x, y, z)` — the unit XZ direction that walks towards the
  goal, or `[0, 0, 0]` for nowhere to go.
 
- Allocates a three-element array, which `notes.md` §17 measures at about 185 ns
- against 55 for a scalar. That is the right trade for **one** agent asking once
- a frame and the wrong one for a crowd — which is what `three.steer` is, and why
- it exists rather than this being called in a loop.
+ Allocates a three-element array, which measures at about 185 ns against 55 for a
+ scalar. That is the right trade for *one* agent asking once a frame and the
+ wrong one for a crowd — which is what `three.steer` is, and why it exists rather
+ than this being called in a loop.
 *>
 fn void js_nav_direction(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -285,10 +280,10 @@ fn void js_nav_direction(
 <*
  `navCost(handle, x, y, z)` — how far the goal is along the ground.
 
- **-1 for unreachable**, which the prelude turns into `Infinity` before a script
- sees it. A cost is a distance and can never be negative, so the sentinel cannot
- be confused with an answer — and the conversion happens in JavaScript because
- C3 has no infinity constant to send and a large finite number would be
+ -1 for unreachable, which the prelude turns into `Infinity` before a script sees
+ it. A cost is a distance and can never be negative, so the sentinel cannot be
+ confused with an answer — and the conversion happens in JavaScript because C3
+ has no infinity constant to send, and a large finite number would be
  indistinguishable from "far" at exactly the moment a caller has to decide
  whether to give up.
 *>
@@ -314,13 +309,12 @@ fn void js_nav_cost(
 
  ## Why it is here and not written as a loop in the script
 
- `notes.md` §17's crowd measurement: the bare crossing that answers a number is
- 143 ns, and `field.cost(point)` — the same crossing, through the `readVector`
- that allocates a three-element array and runs three `Number.isFinite` checks to
- be polite about its argument — is 455 ns. **The ergonomics layer costs twice
- what the boundary does.** That is a good trade for a verb called once a frame
- and a bad one for a verb called once per agent per frame, and both are this
- verb. `navDirection` is worse again: it allocates its answer as well.
+ The bare crossing that answers a number is 143 ns, and `field.cost(point)` — the
+ same crossing through the `readVector` that allocates a three-element array and
+ runs three `Number.isFinite` checks — is 455 ns. The ergonomics layer costs
+ twice what the boundary does: a good trade for a verb called once a frame and a
+ bad one for a verb called once per agent per frame, and both are this verb.
+ `navDirection` is worse again, because it allocates its answer as well.
 
  Either output may be empty, so a caller asking only "how far is everyone from
  the goal" pays for no directions.
@@ -329,10 +323,8 @@ fn void js_nav_cost(
 
  The single form's -1 becomes `Infinity` in the prelude before a script sees it.
  This one cannot: converting means a JavaScript pass over the array, which is
- precisely the loop being avoided, and it would cost more than the crossing it
- saved. So the bulk contract is the host's own — **`cost < 0` is unreachable** —
- and the prelude says so rather than hiding it. C3 has no infinity constant to
- write into the array instead.
+ precisely the loop being avoided. So the bulk contract is the host's own —
+ `cost < 0` is unreachable — and the prelude says so rather than hiding it.
 
  A field handle that is dead, or a bake that has been replaced, fills the costs
  with -1 and the directions with zero rather than raising: "nowhere to go" is
@@ -380,19 +372,19 @@ fn void js_nav_sample(
 }
 
 <*
- `navPath(fromX, fromY, fromZ, toX, toY, toZ, buffer, byteOffset, floats)` —
- one agent, one route, shortened against the geometry.
+ `navPath(fromX, fromY, fromZ, toX, toY, toZ, buffer, byteOffset, floats)` — one
+ agent, one route, shortened against the geometry.
 
- **This solves a whole field and throws it away**, which is the cost the
- two-verb split exists to make visible: a hundred agents heading for one
- door is a hundred solves for one answer, and `three.nav.field()` is that answer
- kept. A single wanderer replanning occasionally is exactly what this is for.
+ This solves a whole field and throws it away, which is the cost the two-verb
+ split exists to make visible: a hundred agents heading for one door is a hundred
+ solves for one answer, and `three.nav.field()` is that answer kept. A single
+ wanderer replanning occasionally is what this is for.
 
- Dijkstra from the goal rather than A* from the start, and the reason is reuse:
+ Dijkstra from the goal rather than A* from the start, for reuse:
  `collision::VoxelGrid.solve_field` is a written and tested chamfer transform
- with no priority queue in it, and it is fast for the one broad sheet a nav
- layer is. A* would be asymptotically better on a long route through a maze and
- would be a second pathfinder to keep correct.
+ with no priority queue in it, and it is fast for the one broad sheet a nav layer
+ is. A* would be asymptotically better on a long route through a maze and would
+ be a second pathfinder to keep correct.
 
  The Float32Array's capacity is in waypoints, three floats each. It answers with
  how many were written, including the start, and zero when there is no route.
@@ -422,11 +414,10 @@ fn void js_nav_path(
 		Vec3[1] goals = { to };
 		if (!self.nav.solve(&goals, field)) { *out = qjs::int_value(0); return; }
 
-		// The raw walk is one point per cell, so it can be as long as the
-		// reachable set. Bounded by the caller's slice times a factor, because
-		// shortening is what turns hundreds of cells into a handful of corners
-		// and a caller asking for eight waypoints still needs the cells between
-		// them to be walked.
+		// The raw walk is one point per cell, so it can be as long as the reachable
+		// set. Bounded by the caller's slice times a factor, because shortening is
+		// what turns hundreds of cells into a handful of corners and a caller
+		// asking for eight waypoints still needs the cells between them walked.
 		sz raw_limit = math::min((sz)self.nav.field_size(), (sz)(slots.len / 3) * 64 + 64);
 		Vec3[] raw = mem::temp_array(Vec3, raw_limit);
 		uint count = self.nav.walk(field, from, raw);
@@ -447,14 +438,13 @@ fn void js_nav_path(
 }
 
 <*
- `steer(posBuffer, posByteOffset, posFloats, outBuffer, outByteOffset,
- outFloats, fieldHandle, goalX, goalY, goalZ, maxSpeed, arriveRadius,
- separationRadius, separationWeight)`.
+ `steer(posBuffer, posByteOffset, posFloats, outBuffer, outByteOffset, outFloats,
+ fieldHandle, goalX, goalY, goalZ, maxSpeed, arriveRadius, separationRadius,
+ separationWeight)`.
 
  The crowd verb, and the one place in this API where the whole point is that
  there is exactly one crossing however many agents there are. See
- `scene/steer.c3` for the argument and `notes.md` §17 for the measurement it
- rests on.
+ `scene/steer.c3`.
 
  The last two arguments are the separation radius and its weight; a radius of
  zero turns it off, which is what a caller steering one agent means.

@@ -1,13 +1,8 @@
 <*
  Slang, at runtime, from a string.
 
- This is what M1's `load_spirv` became. The shape of the swap was predicted in
- that file's header and held: `MeshPass.init` still asks for one thing and gets
- SPIR-V back, and everything downstream of it is unchanged.
-
- What is new is the second return value. A compile does not only produce bytes —
- it produces a *diagnostic*, and on the failure path that diagnostic is the whole
- product. Slang's are unusually good:
+ A compile produces two things: SPIR-V, and a *diagnostic*. On the failure path
+ the diagnostic is the whole product, and Slang's are unusually good:
 
      error[E30015]: undefined identifier
        --> mesh.slang:10:26
@@ -15,27 +10,23 @@
      10 | output.sv_position = notAFunction(vid);
         |                      ^^^^^^^^^^^^ undefined identifier 'notAFunction'.
 
- A line, a column, the source line and a caret span. `plan.md` §3 says routing
- that verbatim into the thrown JS exception is most of what makes the agent loop
- work, and §6 says a compile that fails quietly and keeps the previous pipeline
- is the runtime version of crig's `$embed` trap. So `ShaderModule` carries the
- diagnostic on **both** paths — a warning on a successful compile is worth as
- much as an error on a failed one — and nothing here falls back to anything.
+ A line, a column, the source line and a caret span. Routing that verbatim into
+ the thrown JS exception is most of what makes shader iteration work, so
+ `ShaderModule` carries the diagnostic on *both* paths — a warning on a
+ successful compile is worth as much as an error on a failed one — and nothing
+ here falls back to anything. A compile that fails quietly and keeps the
+ previous pipeline is the worst possible outcome.
 
  ## One session, for the life of the process
 
- `spCreateSession` costs about 55 ms and a compile costs about 17 ms, so a
- session per compile would be four parts setup to one part work. There is one,
- made on first use.
-
- **It is never destroyed**, and that is deliberate rather than overlooked.
- Nothing owns it: `MeshPass`, the JS runtime and the test harness all compile,
- all outlive each other in different orders, and the only correct owner would be
- `main` — which would then have to be right on every early-return path for a
- teardown whose entire benefit is returning memory to a process that is exiting.
- Slang allocates it with `malloc`, not through C3's allocator, so a leak-tracked
- test run does not see it either. `slang::Session.free` exists in the binding and
- is exercised by the standalone tests there.
+ `spCreateSession` costs about 55 ms and a compile about 17 ms, so a session per
+ compile would be four parts setup to one part work. There is one, made on first
+ use, and it is never destroyed. Nothing owns it: `MeshPass`, the JS runtime and
+ the test harness all compile and all outlive each other in different orders,
+ and the only correct owner would be `main` — which would have to be right on
+ every early-return path for a teardown whose entire benefit is returning memory
+ to an exiting process. Slang allocates it with `malloc` rather than through
+ C3's allocator, so leak-tracked test runs do not see it either.
 *>
 module three;
 
@@ -51,16 +42,13 @@ faultdef
 <*
  The flags every compile in this project passes, in one place.
 
- `plan.md` §6 has the trap this closes: `project.json`'s `slangc` line was
- missing `-force-glsl-scalar-layout` while `mesh.slang`'s header said to pass it,
- which is two different SPIR-V modules and no error either way. There is now no
- offline invocation to disagree with — the prepare target is gone — so this array
- is the only place the target is configured and drift has nowhere to happen.
+ There is no offline `slangc` invocation to disagree with — nothing is compiled
+ ahead of time — so this array is the only place the target is configured.
 
- They are passed through `spProcessCommandLineArguments`, which takes the same
- argv `slangc` does, rather than mapped onto `spSetCodeGenTarget` and friends by
- hand. That is `plan.md` §3's suggestion and it is the right one: a flag that
- gains a setter in a future SDK still works spelled this way.
+ They go through `spProcessCommandLineArguments`, which takes the same argv
+ `slangc` does, rather than being mapped onto `spSetCodeGenTarget` and friends
+ by hand: a flag that gains a setter in a future SDK still works spelled this
+ way.
 *>
 const String[*] SLANG_ARGUMENTS = {
 	"-target", "spirv",
@@ -70,38 +58,35 @@ const String[*] SLANG_ARGUMENTS = {
 	// Keeps `vertexMain` called `vertexMain` in the module rather than `main`,
 	// which is what `gpu/pipeline.c3` names its stages by.
 	//
-	// **It is a no-op on the SDK this was built against**, measured rather than
-	// assumed: the module is byte-identical with and without it, through both
-	// this API and `slangc`. Kept because it is in the documented invocation,
-	// because it costs nothing, and because a default that changed once can
-	// change back — but the claim that it is load-bearing was not true here,
+	// It is a no-op on the SDK this was built against — the module is
+	// byte-identical with and without it, through both this API and `slangc` —
 	// and `the_entry_points_keep_their_names` does not fail when it is removed.
+	// Kept because it is in the documented invocation, costs nothing, and a
+	// default that changed once can change back.
 	"-fvk-use-entrypoint-name",
-	// Not optional and not decoration: without it the tightly packed float3 and
-	// float2 streams uploaded by `gpu/buffer.c3` are read at std430 strides, and
-	// geometry arrives a third of the way off with nothing reporting an error.
+	// Not optional: without it the tightly packed float3 and float2 streams
+	// uploaded by `gpu/buffer.c3` are read at std430 strides, and geometry
+	// arrives a third of the way off with nothing reporting an error.
 	"-force-glsl-scalar-layout",
-	// **`slangc` defaults to this and the compile-request API does not.**
+	// `slangc` defaults to this and the compile-request API does not.
 	//
-	// It is not in `mesh.slang`'s documented command line and it did not need to
-	// be, because it was the CLI's default; the API's default is row-major, so
-	// passing the documented flags verbatim still produced a different module.
-	// Every matrix in the frame block and the instance array is then read
-	// transposed. The truck still rendered — a plausible, wrong picture — and
-	// only the built-in triangle collapsed to fourteen pixels and said so.
+	// It is not in `mesh.slang`'s documented command line because it was the
+	// CLI's default; the API's default is row-major, so passing the documented
+	// flags verbatim still produced a different module. Every matrix in the
+	// frame block and the instance array is then read transposed — the truck
+	// still rendered a plausible, wrong picture, and only the built-in triangle
+	// collapsed to fourteen pixels and said so.
 	//
-	// The generalisation is worse than `plan.md` §6's version of this trap: it
-	// is not enough for two invocations to pass the same flags, because the
-	// defaults underneath them differ.
+	// Two invocations passing the same flags is not enough when the defaults
+	// underneath them differ.
 	"-matrix-layout-column-major",
 };
 
-// The SPIR-V magic number, little-endian. M1 checked this against a file on
-// disk, where it caught a stale or truncated build. Checked here against what
-// the compiler just returned, where it catches a Slang that reported success and
-// produced something else — which has a precedent worth respecting:
-// `spGetEntryPointCode` answers with a null pointer and a length of zero under
-// `-emit-spirv-directly` and reports no error at all.
+// The SPIR-V magic number, little-endian. Checked against what the compiler just
+// returned, where it catches a Slang that reported success and produced
+// something else — which happens: `spGetEntryPointCode` answers with a null
+// pointer and a length of zero under `-emit-spirv-directly` and reports no error
+// at all.
 const uint SPIRV_MAGIC = 0x07230203;
 
 <*
@@ -131,8 +116,7 @@ struct ShaderEntry
 
 fn void ShaderModule.free(&self)
 {
-	// **On the pointer, not the length.** `m3_stage.md`'s last verification row
-	// is this exact bug in `RunResult.free`: an allocator hands back a non-null
+	// Guarded on the pointer, not the length: an allocator hands back a non-null
 	// pointer for an empty string, and a `len > 0` guard leaks it — one byte per
 	// compile, invisible without leak tracking, unbounded in an agent loop.
 	if (self.spirv.ptr != null) alloc::free(mem, self.spirv);
@@ -159,13 +143,12 @@ fn slang::Session? slang_session()
 }
 
 <*
- Compile Slang source to a SPIR-V module and reflect it.
+ Compiles Slang source to a SPIR-V module and reflects it.
 
- **A shader that does not compile is not a fault.** It is the ordinary answer
- this function exists to give, and it comes back as `ok: false` with the
- diagnostic attached. A fault would throw the diagnostic away and leave the
- caller with nothing to print, which is the failure mode `plan.md` §6 calls the
- runtime version of the `$embed` trap.
+ A shader that does not compile is not a fault. It is the ordinary answer this
+ function exists to give, and it comes back as `ok: false` with the diagnostic
+ attached; a fault would throw the diagnostic away and leave the caller with
+ nothing to print.
 
  The faults below are for the cases where there is nothing to report *about the
  shader*: Slang did not start, or it reported success and handed back something
@@ -231,7 +214,7 @@ fn ShaderModule? compile_slang(String source, String name, ShaderEntry[] entries
 }
 
 <*
- Compile the source at `path`.
+ Compiles the source at `path`.
 
  @param name : `Overrides what diagnostics call the source; defaults to the path.`
 *>

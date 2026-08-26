@@ -1,33 +1,22 @@
 <*
  What is in a game's directory, without uploading any of it.
 
- `game.md` G1/S5. A `--assets` boot scans for `.glb` and `.gltf` and describes
- each one — mesh names, animation names, skin count, triangle count, bounds —
- for the price of the JSON chunk. No buffer is read, no image is decoded, and
- nothing reaches the device.
+ An `--assets` boot scans for `.glb` and `.gltf` and describes each one — mesh
+ names, animation names, skin count, triangle count, bounds — for the price of
+ the JSON chunk. No buffer is read, no image is decoded, nothing reaches the
+ device.
 
- ## Why this is not just a convenience
+ That makes "what have I got" a cheap question. Without it the only way to find
+ out what a file contains is to load it, which means uploading forty files just
+ to read their mesh names. It is also what a game's `main.js` wants at boot: a
+ manifest nobody had to write by hand or can forget to update.
 
- Before this, the only way to find out what a file contained was to load it, and
- loading it is the expensive, irreversible thing: an upload with no unload
- behind it (G2 is where that changes). So an agent asked to build a scene out of
- an unfamiliar kit had two bad options — upload all forty files to read their
- mesh names, or guess. **An inventory makes "what have I got" a cheap question**,
- which is the one an agent asks first and asks most.
-
- It is also what a game's `main.js` wants at boot: a manifest it did not have to
- write by hand and cannot forget to update.
-
- ## What it costs, and why the numbers are exact rather than estimated
-
- `gltf::open` parses the JSON and stops. Everything below is read out of that:
- an accessor's `count` is in the JSON, so a triangle count is a sum and not a
- guess, and a position accessor's `min`/`max` are required by the spec to be
- present — which is what makes bounds free here and would make them expensive
- anywhere else.
-
- A `.glb`'s binary chunk is never seeked to. On a 200 MB kit that is the whole
- difference between a boot and a wait.
+ The numbers are exact rather than estimated because `gltf::open` parses the
+ JSON and stops, and everything here is read out of that: an accessor's `count`
+ is in the JSON, so a triangle count is a sum; a position accessor's `min`/`max`
+ are required by the spec, which is what makes bounds free. A `.glb`'s binary
+ chunk is never seeked to — on a 200 MB kit that is the difference between a
+ boot and a wait.
 *>
 module three;
 
@@ -88,15 +77,14 @@ fn void Inventory.free_entries(&self)
 }
 
 <*
- Describe every glTF under `root`, recursively.
+ Describes every glTF under `root`, recursively.
 
- **Sorted by path**, so two runs on the same directory answer identically. A
- filesystem's own order is not a promise, and an inventory that reshuffled
- between boots would make every diff of a generated manifest unreadable.
+ Sorted by path, so two runs on the same directory answer identically — a
+ filesystem's own order is not a promise, and a reshuffling inventory makes
+ every diff of a generated manifest unreadable.
 
- A file that will not parse is **skipped rather than fatal**: one corrupt asset
- in a kit of forty should cost that one asset, exactly as M1 decided a texture
- the decoder cannot read costs that texture and not the model.
+ A file that will not parse is skipped rather than fatal: one corrupt asset in a
+ kit of forty should cost that one asset.
 
  @param root : `The assets directory.`
  @return `Owned by the caller; free it with Inventory.free_entries.`
@@ -160,9 +148,9 @@ fn bool ends_with_fold(String text, String suffix) @local
 }
 
 <*
- Byte order, shortest-first on a tie. C3 will not order `String` with `<`, and
- the reason is a good one — ordering text is a locale question — but a path is
- not text in that sense and byte order is exactly what a stable listing wants.
+ Byte order, shortest-first on a tie. C3 will not order `String` with `<` —
+ ordering text is a locale question — but a path is not text in that sense, and
+ byte order is exactly what a stable listing wants.
 *>
 fn bool before(String a, String b) @local
 {
@@ -175,8 +163,8 @@ fn bool before(String a, String b) @local
 }
 
 <*
- Insertion sort, because an inventory is tens of files and not thousands, and a
- sort with no allocation is one less thing that can fail inside a boot.
+ Insertion sort: an inventory is tens of files, not thousands, and a sort with
+ no allocation is one less thing that can fail inside a boot.
 *>
 fn void sort_paths(String[] names) @local
 {
@@ -194,10 +182,10 @@ fn void sort_paths(String[] names) @local
 }
 
 <*
- Read one file's JSON and answer with what it says about itself.
+ Reads one file's JSON and answers with what it says about itself.
 
- The stream is closed on every path, including the failing ones — which is the
- reason for the early `defer` rather than a close at the end.
+ The stream is closed on every path including the failing ones, which is why the
+ `defer` is early rather than a close at the end.
 *>
 fn InventoryEntry? describe_gltf(String root, String relative) @local
 {
@@ -237,9 +225,9 @@ fn InventoryEntry? describe_gltf(String root, String relative) @local
 <*
  A primitive's triangle count, from accessor counts alone.
 
- Indexed geometry counts its indices and unindexed counts its positions, which
- is the same rule `read_indices` follows when it actually uploads one — stated
- twice because the two read different things to reach the same number.
+ Indexed geometry counts its indices, unindexed counts its positions — the same
+ rule `read_indices` follows when it actually uploads one, reached here by
+ reading the JSON instead of the buffer.
 *>
 fn uint primitive_triangles(gltf::Gltf* doc, gltf::Primitive primitive) @local
 {
@@ -255,11 +243,10 @@ fn uint primitive_triangles(gltf::Gltf* doc, gltf::Primitive primitive) @local
 }
 
 <*
- Grow the entry's bounds by a primitive's position accessor.
+ Grows the entry's bounds by a primitive's position accessor.
 
- **The spec requires `min` and `max` on a POSITION accessor**, which is the only
- reason bounds are free here: they are in the JSON beside the count, and reading
- them costs nothing the triangle count did not already cost.
+ The spec requires `min` and `max` on a POSITION accessor, which is the only
+ reason bounds are free here: they sit in the JSON beside the count.
 *>
 fn void widen(InventoryEntry* entry, gltf::Gltf* doc, gltf::Primitive primitive) @local
 {

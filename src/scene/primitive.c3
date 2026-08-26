@@ -1,57 +1,43 @@
 <*
  Parametric shapes — the geometry an agent asks for by name rather than by file.
 
- ## This does not spend the thesis, and here is the argument
+ What crosses from JavaScript is a shape's *name and its numbers*; what comes
+ back is an ordinary asset index, indistinguishable from one `three.load`
+ produced. No script can read a vertex, write one, or hand an array of them over.
 
- `plan.md`'s load-bearing rule is that **an instance is an immutable asset
- reference plus a transform, and JS may not touch vertices**; the same paragraph
- observes that Three.js agents build scenes out of `BoxGeometry` and three.c3
- agents build them out of real assets. This file adds `BoxGeometry` and leaves
- the rule where it was, because the two were never one claim. What crosses from
- JavaScript is a shape's *name and its numbers*. What comes back is an ordinary
- asset index, indistinguishable from one `three.load` produced. No script can
- read a vertex, write one, or hand an array of them over — the refusal that makes
- every expressible scene optimized by construction is untouched.
+ ## One asset per parameter set
 
- What it does change is who has to have a `.glb` to start. An agent asked to lay
- out a room can do it in one script now, and swap in the kit when there is one.
-
- ## One asset per parameter set, which is what makes the Three.js habit cheap
-
- The habit an agent arrives with is a fresh geometry per mesh — `new
- THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)` inside a loop. Under Three.js
- that is N uploads and N draws unless the author knows to reach for
+ The habit an agent arrives with is a fresh geometry per mesh —
+ `new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)` inside a loop. Under
+ Three.js that is N uploads and N draws unless the author knows to reach for
  `InstancedMesh`. Here the built mesh is keyed by its parameters, and the second
  identical `BoxGeometry` answers with the first one's asset index — so the naive
- loop is one upload and one instanced draw, and **the habit produces the fast
- scene without the agent knowing why**. That is the same bargain `Assets.load`
- strikes by returning the first load of a repeated path, and `Primitive.key` is
- where it is struck.
+ loop is one upload and one instanced draw, and the habit produces the fast scene
+ without the agent knowing why. `Primitive.key` is where that is struck.
 
  The key is the parameters, formatted. Six decimals is therefore the resolution
  at which two shapes are the same shape: boxes 1.0 and 1.0000001 wide share an
- asset. That is deliberate and the trade is worth stating — a bit-exact key would
- make a width computed as `3 / 3` and one written as `1` two uploads and two draw
- calls, which is a performance cliff that depends on floating-point history and
- is invisible from JavaScript.
+ asset. That is deliberate — a bit-exact key would make a width computed as
+ `3 / 3` and one written as `1` two uploads and two draw calls, a performance
+ cliff that depends on floating-point history and is invisible from JavaScript.
 
  ## Three.js's formulas, copied rather than re-derived
 
  Positions, winding, UV layout and orientation are Three.js's: a plane faces +Z,
  a cylinder's axis is Y, a torus lies in the XY plane, a sphere's north pole is
- +Y, a cone's point is up. An agent that has memorized Three.js has memorized
+ +Y, a cone's point is up. An agent that has memorised Three.js has memorised
  those too, and a shape that is the right size and the wrong way up is a bug it
  has no reason to look for.
 
- Copying carries the **winding** across for free, and that matters more here than
- it does there. `render/pass.c3` builds the pipeline with `CULL_MODE_BACK_BIT`
- and `FRONT_FACE_COUNTER_CLOCKWISE`, so a face wound the wrong way is not a dark
+ Copying carries the winding across for free, and that matters more here.
+ `render/pass.c3` builds the pipeline with `CULL_MODE_BACK_BIT` and
+ `FRONT_FACE_COUNTER_CLOCKWISE`, so a face wound the wrong way is not a dark
  patch — it is a hole you can see the inside of the object through. Every
  grid-shaped face below emits `(a, b, d)` and `(b, c, d)` over a frame whose
- `u × v = normal`, which is the one invariant that keeps all six sides of a box,
- both caps of a cylinder and every quad of a sphere facing outward.
- `every_generated_face_points_outward` in `test/primitive_test.c3` asserts it
- against the triangles themselves rather than against a picture.
+ `u × v = normal`, which is the invariant that keeps all six sides of a box, both
+ caps of a cylinder and every quad of a sphere facing outward.
+ `every_generated_face_points_outward` asserts it against the triangles
+ themselves rather than against a picture.
 *>
 module three;
 
@@ -68,8 +54,8 @@ faultdef PRIMITIVE_HAS_NO_TRIANGLES, NO_SUCH_PRIMITIVE, NOTHING_BUILT_UNDER_THAT
  There is no `CONE`: a cone is a cylinder with a top radius of zero, which is
  what Three.js's `ConeGeometry` is too. Normalising it here rather than carrying
  a sixth kind means `new three.ConeGeometry(1, 2)` and
- `new three.CylinderGeometry(0, 1, 2)` produce **one** asset and therefore one
- draw call, instead of two uploads of the same triangles.
+ `new three.CylinderGeometry(0, 1, 2)` produce one asset and therefore one draw
+ call, instead of two uploads of the same triangles.
 *>
 enum PrimitiveKind
 {
@@ -116,10 +102,9 @@ fn PrimitiveKind? primitive_kind(String name)
  mesh: a sphere at 4096 x 4096 is sixteen million vertices and four hundred
  megabytes of device memory, asked for by a typo in a number literal.
 
- `prelude.js` refuses anything above this with a sentence naming the cap, so the
- agent is told rather than quietly given something else; the clamp in
- `primitive_segments` is the backstop for a script that reaches past the prelude
- and calls `__three.primitive` itself.
+ `prelude.js` refuses anything above this with a sentence naming the cap; the
+ clamp in `primitive_segments` is the backstop for a script that reaches past the
+ prelude and calls `__three.primitive` itself.
 *>
 const uint MAX_PRIMITIVE_SEGMENTS = 512;
 
@@ -130,15 +115,11 @@ const uint MAX_PRIMITIVE_SEGMENTS = 512;
  gets built out of, and a scene of orange boxes reads as "something is wrong with
  the material" to an agent looking at its own screenshot.
 
- **Stated in sRGB and converted where it is used.** `GpuMesh.base_color` is a
- linear factor, because its dominant source is a glTF `baseColorFactor` and the
+ Stated in sRGB and converted where it is used. `GpuMesh.base_color` is a linear
+ factor, because its dominant source is a glTF `baseColorFactor` and the
  specification defines that linear. Writing 0.5711 here would be the same colour
- and would be unreadable, so the number stays the one a colour picker shows and
+ and unreadable, so the number stays the one a colour picker shows and
  `srgb_to_linear_rgb` runs at the assignment.
-
- It renders to the same bytes it did before the pipeline was corrected — 199,
- 199, 204 — so this constant needed no retuning, unlike anything chosen against
- a *textured* surface.
 *>
 const float[4] PRIMITIVE_COLOR = { 0.78, 0.78, 0.80, 1.0 };
 
@@ -149,7 +130,7 @@ const float[4] PRIMITIVE_COLOR = { 0.78, 0.78, 0.80, 1.0 };
  share them and each reads them differently — `a` is a box's width, a sphere's
  radius, a cylinder's *top* radius and a torus's ring radius — so a name that
  fitted one would be a lie in the other four. The constructors below are where
- the names live, and they are the only intended way to fill this in.
+ the names live, and are the only intended way to fill this in.
 *>
 struct Primitive
 {
@@ -163,9 +144,9 @@ struct Primitive
 	uint v;
 	uint w;
 	// Cylinders only: whether the flat ends are generated. Three.js spells this
-	// `openEnded` and means the opposite; the positive form is used here because
-	// a field that is false by default and means "has caps" is a trap for
-	// whoever fills the struct in without reading this.
+	// `openEnded` and means the opposite; the positive form is used here because a
+	// field that is false by default and means "has caps" is a trap for whoever
+	// fills the struct in without reading this.
 	bool capped;
 }
 
@@ -202,8 +183,7 @@ fn Primitive sphere_shape(float radius, uint width_segments = 32, uint height_se
 
 <*
  A flat rectangle in the XY plane, facing +Z — Three.js's orientation, which is
- vertical. A floor is this rotated -90 degrees about X, and that is the line an
- agent already knows how to write.
+ vertical. A floor is this rotated -90 degrees about X.
 *>
 fn Primitive plane_shape(float width, float height, uint width_segments = 1, uint height_segments = 1)
 {
@@ -243,7 +223,7 @@ fn Primitive cylinder_shape(
 
  `tubular_segments` goes around the ring and `radial_segments` around the tube,
  which is the opposite of the order Three.js's *constructor* takes them in. The
- prelude keeps the constructor's order and swaps here; see `TorusGeometry`.
+ prelude keeps the constructor's order and swaps here.
 *>
 fn Primitive torus_shape(float radius, float tube, uint tubular_segments = 48, uint radial_segments = 12)
 {
@@ -274,9 +254,9 @@ fn uint primitive_segments(uint requested, uint least)
  The shape's identity: equal keys mean equal geometry.
 
  Readable rather than hashed, because it becomes `Asset.path` and a script that
- prints `mesh.geometry` or a stats dump should see `<box 2.000000x1.000000x2.000000 1x1x1>`
- and know what it is looking at. Every field that reaches a vertex is in it —
- which is what makes "equal keys mean equal geometry" true rather than hopeful.
+ prints `mesh.geometry` or a stats dump should see
+ `<box 2.000000x1.000000x2.000000 1x1x1>` and know what it is looking at. Every
+ field that reaches a vertex is in it.
 *>
 fn String Primitive.key(&self, Allocator allocator)
 {
@@ -320,22 +300,22 @@ struct GeometryBuilder
 	List{Vec3} positions;
 	List{Vec3} normals;
 	List{Vec2} uvs;
-	// glTF's COLOR_0, and only ever filled by the path that re-reads a mesh out
-	// of the file it came from — a generated shape has no colour attribute and a
-	// hull never had one. Left empty by `vertex`, so a builder assembled shape by
-	// shape has none and every existing caller is unchanged.
+	// glTF's COLOR_0, and only ever filled by the path that re-reads a mesh out of
+	// the file it came from — a generated shape has no colour attribute and a hull
+	// never had one. Left empty by `vertex`, so a builder assembled shape by shape
+	// has none.
 	//
-	// Here rather than on the upload path because the reader is the exporter:
-	// a layer whose mask reads a vertex colour needs the attribute written beside
-	// it, or the mask it names is one the file does not carry. `scene/export.c3`.
+	// Here rather than on the upload path because the reader is the exporter: a
+	// layer whose mask reads a vertex colour needs the attribute written beside
+	// it, or the mask it names is one the file does not carry.
 	List{Vec4} colors;
 	List{uint} indices;
 }
 
 <*
- Heap-backed from the first push, for `Assets.init`'s reason: a List left with a
- null allocator resolves to `tmem`, and any `@pool()` up the stack then frees the
- vertices out from under the upload.
+ Heap-backed from the first push: a List left with a null allocator resolves to
+ `tmem`, and any `@pool()` up the stack then frees the vertices out from under
+ the upload.
 *>
 fn void GeometryBuilder.init(&self)
 {
@@ -391,12 +371,12 @@ fn void Primitive.build(&self, GeometryBuilder* out)
  A subdivided rectangle in an arbitrary frame — the one grid every flat surface
  here is made of, and six of them are a box.
 
- **`u_axis × v_axis` must equal `normal`.** That is the whole winding argument:
- with a right-handed frame, `(a, b, d)` and `(b, c, d)` over rows that run
- *down* the v axis come out counter-clockwise seen from +normal, which is the
- front face `render/pass.c3` keeps. A frame passed in left-handed produces a
- face that is invisible from outside and visible from inside, and nothing about
- that reads as an error in a screenshot.
+ `u_axis × v_axis` must equal `normal`. That is the whole winding argument: with
+ a right-handed frame, `(a, b, d)` and `(b, c, d)` over rows that run *down* the
+ v axis come out counter-clockwise seen from +normal, which is the front face
+ `render/pass.c3` keeps. A left-handed frame produces a face that is invisible
+ from outside and visible from inside, and nothing about that reads as an error
+ in a screenshot.
 
  @param offset : `How far along the normal the face sits — half the box's depth, or zero for a lone plane.`
 *>
@@ -418,8 +398,8 @@ fn void build_face(
 			Vec3 position = u_axis * ((fu - 0.5f) * u_length)
 				+ v_axis * ((0.5f - fv) * v_length)
 				+ normal * offset;
-			// v counts down the face and the texture coordinate counts up, which
-			// is Three.js's layout: uv (0, 0) is the bottom-left corner.
+			// v counts down the face and the texture coordinate counts up, which is
+			// Three.js's layout: uv (0, 0) is the bottom-left corner.
 			out.vertex(position, normal, { fu, 1.0f - fv });
 		}
 	}
@@ -442,10 +422,9 @@ fn void build_face(
 <*
  Six faces, in Three.js's order: +X, -X, +Y, -Y, +Z, -Z.
 
- Each is a `build_face` whose frame is right-handed about its own outward
- normal, and the segment counts follow Three.js's — the +X face is subdivided by
- (depth, height) rather than by (width, height), because those are the axes it
- actually spans.
+ Each is a `build_face` whose frame is right-handed about its own outward normal,
+ and the segment counts follow Three.js's — the +X face is subdivided by (depth,
+ height) rather than by (width, height), because those are the axes it spans.
 *>
 fn void build_box(GeometryBuilder* out, Primitive shape) @local
 {
@@ -471,9 +450,9 @@ fn void build_plane(GeometryBuilder* out, Primitive shape) @local
 
  The ring nearest each pole is a fan of triangles rather than a grid of quads,
  because the quad's two upper vertices are the same point — so one of its two
- triangles is degenerate. Emitting it anyway would put zero-area triangles in
- the BVH, where they are a ray test that can never hit and a leaf that can never
- be pruned.
+ triangles is degenerate. Emitting it anyway would put zero-area triangles in the
+ BVH, where they are a ray test that can never hit and a leaf that can never be
+ pruned.
 *>
 fn void build_sphere(GeometryBuilder* out, Primitive shape) @local
 {
@@ -496,8 +475,8 @@ fn void build_sphere(GeometryBuilder* out, Primitive shape) @local
 				radius * math::sin(phi) * math::sin(theta),
 			};
 			// From the centre, which is what a sphere's normal is — and it stays
-			// unit length under the normalize even at the poles, where the two
-			// sines vanish and only the cosine survives.
+			// unit length under the normalize even at the poles, where the two sines
+			// vanish and only the cosine survives.
 			out.vertex(position, position.normalize(), { u, 1.0f - v });
 		}
 	}
@@ -520,8 +499,8 @@ fn void build_sphere(GeometryBuilder* out, Primitive shape) @local
 <*
  The side wall, then the two flat ends.
 
- The side's normal is not radial: it leans by the slope of the wall, so a cone
- is lit as a cone rather than as a cylinder that happens to taper. Getting this
+ The side's normal is not radial: it leans by the slope of the wall, so a cone is
+ lit as a cone rather than as a cylinder that happens to taper. Getting this
  wrong is the classic silent one — the silhouette is right and only the shading
  says otherwise.
 *>
@@ -562,7 +541,7 @@ fn void build_cylinder(GeometryBuilder* out, Primitive shape) @local
 			uint c = b + 1;
 			uint d = a + 1;
 			// A tip is a row of points, not a row of edges: the half of each quad
-			// that collapses onto it is dropped, the same as at a sphere's pole.
+			// that collapses onto it is dropped, as at a sphere's pole.
 			if (radius_top > 0 || iy != 0) out.triangle(a, b, d);
 			if (radius_bottom > 0 || iy != rows - 1) out.triangle(b, c, d);
 		}
@@ -579,9 +558,9 @@ fn void build_cylinder(GeometryBuilder* out, Primitive shape) @local
  One flat end, as a fan around a single centre vertex.
 
  Three.js pushes a *copy* of the centre per segment; every copy carries the same
- position, the same normal and the same uv, so the copies exist to keep each
- triangle's three vertices adjacent in the buffer for its group bookkeeping.
- There are no groups here, so there is one centre.
+ position, normal and uv, so the copies exist only to keep each triangle's three
+ vertices adjacent in the buffer for its group bookkeeping. There are no groups
+ here, so there is one centre.
 *>
 fn void build_cap(GeometryBuilder* out, float radius, float y, bool top, uint radial) @local
 {
@@ -670,13 +649,12 @@ fn void build_torus(GeometryBuilder* out, Primitive shape) @local
 // ============================================================================
 
 <*
- Build a shape and upload it — or answer with the one already built for exactly
+ Builds a shape and uploads it, or answers with the one already built for exactly
  these numbers.
 
- The reuse is the point rather than a saving: see the header. It is keyed on
- `Asset.path`, which a generated shape fills in with `Primitive.key` the way a
- loaded file fills it in with its filename, so the two kinds of asset share one
- table and one dedup rule.
+ Keyed on `Asset.path`, which a generated shape fills in with `Primitive.key` the
+ way a loaded file fills it in with its filename, so the two kinds of asset share
+ one table and one dedup rule.
 
  @return `The asset's handle, for Scene.add_mesh.`
  @return? PRIMITIVE_HAS_NO_TRIANGLES : `The numbers describe nothing — a zero radius, a zero-height cone with no caps. The prelude refuses these first; this is what a forged __three.primitive call gets.`
@@ -699,9 +677,9 @@ fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 
 		AssetId built = self.upload_built(gpu, key, shape.kind.label(), &geometry)!;
 		// Kept so the exporter can tessellate this again rather than read it back
-		// off the device — `scene/export.c3`. Set after the upload rather than
-		// through `upload_built`, which builds hulls and glTF primitives too and
-		// has no business knowing what a parametric shape is.
+		// off the device. Set after the upload rather than through `upload_built`,
+		// which builds hulls and glTF primitives too and has no business knowing
+		// what a parametric shape is.
 		self.slot(built).primitive = shape;
 		self.slot(built).has_primitive = true;
 		return built;
@@ -713,7 +691,7 @@ fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 
  Split out because it is the *first* half of the dedup rule and every generator
  needs it before it does the work: `Assets.primitive` asks before it tessellates
- and `Assets.convex` asks before it runs a hull, which is what keeps a repeated
+ and `Assets.convex` asks before it runs a hull, which keeps a repeated
  construction cheap rather than merely deduplicated after the fact.
 
  @return? NOTHING_BUILT_UNDER_THAT_KEY : `No generator has filed an asset under this key yet.`
@@ -734,19 +712,18 @@ fn AssetId? Assets.built(&self, String key)
 }
 
 <*
- Upload a filled `GeometryBuilder` as a one-mesh asset filed under `key`.
+ Uploads a filled `GeometryBuilder` as a one-mesh asset filed under `key`.
 
  The tail every generator shares — the upload, the bounds, the BVH and the
- all-or-nothing cleanup — so that a shape three.c3 tessellated, a hull it
- computed and a glTF primitive it read all reach the device through one piece of
- code and are indistinguishable afterwards.
+ all-or-nothing cleanup — so a shape three.c3 tessellated, a hull it computed and
+ a glTF primitive it read all reach the device through one piece of code and are
+ indistinguishable afterwards.
 
- **The optional streams are optional by length rather than by flag.** A builder
- that filled `normals` and `uvs` for every position gets both uploaded; one that
- left `uvs` empty — a convex hull, which has no natural parameterisation — gets
+ The optional streams are optional by length rather than by flag. A builder that
+ filled `normals` and `uvs` for every position gets both uploaded; one that left
+ `uvs` empty — a convex hull, which has no natural parameterisation — gets
  `has_uvs = false` and the shader's no-uv branch. That is the same test
- `upload_primitive` applies to a glTF accessor, so there is one rule for what
- "this stream exists" means rather than two that can disagree.
+ `upload_primitive` applies to a glTF accessor.
 
  `key` and `label` are copied; the caller may hand over temporary strings.
 
@@ -758,8 +735,8 @@ fn AssetId? Assets.built(&self, String key)
 fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry, bool lines = false)
 {
 	// The generated streams sample the white stand-in, exactly as an untextured
-	// glTF primitive does: the binding is pushed for every draw whether or not
-	// the mesh carries uvs, so it has to be occupied either way.
+	// glTF primitive does: the binding is pushed for every draw whether or not the
+	// mesh carries uvs, so it has to be occupied either way.
 	self.ensure_white(gpu)!;
 
 	GpuMesh mesh = {
@@ -777,8 +754,8 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 	asset.meshes.init(mem, 1);
 	asset.bounds = mesh.bounds;
 
-	// Nothing below is on `self.assets` yet, so a failure part-way is this
-	// scope's to undo — the same argument `Assets.load` makes.
+	// Nothing below is on `self.assets` yet, so a failure part-way is this scope's
+	// to undo — the same argument `Assets.load` makes.
 	defer catch
 	{
 		mesh.free_buffers(gpu);
@@ -796,17 +773,17 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
 	}
 	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
-	// **Not for lines.** The index buffer is pairs and `build_bvh` reads it in
-	// threes, so a line mesh would get a tree over triangles that do not exist and
+	// Not for lines. The index buffer is pairs and `build_bvh` reads it in threes,
+	// so a line mesh would get a tree over triangles that do not exist and
 	// `scene.pick` would answer with a hit on a debug helper. Skipping it is also
 	// what makes a helper unpickable — `pick.c3` steps over a mesh with no tree —
-	// and that is the behaviour a script wants: a click goes through the box
-	// helper onto the thing it is drawn around.
+	// and that is what a script wants: a click goes through the box helper onto
+	// the thing it is drawn around.
 	if (!lines) mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
 
-	// A generated shape has no file to go back to, so it is uploaded at the
-	// moment it is built and says so — `ensure_uploaded` would have nothing to
-	// read from if it were ever reached for one.
+	// A generated shape has no file to go back to, so it is uploaded at the moment
+	// it is built and says so — `ensure_uploaded` would have nothing to read from
+	// if it were ever reached for one.
 	mesh.uploaded = true;
 	mesh.gltf_mesh = -1;
 	mesh.gltf_primitive = -1;
@@ -817,10 +794,10 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 <*
  The tight box around a generated shape.
 
- Computed from the vertices rather than from the parameters, so it is right for
- a shape whose extent is not obvious from its numbers — a torus is
- `radius + tube` wide and `tube` deep, and a cone's box is not centred on its
- own origin in the way a first guess suggests.
+ Computed from the vertices rather than from the parameters, so it is right for a
+ shape whose extent is not obvious from its numbers — a torus is `radius + tube`
+ wide and `tube` deep, and a cone's box is not centred on its own origin in the
+ way a first guess suggests.
 *>
 fn collision::Aabb3 bounds_of(Vec3[] positions)
 {

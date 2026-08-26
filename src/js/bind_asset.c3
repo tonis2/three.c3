@@ -1,21 +1,19 @@
 <*
  `three.load()`, `three.BoxGeometry()` and what an asset can be asked about.
 
- Five verbs, and the smallest set that lets `prelude.js` build an `Asset` whose
+ The smallest set of verbs that lets `prelude.js` build an `Asset` whose
  `mesh(name)` lookup happens in JavaScript: the load itself, the path back, the
  mesh names in order, one shape builder for all five parametric kinds, and the
- hull of a point cloud.
- Resolving a name to an index on this side would be a crossing per lookup and a
- second implementation of a search the host already has; handing the names over
- once means `asset.meshes` is also something a script can print when it has
- guessed a name wrong, which is the case that actually happens.
+ hull of a point cloud. Resolving a name to an index on this side would be a
+ crossing per lookup and a second implementation of a search the host already
+ has; handing the names over once also means `asset.meshes` is something a script
+ can print when it has guessed a name wrong.
 
- **Loading the same path twice returns the same asset**, because `Assets.load`
- does — that is the coarse half of "linked, not duplicated" (`plan.md` §2), and
- it means a script that loads a kit in a loop pays once. `primitive` obeys the
- same rule against a key made of its parameters, which is what makes a thousand
- `new three.BoxGeometry(1, 1, 1)` one upload and one draw call; see
- `scene/primitive.c3`.
+ Loading the same path twice returns the same asset, because `Assets.load` does —
+ the coarse half of "linked, not duplicated" — so a script that loads a kit in a
+ loop pays once. `primitive` obeys the same rule against a key made of its
+ parameters, which is what makes a thousand `new three.BoxGeometry(1, 1, 1)` one
+ upload and one draw call.
 *>
 module three;
 
@@ -30,8 +28,8 @@ import std::collections::list;
  `load(path)` — the asset's index, for `add`.
 
  The device is required, and the message says so rather than throwing something
- about a null pointer: a runtime built for the scene-math tests has no GPU, and
- a script that reaches for a file in one should be told which of the two it is
+ about a null pointer: a runtime built for the scene-math tests has no GPU, and a
+ script that reaches for a file in one should be told which of the two it is
  missing.
 *>
 fn void js_load(
@@ -56,10 +54,9 @@ fn void js_load(
 			return;
 		}
 
-		// Relative to the assets directory in a `--assets` boot, and to the
-		// working directory otherwise — see `JsRuntime.resolve_asset`. Resolved
-		// before the load so that a path reaching out of the game is refused by
-		// name rather than opening whatever it found.
+		// Relative to the assets directory in a `--assets` boot, and to the working
+		// directory otherwise. Resolved before the load so a path reaching out of
+		// the game is refused by name rather than opening whatever it found.
 		String? opening = self.resolve_asset(path, tmem);
 		if (catch err = opening)
 		{
@@ -95,8 +92,7 @@ fn void js_load(
  The code is the enum's own ordinal and the prelude derives it from Three.js's
  colourspace strings, so this is the one place the two spellings meet. Anything
  unrecognised is `SRGB`: the prelude has already refused a string it does not
- know, so a code arriving here that is neither 0 nor 1 is a host bug, and the
- forgiving answer is the one that renders a picture correctly.
+ know, so a code arriving here that is neither 0 nor 1 is a host bug.
 *>
 fn ColorSpace color_space_of(int code) @local
 {
@@ -108,10 +104,9 @@ fn ColorSpace color_space_of(int code) @local
 
  The extents are here because the prelude's `Texture` wants them and there is no
  second verb to ask for them: an agent sizing a plane to an image's aspect ratio
- would otherwise have to guess, and a texture that loaded at half the resolution
- it expected is exactly the thing worth being able to see.
+ would otherwise have to guess.
 
- **`levels` is what the image really got, not what was asked for.** A device that
+ `levels` is what the image really got, not what was asked for. A device that
  cannot blit the format gives one level whatever `generateMipmaps` said, and a
  handle reporting the request rather than the result would make `tex.levels` a
  restatement of the caller's own argument.
@@ -129,16 +124,14 @@ fn qjs::Value texture_value(qjs::Context* js, int index, Texture* uploaded) @loc
 <*
  `texture(path, space, mips)` — decode a PNG or JPEG and upload it.
 
- **The path goes through `resolve_asset`, the same door `three.load` uses**, so
- under `--assets` a texture may only come from inside the game — a script cannot
- reach `../../etc/passwd` and hand its bytes to a decoder.
+ The path goes through `resolve_asset`, the same door `three.load` uses, so under
+ `--assets` a texture may only come from inside the game.
 
- The index is not a generational handle, unlike an asset or a node. It does not
+ The index is not a generational handle, unlike an asset or a node, and does not
  need to be: the only way a script gets one is the `Texture` the prelude wraps it
- in, that object marks itself dead on `dispose()`, and a second
- `three.texture()` of the same file returns a second object holding a reference
- of its own. So a stale index cannot be presented — there is no live JS value
- carrying one.
+ in, that object marks itself dead on `dispose()`, and a second `three.texture()`
+ of the same file returns a second object holding a reference of its own. So a
+ stale index cannot be presented.
 *>
 fn void js_texture(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -194,22 +187,22 @@ fn void js_texture(
 <*
  `dataTexture(bytes, width, height, space, mips)` — pixels a script built.
 
- **The bytes are borrowed and are copied before this returns.** `js.bytes` points
+ The bytes are borrowed and are copied before this returns. `js.bytes` points
  into the engine's own storage for the `Uint8Array` the script is holding, which
  moves if the array is resized and is gone when it is collected — so the only
- safe thing to do with it is exactly what happens here: read it inside the call.
- `claim_texture` hashes it, copies it into a staging buffer and uploads, all
- before control goes back to JavaScript. Nothing keeps the pointer.
+ safe thing to do with it is read it inside the call. `claim_texture` hashes it,
+ copies it into a staging buffer and uploads, all before control goes back to
+ JavaScript.
 
- **Deduplicated against every other texture, which is the interesting part.**
- Pixels generated in a script and the identical image loaded from a `.png` are
- one upload, because the hash is over RGBA bytes and has no idea where they came
- from. A script that regenerates the same texture on every frame pays for one.
+ Deduplicated against every other texture, which is the interesting part: pixels
+ generated in a script and the identical image loaded from a `.png` are one
+ upload, because the hash is over RGBA bytes and has no idea where they came
+ from. A script that regenerates the same texture every frame pays for one.
 
  The size is stated rather than inferred, and checked against the array's length.
- The alternative — deriving one from the other — cannot tell a 64x64 from a
- 128x32, so a script that had its dimensions the wrong way round would get a
- skewed picture and no complaint.
+ Deriving one from the other cannot tell a 64x64 from a 128x32, so a script that
+ had its dimensions the wrong way round would get a skewed picture and no
+ complaint.
 *>
 fn void js_data_texture(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -246,8 +239,7 @@ fn void js_data_texture(
 	{
 		// An empty slice means "not a Uint8Array" *and* "an empty one", and the
 		// message covers both because the fix is the same either way: the prelude
-		// has already widened a plain Array into a Uint8Array before this, so
-		// anything arriving here without bytes had none to give.
+		// has already widened a plain Array into a Uint8Array before this.
 		*out = js.raise("new three.DataTexture(data, ...) wants a Uint8Array of RGBA bytes, and this one is empty");
 		return;
 	}
@@ -262,14 +254,13 @@ fn void js_data_texture(
 		return;
 	}
 
-	// An `Image` over the borrowed bytes rather than a copy of them. `to_rgba`
-	// inside `claim_texture` makes the one copy this path needs; a second one
-	// here would be 1 MB memcpy'd for nothing on a 512x512.
+	// An `Image` over the borrowed bytes rather than a copy. `to_rgba` inside
+	// `claim_texture` makes the one copy this path needs; a second one here would
+	// be 1 MB memcpy'd for nothing on a 512x512.
 	//
-	// **The null allocator is what makes borrowing safe.** `Image.free` frees
-	// nothing without one, so this struct owning bytes it did not allocate can
-	// never free the engine's storage — and it is never freed here anyway,
-	// because it is not ours to free.
+	// The null allocator is what makes borrowing safe: `Image.free` frees nothing
+	// without one, so this struct owning bytes it did not allocate can never free
+	// the engine's storage.
 	image::Image borrowed = {
 		.width = (uint)width,
 		.height = (uint)height,
@@ -280,10 +271,10 @@ fn void js_data_texture(
 	};
 
 	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
-	// **`generateMipmaps` is worth reaching for here more than on a file.** Pixels
-	// a script generated are as often a table as a picture — a palette, a ramp, a
-	// noise field indexed exactly — and a blurred level of a table is not a
-	// cheaper approximation of anything.
+	// `generateMipmaps` is worth reaching for here more than on a file. Pixels a
+	// script generated are as often a table as a picture — a palette, a ramp, a
+	// noise field indexed exactly — and a blurred level of a table is not a cheaper
+	// approximation of anything.
 	bool mips = arg_truth_or(&js, argc, args, 4, true);
 
 	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips);
@@ -293,13 +284,13 @@ fn void js_data_texture(
 		return;
 	}
 
-	// **Read back off the upload, not echoed from the arguments.** The two agree
-	// when everything is right, which is exactly why echoing is tempting and
-	// wrong: it makes `tex.width` a restatement of what the caller already said
-	// rather than a report of what happened, so a dimension lost or transposed
-	// anywhere between here and the device is invisible from JavaScript. Written
-	// as an echo first, and a `.width`/`.height` swap injected into the `Image`
-	// above passed the whole suite.
+	// Read back off the upload, not echoed from the arguments. The two agree when
+	// everything is right, which is why echoing is tempting and wrong: it makes
+	// `tex.width` a restatement of what the caller already said rather than a
+	// report of what happened, so a dimension lost or transposed anywhere between
+	// here and the device is invisible from JavaScript. Written as an echo first,
+	// and a `.width`/`.height` swap injected into the `Image` above passed the
+	// whole suite.
 	*out = texture_value(&js, index, self.pass.assets.texture_at(index));
 }
 
@@ -309,14 +300,13 @@ fn void js_data_texture(
  Not a device limit — `maxImageDimension2D` is 16384 on everything this targets —
  but a limit on the mistake. The dimensions and the byte count are checked against
  each other, so a wrong pair is refused rather than uploaded; this is the guard
- for a *right* pair that is absurd, where the array was built by a loop with a
- bad bound and the allocation is what fails, several seconds later, somewhere
- else. 8192x8192 RGBA is 256 MB, which is already past what anyone means.
+ for a *right* pair that is absurd, where the array was built by a loop with a bad
+ bound. 8192x8192 RGBA is 256 MB, which is already past what anyone means.
 *>
 const int MAX_TEXTURE_SIDE = 8192;
 
 <*
- Turn a texture fault into a sentence that says what to do about it.
+ Turns a texture fault into a sentence that says what to do about it.
 
  Each of the three is a different next move — check the path, convert the file,
  re-export it at 8 bits — and "could not load" would cost the agent all of that.
@@ -344,9 +334,9 @@ fn String texture_failure(fault err, String path) @local
 
  Not a free. The slot goes only when nothing names it at all, so disposing a
  handle whose image is still on a material leaves the material drawing correctly
- — which is the behaviour that makes `dispose()` safe to call the moment a script
- is done *referring* to a texture, rather than something to be timed against the
- materials that use it.
+ — which makes `dispose()` safe to call the moment a script is done *referring*
+ to a texture, rather than something to be timed against the materials that use
+ it.
 
  Waits for the device when this release is the last one, for
  `MeshPass.set_material_map`'s reason: the image is destroyed inside
@@ -370,22 +360,19 @@ fn void js_texture_dispose(
  `textureRead(index, into)` — copy a texture's pixels into a caller's
  `Uint8Array`.
 
- ## The destination is an argument, and that is the design
-
- Every other way of getting bytes back to a script is worse here. Building a
- plain `Array` costs one host crossing per element, which is 65,536 of them for
- a 128x128 texture. Handing out an `ArrayBuffer` over host memory — what
- `qjs::Context.buffer` does — means the host now owns an allocation whose
- lifetime is decided by the script, and the only safe end to that is a detach the
- script has to be trusted to trigger.
+ The destination is an argument, and that is the design. Building a plain `Array`
+ costs one host crossing per element — 65,536 of them for a 128x128 texture.
+ Handing out an `ArrayBuffer` over host memory means the host owns an allocation
+ whose lifetime is decided by the script, and the only safe end to that is a
+ detach the script has to be trusted to trigger.
 
  So the script supplies the memory and the host writes into it. `js.bytes` gives
- a mutable slice of the engine's own storage for the array, no copy, no
- ownership question, and the same function `dataTexture` already reads *from*.
- It also puts the allocation at the call site, where a caller reading a texture
+ a mutable slice of the engine's own storage for the array — no copy, no
+ ownership question, and the same function `dataTexture` already reads *from*. It
+ also puts the allocation at the call site, where a caller reading a texture
  every frame can see what it costs.
 
- **The bytes are the uploaded ones, not the sampled ones.** The copy performs no
+ The bytes are the uploaded ones, not the sampled ones. The copy performs no
  format conversion, so an sRGB texture reads back as the sRGB bytes it was made
  from — which is what makes `new three.DataTexture(px, w, h).read()` return `px`,
  and what `png::save_file` wants.
@@ -442,10 +429,9 @@ fn void js_texture_read(
  already a switch on the kind and a per-shape verb here would be five copies of
  this function differing only in which arguments they ignore. What the numbers
  mean is `Primitive`'s business; `prelude.js`'s `BoxGeometry` and friends are
- where they get their Three.js names, their defaults and their range checks.
+ where they get their Three.js names, defaults and range checks.
 
- The device is required and says so: a shape has to be uploaded to be drawn, and
- a runtime built for the scene-math tests has nowhere to put it.
+ The device is required and says so: a shape has to be uploaded to be drawn.
 *>
 fn void js_primitive(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -473,10 +459,10 @@ fn void js_primitive(
 			return;
 		}
 
-		// Clamped rather than trusted: the prelude has already refused anything
-		// out of range with a better sentence, and this is what a script that
-		// called `__three.primitive` itself gets instead of an allocation the
-		// size of the device.
+		// Clamped rather than trusted: the prelude has already refused anything out
+		// of range with a better sentence, and this is what a script that called
+		// `__three.primitive` itself gets instead of an allocation the size of the
+		// device.
 		Primitive shape = {
 			.kind = kind,
 			.a = arg_float(&js, argc, args, 1),
@@ -504,15 +490,13 @@ fn void js_primitive(
 
  `points` is a flat JavaScript array of numbers, `x, y, z` per point, because
  that is the one shape the crossing can read in a single pass: an array of
- `Vector3`s would be three property lookups and a released value per point,
- and `prelude.js` has to walk the caller's input anyway to validate it. It
- flattens while it validates and hands the result over already checked.
+ `Vector3`s would be three property lookups and a released value per point, and
+ `prelude.js` has to walk the caller's input anyway to validate it.
 
  Refused rather than clamped at both ends, unlike `primitive`'s segment counts:
  there is no nearest sensible cloud to substitute for a bad one, and a hull
  quietly built from the first 65536 of a script's points would be a shape nobody
- asked for. See `scene/convex.c3` for why a cloud crossing this boundary leaves
- the thesis where it was.
+ asked for.
 *>
 fn void js_convex(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -574,8 +558,8 @@ fn void js_convex(
 		if (catch err = asset)
 		{
 			// Said rather than named, unlike `js_load`'s faults: there is exactly
-			// one thing that can go wrong here that is about the caller's input,
-			// and "CONVEX_HULL_IS_DEGENERATE" does not tell an agent staring at a
+			// one thing that can go wrong here that is about the caller's input, and
+			// "CONVEX_HULL_IS_DEGENERATE" does not tell an agent staring at a
 			// generated cloud which of the three ways it collapsed.
 			if (err == CONVEX_HULL_IS_DEGENERATE)
 			{
@@ -595,8 +579,8 @@ fn void js_convex(
 }
 
 <*
- One FNV-1a step over a single uint, split out because the ribbon key mixes a
- lot of them and the multiplier is easier to trust in one place.
+ One FNV-1a step over a single uint, split out because the ribbon key mixes a lot
+ of them and the multiplier is easier to trust in one place.
 *>
 fn ulong ribbon_fnv(ulong hash, uint bits) @inline
 {
@@ -605,10 +589,10 @@ fn ulong ribbon_fnv(ulong hash, uint bits) @inline
 	return hash;
 }
 
-// Read one number out of a flat array argument, with the same finite backstop
-// the other geometry reads use: `prelude.js` refuses a non-finite component
-// with a sentence naming its index, and zero is what a forged call gets instead
-// of spreading a NaN into sixty neighbouring vertices.
+// Read one number out of a flat array argument, with the same finite backstop the
+// other geometry reads use: `prelude.js` refuses a non-finite component with a
+// sentence naming its index, and zero is what a forged call gets instead of
+// spreading a NaN into sixty neighbouring vertices.
 fn float ribbon_float(qjs::Context* js, qjs::Value array, uint idx)
 {
 	qjs::Value value = js.index(array, idx);
@@ -618,28 +602,25 @@ fn float ribbon_float(qjs::Context* js, qjs::Value array, uint idx)
 }
 
 <*
- `ribbon(positions, normals, uvs, columns, rows)` — a strip geometry as an
- asset, built from a grid of vertices rather than from a parametric shape.
+ `ribbon(positions, normals, uvs, columns, rows)` — a strip geometry as an asset,
+ built from a grid of vertices rather than from a parametric shape.
 
- Flat `positions`, `normals` and `uvs` arrays, row-major over `columns` x
- `rows`: one cross-section of `columns` vertices, one per row, in the order
- `row` walked down the path then `column` walked across the width. The host
- does the only thing it can know — emit the triangles between adjacent cells of
- the grid — and nothing about the shape of the curve, which is the prelude's
- domain and is where it was already authored.
+ Flat `positions`, `normals` and `uvs` arrays, row-major over `columns` x `rows`:
+ one cross-section of `columns` vertices, one per row, in the order `row` walked
+ down the path then `column` walked across the width. The host does the only
+ thing it can know — emit the triangles between adjacent cells of the grid — and
+ nothing about the shape of the curve, which is the prelude's domain.
 
- The index pattern is a grid like `Heightfield.build`'s, but wound the other
- way. A ribbon's across axis is 90 degrees counter-clockwise from its tangent
- (in the xz plane), so `across x along = +y`; the ground's axes run the other
- hand and its winding is mirrored. The triangles here are emitted so their
- front face points +y, matching the normals the prelude computed — which is
- what a strip culled from above needs to stay visible and lit.
+ The index pattern is a grid like `Heightfield.build`'s, but wound the other way.
+ A ribbon's across axis is 90 degrees counter-clockwise from its tangent (in the
+ xz plane), so `across x along = +y`; the ground's axes run the other hand and
+ its winding is mirrored. The triangles here are emitted so their front face
+ points +y, matching the normals the prelude computed.
 
  Uploaded through `upload_built`, so it is an asset like any other — one draw
  call per unique ribbon, deduplicated by a hash of the vertices, filling the
- bounds and BVH through the same tail a built primitive uses. None of the data
- is retained on the slot (unlike a terrain, a ribbon answers no questions), so
- `upload_built` is the whole story.
+ bounds and BVH through the same tail a built primitive uses. None of the data is
+ retained on the slot: unlike a terrain, a ribbon answers no questions.
 *>
 fn void js_ribbon(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -758,8 +739,7 @@ fn void js_ribbon(
 
  `primitive`'s twin down to the clamping, and deliberately so: a helper is an
  ordinary asset over an ordinary mesh, and the only thing that makes it a helper
- is the material `prelude.js` puts on it. `scene/lines.c3` carries the argument
- for why debug draw is geometry here rather than an immediate-mode side channel.
+ is the material `prelude.js` puts on it.
 
  `divisions` is the grid's and is ignored by the other two — `LineShape.key`
  leaves it out of their keys, so a box asked for with a stray division count is
@@ -791,8 +771,7 @@ fn void js_lines(
 		}
 
 		// Clamped rather than trusted, for `primitive`'s reason: the prelude has
-		// already refused anything out of range with a better sentence, and this
-		// is the backstop for a script that reached past it into `__three`.
+		// already refused anything out of range with a better sentence.
 		int asked = arg_int(&js, argc, args, 1);
 		LineShape shape = {
 			.kind = kind,
@@ -811,14 +790,14 @@ fn void js_lines(
 }
 
 <*
- `wireframe(index, generation, mesh)` — one mesh's triangles as the edges
- between them.
+ `wireframe(index, generation, mesh)` — one mesh's triangles as the edges between
+ them.
 
- **The mesh has to be resident, and that is a sentence rather than an empty
- asset.** The edges are read off `hull_positions`/`hull_triangles`, which are
- filled at upload — and a mesh reaches the device only when something drawing it
- is added to a scene. An empty wireframe would draw nothing and read as a helper
- that does not work, so the two faults each get the thing to do about them.
+ The mesh has to be resident, and that is a sentence rather than an empty asset.
+ The edges are read off `hull_positions`/`hull_triangles`, which are filled at
+ upload, and a mesh reaches the device only when something drawing it is added to
+ a scene. An empty wireframe would draw nothing and read as a helper that does
+ not work.
 *>
 fn void js_wireframe(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -866,35 +845,32 @@ fn void js_wireframe(
 <*
  `exportScene(path)` — write the scene to a `.glb`, and say what went into it.
 
- `js_load`'s other half, and it goes through the same door: the path is resolved
- by `resolve_asset`, so under `--assets` a script may write inside the game
- directory and nowhere else. A game that could write anywhere on the disk would
- be a worse thing than one that cannot export at all.
+ `js_load`'s other half, through the same door: the path is resolved by
+ `resolve_asset`, so under `--assets` a script may write inside the game
+ directory and nowhere else.
 
  No device is needed and none is used. `scene/export.c3` reads a mesh out of the
  file it came from or tessellates it again from its description, so an export is
- the one heavy verb here that works on a runtime with no GPU — and would, except
- that a scene with nothing uploaded into it has nothing to export either.
+ the one heavy verb here that works on a runtime with no GPU.
 
  The report is an object rather than a count because every number in it answers a
  different question about whether the file is the scene: `meshes` against
  `stats().uniqueMeshes`, `instances` against `stats().instances`, and `skipped`
  and `shaded` for the two things that deliberately did not survive the crossing.
 
- `batches` is how many of `nodes` were written as instanced nodes, which is the
- one number that has no counterpart in `stats()` — it says how much of the scene
- the file managed to keep as repetition rather than as a thousand named copies.
+ `batches` is how many of `nodes` were written as instanced nodes — the one
+ number with no counterpart in `stats()`, saying how much of the scene the file
+ managed to keep as repetition rather than as a thousand named copies.
 
  `layers` is `CUSTOM_materials_layers` records written, from a stack a file
  brought and from one a script built alike. It exists because `shaded` cannot
  answer for them: a layered material reaches the frame as a generated
  `ShaderMaterial` either way, so it is counted as a lost shader whether or not
- its stack survived — and "the stack went into the file" and "the file had no
- stack" are the two things a script actually needs to tell apart.
+ its stack survived.
 
  The second argument is `flatten`, which gives up the hierarchy to batch copies
  that are not siblings — the ones `asset.instantiate()` produces, each in a group
- of its own. `scene/export.c3` argues when that is the trade to make.
+ of its own.
 *>
 fn void js_export(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -935,8 +911,8 @@ fn void js_export(
 
 		// The prelude has already reduced the options object to this one flag, so
 		// nothing here reads a property off a JavaScript value — an argument list
-		// this side stays a list of scalars, which is what every other binding here
-		// takes and what keeps the two sides from disagreeing about defaults.
+		// this side stays a list of scalars, which keeps the two sides from
+		// disagreeing about defaults.
 		ExportReport? report = self.pass.export_scene(writing, arg_truth(&js, argc, args, 1));
 		if (catch err = report)
 		{
@@ -986,8 +962,7 @@ fn void js_asset_path(
 
  A glTF mesh with several primitives produced several `GpuMesh` entries sharing
  one name, so this list can repeat — and `Asset.mesh(name)` in the prelude takes
- the first, which is what `Assets.find_mesh` does and what a caller naming a mesh
- means.
+ the first, which is what `Assets.find_mesh` does.
 *>
 fn void js_mesh_names(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1011,15 +986,14 @@ fn void js_mesh_names(
  `meshBounds(index, generation, mesh)` — one mesh's box in its own local space,
  as `[minX, minY, minZ, maxX, maxY, maxZ]`, or `null` if the index names nothing.
 
- **This costs nothing and is available before the mesh is on the device.** A
+ This costs nothing and is available before the mesh is on the device. A
  `GpuMesh` exists from the moment the JSON is parsed, and `bounds` is one of the
  three fields filled in then rather than at upload — it is the POSITION
- accessor's required `min`/`max`, the same numbers `inventory.c3` reads. So
- asking how big a kit piece is does not upload the kit.
+ accessor's required `min`/`max`. So asking how big a kit piece is does not
+ upload the kit.
 
- **Per mesh index, not per name.** A glTF mesh with several primitives produced
- several entries sharing a name, and a `Mesh` node draws exactly one of them, so
- the box a script wants is the one belonging to the thing it placed.
+ Per mesh index, not per name: a glTF mesh with several primitives produced
+ several entries sharing a name, and a `Mesh` node draws exactly one of them.
 *>
 fn void js_mesh_bounds(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1039,10 +1013,9 @@ fn void js_mesh_bounds(
  `meshMaterial(index, generation, mesh)` — what the primitive's glTF material
  said, beyond the base colour that is already on the mesh.
 
- `scene/asset.c3`'s `GpuMaterial` has what is in it and why it is a record rather
- than a `Material`. What crosses is one flat array, `js_mesh_layers`'s shape and
- for its reason — the QuickJS shim has no property enumeration, so a positional
- row is cheaper on both sides than an object.
+ `scene/asset.c3`'s `GpuMaterial` has what is in it. What crosses is one flat
+ array, `js_mesh_layers`'s shape and for its reason — the QuickJS shim has no
+ property enumeration, so a positional row is cheaper on both sides.
 
 	 0  alphaMode ordinal      4  emissiveFactor r     8  metallic
 	 1  alphaCutoff           5  emissiveFactor g     9  roughness
@@ -1050,9 +1023,9 @@ fn void js_mesh_bounds(
 	 3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
 	                                                 12  emissive texture
 
- **Reading this uploads the mesh, and every read holds new references**, exactly
- as `meshLayers` does and for the same reason: the images exist only once the
- primitive is on the device, and each texture handed back is a handle of its own.
+ Reading this uploads the mesh, and every read holds new references, exactly as
+ `meshLayers` does: the images exist only once the primitive is on the device,
+ and each texture handed back is a handle of its own.
 
  `null` for a primitive that names no material, which is a real glTF and means
  the default one.
@@ -1161,8 +1134,8 @@ fn void js_split_mesh(
 		}
 
 		// `[index, generation, mesh]` rather than `asset_value`'s pair: a piece
-		// carries which mesh of its asset it is, because the one-component answer
-		// is the source's own handle and that mesh need not be zero.
+		// carries which mesh of its asset it is, because the one-component answer is
+		// the source's own handle and that mesh need not be zero.
 		qjs::Value list = js.array();
 		foreach (i, piece : pieces)
 		{
@@ -1180,22 +1153,21 @@ fn void js_split_mesh(
  `meshLayers(index, generation, mesh)` — one mesh's `CUSTOM_materials_layers`
  stack, or `null` when its material never carried the extension.
 
- **This uploads the mesh, unlike `meshBounds` beside it.** A stack is texture
- slots, and texture slots exist only once the primitive has been through
+ This uploads the mesh, unlike `meshBounds` beside it. A stack is texture slots,
+ and texture slots exist only once the primitive has been through
  `upload_primitive` — so a verb that answered without uploading would answer
  `null` for a mesh that has layers and has simply not been drawn yet, which is a
- wrong answer that looks like a file without the extension. Paying an upload to
- ask the question is the honest price; a script asking this is about to build a
- material for the mesh anyway.
+ wrong answer that looks like a file without the extension. A script asking this
+ is about to build a material for the mesh anyway.
 
- What crosses is a *description* rather than a material, for `assetNodes`'s
- reason: the JS side turns it into an ordinary `LayeredMaterial` through the
- ordinary constructor, so an imported stack and a hand-written one are the same
- object and there is one generator rather than two.
+ What crosses is a *description* rather than a material: the JS side turns it
+ into an ordinary `LayeredMaterial` through the ordinary constructor, so an
+ imported stack and a hand-written one are the same object and there is one
+ generator rather than two.
 
  The blend mode and the mask channel cross as the extension's own ordinals and
- are named on the far side. Numbering them here and naming them there is what
- keeps `gltf.c3l`'s enum the single authority for what the ordinals mean.
+ are named on the far side, which keeps `gltf.c3l`'s enum the single authority
+ for what the ordinals mean.
 
  @return `[maskTexture, [layer...]] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture], or null.`
 *>
@@ -1254,29 +1226,23 @@ fn void js_mesh_layers(
  One of a layer's texture slots, as `[index, width, height, levels, colourspace]`
  — or `null` for a slot the layer does not use.
 
- **It retains.** The `GpuMesh` holds one reference per slot and the `Texture` the
+ It retains. The `GpuMesh` holds one reference per slot and the `Texture` the
  prelude wraps this in holds another, exactly as `three.texture()` of a file
  already in the table does: two handles naming one image is two references, and
  the alternative is a script disposing its material and taking the image out from
  under the mesh that is still drawing with it.
 
  `null` rather than an index of -1, because the far side puts these straight into
- a layer description where the absence of an image is spelled `null` — the same
- spelling `material.map` uses.
+ a layer description where the absence of an image is spelled `null`.
 
- ## The fifth field is the colourspace, and it is not decoration
-
- Everywhere else in this file the prelude knows the space because it *asked* for
- it — `three.texture(path, { colorSpace })` passes one in and hands the same value
- to the `Texture` it builds. Nothing asks here: the importer decides, per image,
- from what the layer uses it for, so the only honest source is the slot itself.
-
- The alternative was tried and is worse in a way that hides exactly the bug it
- would cause. Having the prelude assume "a mask is linear" makes `tex.colorSpace`
- a restatement of the prelude's own rule rather than a fact about the image — so
- an importer that uploaded a mask as sRGB by mistake would still *report* linear,
- and the one test aimed at that class of bug would pass. Reading it back off the
- `Texture` is what makes the report worth having.
+ The fifth field is the colourspace, and it is not decoration. Everywhere else in
+ this file the prelude knows the space because it *asked* for it. Nothing asks
+ here: the importer decides, per image, from what the layer uses it for, so the
+ only honest source is the slot itself. Having the prelude assume "a mask is
+ linear" would make `tex.colorSpace` a restatement of the prelude's own rule
+ rather than a fact about the image — so an importer that uploaded a mask as sRGB
+ by mistake would still *report* linear, and the one test aimed at that class of
+ bug would pass.
 *>
 fn qjs::Value layer_texture_value(qjs::Context* js, Assets* assets, int index) @local
 {
@@ -1297,29 +1263,26 @@ fn qjs::Value layer_texture_value(qjs::Context* js, Assets* assets, int index) @
  same array. Parents always come before their children, so `instantiate()` can
  walk it once and never look forward.
 
- **The tree is not built here and its shape is not decided here.**
- `Assets.flatten` decides — the same walk `Scene.instantiate` uses on the host —
- so a file placed by the CLI and a file placed by a script produce the same
- hierarchy. What crosses the boundary is a description, and JavaScript builds
- ordinary `Object3D`s from it that materialize through the normal `add` path.
- That is deliberate: an object handed back from here is one a script can move,
- hide, recolour and re-parent before it ever reaches a scene, because it is not
- special in any way.
+ The tree is not built here and its shape is not decided here. `Assets.flatten`
+ decides — the same walk `Scene.instantiate` uses on the host — so a file placed
+ by the CLI and a file placed by a script produce the same hierarchy. What
+ crosses the boundary is a description, and JavaScript builds ordinary
+ `Object3D`s from it that materialize through the normal `add` path. That is
+ deliberate: an object handed back from here is one a script can move, hide,
+ recolour and re-parent before it ever reaches a scene.
 
  ## The rotation crosses twice, and both are needed
 
  Once as Euler angles, because that is what an `Object3D.rotation` is and a
  script that reads it back should see numbers rather than a quaternion nobody
  asked for. Once as the quaternion itself, because the Euler form is not exact:
- at gimbal lock — a rotation of exactly 90° about Y, which is the single most
- common thing anyone types into Blender — `asin` is evaluated where its slope is
- infinite and the recovered angle is off by about 3e-4 radians. That is 0.7mm at
- the end of a two-metre arm, which is a hairline gap between two kit pieces that
- were authored flush.
+ at gimbal lock — a rotation of exactly 90° about Y, the single most common thing
+ anyone types into Blender — `asin` is evaluated where its slope is infinite and
+ the recovered angle is off by about 3e-4 radians. That is 0.7mm at the end of a
+ two-metre arm, which is a hairline gap between two kit pieces authored flush.
 
  So `prelude.js` shows the Euler triple and sends the quaternion, and writing an
- Euler angle drops the quaternion. `scene/node.c3` has the general form of this
- argument; this is the one place it has a number attached.
+ Euler angle drops the quaternion.
 
  @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin].`
 *>
@@ -1366,16 +1329,16 @@ fn void js_asset_nodes(
 		js.set_index(row, 14, qjs::number_value(entry.rotation.k));
 		js.set_index(row, 15, qjs::number_value(entry.rotation.l));
 		js.set_index(row, 16, qjs::int_value(entry.gltf_node));
-		// The per-copy tint, which is white for everything but a copy an
-		// instanced node placed. Four numbers rather than an object because the
-		// row is already a flat array and `mesh.color` is already a flat array.
+		// The per-copy tint, which is white for everything but a copy an instanced
+		// node placed. Four numbers rather than an object because the row is already
+		// a flat array and `mesh.color` is already a flat array.
 		js.set_index(row, 17, qjs::number_value(entry.color[0]));
 		js.set_index(row, 18, qjs::number_value(entry.color[1]));
 		js.set_index(row, 19, qjs::number_value(entry.color[2]));
 		js.set_index(row, 20, qjs::number_value(entry.color[3]));
 		// Which skin poses this node, or -1. The JS tree carries it to
-		// `_materialize`, which is where a host node learns it — the JavaScript
-		// path builds its nodes through the ordinary `add`, not through
+		// `_materialize`, which is where a host node learns it — the JavaScript path
+		// builds its nodes through the ordinary `add`, not through
 		// `Scene.instantiate`, so nothing else would ever set it.
 		js.set_index(row, 21, qjs::int_value(entry.skin));
 
@@ -1389,8 +1352,8 @@ fn void js_asset_nodes(
 
  Free: names and durations are read at load out of the JSON chunk, so this
  answers on a file that has uploaded nothing. `mesh.animations` is what a script
- sees, and the reason it is a plain array of strings rather than clip objects is
- that a name is the only handle `play` takes.
+ sees, and it is a plain array of strings rather than clip objects because a name
+ is the only handle `play` takes.
 *>
 fn void js_asset_clips(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1414,10 +1377,9 @@ fn void js_asset_clips(
  `three.inventory()` — every glTF in the assets directory, described without
  being loaded.
 
- `game.md` G1/S5, and `scene/inventory.c3` carries the argument for why it is
- worth a verb of its own. In short: before this, finding out what a file held
- meant uploading it, so "what have I got" — the question an agent asks first —
- was the most expensive one it could ask.
+ `scene/inventory.c3` carries the argument. In short: without it, finding out
+ what a file held means uploading it, so "what have I got" — the question an
+ agent asks first — is the most expensive one it can ask.
 
  Answers with an empty array rather than throwing when there is no assets root,
  because "nothing here" is the true answer for a plain `--mcp` run and an
@@ -1471,9 +1433,9 @@ fn void js_inventory(
 		}
 		js.set_property(described, "animations", animations);
 
-		// Omitted rather than zeroed when the file had no position accessor to
-		// read them from: a box at the origin and "we could not tell" are
-		// different answers, and only one of them is safe to place a camera by.
+		// Omitted rather than zeroed when the file had no position accessor to read
+		// them from: a box at the origin and "we could not tell" are different
+		// answers, and only one of them is safe to place a camera by.
 		if (entry.has_bounds)
 		{
 			qjs::Value bounds = js.object();
@@ -1492,8 +1454,7 @@ fn void js_inventory(
 
  `heights` is a flat array of `(segments + 1)^2` numbers, row-major in z then x,
  for `js_convex`'s reason: it is the one shape the crossing can read in a single
- pass, and the prelude has to walk the caller's input to validate it anyway — so
- it flattens while it validates and hands over something already checked. A
+ pass, and the prelude has to walk the caller's input to validate it anyway. A
  callback is resolved on the JS side into exactly this array, which is why there
  is no callback here.
 
@@ -1555,9 +1516,9 @@ fn void js_terrain(
 			double value = js.number(sample);
 			js.release(sample);
 			// The prelude refuses a non-finite height with a sentence naming its
-			// index. Zero is the backstop for a forged call: a NaN here would
-			// spread through the normals into every neighbouring vertex and put a
-			// black hole in the middle of the ground.
+			// index. Zero is the backstop for a forged call: a NaN here would spread
+			// through the normals into every neighbouring vertex and put a black
+			// hole in the middle of the ground.
 			field.heights.push(math::is_finite(value) ? (float)value : 0.0f);
 		}
 

@@ -3,19 +3,18 @@
  the agent wrote.
 
  Two templates go through here — `shaders/material.slang` (a surface) and
- `shaders/post.slang` (the whole frame) — and they have exactly one thing in
- common worth sharing: **the line counting**. Everything else about them
- differs, and each front door keeps its own: `material_source` has the mesh
- contract, the uniform table and `MATERIAL_RESERVED`; `post_source` has one push
- field, no instances and `POST_RESERVED`.
+ `shaders/post.slang` (the whole frame) — and they share exactly one thing worth
+ sharing: the line counting. Each front door keeps its own rules;
+ `material_source` has the mesh contract, the uniform table and
+ `MATERIAL_RESERVED`, while `post_source` has one push field, no instances and
+ `POST_RESERVED`.
 
- ## Why this file exists rather than a second copy of the walk
+ ## The `#line` arithmetic
 
- `plan.md`'s Phase D says it in one line: the `#line` arithmetic is too subtle to
- exist twice. Three things about it were established by experiment and each is a
- way to get it wrong (`material_source.c3`'s header has them in full):
+ Three things about it were established by experiment, and each is a way to get
+ it wrong:
 
- - the filename in a `#line` directive **must** be a double-quoted string, or the
+ - the filename in a `#line` directive must be a double-quoted string, or the
    preprocessor dies with `E15102`;
  - the directive numbers the line that *follows* it, so a body starts at 1;
  - the restore number is the physical line of the text after the directive, which
@@ -26,20 +25,18 @@
  half that is wrong is the half nobody notices: a restore directive off by one
  does not fail, it points the next `candidate:` note at the wrong line.
 
- ## The trap this file is made of
-
- `plan.md` §6: **a `\n` inside a C3 backtick raw string is a backslash and an
- `n`.** There is no newline in any literal here — every line ending is an
- explicit `append_char('\n')`, which is also what makes `physical` countable.
+ A `\n` inside a C3 backtick raw string is a backslash and an `n`, so there is no
+ newline in any literal here — every line ending is an explicit
+ `append_char('\n')`, which is also what makes `physical` countable.
 *>
 module three;
 
 import std::io;
 
 // The marker lines, matched after trimming so a template can indent them to read
-// naturally. A template that does not contain one simply never reaches its
-// branch — `post.slang` has no `//@rows`, because a post pass has no instances
-// for a table to be indexed by.
+// naturally. A template that does not contain one never reaches its branch —
+// `post.slang` has no `//@rows`, because a post pass has no instances for a table
+// to be indexed by.
 const String MARKER_UNIFORMS @private = "//@uniforms";
 const String MARKER_ROWS @private = "//@rows";
 const String MARKER_DEFINES @private = "//@defines";
@@ -57,44 +54,39 @@ const String MARKER_TABLE @private = "//@table";
 
  An empty function rather than an absent one, so `vertexMain` calls `displace`
  unconditionally and there is no second spelling of the vertex stage to keep in
- step with the first. Every compiler folds it away; the SPIR-V is the same either
- way, which is the claim `a_material_without_a_vertex_body_is_the_shader_it_was`
- holds down.
+ step. Every compiler folds it away, and the SPIR-V is the same either way —
+ which `a_material_without_a_vertex_body_is_the_shader_it_was` holds down.
 *>
 const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 
 <*
  The binding index the first agent-declared sampler gets, per kind of shader.
 
- **These are two numbers that happen to be equal, and writing them as one
- constant is the mistake this comment exists to prevent.** They were 1 and 1
- while both templates reserved one binding; they were 1 and 2 once a post pass
- reserved `prev` and `scene`; they are 2 and 2 now that a material reserves
- `base_color_map` and `shadow_map`. Each of those three states was arrived at by
- a different template growing, and a shared constant would have meant every
- material sampler in the project being silently renumbered by whichever *other*
- template moved — the reflection agreeing with itself the whole way, and the only
- symptom being textures arriving in the wrong slots of shaders nobody had
+ Two numbers that happen to be equal, and writing them as one constant is the
+ mistake this comment exists to prevent. They were 1 and 1 while both templates
+ reserved one binding; 1 and 2 once a post pass reserved `prev` and `scene`; 2
+ and 2 now that a material reserves `base_color_map` and `shadow_map`. A shared
+ constant would mean every material sampler being silently renumbered by whichever
+ *other* template moved — reflection agreeing with itself the whole way, and the
+ only symptom being textures arriving in the wrong slots of shaders nobody had
  touched.
 
- **Nothing outside this file chooses a binding index.** The declaration order
- the caller passed is the binding order, generated here from whichever base the
- front door passed, read back by reflection and resolved by *name* everywhere
- above — which is what makes inserting a texture at the front of the list a
- non-event rather than a silent renumbering of every sampler after it. A script
- that could write `[vk::binding(3, 0)]` itself would be a script that can collide
- with the reserved names.
+ Nothing outside this file chooses a binding index. The declaration order the
+ caller passed is the binding order, generated here from whichever base the front
+ door passed, read back by reflection and resolved by *name* everywhere above —
+ which makes inserting a texture at the front of the list a non-event. A script
+ that could write `[vk::binding(3, 0)]` itself could collide with the reserved
+ names.
 *>
 const uint MATERIAL_BINDING_FIRST = 2;
 
 // Where a post pass's own samplers begin: after `prev` at 0, `scene` at 1, the
-// frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST` and
-// `shaders/post.slang`. Four reserved rather than the two it started with, and
-// moving this constant is the whole of each of those renumberings: every sampler
-// above it is generated from declaration order and resolved by name.
+// frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST`
+// and `shaders/post.slang`. Moving this constant is the whole of a renumbering:
+// every sampler above it is generated from declaration order and resolved by name.
 const uint POST_BINDING_FIRST = 4;
 
-// The third source, and a number rather than a name for `SHADOW_MAP_BINDING`'s
+// The third source, and a number rather than a name for `SHADOW_BINDING`'s
 // reason: only the chain knows which image this is, and resolving it by name
 // would let a body claim it by declaring a texture called `tap_image`.
 // `POST_RESERVED` is what stops that.
@@ -105,11 +97,11 @@ const uint POST_TAP_BINDING = 3;
 
  A number rather than a name, unlike everything a material declares, and for the
  reason `base_color_map` is reached at 0 by hand: only the pass knows what this
- image *is*, and resolving it by name would mean a material could claim it by
- declaring a texture called `shadow_map`. `pipeline_declares_binding` is what asks
- the reflected layout whether it is there, because Slang is entitled to drop a
- sampler a linked program never reads — and both templates do read it, which is
- why the answer is yes today and why it is still asked.
+ image *is*, and resolving it by name would let a material claim it by declaring
+ a texture called `shadow_map`. `pipeline_declares_binding` asks the reflected
+ layout whether it is there, because Slang may drop a sampler a linked program
+ never reads — both templates do read it, which is why the answer is yes today
+ and why it is still asked.
 *>
 const uint SHADOW_BINDING = 1;
 
@@ -132,9 +124,9 @@ fn String slang_type_of(uint components) @private
 <*
  Is this a name a `#define` can safely carry?
 
- The check is `[A-Za-z_][A-Za-z0-9_]*` and nothing else, but the reason is not
- only Slang's: nothing interpolated into a `#line` directive may contain a quote
- or a backslash, and a uniform name reaches one through the `#undef` block.
+ The check is `[A-Za-z_][A-Za-z0-9_]*`, and the reason is not only Slang's:
+ nothing interpolated into a `#line` directive may contain a quote or a
+ backslash, and a uniform name reaches one through the `#undef` block.
 *>
 fn bool is_identifier(String name) @private
 {
@@ -152,16 +144,15 @@ fn bool is_identifier(String name) @private
  Everything a list of sampler names can be refused for, as a sentence.
 
  Shared by both front doors rather than written twice, unlike the uniform checks
- beside it — and the reason for the difference is that the uniform rules genuinely
- differ between a material and a post pass (one has tables and a 52-byte budget,
- the other has neither) while these rules are the same rules with a different word
- in front of them. Two copies would be two chances for the collision list and the
- duplicate check to drift apart.
+ beside it: the uniform rules genuinely differ between a material and a post pass
+ (one has tables and a 52-byte budget, the other has neither) while these rules
+ are the same rules with a different word in front of them.
 
  The name must not collide with a *uniform* either, which is the one check that
  could not be inferred from either list alone: a uniform is a `#define` live
- across the body, so a sampler sharing its name would be rewritten to `push.<name>`
- at every use — a diagnostic about a push field the agent never mentioned.
+ across the body, so a sampler sharing its name would be rewritten to
+ `push.<name>` at every use — a diagnostic about a push field the agent never
+ mentioned.
 
  @param prefix : `"material" or "post" — what the sentence calls the thing being built.`
  @param reserved : `The template's own vocabulary, which a sampler may not take either.`
@@ -176,9 +167,8 @@ fn String texture_problem(
 	uint limit
 ) @private
 {
-	// Counted first, so that a script that passed eight names is told the number
-	// rather than being told about the first one that also happened to be
-	// misspelled.
+	// Counted first, so a script that passed eight names is told the number rather
+	// than being told about the first one that also happened to be misspelled.
 	if (textures.len > limit)
 	{
 		return string::tformat(
@@ -233,7 +223,7 @@ fn String texture_problem(
 }
 
 <*
- Copy a refusal sentence into a fixed buffer and say how long it ended up.
+ Copies a refusal sentence into a fixed buffer and says how long it ended up.
 
  A fixed buffer rather than an allocation because the caller reads this on the
  failure path, where there is no owned value to free and no allocator in scope to
@@ -250,8 +240,8 @@ fn usz shader_note_into(char[] buffer, String message) @private
 }
 
 <*
- Append `text` line by line, normalising the ending, and say how many lines that
- was.
+ Appends `text` line by line, normalising the ending, and says how many lines
+ that was.
 
  The count is the point. `#line` restores numbering by absolute line, so the
  assembler has to know exactly how tall the body it just wrote is — and a body
@@ -277,12 +267,12 @@ fn uint append_lines(DString* out, String text) @private
 }
 
 <*
- Read a template, replace its marker lines, and hand back the whole module.
+ Reads a template, replaces its marker lines, and hands back the whole module.
 
  The result is self-contained: it declares its own `PushData`, its own bindings
  and both entry points, so it goes to `compile_slang` as a string with nothing
- else beside it. Nothing is compiled here and no GPU is involved. **Nothing is
- validated here either** — each front door has already refused what it cannot
+ else beside it. Nothing is compiled here and no GPU is involved, and nothing is
+ validated here either — each front door has already refused what it cannot
  generate, because the messages are the half a caller acts on and they are not
  shared.
 
@@ -309,8 +299,8 @@ fn String? assemble_shader(
 	String preamble_name,
 	uint binding_first,
 	alloc::Allocator allocator,
-	// **Only ever true for a material.** `post.slang` has no `//@table` marker and
-	// no instances for a table to be indexed by, so its caller never asks.
+	// Only ever true for a material. `post.slang` has no `//@table` marker and no
+	// instances for a table to be indexed by, so its caller never asks.
 	bool spill = false
 ) @private
 {
@@ -321,9 +311,9 @@ fn String? assemble_shader(
 		DString out;
 		out.tinit(template.len + 1024);
 
-		// Physical lines written so far, counted rather than derived. Every
-		// marker replaces one line with a different number of lines, so nothing
-		// upstream of here knows what line the text after the body lands on.
+		// Physical lines written so far, counted rather than derived. Every marker
+		// replaces one line with a different number of lines, so nothing upstream
+		// knows what line the text after the body lands on.
 		uint physical = 0;
 
 		usz start = 0;
@@ -337,9 +327,9 @@ fn String? assemble_shader(
 			String marker = line.trim();
 			if (marker == MARKER_TABLE)
 			{
-				// Nothing at all for a material that fits the push block, which is
-				// every material this project had before the table could spill —
-				// so the generated source for one is byte for byte what it was.
+				// Nothing at all for a material that fits the push block, so the
+				// generated source for one is byte for byte what it was before the
+				// table could spill.
 				if (!spill) continue;
 				out.appendf("struct %s", MATERIAL_TABLE_TYPE)!!;
 				out.append_char('\n');
@@ -361,7 +351,7 @@ fn String? assemble_shader(
 			}
 			if (marker == MARKER_UNIFORMS)
 			{
-				// **The pointer first**, so it lands at `MATERIAL_PUSH_START` — a
+				// The pointer first, so it lands at `MATERIAL_PUSH_START` — a
 				// multiple of eight — and scalar layout has no alignment padding to
 				// insert in front of it. After a `float` it would.
 				if (spill)
@@ -403,10 +393,10 @@ fn String? assemble_shader(
 			{
 				foreach (uniform : uniforms)
 				{
-					// **The body cannot tell which shape it got**, which is the whole
-					// point of doing this with a macro: `tint[s.variant]` reads the
-					// push block or the table buffer depending on a decision the
-					// agent never made and never has to know about.
+					// The body cannot tell which shape it got, which is the point of
+					// doing this with a macro: `tint[s.variant]` reads the push block
+					// or the table buffer depending on a decision the agent never
+					// made and never has to know about.
 					if (spill && uniform_rows_of(uniform) > 1)
 					{
 						out.appendf(
@@ -425,12 +415,12 @@ fn String? assemble_shader(
 			}
 			if (marker == MARKER_VDEFINES)
 			{
-				// **Nothing at all when there is no vertex body**, which is the
-				// half that matters. A `#define tint (push.tint)` left live here
-				// would reach `vertexMain`'s own lines rather than the agent's,
-				// and the whole reason the fragment block is `#undef`ed straight
-				// after the body is that the template's code must not be
-				// rewritten by a name a script chose.
+				// Nothing at all when there is no vertex body, which is the half
+				// that matters. A `#define tint (push.tint)` left live here would
+				// reach `vertexMain`'s own lines rather than the agent's, and the
+				// reason the fragment block is `#undef`ed straight after the body is
+				// that the template's code must not be rewritten by a name a script
+				// chose.
 				if (vertex.len > 0)
 				{
 					foreach (uniform : uniforms)
@@ -466,10 +456,10 @@ fn String? assemble_shader(
 				}
 
 				// `#line 1 "vertex"`, so a diagnostic in a vertex body reads
-				// `vertex:3:12` and a diagnostic in a fragment body reads
-				// `material:3:12` — two names rather than one, because an agent
-				// that wrote both needs to know which of the two the compiler is
-				// talking about before it can read the line number at all.
+				// `vertex:3:12` and one in a fragment body reads `material:3:12`.
+				// Two names rather than one, because an agent that wrote both needs
+				// to know which the compiler is talking about before it can read the
+				// line number at all.
 				out.appendf(`#line 1 "%s"`, vertex_name)!!;
 				out.append_char('\n');
 				physical++;
@@ -490,14 +480,13 @@ fn String? assemble_shader(
 			}
 			if (marker == MARKER_TEXTURES)
 			{
-				// **A declaration, not a `#define`.** A uniform is a push field
-				// reached through a macro that is undefined again after the body;
-				// a sampler is a global of the module, so the agent's name *is*
-				// the declaration's name and there is nothing to undo. That also
-				// means a sampler is visible to the template's own lines as well
-				// as to the body — which is harmless here and would not be if
-				// these were macros, and is why `MATERIAL_RESERVED` refuses the
-				// same names for both.
+				// A declaration, not a `#define`. A uniform is a push field reached
+				// through a macro that is undefined again after the body; a sampler
+				// is a global of the module, so the agent's name *is* the
+				// declaration's name and there is nothing to undo. That also means a
+				// sampler is visible to the template's own lines as well as to the
+				// body — harmless here, and why `MATERIAL_RESERVED` refuses the same
+				// names for both.
 				foreach (i, texture : textures)
 				{
 					out.appendf(
