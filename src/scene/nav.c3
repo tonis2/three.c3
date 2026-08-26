@@ -1,52 +1,42 @@
 <*
- Navigation — `notes.md` §17.
+ Navigation: voxelizing standing room, and solving flow fields over it.
 
- ## What was already here, and the one thing that was not
+ The field machinery is `lib/collision.c3l/src/voxel.c3` — `solve_field`,
+ `sample`, `nearest_solved`, and a multi-source `solve_sources` /
+ `nearest_sourced` / `sample_sources` that is a crowd flow field by another name.
+ This file builds the grid those run on.
 
- Both halves of this had their inputs in the repo. Every uploaded mesh keeps
- `hull_positions`, `hull_triangles` and a `TriBVHNode` (`scene/asset.c3`), and
- `lib/collision.c3l/src/voxel.c3` is a written, tested distance-field solver
- — `solve_field`, `sample`, `nearest_solved`, and a multi-source
- `solve_sources` / `nearest_sourced` / `sample_sources` that is a crowd flow
- field by another name. Nothing in `src/` imported any of it.
-
- The piece genuinely missing was the **complement**. `create_voxel_grid`
+ The grid has to be built here rather than borrowed because `create_voxel_grid`
  voxelizes the *inside* of a closed mesh: it marches lines through the model and
- uses the parity of the crossings to decide what is material. Navigation wants
- the opposite of that in two ways at once — the *outside* of many *open* meshes,
- and not all of the outside but the thin layer of it that is standing room. A
- town is not a closed mesh and its interior is not where anybody walks.
+ uses crossing parity to decide what is material. Navigation wants the opposite
+ in two ways at once — the *outside* of many *open* meshes, and not all of the
+ outside but the thin layer of it that is standing room. A town is not a closed
+ mesh and its interior is not where anybody walks.
 
- So this builds the grid rather than borrowing one. `VoxelGrid` is a plain
- struct — an origin, a cell size, three extents, a voxel-to-entry index and an
- ascending entry-to-voxel list — and every field routine on it works on any
- sparse cell set that obeys those two arrays. Filling them with standing room
- instead of with material is the whole of what this file adds; the solver,
- the sampling, the interpolation and the multi-source crowd machinery are used
- exactly as they were written.
+ `VoxelGrid` is a plain struct — an origin, a cell size, three extents, a
+ voxel-to-entry index and an ascending entry-to-voxel list — and every field
+ routine on it works on any sparse cell set obeying those two arrays.
 
- ## Two verbs, and the split is the design
+ ## Two verbs
 
  `nav.path(from, to)` for one agent, `nav.field(goals)` for a handle a script
- samples per agent. §17 was explicit that offering only `path()`
- guarantees somebody writes the second one badly — and the reason is a cost, not
- a taste: a path is a solve of the whole reachable set, thrown away after one
- answer. A hundred agents heading for the same door is a hundred solves for one
- field. `field()` is that solve, kept.
+ samples per agent. A path is a solve of the whole reachable set thrown away
+ after one answer, so a hundred agents heading for the same door is a hundred
+ solves for one field. `field()` is that solve, kept.
 
  ## What a cell is, and what that costs a caller
 
  A cell is walkable when it is empty, the cell below it holds a triangle whose
  normal is inside the slope limit, and the cells above it are empty for the
- agent's height. So there is exactly **one walkable layer per floor**, which is
- what makes a bridge over a road two layers rather than an ambiguity.
+ agent's height. So there is exactly one walkable layer per floor, which is what
+ makes a bridge over a road two layers rather than an ambiguity.
 
- The consequence a caller has to know is that **a step is one cell**. The
- solver relaxes over a 3x3x3 neighbourhood, so two walkable cells are connected
- when they are adjacent — including diagonally and including one cell up. A
- stair with a rise larger than the cell size is not a stair to this grid, it is
- a wall. At the default half-metre cell that is a generous step; a scene with
- finer stairs wants a finer cell, and pays for it as the cube.
+ A step is one cell. The solver relaxes over a 3x3x3 neighbourhood, so two
+ walkable cells are connected when they are adjacent — including diagonally and
+ including one cell up. A stair with a rise larger than the cell size is not a
+ stair to this grid, it is a wall. At the default half-metre cell that is a
+ generous step; a scene with finer stairs wants a finer cell, and pays for it as
+ the cube.
 *>
 module three;
 
@@ -72,23 +62,23 @@ struct NavSettings
 
 	// How wide the agent is. Free space is eroded by this before anything is
 	// called walkable, so a corridor narrower than the agent has no cells in it
-	// rather than a centre line the agent cannot fit on. The erosion grows out
-	// of walls and not out of floors — `bake_nav` has the argument, and it is
-	// what keeps a ramp connected to itself.
+	// rather than a centre line the agent cannot fit on. The erosion grows out of
+	// walls and not out of floors — `bake_nav` has the argument, and it is what
+	// keeps a ramp connected to itself.
 	float agent_radius;
 
 	// How tall it is. Cells above a floor must be clear for this height or the
 	// floor is not standing room.
 	float agent_height;
 
-	// The steepest floor it will stand on, in degrees. Measured from the
-	// triangle normals under a cell, not from the shape of the voxels, so a
-	// ramp is a ramp and not a staircase of cells.
+	// The steepest floor it will stand on, in degrees. Measured from the triangle
+	// normals under a cell, not from the shape of the voxels, so a ramp is a ramp
+	// and not a staircase of cells.
 	float slope_limit;
 
-	// The region to bake. An empty box means the scene's own bounds, which is
-	// what a caller who has not thought about it means and is right until a
-	// level is big enough for the bake to be a loading screen.
+	// The region to bake. An empty box means the scene's own bounds, which is what
+	// a caller who has not thought about it means and is right until a level is
+	// big enough for the bake to be a loading screen.
 	collision::Aabb3 bounds;
 	bool has_bounds;
 }
@@ -104,26 +94,24 @@ fn NavSettings default_nav_settings()
 	};
 }
 
-// A hard ceiling on the voxels one bake may allocate, so a script that asks for
-// a five-centimetre cell over a kilometre is refused rather than being handed
-// the machine's memory. 16 million cells is 64 MB of index and is already far
-// past what a level wants.
+// A hard ceiling on the voxels one bake may allocate, so a script that asks for a
+// five-centimetre cell over a kilometre is refused rather than handed the
+// machine's memory. 16 million cells is 64 MB of index and is already far past
+// what a level wants.
 const long NAV_MAX_VOXELS = 16_000_000;
 
 // Padding cells on every side. `collision::relax_voxel` steps its whole 3x3x3
-// neighbourhood with no bounds test, on the promise that every entry is at
-// least two cells from the edge — this is that promise, and it is why nothing
-// in the padding may ever be marked walkable.
+// neighbourhood with no bounds test, on the promise that every entry is at least
+// two cells from the edge — this is that promise, and it is why nothing in the
+// padding may ever be marked walkable.
 const int NAV_PAD = 2;
 
 <*
  A baked navigation grid, and what it cost to bake.
 
- The counters are reported through `three.nav.stats` because §17 asked
- for the bake cost to be measured before the shape of the API is settled: "that
- number decides whether this is a level-boundary operation or a loading-screen
- one". A caller can now answer it for their own level rather than for a
- reference one.
+ The counters are reported through `three.nav.stats` so a caller can decide for
+ their own level whether baking is a level-boundary operation or a loading-screen
+ one.
 *>
 struct NavMesh
 {
@@ -141,18 +129,18 @@ struct NavMesh
 	 How many disjoint regions the walkable set came out in, and how big the
 	 biggest one is.
 
-	 **The number that says whether the bake is usable**, and the one thing
-	 that was missing when the erosion bug below cut a trail into islands: a
-	 bake returns a healthy `walkable_cells`, `field` returns a live field
-	 rather than null, and every other counter here looks exactly right, so the
-	 only thing that showed it was asking a *second* point whether it was
-	 reachable. `components == 1` is a level an agent can cross; anything else
-	 is a level where "there is no path" is the honest answer for some pairs of
-	 points, and a caller who did not intend that wants to know at bake time.
+	 The number that says whether the bake is usable. Every other counter is a
+	 total, and a total cannot tell a level an agent can cross from the same level
+	 cut into a hundred islands: `walkable_cells` looks healthy, `field` returns a
+	 live field, and the only thing that shows it is asking a *second* point
+	 whether it is reachable.
 
-	 Measured over the same 26-neighbour adjacency `collision::relax_voxel`
-	 relaxes across, so it is exactly the graph a field is solved on rather
-	 than an approximation of it.
+	 `components == 1` is a level an agent can cross; anything else is a level
+	 where "there is no path" is the honest answer for some pairs of points, and a
+	 caller who did not intend that wants to know at bake time.
+
+	 Measured over the same 26-neighbour adjacency `collision::relax_voxel` relaxes
+	 across, so it is exactly the graph a field is solved on.
 	*>
 	uint components;
 	uint largest_component;
@@ -167,7 +155,7 @@ fn void NavMesh.free(&self)
 fn bool NavMesh.usable(&self) => self.built && self.grid.usable();
 
 <*
- Voxelize the scene's standing room.
+ Voxelizes the scene's standing room.
 
  One pass over the triangles to mark what is solid and what of it is floor, one
  dilation to make room for the agent's width, and one pass to pick out the cells
@@ -188,8 +176,8 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	if (!settings.has_bounds) region = self.bounds(assets);
 	if (region.size().length_sq() <= 0.0f) return false;
 
-	// Room above the tallest thing for the headroom test to look into, and a
-	// cell below the lowest for a floor to sit on.
+	// Room above the tallest thing for the headroom test to look into, and a cell
+	// below the lowest for a floor to sit on.
 	region.min -= (Vec3) { cell, cell, cell };
 	region.max += (Vec3) { cell, settings.agent_height + cell, cell };
 
@@ -204,11 +192,11 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 
 	Vec3 origin = region.min - (Vec3) { cell * (float)NAV_PAD, cell * (float)NAV_PAD, cell * (float)NAV_PAD };
 
-	// `solid` is what a triangle is in; `floor` is the subset of it whose
-	// triangles are shallow enough to stand on. They are separate because the
-	// dilation below applies to one and not the other: a wall next to a floor
-	// must not stop the floor beside it being a floor, it must only stop the
-	// agent's *centre* getting within a radius of the wall.
+	// `solid` is what a triangle is in; `floor` is the subset whose triangles are
+	// shallow enough to stand on. Separate because the dilation below applies to
+	// one and not the other: a wall next to a floor must not stop the floor beside
+	// it being a floor, only stop the agent's *centre* getting within a radius of
+	// the wall.
 	char[] solid = mem::new_array(char, (sz)total);
 	char[] floor = mem::new_array(char, (sz)total);
 	defer mem::free(solid);
@@ -230,8 +218,8 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 		{
 			Vec3 normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
 			float area = normal.length();
-			// A degenerate triangle has no normal and no area; it is still
-			// solid, so it is rasterized and simply never counts as floor.
+			// A degenerate triangle has no normal and no area; it is still solid,
+			// so it is rasterized and simply never counts as floor.
 			bool standable = area > 1e-9f && math::abs(normal.y / area) >= cos_limit;
 
 			collision::Aabb3 box = collision::NEW_AABB3;
@@ -259,10 +247,10 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 							origin.z + (float)z * cell,
 						};
 						collision::Aabb3 cell_box = { centre - half, centre + half };
-						// The exact separating-axis test the BVH already uses,
-						// not a bounding-box overlap: a diagonal wall through a
-						// room otherwise fills every cell of the box around it
-						// and closes the room.
+						// The exact separating-axis test the BVH already uses, not a
+						// bounding-box overlap: a diagonal wall through a room
+						// otherwise fills every cell of the box around it and closes
+						// the room.
 						if (tri.collides_aabb(cell_box) < 0) continue;
 
 						sz at = (sz)((z * ny + y) * nx + x);
@@ -281,38 +269,37 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.solid_cells = solid_count;
 	out.floor_cells = floor_count;
 
-	// Erode the free space by the agent's width, by dilating the **walls**
+	// Erode the free space by the agent's width, by dilating the *walls*
 	// horizontally — the solid cells that are not floor. Horizontally only:
-	// growing it vertically would swallow the standing room above every floor,
-	// which is the space being looked for.
+	// growing vertically would swallow the standing room above every floor, which
+	// is the space being looked for.
 	//
-	// **Walls rather than the whole solid set, and that is a bug fix rather
-	// than a refinement** (`plan.md` §17). Dilating every solid cell is correct
-	// only while the floor is level. The moment it is not, the uphill column's
+	// Walls rather than the whole solid set. Dilating every solid cell is correct
+	// only while the floor is level; the moment it is not, the uphill column's
 	// *floor* cell sits at the walkable layer of the column beside it — that is
 	// what a slope is — so growing it sideways blocks exactly the cell the
 	// downhill agent had to stand in, and any descending floor comes out of the
 	// bake as islands one dilation apart. Measured on a 5.7-degree ramp at
 	// `cell: 0.6`: `agent_radius: 0.43` reached 1 of 49 points down a 200-unit
 	// trail where `0.30` — the same bake with `grow` rounding to zero — reached
-	// all 49. A flat corridor was whole either way, which is why it survived
-	// every test until a level had a hill in it.
+	// all 49. A flat corridor is whole either way, which is why it survives every
+	// test until a level has a hill in it.
 	//
 	// A wall keeps its clearance, because a wall is not floor. A ramp keeps its
 	// continuity, because ground you stand *on* is not something to keep clear
 	// *of*. The seam where a floor triangle and a wall triangle share a cell is
-	// left out of the dilation, and the wall's own cells above it are not, so
-	// the clearance is still there one layer up where the agent's chest is.
+	// left out of the dilation, and the wall's own cells above it are not, so the
+	// clearance is still there one layer up where the agent's chest is.
 	int grow = (int)math::ceil(math::max(settings.agent_radius, 0.0f) / cell - 0.5f);
 	char[] blocked = solid;
 	char[] dilated;
 	if (grow > 0)
 	{
 		dilated = mem::new_array(char, (sz)total);
-		// Seeded with the whole solid set, so `blocked` keeps meaning "a cell
-		// the agent's centre may not be in" — a cell inside geometry is blocked
-		// whether or not anything was grown into it. Only the *source* of the
-		// dilation is narrowed.
+		// Seeded with the whole solid set, so `blocked` keeps meaning "a cell the
+		// agent's centre may not be in" — a cell inside geometry is blocked whether
+		// or not anything was grown into it. Only the *source* of the dilation is
+		// narrowed.
 		mem::copy(dilated.ptr, solid.ptr, (usz)total);
 		for (int z = 0; z < nz; z++)
 		{
@@ -340,8 +327,8 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	int head = (int)math::ceil(math::max(settings.agent_height, 0.0f) / cell);
 	if (head < 1) head = 1;
 
-	// The walkable pass. The padding is excluded from the loop rather than
-	// tested inside it — see NAV_PAD for why nothing there may ever be an entry.
+	// The walkable pass. The padding is excluded from the loop rather than tested
+	// inside it — see NAV_PAD for why nothing there may ever be an entry.
 	int[] index = mem::new_array(int, (sz)total);
 	foreach (&slot : index) *slot = -1;
 
@@ -399,21 +386,20 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.settings.cell = cell;
 
 	out.measure_components();
-	// Re-stamped, so the number a caller reads is the whole bake and not the
-	// part of it that existed before the component pass did.
+	// Re-stamped, so the number a caller reads is the whole bake and not the part
+	// of it that existed before the component pass did.
 	out.bake_ms = (double)(long)started.to_now() / 1_000_000.0;
 	return true;
 }
 
 <*
- Label the walkable set's connected regions, and remember how many there were.
+ Labels the walkable set's connected regions, and remembers how many there were.
 
- **`plan.md` §17: nothing reported a fragmented bake.** Every other counter on
- a `NavMesh` is a total, and a total cannot tell a level an agent can cross from
- the same level cut into a hundred islands — which is what the radius erosion
- above used to make of any slope. This is the counter that can, and it is worth
- having on its own: a doorway one cell too narrow, a step one cell too high and
- a ramp that does not quite reach all look identical in `walkable_cells`.
+ Every other counter on a `NavMesh` is a total, and a total cannot tell a level
+ an agent can cross from the same level cut into a hundred islands — which is
+ what the radius erosion above used to make of any slope. A doorway one cell too
+ narrow, a step one cell too high and a ramp that does not quite reach all look
+ identical in `walkable_cells`.
 
  A flood fill over the same 26-neighbourhood `collision::relax_voxel` steps, so
  "one component" means exactly "`solve_field` can carry a cost from any cell to
@@ -463,9 +449,9 @@ fn void NavMesh.measure_components(&self)
 					for (int dx = -1; dx <= 1; dx++)
 					{
 						if (dx == 0 && dy == 0 && dz == 0) continue;
-						// Unbounded on purpose, on NAV_PAD's promise that no
-						// entry is within two cells of the edge — the same
-						// promise `collision::relax_voxel` steps on.
+						// Unbounded on purpose, on NAV_PAD's promise that no entry
+						// is within two cells of the edge — the same promise
+						// `collision::relax_voxel` steps on.
 						int neighbour = self.grid.index[voxel + dz * plane + dy * self.grid.nx + dx];
 						if (neighbour < 0 || label[(sz)neighbour] >= 0) continue;
 						label[(sz)neighbour] = id;
@@ -483,12 +469,11 @@ fn void NavMesh.measure_components(&self)
  The distance to the nearest goal, for every walkable cell.
 
  `collision::VoxelGrid.solve_field` unchanged — a chamfer transform, forward and
- backward sweeps until nothing moves, rather than a priority queue. It is fast
- for exactly the shape a nav layer is (one broad sheet) and it is what already
- existed.
+ backward sweeps until nothing moves, rather than a priority queue. Fast for
+ exactly the shape a nav layer is: one broad sheet.
 
- **This is the expensive call and there is one of it per goal set, not per
- agent.** See the file header.
+ This is the expensive call, and there is one of it per goal set rather than per
+ agent. See the file header.
 
  @param field : `Scratch the caller owns, one float per walkable cell. NavMesh.field_size is how many.`
  @return `False when no goal landed on a walkable cell, which leaves the field unusable rather than uniformly unreachable.`
@@ -512,9 +497,9 @@ fn sz NavMesh.field_size(&self) => self.usable() ? self.grid.cells.len : 0;
 <*
  How far from the goal a point is, along the ground rather than through walls.
 
- `VOXEL_UNREACHED` for a point off the mesh or in a region no goal reaches,
- which is the answer a caller needs in order to give up rather than a large
- number they might mistake for "far".
+ `VOXEL_UNREACHED` for a point off the mesh or in a region no goal reaches, which
+ is the answer a caller needs in order to give up rather than a large number they
+ might mistake for "far".
 *>
 fn float NavMesh.cost_at(&self, float[] field, Vec3 point)
 {
@@ -526,17 +511,16 @@ fn float NavMesh.cost_at(&self, float[] field, Vec3 point)
 <*
  Which way to walk, from a point, to get closer to the goal.
 
- **The flow field, and the verb an agent actually calls.** A unit vector in the
- XZ plane — flattened deliberately, because an agent walks and the y of a step
- is the ground's business, not the field's. A zero vector means "nowhere to go":
- standing on the goal, off the mesh, or in a pocket the goal cannot reach, and a
- caller has to tell those apart with `cost_at` if it matters.
+ The flow field, and the verb an agent actually calls. A unit vector in the XZ
+ plane — flattened deliberately, because an agent walks and the y of a step is
+ the ground's business. A zero vector means "nowhere to go": standing on the
+ goal, off the mesh, or in a pocket the goal cannot reach, and a caller has to
+ tell those apart with `cost_at` if it matters.
 
- The direction is taken from the *cell* neighbourhood rather than from a
- numerical gradient of the interpolated field. A gradient of a chamfer distance
- is noisy at exactly the places it matters — beside a wall, at a doorway — and
- the neighbour with the lowest cost is both cheaper and the answer the graph
- actually encodes.
+ The direction comes from the *cell* neighbourhood rather than from a numerical
+ gradient of the interpolated field. A gradient of a chamfer distance is noisy at
+ exactly the places it matters — beside a wall, at a doorway — and the neighbour
+ with the lowest cost is both cheaper and the answer the graph actually encodes.
 *>
 fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 {
@@ -587,7 +571,7 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
  The top of the floor under a walkable cell, which is what a waypoint should be.
 
  A cell centre is half a cell above the surface, so a path of raw centres floats
- — visibly, on a coarse grid, and it is also the wrong height to sweep a capsule
+ — visibly, on a coarse grid — and it is the wrong height to sweep a capsule
  from. Subtracting the half cell puts the point on the floor.
 *>
 fn Vec3 NavMesh.foot_of(&self, int voxel)
@@ -598,7 +582,7 @@ fn Vec3 NavMesh.foot_of(&self, int voxel)
 }
 
 <*
- Walk the field downhill from `from`, collecting one point per cell.
+ Walks the field downhill from `from`, collecting one point per cell.
 
  The raw path, before shortening. Bounded by the slice it is given and by a step
  count, so a field with a flat spot cannot loop for ever.
@@ -657,16 +641,15 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 }
 
 <*
- Drop a waypoint onto the surface it is over.
+ Drops a waypoint onto the surface it is over.
 
- A cell centre is half a cell above the floor and the foot point this subtracts
- that from is only right when the floor happens to line up with the grid — so a
- raw waypoint floats by up to half a cell, visibly on a coarse bake. One ray per
+ A foot point is only right when the floor happens to line up with the grid, so a
+ raw waypoint floats by up to half a cell — visibly on a coarse bake. One ray per
  *kept* waypoint fixes it, and there are a handful of those after shortening
  rather than one per cell.
 
- Falls back to the point it was given when nothing is under it, which happens
- at the lip of a ledge where the ray goes past the edge: half a cell of float is
+ Falls back to the point it was given when nothing is under it, which happens at
+ the lip of a ledge where the ray goes past the edge: half a cell of float is
  better than a waypoint dropped to the bottom of a pit.
 *>
 fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
@@ -678,14 +661,13 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
 }
 
 <*
- Pull the string tight: drop every waypoint the agent can see past.
+ Pulls the string tight: drops every waypoint the agent can see past.
 
- **§17: "a game that walks cell centres looks like it is walking cell
- centres."** A raw voxel path is a staircase of half-metre steps whatever the
- room looks like, and an agent following it weaves. This is the fix, and it is
- the one place the nav layer touches the actual geometry again — the visibility
- test is a capsule sweep through `scene/query.c3`, at the agent's own radius and
- height, so a corner the agent cannot physically round is not cut.
+ A raw voxel path is a staircase of half-metre steps whatever the room looks
+ like, and an agent following it weaves. This is the one place the nav layer
+ touches the actual geometry again — the visibility test is a capsule sweep
+ through `scene/query.c3`, at the agent's own radius and height, so a corner the
+ agent cannot physically round is not cut.
 
  Greedy and forward-only: from the current anchor, advance while the sweep is
  clear and stop at the first waypoint it is not. That is one sweep per waypoint
@@ -711,8 +693,8 @@ fn uint Scene.shorten_path(
 	float half = math::max((nav.settings.agent_height - 2.0f * radius) * 0.5f, 0.0f);
 	// The capsule's centre above the foot point the path carries.
 	float lift = radius + half;
-	// A hair off the floor, so a sweep along a surface the agent is standing on
-	// is not a sweep starting in contact with it.
+	// A hair off the floor, so a sweep along a surface the agent is standing on is
+	// not a sweep starting in contact with it.
 	float skin = nav.grid.cell * 0.05f;
 
 	uint written = 0;

@@ -1,27 +1,20 @@
 <*
  Three tools and no more: `run_script`, `screenshot`, `get_api_docs`.
 
- ## Why three
-
  `run_script` *is* the API surface. Every scene verb an agent could want is
  already a JavaScript call, so a `create_mesh` tool beside it would be a second,
  worse spelling of something the script can already do — and one that has to be
  kept in step with the first. The other two exist because they are the things a
  script cannot answer for itself: what the frame looks like, and what the API is.
 
- That is also why there is no milestone between the bindings and this. `plan.md`
- §5: `run_script` is the JS binding surface, so there is no useful MCP layer
- before the bindings exist.
-
  ## The answer shape
 
  `run_script` returns a content array rather than text, because one of the four
  things it always answers with is a PNG and an image block is the only way to
  carry one. The first block is the report — log, value, error, stats, as JSON —
- and the second is the frame. **Both, whether or not the script succeeded**
- (`plan.md` §4): a failed run that returns only an error makes the agent guess
- how far it got, and the picture of a half-built scene is often the thing that
- says.
+ and the second is the frame. Both, whether or not the script succeeded: a failed
+ run that returns only an error makes the agent guess how far it got, and the
+ picture of a half-built scene is often the thing that says.
 
  ## Threading
 
@@ -53,7 +46,7 @@ struct ToolHost
 }
 
 <*
- Build the server. The tools are registered here and nowhere else.
+ Builds the server. The tools are registered here and nowhere else.
 *>
 fn mcp::Server new_mcp_server(ToolHost* host)
 {
@@ -128,8 +121,8 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 	if (catch err = source)
 	{
 		// Naming the argument and its type is the difference between a retry that
-		// works and one that guesses again — mcp.c3l's own note, and it applies
-		// most to the one tool an agent calls on every turn.
+		// works and one that guesses again, and it applies most to the one tool an
+		// agent calls on every turn.
 		detail.append_string("run_script needs a `source` string: the JavaScript to run");
 		return TOOL_NEEDS_SOURCE~;
 	}
@@ -161,19 +154,18 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 	report.append_string(`,"stats":`);
 	append_stats(&report, result.stats, result.timing);
 
-	// Only when there is something to say. A `"frame"` block on every result
-	// would be noise on the overwhelming majority of scripts, which never
-	// register a callback — and noise on every result is how a field stops being
-	// read at all.
+	// Only when there is something to say. A `"frame"` block on every result would
+	// be noise on the overwhelming majority of scripts, which never register a
+	// callback — and noise on every result is how a field stops being read at all.
 	if (result.frame_running || result.frame_ticks > 0 || result.frame_error.len > 0)
 	{
 		report.append_string(`,"frame":{"running":`);
 		report.append_string(result.frame_running ? "true" : "false");
 		report.append_string(`,"ticks":`);
 		report.appendf("%d", result.frame_ticks)!!;
-		// Only in a game boot, where it is ever non-zero — and then always, even
-		// at zero, because "no frames ran long" is the answer somebody checking
-		// for hitching came to read.
+		// Only in a game boot, where it is ever non-zero — and then always, even at
+		// zero, because "no frames ran long" is the answer somebody checking for
+		// hitching came to read.
 		if (result.frame_overruns > 0)
 		{
 			report.append_string(`,"overruns":`);
@@ -243,15 +235,15 @@ fn String? tool_screenshot(Object* args, void* user_data, DString* detail)
  The docs, narrowly.
 
  The whole object is about 113 KB of JSON — thirty thousand tokens paid before a
- line is written — and from outside this repository there is nothing to grep:
- the strings are embedded in the binary, so an agent that wanted one fact had to
- take all of them or none. So the arguments are the narrowing, and a bare call
- answers with the index rather than the dump.
+ line is written — and from outside this repository there is nothing to grep: the
+ strings are embedded in the binary, so an agent that wanted one fact had to take
+ all of them or none. So the arguments are the narrowing, and a bare call answers
+ with the index rather than the dump.
 
- **The narrowing is `docs.js`'s, not this file's.** Every argument here is
- forwarded into `three.getApiDocs`, so the walk over the docs lives beside the
- strings it walks and a script asking from `run_script` and an agent asking over
- JSON-RPC get the same answer by the same code.
+ The narrowing is `docs.js`'s, not this file's. Every argument here is forwarded
+ into `three.getApiDocs`, so the walk over the docs lives beside the strings it
+ walks and a script asking from `run_script` and an agent asking over JSON-RPC
+ get the same answer by the same code.
 *>
 fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 {
@@ -277,9 +269,9 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 	if (path.len > 0) return write_api_docs(host, path, detail);
 
 	// A JS object literal built by hand because JSON *is* one, and the escaping
-	// that makes an argument safe to splice into source is the escaping the
-	// answer already uses. An empty `search` or `section` is not a search for
-	// nothing: `docsQuery` reads both as unasked.
+	// that makes an argument safe to splice into source is the escaping the answer
+	// already uses. An empty `search` or `section` is not a search for nothing:
+	// `docsQuery` reads both as unasked.
 	DString source;
 	source.init(mem, 256);
 	defer source.free();
@@ -296,13 +288,13 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 }
 
 <*
- Write the whole surface to a file, and answer with the path rather than the docs.
+ Writes the whole surface to a file, and answers with the path rather than the
+ docs.
 
- The `path` argument `screenshot` already has, with the one difference worth
- stating: a screenshot writes *and* returns the image, because a file is not
- something the agent can look at, while these docs are something it can grep —
- and returning 113 KB beside "I wrote it to a file you can grep" would undo the
- reason for writing the file.
+ The `path` argument `screenshot` already has, with one difference: a screenshot
+ writes *and* returns the image, because a file is not something the agent can
+ look at, while these docs are something it can grep — and returning 113 KB
+ beside "I wrote it to a file you can grep" would undo the reason for the file.
 
  Markdown rather than JSON because the tools that would read it are line-based:
  one heading per entry means a grep hit is a paragraph and the heading above it
@@ -315,8 +307,8 @@ fn String? write_api_docs(ToolHost* host, String path, DString* detail)
 	defer docs.free(mem);
 
 	// The runtime answers in JSON, so a string comes back quoted and escaped.
-	// Parsed rather than unquoted by hand: this prose is full of quotes,
-	// newlines and em dashes, and every one of them is an escape here.
+	// Parsed rather than unquoted by hand: this prose is full of quotes, newlines
+	// and em dashes, and every one of them is an escape here.
 	Object*? parsed = json::parse(mem, docs);
 	if (catch err = parsed)
 	{
@@ -355,7 +347,7 @@ fn String? write_api_docs(ToolHost* host, String path, DString* detail)
 }
 
 <*
- Run one of this tool's own snippets and hand back what it returned.
+ Runs one of this tool's own snippets and hands back what it returned.
 
  `drain_frame: false` — the run is the server's own rather than the agent's, and
  consuming what the animation loop logged would lose it: nothing here reads
@@ -436,15 +428,13 @@ fn void append_json_string(DString* out, String text)
 
  The timings ride along for the same reason, and are a separate argument because
  they are not scene facts: `SceneStats` is device-free, and the millisecond
- counts belong to whichever frame the run last drew. `js/bind_scene.c3`'s
- `js_stats` makes the same join on the script side, so the two spellings still
- agree.
+ counts belong to whichever frame the run last drew.
 
- **The five phases are here and not only in `stats()`** because this is the
- result an agent reads without being asked to. `plan.md` §18.3's complaint is
- that finding out where a frame went took six runs of an edited scene; a tool
- result that already says `"shadowMs":2.66` next to `"gpuMs":3.92` takes none.
- They sum to `gpuMs`, so the block is a breakdown rather than a sample.
+ The five phases are here and not only in `stats()` because this is the result an
+ agent reads without being asked to: a tool result that already says
+ `"shadowMs":2.66` next to `"gpuMs":3.92` saves finding out where a frame went by
+ editing the scene six times. They sum to `gpuMs`, so the block is a breakdown
+ rather than a sample.
 
  Six decimal places rather than two: a headless 200x150 frame costs tens of
  microseconds, and `%.2f` would report every one of them as `0.00` — a number

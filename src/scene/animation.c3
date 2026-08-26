@@ -2,34 +2,25 @@
  glTF node animation: the clips a file carries, and the sampling that turns one
  into a transform.
 
- `game.md` G3/S4 and S5. Two halves, and the split between them is the whole
- design:
+ Two halves, and the split between them is the design:
 
- - **A clip is on the asset.** Keyframes are immutable data read once per file,
-   and a hundred copies of a walking character share one copy of the walk.
- - **A player is on the instance.** Two copies of the same tree must be able to
-   wave at different phases, so the time, the speed and the loop flag live beside
-   the nodes, not beside the keys. This is the first per-instance state in the
-   scene model that is not a transform, which is worth saying out loud: until now
-   a node was an asset reference plus a matrix and nothing else.
+ - A clip is on the asset. Keyframes are immutable data read once per file, so a
+   hundred copies of a walking character share one copy of the walk.
+ - A player is on the instance. Two copies of the same tree must be able to wave
+   at different phases, so the time, the speed and the loop flag live beside the
+   nodes rather than beside the keys. This is the first per-instance state in the
+   scene model that is not a transform.
 
- ## Sampling is not deferred to a library
+ `gltf.c3l`'s `Animation.duration`, `loop_time` and `clamp_time` are used; its
+ whole-node sampler is not, because it walks every channel looking for the frame
+ and returns a matrix, where a `three::Node` wants a TRS triple written into
+ three fields. Reading the keyframes into three.c3's own arrays once, at first
+ play, is faster per frame and is what makes `CUBICSPLINE` implementable rather
+ than approximated.
 
- `gltf.c3l` has `Animation.duration`, `loop_time` and `clamp_time` and they are
- used. It also has a whole-node sampler; that one is not, because it walks every
- channel of an animation looking for the frame and returns a matrix, and what a
- `three::Node` wants is a TRS triple written into three fields. Reading the
- keyframes into three.c3's own arrays once, at first play, is both faster per
- frame and the thing that makes `CUBICSPLINE` implementable rather than
- approximated.
-
- ## What a clip does *not* do
-
- No blending, no crossfade, no additive layers. `game.md` G3/S7 says why: Three.js's
- `AnimationMixer` earns its complexity on crossfading, and crossfading is worth
- having after G4, when blending between clips is what makes a character look
- right. A partial mixer answering to the same name would be worse than a
- deliberately smaller thing with a different one.
+ No blending, no crossfade, no additive layers. Three.js's `AnimationMixer` earns
+ its complexity on crossfading, and a partial mixer answering to the same name
+ would be worse than a deliberately smaller thing with a different one.
 *>
 module three;
 
@@ -64,9 +55,8 @@ enum AnimatedPath
 
  `times` and `values` are three.c3's own copies rather than views into the glTF
  buffer. The buffer is mmapped and could be read in place, but an accessor may be
- strided — `@cast_buffer` is what knows that — and paying the stride arithmetic
- once at first play rather than twice per node per frame is the whole reason to
- copy.
+ strided, and paying the stride arithmetic once at first play rather than twice
+ per node per frame is the whole reason to copy.
 *>
 struct AnimationChannel
 {
@@ -90,9 +80,8 @@ struct AnimationChannel
 
  Names, durations and channel targets are read at `Assets.load` — they are in the
  JSON chunk, so this costs nothing and `mesh.animations` can answer without any
- buffer being touched. **The keyframes are not**, for G3/S3's reason: a file
- describes itself cheaply and pays when it is used. `Assets.ensure_clip` is where
- the curves arrive, and it happens on the first `play` of that clip.
+ buffer being touched. The keyframes are not: `Assets.ensure_clip` reads the
+ curves on the first `play` of that clip.
 *>
 struct AnimationClip
 {
@@ -100,8 +89,7 @@ struct AnimationClip
 
 	// glTF times are absolute and need not start at zero; `start` is the file's
 	// own `min_time` and `duration` is `max_time - min_time`. Keeping both means
-	// looping is arithmetic on the file's numbers rather than on a shifted copy
-	// of them.
+	// looping is arithmetic on the file's numbers rather than on a shifted copy.
 	float start;
 	float duration;
 
@@ -113,7 +101,7 @@ struct AnimationClip
 }
 
 <*
- Give back one clip's curves and its name.
+ Gives back one clip's curves and its name.
 *>
 fn void AnimationClip.free(&self)
 {
@@ -137,10 +125,9 @@ fn void AnimationClip.free(&self)
  Where in a channel's key list a time falls: the key at or before it, and how far
  between that key and the next.
 
- A linear scan from the start would be O(keys) per channel per frame and a walk
- cycle has a few dozen keys, so it would not actually matter — but a binary
- search is four lines and removes the question, and G4's skinned characters have
- a channel per joint rather than per node.
+ A binary search. A linear scan would be O(keys) per channel per frame, which for
+ a walk cycle's few dozen keys would not actually matter — but this is four lines
+ and removes the question, and a skinned character has a channel per joint.
 *>
 fn usz find_keyframe(float[] times, float time, float* fraction) @local
 {
@@ -158,27 +145,26 @@ fn usz find_keyframe(float[] times, float time, float* fraction) @local
 	}
 
 	float span = times[high] - times[low];
-	// Two keys at the same instant are legal and mean a step; dividing by the
-	// gap would be a NaN that then propagates into a world matrix.
+	// Two keys at the same instant are legal and mean a step; dividing by the gap
+	// would be a NaN that then propagates into a world matrix.
 	*fraction = span > 0 ? (time - times[low]) / span : 0;
 	return low;
 }
 
 <*
- Sample a channel at `time` into up to four floats.
+ Samples a channel at `time` into up to four floats.
 
- The three glTF interpolations, all of them:
+ All three glTF interpolations:
 
- - **STEP** holds the earlier key. Used for anything that should pop rather than
-   slide — a light switching, a prop appearing.
- - **LINEAR** interpolates. For a rotation that means **slerp**, not a
-   component-wise mix: the spec says so, and a component-wise mix of two
-   quaternions 90° apart is a rotation that speeds up in the middle and is not a
-   unit quaternion on the way.
- - **CUBICSPLINE** stores three values per key — in-tangent, value, out-tangent —
+ - STEP holds the earlier key. For anything that should pop rather than slide —
+   a light switching, a prop appearing.
+ - LINEAR interpolates. For a rotation that means *slerp*, not a component-wise
+   mix: the spec says so, and a component-wise mix of two quaternions 90° apart
+   speeds up in the middle and is not a unit quaternion on the way.
+ - CUBICSPLINE stores three values per key — in-tangent, value, out-tangent —
    and interpolates with a Hermite spline. The tangents are scaled by the key
    spacing, which is the part that is wrong in every implementation that treats
-   them as if the interval were one second.
+   the interval as one second.
 
  @param out : `At least four floats; only the channel's own stride is written.`
 *>
@@ -254,7 +240,7 @@ fn void AnimationChannel.sample(&self, float time, float[] out)
 }
 
 <*
- Make four floats a unit quaternion, or the identity if they are not a rotation
+ Makes four floats a unit quaternion, or the identity if they are not a rotation
  at all.
 
  A Hermite spline through unit quaternions does not stay on the unit sphere, so
@@ -287,9 +273,9 @@ fn void normalize_into(float[] value) @local
 <*
  One skinned mesh this player poses, and which of the asset's skins poses it.
 
- Kept beside `targets` rather than looked up per frame, because the alternative is
+ Kept beside `targets` rather than looked up per frame: the alternative is
  walking the subtree once a frame per character to ask which of its nodes are
- characters — and the answer cannot change: a node's skin is set when it is
+ characters, and the answer cannot change — a node's skin is set when it is
  created and cleared when its slot is recycled.
 *>
 struct SkinnedTarget
@@ -302,14 +288,12 @@ struct SkinnedTarget
 <*
  One instantiated subtree's animation state.
 
- **Per instance, which is the point.** Two copies of the same character have one
- copy of the walk cycle and two of these, so they can be at different phases —
- the thing that is impossible if the time lives on the asset, and the reason this
- is a separate structure at all.
+ Per instance, which is the point: two copies of the same character have one copy
+ of the walk cycle and two of these, so they can be at different phases.
 
- `targets` is what makes a clip addressable: a channel names a *glTF node index*,
- and `Scene.instantiate` is the only thing that knows which `NodeId` that became.
- The map is built there and kept here, indexed by glTF node index, holding
+ `targets` is what makes a clip addressable. A channel names a *glTF node index*,
+ and `Scene.instantiate` is the only thing that knows which `NodeId` that became;
+ the map is built there and kept here, indexed by glTF node index, holding
  `NO_NODE` for a node the instantiation did not produce.
 
  A player exists for every instantiated subtree of an asset that has clips, even
@@ -326,13 +310,13 @@ struct AnimationPlayer
 	// By glTF node index. Owned.
 	List{NodeId} targets;
 
-	// The skinned meshes under `root`, which is usually one and never many. Owned.
+	// The skinned meshes under `root`, usually one and never many. Owned.
 	//
-	// **What makes a crowd cost nothing.** Advancing a baked character is: step
-	// the clock, divide by the frame rate, write one `uint` per entry here. There
-	// is no palette to compute, nothing to upload, and no per-joint work at all —
-	// the sixty matrices this would otherwise produce were baked when the file
-	// first drew and are shared by every copy of the character in the scene.
+	// What makes a crowd cost nothing: advancing a baked character is stepping
+	// the clock, dividing by the frame rate, and writing one `uint` per entry
+	// here. No palette to compute, nothing to upload, no per-joint work — the
+	// sixty matrices this would otherwise produce were baked when the file first
+	// drew and are shared by every copy in the scene.
 	List{SkinnedTarget} skinned;
 
 	// -1 when nothing is playing, which is the state a player spends most of its
@@ -344,18 +328,17 @@ struct AnimationPlayer
 	bool playing;
 
 	<*
-	 Whether this character's joint matrices are computed every frame from its bone
-	 nodes, rather than keyed out of the baked table.
+	 Whether this character's joint matrices are computed every frame from its
+	 bone nodes, rather than keyed out of the baked table.
 
 	 Set by `instantiate({ skeleton: true })`, and the whole of what that flag
 	 buys: the bones exist as scene nodes, so a script can write one and the skin
 	 follows — a look-at, an aim offset, a foot planted on a slope — and the time
 	 is exact rather than snapped to the bake rate.
 
-	 **It is a cost dial and the doc for it says so.** A live character pays a
-	 hierarchy walk over its own bones and a palette write every frame; a baked one
-	 pays one `uint`. That is the difference between a hero and a crowd, and it is
-	 why the default is the crowd.
+	 It is a cost dial. A live character pays a hierarchy walk over its own bones
+	 and a palette write every frame; a baked one pays one `uint`. That is the
+	 difference between a hero and a crowd, and why the default is the crowd.
 	*>
 	bool live_skin;
 }
@@ -369,12 +352,12 @@ fn void AnimationPlayer.free(&self)
 }
 
 <*
- Advance a player by `dt` seconds and write the result into its nodes.
+ Advances a player by `dt` seconds and writes the result into its nodes.
 
  Time is in the clip's own units, which glTF says are seconds and need not start
  at zero. A finished non-looping clip stops *on its last frame* rather than
- snapping back — `clamp_time` — because a character that finishes a "sit down"
- and returns to standing is the animation bug everyone writes once.
+ snapping back (`clamp_time`), because a character that finishes a "sit down" and
+ returns to standing is the animation bug everyone writes once.
 
  Nodes are marked dirty rather than having their world matrices recomputed here.
  `update_world_matrices` runs once per frame over the whole scene and already
@@ -417,18 +400,15 @@ fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 }
 
 <*
- Point every skinned mesh under this player at the baked frame nearest the
+ Points every skinned mesh under this player at the baked frame nearest the
  player's current time.
 
  The whole of what posing a baked character costs: a divide, a round, a clamp and
- one store per skinned mesh. No matrices are touched and nothing is uploaded —
- the sixty matrices this frame needs were computed when the file first drew and
- are shared by every copy of the character in the scene.
+ one store per skinned mesh. No matrices are touched and nothing is uploaded.
 
- **Snapped rather than interpolated**, which is the design's one visible
- compromise: at thirty frames a second a walk cycle is a walk cycle, and a
- performance slow enough to show the stepping is what the live palette is for.
- `plan.md` §3 has the argument.
+ Snapped rather than interpolated, which is the design's one visible compromise:
+ at thirty frames a second a walk cycle is a walk cycle, and a performance slow
+ enough to show the stepping is what the live palette is for.
 
  A skin the asset never baked — the buffer failed, or the file has clips and no
  skeleton — leaves `pose` where `Scene.set_skin` put it, which is the rest pose.
@@ -436,9 +416,9 @@ fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationClip* clip)
 {
 	if (self.skinned.len() == 0 || self.clip < 0) return;
-	// A live character's offset is written by `MeshPass.write_live_poses` from the
-	// bone nodes `apply` has just posed. Keying a baked frame on top would be two
-	// writers for one field, and which one won would depend on call order.
+	// A live character's offset is written by `MeshPass.write_live_poses` from
+	// the bone nodes `apply` has just posed. Keying a baked frame on top would be
+	// two writers for one field, and which one won would depend on call order.
 	if (self.live_skin) return;
 
 	foreach (&target : self.skinned)
@@ -458,11 +438,11 @@ fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationCli
 }
 
 <*
- Write the clip's value at the player's current time into every node it targets.
+ Writes the clip's value at the player's current time into every node it targets.
 
- Split from `advance` so that `play()` can pose an instance at frame zero without
- stepping it — a prop that is placed paused should look like its first frame, not
- like whatever its rest pose happened to be.
+ Split from `advance` so `play()` can pose an instance at frame zero without
+ stepping it — a prop placed paused should look like its first frame, not like
+ whatever its rest pose happened to be.
 *>
 fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
 {
@@ -488,9 +468,8 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
 			case AnimatedPath.SCALE:
 				node.scale = { value[0], value[1], value[2] };
 		}
-		// Not `node.dirty = true`: the flag alone stopped being enough in §19.5,
-		// when the world-matrix walk gained the right to skip itself. See
-		// `Scene.mark_moved`.
+		// Not `node.dirty = true`: the flag alone is not enough now that the
+		// world-matrix walk may skip itself. See `Scene.mark_moved`.
 		scene.mark_moved(id);
 	}
 }
@@ -503,10 +482,9 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
  the point at which one is available. Same arithmetic, kept honest by
  `a_loop_wraps_to_the_same_pose`.
 
- Not `@local` since `Scene.play` gained a start phase: a crowd spread with
+ Not `@local`: `Scene.play`'s start phase means a crowd spread with
  `i / count * duration` hands in a time past the end on its last copy, and the
- wrap that makes that mean "the start again" is this one rather than a second
- copy of it.
+ wrap that makes that mean "the start again" is this one.
 *>
 fn double clip_loop_time(AnimationClip* clip, double time)
 {

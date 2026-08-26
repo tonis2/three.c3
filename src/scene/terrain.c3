@@ -1,46 +1,38 @@
 <*
- Ground that is a surface rather than a pile of boxes — `plan.md` §18.4.
+ Ground that is a surface rather than a pile of boxes.
 
- ## What this replaces
-
- The first outdoor scene built on this engine paved its ground with 3249
- `BoxGeometry` copies, four units square, because that was the only shape a
- script could stand something on. It cost three things, all measured in §18.4:
-
- - **1.1 ms a frame of pure shadow fill**, from around thirteen thousand side
-   faces buried inside their own neighbours and rasterised into the map anyway.
- - **A staircase.** A slope across four-unit tiles is a flight of steps, and the
-   rolling hills on the horizon had to be abandoned for a treeline.
- - **Four hand-written functions every consumer had to call in the right order**,
-   with nothing in the engine able to see that they were the same terrain the
-   meshes were built from — so nothing could catch them disagreeing.
+ Paving a scene's ground with `BoxGeometry` copies — the only shape a script
+ could otherwise stand something on — costs three things. A 3249-tile ground
+ measured 1.1 ms a frame of pure shadow fill, from around thirteen thousand side
+ faces buried inside their own neighbours and rasterised into the map anyway. A
+ slope across four-unit tiles is a flight of steps, so rolling hills have to
+ become a treeline. And the height query, the collider and the mesh end up as
+ separate hand-written functions that nothing can catch disagreeing.
 
  A `Heightfield` is one asset, one draw call, and one source of truth for all
- three: the mesh, the height query everything outdoors needs, and the collider.
+ three.
 
  ## The grid
 
  `(segments + 1)^2` samples over `width` x `depth`, centred on the origin, in the
- xz plane with +y up — the same frame `PlaneGeometry` lands in after the rotation
- every script writes, and the reason it is baked in here is that a terrain that
- could be authored on its side is a terrain whose `height_at` means nothing.
+ xz plane with +y up — the frame `PlaneGeometry` lands in after the rotation every
+ script writes. It is baked in because a terrain that could be authored on its
+ side is a terrain whose `height_at` means nothing.
 
- **Normals come from the grid, not from the triangles**, and that is the whole
- difference between ground and steps: a vertex normal is the central difference
- of its four neighbours, so the surface shades as the smooth thing the samples
- describe rather than as the faceted thing the triangles are.
+ Normals come from the grid, not from the triangles, and that is the difference
+ between ground and steps: a vertex normal is the central difference of its four
+ neighbours, so the surface shades as the smooth thing the samples describe
+ rather than the faceted thing the triangles are.
 
- ## Why `height_at` cannot disagree with the mesh
+ ## `height_at` cannot disagree with the mesh
 
  It reads the same array through the same bilinear interpolation the two
- triangles of a cell perform between the same four corners. Not "kept in step
- with" — the same numbers, which is the property the hand-written version was one
- edit away from losing at all times.
+ triangles of a cell perform between the same four corners — not "kept in step
+ with", the same numbers.
 
- The one place it is an approximation is inside a cell: a quad split into two
- triangles is not a bilinear patch, and the two differ by at most the cell's own
- twist. Sub-texel, sub-cell, and it is the same difference the physics engine's
- own heightfield makes, so nothing downstream can tell.
+ It is an approximation only inside a cell: a quad split into two triangles is
+ not a bilinear patch, and the two differ by at most the cell's own twist.
+ Sub-cell, and the same difference the physics engine's own heightfield makes.
 *>
 module three;
 
@@ -51,11 +43,11 @@ import collision;
 
 <*
  Beyond this many cells a side, a heightfield is a memory bomb rather than
- terrain: 512 is 263 169 samples and about five megabytes of vertices, which is
- already a large asset, and 4096 would be sixteen million.
+ terrain: 512 is 263 169 samples and about five megabytes of vertices, and 4096
+ would be sixteen million.
 
  The prelude refuses past this with a sentence; the clamp here is the backstop
- for a forged call, in exactly the same arrangement `primitive_segments` has.
+ for a forged call, as `primitive_segments` has.
 *>
 const uint MAX_TERRAIN_SEGMENTS = 512;
 const uint MIN_TERRAIN_SEGMENTS = 1;
@@ -65,9 +57,8 @@ faultdef TERRAIN_SIZE_INVALID, TERRAIN_HEIGHTS_WRONG_LENGTH;
 <*
  A grid of heights, and everything derived from it.
 
- The list is owned. `Assets.free_slot` frees it with the asset that holds it —
- the same arrangement `Asset.meshes` has, and for the same reason: a query on a
- handle to an unloaded asset must find nothing rather than freed memory.
+ The list is owned. `Assets.free_slot` frees it with the asset that holds it, so
+ a query on a handle to an unloaded asset finds nothing rather than freed memory.
 *>
 struct Heightfield
 {
@@ -80,9 +71,9 @@ struct Heightfield
 	 How far the border wall drops below the lowest sample, in world units, or 0
 	 for no wall.
 
-	 **A map edge should be a wall and not a hole.** Without it the ground ends in
-	 a one-pixel line and the camera sees the sky through the seam from any angle
-	 below the horizon — which reads as a rendering bug rather than as the edge of
+	 A map edge should be a wall and not a hole. Without it the ground ends in a
+	 one-pixel line and the camera sees the sky through the seam from any angle
+	 below the horizon, which reads as a rendering bug rather than the edge of
 	 the world.
 	*>
 	float skirt;
@@ -95,10 +86,10 @@ fn uint Heightfield.side(&self) @inline => self.segments + 1;
 <*
  The height at a grid index, with the edges extended outwards.
 
- **Clamped rather than wrapped or zeroed.** A query outside the field is a
- character walking off the map, and the honest answer is the ground it last stood
- on: zero would drop it through the floor at the boundary, and wrapping would
- teleport the ground under it.
+ Clamped rather than wrapped or zeroed. A query outside the field is a character
+ walking off the map, and the honest answer is the ground it last stood on: zero
+ would drop it through the floor at the boundary, and wrapping would teleport the
+ ground under it.
 *>
 fn float Heightfield.sample(&self, int i, int j)
 {
@@ -129,15 +120,14 @@ fn float Heightfield.cell_x(&self) @inline => self.width / (float)self.segments;
 fn float Heightfield.cell_z(&self) @inline => self.depth / (float)self.segments;
 
 <*
- The ground at a world (x, z) — `plan.md` §18.4b.
+ The ground at a world (x, z).
 
- **The piece that makes the rest work.** Everything that stands outdoors needs
- it: buildings, fence posts, trees, and every NPC that will follow. It is also
- what makes `align('y', 'min')` mean anything on open ground.
+ Everything that stands outdoors needs it: buildings, fence posts, trees, NPCs.
+ It is also what makes `align('y', 'min')` mean anything on open ground.
 
  Bilinear, so it is continuous everywhere — a query that stepped to the nearest
  sample would put a character through a staircase on a smooth hill, which is the
- defect the boxes had and the whole reason this exists.
+ defect the boxes had.
 *>
 fn float Heightfield.height_at(&self, float x, float z)
 {
@@ -162,9 +152,9 @@ fn float Heightfield.height_at(&self, float x, float z)
  The surface normal at a grid index, from its four neighbours.
 
  The central difference over two cells rather than the forward difference over
- one: a forward difference makes a normal that belongs half a cell away, which
- tilts every lit surface consistently in one direction — a scene that looks
- lit from the wrong place and nothing that says why.
+ one: a forward difference makes a normal that belongs half a cell away, tilting
+ every lit surface consistently in one direction — a scene that looks lit from
+ the wrong place, with nothing to say why.
 
  At the border the clamp in `sample` turns the central difference into a forward
  one, which is the right degeneracy: the edge normal leans the way the last real
@@ -230,12 +220,12 @@ fn collision::Aabb3 Heightfield.bounds(&self)
 }
 
 <*
- Write the surface into a builder — the same one every generated shape uses.
+ Writes the surface into a builder — the same one every generated shape uses.
 
  One grid of vertices shared by every triangle, so a 128-cell field is 16 641
- vertices rather than the 98 304 that six separate faces would be. The uv runs
- 0..1 across the whole field, which is what makes a splat mask authored at any
- resolution line up with the ground without a transform.
+ vertices rather than the 98 304 six separate faces would be. The uv runs 0..1
+ across the whole field, which makes a splat mask authored at any resolution line
+ up with the ground without a transform.
 
  The skirt is a separate ring of vertices rather than a reuse of the border row,
  because the wall's normal points outwards and the ground's points up: sharing
@@ -270,8 +260,8 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 			uint c = a + side;
 			uint d = c + 1;
 			// Counter-clockwise seen from +y, which is the front face
-			// `render/pass.c3` keeps — the same winding `build_face` argues for
-			// at length, arrived at here by the same right-hand rule.
+			// `render/pass.c3` keeps — the same winding `build_face` uses,
+			// arrived at by the same right-hand rule.
 			out.triangle(a, c, b);
 			out.triangle(b, c, d);
 		}
@@ -283,7 +273,7 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 <*
  A wall around the border, dropping to `skirt` below the lowest sample.
 
- Four strips, each walked so that its front face points away from the field.
+ Four strips, each walked so its front face points away from the field.
 *>
 fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 {
@@ -337,23 +327,20 @@ fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 }
 
 <*
- Build a heightfield and upload it as an asset — `plan.md` §18.4a.
+ Builds a heightfield and uploads it as an asset.
 
- **Through `upload_built`, so a terrain is an asset like any other**: one draw
- call, one bucket, no new pipeline, and `split.c3`, the exporter and the picking
- tree all read it through the paths they already have. That is the whole reason
- this is a `GeometryBuilder` and not a pass of its own.
+ Through `upload_built`, so a terrain is an asset like any other: one draw call,
+ one bucket, no new pipeline, and `split.c3`, the exporter and the picking tree
+ all read it through the paths they already have. That is why this is a
+ `GeometryBuilder` and not a pass of its own.
 
- The key is the parameters and a hash of the heights, so two identical fields are
- one asset — the same dedup every generated shape gets, arrived at the only way a
- shape carrying a quarter of a million numbers can. A collision would hand back
- the wrong terrain, so the hash is 64-bit FNV over the raw floats rather than
- anything cheaper: at one field per scene the birthday bound is not close.
+ The key is the parameters plus a hash of the heights, so two identical fields
+ are one asset. A collision would hand back the wrong terrain, so the hash is
+ 64-bit FNV over the raw floats rather than anything cheaper; at one field per
+ scene the birthday bound is not close.
 
- **The field is kept on the slot**, exactly as `Primitive` is and for a related
- reason — except that `primitive` is kept so the exporter can regenerate, and
- this is kept because `height_at` is the point. `Assets.free_slot` frees the list
- with the asset.
+ The field is kept on the slot because `height_at` is the point.
+ `Assets.free_slot` frees the list with the asset.
 
  @param field : `Borrowed. The list is copied onto the asset, so the caller keeps ownership of theirs.`
  @return? TERRAIN_SIZE_INVALID : `A non-positive extent, or a segment count outside 1..MAX_TERRAIN_SEGMENTS.`

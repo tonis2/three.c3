@@ -1,45 +1,38 @@
 <*
  Line geometry: the shapes a scene is debugged with rather than built out of.
 
- ## Why this is geometry at all, and not a debug renderer
-
  Every engine's debug draw is an immediate-mode side channel — a list of segments
- refilled each frame, uploaded each frame, drawn outside the scene. That would be
- a second renderer here, with its own buffer growth, its own frame-slot problem
- (`gpu/frame.c3`'s, the one that tore crig's pose palette) and its own answer to
- "how many draw calls was that".
+ refilled and uploaded each frame, drawn outside the scene. That would be a
+ second renderer here, with its own buffer growth, its own frame-slot problem and
+ its own answer to "how many draw calls was that".
 
  It is not needed. A debug box is a shape, and this project already has one path
- for shapes: tessellate once, file the result under a key, and let every use of
- the same key share the asset. So a helper is an ordinary `Mesh` over an ordinary
- asset, and the properties fall out rather than being re-engineered:
+ for shapes: tessellate once, file the result under a key, share the asset. So a
+ helper is an ordinary `Mesh` over an ordinary asset, and the useful properties
+ fall out:
 
- - **A thousand box helpers are one draw call.** They share the unit-cube asset
-   and differ by transform, which is the same claim `plan.md` makes about a
-   thousand walls.
- - **Colour is free per copy.** `mesh.color` already rides in the instance record,
-   so red boxes and green boxes are still one draw call — which is what makes
-   `AxesHelper` three meshes over *one* segment asset rather than three assets.
- - **`scene.remove(helper)` works**, and `unloadUnused` gives the memory back,
-   because there is nothing special about these assets.
+ - A thousand box helpers are one draw call — they share the unit-cube asset and
+   differ by transform.
+ - Colour is free per copy, since `mesh.color` rides in the instance record. That
+   is what makes `AxesHelper` three meshes over *one* segment asset.
+ - `scene.remove(helper)` works and `unloadUnused` gives the memory back, because
+   there is nothing special about these assets.
 
- ## Unit shapes, scaled — not shapes built to size
+ ## Unit shapes, scaled
 
- `BoxHelper` around a 3 x 0.2 x 7 wall does not tessellate a 3 x 0.2 x 7 wireframe.
- It places the unit cube with `scale` set to the box's size, because otherwise
- every distinct object size would be its own asset and its own draw call, and a
- scene of two hundred kit pieces would end with two hundred box assets whose only
- purpose was to be looked at.
-
- The grid is keyed on its *divisions* alone for the same reason: `GridHelper(100, 10)`
- and `GridHelper(40, 10)` are one asset at two scales.
+ `BoxHelper` around a 3 x 0.2 x 7 wall does not tessellate a 3 x 0.2 x 7
+ wireframe; it places the unit cube with `scale` set to the box's size.
+ Otherwise every distinct object size would be its own asset and its own draw
+ call, and a scene of two hundred kit pieces would end with two hundred box
+ assets. The grid is keyed on its *divisions* alone for the same reason:
+ `GridHelper(100, 10)` and `GridHelper(40, 10)` are one asset at two scales.
 
  ## Lines, not a fill mode
 
- `PRIMITIVE_TOPOLOGY_LINE_LIST` and an index buffer of pairs. `plan.md` §1
- settled this before there was anything to draw: `fillModeNonSolid` is false on
- the bundled KosmicKrisp, so `POLYGON_MODE_LINE` is not available, and `wideLines`
- is false too — so every line here is one pixel and there is no width to set.
+ `PRIMITIVE_TOPOLOGY_LINE_LIST` and an index buffer of pairs.
+ `fillModeNonSolid` is false on the bundled KosmicKrisp, so `POLYGON_MODE_LINE`
+ is unavailable, and `wideLines` is false too — every line here is one pixel and
+ there is no width to set.
 *>
 module three;
 
@@ -54,9 +47,9 @@ faultdef NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT, NO_SUCH_LINE_SHAPE;
 <*
  The shapes that come as lines.
 
- Three, and no more than three on purpose: a box says where something ends, an
- axis says where its pivot is and which way it faces, and a grid says where the
- ground is and how big a metre looks. A fourth would want a reason of its own.
+ Three, and no more on purpose: a box says where something ends, an axis says
+ where its pivot is and which way it faces, and a grid says where the ground is
+ and how big a metre looks.
 *>
 enum LineKind
 {
@@ -69,8 +62,8 @@ enum LineKind
  A line shape before it is built.
 
  `divisions` is read by the grid and ignored by the other two, which is why it is
- in the key only for the grid — a box that carried a meaningless division count
- would file two identical assets under two keys.
+ in the key only for the grid — a box carrying a meaningless division count would
+ file two identical assets under two keys.
 *>
 struct LineShape
 {
@@ -79,7 +72,7 @@ struct LineShape
 }
 
 // A grid finer than this is a wall of pixels rather than a reference, and the
-// vertex count is 4 * (divisions + 1), so a mistyped literal is still bounded.
+// vertex count is 4 * (divisions + 1), so a mistyped literal stays bounded.
 const uint MAX_GRID_DIVISIONS = 256;
 
 fn String LineShape.key(&self, Allocator allocator)
@@ -96,9 +89,8 @@ fn String LineShape.key(&self, Allocator allocator)
 <*
  The name a script spells, as a kind.
 
- `primitive_kind`'s twin, and the same three-line switch, because the crossing is
- the same one: `prelude.js` names a shape and the host is the place that knows
- whether the name is one it builds.
+ `primitive_kind`'s twin: `prelude.js` names a shape and the host is the place
+ that knows whether the name is one it builds.
 
  @return? NO_SUCH_LINE_SHAPE : `Not one of box, segment or grid.`
 *>
@@ -134,9 +126,8 @@ fn String LineShape.label(&self)
  The absence is what makes the line flat-shaded. `Assets.upload_built` decides a
  stream exists by comparing its length against the position count, so a builder
  that never pushes a normal produces `has_normals = false` and `mesh.slang`'s
- unlit branch — which is what a debug line wants. Pushing a normal here would
- light the wireframe, and a wireframe that is dark on one side is a worse
- diagnostic than one that is not.
+ unlit branch. Pushing a normal here would light the wireframe, and a wireframe
+ dark on one side is a worse diagnostic than one that is not.
 *>
 fn uint GeometryBuilder.line_vertex(&self, Vec3 position)
 {
@@ -165,15 +156,15 @@ fn void LineShape.build(&self, GeometryBuilder* out)
 <*
  The twelve edges of a unit cube about the origin, corners at +/- 0.5.
 
- The same extent `BoxGeometry(1, 1, 1)` has, which is what lets a helper be
- placed by copying a box's centre into `position` and its size into `scale` with
- no factor of two anywhere.
+ The same extent `BoxGeometry(1, 1, 1)` has, so a helper is placed by copying a
+ box's centre into `position` and its size into `scale` with no factor of two
+ anywhere.
 *>
 fn void build_line_box(GeometryBuilder* out) @local
 {
-	// Bit i of the corner index selects the high side of axis i, so corner ^ (1 << axis)
-	// is the neighbour along that axis and the twelve edges are every pair that
-	// differs in exactly one bit.
+	// Bit i of the corner index selects the high side of axis i, so
+	// corner ^ (1 << axis) is the neighbour along that axis and the twelve edges
+	// are every pair differing in exactly one bit.
 	for (uint corner = 0; corner < 8; corner++)
 	{
 		out.line_vertex({
@@ -197,9 +188,8 @@ fn void build_line_box(GeometryBuilder* out) @local
 <*
  One segment, origin to +X, one unit long.
 
- +X rather than +Y so that "the length is the X scale" is true, and so that the
- three axes of an `AxesHelper` are one asset turned three ways rather than three
- assets.
+ +X rather than +Y so "the length is the X scale" is true, and so the three axes
+ of an `AxesHelper` are one asset turned three ways.
 *>
 fn void build_line_segment(GeometryBuilder* out) @local
 {
@@ -211,9 +201,9 @@ fn void build_line_segment(GeometryBuilder* out) @local
 <*
  A unit square in the XZ plane, ruled `divisions` times each way.
 
- Three.js's `GridHelper` plane, so a script that has memorized it is not
- surprised by a grid standing on edge. One unit across, for the header's reason —
- the size is the transform's job.
+ Three.js's `GridHelper` plane, so a script that has memorised it is not
+ surprised by a grid standing on edge. One unit across — the size is the
+ transform's job.
 *>
 fn void build_line_grid(GeometryBuilder* out, uint divisions) @local
 {
@@ -238,9 +228,9 @@ fn void build_line_grid(GeometryBuilder* out, uint divisions) @local
 // ============================================================================
 
 <*
- Build a line shape and upload it — or answer with the one already built.
+ Builds a line shape and uploads it, or answers with the one already built.
 
- `Assets.primitive`'s twin, and deliberately the same shape: one key, one lookup,
+ `Assets.primitive`'s twin and deliberately the same shape: one key, one lookup,
  one `upload_built`. A line asset and a triangle asset are indistinguishable
  afterwards except in their index buffers, which is what lets `unloadUnused`,
  `stats()` and the refcount know nothing about any of this.
@@ -268,27 +258,22 @@ fn AssetId? Assets.lines(&self, Gpu* gpu, LineShape shape)
 <*
  One mesh's triangles, as the edges between them.
 
- The tool for the failure that started this: two faces 0.01 apart z-fighting into
- a starburst, which is invisible in a solid render and obvious the moment the
- edges are drawn — `LINE_STATE` tests no depth, so the wireframe sits over the
- surface it describes rather than fighting it.
+ The tool for two faces 0.01 apart z-fighting into a starburst: invisible in a
+ solid render, obvious the moment the edges are drawn. `LINE_STATE` tests no
+ depth, so the wireframe sits over the surface it describes rather than fighting
+ it.
 
- ## It reads the CPU copy, and that is why the mesh has to be resident
+ It reads the CPU copy — `hull_positions` and `hull_triangles`, kept per mesh for
+ picking and hulls — so nothing is read back from the device. But those are
+ filled at *upload*, and a mesh reaches the device only when something drawing it
+ is added to a scene, so a wireframe of a mesh nobody has placed has nothing to
+ read. That is a sentence rather than an empty mesh, which would draw nothing and
+ read as a helper that does not work.
 
- `hull_positions` and `hull_triangles` are kept per mesh for picking and hulls
- (`GpuMesh.build_bvh`), so the triangles are already here and nothing is read
- back from the device. But they are filled at *upload*, and a mesh reaches the
- device only when something drawing it is added to a scene — so a wireframe of a
- mesh nobody has placed yet has nothing to read. That is a sentence rather than
- an empty mesh, because an empty mesh would draw nothing and read as a helper
- that does not work.
-
- ## Edges are deduplicated, and the sort is the cheap way
-
- Every interior edge is shared by two triangles, so emitting three per triangle
- draws each of them twice and doubles the index buffer. Sorting the packed
- `(low, high)` pairs and skipping repeats halves it in `n log n` with one
- allocation, against a hash map's per-edge one.
+ Edges are deduplicated by sorting the packed `(low, high)` pairs and skipping
+ repeats: every interior edge is shared by two triangles, so emitting three per
+ triangle would double the index buffer. `n log n` with one allocation, against a
+ hash map's per-edge one.
 
  @return? NO_SUCH_LINE_MESH : `The handle names no mesh — a stale asset, or an index past the end of the file.`
  @return? LINE_MESH_NOT_RESIDENT : `That mesh's triangles are not on this side. Add something that draws it to the scene first.`
@@ -328,10 +313,10 @@ fn AssetId? Assets.wireframe(&self, Gpu* gpu, AssetId asset, uint mesh)
 			}
 		}
 
-		// Merge rather than quick for `Scene.build_draw_list`'s reason: the packed
-		// edges arrive in triangle order, which for a grid — a terrain, a plane —
-		// is already ascending over long stretches, and that is the input
-		// `std::sort::quicksort` degrades to quadratic on.
+		// Merge rather than quick: the packed edges arrive in triangle order,
+		// which for a grid — a terrain, a plane — is already ascending over long
+		// stretches, and that is the input `std::sort::quicksort` degrades to
+		// quadratic on.
 		sort::mergesort(edges.array_view());
 
 		ulong previous = 0;

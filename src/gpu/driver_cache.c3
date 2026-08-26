@@ -2,45 +2,34 @@
  The other half of a shader's startup cost: the driver turning SPIR-V into a
  `VkPipeline`.
 
- `shader/disk_cache.c3` keeps the seventeen-millisecond half — the Slang compile
- — and until this file existed the remaining millisecond per pipeline was paid on
- every run, because every `createGraphicsPipelines` call in this project passed
- `VK_NULL_HANDLE` for the cache it is allowed to be given. A `VkPipelineCache`
- handed back the blob it produced last time turns most of that into a lookup.
+ `shader/disk_cache.c3` keeps the seventeen-millisecond half, the Slang compile.
+ This keeps the remaining millisecond per pipeline, by handing
+ `createGraphicsPipelines` a `VkPipelineCache` warmed with the blob the driver
+ produced last time.
 
- ## Why this is a second format and not a field in the first one
+ ## Why a second format rather than a field in the first
 
- The two caches are keyed on completely different things and invalidated by
- completely different events. A shader module is portable — SPIR-V is the same
- bytes on every device, which is why `disk_cache.c3` deliberately keeps the
- device *out* of its key. A pipeline blob is the opposite: it is opaque driver
- memory whose only documented validity rule is the device's own
- `pipelineCacheUUID`, and a driver update invalidates every byte of it with no
- error and no version bump anywhere this side can see.
+ The two caches are keyed on different things and invalidated by different
+ events. A shader module is portable — SPIR-V is the same bytes on every device,
+ which is why `disk_cache.c3` keeps the device *out* of its key. A pipeline blob
+ is the opposite: opaque driver memory whose only documented validity rule is the
+ device's own `pipelineCacheUUID`, and a driver update invalidates every byte of
+ it with no error and no version bump this side can see.
 
- So they are two files, with two headers and two identity rules, and this one is
- stricter.
+ ## The blob is not trusted
 
- ## The blob is not trusted, and the spec is why
+ `vkCreatePipelineCache` says a driver handed data that is not its own may do
+ anything at all. The header fields exist for the driver to check and most do,
+ but undefined behaviour is the contract and a corrupted blob is not required to
+ be detected. Believing a bad shader-cache file costs a wrong shader; believing a
+ bad blob costs whatever the driver decides.
 
- `vkCreatePipelineCache` says a driver handed data that is not its own is
- entitled to do anything at all — the header fields exist for the driver to check
- and most do, but "undefined behaviour" is the contract and a corrupted blob is
- not required to be detected. That is a much worse failure than the shader
- cache's: there the punishment for believing a bad file is a wrong shader, and
- here it is whatever the driver decides.
+ So the payload is wrapped in a header this side writes and checks, and the
+ driver is only handed bytes that came back from *this* device, *this* driver
+ version and *this* `pipelineCacheUUID`. A file failing any of those is a miss:
+ not opened, not repaired, not deleted — just overwritten by the next save.
 
- So the payload is wrapped in a header this side writes and this side checks, and
- the driver is only handed bytes that came back from *this* device, *this*
- driver version and *this* `pipelineCacheUUID`. A file that fails any of those is
- a miss: it is not opened, not repaired and not deleted, it is simply overwritten
- by the next save.
-
- That check is also what makes the filename a *filter* rather than a decision —
- `disk_cache.c3`'s rule, applied to a hash of the identity rather than of a
- source.
-
- ## What it is worth here, measured — and the answer is "nothing"
+ ## What it is worth here: nothing, measured
 
  On this machine, with the Slang half already warm either way:
 
@@ -48,19 +37,15 @@
 	warm (blob on disk)       0.21 s              0.61-0.68 s
 	cold (blob deleted)       0.21-0.22 s         0.62-0.64 s
 
- Five runs and three runs, and the difference is inside the noise. **MoltenVK
- does not pay for pipeline creation the way the entry in `plan.md` §2 assumed a
- driver does** — it is a Metal pipeline built from MSL that Slang's SPIR-V has
- already been turned into, and the expensive part of that is upstream, in the
- half `shader/disk_cache.c3` keeps.
+ Five runs and three runs; the difference is inside the noise. MoltenVK does not
+ pay for pipeline creation the way a desktop driver does — it is a Metal pipeline
+ built from MSL that Slang's SPIR-V has already been turned into, and the
+ expensive part of that is upstream, in the half `shader/disk_cache.c3` keeps.
 
- So this is kept for what it is rather than for a number it did not produce: the
- mechanism is where a desktop driver would need it, it is correct, and it costs
- one read at startup and — see `save` — usually no write at all. The measurement
- is written down here rather than quietly dropped, because "we added a cache" and
- "the cache helped" are different claims and only the first one is true on this
- machine.
-
+ Kept anyway: the mechanism is where a desktop driver would need it, it is
+ correct, and it costs one read at startup and usually no write at all. The
+ measurement is recorded here because "we added a cache" and "the cache helped"
+ are different claims and only the first is true on this machine.
 
  ## The file
 
@@ -94,8 +79,7 @@ const uint DRIVER_CACHE_MAGIC = 0x4350_3354;
  Bumped whenever anything above the payload changes meaning.
 
  It is in the identity *and* in the filename hash, so a bump moves every blob to
- a new name rather than merely rejecting the old one — `SHADER_CACHE_FORMAT_VERSION`
- has the same property for the same reason.
+ a new name rather than merely rejecting the old one.
 *>
 const uint DRIVER_CACHE_FORMAT_VERSION = 1;
 
@@ -109,20 +93,19 @@ const uint DRIVER_CACHE_FORMAT_VERSION = 1;
 struct DriverCache
 {
 	vk::PipelineCache handle;
-	// Everything the blob's validity depends on, kept so that `save` writes the
-	// same identity `open` checked without asking the physical device twice.
+	// Everything the blob's validity depends on, kept so `save` writes the same
+	// identity `open` checked without asking the physical device twice.
 	uint vendor;
 	uint device;
 	uint driver_version;
 	char[vk::UUID_SIZE] uuid;
 	// How many bytes this was created from, and whether there were any. `save`
-	// writes only when the driver's blob has grown past this — see the header on
-	// why the length rather than a hash of the bytes.
+	// writes only when the driver's blob has grown past this.
 	usz loaded_size;
 	bool warmed;
 	// False when there is nowhere to write — `shader_cache_set_dir("")`, or a
 	// directory that could not be made. The handle is still created: a cache
-	// that cannot be persisted is still worth having *within* a process, because
+	// that cannot be persisted is still worth having *within* a process, since
 	// the mesh pipeline's two sides and a material's variants are several
 	// pipelines off one module.
 	bool persisted;
@@ -131,8 +114,8 @@ struct DriverCache
 <*
  What the driver cache did this process.
 
- Counters rather than logging, for `ShaderCacheStats`'s reason: a line saying "it
- loaded" would be true of a cache that loaded and then ignored what it read.
+ Counters rather than logging: a line saying "it loaded" would be true of a cache
+ that loaded and then ignored what it read.
 *>
 struct DriverCacheStats
 {
@@ -163,8 +146,7 @@ fn void driver_cache_reset_stats()
 
  A *filter*. Two devices on one machine get two files without either being asked
  to check the other, and a driver update writes a new name and abandons the old
- one — which is the shader cache's behaviour too, and means "clear the cache" is
- still "delete the directory".
+ one — so "clear the cache" is still "delete the directory".
 
  @return `Allocated from tmem; valid until the enclosing pool is released.`
 *>
@@ -190,9 +172,9 @@ fn String driver_cache_path(DriverCache* cache) @local
 <*
  Does this file's header say it is ours, and this device's?
 
- Every read is bounds-checked against the length actually on disk, for
- `cache_load`'s reason and one more: this payload is handed to a driver, and a
- driver handed bytes that are not its own is entitled to do anything at all.
+ Every read is bounds-checked against the length actually on disk: this payload
+ is handed to a driver, and a driver handed bytes that are not its own is
+ entitled to do anything at all.
 
  @return `The payload, or an empty slice if anything at all disagrees.`
 *>
@@ -209,7 +191,7 @@ fn char[] driver_cache_payload(char[] bytes, DriverCache* cache) @local
 	if (driver_read_u32(bytes, 12) != cache.device) return {};
 	if (driver_read_u32(bytes, 16) != cache.driver_version) return {};
 	// The one the spec actually names. Checked byte by byte rather than by
-	// comparing two slices so that a shorter file cannot reach past its end.
+	// comparing two slices, so a shorter file cannot reach past its end.
 	for (usz i = 0; i < vk::UUID_SIZE; i++)
 	{
 		if (bytes[20 + i] != cache.uuid[i]) return {};
@@ -238,15 +220,15 @@ fn uint driver_read_u32(char[] bytes, usz at) @local
 }
 
 <*
- Create the driver's cache for this device, warm if there is a blob to warm it
+ Creates the driver's cache for this device, warm if there is a blob to warm it
  with.
 
- **Nothing here throws.** A cache is an optimization: a file that cannot be read
+ Nothing here throws. A cache is an optimisation: a file that cannot be read
  costs a millisecond a pipeline, and a `vkCreatePipelineCache` that fails costs
  the same and leaves a null handle that every `.build` call is already allowed to
  be given. Neither may cost a render.
 
- @param properties : `The device's, already queried by Gpu.init — asked for again here would be a second call whose answer could not differ.`
+ @param properties : `The device's, already queried by Gpu.init — asking again would be a second call whose answer could not differ.`
 *>
 fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properties)
 {
@@ -307,27 +289,21 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 }
 
 <*
- Write the blob back, if the driver added anything to it.
+ Writes the blob back, if the driver added anything to it.
 
- Called from `Gpu.free` after the device has gone idle. Two `vkGetPipelineCacheData`
- calls, as the spec's size-then-data pattern requires, and then the test that
- makes this cheap.
-
- ## Growth, not difference
+ Called from `Gpu.free` after the device has gone idle. Two
+ `vkGetPipelineCacheData` calls, as the spec's size-then-data pattern requires.
 
  A run that was never warmed writes. A run that was writes only if the blob came
- back **larger** than it went in. The header says why not "larger or different":
- MoltenVK's serialization is not byte-stable, so difference is true on every run
- and would rewrite 300 KB forever.
+ back *larger* than it went in — growth rather than difference, because
+ MoltenVK's serialization is not byte-stable and difference is true on every run,
+ which would rewrite 300 KB forever.
 
  What growth gives up is a driver that rewrites its blob smaller while adding
- something — an eviction, a re-pack. That entry is then not kept, and the cost of
- not keeping it is that one pipeline is built the slow way next run. It is the
- right side to lose on: the other side rewrites a third of a megabyte per process
- for a saving this file's own header measures at zero.
-
- It also converges rather than alternating. This machine loads 301352, produces
- 301356, writes it; the next run loads 301356, produces 301352, and stops.
+ something (an eviction, a re-pack). That entry is not kept, and one pipeline is
+ built the slow way next run. It is the right side to lose on, and it converges:
+ this machine loads 301352, produces 301356, writes it; the next run loads
+ 301356, produces 301352, and stops.
 *>
 fn void DriverCache.save(&self, Gpu* gpu)
 {
@@ -382,7 +358,7 @@ fn void DriverCache.save(&self, Gpu* gpu)
 }
 
 <*
- Destroy the handle. `save` first — `Gpu.free` does both, in that order.
+ Destroys the handle. `save` first — `Gpu.free` does both, in that order.
 *>
 fn void DriverCache.free(&self, Gpu* gpu)
 {

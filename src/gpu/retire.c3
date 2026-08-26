@@ -1,6 +1,6 @@
 <*
- The frame-tagged deletion queue — how a GPU object outlives the frames that
- may still be reading it.
+ The frame-tagged deletion queue — how a GPU object outlives the frames that may
+ still be reading it.
 
  ## The hazard
 
@@ -10,68 +10,52 @@
  is a corrupted draw or a device loss some frames later, in whichever scene
  happened to be on screen.
 
- ## The two answers, and why this is the second one
+ ## How it works
 
- `Gpu.wait_idle` is the first: stall until the device has finished everything,
- then free. That is right at a level boundary, which is already a stall, and it
- is what `Assets.unload_unused` and `MeshPass.set_material_map` still use. It is
- wrong for anything that can happen while a game is running, because it trades a
- hitch for a hazard the player can see.
+ `Gpu.wait_idle` is the blunt answer, and still the right one at a level
+ boundary or at teardown, which are stalls anyway. It is wrong for anything that
+ happens while a game is running, because it trades a hitch for a hazard the
+ player can see.
 
- This is the second. A retired object records the frame ordinal it was given
- back at and is destroyed once that many frames have *started* since:
+ So a retired object records the frame ordinal it was given back at and is
+ destroyed once that many frames have *started* since:
 
      retire_at = frame + MAX_FRAMES_IN_FLIGHT
 
- The invariant that makes the arithmetic right is the fence wait at the top of
- every frame path. Frame N waits on slot `N % 2`'s fence, and the last thing
- submitted on that slot was frame N - 2 — so by the time frame N begins
- recording, every submission from frame N - 2 and earlier has completed. An
- object retired at frame F can only be referenced by submissions from frames at
- or before F, so `N >= F + 2` is exactly the condition for it to be unreachable.
+ What makes the arithmetic right is the fence wait at the top of every frame
+ path. Frame N waits on slot `N % 2`'s fence, and the last thing submitted on
+ that slot was frame N - 2 — so by the time frame N begins recording, every
+ submission from frame N - 2 and earlier has completed. An object retired at
+ frame F can only be referenced by submissions at or before F, so `N >= F + 2`
+ is exactly the condition for it to be unreachable.
 
- **`begin_frame` is therefore called after the fence wait and only on a path
- that goes on to submit.** A frame that bails out between the wait and the
- record — a minimised window, an out-of-date swapchain — must not advance the
- ordinal, because it did not wait on the fence belonging to the submission the
+ `begin_frame` is therefore called after the fence wait and only on a path that
+ goes on to submit. A frame that bails out between the wait and the record — a
+ minimised window, an out-of-date swapchain — must not advance the ordinal,
+ because it did not wait on the fence belonging to the submission the
  next-but-one frame would be crediting.
 
  ## What is in here
 
  Two lists and one ordinal: pipelines, and everything backed by a `vk::Memory`.
 
- The second list is not a tagged union and there is nothing in it to switch on.
- A buffer, a texture and a chain image are given back by the same three calls in
- the same order — destroy the sampler, destroy the view, free the memory — and
- each call is already guarded by its own handle being non-null. A buffer is the
- case where the first two are null. `Texture.free`, `ShadowMap.destroy_image` and
- `ChainImage.free` were three copies of that sequence before this list existed
- and are three callers of it now.
-
- `vk::Memory.free` destroys the image or buffer it was bound to, which is why
- neither is held separately: holding both would be the double free every one of
- those three functions has a comment about.
-
- ## What this bought
-
- The stalls it replaced were real and were on paths a game reaches:
-
- - `Assets.unload_unused` — the sweep `three.unload()` runs. `plan.md` §2's
-   trigger was "something unloads during gameplay", and this is that.
- - Every texture whose last reference goes when a material's map is replaced.
-   `MeshPass.set_material_map` and its four neighbours each waited for the whole
-   device to go idle before dropping one image.
- - `ShadowMap.ensure` on a size change, and `PostPass.ensure_images` on a resize.
-
- What still stalls is teardown — `Assets.free`, `Gpu.free` — and the swapchain,
- which has to, because the images it is replacing belong to the presentation
- engine rather than to this queue.
+ The second list is not a tagged union and there is nothing to switch on. A
+ buffer, a texture and a chain image are given back by the same three calls in
+ the same order — destroy the sampler, destroy the view, free the memory — each
+ guarded by its own handle being non-null; a buffer is the case where the first
+ two are null. `vk::Memory.free` destroys the image or buffer it was bound to,
+ which is why neither is held separately: holding both would be a double free.
 
  The queue is bounded on its own account as well as by the frame counter. A
  headless run that disposes materials and never renders would otherwise grow it
- forever, since nothing there ever advances a frame — so past
- `MAX_PENDING_DELETES` it falls back to the stall, which is the honest thing to
- do when the cheap mechanism has nothing to work with.
+ forever, since nothing there advances a frame — so past `MAX_PENDING_DELETES`
+ it falls back to the stall.
+
+ ## What still stalls
+
+ Teardown (`Assets.free`, `Gpu.free`), `Assets.unload_unused`,
+ `MeshPass.set_material_map`, and the swapchain — which has to, because the
+ images it replaces belong to the presentation engine rather than to this queue.
 *>
 module three;
 
@@ -94,8 +78,8 @@ struct RetiredPipeline @local
 <*
  One `vk::Memory` and whatever wrapped it, waiting out the frames in flight.
 
- Held by value, `RetiredPipeline`'s reason: the struct these came out of —
- a `Texture` slot, a `GpuMesh` stream, a `ChainImage` — is overwritten or zeroed
+ Held by value for `RetiredPipeline`'s reason: the struct these came out of — a
+ `Texture` slot, a `GpuMesh` stream, a `ChainImage` — is overwritten or zeroed
  the moment it gives them back.
 *>
 struct RetiredMemory @local
@@ -104,8 +88,8 @@ struct RetiredMemory @local
 	// Null for a buffer, and for an image that nothing samples.
 	vk::Sampler sampler;
 	vk::ImageView view;
-	// Destroys the image or the buffer it was bound to. Never null: a caller with
-	// nothing to give back does not reach the queue.
+	// Destroys the image or the buffer it was bound to. Never null: a caller
+	// with nothing to give back does not reach the queue.
 	vk::Memory memory;
 }
 
@@ -113,24 +97,19 @@ struct RetiredMemory @local
  How many pipelines may sit in the queue before it stops being lazy.
 
  Reached only by a caller that retires without rendering, since two frames of
- any kind drain everything older. The number is not a budget anybody tuned: it
- is far above what a frame-driven workload ever holds and far below anything
- that matters as a leak.
+ any kind drain everything older. Far above what a frame-driven workload ever
+ holds and far below anything that matters as a leak.
 *>
 const uint MAX_PENDING_DELETES = 32;
 
 <*
- The same bound for the memory list, and much larger, because the unit is much
+ The same bound for the memory list, and much larger because the unit is much
  smaller.
 
  One unloaded mesh is up to seven vertex streams and an index buffer; one
- unloaded asset is that per mesh plus its images. `MAX_PENDING_DELETES` would
- therefore fall back to the stall on an *ordinary* sweep — the exact case this
- list was added to stop stalling — which would make the bound the behaviour
- rather than the backstop.
-
- Still bounded, and for the same reason: a headless run that unloads and never
- renders advances no frame ordinal, so nothing would ever come due.
+ unloaded asset is that per mesh plus its images. At `MAX_PENDING_DELETES` an
+ ordinary sweep would fall back to the stall this list exists to avoid, making
+ the bound the behaviour rather than the backstop.
 *>
 const uint MAX_PENDING_MEMORY_DELETES = 512;
 
@@ -138,10 +117,9 @@ struct DeletionQueue
 {
 	List{RetiredPipeline} pipelines;
 	List{RetiredMemory} memory;
-	// Monotonic across the process, not the two-slot index. `Frames.slot` cycles
-	// and this does not, which is the whole point — a comparison against a value
-	// that wraps every second frame would retire things two frames early half
-	// the time.
+	// Monotonic across the process, not the two-slot index. `Frames.slot`
+	// cycles and this does not — a comparison against a value that wraps every
+	// second frame would retire things two frames early half the time.
 	ulong frame;
 }
 
@@ -149,8 +127,7 @@ fn void DeletionQueue.init(&self)
 {
 	// The heap, explicitly. A `List` left zero-initialised resolves its null
 	// allocator to `tmem` on the first push, and any `@pool()` up the stack then
-	// frees the queue's storage out from under it — `Frames.init` has the same
-	// note and the same reason.
+	// frees the queue's storage out from under it.
 	self.pipelines.init(mem, 4);
 	// Larger, because one unloaded mesh is seven streams and an index buffer.
 	self.memory.init(mem, 16);
@@ -158,7 +135,8 @@ fn void DeletionQueue.init(&self)
 }
 
 <*
- Give a pipeline back, to be destroyed once the frames that may bind it are done.
+ Gives a pipeline back, to be destroyed once the frames that may bind it are
+ done.
 
  The caller must already have removed it from wherever it was reachable: this
  takes the object by value and owns it from here.
@@ -168,7 +146,7 @@ fn void Gpu.retire_pipeline(&self, MeshPipeline pipeline)
 	if (self.handle == null)
 	{
 		// No device, nothing in flight, nothing to wait for. Freeing here rather
-		// than queueing keeps a scene-math runtime from accumulating a queue that
+		// than queueing keeps a scene-math runtime from accumulating a queue
 		// nothing will ever sweep.
 		pipeline.free(self);
 		return;
@@ -184,7 +162,7 @@ fn void Gpu.retire_pipeline(&self, MeshPipeline pipeline)
 }
 
 <*
- Give a `vk::Memory` back, with the view and the sampler that wrapped it.
+ Gives a `vk::Memory` back, with the view and the sampler that wrapped it.
 
  The one verb for every buffer and every image in this project. The caller must
  already have removed it from wherever it was reachable, and must zero its own
@@ -205,8 +183,7 @@ fn void Gpu.retire_memory(
 )
 {
 	// A stream a mesh never had, a view an image was created without. Cheaper to
-	// answer here than at each of the dozen call sites, all of which would
-	// otherwise repeat the same guard.
+	// answer here than at each of the dozen call sites.
 	if (memory.buffer == null && view == null && sampler == null) return;
 
 	if (self.handle == null)
@@ -229,23 +206,16 @@ fn void Gpu.retire_memory(
 <*
  Sampler, then view, then memory, each guarded by its own handle.
 
- One copy of the order that `Texture.free`, `ShadowMap.destroy_image` and
- `ChainImage.free` each used to carry. It matters: the memory is what destroys
- the image, so a view outliving it would be a view of nothing.
+ The order matters: the memory is what destroys the image, so a view outliving
+ it would be a view of nothing.
 
- **The last guard asks about both handles, and the reason is the bug it fixes.**
- A `vk::Memory` from `vk::new_buffer` fills in `.buffer` and leaves `.image`
- null; one from `vk::create_image_buffer` does the opposite. This line asked
- only about `.buffer`, so every image that ever reached this queue — the 1x1
- white stand-in, every texture a material dropped, a resized shadow map, a
- resized chain image — was retired, dequeued, and then silently skipped:
- `vkDestroyImage` never called and the page block never returned.
-
- Nothing caught it because nothing could. The suite arms the validation sink
- around a script run, and this leaks at `vkDestroyDevice`, after the last one.
- It surfaced the moment a `-D DEBUG` build started validating without being
- asked, which is what `src/debug.c3` is now for: the built-in triangle reported
- one leaked `VkImage` — the white texture, the only one it makes.
+ The last guard asks about *both* handles. A `vk::Memory` from `vk::new_buffer`
+ fills in `.buffer` and leaves `.image` null; one from `vk::create_image_buffer`
+ does the opposite. Asking only about `.buffer` meant every image reaching this
+ queue was retired, dequeued, then silently skipped — `vkDestroyImage` never
+ called and the page block never returned. It leaks at `vkDestroyDevice`, after
+ the suite has disarmed its validation sink, so nothing caught it until a
+ `-D DEBUG` build started validating unconditionally.
 *>
 fn void free_retired_memory(Gpu* gpu, RetiredMemory due) @local
 {
@@ -255,7 +225,7 @@ fn void free_retired_memory(Gpu* gpu, RetiredMemory due) @local
 }
 
 <*
- Start a frame: advance the ordinal, then destroy whatever has come due.
+ Starts a frame: advances the ordinal, then destroys whatever has come due.
 
  Called after the frame's fence wait and only from a path that goes on to
  submit — the header says why both halves matter.
@@ -284,7 +254,7 @@ fn void Gpu.begin_frame(&self)
 }
 
 <*
- Destroy everything queued, after waiting for the device.
+ Destroys everything queued, after waiting for the device.
 
  The stall is what makes it unconditional: nothing is in flight afterwards, so
  the frame ordinals every entry is holding out for are moot. Used by `Gpu.free`

@@ -1,29 +1,22 @@
 <*
- The bulk spatial verbs, the character controller and the batched write —
- `notes.md` §17.
+ The bulk spatial verbs, the character controller and the batched write.
 
  ## Everything here answers into memory the caller already owns
 
- `notes.md` §17 measured the crossing and wrote the rule down: a host call is
- cheap, an *allocating* host call is not, and "a verb returning a vector should
- write into a `Float32Array` the caller owns — that is the only shape whose cost
- stays flat as the count grows, and it is the shape every unbuilt item in §17
- should be built in".
-
- So the two verbs that can answer with hundreds of things — `queryBox` and
- `overlapSphere` — take a typed array and a capacity, fill it, and answer with a
- count. The two that answer with one thing or a handful — `raycastAll`, `sweep`
- — build an object, because one allocation amortised over a BVH walk is nothing
- and a hit that a script has to unpack out of a flat array by hand is worse than
- a hit.
+ A host call is cheap; an *allocating* host call is not. So the two verbs that
+ can answer with hundreds of things — `queryBox` and `overlapSphere` — take a
+ typed array and a capacity, fill it, and answer with a count. The two that
+ answer with one thing or a handful — `raycastAll`, `sweep` — build an object,
+ because one allocation amortised over a BVH walk is nothing and a hit a script
+ has to unpack out of a flat array by hand is worse than a hit.
 
  ## The typed array crosses as three plain numbers
 
  `qjs_get_bytes` reads a `Uint8Array` or an `ArrayBuffer` and nothing else, so a
- `Float32Array` is passed as its `buffer`, its `byteOffset` and its `length`.
- The alternative is three property lookups per call on the host side, which is
- three more crossings of a different kind for the same three numbers — and the
- prelude has the values to hand already.
+ `Float32Array` is passed as its `buffer`, its `byteOffset` and its `length`. The
+ alternative is three property lookups per call on the host side, which is three
+ more crossings of a different kind for the same three numbers — and the prelude
+ has the values to hand already.
 *>
 module three;
 
@@ -47,10 +40,10 @@ fn void JsRuntime.bind_query_verbs(&self, qjs::Value host)
 <*
  A view over a script's typed array, from a buffer, a byte offset and a count.
 
- **Bounds-checked here and nowhere else.** A byte offset a script got wrong is
- a write into whatever the engine happens to have after that buffer, and the
- damage is silent — so an out-of-range view comes back empty and every caller
- treats empty as "nothing to write".
+ Bounds-checked here and nowhere else. A byte offset a script got wrong is a
+ write into whatever the engine happens to have after that buffer, and the damage
+ is silent — so an out-of-range view comes back empty and every caller treats
+ empty as "nothing to write".
 
  @param at : `The argument index of the ArrayBuffer. byteOffset is at + 1 and the element count at + 2.`
 *>
@@ -84,12 +77,12 @@ fn int[] int_view(qjs::Context* js, int argc, qjs::Value* args, int at)
 }
 
 <*
- Write node handles into an `Int32Array`, two ints apiece.
+ Writes node handles into an `Int32Array`, two ints apiece.
 
  The pair rather than the index alone, because a bare index cannot tell slot 7
- from slot 7 after something else was put in it — which is the whole reason
- `NodeId` carries a generation, and the reason `prelude.js` can hand a script
- back a live object rather than a number that used to mean one.
+ from slot 7 after something else was put in it — which is why `NodeId` carries a
+ generation, and why `prelude.js` can hand a script back a live object rather
+ than a number that used to mean one.
 *>
 fn uint write_handles(int[] out, NodeId[] found) @local
 {
@@ -164,15 +157,15 @@ fn void js_overlap_sphere(
  `raycastAll(ox, oy, oz, dx, dy, dz, maxDistance, limit)` — every node the ray
  hits, as an array of the same objects `raycast` answers with.
 
- An array rather than a typed array, unlike the two above, and the reason is the
- shape of the answer rather than inconsistency: a hit is a node, a distance, a
- point and a normal, and packing eleven mixed numbers per hit into a flat array
- for a script to unpack by hand is worse than the allocation. The counts differ
- too — an overlap query answers with hundreds and a ray with a handful.
+ An array rather than a typed array, unlike the two above, because of the shape
+ of the answer: a hit is a node, a distance, a point and a normal, and packing
+ eleven mixed numbers per hit into a flat array for a script to unpack by hand is
+ worse than the allocation. The counts differ too — an overlap query answers with
+ hundreds and a ray with a handful.
 
- **Not sorted.** See `Scene.raycast_all`: sorting means holding everything
- before answering, and a caller who wants the nearest should call `raycast`,
- which is cheaper than sorting because it can stop.
+ Not sorted. See `Scene.raycast_all`: sorting means holding everything before
+ answering, and a caller who wants the nearest should call `raycast`, which is
+ cheaper than sorting because it can stop.
 *>
 fn void js_raycast_all(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -212,8 +205,8 @@ fn void js_raycast_all(
 <*
  A `SweepHit` as JavaScript sees it, or `null` for a clear sweep.
 
- `fraction` is the number a caller integrating a movement wants and `distance`
- is the same thing in world units — both, because a script that thinks in metres
+ `fraction` is the number a caller integrating a movement wants and `distance` is
+ the same thing in world units — both, because a script that thinks in metres
  should not have to multiply by a length it would have to recompute.
 *>
 fn qjs::Value sweep_value(JsRuntime* self, qjs::Context* js, SweepHit hit) @local
@@ -265,17 +258,16 @@ fn void js_sweep(
 <*
  The nodes a sweep was told to ignore, out of an `Int32Array` of handle pairs.
 
- **A set rather than one handle since §17**, because a character is a Group and
- the single node this replaced meant a capsule collided with its own chest —
- `IgnoreSet` carries the argument. The prelude fills one shared scratch array
- rather than allocating per call, so the common case of "ignore this one object"
- costs the same two ints it always did.
+ A set rather than one handle, because a character is a Group and a single node
+ means a capsule collides with its own chest — `IgnoreSet` carries the argument.
+ The prelude fills one shared scratch array rather than allocating per call, so
+ the common case of "ignore this one object" costs the same two ints it always
+ did.
 
- Stale handles are dropped rather than raised on, which is what `optional_handle`
- did before this and for the same reason: the caller's intent — do not collide
- with that — is satisfied by a node that no longer exists. `arg_handle`'s
- raising is right where a script *named* an object; here an absence is an
- answer.
+ Stale handles are dropped rather than raised on: the caller's intent — do not
+ collide with that — is satisfied by a node that no longer exists.
+ `arg_handle`'s raising is right where a script *named* an object; here an
+ absence is an answer.
 *>
 fn IgnoreSet ignore_set(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at) @local
 {
@@ -297,14 +289,13 @@ fn IgnoreSet ignore_set(JsRuntime* self, qjs::Context* js, int argc, qjs::Value*
  `moveAndSlide(px, py, pz, mx, my, mz, radius, halfHeight, step, slope, skin,
  snap, ignoreBuffer, ignoreByteOffset, ignoreLength)`.
 
- **It takes a position and answers with a position; it does not touch a node.**
- The alternative — hand it the character's object and let it write the
- transform — reads better in one line of script and is wrong in three ways: the
- capsule's centre and the object's origin are almost never the same point, the
- write would have to invert the parent's world matrix to land in local space,
- and a character that is not in the scene graph at all (an agent with no mesh
- yet, a probe) could not be moved. A script writing `mesh.position.copy(r.position)`
- is one JavaScript assignment and there is nothing to get wrong.
+ It takes a position and answers with a position; it does not touch a node.
+ Handing it the character's object and letting it write the transform reads
+ better in one line of script and is wrong in three ways: the capsule's centre
+ and the object's origin are almost never the same point, the write would have to
+ invert the parent's world matrix to land in local space, and a character that is
+ not in the scene graph at all could not be moved. A script writing
+ `mesh.position.copy(r.position)` is one JavaScript assignment.
 *>
 fn void js_move_and_slide(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -350,20 +341,19 @@ fn void js_move_and_slide(
 
 <*
  `moveAndSlideAll(posBuffer, posByteOffset, posFloats, motionBuffer,
- motionByteOffset, motionFloats, outBuffer, outByteOffset, outFloats,
- selfBuffer, selfByteOffset, selfInts, radius, halfHeight, step, slope, skin,
- snap, ignoreBuffer, ignoreByteOffset, ignoreLength)`.
+ motionByteOffset, motionFloats, outBuffer, outByteOffset, outFloats, selfBuffer,
+ selfByteOffset, selfInts, radius, halfHeight, step, slope, skin, snap,
+ ignoreBuffer, ignoreByteOffset, ignoreLength)`.
 
  The crowd form of the verb above, and the second of the two places in this API
  where there is exactly one crossing however many agents there are. See
  `Scene.move_capsules` for what it does and for the two decisions in it —
  everyone moving at once, and no node handles in the answer.
 
- `positions` is READ AND WRITTEN: it is the caller's position column and it is
- updated where it lies, so nothing has to be copied back out afterwards. The
- options are one set for the whole crowd, because a crowd is one agent size; a
- pack of two sizes is two calls over two columns, which is also how it would
- have to be stored.
+ `positions` is read *and written*: it is the caller's position column and it is
+ updated where it lies, so nothing has to be copied back out. The options are one
+ set for the whole crowd, because a crowd is one agent size; a pack of two sizes
+ is two calls over two columns, which is also how it would have to be stored.
 
  @return `How many agents were stepped.`
 *>
@@ -407,16 +397,14 @@ fn void js_move_and_slide_all(
 	BATCH_TRS       10   x y z   qx qy qz qw   sx sy sz
 	BATCH_EULER      9   x y z   rx ry rz      sx sy sz
 
- **Two rotation forms, and they are not redundant.** `BATCH_TRS` is for a batch
- written by ARITHMETIC — a look-at, a slerp, a physics read-back — where what
+ Two rotation forms, and they are not redundant. `BATCH_TRS` is for a batch
+ written by *arithmetic* — a look-at, a slerp, a physics read-back — where what
  produced the rotation produced a quaternion, and converting it to Euler angles
  to send it would be lossy at every gimbal-locked pose. `BATCH_EULER` is for a
- batch written by a GAME, where the rotation is a heading and a limb swing: one
- angle each, typed by a person, and `notes.md` §17 measured what forcing that
- case through the quaternion form costs — a critter writing a group position, a
- group heading and two leg angles is four crossings a frame at about 380 ns
- apiece, and the reason it was four rather than one is that the batch could not
- express the three angles it wanted to write.
+ batch written by a *game*, where the rotation is a heading and a limb swing: one
+ angle each, typed by a person. Forcing that case through the quaternion form is
+ what turns a critter writing a group position, a group heading and two leg
+ angles into four crossings a frame at about 380 ns apiece.
 *>
 const int BATCH_POSITION = 0;
 const int BATCH_TRS = 1;
@@ -426,26 +414,20 @@ const int BATCH_EULER = 2;
  `setTransforms(handleBuffer, handleByteOffset, handleInts, dataBuffer,
  dataByteOffset, dataFloats, mode)` — move many nodes in one crossing.
 
- ## What this is for, and what it is not
-
- `notes.md` §17 measured five hundred `mesh.position.set(x, y, z)` at 0.245 ms a
- frame — three per cent of the eight-millisecond budget — and wrote down that
- batched transforms "buy nothing anybody can see until the count is in the
- thousands", with a trigger of about two thousand nodes a frame. So this is not
- a faster way to write one transform and a script should not reach for it to
- move a dozen things. It is what a crowd, a particle field or a chunked terrain
- wants, where the write is already a loop over a typed array.
+ Five hundred `mesh.position.set(x, y, z)` measure 0.245 ms a frame — three per
+ cent of an eight-millisecond budget — so batching buys nothing anybody can see
+ until the count is in the thousands. This is not a faster way to write one
+ transform and a script should not reach for it to move a dozen things; it is
+ what a crowd, a particle field or a chunked terrain wants, where the write is
+ already a loop over a typed array.
 
  The saving is the crossing and the argument marshalling, not the write: the
  host-side work per node is the same three stores either way.
 
- ## The handles are checked, every one, every call
-
- A stale handle in the middle of a batch is skipped rather than raising. The
- batch is a *bulk* verb: a crowd where one agent was removed this frame is
- ordinary, and throwing would abandon the other nine hundred and ninety-nine
- halfway through with no way to tell which. The count answered with is how many
- actually landed, which is the signal.
+ A stale handle in the middle of a batch is skipped rather than raising. This is
+ a *bulk* verb: a crowd where one agent was removed this frame is ordinary, and
+ throwing would abandon the other nine hundred and ninety-nine halfway through
+ with no way to tell which. The count answered with is how many actually landed.
 
  @return `How many nodes were written.`
 *>
@@ -471,8 +453,8 @@ fn void js_set_transforms(
 		NodeId id = { .index = (uint)handles[i * 2], .generation = (uint)handles[i * 2 + 1] };
 		Node* node = self.pass.scene.node(id);
 		if (node == null) continue;
-		// The same refusal `setTransform` makes, and for the same reason — see
-		// `PHYSICS_OWNS_TRANSFORM`. Skipped rather than raised, per the header.
+		// The same refusal `setTransform` makes — see `PHYSICS_OWNS_TRANSFORM`.
+		// Skipped rather than raised, per the header.
 		if (self.physics.owns_transform(id)) continue;
 
 		sz at = i * stride;
@@ -480,21 +462,20 @@ fn void js_set_transforms(
 		if (mode == BATCH_EULER)
 		{
 			// The same conversion `setTransform` makes, so a node written by a
-			// batch and a node written by `mesh.rotation.y = h` end up with
-			// the same quaternion for the same three numbers. See
-			// `quat_from_euler` for why it is not `from_euler`.
+			// batch and a node written by `mesh.rotation.y = h` end up with the same
+			// quaternion for the same three numbers.
 			node.rotation = quat_from_euler({ data[at + 3], data[at + 4], data[at + 5] });
 			node.scale = { data[at + 6], data[at + 7], data[at + 8] };
 		}
 		else if (mode == BATCH_TRS)
 		{
-			// A quaternion rather than Euler angles, unlike `setTransform`.
-			// A batch is written by arithmetic rather than typed by a person,
-			// and the arithmetic that produced it — a look-at, a slerp, a
-			// physics read-back — produced a quaternion; converting to Euler
-			// to send it and back to compose it is lossy at every gimbal-locked
-			// pose. The Euler triple is what a *script* reads back off
-			// `.rotation`, and a batched node has no such object to read.
+			// A quaternion rather than Euler angles, unlike `setTransform`. A batch
+			// is written by arithmetic rather than typed by a person, and the
+			// arithmetic that produced it — a look-at, a slerp, a physics read-back
+			// — produced a quaternion; converting to Euler to send it and back to
+			// compose it is lossy at every gimbal-locked pose. The Euler triple is
+			// what a *script* reads back off `.rotation`, and a batched node has no
+			// such object to read.
 			node.rotation = (Quaternionf) { data[at + 3], data[at + 4], data[at + 5], data[at + 6] }.normalize();
 			node.scale = { data[at + 7], data[at + 8], data[at + 9] };
 		}

@@ -1,36 +1,25 @@
 <*
- Steering — `notes.md` §17. "Seek, arrive, separation... arrives with navigation
- and is pointless without it."
+ Steering: seek, arrive and separation for a whole crowd in one call.
 
- ## Why this is one verb over an array rather than five verbs over an agent
+ One verb over an array rather than five verbs over an agent, because a host
+ call is cheap but an *allocating* host call is not — a verb returning a boolean
+ costs ~55 ns against JavaScript's 70, and the same crossing returning nine
+ numbers costs 185. So a verb answering with vectors writes into a
+ `Float32Array` the caller owns. One crossing per frame writes the desired
+ velocity of every agent, into memory the script allocated once.
 
- `notes.md` §17 measured the boundary and the finding was not the obvious one: a
- host call is not expensive, an *allocating* host call is. A verb returning a
- boolean beat the JavaScript it replaced — 55 ns against 70 — and the same
- crossing returning nine numbers cost 185. So the rule it wrote down is that a
- verb answering with a vector must write into a `Float32Array` the caller owns,
- "and it is the shape every unbuilt item in §17 should be built in".
+ That also settles where seek and arrive live. Alone they are four multiplies
+ and belong in JavaScript, but they compose with separation and with the flow
+ field, which do not — splitting the composition across the boundary would mean
+ three crossings and two intermediate arrays per frame to save arithmetic that
+ was never the cost.
 
- This is that shape taken to its conclusion. One crossing per frame writes the
- desired velocity of every agent in the crowd, into memory the script allocated
- once. A hundred agents cost one call rather than a hundred, and the array they
- are read out of is the same array a script's own arithmetic already works over.
-
- It also settles what would otherwise be an awkward question about where seek
- and arrive live. On their own they are four multiplies and belong in
- JavaScript by the same rule — but they are *composed* with separation and with
- the flow field, which do not, and splitting the composition across the boundary
- would mean three crossings and two intermediate arrays per frame to save an
- arithmetic operation that was never the cost.
-
- ## Separation is the one that needed a host
-
- Seek and arrive are per-agent. Separation is every agent against every other,
- which is quadratic — two hundred agents is forty thousand distance tests per
- frame, and in QuickJS that is milliseconds. The grid below makes it linear in
- the crowd and constant in its density, and it is rebuilt per call because the
- agents have all moved since the last one and a rebuild over a flat array is
- cheaper than the updates would be.
+ Separation is the part that needs a host at all. Seek and arrive are per-agent;
+ separation is every agent against every other, so two hundred agents is forty
+ thousand distance tests per frame, which in QuickJS is milliseconds. The grid
+ below makes that linear in the crowd and constant in its density. It is rebuilt
+ per call because the agents have all moved since the last one, and a rebuild
+ over a flat array is cheaper than the updates would be.
 *>
 module three;
 
@@ -42,9 +31,9 @@ import collision;
 <*
  What the crowd is being asked to do.
 
- `goal` and the flow field are alternatives and the field wins when it is
- present: a field already knows the way around a wall and a goal does not, so a
- caller that has both meant the field and was naming the goal for the arrive.
+ `goal` and the flow field are alternatives, and the field wins when present: a
+ field already knows the way around a wall and a goal does not, so a caller with
+ both meant the field and was naming the goal for the arrive.
 *>
 struct SteerOptions
 {
@@ -60,7 +49,7 @@ struct SteerOptions
 
 	 Zero means "do not" — full speed until the goal is reached, which is what a
 	 projectile wants and what makes a crowd of people orbit a door for ever.
-	 The taper is linear rather than exponential on purpose: an exponential one
+	 The taper is linear rather than exponential because an exponential one
 	 never actually arrives, and an agent that never arrives goes on pushing its
 	 neighbours out of the way.
 	*>
@@ -74,15 +63,15 @@ struct SteerOptions
 }
 
 // The most neighbours one agent is pushed by. A crowd dense enough to have more
-// than this within a body's width is a crush, and the ones past the cap are in
+// than this within a body's width is a crush, and the ones past the cap push in
 // the same direction as the ones counted — the sum is already saturated.
 const int STEER_MAX_NEIGHBOURS = 24;
 
 <*
  A bucket grid over the agents, thrown away at the end of the call.
 
- A counting sort, exactly as `scene/query.c3`'s index is and for the same
- reason: it is rebuilt every frame, so nothing may allocate per cell.
+ A counting sort, like `scene/query.c3`'s index and for the same reason: it is
+ rebuilt every frame, so nothing may allocate per cell.
 *>
 struct AgentGrid @local
 {
@@ -120,9 +109,9 @@ fn void AgentGrid.build(&self, float[] positions, int count, float cell)
 
 	long cells = (long)self.dims.x * (long)self.dims.y * (long)self.dims.z;
 	// A crowd spread over a level with a body-width cell asks for a grid far
-	// larger than the crowd. Past four cells per agent the grid is mostly
-	// empty and the quadratic loop it replaces was never going to be the cost,
-	// so the caller is quietly given that loop back — see `separation_of`.
+	// larger than the crowd. Past four cells per agent the grid is mostly empty
+	// and the quadratic loop it replaces was never the cost, so the caller is
+	// quietly given that loop back — see `separation_of`.
 	if (cells <= 0 || cells > (long)count * 4 + 64) return;
 
 	self.starts.tinit((sz)cells + 1);
@@ -160,11 +149,10 @@ fn int AgentGrid.key_of(&self, float[] positions, int agent)
 <*
  The push one agent gets from the others near it.
 
- Weighted by how deep the overlap is rather than by the inverse distance: an
- inverse blows up as two agents coincide, which they do the moment two of them
- are given the same spawn point, and one frame of an infinite push throws an
- agent across the level. A linear taper from "touching" to "overlapping
- completely" is bounded by construction.
+ Weighted by overlap depth rather than inverse distance: an inverse blows up as
+ two agents coincide, which they do the moment two share a spawn point, and one
+ frame of an infinite push throws an agent across the level. A linear taper from
+ touching to fully overlapping is bounded by construction.
 *>
 fn Vec3 separation_of(
 	AgentGrid* grid, float[] positions, int count, int agent, float radius
@@ -178,7 +166,7 @@ fn Vec3 separation_of(
 	if (!grid.usable)
 	{
 		// The quadratic fallback — see `AgentGrid.build`. Correct and slower,
-		// and reached only for a crowd so spread out that almost every pair is
+		// reached only for a crowd so spread out that almost every pair is
 		// rejected on the first compare anyway.
 		for (int other = 0; other < count && counted < STEER_MAX_NEIGHBOURS; other++)
 		{
@@ -236,7 +224,7 @@ fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
 	float distance = math::sqrt(distance_sq);
 	if (distance < 1e-5f)
 	{
-		// Exactly on top of one another, which two agents spawned at one point
+		// Exactly on top of one another, as two agents spawned at one point
 		// are. Any direction resolves it and none is more correct, so the
 		// agent's index decides — a fixed direction would leave the pair pushing
 		// the same way for ever and never separating.
@@ -246,7 +234,7 @@ fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
 }
 
 <*
- Fill `out` with a desired velocity per agent.
+ Fills `out` with a desired velocity per agent.
 
  @param positions : `Three floats per agent, x/y/z. Read only.`
  @param out : `Three floats per agent. Written, never read.`
@@ -293,7 +281,7 @@ fn void steer_agents(
 			if (remaining > 1e-6f) want = towards / remaining;
 		}
 
-		// Arrive: taper the speed inside the radius, and stop dead at the goal
+		// Arrive: taper the speed inside the radius, stopping dead at the goal
 		// rather than asymptotically near it — see `SteerOptions.arrive_radius`.
 		float wanted_speed = speed;
 		if (options.arrive_radius > 0.0f && remaining < options.arrive_radius)
@@ -311,8 +299,8 @@ fn void steer_agents(
 		}
 
 		// One clamp at the end rather than one per term: clamping the seek and
-		// then adding the separation is how a crowd ends up moving faster in a
-		// scrum than in the open.
+		// then adding separation is how a crowd ends up moving faster in a scrum
+		// than in the open.
 		float length = velocity.length();
 		if (length > speed && length > 1e-9f) velocity = velocity * (speed / length);
 

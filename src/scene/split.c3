@@ -1,72 +1,58 @@
 <*
  Cutting one merged mesh into the pieces it is actually made of.
 
- ## The problem this exists for
-
  Every AI-generated kit ships as one merged mesh. A town square arrives as a
  single primitive with 23 buildings in it, and there is nothing a scene can do
  with that: one mesh is one transform, so the buildings cannot be moved, placed,
- rotated, culled or picked apart from each other. `plan.md` §2 recorded the
- workaround — cut it in Blender once — and the trigger for doing it here: **an
- agent generating kits with no person in the loop**, which is a loop with no
- Blender in it.
+ rotated, culled or picked apart.
 
- ## Connected components, and why that is the right cut
+ ## Connected components
 
- Two triangles belong to the same piece when they share a vertex, and the
- pieces are the equivalence classes of that relation. That is the whole
- algorithm, and it is right for this input for a reason worth stating: a merged
- kit is merged by *concatenation*. The buildings were separate meshes that a tool
- appended into one buffer, so nothing welds their vertices together and the
+ Two triangles belong to the same piece when they share a vertex, and the pieces
+ are the equivalence classes of that relation. That is right for this input
+ because a merged kit is merged by *concatenation* — the buildings were separate
+ meshes a tool appended into one buffer, so nothing welded their vertices and the
  seams the merge erased are exactly the ones this finds.
 
- What it cannot cut is a mesh that is genuinely one connected surface — a
- terrain with the houses extruded out of it, a character welded to its base.
- Those come back as one piece, which is the honest answer rather than an
- arbitrary one: there is no seam, and inventing one would put a cut through the
- middle of a wall.
+ What it cannot cut is a genuinely connected surface: a terrain with the houses
+ extruded out of it, a character welded to its base. Those come back as one
+ piece, which is honest — there is no seam, and inventing one would put a cut
+ through the middle of a wall.
 
  Union-find over the vertex indices, with path halving and union by size. Almost
- linear on the triangle count, and the arrays are two `uint`s per vertex, freed
- before anything is uploaded.
+ linear in the triangle count; the arrays are two `uint`s per vertex and are
+ freed before anything is uploaded.
 
- ## What a piece inherits, and what it cannot
+ ## What a piece inherits
 
- A piece gets the source's **base colour** and its **base colour map**, taking a
- reference to the image the way any other mesh that names one does. Its normals,
- uvs and vertex colours come across per vertex, because the split is a partition
- of the vertex list and not a re-tessellation — a piece's vertices are the
- source's vertices, renumbered.
+ The source's base colour and base colour map, taking a reference to the image
+ the way any other mesh naming one does. Normals, uvs and vertex colours come
+ across per vertex, because the split is a partition of the vertex list rather
+ than a re-tessellation — a piece's vertices are the source's, renumbered.
 
- It does **not** get a `CUSTOM_materials_layers` stack, and a mesh that has one is
+ It does *not* get a `CUSTOM_materials_layers` stack, and a mesh that has one is
  refused rather than split into pieces that quietly lost it. A stack is a
- material rather than a mesh property, `Assets.load_material_layers` resolves it
- against the file's own images, and half-carrying it — the base colour but not the
- layers — is the shape of bug this project's headers keep refusing: a picture
- that looks plausible and is wrong.
+ material property resolved against the file's own images, and half-carrying it
+ would produce a picture that looks plausible and is wrong.
 
- ## The pieces are ordinary assets, and a mesh that is one piece is itself
+ ## The pieces are ordinary assets
 
  One `upload_built` per piece, filed under a key derived from the source's, so a
- second split of the same mesh answers with the same assets rather than
- uploading a second copy. They are indistinguishable from a hull or a box
- afterwards: pickable, instanced, exportable, unloadable one at a time.
+ second split of the same mesh answers with the same assets. Afterwards they are
+ indistinguishable from a hull or a box: pickable, instanced, exportable,
+ unloadable one at a time.
 
- **A mesh that turns out to be one component answers with the source itself** —
- same asset, same mesh index, nothing uploaded. That is not only an optimisation.
- `Assets.read_geometry` reaches a mesh built through `upload_built` by its picking
- tree, which carries positions and triangles and *recomputes* normals and uvs the
- way a hull wants them; copying a piece back through that would replace its uv
- stream with a projection. The identity case is the only one that could hit it —
- a hull is always one component, and a piece is one by construction — so
- short-circuiting it is what keeps the lossy path unreachable rather than merely
- unlikely.
+ A mesh that turns out to be one component answers with the source itself — same
+ asset, same mesh index, nothing uploaded. That is a correctness short-circuit,
+ not just a saving: `Assets.read_geometry` reaches a mesh built through
+ `upload_built` by its picking tree, which carries positions and triangles and
+ *recomputes* normals and uvs the way a hull wants them, so copying a piece back
+ through that would replace its uv stream with a projection.
 
- **This is a load-time tool and it stays one.** It reads the geometry back
- through `Assets.read_geometry` — the exporter's path, which is host-side and
- touches no device — so it is a walk over vertices and an upload per piece, at
- whatever moment the script asks. Nothing calls it automatically, because a kit
- that is already cut would pay for it every run.
+ This is a load-time tool. It reads geometry back through `Assets.read_geometry`
+ — the exporter's host-side path, touching no device — so it is a walk over
+ vertices and an upload per piece, whenever the script asks. Nothing calls it
+ automatically, because a kit that is already cut would pay for it every run.
 *>
 module three;
 
@@ -80,8 +66,8 @@ faultdef MESH_CANNOT_BE_SPLIT, MESH_HAS_LAYERS, TOO_MANY_SPLIT_PIECES;
  One piece: which asset it landed in and which mesh of it.
 
  The mesh index is carried because a piece is not always mesh 0 — a mesh that was
- already one component is answered with the source's own handle, and that mesh
- may be any of the file's.
+ already one component answers with the source's own handle, and that mesh may be
+ any of the file's.
 *>
 struct MeshPiece
 {
@@ -97,15 +83,15 @@ struct MeshPiece
  particle dump or a mesh whose triangles genuinely do not touch, and uploading
  one asset per triangle would be a stall and then a scene nothing can draw.
 
- Refused with the count, so the caller learns what it actually handed over.
+ Refused with the count, so the caller learns what it handed over.
 *>
 const uint MAX_SPLIT_PIECES = 512;
 
 <*
  Union-find over the vertex indices, with path halving and union by size.
 
- The whole of the algorithm, kept as a struct so the two arrays have one owner
- and one `free`. `parent[i] == i` is a root; `size` is only meaningful at a root.
+ Kept as a struct so the two arrays have one owner and one `free`.
+ `parent[i] == i` is a root; `size` is only meaningful at a root.
 *>
 struct VertexUnion @local
 {
@@ -134,10 +120,10 @@ fn void VertexUnion.free(&self)
 <*
  The root of `at`, flattening the path on the way.
 
- Path *halving* rather than full compression: one pass, no recursion and no
- second walk, and the same near-constant amortised cost. Iterative because the
- recursive version's depth is the tree's, and a pathological merge order over a
- million vertices would be a stack overflow rather than a slow answer.
+ Path *halving* rather than full compression: one pass, no recursion, no second
+ walk, and the same near-constant amortised cost. Iterative because the recursive
+ version's depth is the tree's, and a pathological merge order over a million
+ vertices would be a stack overflow rather than a slow answer.
 *>
 fn uint VertexUnion.find(&self, uint at)
 {
@@ -168,16 +154,16 @@ fn void VertexUnion.join(&self, uint a, uint b)
 }
 
 <*
- Cut one mesh into its connected components and upload each as its own asset.
+ Cuts one mesh into its connected components and uploads each as its own asset.
 
  The pieces come back in the order their first triangle appears in the source's
- index buffer, which is stable for a given file and is what makes the keys stable
- too. A mesh that is one connected surface comes back as one piece — not as a
- fault, because "this was already one thing" is an answer and not an error.
+ index buffer, which is stable for a given file and makes the keys stable too. A
+ mesh that is one connected surface comes back as one piece rather than a fault:
+ "this was already one thing" is an answer, not an error.
 
- **Nothing is changed about the source.** It stays loaded, stays uploaded and
- keeps its references; a script that splits a kit and then unloads the kit gets
- exactly what it asked for, because the pieces hold their own image references.
+ Nothing about the source changes. It stays loaded, stays uploaded and keeps its
+ references, so a script that splits a kit and then unloads the kit gets what it
+ asked for — the pieces hold their own image references.
 
  @param id : `The asset the mesh belongs to.`
  @param mesh : `Which of its meshes to cut.`
@@ -190,8 +176,7 @@ fn void VertexUnion.join(&self, uint a, uint b)
 fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiece}* pieces)
 {
 	// The geometry has to be readable, and for a lazily-loaded glTF mesh that
-	// means uploaded: `read_geometry`'s stream path needs `gltf_mesh` filled in,
-	// which is what `ensure_uploaded` does.
+	// means uploaded: `read_geometry`'s stream path needs `gltf_mesh` filled in.
 	self.ensure_uploaded(id, mesh);
 
 	GpuMesh* source = self.mesh(id, mesh);
@@ -200,8 +185,7 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 
 	Asset* owner = self.slot(id);
 	if (owner == null) return MESH_CANNOT_BE_SPLIT~;
-	// Copied before anything can grow `self.assets` and move the slot under us —
-	// `upload_primitive` has the same note for the same reason.
+	// Copied before anything can grow `self.assets` and move the slot under us.
 	String source_path = owner.path;
 	String source_name = source.name;
 	Vec4 base_color = source.base_color;
@@ -231,16 +215,16 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 			// trust to describe anything, and a `find` on it would read out of
 			// bounds. Skipped rather than refused: `upload_primitive` already
 			// uploaded the same indices, so the mesh draws — and a triangle
-			// nothing can place simply belongs to no piece.
+			// nothing can place belongs to no piece.
 			if (a >= vertices || b >= vertices || c >= vertices) continue;
 			sets.join(a, b);
 			sets.join(b, c);
 		}
 
 		// Roots in the order their first triangle appears, so the pieces are
-		// numbered the way somebody reading the file would number them. `piece_of`
-		// is indexed by root and holds one past the piece index, so zero is "not a
-		// root anything reached".
+		// numbered the way somebody reading the file would number them.
+		// `piece_of` is indexed by root and holds one past the piece index, so
+		// zero is "not a root anything reached".
 		uint[] piece_of = mem::new_array(uint, (sz)vertices);
 		defer mem::free(piece_of);
 		List{usz} first_triangle;
@@ -260,8 +244,8 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 		uint count = (uint)first_triangle.len();
 		if (count == 0) return MESH_CANNOT_BE_SPLIT~;
 
-		// Already one thing. The header says why this is a correctness
-		// short-circuit and not only a saving.
+		// Already one thing. See the header — this is a correctness
+		// short-circuit, not only a saving.
 		if (count == 1)
 		{
 			pieces.push({ .asset = id, .mesh = mesh });
@@ -274,9 +258,9 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 		piece.init();
 		defer piece.free();
 
-		// Where each source vertex landed in the piece being built, plus the piece
-		// it was written for — so one array serves every piece instead of being
-		// cleared N times over a million entries.
+		// Where each source vertex landed in the piece being built, plus the
+		// piece it was written for — so one array serves every piece instead of
+		// being cleared N times over a million entries.
 		uint[] moved_to = mem::new_array(uint, (sz)vertices);
 		defer mem::free(moved_to);
 		uint[] moved_in = mem::new_array(uint, (sz)vertices);
@@ -303,8 +287,8 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 				for (usz corner = 0; corner < 3; corner++)
 				{
 					uint vertex = geometry.indices[(sz)(t * 3 + corner)];
-					// `p + 1` for the same reason `piece_of` is offset: zero is the
-					// value the array was allocated with, and piece 0 is real.
+					// `p + 1` for the same reason `piece_of` is offset: zero is
+					// the value the array was allocated with, and piece 0 is real.
 					if (moved_in[vertex] != p + 1)
 					{
 						moved_in[vertex] = p + 1;
@@ -318,16 +302,15 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 				}
 			}
 
-			// The source's path and mesh index, so a second split of the same mesh
-			// is a lookup rather than a second upload — `Assets.built` matches on
-			// this exactly as it does for a box's parameters.
+			// The source's path and mesh index, so a second split of the same
+			// mesh is a lookup rather than a second upload.
 			String key = string::tformat("<split %s#%d/%d of %d>", source_path, mesh, p, count);
 			String label = string::tformat("%s piece %d", source_name, p);
 			AssetId built = self.upload_built(gpu, key, label, &piece)!;
 
 			// The colour and the map, after the upload rather than through it: a
-			// piece that was already built under this key is somebody else's mesh
-			// holding somebody else's reference, and writing over it would take a
+			// piece already built under this key is somebody else's mesh holding
+			// somebody else's reference, and writing over it would take a
 			// reference twice.
 			GpuMesh* fresh = self.mesh(built, 0);
 			if (fresh != null && fresh.texture < 0)

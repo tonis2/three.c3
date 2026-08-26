@@ -1,51 +1,38 @@
 <*
  What a mesh is drawn *with*: a pipeline, and the uniform bytes that go with it.
 
- `plan.md`'s source tree has carried a line for this file since M0 and M2
- deliberately did not write it: "at M2 a material is a base colour factor and a
- texture index, both carried on `GpuMesh`, and both resolve to the one pipeline —
- a `Material` struct with exactly those two fields would be a name for something
- that already has one. It arrives at M5 with `ShaderMaterial`, which is the first
- thing that makes a material a choice between pipelines."
-
  ## The uniforms ride in the push block, not in a uniform buffer
 
  `shaders/material.slang` appends the agent's uniforms to the same push block the
- mesh contract already uses, after `uv_transform`. That is 52 free bytes — 13
- floats — and it is the whole storage story for *values*.
+ mesh contract already uses. That is the whole storage story for *values*.
 
- **Textures are not in it and never were.** A sampler is a descriptor, so the
- four a material may declare cost the push block nothing at all and the budget
- below is only ever about floats. That is why `textures:` arrived without the
- uniform buffer this header used to say it depended on: the thing that was
- missing was never storage, it was the *write* site — two hardcoded
- `setDstBinding(0)` calls that could not express a second image however much room
- there was. `render/bind.c3` is where that changed.
+ Textures are not in it and never were. A sampler is a descriptor, so the ones a
+ material declares cost the push block nothing and the budget below is only ever
+ about floats.
 
  The alternative, a `ConstantBuffer<Params>` reached by descriptor, costs four
- things that do not exist yet: reflection of uniform-block *members* (Slang
- reports a constant buffer as one opaque binding and the externs to walk into it
- are not even declared in `lib/slang.c3l`), a `UNIFORM_BUFFER` usage bit on
+ things that do not exist here: reflection of uniform-block *members* (Slang
+ reports a constant buffer as one opaque binding, and the externs to walk into it
+ are not declared in `lib/slang.c3l`), a `UNIFORM_BUFFER` usage bit on
  `Gpu.create_dynamic`, a descriptor pool sized for it, and a per-frame-slot ring
- so a buffer the GPU may still be reading is never overwritten (`plan.md` §6, the
- trap that tore crig's pose palette). The push block costs none of them: reflection
- of push fields by name and byte offset is already built, already tested
- byte-for-byte, and already the mechanism `base_color` reaches the shader through.
+ so a buffer the GPU may still be reading is never overwritten. The push block
+ costs none of them: reflection of push fields by name and byte offset is already
+ built, already tested byte-for-byte, and already how `base_color` reaches the
+ shader.
 
- What it refuses is a material with more than 52 bytes of uniforms — no long
- arrays, no matrices beyond a couple, and a table of four float3 rows plus a clock
- is already over. That is the right trade for tier 2, whose whole claim is "a
- fragment function, not a pipeline", and `MATERIAL_UNIFORM_BUDGET` is where the
- conversation about widening it starts.
+ What it refuses is a material with more uniforms than the block has room for —
+ no long arrays, no matrices beyond a couple. `MATERIAL_UNIFORM_BUDGET` is where
+ the conversation about widening it starts, and `MATERIAL_TABLE_BUDGET` is what
+ already happened to the table half.
 
  ## A material is an index, and the default one is shared
 
  `Node.material` is a `uint` into `MeshPass.materials`, and every node starts on
  `DEFAULT_MATERIAL`. It has to be a shared index rather than a per-node value:
- `a_thousand_instances_are_one_draw_call` is the project's central claim, and it
- stops being true the moment two nodes drawing the same mesh disagree about their
- material. Handing every new node its own material id would keep every test's
- numbers green while quietly turning one draw call into a thousand.
+ a thousand instances stop being one draw call the moment two nodes drawing the
+ same mesh disagree about their material, and handing every new node its own
+ material id would keep every test's numbers green while quietly turning one draw
+ call into a thousand.
 *>
 module three;
 
@@ -78,9 +65,9 @@ const uint DEFAULT_MATERIAL = 0;
 <*
  Which faces a material keeps, in Three.js's own numbering.
 
- `FrontSide` is 0 there, `BackSide` 1 and `DoubleSide` 2, and matching the
- numbers rather than only the names means a script that hardcoded `side: 2` from
- memory of Three.js gets what it meant.
+ `FrontSide` is 0 there, `BackSide` 1 and `DoubleSide` 2. Matching the numbers
+ rather than only the names means a script that hardcoded `side: 2` from memory
+ of Three.js gets what it meant.
 *>
 const int SIDE_FRONT = 0;
 const int SIDE_BACK = 1;
@@ -89,18 +76,16 @@ const int SIDE_DOUBLE = 2;
 <*
  The cull mode a side means.
 
- **Culling is not an optional device feature**, unlike the wireframe fill mode
- `plan.md` §1 refuses to depend on: `cullMode` is core Vulkan with no capability
- bit behind it, so this needs no query and has no fallback path.
+ `cullMode` is core Vulkan with no capability bit behind it, so this needs no
+ query and has no fallback path.
 
- The inversion is the thing to read twice. `BackSide` means *keep the back
+ The inversion is the thing to read twice: `BackSide` means *keep the back
  faces*, so it culls the front ones. Getting it the other way round renders a
- skydome that is invisible from inside — which is the exact bug this exists to
- fix, so it would look like nothing had changed.
+ skydome that is invisible from inside — the exact bug this exists to fix, so it
+ would look like nothing had changed.
 
- Anything unrecognised is `FrontSide`, the default every material had before
- this argument existed. The JS side refuses an unknown value by name before it
- reaches here; this is the floor under that, not the check.
+ Anything unrecognised is `FrontSide`. The JS side refuses an unknown value by
+ name before it reaches here; this is the floor under that, not the check.
 *>
 fn vk::CullModeFlags cull_for_side(int side)
 {
@@ -117,17 +102,15 @@ fn vk::CullModeFlags cull_for_side(int side)
  own numbering.
 
  `NoBlending` is 0 there, `NormalBlending` 1 and `AdditiveBlending` 2 — matched
- for `SIDE_FRONT`'s reason: a script that wrote `blending: 2` from memory of
- Three.js gets what it meant. Three.js has `Subtractive` and `Multiply` at 3 and
- 4 as well; they are not here, and leaving the numbers free is what lets them
- arrive later without renumbering anything a script may have hardcoded.
+ for `SIDE_FRONT`'s reason. Three.js has `Subtractive` and `Multiply` at 3 and 4
+ as well; they are not here, and leaving the numbers free lets them arrive later
+ without renumbering anything a script may have hardcoded.
 
- The default is `NONE` and not `NORMAL`, which is worth stating because it is the
- opposite of what "a material has an opacity" suggests. An opaque pipeline
- ignores the alpha it writes, so a material that never asked to blend renders
- exactly as every material did before this existed, whatever its opacity says.
- Three.js behaves the same way — `opacity` without `transparent` does nothing —
- and the honest reason is the hardware's, not a rule anybody chose.
+ The default is `NONE` and not `NORMAL`, which is the opposite of what "a
+ material has an opacity" suggests. An opaque pipeline ignores the alpha it
+ writes, so a material that never asked to blend renders exactly as every
+ material did before this existed, whatever its opacity says. Three.js behaves
+ the same way — `opacity` without `transparent` does nothing.
 *>
 const int BLENDING_NONE = 0;
 const int BLENDING_NORMAL = 1;
@@ -137,11 +120,10 @@ const int BLENDING_ADDITIVE = 2;
  The pipeline blend mode a `blending` number means.
 
  `cull_for_side`'s shape and its floor-not-check role: anything unrecognised is
- `NONE`, the behaviour every material had before blending existed, and the JS
- side refuses an unknown value **by name** before it reaches here. Two guards
- rather than one because they answer different questions — the boundary tells an
- agent what it typed wrong, and this makes sure a value that arrived any other
- way cannot select a pipeline nobody meant.
+ `NONE`, and the JS side refuses an unknown value *by name* before it reaches
+ here. Two guards rather than one because they answer different questions — the
+ boundary tells an agent what it typed wrong, and this makes sure a value that
+ arrived any other way cannot select a pipeline nobody meant.
 *>
 fn BlendMode blend_for(int blending)
 {
@@ -159,7 +141,7 @@ fn BlendMode blend_for(int blending)
  One place rather than a switch at every `acquire`, because the *depth* half of
  the answer is the part that is easy to get wrong and impossible to see: an
  `ALPHA_STATE` written by hand with `depth_write: true` renders correctly in
- every scene where nothing overlaps itself. `ALPHA_STATE` has that argument.
+ every scene where nothing overlaps itself.
 *>
 fn PipelineState state_for_blend(BlendMode blend)
 {
@@ -177,7 +159,7 @@ fn PipelineState state_for_blend(BlendMode blend)
  Index 1 of `MeshPass.materials`, built in `MeshPass.init` from the same
  `mesh.slang` the default material uses, over `LINE_STATE`.
 
- It is a *material* rather than a flag on the mesh because a bucket is
+ A *material* rather than a flag on the mesh because a bucket is
  `(asset, mesh, material)` and the material is what chooses the pipeline. Making
  topology a property of the geometry instead would mean every material needed a
  line variant of its pipeline, for a case in which nobody wants a custom shader:
@@ -197,10 +179,9 @@ const uint LINE_MATERIAL = 1;
  `draw` at 16+8, and `shaders/material.slang` declares those three fields first
  and in that order so `check_push_block` passes on a generated module exactly as
  it does on `mesh.slang`. The `$assert` is what makes this a derived number
- rather than a copied one — and it earned that twice: when `uv_transform` was
+ rather than a copied one, and it earned that twice: when `uv_transform` was
  added and this moved from 60 to 76, and when the whole mesh contract moved into
- `DrawRecord` and it fell to 24, both times without anyone having to remember it
- existed.
+ `DrawRecord` and it fell to 24.
 *>
 const uint MATERIAL_PUSH_START = 24;
 
@@ -228,25 +209,24 @@ const uint NO_TABLE_POINTER = uint::max;
  `block` is laid out *as the push block itself* rather than as a list of values.
  Everything below `MATERIAL_PUSH_START` is overwritten per draw with the mesh's
  own push data; everything at or above it is the material's, written once when a
- uniform is set and memcpy'd straight out at record time. That means setting a
- uniform costs a bounds check and a copy of at most 16 bytes, and drawing costs
- no per-uniform loop at all.
+ uniform is set and memcpy'd straight out at record time. So setting a uniform
+ costs a bounds check and a copy of at most 16 bytes, and drawing costs no
+ per-uniform loop at all.
 
  `pipeline` is borrowed from `MeshPass.pipelines`, which hands out heap-boxed
  entries precisely so a live pointer survives the cache growing.
 
- ## Three fields are shaped around C3's zero fill, and each answers it differently
+ ## Three fields are shaped around C3's zero fill
 
  A designated initializer leaves out what it does not name and C3 writes zero
- there, so every field here has to have an answer for "what does a construction
- site that forgot me produce". There are exactly three strategies in use and they
- are worth reading together, because which one is right depends entirely on
- whether zero is a *legal value* of the field:
+ there, so every field here needs an answer to "what does a construction site
+ that forgot me produce". There are three strategies in use, and which is right
+ depends entirely on whether zero is a *legal value* of the field:
 
- - `texture` — zero is a perfectly ordinary texture index, so no encoding saves
-   it. `NO_TEXTURE` is -1 and **every construction site names the field**, which
-   makes forgetting possible on purpose: the mistake shows up as a wrong picture
-   rather than being silently absorbed.
+ - `texture` — zero is an ordinary texture index, so no encoding saves it.
+   `NO_TEXTURE` is -1 and every construction site names the field, which makes
+   forgetting possible on purpose: the mistake shows up as a wrong picture rather
+   than being silently absorbed.
  - `uv_transform` — zero is a legal number but a meaningless *transform*, so the
    all-zero value is read as "unset" and the boundary refuses a script that tries
    to write one. Nobody has to remember anything.
@@ -255,73 +235,62 @@ const uint NO_TABLE_POINTER = uint::max;
    complement: zero fill spells opacity 1, and an opacity of exactly 0 is still
    representable rather than being stolen by a sentinel.
 
- The pattern behind all three: encode when zero is meaningful and the default is
- not zero; require naming when no encoding is honest.
+ The pattern: encode when zero is meaningful and the default is not zero; require
+ naming when no encoding is honest.
 *>
 struct Material
 {
 	MeshPipeline* pipeline;
 	// Which faces survive, as `material.side` chose them. Set at record time with
-	// `vk::cmdSetCullMode` rather than baked into `pipeline`, so two materials that
-	// differ only in their side share one `VkPipeline` and changing a side builds
-	// nothing at all. `PipelineState` has the argument, including why topology did
-	// not get the same treatment.
+	// `vk::cmdSetCullMode` rather than baked into `pipeline`, so two materials
+	// that differ only in their side share one `VkPipeline` and changing a side
+	// builds nothing at all. `PipelineState` has the argument.
 	vk::CullModeFlags cull;
-	// The body the agent wrote, owned. Kept for `toJSON` and for the error
-	// message when a uniform name does not resolve — "that material has no
-	// uniform called X" is only actionable next to the source that declared them.
+	// The body the agent wrote, owned. Kept for `toJSON` and for the error message
+	// when a uniform name does not resolve — "that material has no uniform called
+	// X" is only actionable next to the source that declared them.
 	String fragment;
 	// The vertex body, owned, or an empty slice for a material that has none.
-	// Kept for `toJSON` and for the same reason `fragment` is: a message about a
-	// shader is worth much less than the shader beside it.
+	// Kept for `toJSON` and for the same reason `fragment` is.
 	String vertex;
 	// How far this material's vertex body can move a vertex, in world units.
 	//
-	// **A cull margin, and nothing else.** `build_draw_list` tests a mesh's own
-	// bounds against the frustum, and those bounds describe the geometry as it
-	// was uploaded — a body that pushes a vertex two metres out is drawing
-	// something the box does not contain, so the draw is dropped while the
-	// displaced part is still on screen. The symptom is geometry vanishing as it
-	// reaches the edge of the view and coming back when the camera turns, which
-	// reads as a culling bug in the engine rather than as a number the material
-	// never gave.
+	// A cull margin and nothing else. `build_draw_list` tests a mesh's own bounds
+	// against the frustum, and those bounds describe the geometry as it was
+	// uploaded — a body that pushes a vertex two metres out is drawing something
+	// the box does not contain, so the draw is dropped while the displaced part is
+	// still on screen. That reads as geometry vanishing at the edge of the view
+	// and coming back when the camera turns.
 	//
 	// Zero for every material without a vertex body, which is exactly right for
-	// them: the zero fill means "displaces nothing", and a material that does
-	// displace says how far. It is deliberately not derived — nothing can read a
-	// bound out of an arbitrary shader body, and a conservative guess would
-	// either cost draw calls everywhere or be wrong in the one case it mattered.
+	// them. Deliberately not derived: nothing can read a bound out of an arbitrary
+	// shader body, and a conservative guess would either cost draw calls
+	// everywhere or be wrong in the one case it mattered.
 	float bounds;
 	// `material.map` — an index into `Assets.textures`, or `NO_TEXTURE` for
-	// "whatever the mesh brought". Holds one reference to that slot for as long
-	// as it names it; `MeshPass.set_material_map` is the only thing that moves
-	// it, so that the retain and the release cannot get out of step.
+	// "whatever the mesh brought". Holds one reference to that slot for as long as
+	// it names it; `MeshPass.set_material_map` is the only thing that moves it, so
+	// the retain and the release cannot get out of step.
 	//
-	// **This must be set explicitly at every site that builds a `Material`.**
-	// C3 zero-fills what a designated initializer leaves out, and zero is a
-	// perfectly ordinary texture index — so a forgotten `.texture` does not
-	// render untextured, it renders whatever the *first* image the table
-	// uploaded happens to be. That is a bug that looks like a texture bug, on a
-	// material nobody gave a texture to. `NO_TEXTURE` is -1 rather than 0 so
-	// that the mistake is possible to make; the alternative, a biased
-	// index-plus-one, makes it impossible and makes every read arithmetic.
+	// This must be set explicitly at every site that builds a `Material`. C3
+	// zero-fills what a designated initializer leaves out, and zero is a perfectly
+	// ordinary texture index — so a forgotten `.texture` does not render
+	// untextured, it renders whatever the *first* image the table uploaded happens
+	// to be. `NO_TEXTURE` is -1 rather than 0 so the mistake is possible to make;
+	// a biased index-plus-one makes it impossible and makes every read arithmetic.
 	int texture;
 	// The samplers the body declared, at bindings 1..N. Binding 0 is `texture`
-	// above and is not in here. See `TextureSlots` for what is stored and why it
-	// is not simply the index.
+	// above and is not in here. See `TextureSlots`.
 	TextureSlots textures;
 	// `material.repeat` and `material.offset` — xy is how many times the texture
 	// repeats across the surface, zw is where it starts.
 	//
-	// **All zeros means unset, and is read as the identity.** That is the answer
-	// to the hazard the `.texture` comment above spends a paragraph on: C3
-	// zero-fills what an initializer omits, and here zero would be a repeat of
-	// zero, which collapses a whole surface onto one texel — a black or
-	// single-colour shape, on a material nobody gave a transform to. Rather than
-	// require every construction site to remember, `uv_transform_or_identity`
-	// treats the zero value as "none", and a script that writes a zero repeat is
-	// refused by name at the boundary because a zero repeat means nothing anyone
-	// wants.
+	// All zeros means unset, and is read as the identity. Zero would otherwise be
+	// a repeat of zero, which collapses a whole surface onto one texel — a black
+	// or single-colour shape, on a material nobody gave a transform to. Rather
+	// than require every construction site to remember,
+	// `uv_transform_or_identity` treats the zero value as "none", and a script
+	// that writes a zero repeat is refused by name at the boundary.
 	float[4] uv_transform;
 	// Which blend mode the material's pipeline was built with — `material.blend`
 	// and `material.transparent`, decided once, at construction.
@@ -329,109 +298,93 @@ struct Material
 	// A copy of what `PipelineState.blend` already says, kept here because the two
 	// readers cannot get at that: `Scene`'s draw ordering needs to know which
 	// buckets are transparent without reaching into a `MeshPipeline`, and the
-	// exporter needs it to write `alphaMode`. `NONE` is the zero fill and means
-	// what every material meant before this field existed.
+	// exporter needs it to write `alphaMode`.
 	//
-	// **There is no setter**, unlike `cull`. Blending is baked into the pipeline
-	// on this device (`BlendMode` has the measurement), so changing it would mean
-	// re-acquiring — a device, a target and the assembled source read back out of
-	// the cache — to save a script one line. Building a new material is that line.
+	// There is no setter, unlike `cull`. Blending is baked into the pipeline on
+	// this device, so changing it would mean re-acquiring — a device, a target and
+	// the assembled source read back out of the cache — to save a script one line.
+	// Building a new material is that line.
 	BlendMode blend;
-	// `material.opacity`, stored as **1 - opacity** so that the zero fill is the
-	// common case.
+	// `material.opacity`, stored as 1 - opacity so the zero fill is the common
+	// case.
 	//
-	// Reading `1.0` out of a field nobody wrote is the whole reason for the
-	// inversion, and the alternative was tried and thrown out: a plain `opacity`
-	// field would make every forgotten initializer produce an invisible material —
-	// geometry that does not render, on a material nobody said anything about,
-	// which is the failure mode that costs an agent the most to diagnose. A
-	// sentinel would have cost the one value a fade-out has to reach. See the
-	// header for the other two answers to the same problem.
+	// A plain `opacity` field would make every forgotten initializer produce an
+	// invisible material — geometry that does not render, on a material nobody
+	// said anything about. A sentinel would have cost the one value a fade-out has
+	// to reach.
 	//
 	// Never read directly outside `Material.opacity`.
 	float one_minus_opacity;
 	char[PUSH_BUDGET] block;
-	// **The uniform table, when it did not fit the block.** Empty for every
-	// material whose uniforms fit — which is almost all of them, and then nothing
-	// below this line costs anything.
+	// The uniform table, when it did not fit the block. Empty for every material
+	// whose uniforms fit — almost all of them — and then nothing below this line
+	// costs anything.
 	//
 	// A CPU shadow rather than the device buffer itself. `set_uniform` writes
 	// here, and `MeshPass.prepare` copies it into that frame slot's table buffer
-	// once per frame — which is what makes writing a uniform safe while frames are
-	// in flight, for exactly the reason the instance array is per slot: the GPU may
-	// still be reading last frame's copy.
+	// once per frame, which is what makes writing a uniform safe while frames are
+	// in flight: the GPU may still be reading last frame's copy.
 	//
 	// Laid out as the shader lays the table out, so the copy is one memcpy with no
 	// per-uniform loop, and every offset in it came from reflection.
 	char[] table;
 	// Where in the push block the pointer to that buffer goes — the reflected
-	// offset of `material_table` — or `NO_TABLE_POINTER` for a material that has
-	// no table. Cached rather than looked up per draw: `record` binds a material
-	// per bucket and a name scan there would be a scan per bucket per frame.
+	// offset of `material_table` — or `NO_TABLE_POINTER` for a material with no
+	// table. Cached rather than looked up per draw: `record` binds a material per
+	// bucket, and a name scan there would be a scan per bucket per frame.
 	uint table_pointer;
 	// Where this material's table sits inside the frame's shared table buffer.
 	// Assigned by `MeshPass.prepare` every frame, because a material collected and
 	// reused moves.
 	uint table_offset;
 	// Whether this slot holds a material at all. False for a slot whose material
-	// was collected, which stays in the list so that every index ever handed out
-	// keeps meaning what it meant — and is handed to the next `create_material`
-	// rather than growing the list forever.
+	// was collected, which stays in the list so every index ever handed out keeps
+	// meaning what it meant — and is handed to the next `create_material` rather
+	// than growing the list forever.
 	//
 	// Never set at a construction site: `MeshPass.claim_slot` is the only thing
-	// that makes a material live, precisely so that C3's zero-fill cannot produce
-	// a material that is dead the moment it is built.
+	// that makes a material live, so C3's zero-fill cannot produce a material that
+	// is dead the moment it is built.
 	bool alive;
 	// Whether the script's handle has been given back — `material.dispose()`.
 	//
-	// **Not the same as dead.** A material is collected when this is true *and*
-	// no node still names it, which is the rule `texture.dispose()` already
-	// follows: giving back a handle is a statement about the handle, and a mesh
-	// that is still drawing with the material is not wrong for doing so.
-	// `MeshPass.collect_materials` is where the two halves meet.
+	// Not the same as dead. A material is collected when this is true *and* no
+	// node still names it, the rule `texture.dispose()` already follows: giving
+	// back a handle is a statement about the handle, and a mesh that is still
+	// drawing with the material is not wrong for doing so.
 	bool released;
-	// What a `three.LayeredMaterial` *is*, beside what it compiled to.
-	//
-	// Empty for every other material, including a hand-written `ShaderMaterial`.
-	// `ScriptLayers` says what it is for and why it is stored here rather than
-	// recovered from the shader.
+	// What a `three.LayeredMaterial` *is*, beside what it compiled to. Empty for
+	// every other material, including a hand-written `ShaderMaterial`.
 	ScriptLayers script_layers;
 }
 
 <*
  One layer of a stack a script described, as the host can still read it.
 
- ## Why a shader's own source is not enough
-
  `js/prelude/layers.js` turns a layer stack into a fragment body and a set of
- samplers, and until this record existed that was all that crossed: `fragment`
- holds "the blend was a multiply" as Slang text, and no reader on this side can
- get it back out. So a scene built with `new three.LayeredMaterial(...)` exported
- as a flat material — the base colour and its map, with the layers gone — while
- the *same stack loaded from a `.glb`* exported intact, because `scene/export.c3`
- could read that one out of the source document.
-
- This is the missing half of that asymmetry: the description crosses at
- construction, and the exporter has a stack for a script's material exactly as it
- has one for a file's.
+ samplers, and that is all that would otherwise cross: `fragment` holds "the
+ blend was a multiply" as Slang text, and no reader on this side can get it back
+ out. Without this record, a scene built with `new three.LayeredMaterial(...)`
+ exports as a flat material while the *same stack loaded from a `.glb`* exports
+ intact, because `scene/export.c3` can read that one out of the source document.
 
  ## Bindings and offsets rather than values
 
- A layer's images are named by **sampler binding**, not by device slot, and its
- animated tint by **push offset**, not by number. Both are live: `mat.layers[1].map
- = moss` writes through `setMaterialTexture` into `Material.textures`, and an
- animated tint writes through `setUniform` into `Material.block`. Storing the
- values here would mean a second copy that every setter had to remember to
- update, and the one that forgot would export the image the material used to
- have. Storing where to look means there is nothing to keep in step.
+ A layer's images are named by sampler binding, not by device slot, and its
+ animated tint by push offset, not by number. Both are live:
+ `mat.layers[1].map = moss` writes through `setMaterialTexture` into
+ `Material.textures`, and an animated tint writes through `setUniform` into
+ `Material.block`. Storing the values here would mean a second copy every setter
+ had to remember to update, and the one that forgot would export the image the
+ material used to have.
 
- **Nothing here retains anything.** Every image a layer names is either
+ Nothing here retains anything. Every image a layer names is either
  `Material.texture` or one of `Material.textures`, both of which the material
- already holds a reference to for its whole life — that is what makes a binding
+ already holds a reference to for its whole life — which is what makes a binding
  safe to keep and a device slot not.
 
  A disabled layer never arrives: `LayeredMaterial` drops `enabled: false` before
- it generates anything, so a layer that is here is one the shader draws.
+ it generates anything.
 *>
 struct ScriptLayer
 {
@@ -456,8 +409,8 @@ struct ScriptLayer
 	// were baked into the shader as literals. `Material.layer_params` reads it.
 	int params_offset;
 	// `gltf::LayerBlendMode`, `LayerMaskChannel` and `LayerMaskSource` ordinals,
-	// passed through untranslated for `GpuLayer`'s reason: naming them on both
-	// sides would be two tables to keep in step with the extension's enum.
+	// passed through untranslated: naming them on both sides would be two tables
+	// to keep in step with the extension's enum.
 	uint blend_mode;
 	uint mask_channel;
 	uint mask_source;
@@ -467,16 +420,16 @@ struct ScriptLayer
 <*
  A script's whole layer stack.
 
- `present` is false for every material that is not a `LayeredMaterial`, which is
- almost all of them, so this costs a bool and an empty list on the rest.
+ `present` is false for every material that is not a `LayeredMaterial`, so this
+ costs a bool and an empty list on the rest.
 *>
 struct ScriptLayers
 {
 	bool present;
 	// The mask several layers read a channel of, as a binding. Zero when no two
 	// layers shared one — the mirror of `GpuLayers.mask_texture`, which the
-	// importer arrives at by hoisting and the generator arrives at by declaring
-	// one sampler for the whole stack.
+	// importer arrives at by hoisting and the generator by declaring one sampler
+	// for the whole stack.
 	uint mask_binding;
 	// The *base* material's normal map, as a binding, or zero.
 	//
@@ -484,7 +437,7 @@ struct ScriptLayers
 	// on `Material` beside `texture` because a `LayeredMaterial` is the only thing
 	// in this renderer that has one: the core materials have no normal map
 	// property at all. `scene/export.c3` writes it as the glTF material's own
-	// `normalTexture`, which is where a base normal belongs.
+	// `normalTexture`.
 	uint base_normal_binding;
 	List{ScriptLayer} layers;
 }
@@ -513,8 +466,7 @@ fn float[4] Material.uv_transform_or_identity(&self)
 
  The only reader of the stored field. Everything else asks through here, so the
  complement stays an implementation detail of the struct rather than something
- every call site has to remember to undo — which is exactly how a stored
- complement turns into a bug the second time somebody touches it.
+ every call site has to remember to undo.
 *>
 fn float Material.opacity(&self)
 {
@@ -526,8 +478,7 @@ fn float Material.opacity(&self)
 
  The mesh's texture is what such a material draws with, which is what every
  material did before `map` existed and is why a glTF's own materials still work
- unchanged: the file's image rides on the `GpuMesh`, and nothing about that
- moved.
+ unchanged: the file's image rides on the `GpuMesh`.
 *>
 const int NO_TEXTURE = -1;
 
@@ -539,32 +490,26 @@ const int NO_TEXTURE = -1;
  bound every draw — and the bias below is not something two files should each
  know about.
 
- ## Indexed by the binding itself, which is the half that changed
+ ## Indexed by the binding itself
 
- This used to be `int[MATERIAL_TEXTURE_LIMIT]` with `binding - TEXTURE_BINDING_FIRST`
- for a subscript, which was exact while both kinds of shader reserved exactly one
- binding. A post pass now reserves two (`prev` and `scene`), so there is no single
- first binding left to subtract — see `MATERIAL_BINDING_FIRST`.
-
- Carrying the base into the accessors was the other option and is the worse one:
- the base would have had to be passed correctly at every call site, and a call
- site that passed a material's base for a post pass would read a real texture out
- of the wrong slot rather than fault. **Indexing by the absolute binding cannot
- be got wrong** — a binding is the same number to everybody — at a cost of
- `MAX_SAMPLED_BINDINGS` ints per material instead of `MATERIAL_TEXTURE_LIMIT`,
- which is one int.
+ An array subscripted by `binding - <first>` is exact only while both kinds of
+ shader reserve the same number of bindings, and they no longer do. Carrying the
+ base into the accessors was the other option and is worse: it would have to be
+ passed correctly at every call site, and a call site passing a material's base
+ for a post pass would read a real texture out of the wrong slot rather than
+ fault. Indexing by the absolute binding cannot be got wrong — a binding is the
+ same number to everybody — at a cost of `MAX_SAMPLED_BINDINGS` ints per material
+ instead of one.
 
  ## What is stored is the index plus one
 
  Zero is an ordinary texture index, and this is an *array*: requiring every
  construction site to spell it out, the way `Material.texture` is spelled out,
- would mean four entries at each of them, and the site that wrote three would bind
- whatever image the table uploaded first to the fourth. So this takes the third of
- the three strategies `Material`'s header lays out — encode when zero is
- meaningful and the default is not zero. The zero fill means "nothing here", a
- real index `n` is stored as `n + 1`, and the arithmetic lives only in the two
- accessors below, exactly as the opacity complement lives only in
- `Material.opacity`.
+ would mean four entries at each of them, and the site that wrote three would
+ bind whatever image the table uploaded first to the fourth. So this takes the
+ third of `Material`'s three strategies — encode when zero is meaningful and the
+ default is not zero. The zero fill means "nothing here", a real index `n` is
+ stored as `n + 1`, and the arithmetic lives only in the two accessors below.
 *>
 struct TextureSlots
 {
@@ -578,13 +523,13 @@ struct TextureSlots
 
  A binding outside the range answers `NO_TEXTURE` rather than faulting, which is
  the call `Assets.texture_at` makes about an unknown index and for the same
- reason: the caller is `record`, the answer picks an image, and white is a picture
- that is visibly wrong rather than a draw that does not happen.
+ reason: the caller is `record`, the answer picks an image, and white is a
+ picture that is visibly wrong rather than a draw that does not happen.
 
- **Binding 0 is refused in both kinds**, which is what lets `sampler_binding_of`
+ Binding 0 is refused in both kinds, which is what lets `sampler_binding_of`
  answer 0 for "no such sampler": it is the template's own in a material
- (`base_color_map`) and in a post pass (`prev`), reached through
- `material.map` and through the chain respectively, and never by name.
+ (`base_color_map`) and in a post pass (`prev`), reached through `material.map`
+ and through the chain respectively, and never by name.
 
  @param binding : `The shader's own binding index, from its kind's first agent binding up.`
  @return `An index into Assets.textures, or NO_TEXTURE for a binding nothing was put in.`
@@ -597,13 +542,13 @@ fn int TextureSlots.at(&self, uint binding)
 }
 
 <*
- Put a texture in one binding.
+ Puts a texture in one binding.
 
- The only writer of the bias. **It takes no references and gives none back** —
+ The only writer of the bias. It takes no references and gives none back —
  retaining the new index and releasing the old one belongs to whoever has the
  `Assets` and a device to wait on, which is `MeshPass.set_material_texture` for a
  material and `PostPass.hold_textures` for a post pass. Writing through here
- directly leaks a reference, which is why it is said here and not only there.
+ directly leaks a reference.
 
  @param binding : `The shader's own binding index. Out of range is ignored.`
  @param texture : `An index into Assets.textures, or NO_TEXTURE to empty the binding.`
@@ -619,35 +564,32 @@ fn void TextureSlots.set(&self, uint binding, int texture)
 
  One line, because the resolution itself is `sampler_binding_of` in
  `render/bind.c3` — shared with the post pass, which asks the identical question
- of a pipeline that is not a material's. Zero means no; see there for why zero can
- mean that.
+ of a pipeline that is not a material's. Zero means no.
 *>
 fn uint Material.binding_of_texture(&self, String name)
 	=> sampler_binding_of(self.pipeline, name, MATERIAL_BINDING_FIRST);
 
 <*
- Point a uniform at new values.
+ Points a uniform at new values.
 
  The name is resolved through the pipeline's *reflected* push fields rather than
- through anything this side remembers, which is what makes the offsets right by
- construction: Slang decided them, and `-force-glsl-scalar-layout` is what makes
- them tight and predictable. A name below `MATERIAL_PUSH_START` resolves — it is
- a real field — and is refused anyway, because writing `base_color` or
- `positions` through this door would corrupt a BDA pointer and crash in the
- driver rather than here.
+ through anything this side remembers, which makes the offsets right by
+ construction. A name below `MATERIAL_PUSH_START` resolves — it is a real field —
+ and is refused anyway, because writing `base_color` or `positions` through this
+ door would corrupt a BDA pointer and crash in the driver rather than here.
 
  ## One row at a time, because a table is a column of them
 
  A uniform declared with rows is `float3 tint[4]` in the shader — one column of
  the material's table, selected per instance by `Surface.variant`. It is written
- a row at a time rather than whole, so the caller needs no view of the whole
- column and `material.uniforms.tint[2] = [1, 0, 0]` is one crossing.
+ a row at a time, so the caller needs no view of the whole column and
+ `material.uniforms.tint[2] = [1, 0, 0]` is one crossing.
 
- **The shape is stated rather than inferred**, which is what keeps the width
- check exact. `field.size` alone cannot tell a `float4` from two `float2`s, so
- asking the caller for both numbers and requiring `width * rows` to be the size
- the shader reflected refuses a caller that has the shape wrong — instead of
- silently writing half a row.
+ The shape is stated rather than inferred, which is what keeps the width check
+ exact: `field.size` alone cannot tell a `float4` from two `float2`s, so asking
+ the caller for both numbers and requiring `width * rows` to be the reflected
+ size refuses a caller that has the shape wrong instead of silently writing half
+ a row.
 
  @param values : `One to four floats. Must match the width the shader declared.`
  @param row : `Which row of the column, 0 for a plain uniform.`
@@ -658,7 +600,7 @@ fn uint Material.binding_of_texture(&self, String name)
 fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, uint rows = 1)
 {
 	ShaderField* field = self.pipeline.shader.field_of(name);
-	// **The `MATERIAL_PUSH_START` cut only applies to the block.** A table field's
+	// The `MATERIAL_PUSH_START` cut only applies to the block. A table field's
 	// offset is inside the table buffer, where zero is a real offset and the mesh
 	// contract does not exist.
 	if (field == null) return MATERIAL_UNIFORM_UNKNOWN~;
@@ -683,8 +625,8 @@ fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, 
 <*
  Every uniform this material declared, in the order the shader laid them out.
 
- Reads the reflected push fields and drops the mesh contract's seven, which is
- the same cut `set_uniform` makes. Used by the JS side to build the accessors on
+ Reads the reflected push fields and drops the mesh contract's, the same cut
+ `set_uniform` makes. Used by the JS side to build the accessors on
  `material.uniforms` — the prelude cannot enumerate them any other way, because
  the QuickJS shim has no property enumeration at all.
 *>
@@ -706,7 +648,7 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
 }
 
 <*
- Give this material somewhere to keep a uniform table, if its shader has one.
+ Gives this material somewhere to keep a uniform table, if its shader has one.
 
  Called once, wherever a material is built, and idempotent. Two things come out
  of the reflected layout and neither can be derived from the uniform list on this
@@ -714,8 +656,7 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
  because both are Slang's answers rather than ours.
 
  A material whose uniforms fit the push block gets `NO_TABLE_POINTER`, an empty
- table and no allocation, which is every material this project had before a table
- could spill.
+ table and no allocation.
 *>
 fn void Material.bind_table(&self)
 {
@@ -741,11 +682,10 @@ fn void Material.bind_table(&self)
 }
 
 <*
- Start a script's layer stack, discarding whatever it had.
+ Starts a script's layer stack, discarding whatever it had.
 
  Called by `setMaterialLayers`, once, before the layers themselves — the shape
- `add_material_layers`/`add_layer` has on the writing side and `add_mesh`/
- `add_primitive` has in `gltf.c3l`.
+ `add_material_layers`/`add_layer` has on the writing side.
 
  @param mask_binding : `The sampler several layers read a channel of, or 0 for a stack where no two share one.`
  @param base_normal_binding : `The base material's normal map, or 0. Written as the glTF material's own normalTexture rather than as any layer's.`
@@ -760,7 +700,7 @@ fn void Material.begin_script_layers(&self, uint mask_binding, uint base_normal_
 }
 
 <*
- Append one layer. `layer.name` is copied.
+ Appends one layer. `layer.name` is copied.
 *>
 fn void Material.add_script_layer(&self, ScriptLayer layer)
 {
@@ -805,10 +745,7 @@ fn float[4] Material.layer_params(&self, ScriptLayer* layer)
 
  The read half of the resolution `set_uniform` does on every write, split out
  because a layer resolves its `animated` float4 once at construction and reads it
- many times afterwards. The same two refusals apply: a name the shader never
- declared, and one below `MATERIAL_PUSH_START` — which is a real field and is
- refused anyway, because it belongs to the mesh contract rather than to the
- material.
+ many times afterwards. The same two refusals apply.
 *>
 fn int Material.uniform_offset(&self, String name)
 {
@@ -826,9 +763,8 @@ fn void Material.free(&self)
 	self.table = {};
 	self.free_script_layers();
 	*self = { };
-	// **Not left at the zero fill.** Zero is a perfectly ordinary texture index —
-	// the hazard `Material.texture` spends a paragraph on — and a collected slot
-	// that reads as naming texture 0 would have that slot released a second time
-	// by `MeshPass.free`'s sweep at teardown.
+	// Not left at the zero fill. Zero is a perfectly ordinary texture index, and a
+	// collected slot that read as naming texture 0 would have that slot released a
+	// second time by `MeshPass.free`'s sweep at teardown.
 	self.texture = NO_TEXTURE;
 }

@@ -4,21 +4,18 @@
 
  ## Two frames in flight
 
- `MAX_FRAMES_IN_FLIGHT` is 2, which means **anything the GPU may still be
- reading must be double-buffered.** crig's pose palette tore for exactly this
- reason, and the per-frame instance buffer arriving at M2 has the same shape and
- would have the same bug. Nothing in the base stage is per-frame-mutable yet;
- the rule is written here because the first uniform buffer is where it starts
- being possible to get wrong.
+ `MAX_FRAMES_IN_FLIGHT` is 2, which means anything the GPU may still be reading
+ must be double-buffered — the per-frame instance buffer above all. A host-visible
+ buffer rewritten while the previous frame is still reading it tears.
 
- ## The semaphore layout, taken from cui and not re-derived
+ ## The semaphore layout
 
- - **Acquire semaphores and fences are per frame slot** (2 of each).
- - **Render-finished semaphores are per swapchain image.**
+ - Acquire semaphores and fences are per frame slot (2 of each).
+ - Render-finished semaphores are per swapchain image.
 
  A render-finished semaphore shared across slots can be re-signalled while a
- presentation of the same image is still waiting on it. That is a genuine
- hazard, and validation catches it only sometimes.
+ presentation of the same image is still waiting on it. That is a genuine hazard,
+ and validation catches it only sometimes.
 
  ## The frame
 
@@ -29,9 +26,8 @@
 	                                   rebuild
 
  Recording is the same one call whether or not there is a window, because the
- target is offscreen either way (`plan.md` §1): `record_scene` begins the
- target, draws and ends it. The blit and the readback are optional consumers
- appended after.
+ target is offscreen either way: `record_scene` begins the target, draws and ends
+ it. The blit and the readback are optional consumers appended after.
 *>
 module three;
 
@@ -53,12 +49,11 @@ struct Frames
 
 fn Frames? Frames.init(&self, Gpu* gpu, uint image_count)
 {
-	// Every list here is given the heap explicitly. A List left
-	// zero-initialised has a null allocator, and `list_ensure_capacity`
-	// resolves null to `tmem` — so the first push backs it with temp-arena
-	// memory and any `@pool()` open up the stack frees it on the way out.
-	// Nothing faults at that point; the crash arrives later, wherever the list
-	// is next walked. See vulkan.c3l's MemoryAllocator, which was bitten by it.
+	// Every list here is given the heap explicitly. A List left zero-initialised
+	// has a null allocator, and `list_ensure_capacity` resolves null to `tmem` —
+	// so the first push backs it with temp-arena memory and any `@pool()` open up
+	// the stack frees it on the way out. Nothing faults at that point; the crash
+	// arrives later, wherever the list is next walked.
 	self.buffers.init(mem, MAX_FRAMES_IN_FLIGHT);
 	self.fences.init(mem, MAX_FRAMES_IN_FLIGHT);
 	self.image_available.init(mem, MAX_FRAMES_IN_FLIGHT);
@@ -86,9 +81,11 @@ fn Frames? Frames.init(&self, Gpu* gpu, uint image_count)
 }
 
 <*
- Top up the per-image semaphores after a rebuild handed back more images than
- last time. Never shrinks: a semaphore that might still be waited on by a
- presentation in flight is not ours to destroy, and a spare costs nothing.
+ Tops up the per-image semaphores after a rebuild handed back more images than
+ last time.
+
+ Never shrinks: a semaphore that might still be waited on by a presentation in
+ flight is not ours to destroy, and a spare costs nothing.
 *>
 fn void? Frames.ensure_present_semaphores(&self, Gpu* gpu, uint image_count)
 {
@@ -153,22 +150,20 @@ struct Renderer
 	Target target;
 	Viewer viewer;
 	Frames frames;
-	// What the last frame cost the GPU. Beside `frames` because its query pool
-	// is indexed by frame slot and shares that lifetime exactly — see
+	// What the last frame cost the GPU. Beside `frames` because its query pool is
+	// indexed by frame slot and shares that lifetime exactly — see
 	// `gpu/timing.c3` for which frame "the last" means on which path.
 	FrameTimer timer;
-	// The scene graph, the asset table and the one pipeline that draws them.
-	// The frame path above does not know any of that is in there.
+	// The scene graph, the asset table and the one pipeline that draws them. The
+	// frame path above does not know any of that is in there.
 	MeshPass pass;
 	// The one agent-written shader that runs over the finished frame, and the
-	// image the scene goes into while it does. Inert until something calls
-	// `set` — see `render/post.c3`, which is also where the argument for it
-	// being a field of the renderer rather than of the pass is.
+	// image the scene goes into while it does. Inert until something calls `set`
+	// — see `render/post.c3`.
 	PostPass post;
 	bool windowed;
-	// What every render begins with. Reachable from a script since M6 as
-	// `scene.background` — a daylight scene against this was rendering itself a
-	// night sky, and the only way round it was to build one out of geometry.
+	// What every render begins with. Reachable from a script as
+	// `scene.background`.
 	float[4] clear;
 }
 
@@ -176,8 +171,8 @@ struct Renderer
  The clear colour a renderer starts on, and the one `scene.background = null`
  goes back to.
 
- Named rather than written twice, because "the default" is now something a
- script can ask to be restored to and two spellings of it would drift.
+ Named rather than written twice, because "the default" is something a script can
+ ask to be restored to and two spellings of it would drift.
 *>
 const float[4] DEFAULT_CLEAR = { 0.10, 0.11, 0.13, 1.0 };
 
@@ -199,8 +194,8 @@ fn Renderer? Renderer.init(
 
 	self.gpu.init(instance, surface, validate)!;
 	self.target.init(&self.gpu, width, height)!;
-	// Before anything can push a stage — an uninitialised `List` falls back to the
-	// temp allocator on its first push. `PostPass.init` has the note.
+	// Before anything can push a stage — an uninitialised `List` falls back to
+	// the temp allocator on its first push. `PostPass.init` has the note.
 	self.post.init();
 
 	uint image_count = 0;
@@ -219,13 +214,13 @@ fn void Renderer.free(&self)
 {
 	if (self.gpu.handle != null) self.gpu.handle.waitIdle();
 	// Before the target, because it holds an image created at the target's
-	// extent — and after the idle, because it frees a pipeline outright rather
+	// extent, and after the idle, because it frees a pipeline outright rather
 	// than retiring it.
 	//
-	// **And before the mesh pass**, which is newer and is the ordering that
-	// matters now: the post shader's own samplers hold references into
-	// `pass.assets`, and `MeshPass.free` frees every texture slot outright. Giving
-	// them back afterwards would be reading a table that no longer exists.
+	// Also before the mesh pass: the post shader's own samplers hold references
+	// into `pass.assets`, and `MeshPass.free` frees every texture slot outright,
+	// so giving them back afterwards would be reading a table that no longer
+	// exists.
 	self.post.release_textures(&self.gpu, &self.pass.assets);
 	self.post.free(&self.gpu);
 	self.pass.free(&self.gpu);
@@ -240,88 +235,67 @@ fn void Renderer.free(&self)
  A whole frame of scene, recorded into `cmd`: begin the target, draw, end the
  target.
 
- The one description of what a frame contains, and the reason it is a function
- is that there are three callers. `frame()`, `capture()` and
- `render_offscreen()` were the same three calls written out three times, which
- is the shape every "the window shows something the screenshot does not" bug
- has: nothing enforced that the three stayed identical except that they
- currently were. They cannot disagree now.
-
- What the three paths legitimately differ by stays with them — the acquire, the
- blit, the readback, the timestamps that span all of it. This is only the part
- that must be the same.
+ One description of what a frame contains, for three callers. `frame()`,
+ `capture()` and `render_offscreen()` would otherwise be the same three calls
+ written out three times, which is the shape every "the window shows something
+ the screenshot does not" bug has. What the three legitimately differ by — the
+ acquire, the blit, the readback, the timestamps spanning all of it — stays with
+ them.
 
  ## A sequence, with the destination decided once at the top
 
- This used to be two `if (posted)` blocks with an `end_render` inside the second
- one's `else`, which was exact for one optional stage and is the shape every
- "window shows something the screenshot does not" bug has: with shadows, a post
- chain and a UI layer the question *who writes `target.color`, and who closes it*
- has two-by-two-by-N answers, and nested ifs are where that goes wrong.
+ The invariant the sequence exists to hold is:
 
- So it is a sequence, and the invariant the sequence exists to hold is:
-
- > **Exactly one stage writes `target.color`, and the close happens exactly once,
- > here.**
+ > Exactly one stage writes `target.color`, and the close happens exactly once,
+ > here.
 
  With a post chain running, the scene is drawn into image A instead and the
- chain's tonemap is the stage that writes `target.color`. **The branch is here and
- nowhere else**, which is the payoff for there being one recording function:
- window, screenshot and `render()` get post-processing at the same moment and
- cannot disagree about it. Everything downstream of `target.color` — the blit, the
+ chain's tonemap is the stage that writes `target.color`. The branch is here and
+ nowhere else, which is the payoff for there being one recording function: window,
+ screenshot and `render()` get post-processing at the same moment and cannot
+ disagree about it. Everything downstream of `target.color` — the blit, the
  readback, the layout contract — is unchanged and unaware.
 
- With no post shader, the calls below are the calls this function has always
- made, so an unposted frame is byte-identical to one from before the chain
- existed rather than merely equivalent to it.
+ Written as nested `if (posted)` blocks it would be exact for one optional stage
+ and wrong for three: with shadows, a post chain and a UI layer, "who writes
+ `target.color`, and who closes it" has two-by-two-by-N answers.
 
- **The invariant is checked, and by an instrument that already existed.** A second
- close — the shape a careless third stage would take — is a layout transition out
- of COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in TRANSFER_SRC, so
- the validation checks in `three_tests::post` fail on it:
- "VUID-VkImageMemoryBarrier2-oldLayout-01197: ... cannot transition the layout ...
- from VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL when the previous known layout is
- VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL". Proved by injection: a second
- `self.target.close(cmd)` here, and both of them fail. That is worth knowing
- before a fourth stage is written, because it means the rule is enforced rather
- than merely documented.
+ The invariant is enforced, not just documented. A second close is a layout
+ transition out of COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in
+ TRANSFER_SRC, so the validation checks in `three_tests::post` fail on it
+ ("VUID-VkImageMemoryBarrier2-oldLayout-01197"). Verified by injecting a second
+ `self.target.close(cmd)` here: both fail.
 *>
 fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 {
-	// Read once: `active` must not be allowed to change between the begin and
-	// the end of one recording, and reading it twice is how that becomes
-	// possible.
+	// Read once: `active` must not change between the begin and the end of one
+	// recording, and reading it twice is how that becomes possible.
 	bool posted = self.post.active();
 
-	// The same read `pass.prepare` makes below, and for the same reason: the
-	// slot is advanced by the caller *after* the submit, so every mark recorded
-	// here belongs to the run `timer.begin` opened.
+	// The same read `pass.prepare` makes below: the slot is advanced by the
+	// caller *after* the submit, so every mark recorded here belongs to the run
+	// `timer.begin` opened.
 	uint slot = self.frames.slot;
 
-	// **Before the render pass, because a dispatch cannot be inside one.** This is
+	// Before the render pass, because a dispatch cannot be inside one. This is
 	// the scene update, the frame's buffers, and the compute skinning for any
-	// character routed through it — everything that used to sit at the top of
-	// `MeshPass.record` and had to move out when compute skinning landed. It is a
-	// phase and not a branch: the frame path still does not grow a case per kind
-	// of thing that can be drawn.
+	// character routed through it. A phase and not a branch: the frame path does
+	// not grow a case per kind of thing that can be drawn.
 	self.pass.prepare(&self.gpu, cmd, &self.target, slot)!;
 	self.timer.mark(cmd, slot, FrameMark.PREPARE);
 
-	// **The shadow map, and it is a line rather than a branch** — which is what
-	// this function was rewritten as a sequence to make possible, and `plan.md`
-	// §13 predicted in those words. It begins and ends a rendering of its own, so
-	// it has to be here and not inside the block below; it records nothing at all
-	// in a frame with shadows off, so an unshadowed frame is byte-identical to one
-	// from before this existed.
+	// The shadow map, and it is a line rather than a branch. It begins and ends a
+	// rendering of its own, so it has to be here and not inside the block below;
+	// it records nothing at all in a frame with shadows off, so an unshadowed
+	// frame is byte-identical to one from before this existed.
 	//
 	// It does not touch `target.color` and so does not touch the invariant the
-	// rest of this function holds: exactly one stage writes it, and the close
-	// happens once, at the bottom.
+	// rest of this function holds.
 	self.pass.record_shadow(cmd);
-	// **Recorded even when the call above recorded nothing**, which is the one
-	// place the byte-identity claim just made does not hold: with shadows off
-	// the buffer carries this timestamp and `stats().shadowMs` reads 0. The
-	// alternative is a frame that reports no timings at all — `gpu/timing.c3`.
+	// Recorded even when the call above recorded nothing, which is the one place
+	// the byte-identity claim does not hold: with shadows off the buffer carries
+	// this timestamp and `stats().shadowMs` reads 0. The alternative is a frame
+	// that reports no timings at all — see `gpu/timing.c3`.
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
 
 	if (posted)
@@ -336,13 +310,12 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// Everything drawn into the target, between `begin_render` and `close`. One
 	// call, on purpose: the frame path does not grow a branch per kind of thing
 	// that can be drawn. A pass that was never given a pipeline records nothing,
-	// which is what lets the M0 tests and a headless clear-colour render work
-	// with no shader on disk.
+	// which lets a headless clear-colour render work with no shader on disk.
 	self.pass.record(cmd);
 
-	// The scene's rendering ends here on both paths, which is what lets the chain
-	// below be a list of passes rather than a thing that also has to know how the
-	// frame started.
+	// The scene's rendering ends here on both paths, which lets the chain below be
+	// a list of passes rather than a thing that also has to know how the frame
+	// started.
 	vk::cmdEndRendering(cmd);
 	self.timer.mark(cmd, slot, FrameMark.SCENE);
 
@@ -365,16 +338,13 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 <*
  What the GPU spent on a frame, in milliseconds.
 
- **Which frame depends on how it was drawn**, and `gpu/timing.c3` is where that
- is argued rather than here: `capture()` and `render_offscreen()` leave behind
- the frame they just drew, `frame()` leaves behind the last one to have
- completed. 0 before anything has been rendered, and 0 for the whole run on a
- device that cannot write timestamps.
+ Which frame depends on how it was drawn: `capture()` and `render_offscreen()`
+ leave behind the frame they just drew, `frame()` leaves behind the last one to
+ have completed. 0 before anything has been rendered, and 0 for the whole run on
+ a device that cannot write timestamps. See `gpu/timing.c3`.
 
- A method rather than a public field so that the one place that decides what
- "the last frame" means stays inside this module — the same shape as
- `Scene.stats().culled_last_frame`, which is also a number about the past that
- callers may only read.
+ A method rather than a public field, so the one place that decides what "the
+ last frame" means stays inside this module.
 *>
 fn double Renderer.gpu_ms(&self) => self.timer.timing.total;
 
@@ -382,16 +352,13 @@ fn double Renderer.gpu_ms(&self) => self.timer.timing.total;
  The same frame, split into the phases that produced it.
 
  `total` is what `gpu_ms` returns and the five phases sum to it, so this is the
- whole of the answer rather than a sample of it — `gpu/timing.c3` has the marks
- and `plan.md` §18.3 has why a frame that cannot say which pass it spent itself
- in makes every optimisation of a pass unverifiable.
-
- Same "which frame" rules as `gpu_ms` above, because it is the same reading.
+ whole of the answer rather than a sample of it. Same "which frame" rules as
+ `gpu_ms`, because it is the same reading.
 *>
 fn FrameTiming Renderer.timing(&self) => self.timer.timing;
 
 <*
- Rebuild the swapchain for the window's current size.
+ Rebuilds the swapchain for the window's current size.
 
  @return `false when the window is minimised — skip the frame and wait for the next event.`
 *>
@@ -405,14 +372,14 @@ fn bool? Renderer.rebuild(&self)
 }
 
 <*
- Draw one frame into the target and blit it to the window.
+ Draws one frame into the target and blits it to the window.
 
- The size poll at the top is the primary resize path, not a backstop: on macOS
- a live drag routinely resizes the surface without either the acquire or the
+ The size poll at the top is the primary resize path, not a backstop: on macOS a
+ live drag routinely resizes the surface without either the acquire or the
  present ever reporting `OUT_OF_DATE`, so waiting to be told means a stretched
- picture for the whole drag. `SUBOPTIMAL_KHR` is read off the raw result
- because it is a *success* code — the binding does not turn it into a fault, so
- there is nothing to catch.
+ picture for the whole drag. `SUBOPTIMAL_KHR` is read off the raw result because
+ it is a *success* code — the binding does not turn it into a fault, so there is
+ nothing to catch.
 
  @return `false when nothing was presented (minimised, or the swapchain was rebuilt instead).`
 *>
@@ -456,8 +423,8 @@ fn bool? Renderer.frame(&self)
 	// Here rather than beside the fence wait above, and this is load-bearing: the
 	// acquire between them can bail out to `rebuild` without submitting anything,
 	// and an ordinal advanced by a frame that never submitted would credit the
-	// next-but-one frame's fence wait with work it did not cover. `gpu/retire.c3`
-	// has the invariant in full.
+	// next-but-one frame's fence wait with work it did not cover. See
+	// `gpu/retire.c3`.
 	self.gpu.begin_frame();
 
 	vk::CommandBuffer cmd = self.frames.buffers[slot];
@@ -484,9 +451,9 @@ fn bool? Renderer.frame(&self)
 
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 
-	// Rebuilt last, after the frame's own bookkeeping: the swapchain is
-	// replaced under a device that has just been idled, and the acquired image
-	// has been returned by the present above either way.
+	// Rebuilt last, after the frame's own bookkeeping: the swapchain is replaced
+	// under a device that has just been idled, and the acquired image has been
+	// returned by the present above either way.
 	if (presented == ERROR_OUT_OF_DATE_KHR || presented == SUBOPTIMAL_KHR)
 	{
 		self.rebuild()!;
@@ -498,10 +465,10 @@ fn bool? Renderer.frame(&self)
 }
 
 <*
- Render one frame into the target and read it back.
+ Renders one frame into the target and reads it back.
 
  Identical to `frame()` minus the acquire, the blit and the present — which is
- the whole argument for the offscreen decision: this works with no window, no
+ the whole argument for rendering offscreen: this works with no window, no
  surface and no window server, and what it returns is the rendered image rather
  than an OS window grab. Byte-identical across runs and across window sizes,
  because nothing about a window reaches it.
@@ -545,14 +512,13 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 }
 
 <*
- Render one frame into the target and stop there.
+ Renders one frame into the target and stops there.
 
  `capture` without the readback, which is what `three.render(scene)` from a
  script wants: the pixels are read back once at the end of a run, and a script
- that calls `render()` in a loop should not pay for a buffer allocation and a
- host copy each time. It exists at all — rather than `render()` being a no-op
- that lets the final capture do the work — so that a scene which cannot be drawn
- says so at the line that asked for it.
+ calling `render()` in a loop should not pay for a buffer allocation and a host
+ copy each time. It exists rather than `render()` being a no-op so that a scene
+ which cannot be drawn says so at the line that asked for it.
 *>
 fn void? Renderer.render_offscreen(&self)
 {
@@ -574,8 +540,8 @@ fn void? Renderer.render_offscreen(&self)
 	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
 
 	// Waited on here rather than left to the next frame's fence: the instance
-	// buffer for this slot is rewritten on the next record, and the rule at the
-	// top of this file is that it may not be while the GPU is still reading it.
+	// buffer for this slot is rewritten on the next record, and it may not be
+	// while the GPU is still reading it.
 	fence.wait(self.gpu.handle)!;
 	// The wait is already paid for, so the frame's own timing is free to take —
 	// same argument as in `capture`.
@@ -584,7 +550,7 @@ fn void? Renderer.render_offscreen(&self)
 }
 
 <*
- Render one frame and write it to `path` as a PNG.
+ Renders one frame and writes it to `path` as a PNG.
 *>
 fn void? Renderer.screenshot(&self, String path)
 {
