@@ -38,15 +38,6 @@
 //                      anything with a body clean off the path
 //   Q E                swing the camera        R F   tilt it
 //   drag               look                    wheel zoom
-//
-// ## Why the controller is written here rather than being three.character()
-//
-// `three.character({ terrain })` is the built-in and is what a scene that only
-// wants to walk around should use — this file's movement, look and walk cycle
-// are deliberately the same idiom, down to the key table and `planarMove`.
-// What it does not expose is `vy`, and two of the three things that make this
-// feel like Crash write to it: bouncing off a crate you land on, and the little
-// hop a TNT gives you. So the vertical half is spelled out here.
 
 // ---------------------------------------------------------------------------
 // Noise and paint. Everything is arithmetic, so the file runs anywhere.

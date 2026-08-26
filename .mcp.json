@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "three": {
-      "type": "stdio",
-      "command": "./build/three",
-      "args": ["--mcp-stdio"]
+      "type": "http",
+      "url": "http://127.0.0.1:8808/mcp"
     }
   }
 }
