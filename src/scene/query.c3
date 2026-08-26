@@ -1229,8 +1229,8 @@ fn void Scene.gather_triangles(
 
  **This is the narrow phase the character controller is built out of**, which is
  why it lives here rather than beside the controller: `three.query.sweep` and
- `three.character` are then one implementation, and a wall a sweep reports and a
- wall the controller slides along cannot be two different walls.
+ `three.moveAndSlide` are then one implementation, and a wall a sweep reports
+ and a wall the controller slides along cannot be two different walls.
 
  ## Conservative advancement, not a closed-form time of impact
 

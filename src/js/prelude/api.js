@@ -28,7 +28,6 @@ import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
 import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry, RibbonGeometry } from './geometry.js';
 import { Field, scatter, catmullRom } from './field.js';
-import { character } from './character.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
 import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, TransformBatch, QueryResult } from './query.js';
 import { nav, steer, NavField } from './nav.js';
@@ -1045,14 +1044,6 @@ export const three = {
 	noise2,
 	fbm2,
 
-	// A walkable character with a follow camera — the controller every
-	// third-person scene writes by hand, and the place the two worst bugs in it
-	// (camera/movement frame disagreement, and hand-rolled orbit-trig signs) are
-	// already fixed. It rides a terrain height field (or a `height(x, z)`
-	// function), moves with WASD relative to the camera, drag-looks, jumps, and
-	// swings the mesh's limb pivots as it walks. See character.js.
-	character,
-
 	// The spatial questions a game asks that a picture does not: what is
 	// within five metres, what does this box overlap, what is behind that
 	// wall, and where does this capsule stop if it moves there.
@@ -1071,8 +1062,7 @@ export const three = {
 	// climb a ledge under the step height, and report whether it is standing
 	// on anything. It takes a position and answers with a position — it does
 	// not own an object and integrates nothing, so gravity and the jump stay
-	// the caller's. Not to be confused with three.character, which is the
-	// higher-level helper that rides a height field and does not collide.
+	// the caller's.
 	moveAndSlide,
 
 	// The same controller for a whole crowd, in ONE call — and it exists for
