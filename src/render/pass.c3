@@ -545,14 +545,16 @@ const uint SCENE_WARN_AT = 4;
  else would say so: the old scene is not drawn, not stepped and not queried, so
  it costs frame time nothing and memory everything.
 
- Doubling, to stderr, and never reset downwards — `note_material_claimed` has
- the argument for all three.
+ Doubling, advised rather than raised, and never reset downwards —
+ `note_material_claimed` has the argument for all three. `@advise` puts it in
+ front of both readers: the terminal, and the `warnings` array a `run_script`
+ answers with, which is the one that provoked it.
 *>
 fn void MeshPass.note_scene_created(&self)
 {
 	if (self.scenes.len() < self.scene_warn_at) return;
 
-	io::eprintfn(
+	@advise(
 		"three: %d live scenes. new three.Scene() no longer empties the one before "
 		"it — each keeps its nodes, its bodies and its asset references until "
 		"scene.dispose(). stats().scenes is the number to watch.",
@@ -627,16 +629,17 @@ const uint MATERIAL_WARN_AT = 64;
  threshold and warned again at the same number would say the same sentence
  forever to a script that is cycling materials correctly.
 
- Written to stderr rather than raised. It is a diagnostic about a shape, not a
- fault — every one of those materials draws correctly — and a throw would break
- the one script that legitimately holds a hundred.
+ Advised rather than raised. It is a diagnostic about a shape, not a fault —
+ every one of those materials draws correctly — and a throw would break the one
+ script that legitimately holds a hundred. `advice.c3` is where it goes and why
+ it now reaches the script as well as the terminal.
 *>
 fn void MeshPass.note_material_claimed(&self)
 {
 	self.live_materials++;
 	if (self.live_materials < self.material_warn_at) return;
 
-	io::eprintfn(
+	@advise(
 		"three: %d live materials, and each one holds its pipeline until "
 		"material.dispose() gives it back — %d distinct pipelines so far. "
 		"stats().materials is the number to watch.",
@@ -1783,7 +1786,7 @@ fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 	defer mod.free();
 	if (!mod.ok)
 	{
-		io::eprintfn("three: the skinning shader would not compile: %s", mod.diagnostic);
+		@advise("three: the skinning shader would not compile: %s", mod.diagnostic);
 		return SHADER_MISSING_ENTRY_POINT~;
 	}
 
@@ -1813,6 +1816,12 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// A fact about the pass and not about the scene being asked, which is the
 	// point of it: the number exists so that a scene nobody replaced shows up.
 	stats.scenes = (uint)self.scenes.len();
+	// The two blocks of memory the pass can see. The target and the post chain
+	// belong to the `Renderer` and are filled in a layer up — `SceneStats` has the
+	// split. Both are process-wide rather than per scene, and say so: geometry is
+	// shared across every scene holding it, and there is one shadow map.
+	stats.shadow_bytes = self.shadows.bytes();
+	stats.geometry_bytes = self.assets.geometry_bytes();
 	return stats;
 }
 

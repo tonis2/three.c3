@@ -389,6 +389,15 @@ fn void Target.close(&self, vk::CommandBuffer cmd)
 // Readback — the screenshot
 // ============================================================================
 
+<*
+ What the offscreen frame costs, in bytes.
+
+ Colour and depth, both at the target's extent and neither of them optional: this
+ is what a process holds before a single mesh is loaded. At 1080p it is about
+ 17 MB, and it is the floor under every other number in `stats()`.
+*>
+fn usz Target.bytes(&self) => (usz)(self.color_memory.size + self.depth_memory.size);
+
 fn sz Target.readback_size(&self) => (sz)self.extent.width * (sz)self.extent.height * 4;
 
 <*

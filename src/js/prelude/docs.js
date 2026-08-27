@@ -39,7 +39,7 @@ export const DOCS = {
 		'one-module': 'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
 		'material-samplers': 'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 		'no-colour-management': 'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
-		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). The look travels with the scene — scene.background, every light in three.lights and three.light.shadow are the ACTIVE scene\'s, and activating a scene again brings back the ones it had, all four lights included, so a level does not come home to the default sky. Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, and a game that transitions eight times and never disposes holds eight worlds.',
+		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). The look travels with the scene — scene.background, every light in three.lights and three.light.shadow are the ACTIVE scene\'s, and activating a scene again brings back the ones it had, all four lights included, so a level does not come home to the default sky. Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, three.scenes is the list behind it — one entry per world, with held saying whether this script still has the Scene object that built it — and three.disposeInactive() frees every world except the one being rendered and sweeps afterwards, which is the whole transition minus the activate. A game that transitions eight times and never disposes holds eight worlds.',
 		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; scene.dispose() frees the whole scene, its bodies and its bake with it; three.unloadUnused() does the freeing without the emptying. None of them is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Naming one throws a sentence saying so, and it throws at the new three.Mesh() that named it rather than waiting for the scene.add() that would have drawn it — so the line that is wrong is the line that is blamed, which matters in a script that builds a subtree and adds it at the end. Loading the file again gives a fresh handle. Object handles go stale the same way, and the event is scene.dispose() rather than new three.Scene() — a scene you stopped rendering still holds its objects, so its handles still resolve.',
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
@@ -76,6 +76,7 @@ export const DOCS = {
 		'mesh-no-material': 'A mesh with no material draws with the base colour and texture its glTF material carried.',
 		'no-raycaster': 'There is no Raycaster. scene.pick(x, y) takes pixels of the rendered image and scene.raycast(origin, direction) takes a world ray; both answer with the closest hit or null, not with an array.',
 		'script-scope': 'Each run_script call runs in its own function scope. Use globalThis to keep state between calls.',
+		'warnings-beside-log': 'A run_script reply carries a warnings ARRAY beside log when the renderer noticed something, and the two are different things: log is what your script printed, warnings is what the host has to say about it. It is absent on nearly every run, which is what makes it worth reading on the runs it appears in — live scenes climbing, live materials climbing, a shadow map that just cost 134 MB, a shader that would not compile, a disk cache that could not be written. Advice, not errors: the run still succeeded. They are deduplicated and they arrive one run late when they happened between calls, so a warning about the frame you just rendered shows up on your next call.',
 		'animation-loop': 'three.setAnimationLoop(fn) runs fn once per frame, with the elapsed milliseconds, until three.setAnimationLoop(null). It is how a scene moves without an agent in the loop. The callback must be synchronous, is stopped for good if it throws or runs longer than 100ms in one frame, and what it logs comes back with the next run_script under an [animation loop] marker.',
 		'game-clock': 'There is a GAME CLOCK, which Three.js has nothing quite like: three.clock.dt is what the frame being drawn is worth in seconds, three.clock.time is what the frames have added up to, and three.clock.timeScale is the multiplier — 0 is paused. It is not a convenience over differencing the callback\'s argument yourself. Everything in a frame that moves is downstream of it — the clips, the physics, the fixed loop, the follow camera, the argument setAnimationLoop is handed and p.time in a post body — so timeScale = 0 stops the WORLD, which no amount of a script stopping its own arithmetic can do.',
 		'fixed-loop-for-gameplay': 'Gameplay belongs in three.setFixedLoop(fn), which runs at three.clock.fixedRate (60 Hz) however fast frames arrive and hands the callback the same dt every call. Drawing the consequence belongs in setAnimationLoop. The accumulator is the host\'s: one written in the animation callback spends the script budget catching up and gets the callback stopped for good instead of merely stuttering.',
@@ -116,6 +117,7 @@ export const DOCS = {
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
 				'isActive (whether this is the one being rendered — only one is, and only that one is stepped, drawn and queried)',
+				'id (the host\'s id for this scene — what three.sceneById(id) takes and what three.scenes lists. Read-only)',
 				'physics (this scene\'s own physics world — three.physics is whichever scene is active)',
 				'nav (this scene\'s own navigation bake — three.nav is whichever scene is active)',
 				'static (marks the whole scene as not moving again — see the static-casters topic)',
@@ -1471,7 +1473,34 @@ export const DOCS = {
 			'The numbers below, for the whole scene, with culling off. The six ...Ms are the exception: '
 			+ 'they are not facts about the scene but measurements of the last frame drawn, so they move '
 			+ 'when nothing about the scene has. gpuMs is the frame and the other five are what it was '
-			+ 'spent on, which is how you find out that a slow scene is slow in the shadow pass.',
+			+ 'spent on, which is how you find out that a slow scene is slow in the shadow pass. '
+			+ 'The four ...Bytes that are not textureBytes or poseBytes — geometryBytes, targetBytes, '
+			+ 'postBytes, shadowBytes — are the memory the RENDERER owns rather than the scene, so they '
+			+ 'read the same whichever scene you ask, and between them they are most of what a three '
+			+ 'process is holding.',
+		'three.scenes':
+			'Every scene that exists, as [{ id, active, held, nodes }]. stats().scenes has always been '
+			+ 'the count; this is what the count is made of. new three.Scene() shows a new world without '
+			+ 'freeing the one before it, so a script that builds a scene per run_script holds every one '
+			+ 'of them — a node pool, a physics world and a set of asset references apiece, drawn by '
+			+ 'nothing. held is the half that matters: false means the Scene object that built it is gone, '
+			+ 'which happens to every scene built inside a run_script that has ended. three.sceneById(id) '
+			+ 'gets a handle back and three.disposeInactive() frees them without one.',
+		'three.sceneById(id)':
+			'The Scene for a host id — the one you built, or a handle onto one whose wrapper is gone. '
+			+ 'three.sceneById(s.id) === s for a scene this script still holds, so identity survives. For one '
+			+ 'it does not, everything that goes through the host works — activate, dispose, stats, '
+			+ 'export, background, raycast, pick — but children is EMPTY, because the objects that filled '
+			+ 'it belonged to a script that ended. It is a handle, not the tree. scene.id is the other '
+			+ 'direction.',
+		'three.disposeInactive()':
+			'Free every scene except the one being rendered, then sweep. The level transition minus the '
+			+ 'step everybody forgets: the ritual is activate the next one, dispose the rest, '
+			+ 'three.unloadUnused(), and this is the last two. It cannot leave the frame with nothing to '
+			+ 'draw, because the host refuses to dispose the scene being rendered — so activate what you '
+			+ 'are keeping first. Answers with { scenes, assets, meshes, textures, bytes }: how many '
+			+ 'worlds went, and what the sweep afterwards actually gave back. The second is often zero and '
+			+ 'that is right — two scenes over one kit means disposing either frees nothing.',
 		'three.camera.attach(object, options)':
 			'Follow an object with the camera. { offset: [x, y, z] } is added to its world position and '
 			+ 'becomes the orbit point every frame; { distance } is how far behind the eye sits, and 0 '
@@ -1602,7 +1631,9 @@ export const DOCS = {
 	'three.physics.count':
 		'How many bodies the rendered scene\'s world holds. scene.physics.count is any scene\'s.',
 	'three.budget':
-		'How long this script may run before the interrupt stops it, in milliseconds. 5,000 by default. '
+		'How long this script may run before the interrupt stops it, in milliseconds. 30,000 by default '
+		+ 'through run_script and 5,000 everywhere else — a tool call is already asynchronous to whoever '
+		+ 'made it, where a window is somebody watching a frame. '
 		+ 'Raise it to SIMULATE, not to build: five seconds is generous for assembling a scene and short '
 		+ 'for stepping one — a check that walks a character 30,000 frames against its colliders needs '
 		+ 'minutes, and being forced under five seconds means cutting it into pieces that fit the budget '
@@ -1611,11 +1642,11 @@ export const DOCS = {
 		+ 'and asking for more clamps rather than throws; zero or negative throws, because there is no way '
 		+ 'to turn the interrupt off. It does not reach the animation callback, which keeps its own 100 ms '
 		+ 'so that one slow frame is a stutter rather than a hang.',
-	'three.budget (a COLD scene build over 5s — the exact trap)':
-		'A run_script that REBUILDS a scene from scratch often times out at 5,000 ms, and the error is '
-		+ 'simply "the script ran for longer than 5000 ms and was stopped" — which reads like a bug when '
-		+ 'it is just the budget. On a fresh --mcp backend, the first build pays for shader compiles and '
-		+ 'texture uploads that a warm (--script-preloaded) backend already did, so it crosses 5s even when '
+	'three.budget (a COLD scene build over the budget)':
+		'A run_script that REBUILDS a scene from scratch can still run past 30,000 ms, and the error names '
+		+ 'the fix: "...was stopped. three.budget = 60000; at the top of the script raises it". On a fresh '
+		+ '--mcp backend the first build pays for shader compiles and texture uploads that a warm '
+		+ '(--script-preloaded) backend already did, so it can cross the budget even when '
 		+ 'the SAME script returns in time on a second call. The fix is one line at the TOP of the script, '
 		+ 'before any build: "three.budget = 60000;". Better still, preload the scene so the build runs '
 		+ 'outside the budget: launch the backend with "--script scenes/mine.js" and let run_script move '
@@ -2053,14 +2084,18 @@ export const DOCS = {
 		uniqueMeshes: 'Distinct (asset, mesh) pairs drawn.',
 		instances: 'Total placed meshes. The M2 claim is that 1000 of these can be 1 drawCall.',
 		nodes: 'Live nodes, groups and the root included.',
-		scenes: 'How many Scenes exist. new three.Scene() shows a new world without freeing the one before it, so this is the number a level transition has to bring back down with scene.dispose(). Every scene past the first holds a node pool, a physics world, a nav bake and a set of asset references, and none of it shows up in any other number here — the scenes nobody is looking at cost the frame nothing and memory everything. A warning goes to stderr once the count starts doubling past four.',
+		scenes: 'How many Scenes exist. new three.Scene() shows a new world without freeing the one before it, so this is the number a level transition has to bring back down with scene.dispose(). Every scene past the first holds a node pool, a physics world, a nav bake and a set of asset references, and none of it shows up in any other number here — the scenes nobody is looking at cost the frame nothing and memory everything. three.scenes is what the count is MADE of, one entry per world, and three.disposeInactive() frees every one that is not being rendered. A warning arrives in the run_script reply once the count starts doubling past four.',
 		colliders: 'Of those, the meshes in the spatial index — the ones every sweep and every raycast tests a box against. Drawable meshes default to collision geometry, so this grows as a level is decorated whether or not anybody meant it to; object.collides = false takes one out entirely rather than making it cheap to reject. Read it beside nodes: the gap between them is what has been said out loud, and this number climbing while sweeps get slower is a field of grass acting as a fence.',
 		assets: 'Loaded files and generated shapes resident on the device. This is the number a level transition has to bring back down; watch it across scene.unload().',
 		triangles: 'Summed over instances, so 1000 copies of a 500-triangle mesh is 500000.',
 		vertices: 'Likewise.',
 		textures: 'Unique images on the device, deduplicated by content across every loaded file.',
 		textureBytes: 'What those cost.',
-		materials: 'Materials you have built and not had collected. The two built-in ones are not counted. This is assets for the OTHER resource that has to be given back by hand: a material holds a compiled pipeline until material.dispose() gives it back, so a script that builds one per run and drops the handle grows this forever — and the host says so on stderr once this passes 64. It falls when the material is COLLECTED, which is after both the dispose() and the last mesh that named it going, so disposing while something still draws with it leaves the number where it was and that is correct.',
+		geometryBytes: 'What the geometry costs: every vertex stream and index buffer on the device, PLUS the positions and triangle indices kept resident on the CPU, because the pick tree points at them. Both halves, because there are two — a scene of a few hundred thousand vertices carries tens of megabytes on each side. Falls to zero across a full unload, which is the number a count of assets cannot prove.',
+		targetBytes: 'The offscreen frame: one colour image and one depth image at the render size. What the process holds before a single mesh is loaded, about 17 MB at 1080p, and the floor under everything else here.',
+		postBytes: 'The post chain, and 0 with no post shader. Image A plus the ping-pong pair plus one image per tapped pass, at EIGHT bytes a pixel against the target\'s four — so a two-pass chain at 1080p is around 40 MB, more than the frame it is processing.',
+		shadowBytes: 'The shadow map, and 0 until shadows are turned on. Two D32 images at size squared once anything in the scene is static, one before that: 2048 is 34 MB, 4096 is 134 MB and 8192 — the ceiling — is 536 MB. This is the single largest thing one assignment can do to a process, which is why the setter says so when it is raised above the default.',
+		materials: 'Materials you have built and not had collected. The two built-in ones are not counted. This is assets for the OTHER resource that has to be given back by hand: a material holds a compiled pipeline until material.dispose() gives it back, so a script that builds one per run and drops the handle grows this forever — and the host says so in the run_script reply once this passes 64. It falls when the material is COLLECTED, which is after both the dispose() and the last mesh that named it going, so disposing while something still draws with it leaves the number where it was and that is correct.',
 		culledLastFrame: 'Instances the camera frustum dropped in the last render(). Meaningful with shadows on too: the shadow pass has its own draw list against the light\'s box, so turning shadows on no longer costs the camera its cull.',
 		shadowCulled: 'Instances neither pass drew — outside the camera frustum AND outside the light\'s box. 0 with shadows off. A caster the camera cannot see is still drawn into the map, so this is smaller than culledLastFrame, not equal to it.',
 		shadowDraws: 'Draw calls the last frame\'s shadow pass made, and 0 with shadows off. Roughly drawCalls minus the transparent buckets and the helpers, so this is what shadows cost in draws. With static casters in the scene it counts the movers alone — the rest were drawn once and kept.',

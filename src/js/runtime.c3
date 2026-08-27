@@ -1,14 +1,18 @@
 <*
- The QuickJS context: one engine, one script at a time, and the four things a run
+ The QuickJS context: one engine, one script at a time, and everything a run
  always answers with.
 
  ## `run_script` is the whole contract
 
  What comes back is everything the script logged, the value it returned, the
- stats block and — from the layer above — a PNG. All four, every time, whether or
- not the script succeeded. A failed run that returns only an error string makes
- the agent guess about how far it got. `RunResult` therefore has no failure
+ stats block and — from the layer above — a PNG. All of it, every time, whether
+ or not the script succeeded. A failed run that returns only an error string
+ makes the agent guess about how far it got. `RunResult` therefore has no failure
  variant: `ok` is a field, not a fault.
+
+ `warnings` is the fifth, and empty on nearly every run: what the renderer
+ noticed while the script ran, which before `advice.c3` went to stderr and
+ therefore nowhere an agent could read. `collect_advice` has the window.
 
  ## Every script is an async function body
 
@@ -68,6 +72,25 @@ const usz JS_STACK_LIMIT  = 1 * 1024 * 1024;
 // anything that only builds a scene, and short enough that a wedged agent loop is
 // a five-second pause rather than a hang.
 const long JS_BUDGET_MS = 5_000;
+
+<*
+ What a `run_script` gets instead, before the script says otherwise.
+
+ The default above is protecting an interactive window from a wedged loop: five
+ seconds is how long a person watching the frame should have to wait for a
+ mistake. A tool call is not that case. It is already asynchronous to whoever
+ made it, it is under the client's own timeout, and the thing it most often does
+ is the one thing five seconds is genuinely tight for — a cold build, paying for
+ shader compiles and texture uploads a warm process already paid, timing out at
+ 5,000 ms on the first call and returning in time on the second.
+
+ So the MCP path raises the *default* rather than the ceiling. `three.budget`
+ still works, still clamps at `JS_BUDGET_CEILING_MS`, and still takes effect on
+ the run that sets it; the frame callback keeps its own 100 ms, which is the
+ budget that was never about this. What changes is only what a script gets for
+ not having said anything.
+*>
+const long JS_MCP_BUDGET_MS = 30_000;
 
 // The most a script may raise its own budget to, through `three.budget`.
 //
@@ -164,7 +187,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 }
 
 <*
- What one script run answers with. Owns all four strings; `free` releases them.
+ What one script run answers with. Owns every string in it; `free` releases them.
 *>
 struct RunResult
 {
@@ -177,6 +200,17 @@ struct RunResult
 	String value;
 	// The message and, when the throw carried one, the stack. Empty when `ok`.
 	String error;
+	<*
+	 What the renderer noticed while this ran, one message per line.
+
+	 Beside `log` rather than in it, which is the whole point of it: these are the
+	 heuristics that watch for a leak and they are advice, not output. `advice.c3`
+	 has the argument and the sink; `collect_advice` has the window this covers.
+
+	 Empty on almost every run — advice is rare and deduplicated, so a run that
+	 provokes none says nothing.
+	*>
+	String warnings;
 	SceneStats stats;
 	// What the GPU spent on the last frame this run drew, split by pass, in
 	// milliseconds — all zero when it drew none or when there is no device to
@@ -198,7 +232,7 @@ struct RunResult
 }
 
 <*
- Releases all four strings.
+ Releases every string.
 
  Guarded on the pointer, not on the length. `DString.copy_str` allocates even for
  an empty string — one byte, for the terminator — so `if (len > 0)` frees three
@@ -212,6 +246,7 @@ fn void RunResult.free(&self)
 	if (self.log.ptr != null) self.log.free(mem);
 	if (self.value.ptr != null) self.value.free(mem);
 	if (self.error.ptr != null) self.error.free(mem);
+	if (self.warnings.ptr != null) self.warnings.free(mem);
 	if (self.frame_error.ptr != null) self.frame_error.free(mem);
 	*self = {};
 }
@@ -234,6 +269,10 @@ struct JsRuntime
 	DString log;
 	DString value;
 	DString error;
+	// What `advice.c3` had to say during the run, copied out of the sink so that
+	// `RunResult` can own a string like the three above rather than a view into a
+	// global. `collect_advice` fills it.
+	DString advice;
 
 	// What a *script* gets, as opposed to what a frame callback gets. Raisable
 	// from JavaScript through `three.budget`, because 5,000 ms is generous for
@@ -373,6 +412,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.wall_clock = clock::now();
 
 	self.log.init(mem, 1024);
+	self.advice.init(mem, 256);
 	self.value.init(mem, 256);
 	self.error.init(mem, 256);
 	self.frame_log.init(mem, 512);
@@ -419,6 +459,7 @@ fn void JsRuntime.close(&self)
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
+	self.advice.free();
 	self.value.free();
 	self.error.free();
 	self.frame_log.free();
@@ -429,7 +470,7 @@ fn void JsRuntime.close(&self)
 }
 
 <*
- Runs one script and answers with all four fields.
+ Runs one script and answers with every field.
 
  @param source : `The script. Evaluated as an async function body — see the header.`
  @param name : `What a stack trace calls it. Never opened.`
@@ -472,6 +513,7 @@ fn RunResult JsRuntime.run_module(&self, String specifier)
 			.log = self.log.copy_str(mem),
 			.value = self.value.copy_str(mem),
 			.error = self.error.copy_str(mem),
+			.warnings = self.advice.copy_str(mem),
 			.frame_error = self.frame_error.copy_str(mem),
 		};
 	}
@@ -530,8 +572,11 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 	};
 
 	self.collect_validation();
+	// Only for a run the caller asked for — `collect_advice` has why, and what a
+	// run that skips it leaves in the sink for the next one.
+	if (drain_frame) self.collect_advice();
 
-	SceneStats stats = self.pass != null ? self.pass.stats() : (SceneStats){};
+	SceneStats stats = self.pass != null ? self.scene_stats() : (SceneStats){};
 
 	// Always copied, cleared only when this run is the agent's. Copying is free of
 	// consequence and the clear is not: a stopped callback has to be explained to
@@ -556,6 +601,9 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.log = self.log.copy_str(mem),
 		.value = self.value.copy_str(mem),
 		.error = self.error.copy_str(mem),
+		// Copied unconditionally like the three above, and for `frame_error`'s
+		// second reason: `RunResult.free` frees whatever pointer it finds.
+		.warnings = self.advice.copy_str(mem),
 		.stats = stats,
 		.timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ },
 		.frame_running = self.frame_active,
@@ -642,10 +690,48 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
  budgets: a script's, and the much shorter one a frame callback runs under
  (`js/frame_loop.c3`). A message naming a constant the run did not use sends the
  reader looking for a five-second pause that never happened.
+
+ It names the fix as well as the fault. A cold build crossing the default is the
+ commonest single failure an agent hits here — the docs carry a whole entry about
+ it — and that entry only has to exist because the sentence stopped one word
+ short of the one-line answer. A frame callback gets a different sentence
+ entirely (`loop_timeout_message`), which is right: its budget is not raisable
+ and pointing at `three.budget` there would name a setting that does not reach
+ it.
 *>
 fn String JsRuntime.timeout_message(&self)
 {
-	return string::tformat("the script ran for longer than %d ms and was stopped", self.budget_ns / 1_000_000);
+	return string::tformat(
+		"the script ran for longer than %d ms and was stopped. `three.budget = 60000;` at the top of "
+		"the script raises it (ten minutes is the ceiling), and takes effect on the run that sets it",
+		self.budget_ns / 1_000_000
+	);
+}
+
+<*
+ `MeshPass.stats`, plus the two memory numbers only the renderer can answer.
+
+ The split is `SceneStats`': the shadow map and the asset table are the pass's
+ and it fills those in itself, while the target and the post chain belong to the
+ `Renderer`. This is the one place that holds both, so it is the one place the
+ whole block can be assembled — and it is why `run_source` and `js_stats` both go
+ through here rather than calling `MeshPass.stats` directly.
+
+ Zero for both in a runtime with no device, along with every other number here
+ that needs one.
+
+ @param scene : `Null for the rendered one. A scene being built answers for itself; the memory numbers are the process's either way.`
+ @require self.pass != null : "no scene to report on"
+*>
+fn SceneStats JsRuntime.scene_stats(&self, Scene* scene = null)
+{
+	SceneStats stats = self.pass.stats(scene);
+	if (self.renderer != null)
+	{
+		stats.target_bytes = self.renderer.target.bytes();
+		stats.post_bytes = self.renderer.post.bytes();
+	}
+	return stats;
 }
 
 <*
@@ -693,6 +779,44 @@ fn void JsRuntime.collect_validation(&self)
 	}
 
 	gpu.end_capture();
+}
+
+<*
+ Folds what the renderer advised into the run's answer, and empties the sink.
+
+ ## The window is "since the last answered run", not "during this one"
+
+ `collect_validation` above clears its sink at the *start* of a run, because the
+ validation layer is loud and a message from the frame before would be attributed
+ to the wrong script. Advice is the other case: it is rare, it is deduplicated,
+ and every source of it is something a caller wants to hear about once. So the
+ sink is emptied here, on the way out, and whatever accumulated since the last
+ run comes with it — the shader cache that could not be written at boot, the
+ advisory a frame callback provoked between two tool calls, the shadow shader
+ that would not compile during the render `mcp/server.c3` does after the
+ `RunResult` was built. All of those used to be lost and now arrive one run late,
+ which is the whole distance between unreadable and readable.
+
+ ## Not on a run the caller did not make
+
+ `drain_frame` is false exactly for the runs this process invented — the prelude,
+ evaluated inside `open`, whose `RunResult` nobody sees. Collecting there would
+ empty the sink into a value that is freed immediately, and a boot-time advisory
+ would be gone before the first tool call.
+*>
+fn void JsRuntime.collect_advice(&self)
+{
+	self.advice.clear();
+	self.advice.append_string(advice_all());
+	usz lost = advice_dropped();
+	if (lost > 0)
+	{
+		if (self.advice.len() > 0) self.advice.append_char('\n');
+		// Its own line, so it comes back as its own entry in the array rather than
+		// as a tail on somebody else's sentence.
+		self.advice.appendf("%d more advisories were not kept — the sink holds %d", lost, ADVICE_MAX)!!;
+	}
+	advice_clear();
 }
 
 // ============================================================================

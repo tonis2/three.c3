@@ -82,6 +82,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "sceneDispose", &js_scene_dispose, 1);
 	self.bind(host, "sceneAlive", &js_scene_alive, 1);
 	self.bind(host, "sceneActive", &js_scene_active, 0);
+	self.bind(host, "sceneIds", &js_scene_ids, 0);
+	self.bind(host, "disposeInactive", &js_dispose_inactive, 0);
 	self.bind(host, "add", &js_add, 6);
 	self.bind(host, "remove", &js_remove, 2);
 	self.bind(host, "setParent", &js_set_parent, 4);
@@ -493,6 +495,70 @@ fn void js_scene_active(
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	*out = qjs::number_value(self.pass.scene == null ? 0 : (double)self.pass.scene.id);
+}
+
+<*
+ Every live scene, as `[id, rootIndex, rootGeneration]` — `three.scenes`.
+
+ The list is the thing an agent could not see. A `Scene` in JavaScript is a
+ wrapper around `_sid` and nothing else, so a scene built inside a `run_script`
+ scope that then ended is alive, counted, holding a node pool and a set of asset
+ references, and named by no handle in existence — the exact shape of the leak
+ `note_scene_created` warns about. The host knew all of them the whole time.
+
+ The root travels with the id for `js_scene_create`'s reason: a `Scene` needs
+ both, and asking twice would be two crossings. It is what lets the prelude hand
+ back a usable handle for a scene whose wrapper is gone.
+*>
+fn void js_scene_ids(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	qjs::Value list = js.array();
+	foreach (i, each : self.pass.scenes)
+	{
+		qjs::Value triple = js.array();
+		js.set_index(triple, 0, qjs::number_value((double)each.id));
+		js.set_index(triple, 1, qjs::number_value((double)each.root.index));
+		js.set_index(triple, 2, qjs::number_value((double)each.root.generation));
+		js.set_index(list, (uint)i, triple);
+	}
+	*out = list;
+}
+
+<*
+ Frees every scene except the one being rendered — `three.disposeInactive()`.
+
+ Safe by construction, and `MeshPass.dispose_scene` is why: it refuses the active
+ one, so the loop cannot leave the frame with nothing to draw however many scenes
+ it walks. The list is copied over by index from the back, because disposing
+ removes from it.
+
+ The verb exists because the transition is three steps — activate the next one,
+ dispose the rest, `unloadUnused` — and the middle one is the one that gets
+ forgotten. Nothing here reclaims memory on its own: the asset references go back
+ when the scenes do, and the sweep afterwards is what frees them.
+
+ @return `How many were disposed.`
+*>
+fn void js_dispose_inactive(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+
+	uint disposed = 0;
+	// Backwards: `dispose_scene` removes from the list it is walking.
+	sz at = self.pass.scenes.len();
+	while (at > 0)
+	{
+		at--;
+		if (self.pass.dispose_scene(self.pass.scenes[at].id)) disposed++;
+	}
+	*out = qjs::int_value((int)disposed);
 }
 
 <*
@@ -1224,7 +1290,7 @@ fn void js_stats(
 		if (scene == null) return;
 	}
 
-	SceneStats stats = self.pass.stats(scene);
+	SceneStats stats = self.scene_stats(scene);
 
 	qjs::Value object = js.object();
 	js.set_property(object, "drawCalls", qjs::int_value((int)stats.draw_calls));
@@ -1259,6 +1325,15 @@ fn void js_stats(
 	js.set_property(object, "skinnedInstances", qjs::int_value((int)stats.skinned_instances));
 	js.set_property(object, "preskinnedInstances", qjs::int_value((int)stats.preskinned_instances));
 	js.set_property(object, "poseBytes", qjs::number_value((double)stats.pose_bytes));
+	// The memory the RENDERER owns, which is where nearly all of it actually is —
+	// `SceneStats` has the four and why `textureBytes` and `poseBytes` on their own
+	// were answering a question about memory with a small fraction of the memory.
+	// All four are process-wide rather than per scene, including when this call
+	// names a scene that is not the rendered one.
+	js.set_property(object, "shadowBytes", qjs::number_value((double)stats.shadow_bytes));
+	js.set_property(object, "targetBytes", qjs::number_value((double)stats.target_bytes));
+	js.set_property(object, "postBytes", qjs::number_value((double)stats.post_bytes));
+	js.set_property(object, "geometryBytes", qjs::number_value((double)stats.geometry_bytes));
 	// The draws the shadow pass made last frame, which is the only place a script
 	// can see that turning shadows on roughly doubled the frame's draw calls —
 	// `drawCalls` above counts the scene pass and always has. Zero with shadows
@@ -2086,6 +2161,39 @@ fn void js_debug_view_set(
 }
 
 <*
+ Says what a shadow map larger than the default costs, the once it is asked for.
+
+ `three.light.shadow.size = 4096` is one assignment, one clamp away from 8192,
+ and 134 MB — more than everything else in a frame put together, and the setter
+ is the only place that knows both numbers before the allocation happens. It was
+ the largest single thing in a process nobody could account for, and nothing
+ anywhere said so.
+
+ Only above the default, and only when the number moves. 2048 is the size this
+ project chose and warning about a default is noise; a script that writes the
+ same size every frame has not done anything worth a second sentence.
+
+ Both images, because there are two: `image` and `static_image` are the same
+ format at the same extent, and the second is allocated the moment a scene has a
+ static caster — which is the ordinary thing to do to scenery, so the doubled
+ figure is the one to plan for rather than the surprise afterwards.
+*>
+fn void say_shadow_size(uint was, uint now) @local
+{
+	if (now <= SHADOW_DEFAULT_SIZE || now == was) return;
+
+	// D32, one texel per texel. `ShadowMap.bytes` reads the allocations back once
+	// they exist; this has to answer before there are any.
+	usz each = (usz)now * now * 4;
+	@advise(
+		"three: shadow.size = %d is %d MB of depth image, and %d MB once anything in the scene is "
+		"static — image and static_image are the same format at the same extent. "
+		"stats().shadowBytes is what it actually cost.",
+		now, each / (1024 * 1024), (each * 2) / (1024 * 1024)
+	);
+}
+
+<*
  `shadowSet(enabled, size, bias, intensity, distance)` — all five at once.
 
  ## Why all five rather than five setters
@@ -2128,6 +2236,7 @@ fn void js_shadow_set(
 	uint rounded = SHADOW_MIN_SIZE;
 	while (rounded * 2 <= wanted) rounded *= 2;
 	settings.size = rounded;
+	say_shadow_size(self.pass.shadows.settings.size, rounded);
 
 	// The bias has no upper bound worth inventing — past a certain size every
 	// shadow simply disappears, which is a visible answer to a value somebody

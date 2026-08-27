@@ -16,19 +16,45 @@ const H = globalThis.__three;
 // click can be resolved against without the host being told which scene to use.
 export let liveScene = null;
 
+// Every Scene wrapper this script still has a way to reach, by host id.
+//
+// The wrapper is the only thing that knows a scene's JavaScript side — its
+// children, its physics facade, its nav facade — and the host knows nothing
+// about any of it. So a scene handed back by `three.sceneById(id)` has to be the
+// SAME object the script built where there is one, or `three.sceneById(s.id) === s`
+// would be false and two wrappers would be two `children` arrays over one node
+// pool.
+//
+// Strong references, and bounded by the same thing the host list is: an entry
+// goes when the scene is disposed. Holding the wrapper cannot keep a scene alive
+// that would otherwise have gone, because nothing frees a scene without being
+// told to.
+const scenesById = new Map();
+
+// The marker that makes the second constructor form unreachable by accident.
+// `new three.Scene()` is public and takes no arguments, so a bare array would be
+// a way for a typo to build a wrapper around a number that names nothing.
+const ADOPT = Symbol('adopt');
+
 export class Scene extends Object3D {
-	constructor() {
+	constructor(adopt) {
 		super();
 		// What Object3D.add checks for — see the note there.
 		this._isScene = true;
-		const [sid, i, g] = H.sceneCreate();
+		const claimed = adopt !== undefined && adopt !== null && adopt[0] === ADOPT;
+		const [sid, i, g] = claimed ? adopt[1] : H.sceneCreate();
 		this._sid = sid;
 		this._i = i;
 		this._g = g;
 		this._name = 'Scene';
 		this.physics = makeScenePhysics(this);
 		this.nav = makeSceneNav(this);
-		liveScene = this;
+		scenesById.set(sid, this);
+		// A new Scene is made active by the host and is therefore the live one.
+		// An adopted one changed nothing — it is a handle onto a scene that was
+		// already whatever it was — so it becomes `liveScene` only if it happens
+		// to be the scene being rendered.
+		if (!claimed || H.sceneActive() === sid) liveScene = this;
 	}
 
 	_check() {
@@ -86,10 +112,15 @@ export class Scene extends Object3D {
 			);
 		}
 		H.sceneDispose(this._sid);
-		this.children.length = 0;
-		this._i = -1;
-		this._g = -1;
+		forgetScene(this);
 		return H.unloadUnused();
+	}
+
+	// The host's id for this scene — what three.sceneById(id) takes and what
+	// three.scenes lists. Read-only: it names a host object, and assigning it
+	// would be pointing a wrapper at somebody else's node pool.
+	get id() {
+		return this._sid;
 	}
 
 	add(...objects) {
@@ -306,6 +337,84 @@ export class Scene extends Object3D {
 		};
 		return lazyObject(hit, 'object', Int32Array.from(raw.node), 0);
 	}
+}
+
+// -----------------------------------------------------------------------
+// The scenes that exist
+
+// Empties a wrapper whose host scene has gone. Every field a live Scene is
+// identified by, so a handle held past a dispose throws the sentence rather
+// than resolving into a reused slot.
+function forgetScene(scene) {
+	scenesById.delete(scene._sid);
+	scene.children.length = 0;
+	scene._i = -1;
+	scene._g = -1;
+	if (liveScene === scene) liveScene = null;
+}
+
+// The Scene wrapper for a host id: the one the script built, or a new handle
+// onto a scene whose wrapper is gone.
+//
+// The second case is the one this exists for. A scene built inside a run_script
+// scope that then ended is alive, counted, holding its nodes and its asset
+// references, and named by nothing — so before this there was no way to dispose
+// it and no way to look at it. Now there is.
+//
+// **An adopted handle is a handle, not the tree.** Its `children` is empty even
+// where the host scene has hundreds of nodes, because the objects that made
+// them were the previous script's and are gone. What it can do is everything
+// that goes through the host: activate, dispose, stats, export, background,
+// raycast, pick. What it cannot do is give you back objects nothing kept.
+export function sceneForId(id) {
+	const sid = +id;
+	if (!Number.isInteger(sid)) {
+		throw new TypeError('three.sceneById(id) wants a scene id — three.scenes lists them');
+	}
+	const held = scenesById.get(sid);
+	if (held !== undefined) return held;
+
+	const found = H.sceneIds().find(([each]) => each === sid);
+	if (found === undefined) {
+		throw new Error(`there is no scene ${sid} — three.scenes lists the ones there are`);
+	}
+	return new Scene([ADOPT, found]);
+}
+
+// What is alive, in the order the host holds them.
+//
+// `id` is what three.sceneById(id) takes; `active` is the one being rendered;
+// `held` says whether this script still has the Scene object that built it,
+// which is the difference between a scene you can reach and one you had lost.
+// `nodes` is there because a leaked scene and an empty one look identical
+// without it.
+export function sceneOverview() {
+	const active = H.sceneActive();
+	return H.sceneIds().map(([id]) => ({
+		id,
+		active: id === active,
+		held: scenesById.has(id),
+		nodes: H.stats(id).nodes,
+	}));
+}
+
+// Free every scene except the one being rendered, then sweep.
+//
+// The level transition without the step that gets forgotten. Disposing the
+// active scene is refused by the host, so this cannot leave the frame with
+// nothing to draw however many scenes it walks — activate the one you want
+// first, and this is the rest of it.
+//
+// Answers with { scenes, assets, textures, bytes }: how many worlds went, and
+// what the sweep afterwards actually gave back. Those are different numbers and
+// the second is often zero — two scenes over one kit means disposing either
+// frees nothing.
+export function disposeInactiveScenes() {
+	const scenes = H.disposeInactive();
+	for (const held of [...scenesById.values()]) {
+		if (!H.sceneAlive(held._sid)) forgetScene(held);
+	}
+	return { scenes, ...H.unloadUnused() };
 }
 
 // -----------------------------------------------------------------------

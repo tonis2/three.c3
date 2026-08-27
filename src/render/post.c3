@@ -213,6 +213,26 @@ fn void PostPass.init(&self)
 	self.stages.init(mem, 2);
 }
 
+<*
+ What the chain costs, in bytes, and 0 for a runtime that never set a post
+ shader.
+
+ Image A plus as much of the ping-pong pair as the chain needed, plus one image
+ for every stage another stage taps. `POST_CHAIN_FORMAT` is eight bytes a pixel
+ against the target's four, so a two-pass chain at 1080p is around 40 MB — more
+ than the frame it is post-processing, and the reason this is reported apart from
+ `target_bytes` rather than folded into it.
+
+ Read off the allocations, so a chain that grew an image for a tap is counted
+ without this having to know the rule that gave it one.
+*>
+fn usz PostPass.bytes(&self)
+{
+	usz total = (usz)(self.scene.memory.size + self.pong[0].memory.size + self.pong[1].memory.size);
+	foreach (stage : self.stages) total += (usz)stage.keep.memory.size;
+	return total;
+}
+
 // ============================================================================
 // Building a stage
 // ============================================================================

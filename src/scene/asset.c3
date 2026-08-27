@@ -880,6 +880,46 @@ fn usz Assets.texture_bytes(&self)
 }
 
 <*
+ What the geometry costs, on the device and on the CPU, across every resident
+ asset.
+
+ Read off the allocations rather than recomputed from vertex counts and stream
+ widths, so it cannot drift from what was actually asked of the device: a mesh
+ that carries colours, joints and weights costs four times a mesh that carries
+ positions alone, and the flags saying which of those exist are exactly the
+ flags this would have had to read anyway.
+
+ **Both halves, because there are two.** The header's third bullet is the reason:
+ a `TriBVH` points into a positions array and a triangle index array, so those
+ stay resident on the CPU for the life of the asset. On a scene of a few hundred
+ thousand vertices that is tens of megabytes standing beside the device copy, and
+ a number that reported only the device half would be answering a question about
+ memory with two thirds of the memory.
+
+ The tree itself is not counted. `collision::create_indexed_tri_bvh` allocates
+ its own nodes and does not answer with how many, so counting it would mean
+ guessing — and a guess inside a number an agent reads as measured is worse than
+ a stated omission. It is bounded by the triangle count, which is here.
+*>
+fn usz Assets.geometry_bytes(&self)
+{
+	usz total = 0;
+	foreach (&asset : self.assets)
+	{
+		if (!asset.alive) continue;
+		foreach (&mesh : asset.meshes)
+		{
+			total += (usz)(mesh.positions.size + mesh.normals.size + mesh.uvs.size);
+			total += (usz)(mesh.colors.size + mesh.joints.size + mesh.weights.size);
+			total += (usz)mesh.indices.size;
+			total += Vec3::size * mesh.hull_positions.len;
+			total += collision::Triangle::size * mesh.hull_triangles.len;
+		}
+	}
+	return total;
+}
+
+<*
  The texture a mesh draws with: its own, or the white stand-in.
 
  Answers with the `Texture` rather than a descriptor set because there are no

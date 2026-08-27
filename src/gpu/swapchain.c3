@@ -136,10 +136,10 @@ fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint
 	// Nothing sRGB on offer is a surface this project has never met. Presenting
 	// through it still beats refusing to open a window, and the failure it
 	// leaves — a window that is too dark, with correct screenshots beside it —
-	// is worth a line on stderr rather than a fault the caller cannot act on.
+	// is worth advising about rather than a fault the caller cannot act on.
 	if (!found)
 	{
-		io::eprintfn("three: no sRGB surface format offered; the window will present linear values and look dark. Screenshots are unaffected.");
+		@advise("three: no sRGB surface format offered; the window will present linear values and look dark. Screenshots are unaffected.");
 	}
 
 	if ((uint)(caps.supportedUsageFlags & IMAGE_USAGE_TRANSFER_DST_BIT) == 0) return SURFACE_CANNOT_BLIT~;

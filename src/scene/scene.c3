@@ -306,6 +306,30 @@ struct SceneStats
 	 cached map to rebuild rather than a cheap one.
 	*>
 	uint shadow_static_draws;
+
+	<*
+	 The four blocks of memory the renderer owns, in bytes.
+
+	 `texture_bytes` and `pose_bytes` above were the only memory numbers here, and
+	 between them they miss nearly all of it. A 1080p frame is a colour and a depth
+	 image before a single mesh is loaded; a post chain is two or three more, at
+	 eight bytes a pixel; one `three.light.shadow.size = 4096` is two D32 images
+	 and is larger than every other number in this struct put together; and a
+	 scene's geometry is on the device *and* kept on the CPU, because
+	 `scene/asset.c3` holds the positions and the triangle index for picking.
+
+	 Read off the allocations rather than recomputed from extents and formats, so
+	 they cannot drift from what was actually asked of the device.
+
+	 `shadow_bytes` and `geometry_bytes` are filled in by `MeshPass.stats`, which
+	 can see the shadow map and the asset table. The other two need the `Renderer`
+	 and are filled in by `JsRuntime.scene_stats`; they are zero in a runtime with
+	 no device, along with everything else here that needs one.
+	*>
+	usz shadow_bytes;
+	usz target_bytes;
+	usz post_bytes;
+	usz geometry_bytes;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into

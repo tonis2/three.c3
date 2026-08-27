@@ -84,8 +84,9 @@ const bool DEBUG_BUILD = $feat(DEBUG);
  call site even with the same `$if`'d body; only `$vaarg` inside the `$if`
  disappears with it.
 
- This is for the developer at the terminal, not the agent: anything a
- `run_script` should see belongs in `log`, which comes back through `RunResult`.
+ This is for the developer at the terminal, not the agent: what a `run_script`
+ should see belongs in `log`, which comes back through `RunResult`, and advice
+ about the scene belongs in `@advise`, which reaches both.
 *>
 macro @debug_log(format, ...)
 {
