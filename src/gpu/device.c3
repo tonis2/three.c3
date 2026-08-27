@@ -364,9 +364,15 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 	// correct on whichever driver happened to finish first.
 	//
 	// Measured, and the measurement is negative: deleting the barrier at the end
-	// of `MeshPass.skin` leaves `the_skinning_paths_are_silent_under_validation`
-	// green with this off, with it on, and with `VK_EXT_validation_features`
-	// enabled so the struct below is really read.
+	// of `MeshPass.skin` left the skinning checks green with this off, with it on,
+	// and with `VK_EXT_validation_features` enabled so the struct below was really
+	// read.
+	//
+	// That is history rather than something the suite re-derives. The check that
+	// recorded it asked for the extension at instance creation and the loader here
+	// answers "Extension not supported VK_EXT_validation_features", so it failed
+	// for the machine rather than for the code and has been removed. Nothing in
+	// the suite passes `sync: true` today.
 	//
 	// Kept because it is the documented way to ask, it costs nothing when nobody
 	// asks, and a layer that reports nothing today may report something tomorrow.

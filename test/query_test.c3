@@ -1352,6 +1352,38 @@ fn void pointer_lock_reports_what_the_platform_did() @test
 	};
 }
 
+// ============================================================================
+// The window
+// ============================================================================
+
+<*
+ The window reports its absence rather than inventing a size.
+
+ A headless run has no window, so the three numbers are zero and `resize` answers
+ false — `pointerLock`'s contract in a second place, and for its reason: a game
+ that sizes its own window should still start on a machine that has none.
+
+ A bad size is the one thing here that does throw, and it throws headless too. No
+ window is a fact about the machine; `resize(0, 900)` is a mistake in the script,
+ and a platform that happens to have nothing to ask is no reason to swallow it.
+*>
+fn void the_window_reports_zero_when_there_is_none() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const before = [three.window.width, three.window.height, three.window.scale];
+			const asked = three.window.resize(1600, 900);
+			let refused = '';
+			try { three.window.resize(0, 900); } catch (e) { refused = e.message.slice(0, 18); }
+			return [before, asked, refused];
+		`, "the window script ran");
+
+		test::@check(value == `[[0,0,0],false,"three.window.resiz"]`,
+			"a run with no window has no size and refuses a bad one; got %s", value);
+	};
+}
+
 <*
  A locked cursor's movement is the platform's delta, not a difference of
  positions.

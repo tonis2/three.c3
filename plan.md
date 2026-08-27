@@ -18,29 +18,24 @@ under it; a section missing from *this* file has no work left in it.
 
 ## 1. Platform defects
 
-All three want a machine this repo has never had, and will stay open until
-somebody has one.
+Two of these want a machine this repo has never had and will stay open until
+somebody has one. The third wants ten minutes with a mouse.
 
-- [ ] **Run the Linux and Windows backends.** Both type-check; neither has had a
-      window on screen since any of the mouse, cursor and DPI work. Compiling
-      catches a missing symbol and none of the faults that matter — a wrong sign,
-      an event that never arrives, a DPI declaration fighting something else.
-      `get_scroll_x` and the right/middle latches are the newest blind surface.
+- [ ] **Run the win32 backend.** It type-checks and has not had a window on
+      screen since any of the mouse, cursor and DPI work. Compiling catches a
+      missing symbol and none of the faults that matter — a wrong sign, an event
+      that never arrives, a DPI declaration fighting something else.
 - [ ] **Handle `WM_DPICHANGED`** (win32). A window dragged between displays of
       different densities keeps the size it was given.
-- [ ] **`Window.width`/`height` go stale on Linux.** x11 and wayland need their
-      own `GetClientRect` equivalent. `notes.md` §10 has why fixing the
-      live-resize delta instead is the wrong move.
-- [ ] **Pointer lock on Linux.** Built on darwin and win32, and reported as
-      absent on both Linux backends rather than faked — `three.input.pointerLock`
-      reads back false there, which is the signal a script branches on. x11 wants
-      `XDefineCursor` with a 1x1 transparent pixmap and `XWarpPointer` back to
-      the centre, which is the same recentre darwin does and simpler because
-      there is no local-event suppression to defeat. Wayland wants
-      `zwp_pointer_constraints_v1` plus `zwp_relative_pointer_v1`, and that is a
-      protocol binding rather than an x11 shortcut: a Wayland client cannot move
-      the cursor at all, by design. `linux/xdg_shell.c3` is the shape a second
-      one would take. Both are blind work until the entry above happens.
+- [ ] **Finish the Linux hand-check.** Both backends have now been run with a
+      window on screen, and `tools/linux_input_check.js` is the harness that did
+      it: the size, the wake, the wheel and its horizontal half, the left and
+      middle latches and the x11 pointer lock all work. Three things it has not
+      confirmed, because a desktop keeps stealing synthetic clicks from the tool
+      that sends them — **the right-button latch**, `mouse4`/`mouse5`, and
+      whether a Wayland compositor actually *grants* the lock, which it only does
+      for a surface that holds pointer focus. The request reaches it: both
+      globals bind and both objects are created.
 - [ ] **Pointer lock in the browser.** `wasm/main.c3` reports it absent too. The
       browser has the best version of it — `requestPointerLock` and
       `movementX`/`movementY` straight out of the platform — but the request must
@@ -56,8 +51,12 @@ somebody has one.
 - [ ] **Sockets.** A bone's world transform is `pose * bind` and `AssetSkin.bind`
       is kept for it; nothing reads it yet.
 - [ ] **Re-run the compute→vertex barrier injection on a machine with a fuller
-      validation layer.** Deleting that barrier leaves the suite green here, under
-      the ordinary layer and under synchronization validation both.
+      validation layer.** Deleting that barrier left the suite green here, under
+      the ordinary layer and under synchronization validation both. The check that
+      measured it is gone — this machine's loader refuses
+      `VK_EXT_validation_features`, so it failed for the machine rather than for
+      the code — which means the suite no longer asks the question at all, and
+      re-running it somewhere else starts by writing the check back.
 
 ## 4. Textures, async load, and a sky
 
@@ -199,9 +198,6 @@ followed.
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
-      
-- [ ] Give JS api a way to increase window size      
-
 
 ## 19. Shadows at game scale
 

@@ -687,6 +687,51 @@ const controls = {
 };
 
 // -----------------------------------------------------------------------
+// The window
+//
+// Not a Three.js API — the browser has `window` and Three.js takes a
+// canvas, so there was nothing to match. What is here is the smallest set
+// that answers "how big is this thing" and "make it bigger".
+//
+// **It is the window and not the picture.** Everything renders into an
+// offscreen target fixed at what `--width`/`--height` asked for, and the
+// swapchain stretches the whole of that onto the whole window. So a bigger
+// window is the same pixels spread wider: softer on screen, and
+// `three.renderSize()` — what a screenshot comes back as and what
+// `scene.pick(x, y)` counts in — does not move. Resizing past the render
+// size says so in the run's `warnings`.
+//
+// **`width` and `height` are device pixels**, read off the surface rather
+// than the window, so they are current through a live resize drag and
+// honest on a display that is not 1:1. `scale` is device pixels per logical
+// point, and `resize` takes the same device pixels these report, so asking
+// for a size and reading it back agrees.
+//
+// **`resize` is a request.** X11's window manager may adjust it and a
+// Wayland compositor answers with a configure some frames later, so the new
+// size arrives on a later frame rather than on the next line:
+//
+//     three.window.resize(1600, 900);
+//     three.window.width;                    // still the old one
+//     three.setAnimationLoop(() => { ... }); // where the new one turns up
+//
+// Everything is zero and `resize` returns false when there is no window,
+// which is `--headless` — the same shape `three.input.pointerLock` uses,
+// and for the same reason: a game that resizes its window should still
+// start on a machine that has none.
+//
+// **On Wayland the size never reads back.** That surface answers "whatever
+// the swapchain asks for" rather than a size, so the drawable stays what
+// the process booted at and the compositor scales it into whatever the
+// window became. X11, macOS and Windows track it.
+const windowSurface = {
+	get width() { return H.windowSize()[0]; },
+	get height() { return H.windowSize()[1]; },
+	get scale() { return H.windowSize()[2]; },
+	resize(width, height) { return H.windowResize(width, height); },
+};
+
+// -----------------------------------------------------------------------
 // The clock
 //
 // Not a Three.js API in this shape — Three.js has a `Clock` you construct
@@ -1672,11 +1717,16 @@ export const three = {
 	},
 
 	// What `scene.pick(x, y)` counts in, and what the PNG comes back as.
-	// It is the offscreen target's, never a window's (`plan.md` §1).
+	// It is the offscreen target's, never a window's: `three.window` is the
+	// window, and it can be a different size without moving this one.
 	renderSize() {
 		const [width, height] = H.renderSize();
 		return { width, height };
 	},
+
+	// How big the window is, and how to make it bigger. Zero everywhere
+	// under `--headless`.
+	window: windowSurface,
 
 	input,
 

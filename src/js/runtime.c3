@@ -333,8 +333,8 @@ struct JsRuntime
 
 	 Null under `--headless`, and every verb that reaches for it says what it does
 	 then. It is here only for what a script may ask of the *window* rather than
-	 of the scene, which today is `three.input.pointerLock`: the renderer is a
-	 consumer of the window and nothing else in the runtime knows one exists.
+	 of the scene — `three.input.pointerLock` and `three.window`: the renderer is
+	 a consumer of the window and nothing else in the runtime knows one exists.
 
 	 Owned by `main.c3`'s loop and outliving this runtime, like `pass`.
 	*>

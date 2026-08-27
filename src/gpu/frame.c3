@@ -358,6 +358,22 @@ fn double Renderer.gpu_ms(&self) => self.timer.timing.total;
 fn FrameTiming Renderer.timing(&self) => self.timer.timing;
 
 <*
+ Tell the swapchain how big the window says it is, in device pixels.
+
+ Only consulted where the surface itself declines to answer, which is Wayland
+ and nowhere else — see `Viewer.surface_extent`. Called every frame rather than
+ on a resize event, because it is a comparison of two numbers and the loop that
+ would have to notice a resize is the one this is protecting from having to.
+
+ Zero is ignored, which is what a window reports before its first configure.
+*>
+fn void Renderer.want_surface(&self, uint width, uint height)
+{
+	if (!self.windowed || width == 0 || height == 0) return;
+	self.viewer.wanted = { .width = width, .height = height };
+}
+
+<*
  Rebuilds the swapchain for the window's current size.
 
  @return `false when the window is minimised — skip the frame and wait for the next event.`
