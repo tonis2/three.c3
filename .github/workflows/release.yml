@@ -86,31 +86,25 @@ jobs:
             target: macos-aarch64
             exe: three
           # ---------------------------------------------------------------
-          # **Linux and Windows are commented out until their static Slang
-          # archives exist.** The bundle links Slang IN now, and the archives
-          # come off slang.c3l's `static` branch, which currently carries
-          # macos-aarch64 alone. Slang cannot be cross-built — its build runs
-          # code generators it compiled for the host — so each one has to be
-          # produced on a machine of its own architecture:
+          # **Linux is still commented out; Windows is on now.** The bundle
+          # links Slang IN, and the archives come off slang.c3l's `static`
+          # release, which carries macos-aarch64 and windows-x64. Slang cannot
+          # be cross-built — its build runs code generators it compiled for the
+          # host — so linux-x64 has to be produced on a linux-x64 machine:
           #
           #     ./lib/slang.c3l/native/build-slang.sh
           #     ./lib/slang.c3l/native/publish-static.sh
           #
-          # Uncomment a leg once its archive is on that branch. Two things go
-          # with it, and neither is optional:
+          # Uncomment the leg once its archive is on that release. It also
+          # needs `-lstdc++` (or `-static-libstdc++`) in slang.c3l's
+          # manifest.json link-args, the way macos-aarch64 has `-lc++` — a
+          # static Slang does not carry its own C++ runtime dependency the way
+          # the dylib did, and without it the link ends in hundreds of
+          # undefined std:: symbols. That entry is already written, so this
+          # block is the only thing standing between here and a Linux zip.
           #
-          #   - linux-x64 needs `-lstdc++` (or `-static-libstdc++`) in its
-          #     manifest.json link-args, the way macos-aarch64 has `-lc++`. A
-          #     static Slang does not carry its own C++ runtime dependency the
-          #     way the dylib did, and without it the link ends in hundreds of
-          #     undefined std:: symbols.
-          #   - windows-x64 needs slang.lib built with a matching
-          #     CMAKE_MSVC_RUNTIME_LIBRARY, and has never been linked on a real
-          #     Windows toolchain at all.
-          #
-          # The steps below that are guarded by `runner.os` — the apt install,
-          # the quickjs PIC rebuild, the mingw --cc branch — are left in place
-          # and simply never fire, so re-enabling a leg is this block alone.
+          # The Linux-only steps below — the apt install, the quickjs PIC
+          # rebuild — are left in place and simply never fire.
           #
           # - bundle: three-linux-x64
           #   runner: ubuntu-22.04
@@ -118,21 +112,20 @@ jobs:
           #   target: linux-x64
           #   exe: three
           #
-          # The Windows leg is the one with a NATIVE toolchain, so c3c hands
-          # quickjs.c3l's `c-sources` to MSVC unless told otherwise — and that
-          # manifest's cflags are the GNU spellings, which cl rejects outright
-          # ("D8021: invalid numeric argument '/Wno-unused-parameter'"). mingw
-          # is the compiler this target is designed around (the archive beside
-          # the shim is mingw-built; see that manifest), and the image ships
-          # gcc 14. The Build step below is what points c3c at it — and why it
-          # cannot be a bare `--cc gcc` there.
-          #
-          # - bundle: three-windows-x64
-          #   runner: windows-2022
-          #   c3c_asset: c3-windows.zip
-          #   target: windows-x64
-          #   exe: three.exe
-          #   experimental: true
+          # windows-x64's archive is published, and the bundle has been built
+          # and linked end to end on a real Windows toolchain — MSVC 14.44
+          # against a slang.lib built with CMAKE_MSVC_RUNTIME_LIBRARY set to
+          # MultiThreadedDLL, which is what c3c's default `--wincrt=dynamic`
+          # link wants. What has NOT happened is a run on this image, so the
+          # leg keeps `experimental` for its first green build: a failure here
+          # must not withhold the macOS zip from a release. Drop the flag once
+          # it passes.
+          - bundle: three-windows-x64
+            runner: windows-2022
+            c3c_asset: c3-windows.zip
+            target: windows-x64
+            exe: three.exe
+            experimental: true
 
     steps:
       - uses: actions/checkout@v4
@@ -267,30 +260,22 @@ jobs:
       # the wrong thing. `--safe=no -O3` is claude.md's "the fast one", and a
       # release binary is exactly what it is for.
       #
-      # **`--cc` must be a PATH, with the `.exe`, on Windows.** c3c 0.8.3 checks
-      # the compiler it was handed with `file_executable_in_path`, which appends
-      # no extension — so a bare `--cc gcc` fails that check on Windows and the
-      # compiler falls back to `default_c_compiler()`, i.e. MSVC, *silently*.
-      # The symptom is the D8021 above with no mention of --cc having been
-      # ignored. A name containing a slash takes the plain `file_exists` branch
-      # instead, which is why the resolved path works.
+      # **Windows takes no `--cc`, and must not be given one.** The only C in
+      # this build is quickjs.c3l's shim, and that manifest used to carry one
+      # set of GNU-spelled cflags for every target — which cl rejects outright
+      # ("D8021: invalid numeric argument '/Wno-unused-parameter'"), so the leg
+      # had to be pointed at mingw. It now carries a `cflags-override` of MSVC
+      # switches for windows-x64, so the compiler c3c picks by default on a
+      # native toolchain is the right one. Pointing `--cc` at mingw here would
+      # hand `/O2 /std:c11 /J` to gcc and fail from the other side.
+      #
+      # No vcvars step goes with that. c3c finds cl.exe and its header
+      # environment from its own Visual Studio detection rather than from a
+      # developer prompt — verified on a machine where cl is not on PATH and
+      # INCLUDE is unset. If this ever regresses it fails inside the shim
+      # compile, naming the cl.exe path it resolved.
       - name: Build
-        run: |
-          set -euo pipefail
-          if [ "${{ runner.os }}" != Windows ]; then
-            c3c build --trust=full --safe=no -O3
-            exit 0
-          fi
-          cc="$(command -v gcc || true)"
-          test -n "$cc" || {
-            echo "::error::no gcc on PATH — the runner image is expected to ship mingw."
-            exit 1; }
-          case "$cc" in *.exe) ;; *) cc="$cc.exe" ;; esac
-          test -f "$cc" || { echo "::error::$cc does not exist"; exit 1; }
-          cc="$(cygpath -w "$cc")"
-          echo "C compiler: $cc"
-          "$cc" --version | head -1
-          c3c build --trust=full --safe=no -O3 --cc "$cc"
+        run: c3c build --trust=full --safe=no -O3
 
       - name: Show what was built
         run: ls -la build/
@@ -363,6 +348,15 @@ jobs:
             exit 1; }
           rm -f help.log
           echo "::warning::CI verifies that this bundle LOADS. Rendering and the embedded shader templates are NOT verified here — run packaging/smoke.js on a real GPU before shipping."
+          # A second thing this step cannot prove, and only on Windows. The
+          # bundle imports VCRUNTIME140.dll, VCRUNTIME140_1.dll and MSVCP140.dll
+          # — Slang is C++ against the shared CRT — and every GitHub Windows
+          # image has the redistributable, so `--help` answering here says
+          # nothing about a machine that does not. That failure is the silent
+          # one: 0xC0000135 before `main`, no message.
+          if [ "${{ runner.os }}" = Windows ]; then
+            echo "::warning::This runner has the MSVC redistributable installed, so a passing start check does not prove the zip runs on a machine without it. packaging/bundle-README.md tells the user what to install."
+          fi
 
       # **The check that the static link actually happened.** Everything above
       # this passes just as well for the old bundle: the binary starts either
@@ -388,6 +382,15 @@ jobs:
             # must not be part of what is searched.
             macOS) deps="$(otool -L "$exe" | tail -n +2)" ;;
             Linux) deps="$(objdump -p "$exe" | awk '/NEEDED/ { print $2 }')" ;;
+            # objdump reads PE as happily as ELF, and it comes with the mingw
+            # the image already ships — which keeps this off the vcvars shell
+            # that dumpbin would need. Skipped rather than failed when it is
+            # absent: this step is a guard, and a missing tool is not evidence
+            # of a bad bundle.
+            Windows)
+              command -v objdump >/dev/null 2>&1 || {
+                echo "no objdump on this image — dependency check skipped"; exit 0; }
+              deps="$(objdump -p "$exe" | awk '/DLL Name:/ { print $3 }')" ;;
             *)     echo "no dependency dump for ${{ runner.os }} — skipped"; exit 0 ;;
           esac
 
