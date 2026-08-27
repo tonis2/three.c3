@@ -1585,11 +1585,14 @@ export const three = {
 	// `stats().scenes` has always been the count. This is what the count is
 	// made of.
 	//
-	// `held` is the half that says whether you can still do anything about it
-	// from here: false means the Scene object that built it is gone, which is
-	// what happens to every scene built inside a run_script that has ended.
-	// three.sceneById(id) is how you get a handle back, and
-	// three.disposeInactive() is how you get rid of them without one.
+	// `held` is the half that says what three.sceneById(id) gives you back.
+	// True is the same Scene object with its `children` intact, and it stays
+	// true across run_scripts: the registry behind it is bounded by dispose,
+	// not by the scope that built the scene, so a world built two calls ago is
+	// still the one you built. False means no Scene was ever made for it here
+	// — the scene the process starts with is the one that reads that way — and
+	// sceneById mints a handle onto it instead, which flips this to true.
+	// three.disposeInactive() is how you get rid of them without naming any.
 	get scenes() { return sceneOverview(); },
 
 	// The Scene for a host id — the one you built, or a handle onto one whose
