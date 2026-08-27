@@ -237,6 +237,38 @@ fn void usage()
 	io::printn("  Shaders are read from shaders/ — run from the project root.");
 }
 
+
+<*
+ Whether this binary was built with `-D DEBUG`.
+
+ A plain constant rather than a `$if` at every reading, so it can be branched on
+ in ordinary code and asserted on in tests.
+*>
+const bool DEBUG_BUILD = $feat(DEBUG);
+
+<*
+ A log line that exists only in a debug build.
+
+ The arguments are not evaluated without one, which makes this usable where
+ composing the message costs more than printing it: `@debug_log("%s", describe())`
+ does not call `describe` in a release build.
+
+ That property is why the signature uses untyped varargs. A typed parameter list
+ — `macro @debug_log(String format, args...)` — still evaluates everything at the
+ call site even with the same `$if`'d body; only `$vaarg` inside the `$if`
+ disappears with it.
+
+ This is for the developer at the terminal, not the agent: what a `run_script`
+ should see belongs in `log`, which comes back through `RunResult`, and advice
+ about the scene belongs in `@advise`, which reaches both.
+*>
+macro @debug_log(format, ...)
+{
+	$if DEBUG_BUILD:
+		io::printfn(format, ...$vaarg);
+	$endif
+}
+
 fn int main(String[] args)
 {
 	Options? parsed = parse_args(args);
