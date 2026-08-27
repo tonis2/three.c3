@@ -18,6 +18,13 @@
 # tracked file for ever, so committing them charges every clone, and every clone
 # of anything using this as a submodule, for binaries nobody will run again.
 #
+# **They are release assets, not orphan branches.** Both used to be branches,
+# which is a trick that does not work: a branch keeps a binary out of a checkout
+# but not out of the object database, `git clone` fetches every `refs/heads/*`
+# unconditionally, and no setting opts one out. So every clone paid for them
+# anyway. An asset is reachable from no ref — a clone costs nothing and the
+# fetch is on demand, verified against a hash committed beside the script.
+#
 # The cost of that decision is this file. Without it the build does not fail
 # cleanly — see each step below for how it fails instead, which is the part
 # worth knowing.
@@ -43,17 +50,18 @@ run_slang() {
 	echo "==> slang"
 	# slang.c3l links Slang IN, as one 43 MB static archive, and has no other
 	# mode — no SDK on the machine, no dylibs beside the binary, no rpath. The
-	# archive is too large for git, so it lives on that repository's `static`
-	# orphan branch and this fetches it: the same arrangement as run_driver
-	# below, for the same reason.
+	# archive is too large for git, so it is published as a release asset on
+	# that repository's `static` tag and this fetches it, verified against the
+	# SHA256SUMS published beside it: the same arrangement as run_driver below,
+	# for the same reason.
 	#
 	# Skipping it fails at the linker with "library not found for -lslang".
 	#
 	# A target nobody has published yet has to be built on a machine of that
 	# architecture — Slang runs code generators it compiled for the host, so
 	# there is no cross-build — with lib/slang.c3l/native/build-slang.sh, then
-	# pushed with native/publish-static.sh. Only macos-aarch64 exists today, and
-	# fetch-static.sh says so by name when it comes up empty.
+	# published with native/publish-static.sh. Only macos-aarch64 exists today,
+	# and fetch-static.sh says so by name, listing what the release does have.
 	#
 	# **The archive carries no spirv-opt**, so src/shader/compile.c3's
 	# SLANG_ARGUMENTS must keep its `-O0`. Without it every shader compile fails
@@ -69,36 +77,21 @@ run_driver() {
 		return 0
 	fi
 
-	local target="lib/vulkan.c3l/macos-aarch64/libvulkan_kosmickrisp.dylib"
 	echo "==> driver"
-
-	# 10 MB rather than -f: a failed fetch also leaves a file behind, and an
-	# HTML error page saved under this name would otherwise be reported as a
-	# working driver. It has never been under 14 MB.
-	if [[ -f "$target" && "$(wc -c < "$target")" -gt 10000000 ]]; then
-		echo "    already present"
-		return 0
-	fi
-
 	# KosmicKrisp is 15 MB and is rebuilt on every Mesa bump, so vulkan.c3l keeps
-	# it on a `driver` orphan branch that is amended and force-pushed rather than
-	# added to — one revision, however many bumps. It is therefore not on main
-	# and not in the submodule checkout.
+	# it as an asset on its rolling `latest` release rather than in git, pinned by
+	# that repository's driver.sha256. It is therefore not on main and not in the
+	# submodule checkout.
+	#
+	# The script does the size and hash checking this step used to do inline, and
+	# is a no-op with the file already there. It is also what build.sh and
+	# vulkan.c3l's own release workflow call, so there is one fetch to get wrong.
 	#
 	# **Skipping this does not fail the build.** vk::findBundledDriver treats "no
 	# bundled driver" as a normal outcome and falls back to the loader's own ICD
 	# discovery (vk/driver.c3), so three runs on whatever other ICD is installed,
 	# or reports no devices — neither of which mentions a missing file.
-	git -C lib/vulkan.c3l fetch --depth 1 origin driver
-	git -C lib/vulkan.c3l cat-file blob FETCH_HEAD:libvulkan_kosmickrisp.dylib > "$target"
-	chmod 755 "$target"
-
-	if [[ "$(wc -c < "$target")" -lt 10000000 ]]; then
-		rm -f "$target"
-		echo "    the fetched driver is too small to be one — removed" >&2
-		exit 1
-	fi
-	echo "    fetched $(git -C lib/vulkan.c3l show FETCH_HEAD:VERSION 2>/dev/null || echo 'unversioned')"
+	./lib/vulkan.c3l/fetch-driver.sh
 }
 
 case "$step" in

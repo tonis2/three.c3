@@ -6,8 +6,9 @@
 #
 # The driver is the only library left beside the executable, and it is there
 # because it cannot be anywhere else: vk/driver.c3 dlopens it by name at
-# runtime. Slang used to sit beside it as three dylibs; it is linked in now, by
-# lib/slang.c3l/native/build-slang.sh and setup.sh's `static` step. See
+# runtime, and it is fetched from vulkan.c3l's release by setup.sh's `driver`
+# step. Slang used to sit beside it as three dylibs; it is linked in now, by
+# lib/slang.c3l/native/build-slang.sh and setup.sh's `slang` step. See
 # lib/slang.c3l/README.md, "Linking Slang in".
 #
 #   push a tag v*        build every platform, publish a GitHub release
@@ -175,9 +176,10 @@ jobs:
 
       # ------------------------------------------------------------- staging --
       # `submodules; slang; driver`. The `slang` step fetches slang.c3l's
-      # prebuilt static archive off its `static` branch — the same shape as the
-      # driver fetch beside it — so a release build downloads no SDK and stages
-      # no dylibs at all.
+      # prebuilt static archive from its `static` release — the same shape as the
+      # driver fetch beside it, both GitHub release assets rather than the orphan
+      # branches they used to be — so a release build downloads no SDK and stages
+      # no dylibs at all. Both verify against a hash published with them.
       - name: setup.sh
         run: ./setup.sh
 
@@ -203,7 +205,7 @@ jobs:
 
           test -f "$dir/$name" || {
             echo "::error::$dir/$name is missing — setup.sh's slang step did not"
-            echo "::error::produce it. slang.c3l's 'static' branch carries an archive"
+            echo "::error::produce it. slang.c3l's 'static' release carries an archive"
             echo "::error::per target; build and publish this one on a ${{ matrix.target }}"
             echo "::error::machine with native/build-slang.sh + native/publish-static.sh."
             exit 1; }
@@ -418,6 +420,9 @@ jobs:
           test -f "$driver" || {
             echo "::error::no libvulkan_kosmickrisp.dylib in the bundle — setup.sh's"
             echo "::error::driver step was skipped, or stage-libs.sh did not copy it."
+            echo "::error::That step is lib/vulkan.c3l/fetch-driver.sh, which pulls the"
+            echo "::error::dylib from vulkan.c3l's 'latest' release and verifies it"
+            echo "::error::against driver.sha256; a failure there is named in the log."
             exit 1; }
           file "$driver"
           lipo -archs "$driver" | grep -q arm64 || {
