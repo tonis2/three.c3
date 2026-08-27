@@ -305,7 +305,9 @@ can be built early, but only the active scene's world is stepped.
 and `three.disposeInactive()` frees every scene except the one being rendered
 and sweeps afterwards. `stats()`'s four `...Bytes` beyond `textureBytes` —
 `geometryBytes, targetBytes, postBytes, shadowBytes` — are where the memory
-actually is.
+actually is. Neither `postBytes` nor `shadowBytes` falls when you clear the post
+chain or turn shadows off: the images are kept for the next one, and the numbers
+say so.
 
 **The window** — `three.window.width/.height/.scale` in device pixels, and
 `three.window.resize(w, h)` to ask for a different size. It moves the *window*

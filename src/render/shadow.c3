@@ -1277,6 +1277,12 @@ fn void ShadowMap.destroy_static_image(&self, Gpu* gpu)
  `three.light.shadow.size = 4096` is a single assignment and 134 MB, larger than
  everything else in a frame put together, and until this there was nothing in
  `stats()` that moved when it was written.
+
+ A resize destroys the old images and this follows it down as well as up, but
+ turning shadows OFF does not: nothing frees the map until the size changes or
+ `free` runs, so this keeps reading what the last enabled size cost. That is the
+ honest answer — the memory really is still held — and it is why the number is
+ worth having rather than inferring from `shadow.enabled`.
 *>
 fn usz ShadowMap.bytes(&self) => (usz)(self.memory.size + self.static_memory.size);
 

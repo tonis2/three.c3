@@ -580,6 +580,11 @@ struct UnloadReport
 	// went is counted in `assets` instead, not twice.
 	uint meshes;
 	uint textures;
+	// TEXTURE bytes, which is what `texture_bytes` on either side of the sweep can
+	// be differenced for. The geometry that went with them is not in here — it is
+	// spread across per-mesh allocations that are already gone by the time this is
+	// filled in — so a caller who wants that half reads `geometry_bytes` before and
+	// after instead. `stats().geometryBytes` is the same number.
 	usz bytes;
 }
 
