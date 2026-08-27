@@ -68,9 +68,20 @@ Vulkan loader, and what is missing is:
     sudo apt install libvulkan1            # the loader itself
     sudo apt install mesa-vulkan-drivers   # lavapipe, if there is no GPU to use
 
-**Windows** — nothing to install. `vulkan-1.dll` is a system library that
-current GPU drivers put there. If a run reports no device, update your graphics
-driver.
+**Windows** — `vulkan-1.dll` is a system library that current GPU drivers put
+there, so there is nothing to install for Vulkan itself. If a run reports no
+device, update your graphics driver.
+
+One thing may be missing on a bare machine, and it fails before the program
+prints anything: `three.exe` imports `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`
+and `MSVCP140.dll`. Those are the Microsoft Visual C++ runtime — the shader
+compiler linked into the binary is C++ and is built against the shared CRT —
+and they come with almost every application that has ever been installed, so
+most machines already have them. A machine that does not exits with
+`0xC0000135` and no message at all. The fix is the Microsoft Visual C++
+Redistributable for x64, from Microsoft, or:
+
+    winget install Microsoft.VCRedist.2015+.x64
 
 ## Moving the binary
 
