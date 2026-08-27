@@ -2,7 +2,7 @@
 // every verb an agent calls.
 
 import {
-	Vector3, Box3, readVector, asTriple, damp, dampAngle, smoothDamp, CatmullRomCurve3,
+	Vector3, Box3, readVector, readColor, asTriple, damp, dampAngle, smoothDamp, CatmullRomCurve3,
 	clamp, clamp01, lerp, inverseLerp, mapLinear, smoothstep, smootherstep, band,
 	pingpong, euclideanModulo, degToRad, radToDeg, moveTowards,
 	wrapAngle, angleDelta, moveTowardsAngle,
@@ -62,46 +62,131 @@ const renderedNav = makeSceneNav(renderedScene);
 // Three.js does not have, which is `plan.md` §4's rule for a divergence.
 
 // -------------------------------------------------------------------
-// The light
+// The lights
 //
-// One directional light and an ambient floor, which is the whole model the
-// shaders implement. Not `scene.add(new three.DirectionalLight(...))`: that
-// name would promise adding, removing, colouring and duplicating, and this
-// renderer can do none of them. `plan.md` §4's half-match rule — a name
-// Three.js does not have is a name nobody expects Three.js's behaviour from.
+// Up to four directional lights and one ambient floor, which is the whole
+// model the shaders implement. Not `scene.add(new three.DirectionalLight(...))`:
+// that name would promise a light with a position, a light you can parent
+// something to, and a light `scene.remove` reaches. A light here is none of
+// those — it is a direction, a colour and a slot. `plan.md` §4's half-match
+// rule: a name Three.js does not have is a name nobody expects Three.js's
+// behaviour from, and `three.lights` is a list of four rather than a graph.
+//
+// **`three.light` is `three.lights[0]`, the same object.** It is the sun: the
+// one the shadow map is fitted around and the only one that casts, which is
+// why the shadow settings hang off it and not off the list. Every script
+// written before there was a list still means what it meant.
 //
 // `direction` hands back a live Vector3, so `three.light.direction.y = -1`
 // writes through the same way `mesh.position.y = 1` does. A detached copy
 // would be the trap the camera avoided by making yaw and pitch throw on
 // assignment — a property that reads back what you wrote and changes nothing.
 
-const light = {
-	get direction() {
-		const [x, y, z] = H.lightGet();
-		const v = new Vector3(null, x, y, z);
-		v._o = { _flush() { H.lightSet(v._x, v._y, v._z, H.lightGet()[3]); } };
-		return v;
-	},
-	set direction(v) {
-		const [x, y, z] = readVector(v, 'three.light.direction');
-		H.lightSet(x, y, z, H.lightGet()[3]);
-	},
+// How many slots the frame block has — `MAX_LIGHTS` in `src/gpu/pipeline.c3`,
+// which is where the argument for the number is. Spelled here as well because
+// a script that wants to know cannot ask the host for it, and
+// `three.lights.max` matching what `add` refuses past is a test rather than a
+// comment.
+const MAX_LIGHTS = 4;
 
-	// 0 leaves a face turned away from the light black; 1 removes the
+// One light, by slot.
+//
+// A fresh object each read, like `three.light.shadow` and for the same
+// reason: a slot is a position in a list that `remove` can shift, so an
+// object that remembered which light it was would start describing its
+// neighbour. What it remembers is the index, which is exactly what
+// `three.lights[i]` means.
+function lightAt(index) {
+	return {
+		// Which slot this is. `three.lights.remove(light)` is the reader —
+		// a light has no handle, so the index is how one names itself.
+		get index() { return index; },
+
+		get direction() {
+			const l = H.lightGet(index);
+			const v = new Vector3(null, l[0], l[1], l[2]);
+			v._o = {
+				_flush() {
+					const c = H.lightGet(index);
+					H.lightSet(index, v._x, v._y, v._z, c[3], c[4], c[5], c[6]);
+				},
+			};
+			return v;
+		},
+		set direction(v) {
+			const [x, y, z] = readVector(v, 'light.direction');
+			const c = H.lightGet(index);
+			H.lightSet(index, x, y, z, c[3], c[4], c[5], c[6]);
+		},
+
+		// The light's own colour, as `[r, g, b]` from 0 to 1. White is what
+		// every slot starts at, so a scene that never mentions colour is lit
+		// exactly as it was before lights had one.
+		//
+		// Takes whatever `readColor` takes — a hex, a triple, an `{r, g, b}`
+		// — and answers with the triple, for `scene.background`'s reason:
+		// the components are what the arithmetic uses, and a hex cannot
+		// represent what the arithmetic can hold.
+		get color() {
+			const l = H.lightGet(index);
+			return [l[3], l[4], l[5]];
+		},
+		set color(v) {
+			const c = readColor(v, 'light.color');
+			const l = H.lightGet(index);
+			H.lightSet(index, l[0], l[1], l[2], c[0], c[1], c[2], l[6]);
+		},
+
+		// How strongly this light shines, 1 by default. It multiplies the
+		// colour, so it is the knob for "brighter than white" — a colour is
+		// clamped to 0..1 and this is not.
+		//
+		// 0 is how a light is turned off. `three.lights.remove()` is the
+		// other way and is not available for light zero, which is the sun.
+		get intensity() { return H.lightGet(index)[6]; },
+		set intensity(v) {
+			const l = H.lightGet(index);
+			H.lightSet(index, l[0], l[1], l[2], l[3], l[4], l[5], +v);
+		},
+	};
+}
+
+const light = lightAt(0);
+
+Object.defineProperties(light, {
+	// 0 leaves a face turned away from every light black; 1 removes the
 	// shading entirely and everything is its own flat colour.
-	get ambient() { return H.lightGet()[3]; },
-	set ambient(v) {
-		const [x, y, z] = H.lightGet();
-		H.lightSet(x, y, z, +v);
+	//
+	// **On `three.light` rather than on each light**, because it is not a
+	// light: it stands in for every bounce this renderer does not simulate,
+	// and four of them summed would be four times the same fudge.
+	ambient: {
+		enumerable: true,
+		get() { return H.ambientGet(); },
+		set(v) { H.ambientSet(+v); },
 	},
 
-	// Both at once, because setting them one at a time is two host crossings
-	// and reads worse at a call site that always means one change.
-	set(direction, ambient = H.lightGet()[3]) {
-		const [x, y, z] = readVector(direction, 'three.light.set(direction, ambient)');
-		H.lightSet(x, y, z, +ambient);
-		return light;
+	// The sun and the floor at once, because setting them one at a time is
+	// two host crossings and reads worse at a call site that always means
+	// one change.
+	//
+	// **The second argument is the ambient floor and not a colour**, which
+	// it was before there were colours and still is. `three.light.color` is
+	// how the sun is coloured; changing what this meant would have been a
+	// silent reinterpretation of every script that had already called it.
+	set: {
+		enumerable: true,
+		value(direction, ambient = H.ambientGet()) {
+			const [x, y, z] = readVector(direction, 'three.light.set(direction, ambient)');
+			const l = H.lightGet(0);
+			H.lightSet(0, x, y, z, l[3], l[4], l[5], l[6]);
+			H.ambientSet(+ambient);
+			return light;
+		},
 	},
+});
+
+Object.defineProperties(light, {
 
 	// The shadow this light casts. `three.light.shadow.bias` and
 	// `.intensity` are Three.js's own names on Three.js's own object —
@@ -117,7 +202,9 @@ const light = {
 	// A fresh object each read, like `direction` above, so the four
 	// properties always answer with what the host holds rather than with
 	// what a captured copy remembered.
-	get shadow() {
+	shadow: {
+		enumerable: true,
+		get() {
 		return {
 			// Off by default. Turning it on allocates a depth image and
 			// compiles a shader the first frame after, and never before
@@ -209,30 +296,107 @@ const light = {
 				};
 			},
 		};
+		},
+
+		// `three.light.shadow = true` and `= { size: 4096 }` both work,
+		// because the first is what somebody writes without reading
+		// anything and the second is what they write after. An object sets
+		// only the keys it names; a boolean is `{ enabled: it }`.
+		set(v) {
+			const [enabled, size, bias, intensity, distance] = H.shadowGet();
+			if (typeof v === 'boolean' || v == null) {
+				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
+				return;
+			}
+			if (typeof v !== 'object') {
+				throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias, intensity or distance');
+			}
+			H.shadowSet(
+				('enabled' in v ? (v.enabled ? 1 : 0) : enabled),
+				('size' in v ? +v.size : size),
+				('bias' in v ? +v.bias : bias),
+				('intensity' in v ? +v.intensity : intensity),
+				('distance' in v ? +v.distance : distance),
+			);
+		},
+	},
+});
+
+// The list. Four slots, the sun in the first, and `length` of them lit.
+//
+// Array-shaped rather than a set of methods, because the thing a script wants
+// to do with more than one light is loop over them — and because
+// `three.lights[0] === three.light` is the sentence that says the two views
+// are of the same four slots.
+const lights = {
+	get length() { return H.lightCount(); },
+
+	// How many there can be, and the number `add` refuses past. Four, and
+	// `plan.md` §19 has why: the fifth light is the trigger for a compute
+	// pass that bins them, and a list this short does not need one.
+	get max() { return MAX_LIGHTS; },
+
+	// A light in the next free slot, answering with it.
+	//
+	// `add(direction, color, intensity)` and `add({ direction, color,
+	// intensity })` both work, for `three.light.shadow`'s reason: the first
+	// is what somebody writes without reading anything and the second is
+	// what they write after.
+	add(direction, color = 0xffffff, intensity = 1) {
+		let d = direction, c = color, i = intensity;
+		if (direction !== null && typeof direction === 'object' && !Array.isArray(direction)
+			&& !('x' in direction) && !('0' in direction)) {
+			d = direction.direction;
+			c = 'color' in direction ? direction.color : 0xffffff;
+			i = 'intensity' in direction ? direction.intensity : 1;
+		}
+		if (d === undefined) {
+			throw new TypeError('three.lights.add wants a direction — add([x, y, z]) or add({ direction, color, intensity })');
+		}
+		const [x, y, z] = readVector(d, 'three.lights.add(direction)');
+		const rgb = readColor(c, 'three.lights.add(direction, color)');
+		return lightAt(H.lightAdd(x, y, z, rgb[0], rgb[1], rgb[2], +i));
 	},
 
-	// `three.light.shadow = true` and `= { size: 4096 }` both work, because
-	// the first is what somebody writes without reading anything and the
-	// second is what they write after. An object sets only the keys it
-	// names; a boolean is `{ enabled: it }`.
-	set shadow(v) {
-		const [enabled, size, bias, intensity, distance] = H.shadowGet();
-		if (typeof v === 'boolean' || v == null) {
-			H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
-			return;
+	// Take one out. The slots above it move down, exactly as
+	// `Array.prototype.splice` does — so an index held across this names a
+	// different light afterwards, which is the rule an array index has
+	// always had.
+	//
+	// **Light zero cannot be removed**: it is the one the shadow map is
+	// fitted around, so taking it out would silently move every shadow in
+	// the scene onto whichever light was next. `three.light.intensity = 0`
+	// is how the sun is turned off.
+	remove(which) {
+		const i = typeof which === 'number'
+			? which
+			: (which && typeof which.index === 'number' ? which.index : -1);
+		if (i < 0) {
+			throw new TypeError('three.lights.remove wants an index, or a light from three.lights');
 		}
-		if (typeof v !== 'object') {
-			throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias, intensity or distance');
-		}
-		H.shadowSet(
-			('enabled' in v ? (v.enabled ? 1 : 0) : enabled),
-			('size' in v ? +v.size : size),
-			('bias' in v ? +v.bias : bias),
-			('intensity' in v ? +v.intensity : intensity),
-			('distance' in v ? +v.distance : distance),
-		);
+		H.lightRemove(i);
+	},
+
+	*[Symbol.iterator]() {
+		for (let i = 0; i < H.lightCount(); i++) yield lights[i];
 	},
 };
+
+// The four slots, by index. Getters rather than an array because the list is
+// live: a script that reads `three.lights[1]` after a `remove` should see the
+// light that is there now, not the one that was.
+//
+// Slot zero answers with `light` itself, so `three.lights[0] === three.light`
+// — one object, one place the shadow settings live.
+for (let i = 0; i < MAX_LIGHTS; i++) {
+	Object.defineProperty(lights, i, {
+		enumerable: true,
+		get() {
+			if (i >= H.lightCount()) return undefined;
+			return i === 0 ? light : lightAt(i);
+		},
+	});
+}
 
 const camera = {
 	get fov() { return H.cameraGet()[6]; },
@@ -512,7 +676,7 @@ const camera = {
 // mode ends.
 //
 // **It survives `new three.Scene()` and `activate()`,** following the camera
-// rather than the background. The background, the light and the shadow
+// rather than the background. The background, the lights and the shadow
 // settings belong to a scene and travel with it; the mouse does not belong
 // to a scene at all, and a game that took it for its own camera would lose
 // it at every level boundary.
@@ -835,6 +999,7 @@ export const three = {
 	DataTexture,
 	camera,
 	light,
+	lights,
 	controls,
 	clock,
 	debug,

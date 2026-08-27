@@ -315,6 +315,32 @@ struct Material
 	//
 	// Never read directly outside `Material.opacity`.
 	float one_minus_opacity;
+	// `material.roughness`, stored as `1 - roughness` for the same reason opacity
+	// is stored as its complement: C3 zero-fills what an initializer leaves out,
+	// and a *zero* roughness is a mirror — every material nobody said anything
+	// about would come out as one.
+	//
+	// Never read directly outside `Material.surface`.
+	float one_minus_roughness;
+	// `material.metalness` and `material.reflectance`, both 0 by default, so the
+	// zero fill is already the right answer and neither needs inverting.
+	//
+	// ## Why reflectance is 0 rather than the 4% that real dielectrics reflect
+	//
+	// Because the standing constraint at the bottom of `plan.md` says a default is
+	// invented when the answer stops depending on the scene, and this one has not:
+	// every scene in this project was authored against a Lambert renderer, and
+	// turning a 4% highlight on for all of them would relight all of them. So the
+	// physical value is one line away — `material.reflectance = 0.5` — and off
+	// until asked for, exactly as shadows are.
+	//
+	// The same argument is why the glTF importer does not apply the file's
+	// `metallicFactor` and `roughnessFactor`, whose spec defaults are 1 and 1: a
+	// file that says nothing is a fully metallic surface under those, and this
+	// renderer has no environment for a metal to reflect. `GpuMaterial` carries
+	// both so a script can read them and decide.
+	float metalness;
+	float reflectance;
 	char[PUSH_BUDGET] block;
 	// The uniform table, when it did not fit the block. Empty for every material
 	// whose uniforms fit — almost all of them — and then nothing below this line
@@ -471,6 +497,18 @@ fn float[4] Material.uv_transform_or_identity(&self)
 fn float Material.opacity(&self)
 {
 	return 1.0f - self.one_minus_opacity;
+}
+
+<*
+ The three numbers the specular term reads, in `DrawRecord.surface`'s order.
+
+ One accessor rather than three fields read directly, so the roughness complement
+ is undone in exactly one place — `Material.opacity` is the same shape for the
+ same reason.
+*>
+fn float[4] Material.surface(&self)
+{
+	return { 1.0f - self.one_minus_roughness, self.metalness, self.reflectance, 0 };
 }
 
 <*

@@ -41,17 +41,29 @@ struct Instance
     uint pose;
 };
 
+// Byte for byte what `mesh.slang`, `material.slang` and `gpu/pipeline.c3`
+// declare. Nothing here reads a light — this pass is fitted around light zero and
+// the fit arrives as `light_view_projection` — and the struct is here because the
+// offsets are the contract, not because the fields are used.
+struct Light
+{
+    float4 direction;
+    float4 color;
+};
+
 // Byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare. This pass reads
 // `light_view_projection` and `live_poses` and nothing else in it — the fields
 // are here because the offsets are the contract, not because they are all used.
 struct FrameBlock
 {
     float4x4 view_projection;
-    float4 light;
+    float4 lighting;
     float4x4* live_poses;
     float4x4 light_view_projection;
     float4 shadow;
     float4 debug;
+    float4 camera;
+    Light lights[4];
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.
@@ -76,6 +88,7 @@ struct Draw
     uint flags;
     uint skin_stride;
     float4 uv_transform;
+    float4 surface;
 };
 
 // The mesh contract exactly, and nothing appended: there are no material

@@ -28,8 +28,10 @@
 
  That rule has been obeyed twice. First, the old block spent 64 of its 128 bytes
  on a per-draw `mvp`, which left no room for the instance-array pointer
- instancing needs — so the view-projection and the light moved into a
- `FrameBlock` written once a frame and reached through one pointer.
+ instancing needs — so the view-projection and the lighting moved into a
+ `FrameBlock` written once a frame and reached through one pointer. That is also
+ what makes a *list* of lights free: four more of them is 128 bytes of a buffer
+ rather than 128 bytes of a budget every material is competing for.
 
  Second, `DrawRecord`. The mesh contract had grown to 76 bytes across eight
  fields, every one per-draw and none able to move to a per-*frame* block, which
@@ -127,13 +129,46 @@ const ShaderEntry[*] SHADOW_ENTRIES = {
 const uint SKIN_WORKGROUP = 64;
 
 <*
+ How many lights the frame block carries, and so how many a script may have.
+
+ Four because the fifth is `plan.md` §19's trigger for clustered forward: a loop
+ this short costs less than the compute pass that would bin it, and the number
+ that makes that stop being true is the one the plan already names. The shaders
+ spell it as a literal in their `FrameBlock` declarations, because those are a
+ wire format and `FrameBlock::size` is what holds the two together.
+*>
+const uint MAX_LIGHTS = 4;
+
+<*
+ One light, as the three shading shaders declare it.
+
+ **Light zero is the sun.** `render/shadow.c3` fits the shadow map around it and
+ it is the only one that casts; the rest light and do not shadow. A second caster
+ is a second fit and a second depth pass — `plan.md` §19's atlas is what turns
+ that into a tiling question rather than an allocation one.
+*>
+struct Light
+{
+	// xyz surface-to-light in world space, w unused. Not normalized: the shaders
+	// normalize on read, so a script's magnitude has never meant anything, and
+	// normalizing at the door would answer `three.light.direction` with numbers
+	// nobody wrote.
+	float[4] direction;
+	// rgb the light's colour, linear. w its intensity, which the shader multiplies
+	// in — so a colour stays a colour a picker can produce and a light can still be
+	// brighter than white.
+	float[4] color;
+}
+
+<*
  What every draw in a frame shares. One per frame in flight, written before
  recording and read through `MeshPush.frame`.
 *>
 struct FrameBlock
 {
 	Matrix4f view_projection;
-	float[4] light; // xyz surface-to-light (world), w ambient floor
+	// x the ambient floor, y how many of `lights` are lit this frame, zw unused.
+	float[4] lighting;
 	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
 	// frame with no live character.
 	//
@@ -171,6 +206,24 @@ struct FrameBlock
 	 first time a second view wanted a parameter.
 	*>
 	float[4] debug;
+	<*
+	 Where the camera is, in world space, with w unused.
+
+	 Read by the specular term and by nothing else — a highlight is the one thing
+	 in a shading body that depends on which way the surface is being looked at,
+	 and inverting `view_projection` per fragment to recover it would be work for a
+	 value the CPU already has.
+	*>
+	float[4] camera;
+	<*
+	 The frame's lights, `lighting[1]` of them, light zero first. The rest of the
+	 array is whatever was there last frame and no loop reaches it.
+
+	 **At the end of the block deliberately.** Every field above kept the offset it
+	 had when there was one light, and `shaders/shadow.slang` reads
+	 `light_view_projection` at 88 by that offset rather than by name.
+	*>
+	Light[MAX_LIGHTS] lights;
 }
 
 <*
@@ -207,7 +260,8 @@ struct SkinnedVertex
 	base_color    64    16
 	flags         80     4
 	skin_stride   84     4
-	uv_transform  88    16    = 104, and no tail padding
+	uv_transform  88    16
+	surface      104    16    = 120, and no tail padding
 
  The stride between records is this struct's size, decided on the C3 side alone:
  the shader is handed a pointer to one record and never indexes past it, so
@@ -244,6 +298,14 @@ struct DrawRecord
 	// `examples/village` covered its ground with 484 separate plane meshes purely
 	// so one 128px grass texture would not stretch across 132 units.
 	float[4] uv_transform;
+	// x roughness, y metalness, z reflectance, w unused — `material.roughness`,
+	// `.metalness` and `.reflectance`, which is everything the specular term reads
+	// off a material.
+	//
+	// Here rather than in a material's uniforms for `uv_transform`'s reason: only a
+	// ShaderMaterial has uniforms, and the surface most likely to want a highlight
+	// is a `MeshLambertMaterial` on a floor.
+	float[4] surface;
 }
 
 struct MeshPush
@@ -307,8 +369,9 @@ $assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer 
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert DrawRecord::size == 104 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 184 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert DrawRecord::size == 120 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert FrameBlock::size == 328 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 
@@ -374,19 +437,23 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  push block, which is a layout Slang will report.
 
 	view_projection          0    64
-	light                   64    16
+	lighting                64    16
 	live_poses              80     8
 	light_view_projection   88    64
 	shadow                 152    16
-	debug                  168    16    = 184, and no tail padding
+	debug                  168    16
+	camera                 184    16
+	lights                 200   128    = 328, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
-	{ "view_projection",         0, 64 },
-	{ "light",                  64, 16 },
-	{ "live_poses",             80,  8 },
-	{ "light_view_projection",  88, 64 },
-	{ "shadow",                152, 16 },
-	{ "debug",                 168, 16 },
+	{ "view_projection",         0,  64 },
+	{ "lighting",               64,  16 },
+	{ "live_poses",             80,   8 },
+	{ "light_view_projection",  88,  64 },
+	{ "shadow",                152,  16 },
+	{ "debug",                 168,  16 },
+	{ "camera",                184,  16 },
+	{ "lights",                200, 128 },
 };
 
 <*
@@ -418,6 +485,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "flags",        80,  4 },
 	{ "skin_stride",  84,  4 },
 	{ "uv_transform", 88, 16 },
+	{ "surface",     104, 16 },
 };
 
 <*

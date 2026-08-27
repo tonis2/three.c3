@@ -462,7 +462,7 @@ fn void the_draw_record_matches_the_shader() @test
 		"    + float4(push.weights[0].xyz + push.posed[0].position + push.posed[0].normal, 0.0)\n"
 		"    + push.palette[0][0] + float(push.joints[0].x) + float(push.skin_stride); }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
-		"{ return push.uv_transform * push.colors[0] * float(push.flags); }\n",
+		"{ return push.uv_transform * push.surface * push.colors[0] * float(push.flags); }\n",
 		source[vertex_start : vertex_end],
 		source[start : end]
 	);
@@ -499,7 +499,7 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	test::@check(three::DrawRecord::size == 104, "and the record is 104 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 120, "and the record is 120 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
@@ -522,6 +522,13 @@ fn void the_frame_block_matches_the_shader() @test
 	String source = three::load_source(MESH_PATH)!!;
 	defer source.free(mem);
 
+	sz? light_start = source.index_of("struct Light");
+	test::@check(@ok(light_start), "mesh.slang declares a `struct Light`");
+	if (catch light_start) return;
+	sz? light_end = source[light_start..].index_of("};");
+	test::@check(@ok(light_end), "and it is closed");
+	if (catch light_end) return;
+
 	sz? start = source.index_of("struct FrameBlock");
 	test::@check(@ok(start), "mesh.slang declares a `struct FrameBlock`");
 	if (catch start) return;
@@ -529,13 +536,18 @@ fn void the_frame_block_matches_the_shader() @test
 	test::@check(@ok(end), "and it is closed");
 	if (catch end) return;
 
+	// `Light` as well as the block, because the block holds an array of them and
+	// a probe without it does not compile.
 	String probe = string::tformat(
+		"%s};\n"
 		"%s};\n"
 		"[vk_push_constant] const FrameBlock push;\n"
 		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
-		"{ return mul(push.view_projection, push.light) + push.live_poses[0][0]; }\n"
+		"{ return mul(push.view_projection, push.lighting) + push.live_poses[0][0] + push.camera; }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
-		"{ return mul(push.light_view_projection, push.shadow); }\n",
+		"{ return mul(push.light_view_projection, push.shadow) + push.debug\n"
+		"  + push.lights[0].direction + push.lights[3].color; }\n",
+		source[light_start : light_end],
 		source[start : end]
 	);
 
@@ -563,7 +575,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 184, "and the block is 184 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 328, "and the block is 328 bytes, got %d", three::FrameBlock::size);
 }
 
 <*
@@ -596,7 +608,7 @@ fn void every_shader_declares_the_same_contract() @test
 	String mesh = three::load_source(paths[0])!!;
 	defer mesh.free(mem);
 
-	String[4] structs = { "struct Instance", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
+	String[5] structs = { "struct Instance", "struct Light", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
 
 	for (uint file = 1; file < 3; file++)
 	{

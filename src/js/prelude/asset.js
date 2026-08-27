@@ -106,11 +106,13 @@ export class MeshRef {
 	// file, and is the shorter door.
 	//
 	// **What nothing shades yet.** `aoMap` has no built-in term — one line in a
-	// `shade` body multiplies by it. `metalness`/`roughness` and their map are
-	// blocked rather than missing: the built-in light is one lambert factor with
-	// no specular, so there is nothing for a roughness value to feed. They cross
-	// because a `ShaderMaterial` body may do something else with them and
-	// "we parsed it and threw it away" was the previous answer.
+	// `shade` body multiplies by it. `metalness` and `roughness` cross as the
+	// file's numbers and are **not applied**: glTF's defaults are 1 and 1, so a
+	// file that says nothing is a fully metallic surface, and a metal with no
+	// environment to reflect renders dark. Put them on the material yourself —
+	// `material.metalness`, `material.roughness` — when the file means them.
+	// Their map is per texel and this renderer's pair is per material, so it
+	// crosses for a `ShaderMaterial` body to do something with and nothing else.
 	//
 	// **Reading this uploads the mesh, and every read holds new references**,
 	// exactly as `layers` does: the images exist only once the primitive is on the

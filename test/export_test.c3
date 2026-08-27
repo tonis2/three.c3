@@ -1974,10 +1974,15 @@ fn void a_source_materials_normal_map_is_written_across() @test
  nothing carrying them across.
 
  The light's aiming is the half worth checking rather than assuming.
- `MeshPass.light` is *surface-to-light* and a glTF directional light shines along
+ `Light.direction` is *surface-to-light* and a glTF directional light shines along
  its node's -Z, so the node's +Z is the vector as stored — a negation either way
  lights the far side of everything, which reads as the exporter having the
  normals wrong rather than the light backwards.
+
+ The second light is here for the half that is not aiming: the file has to carry
+ every light rather than the sun alone, with the colour and the intensity each was
+ given, and the names have to say which one casts the scene's shadows — glTF has
+ no slot that records it.
 *>
 fn void the_camera_and_the_light_are_in_the_file() @test
 {
@@ -1992,6 +1997,7 @@ fn void the_camera_and_the_light_are_in_the_file() @test
 
 			three.camera.fov = 60;
 			three.light.direction = [0, 0, 1];
+			three.lights.add({ direction: [1, 0, 0], color: 0x0000ff, intensity: 2 });
 
 			const report = scene.export("build/export_camera_light.glb");
 			return { nodes: report.nodes, fov: three.camera.fov };
@@ -2012,11 +2018,16 @@ fn void the_camera_and_the_light_are_in_the_file() @test
 			"on a node that names it: %s", json);
 		// Surface-to-light is +z, so the node is unrotated: its +Z is already the
 		// vector, and the light travels along -Z from there.
-		test::@check(json.contains(`{"name":"light","extensions"`),
+		test::@check(json.contains(`{"name":"sun","extensions"`),
 			"whose rotation is the identity for a light straight down +z: %s", json);
 
-		// Four nodes: the scene root, the box under it, the camera and the light.
-		test::@check(result.value.contains(`"nodes":4`),
-			"the camera and the light are nodes like any other: %s", result.value);
+		// The second one, with the colour and the strength it was given — and named
+		// so that reloading puts it back as a light that does not cast.
+		test::@check(json.contains(`{"name":"light 1","type":"directional","color":[0,0,1],"intensity":2}`),
+			"the fill light is in the file with its own colour and strength: %s", json);
+
+		// Five nodes: the scene root, the box under it, the camera and two lights.
+		test::@check(result.value.contains(`"nodes":5`),
+			"the camera and the lights are nodes like any other: %s", result.value);
 	};
 }

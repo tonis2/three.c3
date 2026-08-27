@@ -36,17 +36,54 @@ import collision;
 const sz INITIAL_INSTANCES = 64;
 
 <*
- The light a renderer starts on: down and to the right, from slightly in front,
- with a quarter of the surface's colour reaching the shadowed side.
+ Every light in one world, and the floor underneath them.
+
+ One struct because there is one moment they all change — `activate()` — and
+ because adding a light and raising the floor are the same kind of statement:
+ how this world is lit. `SceneLook` keeps one per scene; `MeshPass` keeps the live
+ copy the frame is drawn from.
+
+ The array is always `MAX_LIGHTS` long and `count` says how much of it means
+ anything. A slot past the count holds whatever it last held, which is invisible
+ because the shader's loop stops at the count as well, and is what makes removing
+ a light and adding another one cost nothing.
+*>
+struct Lighting
+{
+	// How many lights are lit, 1 to `MAX_LIGHTS`.
+	//
+	// Never zero. Light zero is `three.light` — the one the shadow map is fitted
+	// around — so "no direct light" is that light set to black rather than a count
+	// of none, and every reader is spared the empty case.
+	uint count;
+	// How much of its own colour a surface keeps where no light reaches it, 0 to 1.
+	//
+	// Frame-wide rather than per light, because it is not a light: it is the term
+	// standing in for every bounce this renderer does not simulate, and four of
+	// them summed would be four times the same fudge.
+	float ambient;
+	Light[MAX_LIGHTS] lights;
+}
+
+<*
+ The lighting a renderer starts on: one white light, down and to the right, from
+ slightly in front, with a quarter of the surface's colour reaching the shadowed
+ side.
 
  Named rather than written twice for `DEFAULT_CLEAR`'s reason — it is something a
  script can ask to be restored to, and two spellings of a default drift.
 
- Not normalized here. The shaders normalize on read, so the magnitude of the
- direction has never meant anything, and normalizing at the door would make
+ The direction is not normalized here. The shaders normalize on read, so its
+ magnitude has never meant anything, and normalizing at the door would make
  `three.light.direction` answer with numbers a script did not write.
 *>
-const float[4] DEFAULT_LIGHT = { 0.35, 0.80, 0.45, 0.25 };
+const Lighting DEFAULT_LIGHTING = {
+	.count = 1,
+	.ambient = 0.25,
+	// The three unlit slots are zero, which is the value they hold until something
+	// fills them and is never read while `count` is one.
+	.lights = { { .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {} },
+};
 
 <*
  The debug views `three.debug.view` selects, as `shaders/mesh.slang` reads them
@@ -128,9 +165,10 @@ struct MeshPass
 	// most of why `frameAll` would otherwise leave the subject at a third of the
 	// width. Seeded in `init` so the very first fit is already right.
 	float aspect;
-	// xyz: surface-to-light in world space. w: the ambient floor, which keeps unlit
-	// faces readable rather than black.
-	float[4] light;
+	// The lights this frame is drawn with, and the ambient floor under them. The
+	// active scene's own — `SceneLook` is where a script's writes land, and
+	// `activate_scene` is the only thing that copies one here.
+	Lighting lighting;
 	// How many materials have had their handle given back and are still named by a
 	// node. Nonzero is the only thing that makes `record` walk the scene for
 	// collectible materials, so the sweep costs nothing in the common case.
@@ -352,7 +390,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	self.assets.init(gpu);
 	self.init_scenes();
 	self.camera = default_camera();
-	self.light = DEFAULT_LIGHT;
+	self.lighting = DEFAULT_LIGHTING;
 	// The first `frame_camera` can run before any frame has been recorded — the CLI
 	// loads a file and fits the camera to it during startup — so the aspect starts
 	// from the target rather than from zero. A zero-height target would make this a
@@ -825,7 +863,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			// holds still spends texel density to avoid that. `ShadowMap.fit`'s
 			// header has the numbers, and this is the one line that decides which
 			// scene is which.
-			self.shadows.fit(self.light, bounds, focus, stable: self.scene.static_nodes > 0);
+			// Light zero and no other: it is the one the map is fitted around, which
+			// is the whole of why the rest do not cast.
+			self.shadows.fit(self.lighting.lights[0].direction, bounds, focus, stable: self.scene.static_nodes > 0);
 			self.shadows.live = true;
 		}
 	}
@@ -860,13 +900,16 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		return;
 	}
 
+	Vec3 eye = self.camera.eye();
 	FrameBlock frame = {
 		.view_projection = view_projection,
-		.light = self.light,
+		.lighting = { self.lighting.ambient, (float)self.lighting.count, 0, 0 },
 		.live_poses = live_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
 		.debug = { (float)self.debug_view, 0, 0, 0 },
+		.camera = { eye.x, eye.y, eye.z, 0 },
+		.lights = self.lighting.lights,
 	};
 	self.frame_view_projection = view_projection;
 	self.live_address = live_address;
@@ -1044,6 +1087,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 				| (preskinned ? FLAG_PRESKINNED : 0),
 			.skin_stride = preskinned ? mesh.vertex_count : 0,
 			.uv_transform = material.uv_transform_or_identity(),
+			.surface = material.surface(),
 		};
 
 		self.draw_indices.push(recorded);
@@ -2023,6 +2067,44 @@ fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repea
 	if (repeat_u == 0 || repeat_v == 0) return MATERIAL_REPEAT_IS_ZERO~;
 
 	self.materials[index].uv_transform = { repeat_u, repeat_v, offset_u, offset_v };
+}
+
+<*
+ `material.roughness`, `.metalness` and `.reflectance` — everything the specular
+ term reads off a material.
+
+ One verb for the three, for `set_material_uv`'s reason: they are one `float4` in
+ the record and setting them separately would be three host crossings to write
+ three quarters of the same sixteen bytes.
+
+ Free to animate, like the opacity and unlike the side: nothing is rebuilt, and a
+ material that goes from matte to wet between frames costs the write.
+
+ The prelude has already refused a value outside 0..1 by name.
+
+ @return? MATERIAL_UNKNOWN : `No such material in this context.`
+*>
+fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float metalness, float reflectance)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	Material* material = &self.materials[index];
+	material.one_minus_roughness = 1.0f - roughness;
+	material.metalness = metalness;
+	material.reflectance = reflectance;
+}
+
+<*
+ What those three read back as.
+
+ An index that names nothing answers the default surface rather than throwing,
+ which is `material_uv`'s rule and `material_opacity`'s: a getter answers what a
+ material nobody asked for anything would answer.
+*>
+fn float[4] MeshPass.material_surface(&self, uint index)
+{
+	if (index >= self.materials.len()) return { 1, 0, 0, 0 };
+	return self.materials[index].surface();
 }
 
 <*

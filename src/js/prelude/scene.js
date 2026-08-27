@@ -54,10 +54,11 @@ export class Scene extends Object3D {
 	// brings the world back exactly as it was. Nothing is freed here — that is
 	// `dispose()`.
 	//
-	// The look comes back with it: the background, the light and the shadow
+	// The look comes back with it: the background, every light and the shadow
 	// settings belong to the scene, so a level looks the way it looked when it
-	// was last on screen. What does not come back is the camera's attachment —
-	// the follow named an object in the scene being left, so it is dropped.
+	// was last on screen — a fill light added for one level does not follow you
+	// into the next. What does not come back is the camera's attachment — the
+	// follow named an object in the scene being left, so it is dropped.
 	activate() {
 		this._check();
 		H.sceneActivate(this._sid);

@@ -235,8 +235,17 @@ fov/near/far`; `position()/forward()/right()` give world vectors;
 `three.camera.attach(object, { offset, distance, lag })` follows something —
 `distance: 0` is first person. There is no `camera.position` to assign.
 
-**Light** — one directional light. `three.light.set(direction, color)`,
-`three.light.shadow`. Shadows are **off by default** and cost a draw.
+**Light** — up to four directional lights. `three.light` is the sun and
+`three.lights` is the list; `three.lights[0] === three.light`. Each has
+`direction`, `color` and `intensity`; `three.lights.add(direction, color,
+intensity)` fills the next slot, `three.light.ambient` is the frame-wide floor.
+Only the sun casts, and `three.light.shadow` is **off by default** and costs a
+draw.
+
+**Surfaces** — `material.reflectance` turns the specular highlight on (0 by
+default — nothing has one until you ask; 0.5 is ordinary glass or wet stone),
+`material.roughness` spreads it out, `material.metalness` moves a colour out of
+the diffuse and into the highlight.
 
 **The loop** — `three.setAnimationLoop(fn)` for drawing,
 `three.setFixedLoop(fn)` for gameplay (60 Hz, same `dt` every call — put
@@ -367,9 +376,10 @@ These are the differences that actually break scripts.
   **stepped**, so bodies in a scene nobody is looking at stand still; a nav bake
   is the exception and works ahead of time. `stats().scenes` is the count a
   transition has to bring back down.
-- **The look belongs to the scene.** `scene.background`, `three.light` and
+- **The look belongs to the scene.** `scene.background`, `three.lights` and
   `three.light.shadow` are the active scene's, and `activate()` brings back the
-  ones that scene had — so a level looks the way you left it. The camera is not:
+  ones that scene had — every light, not just the sun — so a level looks the way
+  you left it. The camera is not:
   its attachment is dropped on a switch, because the follow named an object in
   the scene being left.
 - **Handles go stale.** Unloading an asset frees its slot; naming an old handle
@@ -394,8 +404,14 @@ These are the differences that actually break scripts.
   `stats().nodes` is how many meshes every sweep is testing.
 - **Instancing is automatic.** Same asset reference = one draw call; there is no
   batching step to invoke and no way to write an unbatched scene.
-- **Shadows are off by default**, there is one light and one shadow map, and
-  turning it on costs a second draw per caster.
+- **Shadows are off by default**, there is one shadow map and **only
+  `three.light` casts into it** — the other three lights light and do not shadow.
+  Turning it on costs a second draw per caster.
+- **Nothing is shiny until you say so.** `material.reflectance` is 0 on every
+  material, so the specular term contributes exactly nothing; a surface that
+  should read as wet, polished or glazed wants `reflectance = 0.5` and a
+  `roughness` below 1. A `metalness` of 1 with no sky to reflect is dark, and
+  correctly so.
 - **A platform wider than the route beneath it is a lid.** Every drawable mesh
   is collision geometry, so a summit cap laid over the top of a spiral
   staircase seals it — and the picture shows a cap and a staircase, both

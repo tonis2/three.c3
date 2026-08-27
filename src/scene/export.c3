@@ -63,9 +63,10 @@
  once across the whole surface — and the normal, occlusion and emissive maps of
  the source material.
 
- Not the metallic-roughness half: there is no specular term here, so those
- describe an equation nothing evaluates, and a number in the file that never
- affected a pixel is worse than its absence.
+ The metallic-roughness *factors* go across as well, because the specular term
+ reads them and so the frame was drawn with them. Not the metallic-roughness
+ *map*: this renderer's roughness is one number per material rather than a value
+ per texel, so there is nothing to write one from.
 
  ## Material layers, recovered from the file rather than the frame
 
@@ -261,6 +262,13 @@ struct ExportSurface @local
 	// them: xy is the repeat, zw the offset. `UV_IDENTITY` for a material that
 	// never set one, which writes no `KHR_texture_transform` at all.
 	float[4] uv_transform;
+	// `Material.surface` — x roughness, y metalness, z reflectance, w unused.
+	//
+	// glTF carries the first two directly and has no word for the third, so the
+	// reflectance is here for the dedup key rather than for the writer: two
+	// materials that differ only in it are two materials here and would otherwise
+	// collapse into one on the way out.
+	float[4] surface;
 	bool transparent;
 	// `material.side` — `DoubleSide` is the only one glTF has a word for, and the
 	// two single-sided values differ in which face they keep, which glTF cannot say
@@ -311,6 +319,7 @@ fn bool ExportSurface.equals(self, ExportSurface other)
 	{
 		if (self.base_color[i] != other.base_color[i]) return false;
 		if (self.uv_transform[i] != other.uv_transform[i]) return false;
+		if (self.surface[i] != other.surface[i]) return false;
 	}
 	return true;
 }
@@ -1430,9 +1439,18 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		if (known.key.equals(surface)) return (int)known.material;
 	}
 
-	// Fully rough and not metallic: `mesh.slang` is a Lambert term and a texture,
-	// with no specular of any kind, so a metallic material would render in a glTF
-	// viewer as something this never showed.
+	// The material's own roughness and metalness, which is what the specular term
+	// reads and so what the frame was drawn with. A material nobody set them on is
+	// `roughness: 1, metallic: 0` — fully rough and not metallic — which is both
+	// this renderer's default and the surface a glTF viewer draws closest to what
+	// it saw here.
+	//
+	// `reflectance` has no slot. `KHR_materials_specular` is where it would go, and
+	// it is not written: this renderer's 0 is that extension's 1, so a file
+	// carrying the extension would reload here as a material with no highlight and
+	// a file without it would reload in a viewer as one that has always had one.
+	// Neither direction round-trips, and the one that loses less is the one that
+	// stays silent. The dedup key carries it anyway — see `ExportSurface`.
 	//
 	// `BLEND` rather than `MASK`, because that is what this renderer does: the
 	// alpha is a blend factor, not a cutoff, and `alpha_cutoff` is left at its
@@ -1442,8 +1460,8 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 	uint written = self.out.add_material(
 		"",
 		{ surface.base_color[0], surface.base_color[1], surface.base_color[2], surface.base_color[3] },
-		metallic: 0.0,
-		roughness: 1.0,
+		metallic: surface.surface[1],
+		roughness: surface.surface[0],
 		base_color_texture: uv_texture_ref(surface.texture, surface.uv_transform),
 		double_sided: surface.double_sided,
 		alpha_mode: surface.transparent ? gltf::AlphaMode.BLEND : gltf::AlphaMode.OPAQUE,
@@ -1495,8 +1513,9 @@ fn int Exporter.material_for(&self, ExportSurface surface)
  mesh under its own `LayeredMaterial` shows the script's stack and the script's
  base normal; writing the file's would be a picture the frame did not draw.
 
- Not the metallic-roughness map, and not the two factors: this renderer has no
- specular term, so those describe an equation nothing evaluates.
+ Not the metallic-roughness *map*: this renderer's roughness and metalness are one
+ number each for a whole material rather than a texel-by-texel pair, so there is
+ nothing to write one from. The two factors do go across — see `material_for`.
 *>
 fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color)
 {
@@ -1507,6 +1526,7 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		// it, which `MeshPass.record` draws as nothing at all. Every answer here has
 		// the same shape for it — opaque, single-sided, the identity transform.
 		.uv_transform = material_of == null ? UV_IDENTITY : material_of.uv_transform_or_identity(),
+		.surface = material_of == null ? (float[4]) { 1, 0, 0, 0 } : material_of.surface(),
 		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
 		.double_sided = material_of != null && material_of.cull == CULL_MODE_NONE,
 		.normal = gltf::NO_TEXTURE_REF,
@@ -1749,36 +1769,53 @@ fn void Exporter.write_camera(&self)
 }
 
 <*
- The light, as a directional `KHR_lights_punctual` on a node of its own.
+ Every light, as a directional `KHR_lights_punctual` on a node of its own.
 
- `MeshPass.light` is `float[4]`: xyz is the *surface-to-light* direction and w is
- the ambient floor. A glTF directional light shines along its node's -Z, and the
- direction light *travels* is the negation of surface-to-light — so the node's +Z
- is the vector as stored, and no negation appears here at all. Getting that
- backwards lights the far side of everything, which reads as the exporter having
- the normals wrong.
+ `Light.direction` is the *surface-to-light* direction. A glTF directional light
+ shines along its node's -Z, and the direction light *travels* is the negation of
+ surface-to-light — so the node's +Z is the vector as stored, and no negation
+ appears here at all. Getting that backwards lights the far side of everything,
+ which reads as the exporter having the normals wrong.
+
+ The colour and the intensity go straight across: both sides mean linear rgb and a
+ scalar multiplier, so `three.lights[1].color = 0x4060ff` reloads as the same
+ blue. glTF measures a directional light's intensity in lux and this renderer
+ measures it in nothing at all, so the number is carried rather than converted —
+ the alternative is a unit conversion with no defined input.
+
+ **The names say which one is the sun.** Light zero casts the scene's shadows and
+ nothing in glTF records that, so it is written as `sun` and the rest as `light 1`
+ and up. Reloading into this renderer puts them back in the same order, which is
+ what makes the distinction survive.
 
  The ambient floor cannot be written. `KHR_lights_punctual` has no ambient light
  — it was removed from the extension before ratification — and there is no other
  standard slot for one. A scene with a high floor therefore reloads darker in a
- viewer than it looked here. Folding it into the directional light's intensity
+ viewer than it looked here. Folding it into a directional light's intensity
  would be a different picture rather than the same one.
-
- White at intensity 1 because three's light has neither a colour nor a strength
- of its own — the direction is the whole of it.
 *>
 fn void Exporter.write_light(&self)
 {
-	Vec3 to_light = { self.pass.light[0], self.pass.light[1], self.pass.light[2] };
-	// A light of zero length points nowhere, and normalising it would put NaNs into
-	// the node's rotation. Nothing is written rather than something wrong.
-	if (to_light.length() < 1e-6f) return;
+	for (uint i = 0; i < self.pass.lighting.count; i++)
+	{
+		Light light = self.pass.lighting.lights[i];
+		Vec3 to_light = { light.direction[0], light.direction[1], light.direction[2] };
+		// A light of zero length points nowhere, and normalising it would put NaNs
+		// into the node's rotation. Nothing is written rather than something wrong.
+		if (to_light.length() < 1e-6f) continue;
 
-	uint written = self.out.add_light("light", gltf::LightType.DIRECTIONAL);
-	uint node = self.out.add_node("light", rotation: rotation_towards(to_light.normalize()));
-	self.out.set_node_light(node, written);
-	self.out.add_root(node);
-	self.report.nodes++;
+		String name = i == 0 ? "sun" : string::tformat("light %d", i);
+		uint written = self.out.add_light(
+			name,
+			gltf::LightType.DIRECTIONAL,
+			color: { light.color[0], light.color[1], light.color[2] },
+			intensity: light.color[3]
+		);
+		uint node = self.out.add_node(name, rotation: rotation_towards(to_light.normalize()));
+		self.out.set_node_light(node, written);
+		self.out.add_root(node);
+		self.report.nodes++;
+	}
 }
 
 <*

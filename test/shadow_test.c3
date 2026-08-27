@@ -711,6 +711,164 @@ fn void a_shader_material_draws_the_same_shadowed_frame() @test
 	};
 }
 
+<*
+ A body of `standard(s)` draws the byte-identical frame no material at all draws.
+
+ **The claim the specular term had to keep.** `s.albedo * lambert(s.normal)` was
+ the whole of the built-in shading until there was a highlight; now the built-in
+ is a diffuse half the metalness takes away and a specular half it gives back, and
+ `standard(s)` is the name for both of them together. If that name is not exactly
+ what `mesh.slang` computes then the sentence in `getApiDocs` — "standard(s) IS
+ the built-in shading, whole" — is a comment rather than a fact, and a material
+ written to look like the default would be subtly not.
+
+ Byte equality for `a_shader_material_draws_the_same_shadowed_frame`'s reason: two
+ pipelines computing the same arithmetic on one device produce the same bytes, so
+ anything weaker would pass for a body that was merely close.
+
+ The material carries a roughness, a metalness and a reflectance so that the
+ highlight is actually part of what is being compared. With all three at their
+ defaults both sides reduce to the old arithmetic and the test would pass without
+ the specular term existing at all.
+
+ Proved by injection: drop the `(1 - s.metalness)` from `standard` and the two
+ frames stop matching.
+*>
+fn void a_body_of_standard_draws_the_built_in_frame() @test
+{
+	String scene = `
+		const scene = new three.Scene();
+		const ground = new three.Mesh(new three.PlaneGeometry(12, 12), MATERIAL);
+		ground.rotation.x = -Math.PI / 2;
+		scene.add(ground);
+		const box = new three.Mesh(new three.BoxGeometry(2, 2, 2), new three.MeshLambertMaterial());
+		box.position.set(0, 3, 0);
+		scene.add(box);
+		three.light.set([0.25, 1.0, 0.35], 0.2);
+		three.camera.orbit(0, 45);
+		three.camera.frameAll();
+	`;
+
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@pool()
+		{
+			String surface = `roughness: 0.3, metalness: 0.4, reflectance: 0.8`;
+			String plain_source = scene.treplace(
+				"MATERIAL", string::tformat("new three.MeshLambertMaterial({ %s })", surface)
+			);
+			String custom_source = scene.treplace(
+				"MATERIAL",
+				string::tformat(
+					`new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return standard(s); }", %s })`,
+					surface
+				)
+			);
+
+			three::RunResult plain = run.run(plain_source);
+			defer plain.free();
+			test::@check(plain.ok, "the plain scene built: %s", plain.error);
+
+			three::RunResult on = run.run(`three.light.shadow = true`);
+			defer on.free();
+			image::Image built_in = renderer.capture()!!;
+			defer built_in.free();
+
+			three::RunResult custom = run.run(custom_source);
+			defer custom.free();
+			test::@check(custom.ok, "the ShaderMaterial scene built: %s", custom.error);
+
+			three::RunResult again = run.run(`three.light.shadow = true`);
+			defer again.free();
+			image::Image with_body = renderer.capture()!!;
+			defer with_body.free();
+
+			test::@check(
+				differing_bytes(&built_in, &with_body) == 0,
+				"a body of `standard(s)` draws it identically, %d bytes differ",
+				differing_bytes(&built_in, &with_body)
+			);
+		};
+	};
+}
+
+<*
+ Only light zero is shadowed, because only light zero was fitted.
+
+ **The regression this exists for is a shadow applied to every light.** The map is
+ fitted around light zero and nothing else, so folding its factor into every term
+ of the loop would darken a surface for an occluder that is not between it and
+ that light — a shadow in the wrong place, cast by the wrong thing, and the
+ brighter the fill light the more obviously wrong it looks.
+
+ The two frames are the same scene lit by the same one white light from the same
+ direction. In the first that light is the sun and the shadow pass is off; in the
+ second it is slot one, the sun is at zero intensity, and the shadow pass is on
+ and rendering a map. They must come out byte for byte the same, which they can
+ only do if the map reaches light zero and stops.
+
+ Proved by injection: multiply `direct` by `g_shadow` outside the loop in
+ `lambert` instead of light zero's term inside it, and the second frame gains the
+ box's shadow.
+*>
+fn void only_the_sun_is_shadowed() @test
+{
+	String scene = `
+		const scene = new three.Scene();
+		const ground = new three.Mesh(new three.PlaneGeometry(12, 12));
+		ground.rotation.x = -Math.PI / 2;
+		scene.add(ground);
+		const box = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+		box.position.set(0, 3, 0);
+		scene.add(box);
+		three.light.set([0.25, 1.0, 0.35], 0.2);
+		three.camera.orbit(0, 45);
+		three.camera.frameAll();
+	`;
+
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@pool()
+		{
+			three::RunResult built = run.run(scene);
+			defer built.free();
+			test::@check(built.ok, "the scene built: %s", built.error);
+
+			image::Image unshadowed = renderer.capture()!!;
+			defer unshadowed.free();
+
+			three::RunResult shadowed = run.run(`three.light.shadow = true`);
+			defer shadowed.free();
+			image::Image with_shadow = renderer.capture()!!;
+			defer with_shadow.free();
+			test::@check(
+				differing_bytes(&unshadowed, &with_shadow) > 0,
+				"the scene is one the shadow pass changes"
+			);
+
+			// The same light, moved into a slot the map was not fitted around.
+			three::RunResult moved = run.run(`
+				three.lights.add(three.light.direction, three.light.color, 1);
+				three.light.intensity = 0;
+				three.render(three.scene);
+				return three.lights.length;
+			`);
+			defer moved.free();
+			test::@check(moved.ok, "the second script succeeded: %s", moved.error);
+			test::@check(moved.value == "2", "there are two lights: %s", moved.value);
+
+			image::Image fill = renderer.capture()!!;
+			defer fill.free();
+
+			test::@check(
+				differing_bytes(&unshadowed, &fill) == 0,
+				"a scene lit only by light one is unshadowed even with the pass running, %d bytes differ",
+				differing_bytes(&unshadowed, &fill)
+			);
+		};
+	};
+}
+
 // ============================================================================
 // What the settings do, and what they cost when they are off
 // ============================================================================
