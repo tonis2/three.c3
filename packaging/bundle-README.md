@@ -17,9 +17,9 @@ clear that once:
     ./three --help
 
 There is nothing to install, nothing to build and no launcher script. The
-shader templates are compiled into the executable, so `three` runs from
-whatever directory you are in — including from `$PATH`, as long as the
-libraries beside it come along.
+shader templates and the shader compiler are both inside the executable, so
+`three` runs from whatever directory you are in. On macOS the GPU driver is
+the one file that still has to travel with it — see "Moving the binary".
 
 ## A first scene
 
@@ -35,11 +35,14 @@ non-interactive run needs `--frames` or `--screenshot` to bound it.
 
 ## What is in here
 
-    three            the engine
-    libslang-*       the Slang compiler, which builds the shaders at startup
+    three            the engine, with the Slang shader compiler linked in
     libvulkan_*      the GPU driver (macOS only — see below)
     SKILL.md         the guide
     LICENSE
+
+That is the whole list. Earlier releases also carried `libslang-*.dylib`
+beside the binary; the compiler is inside `three` now, so a bundle that still
+has those files is an old one.
 
 ## Requirements
 
@@ -71,6 +74,10 @@ driver.
 
 ## Moving the binary
 
-The libraries are found relative to the executable, so move the whole folder
-rather than the binary alone. If you want `three` on your `$PATH`, symlink to
-it or add this directory — do not copy the executable out on its own.
+**macOS** — the driver is found relative to the executable, so move the whole
+folder rather than the binary alone. If you want `three` on your `$PATH`,
+symlink to it or add this directory; do not copy the executable out on its
+own, or it will report no Vulkan device.
+
+**Linux / Windows** — `three` is self-contained and the loader is the system's,
+so the executable can be copied anywhere on its own.

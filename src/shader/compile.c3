@@ -145,7 +145,7 @@ slang::Session shared_session @local = null;
 <*
  The Slang session, started on first use.
 
- @return? SLANG_UNAVAILABLE : `Slang would not start. There is no compile request to ask for a diagnostic yet, so the usual cause is a libslang that cannot find the downstream compiler it loads for SPIR-V — see lib/slang.c3l/native/stage-slang.sh.`
+ @return? SLANG_UNAVAILABLE : `Slang would not start. Slang is linked into the binary, so this is not a missing library; there is no compile request to ask for a diagnostic yet either, which is what makes it opaque.`
 *>
 fn slang::Session? slang_session()
 {

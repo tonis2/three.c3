@@ -283,8 +283,8 @@ fn int main(String[] args)
 		// above this by the compiler with a line and a column.
 		if (err == SLANG_UNAVAILABLE)
 		{
-			io::printn("  Slang would not start. The libraries it loads are staged with:");
-			io::printn("      ./lib/slang.c3l/native/stage-slang.sh");
+			io::printn("  Slang would not start. It is linked into this binary, so this is");
+			io::printn("  not a missing file — see the diagnostic above, if there was one.");
 		}
 		// Two different ways of saying "the only driver here is MoltenVK": the
 		// loader refuses to make the instance when that is all it has, and the

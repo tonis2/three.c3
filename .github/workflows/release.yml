@@ -1,8 +1,14 @@
 # Build a downloadable bundle of three for each platform.
 #
-# What a user gets is a zip they extract and run: the binary, the five shader
-# templates it reads at startup, the Slang libraries it links, and — on macOS —
-# the Vulkan driver. Nothing to install and nothing to build.
+# What a user gets is a zip they extract and run: the binary — with the shader
+# templates AND the whole Slang compiler inside it — and, on macOS, the Vulkan
+# driver. Nothing to install and nothing to build.
+#
+# The driver is the only library left beside the executable, and it is there
+# because it cannot be anywhere else: vk/driver.c3 dlopens it by name at
+# runtime. Slang used to sit beside it as three dylibs; it is linked in now, by
+# lib/slang.c3l/native/build-slang.sh and setup.sh's `static` step. See
+# lib/slang.c3l/README.md, "Linking Slang in".
 #
 #   push a tag v*        build every platform, publish a GitHub release
 #   run it by hand       build every platform, keep the zips as artifacts
@@ -56,10 +62,9 @@ jobs:
   build:
     name: ${{ matrix.bundle }}
     runs-on: ${{ matrix.runner }}
-    # Windows is marked experimental not because slang.c3l lacks a target any
-    # more — it has one — but because nothing has yet linked it on a real
-    # Windows toolchain. A red leg here must not withhold the macOS and Linux
-    # zips from a release.
+    # Kept for the legs that are commented out of the matrix below: a red
+    # experimental leg must not withhold the other zips from a release. With
+    # only macOS in the matrix this evaluates false and does nothing.
     continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
@@ -79,25 +84,54 @@ jobs:
             c3c_asset: c3-macos.zip
             target: macos-aarch64
             exe: three
-          - bundle: three-linux-x64
-            runner: ubuntu-22.04
-            c3c_asset: c3-linux-static.tar.gz
-            target: linux-x64
-            exe: three
-          # This is the one leg with a NATIVE Windows toolchain, so c3c hands
+          # ---------------------------------------------------------------
+          # **Linux and Windows are commented out until their static Slang
+          # archives exist.** The bundle links Slang IN now, and the archives
+          # come off slang.c3l's `static` branch, which currently carries
+          # macos-aarch64 alone. Slang cannot be cross-built — its build runs
+          # code generators it compiled for the host — so each one has to be
+          # produced on a machine of its own architecture:
+          #
+          #     ./lib/slang.c3l/native/build-slang.sh
+          #     ./lib/slang.c3l/native/publish-static.sh
+          #
+          # Uncomment a leg once its archive is on that branch. Two things go
+          # with it, and neither is optional:
+          #
+          #   - linux-x64 needs `-lstdc++` (or `-static-libstdc++`) in its
+          #     manifest.json link-args, the way macos-aarch64 has `-lc++`. A
+          #     static Slang does not carry its own C++ runtime dependency the
+          #     way the dylib did, and without it the link ends in hundreds of
+          #     undefined std:: symbols.
+          #   - windows-x64 needs slang.lib built with a matching
+          #     CMAKE_MSVC_RUNTIME_LIBRARY, and has never been linked on a real
+          #     Windows toolchain at all.
+          #
+          # The steps below that are guarded by `runner.os` — the apt install,
+          # the quickjs PIC rebuild, the mingw --cc branch — are left in place
+          # and simply never fire, so re-enabling a leg is this block alone.
+          #
+          # - bundle: three-linux-x64
+          #   runner: ubuntu-22.04
+          #   c3c_asset: c3-linux-static.tar.gz
+          #   target: linux-x64
+          #   exe: three
+          #
+          # The Windows leg is the one with a NATIVE toolchain, so c3c hands
           # quickjs.c3l's `c-sources` to MSVC unless told otherwise — and that
           # manifest's cflags are the GNU spellings, which cl rejects outright
           # ("D8021: invalid numeric argument '/Wno-unused-parameter'"). mingw
           # is the compiler this target is designed around (the archive beside
           # the shim is mingw-built; see that manifest), and the image ships
           # gcc 14. The Build step below is what points c3c at it — and why it
-          # cannot be a bare `--cc gcc` here.
-          - bundle: three-windows-x64
-            runner: windows-2022
-            c3c_asset: c3-windows.zip
-            target: windows-x64
-            exe: three.exe
-            experimental: true
+          # cannot be a bare `--cc gcc` there.
+          #
+          # - bundle: three-windows-x64
+          #   runner: windows-2022
+          #   c3c_asset: c3-windows.zip
+          #   target: windows-x64
+          #   exe: three.exe
+          #   experimental: true
 
     steps:
       - uses: actions/checkout@v4
@@ -140,21 +174,46 @@ jobs:
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools zip
 
       # ------------------------------------------------------------- staging --
-      # Fails early and by name. Without this the Windows leg dies in the linker
-      # with "library not found for -lslang", which does not say that the
-      # binding has no target for this platform.
-      - name: Check Slang staging supports this target
-        run: |
-          set -euo pipefail
-          if ! grep -q '"${{ matrix.target }}"' lib/slang.c3l/manifest.json; then
-            echo "::error::lib/slang.c3l/manifest.json has no '${{ matrix.target }}' target."
-            echo "::error::Add one there, plus asset_for_target/sha_for cases in"
-            echo "::error::lib/slang.c3l/native/stage-slang.sh, before this platform can build."
-            exit 1
-          fi
-
+      # `submodules; slang; driver`. The `slang` step fetches slang.c3l's
+      # prebuilt static archive off its `static` branch — the same shape as the
+      # driver fetch beside it — so a release build downloads no SDK and stages
+      # no dylibs at all.
       - name: setup.sh
         run: ./setup.sh
+
+      # Fails early and by name. Two different failures are being headed off,
+      # and neither says anything about Slang on its own:
+      #
+      #   no archive        `library not found for -lslang`, which names
+      #                     neither the file nor the branch it comes from
+      #   no manifest entry the same message, from the other direction —
+      #                     `linked-libraries` is per target
+      #
+      # There is a third that this cannot check but that belongs in the same
+      # breath: a target whose manifest link-args do not name a C++ runtime
+      # (`-lc++`, `-lstdc++`) links a static Slang and ends in hundreds of
+      # undefined std:: symbols. The dylib carried that dependency itself; the
+      # archive does not. macos-aarch64 has it; a new target needs it adding.
+      - name: Check the static Slang archive is in place
+        run: |
+          set -euo pipefail
+          dir="lib/slang.c3l/lib/${{ matrix.target }}"
+          name=libslang.a
+          if [ "${{ runner.os }}" = Windows ]; then name=slang.lib; fi
+
+          test -f "$dir/$name" || {
+            echo "::error::$dir/$name is missing — setup.sh's slang step did not"
+            echo "::error::produce it. slang.c3l's 'static' branch carries an archive"
+            echo "::error::per target; build and publish this one on a ${{ matrix.target }}"
+            echo "::error::machine with native/build-slang.sh + native/publish-static.sh."
+            exit 1; }
+
+          grep -q '"${{ matrix.target }}"' lib/slang.c3l/manifest.json || {
+            echo "::error::lib/slang.c3l/manifest.json has no '${{ matrix.target }}' target,"
+            echo "::error::so -lslang will not find the archive that is sitting right there."
+            exit 1; }
+
+          ls -la "$dir"
 
       # quickjs.c3l ships lib/linux-x64/libquickjs.a prebuilt, and that archive
       # was built without -fPIC. ELF x86-64 forbids the relocations non-PIC code
@@ -251,18 +310,15 @@ jobs:
           cp "build/${{ matrix.exe }}" "$out/"
           chmod +x "$out/${{ matrix.exe }}" || true
 
-          # No shaders/ and no launcher. src/shader/load.c3 carries the five
-          # templates in the binary now, so `three` runs from any directory and
-          # the bundle is the executable plus the libraries it loads.
-
-          # Those directories hold SYMLINKS into a per-machine SDK, and on macOS
-          # three of the four slang names resolve to the same 27 MB file — so
-          # this is not `cp -RL`, which ships it three times. See the script.
-          echo "slang libraries:"
-          ./packaging/stage-libs.sh "lib/slang.c3l/lib/${{ matrix.target }}" "$out"
+          # No shaders/, no launcher and no Slang. src/shader/load.c3 carries
+          # the five templates in the binary and the compiler is linked in, so
+          # the bundle is the executable plus, on macOS, the one library that
+          # has to stay a file: the driver.
 
           # macOS arm64 is the only platform that bundles a driver; setup.sh
           # skips the fetch everywhere else and Linux/Windows use the system's.
+          # stage-libs.sh rather than `cp -RL` because these are symlinks and a
+          # dereferencing copy ships the same file once per alias.
           if [ -d "lib/vulkan.c3l/${{ matrix.target }}" ]; then
             echo "vulkan driver:"
             ./packaging/stage-libs.sh "lib/vulkan.c3l/${{ matrix.target }}" "$out"
@@ -286,6 +342,11 @@ jobs:
       # others — and in every case it prints nothing of its own. So usage text
       # coming back IS the linkage test, and it is run from INSIDE the bundle
       # so that what is tested is the zip rather than the build tree.
+      #
+      # With Slang linked in there is far less left for this to catch than
+      # there was — the C++ runtime `-lc++` names, and the c3c runtime. That is
+      # exactly why the otool check below exists: this step passing no longer
+      # means the bundle is complete, only that it starts.
       - name: Check the bundle starts and its libraries resolve
         run: |
           set -euo pipefail
@@ -299,7 +360,47 @@ jobs:
             echo "::error::${{ matrix.exe }} did not start — a library is missing from the bundle"
             exit 1; }
           rm -f help.log
-          echo "::warning::CI verifies that this bundle LOADS. Rendering, the embedded shader templates and glslang are NOT verified here — run packaging/smoke.js on a real GPU before shipping."
+          echo "::warning::CI verifies that this bundle LOADS. Rendering and the embedded shader templates are NOT verified here — run packaging/smoke.js on a real GPU before shipping."
+
+      # **The check that the static link actually happened.** Everything above
+      # this passes just as well for the old bundle: the binary starts either
+      # way, because in the old shape the dylibs were sitting next to it. What
+      # distinguishes the two is what the executable RECORDS as its
+      # dependencies, and that is readable without running anything.
+      #
+      # It matters because the failure is silent and directional. `-lslang`
+      # prefers a dylib to an archive when both are in the search path, so one
+      # stray libslang.dylib left in lib/slang.c3l/lib/<target>/ — from a
+      # developer's `./setup.sh slang`, or a `static` step that failed in a way
+      # `set -e` did not catch — produces a bundle that builds, starts, passes
+      # every other check here, and then dies in dyld on the user's machine
+      # naming a library that was never put in the zip.
+      - name: Check Slang is INSIDE the binary, not beside it
+        run: |
+          set -euo pipefail
+          exe="${{ steps.assemble.outputs.out }}/${{ matrix.exe }}"
+
+          case "${{ runner.os }}" in
+            # tail -n +2 drops otool's header, which is the path to the
+            # executable — and that path is built out of matrix.bundle, so it
+            # must not be part of what is searched.
+            macOS) deps="$(otool -L "$exe" | tail -n +2)" ;;
+            Linux) deps="$(objdump -p "$exe" | awk '/NEEDED/ { print $2 }')" ;;
+            *)     echo "no dependency dump for ${{ runner.os }} — skipped"; exit 0 ;;
+          esac
+
+          echo "--- recorded dependencies ---"
+          echo "$deps"
+
+          if echo "$deps" | grep -qi 'slang'; then
+            echo "::error::${{ matrix.exe }} still records a Slang library as a runtime"
+            echo "::error::dependency, so Slang was NOT linked in. Almost always a stale"
+            echo "::error::dylib left in lib/slang.c3l/lib/${{ matrix.target }}/ by an older"
+            echo "::error::checkout, which -lslang preferred to the archive. fetch-static.sh"
+            echo "::error::sweeps those and names each one it removes — check the setup.sh log."
+            exit 1
+          fi
+          echo "ok: no Slang library is loaded at runtime"
 
       # The macOS-only half, and the only thing about the driver a machine with
       # no GPU can still be sure of. `vk/driver.c3` dlopens this file and dlsyms

@@ -6,7 +6,6 @@
 #     ./setup.sh submodules   # just one step, by name
 #     ./setup.sh slang
 #     ./setup.sh driver
-#     ./setup.sh static      # link Slang IN, for a single-file release binary
 #
 # Safe to re-run: every step checks whether it has already been done.
 #
@@ -42,16 +41,24 @@ run_submodules() {
 
 run_slang() {
 	echo "==> slang"
-	# slang.c3l links a Slang SDK — 35 MB of somebody else's build, and
-	# machine-specific — so lib/slang.c3l/lib/ holds symlinks that are not in git.
-	# The script uses an installed SDK if there is one and downloads the pinned
-	# release, checksum-verified, if there is not.
+	# slang.c3l links Slang IN, as one 43 MB static archive, and has no other
+	# mode — no SDK on the machine, no dylibs beside the binary, no rpath. The
+	# archive is too large for git, so it lives on that repository's `static`
+	# orphan branch and this fetches it: the same arrangement as run_driver
+	# below, for the same reason.
 	#
-	# **This one does not always fail at the linker when skipped.** A machine
-	# with another Slang on the default search path — /usr/local/lib, from an
-	# installer — links against that one instead and dies at startup in dyld
-	# naming a version nobody asked for. Measured; see slang.c3l's README.
-	./lib/slang.c3l/native/stage-slang.sh
+	# Skipping it fails at the linker with "library not found for -lslang".
+	#
+	# A target nobody has published yet has to be built on a machine of that
+	# architecture — Slang runs code generators it compiled for the host, so
+	# there is no cross-build — with lib/slang.c3l/native/build-slang.sh, then
+	# pushed with native/publish-static.sh. Only macos-aarch64 exists today, and
+	# fetch-static.sh says so by name when it comes up empty.
+	#
+	# **The archive carries no spirv-opt**, so src/shader/compile.c3's
+	# SLANG_ARGUMENTS must keep its `-O0`. Without it every shader compile fails
+	# with "failed to load downstream compiler 'spirv-opt'".
+	./lib/slang.c3l/native/fetch-static.sh
 }
 
 run_driver() {
@@ -94,39 +101,17 @@ run_driver() {
 	echo "    fetched $(git -C lib/vulkan.c3l show FETCH_HEAD:VERSION 2>/dev/null || echo 'unversioned')"
 }
 
-# **Not part of `all`, on purpose.** The default is stage-slang.sh's dylibs: it
-# takes thirty seconds, needs no C++ toolchain, and is what a checkout wants in
-# order to start building. This step is for the other job — producing the single
-# file a person downloads and runs, with no libraries beside it and no rpath to
-# get wrong.
-#
-# It fetches a prebuilt archive from slang.c3l's `static` orphan branch, the same
-# way run_driver fetches KosmicKrisp from vulkan.c3l's `driver` branch and for
-# the same reason: ~43 MB per target, rebuilt on every Slang bump, so main would
-# keep every version of every target for ever.
-#
-# A target nobody has published yet has to be built on a machine of that
-# architecture — Slang runs generators it compiled for the host, so there is no
-# cross-build — with lib/slang.c3l/native/build-slang.sh, then pushed with
-# native/publish-static.sh. fetch-static.sh says so by name when it comes up
-# empty.
-#
-# **The archive carries no spirv-opt**, so src/shader/compile.c3's
-# SLANG_ARGUMENTS must keep its `-O0`. Without it every shader compile fails
-# with "failed to load downstream compiler 'spirv-opt'".
-run_static() {
-	echo "==> static slang"
-	./lib/slang.c3l/native/fetch-static.sh
-}
-
 case "$step" in
 	all)        run_submodules; run_slang; run_driver ;;
 	submodules) run_submodules ;;
 	slang)      run_slang ;;
+	# `static` was this script's name for the Slang fetch while there was also a
+	# dylib path to tell it apart from. There is not any more; kept so the old
+	# invocation does not fail with "unknown step".
+	static)     run_slang ;;
 	driver)     run_driver ;;
-	static)     run_static ;;
-	-h|--help)  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	*)          echo "setup: unknown step '$step' (all, submodules, slang, driver, static)" >&2; exit 2 ;;
+	-h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	*)          echo "setup: unknown step '$step' (all, submodules, slang, driver)" >&2; exit 2 ;;
 esac
 
 echo "==> done"
