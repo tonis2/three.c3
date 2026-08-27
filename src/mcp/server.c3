@@ -60,6 +60,13 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	// that builds the tools.
 	if (host != null && host.runtime != null) host.runtime.script_budget_ns = JS_MCP_BUDGET_MS * 1_000_000;
 
+	// And the advice stops going to the terminal, for the same reason and in the
+	// same place. `run_script` answers with a `warnings` array, so under a server
+	// the terminal is a second copy of it — printed at a person who is watching an
+	// agent work and reading advice about a script they did not write.
+	// `advise_quiet` has the rest.
+	advise_quiet(true);
+
 	server.add_tool({
 		.name = "run_script",
 		.description =

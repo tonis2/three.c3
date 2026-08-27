@@ -1609,10 +1609,12 @@ export const three = {
 	// the last two, and it cannot go wrong in the way doing it by hand does
 	// because the host refuses to dispose the scene being rendered.
 	//
-	// Answers with { scenes, assets, textures, bytes } — how many worlds went,
-	// and what the sweep actually gave back afterwards. The second is often
-	// zero and that is right: two scenes over one kit means disposing either
-	// frees nothing.
+	// Answers with { scenes, assets, meshes, textures, bytes } — how many
+	// worlds went, and what the sweep actually gave back afterwards. The
+	// second is often zero and that is right: two scenes over one kit means
+	// disposing either frees nothing, and `bytes` is texture bytes alone, so a
+	// sweep that gave back nothing but geometry reads zero too.
+	// `stats().geometryBytes` before and after is that half.
 	disposeInactive() { return disposeInactiveScenes(); },
 
 	// Free every asset no live mesh names, and every texture that goes with
@@ -1620,8 +1622,11 @@ export const three = {
 	// transition wants; this on its own is for the asset loaded and then
 	// changed its mind about.
 	//
-	// Answers with { assets, textures, bytes } — how many asset slots went,
-	// how many unique images went, and how many bytes of image that was.
+	// Answers with { assets, meshes, textures, bytes } — how many asset slots
+	// went, how many pieces of a still-used file went without it, how many
+	// unique images went, and how many bytes of IMAGE that was. `bytes` is
+	// textures only: geometry freed here does not appear in it, and
+	// `stats().geometryBytes` before and after is where that shows.
 	// Costs a full device idle when there is anything to free and nothing at
 	// all when there is not, so once per level is right and once per frame is
 	// merely wasteful.

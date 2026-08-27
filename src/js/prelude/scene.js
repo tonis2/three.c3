@@ -405,10 +405,11 @@ export function sceneOverview() {
 // nothing to draw however many scenes it walks — activate the one you want
 // first, and this is the rest of it.
 //
-// Answers with { scenes, assets, textures, bytes }: how many worlds went, and
-// what the sweep afterwards actually gave back. Those are different numbers and
-// the second is often zero — two scenes over one kit means disposing either
-// frees nothing.
+// Answers with { scenes, assets, meshes, textures, bytes }: how many worlds
+// went, and what the sweep afterwards actually gave back. Those are different
+// numbers and the second is often zero — two scenes over one kit means
+// disposing either frees nothing, and `bytes` counts textures alone, so a sweep
+// that gave back only geometry reads zero as well.
 export function disposeInactiveScenes() {
 	const scenes = H.disposeInactive();
 	for (const held of [...scenesById.values()]) {

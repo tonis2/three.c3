@@ -1501,7 +1501,9 @@ export const DOCS = {
 			+ 'draw, because the host refuses to dispose the scene being rendered — so activate what you '
 			+ 'are keeping first. Answers with { scenes, assets, meshes, textures, bytes }: how many '
 			+ 'worlds went, and what the sweep afterwards actually gave back. The second is often zero and '
-			+ 'that is right — two scenes over one kit means disposing either frees nothing.',
+			+ 'that is right: two scenes over one kit means disposing either frees nothing, and bytes counts '
+			+ 'TEXTURE bytes alone, so a sweep that gave back nothing but geometry also reads 0. '
+			+ 'stats().geometryBytes before and after is that half.',
 		'three.camera.attach(object, options)':
 			'Follow an object with the camera. { offset: [x, y, z] } is added to its world position and '
 			+ 'becomes the orbit point every frame; { distance } is how far behind the eye sits, and 0 '
@@ -1521,8 +1523,10 @@ export const DOCS = {
 			'Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and '
 			+ 'every texture that goes with them. Answers with { assets, meshes, textures, bytes } — '
 			+ 'meshes counts the pieces given back without their file, which is what lets a level swap '
-			+ 'which parts of a kit it places without reloading the kit. scene.unload() is this plus '
-			+ 'emptying the scene and is what a level transition wants. An asset loaded but never added '
+			+ 'which parts of a kit it places without reloading the kit. bytes is TEXTURE bytes — the images '
+			+ 'that went, not the geometry — so a sweep that freed a hundred megabytes of vertex streams and '
+			+ 'no images answers 0; stats().geometryBytes before and after is the other half. '
+			+ 'scene.unload() is this plus emptying the scene and is what a level transition wants. An asset loaded but never added '
 			+ 'has no references either, so it goes too — load the next level after unloading, not before.',
 		'three.inventory()':
 			'Every .glb and .gltf under the assets directory, described without loading any of it: '
@@ -2097,8 +2101,8 @@ export const DOCS = {
 		textureBytes: 'What those cost.',
 		geometryBytes: 'What the geometry costs: every vertex stream and index buffer on the device, PLUS the positions and triangle indices kept resident on the CPU, because the pick tree points at them. Both halves, because there are two — a scene of a few hundred thousand vertices carries tens of megabytes on each side. Falls to zero across a full unload, which is the number a count of assets cannot prove.',
 		targetBytes: 'The offscreen frame: one colour image and one depth image at the render size. What the process holds before a single mesh is loaded, about 17 MB at 1080p, and the floor under everything else here.',
-		postBytes: 'The post chain, and 0 with no post shader. Image A plus the ping-pong pair plus one image per tapped pass, at EIGHT bytes a pixel against the target\'s four — so a two-pass chain at 1080p is around 40 MB, more than the frame it is processing.',
-		shadowBytes: 'The shadow map, and 0 until shadows are turned on. Two D32 images at size squared once anything in the scene is static, one before that: 2048 is 34 MB, 4096 is 134 MB and 8192 — the ceiling — is 536 MB. This is the single largest thing one assignment can do to a process, which is why the setter says so when it is raised above the default.',
+		postBytes: 'The post chain: Image A plus as much of the ping-pong pair as the chain needed, plus one image per tapped pass, at EIGHT bytes a pixel against the target\'s four — so a two-pass chain at 1080p is around 40 MB, more than the frame it is processing. 0 for a runtime that NEVER SET a post shader, and a high-water mark after that: three.setPost(null) retires the shaders and KEEPS the images, because the next setPost wants them at the same extent and freeing device images is not something a clear should stall for. So this does not fall when a chain is cleared or shortened, and a nonzero reading with nothing running is that rather than a leak.',
+		shadowBytes: 'The shadow map: two D32 images at size squared once anything in the scene is static, one before that. 2048 is 34 MB, 4096 is 134 MB and 8192 — the ceiling — is 536 MB. This is the single largest thing one assignment can do to a process, which is why the setter says so when it is raised above the default. 0 until shadows are turned on for the FIRST time. After that it follows shadow.size both up and down while they are on, but three.light.shadow.enabled = false keeps the last map rather than freeing it — turning shadows off does not give the memory back, and this says so.',
 		materials: 'Materials you have built and not had collected. The two built-in ones are not counted. This is assets for the OTHER resource that has to be given back by hand: a material holds a compiled pipeline until material.dispose() gives it back, so a script that builds one per run and drops the handle grows this forever — and the host says so in the run_script reply once this passes 64. It falls when the material is COLLECTED, which is after both the dispose() and the last mesh that named it going, so disposing while something still draws with it leaves the number where it was and that is correct.',
 		culledLastFrame: 'Instances the camera frustum dropped in the last render(). Meaningful with shadows on too: the shadow pass has its own draw list against the light\'s box, so turning shadows on no longer costs the camera its cull.',
 		shadowCulled: 'Instances neither pass drew — outside the camera frustum AND outside the light\'s box. 0 with shadows off. A caster the camera cannot see is still drawn into the map, so this is smaller than culledLastFrame, not equal to it.',

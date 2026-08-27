@@ -1362,9 +1362,11 @@ fn void js_stats(
  like collecting, which is the worst possible property for the one number a game
  watches. A level boundary is an explicit moment and this is what happens at it.
 
- Answers with `{ assets, textures, bytes }` rather than nothing, because an agent
- that cannot see the number move has no way to tell a working unload from a
- no-op — and `stats()` afterwards is the independent confirmation.
+ Answers with `{ assets, meshes, textures, bytes }` rather than nothing, because
+ an agent that cannot see the number move has no way to tell a working unload
+ from a no-op — and `stats()` afterwards is the independent confirmation. `bytes`
+ is texture bytes alone, so a sweep that gave back geometry and no images answers
+ 0; `stats().geometryBytes` across the call is that half.
 
  Costs a full device idle when there is anything to free and nothing at all when
  there is not, so calling it every level is right and calling it every frame is

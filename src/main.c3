@@ -260,7 +260,8 @@ const bool DEBUG_BUILD = $feat(DEBUG);
 
  This is for the developer at the terminal, not the agent: what a `run_script`
  should see belongs in `log`, which comes back through `RunResult`, and advice
- about the scene belongs in `@advise`, which reaches both.
+ about the scene belongs in `@advise`, which reaches the agent always and the
+ terminal when no server is driving.
 *>
 macro @debug_log(format, ...)
 {

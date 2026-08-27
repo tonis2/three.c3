@@ -225,6 +225,11 @@ fn void PostPass.init(&self)
 
  Read off the allocations, so a chain that grew an image for a tap is counted
  without this having to know the rule that gave it one.
+
+ Which is also why it does not fall when a chain is cleared. `clear` retires the
+ stages and keeps the three images for the next `set` — its own doc has the
+ argument — so past the first `set` this is a high-water mark rather than a
+ reading of what is running. `free` is the only thing that takes it back to zero.
 *>
 fn usz PostPass.bytes(&self)
 {
