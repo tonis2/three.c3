@@ -31,11 +31,12 @@
 
  `slang::build_tag()` — `spGetBuildTagString`, the release tag baked into
  libslang at its own build — is hashed into the filename *and* written into the
- file as checked identity. So an SDK upgrade does not leave the cache holding
+ file as checked identity. So a Slang upgrade does not leave the cache holding
  modules built by a compiler that is gone: every key moves, every old file is
  unreachable, and a hash collision onto one of them fails the identity check the
  same way. That costs one call to a function returning static storage; hashing
- `libslang.dylib` instead would cost 35 MB of reading per process.
+ the compiler itself would mean re-reading tens of megabytes per process, and
+ now that Slang is linked in there is no separate file to hash anyway.
 
  A build with no tag is still a key. Slang reports something like `unknown` for a
  compiler built from an untagged checkout, and two such builds are then

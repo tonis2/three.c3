@@ -16,16 +16,18 @@ this file and the docs disagree, the docs are right.
 
 ## What has to be next to the binary
 
-`three` is one executable and the native libraries it loads beside it. The
-shader templates used to be a third thing — read from `shaders/` relative to the
-**working directory** — and they are compiled into the binary now, so a bundle
-is the executable plus its libraries and `three` runs from any directory.
+`three` is one executable. The shader templates are compiled into it and so is
+the Slang compiler, so `three` runs from any directory and there is nothing to
+copy alongside it — with one exception, on macOS.
 
 | What | Looked for in | A missing one looks like |
 |---|---|---|
-| the Slang compiler library | next to the executable (macOS: `@executable_path`, then `@executable_path/../lib/slang.c3l/lib/<platform>`) | `dyld: Library not loaded` — the process never starts |
-| the Slang **glslang** library | beside the compiler library | shadows only — see below |
 | a Vulkan driver (macOS) | `@executable_path` first, then the loader's own ICD discovery | no device, or a silent fall through to whatever else is installed |
+
+On macOS that driver is `libvulkan_kosmickrisp.dylib`, and it has to stay a
+file beside the binary because `vk/driver.c3` `dlopen`s it by name. Move the
+folder, not the executable. On Linux and Windows the loader is the system's and
+the executable travels alone.
 
 **A checkout still overrides.** `shader_source` reads the search path first —
 `shaders/<name>` then `build/shaders/<name>` — and falls back to the embedded
@@ -34,12 +36,6 @@ rebuild, exactly as before; a shipped binary with no `shaders/` beside it uses
 what it carries. A *broken* shader on that path wins too, and reports a Slang
 error with a line and a column rather than being quietly ignored.
 
-### The glslang library, and what it actually breaks
-
-`libslang-glslang` is not a second compiler. It is `spirv-opt`, which Slang
-loads as a *downstream tool* on the SPIR-V path and finds by name beside its own
-dylib. Remove it from a bundle and **every** shader compile fails — measured on
-a cold cache, from an assembled bundle:
 
 ```
 error[E00100]: failed to load downstream compiler 'spirv-opt'
@@ -48,9 +44,7 @@ note[E99996]: failed to load dynamic library 'slang-glslang-2026.12.2'
 three: three::SHADER_COMPILE_FAILED
 ```
 
-No frame is drawn and no PNG is written, so this one is loud. (An earlier note
-here said it broke only the shadow shader and exited 0 — that was true of an
-older configuration and is not what happens now.)
+No frame is drawn and no PNG is written, so this one is loud. 
 
 ### The one that fails quietly
 

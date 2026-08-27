@@ -3,13 +3,14 @@
 # Copy a staged native-library directory into a bundle, once per FILE rather
 # than once per name.
 #
-#     ./packaging/stage-libs.sh lib/slang.c3l/lib/macos-aarch64 dist/three-macos-arm64
+#     ./packaging/stage-libs.sh lib/vulkan.c3l/macos-aarch64 dist/three-macos-arm64
 #
-# `lib/slang.c3l/lib/<target>/` holds symlinks into a per-machine SDK, and on
-# macOS three of its four names — libslang.dylib, libslang-compiler.dylib and
-# libslang-compiler.<ver>.dylib — resolve to the SAME 27 MB file. A plain
-# `cp -RL` dereferences each one separately and ships that file three times: a
-# measured 115 MB bundle where 61 MB is the whole content.
+# The one caller left is the Vulkan driver — Slang is linked into the binary now
+# and has nothing to stage. `lib/vulkan.c3l/<target>/` holds a real file plus
+# aliases, and a directory of that shape is what this exists for: a plain
+# `cp -RL` dereferences each name separately and ships the same bytes once per
+# alias. Measured on the old Slang directory, where three of four names resolved
+# to the same 27 MB file: a 115 MB bundle holding 61 MB of content.
 #
 # So: one real copy per distinct target, and every other name recreated as a
 # relative symlink beside it. The loader is looking for a NAME, and both the
