@@ -307,6 +307,14 @@ and sweeps afterwards. `stats()`'s four `...Bytes` beyond `textureBytes` —
 `geometryBytes, targetBytes, postBytes, shadowBytes` — are where the memory
 actually is.
 
+**The window** — `three.window.width/.height/.scale` in device pixels, and
+`three.window.resize(w, h)` to ask for a different size. It moves the *window*
+and not the picture: everything renders into an offscreen target fixed at what
+`--width`/`--height` asked for at boot, so a bigger window is the same pixels
+stretched and `renderSize()`, the screenshot PNG and `pick(x, y)` do not move.
+Resizing past the render size says so in `warnings`. Zero and `false` under
+`--headless`, and the size never reads back on Wayland.
+
 **Math** — `three.clamp/smoothstep/pingpong/moveTowards/wrapAngle/mixColor/
 damp/smoothDamp`, `three.seed(n)`/`three.hash`, `three.catmullRom`, `Vector3`,
 `Random`.

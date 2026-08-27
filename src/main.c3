@@ -432,6 +432,7 @@ fn void? run(Options opts)
 	{
 		c3w::EventMap events = window.getEvent(wait: quiet);
 		if (events.is_pressed(ESCAPE)) break;
+		want_surface(&renderer, &window);
 
 		long now_ns = (long)since_start.to_now();
 		float dt_ms = (float)(now_ns - last_ns) / 1_000_000.0f;
@@ -455,6 +456,28 @@ fn void? run(Options opts)
 		bool presented = renderer.frame()!;
 		quiet = presented && !moved;
 	}
+}
+
+<*
+ Hands the window's own size to the swapchain, in device pixels.
+
+ Read every frame and written straight through, because both numbers are latches
+ on this side of the call and the comparison that matters happens in
+ `Renderer.frame`, against what the surface reports.
+
+ The scale is what makes it device pixels: `Window.width` is logical points, and
+ a swapchain image is physical. They differ on a retina display and on any
+ Wayland session with a scaled output, and agreeing at startup is a coincidence
+ of both being 1.
+
+ It only reaches anything on a surface that declines to report its own size —
+ Wayland — so on X11 and macOS this is two multiplications and a store.
+*>
+fn void want_surface(Renderer* renderer, c3w::Window* window)
+{
+	float scale = window.get_scale();
+	if (scale <= 0.0f) scale = 1.0f;
+	renderer.want_surface((uint)(window.width * scale), (uint)(window.height * scale));
 }
 
 <*
@@ -725,6 +748,7 @@ fn void? live(
 			if (window.should_close()) break;
 			c3w::EventMap events = window.getEvent(wait: quiet);
 			if (events.is_pressed(ESCAPE)) break;
+			want_surface(renderer, window);
 
 			long now_ns = (long)since_start.to_now();
 			float dt_ms = (float)(now_ns - last_frame_ns) / 1_000_000.0f;

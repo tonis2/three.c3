@@ -54,6 +54,13 @@
  lives here rather than beside the camera verbs because what it turns off is a
  hand on a window, and the camera is only where the hand was going.
 
+ ## And the window it all arrives through
+
+ `three.window` is the last thing in here that is not input at all: the drawable's
+ size, the display scale, and a way to ask for a different size. It lives beside
+ the pointer lock because the runtime holds exactly one `c3w::Window` and this is
+ the file that reaches for it — see `js_window_size`.
+
  ## One handler per key per edge
 
  Registering `'space'` twice replaces the first, exactly as `setAnimationLoop`
@@ -99,6 +106,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "onClick", &js_on_click, 1);
 	self.bind(host, "controlsGet", &js_controls_get, 0);
 	self.bind(host, "controlsSet", &js_controls_set, 1);
+	self.bind(host, "windowSize", &js_window_size, 0);
+	self.bind(host, "windowResize", &js_window_resize, 2);
 }
 
 <*
@@ -644,4 +653,152 @@ fn void js_pointer_lock_set(
 
 	self.window.setPointerLock(arg_truth(&js, argc, args, 0));
 	*out = qjs::bool_value(self.window.pointerLocked());
+}
+
+// ============================================================================
+// The window itself
+// ============================================================================
+
+// Past this a window manager is being asked for something no display has, and
+// the `int` the backends take would be the only thing objecting.
+const int WINDOW_MAX_SIDE = 16384;
+
+<*
+ `windowSize()` — the drawable and the display density, as
+ `[width, height, scale]`.
+
+ ## Device pixels, and read off the surface
+
+ `width` and `height` are the swapchain's extent: physical pixels, and current
+ through a live resize drag. `Window.width` is only ever what `new` was asked
+ for and is stale on Linux besides, so asking the window would answer a
+ different question badly. `WindowView` reads the same number for the same
+ reason.
+
+ That makes these the same unit `renderSize()` answers in, which is the
+ comparison anybody asking has in mind: the window is where the picture is
+ shown and `renderSize()` is how many pixels the picture has.
+
+ `scale` is device pixels per logical point — 1.0 on an ordinary display, 2.0 on
+ a retina one. It is here because `--width`/`--height` at boot mean logical
+ points to the window and device pixels to the target, so the two agree at
+ startup only where the scale is 1.
+
+ Zeros with no window, which is `--headless` and every test in this repo. Zero
+ is an answer a script can branch on and there is nothing here worth throwing
+ over — `pointerLockGet` reports the same kind of absence the same way.
+
+ ## It does not move on Wayland
+
+ Measured, on the two Linux backends. Under X11 a `windowResize` lands and this
+ reads the new size back a frame or two later. Under Wayland it stays whatever
+ the process booted at, and the reason is one branch in `Viewer.surface_extent`:
+ Wayland answers `currentExtent` with `0xFFFFFFFF`, meaning "whatever the
+ swapchain asks for", so the swapchain goes on asking for the size it was
+ created at and never rebuilds. That is the surface contract rather than anything
+ this verb does — the compositor scales the buffer into whatever the toplevel
+ became — and it is the same reason a live resize drag does not sharpen the
+ picture there either.
+*>
+fn void js_window_size(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint width = 0;
+	uint height = 0;
+	float scale = 0;
+	if (self.window != null && self.renderer != null && self.renderer.windowed)
+	{
+		width = self.renderer.viewer.extent.width;
+		height = self.renderer.viewer.extent.height;
+		scale = self.window.get_scale();
+	}
+
+	qjs::Value triple = js.array();
+	js.set_index(triple, 0, qjs::int_value((int)width));
+	js.set_index(triple, 1, qjs::int_value((int)height));
+	js.set_index(triple, 2, qjs::number_value((double)scale));
+	*out = triple;
+}
+
+<*
+ `windowResize(width, height)` — ask the window to be that many device pixels,
+ and answer with whether there was a window to ask.
+
+ ## A request, not a setting
+
+ Nothing is recorded here and `windowSize()` does not change on the way out. X11
+ configures the window and the manager may adjust the request; Wayland cannot ask
+ at all — it constrains its own geometry and the compositor answers with a
+ configure some time later. The size that arrives back is the one that counts, so
+ a script that cares reads `windowSize()` on a later frame rather than on the
+ next line.
+
+ ## Device pixels in, logical units out
+
+ The arguments match what `windowSize()` reports, so asking for a size and
+ reading it back agrees. `Window.set_size` takes the window's own logical units
+ on every backend, so the scale is divided out here — one place rather than in
+ each of the three callers a prelude property would become.
+
+ False with no window rather than a raise, for `pointerLockSet`'s reason: a
+ headless run is not a mistake a script made, and a game that resizes its window
+ on a machine that has one should still start on a machine that does not.
+*>
+fn void js_window_resize(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int width = arg_int(&js, argc, args, 0);
+	int height = arg_int(&js, argc, args, 1);
+	if (width < 1 || height < 1 || width > WINDOW_MAX_SIDE || height > WINDOW_MAX_SIDE)
+	{
+		*out = js.raise(string::tformat(
+			"three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
+			WINDOW_MAX_SIDE, width, height
+		));
+		return;
+	}
+
+	if (self.window == null) { *out = qjs::bool_value(false); return; }
+
+	float scale = self.window.get_scale();
+	if (scale <= 0.0f) scale = 1.0f;
+	int points_wide = (int)((float)width / scale);
+	int points_high = (int)((float)height / scale);
+	self.window.set_size(points_wide < 1 ? 1 : points_wide, points_high < 1 ? 1 : points_high);
+
+	say_window_stretch(self.renderer, (uint)width, (uint)height);
+	*out = qjs::bool_value(true);
+}
+
+<*
+ Says that a bigger window is not a bigger picture, when it is about to not be.
+
+ The trap this exists for: "make the window bigger" reads as "render more
+ pixels" and here it is neither. The swapchain blits the whole offscreen target
+ onto the whole swapchain image, so a window past the target's extent is the same
+ picture stretched — softer, and a screenshot comes back at the size it always
+ was. Only on the way up, because a window smaller than the target is the same
+ stretch in the direction nobody complains about.
+*>
+fn void say_window_stretch(Renderer* renderer, uint width, uint height) @local
+{
+	if (renderer == null) return;
+	uint image_wide = renderer.target.extent.width;
+	uint image_high = renderer.target.extent.height;
+	if (width <= image_wide && height <= image_high) return;
+
+	@advise(
+		"three: the window was asked for %dx%d and the picture in it is %dx%d stretched to fit. The "
+		"render target is fixed at what --width/--height asked for and resizing the window does not "
+		"move it — three.renderSize() stays what a screenshot and scene.pick count in.",
+		width, height, image_wide, image_high
+	);
 }

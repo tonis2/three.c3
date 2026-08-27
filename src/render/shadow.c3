@@ -78,9 +78,14 @@
  ## The two barriers rest on the specification, not on the layer
 
  `ShadowMap.begin` and `ShadowMap.end` own both ends of this image's life, and
- deleting either leaves every check in `three_tests::shadow` green — the pictures
+ deleting either left every check in `three_tests::shadow` green — the pictures
  included, with the ordinary validation layer and with synchronization validation
  requested through `create_instance(sync: true)`. Measured by injection, twice.
+
+ The check that carried that measurement is gone: it asked the loader for
+ `VK_EXT_validation_features`, which this machine refuses, so it failed for the
+ machine rather than for the pass. The finding stands on the injections, which is
+ all it ever stood on — a green check was never the evidence here.
 
  The post chain does measure that way: comment out `record_chain`'s
  `shader_read_barrier` and `VUID-vkCmdDraw-imageLayout-00344` names the image,

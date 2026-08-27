@@ -60,6 +60,17 @@ struct Viewer
 	vk::ImageList images;
 	// Settled at init, then fixed. See the header.
 	uint image_count;
+	<*
+	 What to build at when the surface declines to say — see `surface_extent`.
+
+	 Zero means "no opinion", which keeps the extent already in use and is what
+	 every path that has no window does. `main.c3`'s loop writes the window's own
+	 size here every frame, and Wayland is the whole reason it exists: that
+	 surface never reports a size, so without this the swapchain goes on asking
+	 for whatever it was created at and a resized window shows an old picture
+	 scaled by the compositor forever.
+	*>
+	vk::Extent2D wanted;
 }
 
 <*
@@ -74,8 +85,21 @@ struct Viewer
 fn vk::Extent2D? Viewer.surface_extent(&self, Gpu* gpu)
 {
 	vk::SurfaceCapabilitiesKHR caps = self.surface.deviceSurfaceCapabilities(gpu.pdevice)!;
-	if (caps.currentExtent.width == uint::max) return self.extent;
+	if (caps.currentExtent.width == uint::max) return self.client_extent();
 	return caps.currentExtent;
+}
+
+<*
+ What to build at when the surface leaves the choice to the client.
+
+ `wanted` if anybody set it, and the extent already in use otherwise — which
+ keeps a renderer with no window, and every test, on exactly the path it was on
+ before this existed.
+*>
+fn vk::Extent2D Viewer.client_extent(&self)
+{
+	if (self.wanted.width == 0 || self.wanted.height == 0) return self.extent;
+	return self.wanted;
 }
 
 <*
@@ -224,7 +248,7 @@ fn bool? Viewer.rebuild(&self, Gpu* gpu)
 {
 	vk::SurfaceCapabilitiesKHR caps = self.surface.deviceSurfaceCapabilities(gpu.pdevice)!;
 	vk::Extent2D extent             = caps.currentExtent;
-	if (extent.width == uint::max) extent = self.extent;
+	if (extent.width == uint::max) extent = self.client_extent();
 	if (extent.width == 0 || extent.height == 0) return false;
 
 	gpu.handle.waitIdle();
