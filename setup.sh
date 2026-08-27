@@ -6,6 +6,7 @@
 #     ./setup.sh submodules   # just one step, by name
 #     ./setup.sh slang
 #     ./setup.sh driver
+#     ./setup.sh static      # link Slang IN, for a single-file release binary
 #
 # Safe to re-run: every step checks whether it has already been done.
 #
@@ -93,13 +94,39 @@ run_driver() {
 	echo "    fetched $(git -C lib/vulkan.c3l show FETCH_HEAD:VERSION 2>/dev/null || echo 'unversioned')"
 }
 
+# **Not part of `all`, on purpose.** The default is stage-slang.sh's dylibs: it
+# takes thirty seconds, needs no C++ toolchain, and is what a checkout wants in
+# order to start building. This step is for the other job — producing the single
+# file a person downloads and runs, with no libraries beside it and no rpath to
+# get wrong.
+#
+# It fetches a prebuilt archive from slang.c3l's `static` orphan branch, the same
+# way run_driver fetches KosmicKrisp from vulkan.c3l's `driver` branch and for
+# the same reason: ~43 MB per target, rebuilt on every Slang bump, so main would
+# keep every version of every target for ever.
+#
+# A target nobody has published yet has to be built on a machine of that
+# architecture — Slang runs generators it compiled for the host, so there is no
+# cross-build — with lib/slang.c3l/native/build-slang.sh, then pushed with
+# native/publish-static.sh. fetch-static.sh says so by name when it comes up
+# empty.
+#
+# **The archive carries no spirv-opt**, so src/shader/compile.c3's
+# SLANG_ARGUMENTS must keep its `-O0`. Without it every shader compile fails
+# with "failed to load downstream compiler 'spirv-opt'".
+run_static() {
+	echo "==> static slang"
+	./lib/slang.c3l/native/fetch-static.sh
+}
+
 case "$step" in
 	all)        run_submodules; run_slang; run_driver ;;
 	submodules) run_submodules ;;
 	slang)      run_slang ;;
 	driver)     run_driver ;;
-	-h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	*)          echo "setup: unknown step '$step' (all, submodules, slang, driver)" >&2; exit 2 ;;
+	static)     run_static ;;
+	-h|--help)  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	*)          echo "setup: unknown step '$step' (all, submodules, slang, driver, static)" >&2; exit 2 ;;
 esac
 
 echo "==> done"

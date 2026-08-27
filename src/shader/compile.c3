@@ -80,6 +80,17 @@ const String[*] SLANG_ARGUMENTS = {
 	// Two invocations passing the same flags is not enough when the defaults
 	// underneath them differ.
 	"-matrix-layout-column-major",
+	// Slang's default is -O1, and at -O1 it hands the SPIR-V it just generated
+	// to `spirv-opt` — which lives inside libslang-glslang and is loaded by
+	// name at runtime, not linked. -emit-spirv-directly does not change that:
+	// it picks the codegen path, and the optimiser runs after codegen either
+	// way. -O0 is the only way to compile without that second library present.
+	//
+	// It costs almost nothing here. Measured on these shaders: mesh.slang is
+	// 28700 bytes at -O0 against 28728 at -O1 — spirv-opt makes it *bigger* —
+	// and shadow.slang 11776 against 10320. Drivers optimise SPIR-V themselves
+	// before it reaches the GPU.
+	"-O0",
 };
 
 // The SPIR-V magic number, little-endian. Checked against what the compiler just
