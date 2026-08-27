@@ -135,6 +135,10 @@ Cheap to decide, expensive to discover. Both gate §8.
       what could break it, by stepping at a rate that depends on the frame.
 - [ ] **Move `test/resize_test.c3` into `lib/window.c3l`.** Its `@test` is
       commented out here, so the swapchain resize path is covered by nothing.
+- [ ] **A scene round-trips to zero.** Build one, `dispose()` it, call
+      `three.unloadUnused()`, and assert `stats().scenes` is back to 1 and
+      `stats().assets` to 0. Nothing covers this, and §23's leak is what it would
+      have caught.
 
 ## 13. The pass system
 
@@ -199,6 +203,8 @@ followed.
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
+      
+- [ ] Give JS api a way to increase window size      
 
 
 ## 19. Shadows at game scale
@@ -222,6 +228,11 @@ followed.
 - [ ] **Revisit `SHADOW_PLAN_STATIC` on a device where the full-image copy is not
       free.** Two lines in `MeshPass.plan_shadow`; `notes.md` §19.3 has the
       numbers to beat and why the measurement came out backwards here.
+- [ ] **Say what `size` costs when it is set.** Two D32 images at `size` squared,
+      `image` and `static_image` (`render/shadow.c3:310`, `:331`), so 2048 is
+      34 MB, 4096 is 134 MB and 8192 is 536 MB — and the clamp is the only thing
+      between a script and the last of those. The setter knows the format and
+      that there are two of them. §23's memory block is where the number belongs.
 
 **Not doing:** the depth prepass (measured — pay 0.59 ms to save at most 0.23),
 and deferred shading (it breaks the material contract). Both are in `notes.md`
@@ -275,6 +286,59 @@ is converted and its header has the before/after.
       a task. `three.kindOf(object)` exists because whatever it turns out to be
       needs to answer "what are these two things" before it can dispatch on
       them; nothing else in §22 assumes it.
+
+---
+
+## 23. The agent surface
+
+What an agent driving `--mcp` can find out, and what it cannot. Every item here
+came out of one session building a beach through `run_script`. The renderer
+diagnosed most of it correctly at the time and had nowhere to say so.
+
+- [ ] **Advisories reach the agent, not just the terminal.** All 17 `io::eprintfn`
+      sites in `src/` are invisible over MCP, including the three that diagnose a
+      real leak: live scenes (`render/pass.c3:555`), live materials (`:639`), and
+      the shadow shader that would not compile (`render/shadow.c3:701`). All three
+      fired during that session; none was read. Route them through a sink and fold
+      it into the `run_script` reply as a `warnings` array *beside* `log` rather
+      than inside it, so an agent can tell advice from its own output.
+      `JsRuntime.collect_validation` (`js/runtime.c3:675`) already does this for
+      the validation layer and is the shape to copy. **Do this one first:** it is
+      one piece of plumbing, and it makes every heuristic already written start
+      reaching the only consumer that needed it.
+- [ ] **Name the fix in the timeout message.** `JsRuntime.timeout_message`
+      (`js/runtime.c3:646`) says the script was stopped and not that
+      `three.budget` is how to stop it happening again. The docs carry a whole
+      entry about this trap, which exists only because the error is silent about
+      the one-line answer.
+- [ ] **Give the MCP path its own budget.** `tool_run_script`
+      (`mcp/server.c3:130`) is the single call site, so this is one line. An agent
+      assembling a scene is not the case the 5 s default protects: that argument
+      (`js/runtime.c3:68`) is about a wedged loop hanging an interactive window,
+      and an MCP call is already asynchronous to the user, under a client timeout
+      of its own. 30–60 s there, `JS_BUDGET_MS` unchanged everywhere else, and the
+      frame callback keeps its own 100 ms. Narrower than raising the global
+      default, and it does not weaken the guarantee for the case that wanted one.
+- [ ] **`three.scenes` and `three.scene(id)`.** A `Scene` in JavaScript is a
+      wrapper around `_sid` (`js/prelude/scene.js`), so a scene whose wrapper was
+      dropped — built inside a `run_script` scope that then ended — is alive,
+      counted, holding a node pool and asset references, and unreachable by any
+      handle in existence. The host can name it the whole time:
+      `MeshPass.scene_by_id` and `dispose_scene` (`render/pass.c3:500`, `:523`)
+      both work by id, and `dispose_scene` already refuses the active one. Binding
+      plus prelude, over a list that is already there.
+- [ ] **`three.disposeInactive()`.** The transition ritual — activate, dispose the
+      rest, `unloadUnused` — is three steps an agent gets wrong by forgetting the
+      middle one. Safe by construction once the loop is written, for
+      `dispose_scene`'s reason.
+- [ ] **`stats()` reports the images the renderer owns.** `textureBytes` and
+      `poseBytes` are the only memory numbers there, and they are not where the
+      memory is: a 1080p frame is ~17 MB of target and ~25 MB of post chain, a
+      scene of 361k vertices is ~18 MB on the device and ~12 MB more kept resident
+      on the CPU (`scene/asset.c3:22`), and one `shadow.size = 4096` is 134 MB by
+      itself. Four fields — `shadowBytes`, `targetBytes`, `postBytes`,
+      `geometryBytes`. It is also the measurement §19's `size` needs before it can
+      earn a default under the standing constraint below.
 
 ---
 
