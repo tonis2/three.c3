@@ -353,19 +353,23 @@ function forgetScene(scene) {
 	if (liveScene === scene) liveScene = null;
 }
 
-// The Scene wrapper for a host id: the one the script built, or a new handle
-// onto a scene whose wrapper is gone.
+// The Scene wrapper for a host id: the one a script built, or a new handle onto
+// a scene no script ever wrapped.
 //
-// The second case is the one this exists for. A scene built inside a run_script
-// scope that then ended is alive, counted, holding its nodes and its asset
-// references, and named by nothing — so before this there was no way to dispose
-// it and no way to look at it. Now there is.
+// The second case is the one this exists for. The scene the process starts with
+// is alive, counted, drawn, and named by nothing on this side, so before this
+// there was no way to activate it back or dispose it. Now there is.
+//
+// A scene a *script* built is not that case, however long ago it built it:
+// `scenesById` holds it until it is disposed, so this gives back the same object
+// with its `children` intact. That is what makes identity survive the end of the
+// run_script that built it.
 //
 // **An adopted handle is a handle, not the tree.** Its `children` is empty even
-// where the host scene has hundreds of nodes, because the objects that made
-// them were the previous script's and are gone. What it can do is everything
-// that goes through the host: activate, dispose, stats, export, background,
-// raycast, pick. What it cannot do is give you back objects nothing kept.
+// where the host scene has hundreds of nodes, because those nodes are the host's
+// and no `Object3D` was ever made for them. What it can do is everything that
+// goes through the host: activate, dispose, stats, export, background, raycast,
+// pick. What it cannot do is give you back objects that never existed here.
 export function sceneForId(id) {
 	const sid = +id;
 	if (!Number.isInteger(sid)) {
@@ -384,8 +388,11 @@ export function sceneForId(id) {
 // What is alive, in the order the host holds them.
 //
 // `id` is what three.sceneById(id) takes; `active` is the one being rendered;
-// `held` says whether this script still has the Scene object that built it,
-// which is the difference between a scene you can reach and one you had lost.
+// `held` says whether a Scene wrapper exists for it here, which is the
+// difference between three.sceneById(id) giving back the tree and giving back a
+// bare handle. It stays true once true — the registry is bounded by dispose,
+// not by the script that built it — so false is a scene nothing here ever
+// wrapped, which the startup scene is until somebody looks it up.
 // `nodes` is there because a leaked scene and an empty one look identical
 // without it.
 export function sceneOverview() {
