@@ -728,7 +728,7 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 	// in `MeshPipeline.init`.
 	if (layout.push_size > PUSH_BUDGET)
 	{
-		io::eprintfn(
+		@advise(
 			"shader: the push block is %d bytes and the budget is %d",
 			layout.push_size,
 			PUSH_BUDGET
@@ -741,12 +741,12 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 		ShaderField* found = layout.field_of(expected.name);
 		if (found == null)
 		{
-			io::eprintfn("shader: the push block has no field '%s'", expected.name);
+			@advise("shader: the push block has no field '%s'", expected.name);
 			return PUSH_BLOCK_MISMATCH~;
 		}
 		if (found.offset != expected.offset || found.size != expected.size)
 		{
-			io::eprintfn(
+			@advise(
 				"shader: push field '%s' is at %d+%d and the contract has it at %d+%d",
 				expected.name,
 				found.offset,
@@ -781,7 +781,7 @@ fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTR
 		}
 		if (!found)
 		{
-			io::eprintfn("shader: the module has no '%s' entry point", wanted.name);
+			@advise("shader: the module has no '%s' entry point", wanted.name);
 			return SHADER_MISSING_ENTRY_POINT~;
 		}
 	}
@@ -825,7 +825,7 @@ fn void? MeshPipeline.build_layouts(
 
 	if (mod.layout.set_count > 1)
 	{
-		io::eprintfn("shader: %d descriptor sets declared and this pass creates one", mod.layout.set_count);
+		@advise("shader: %d descriptor sets declared and this pass creates one", mod.layout.set_count);
 		return SHADER_TOO_MANY_SETS~;
 	}
 
@@ -839,7 +839,7 @@ fn void? MeshPipeline.build_layouts(
 		{
 			if (binding.type == DESCRIPTOR_TYPE_UNBINDABLE)
 			{
-				io::eprintfn("shader: cannot bind '%s' — no Vulkan descriptor type for it", binding.name);
+				@advise("shader: cannot bind '%s' — no Vulkan descriptor type for it", binding.name);
 				return SHADER_BINDING_UNSUPPORTED~;
 			}
 			bindings.push({

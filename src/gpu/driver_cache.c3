@@ -271,7 +271,7 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 		vk::PipelineCache? made = info.build(gpu.handle);
 		if (catch err = made)
 		{
-			io::eprintfn("driver cache: cannot create (%s); every pipeline is built from scratch", err);
+			@advise("driver cache: cannot create (%s); every pipeline is built from scratch", err);
 			self.handle = (vk::PipelineCache)null;
 			self.persisted = false;
 			return;
@@ -330,7 +330,7 @@ fn void DriverCache.save(&self, Gpu* gpu)
 
 		if (catch err = path::mkdir(shader_cache_dir(), recursive: true))
 		{
-			io::eprintfn("driver cache: cannot create %s (%s); every run builds its own pipelines",
+			@advise("driver cache: cannot create %s (%s); every run builds its own pipelines",
 				shader_cache_dir(), err);
 			return;
 		}
@@ -349,7 +349,7 @@ fn void DriverCache.save(&self, Gpu* gpu)
 		String where = driver_cache_path(self);
 		if (catch err = file::save(where, (char[])out.str_view()))
 		{
-			io::eprintfn("driver cache: cannot write %s (%s)", where, err);
+			@advise("driver cache: cannot write %s (%s)", where, err);
 			return;
 		}
 		driver_cache_counters.stores++;

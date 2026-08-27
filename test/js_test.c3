@@ -552,6 +552,80 @@ fn void a_disposed_scene_says_so_and_the_live_one_refuses() @test
 }
 
 <*
+ A scene round-trips to zero: build one over a file, dispose it, sweep, and every
+ number is back where it started.
+
+ **The regression this exists for is the leak nobody could see.** Every piece of
+ this was covered on its own — `unload_test.c3` cycles the asset table a hundred
+ times, and the check above proves a disposed Scene says so — and the whole
+ journey was covered by nothing. A scene that frees its nodes while its asset
+ references stay behind passes both of those and grows the process by a level
+ every time it transitions.
+
+ Four numbers, and each is a different way it can go wrong: `scenes` is the world
+ itself, `assets` is what its nodes were holding, `textures` is what those were
+ holding, and `geometryBytes` is the one that is not a count — a slot given back
+ with its streams still allocated would leave the first three at zero and this
+ above it.
+
+ The sweep is the part that has to be asked for. `dispose()` gives the references
+ back and frees nothing on its own, which is right for two scenes over one kit;
+ `three.unloadUnused()` after it is what makes the memory go.
+*>
+fn void a_scene_round_trips_to_zero() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const start = three.stats();
+
+			// The first Scene claims the empty one the pass boots with, so this is
+			// two scenes and not three — MeshPass.claim_scene has the rule.
+			const home = new three.Scene();
+			const level = new three.Scene();
+			const kit = three.load('test/fixtures/textured.glb');
+			for (const name of kit.meshes) level.add(new three.Mesh(kit.mesh(name)));
+			const built = three.stats();
+
+			// The whole transition: show the one being kept, free the other, sweep.
+			home.activate();
+			level.dispose();
+			three.unloadUnused();
+			const after = three.stats();
+
+			return {
+				startScenes: start.scenes,
+				startAssets: start.assets,
+				builtScenes: built.scenes,
+				builtAssets: built.assets,
+				builtTextures: built.textures,
+				builtGeometry: built.geometryBytes > 0,
+				scenes: after.scenes,
+				assets: after.assets,
+				textures: after.textures,
+				textureBytes: after.textureBytes,
+				geometryBytes: after.geometryBytes,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"startScenes":1`) && result.value.contains(`"startAssets":0`),
+			"it started at one scene and nothing loaded; got %s", result.value);
+		test::@check(result.value.contains(`"builtScenes":2`), "two scenes were live; got %s", result.value);
+		test::@check(result.value.contains(`"builtAssets":1`) && result.value.contains(`"builtTextures":1`),
+			"holding one asset and its texture; got %s", result.value);
+		test::@check(result.value.contains(`"builtGeometry":true`),
+			"and geometry on the device; got %s", result.value);
+		test::@check(result.value.contains(`"scenes":1`), "the world came back down; got %s", result.value);
+		test::@check(result.value.contains(`"assets":0`) && result.value.contains(`"textures":0`),
+			"and gave back what it was holding; got %s", result.value);
+		test::@check(result.value.contains(`"textureBytes":0`) && result.value.contains(`"geometryBytes":0`),
+			"including the bytes, which is the number a count cannot prove; got %s", result.value);
+	};
+}
+
+<*
  Re-parenting keeps the node rather than rebuilding it.
 
  Three.js's `add` moves an object that already has a parent, and doing that by

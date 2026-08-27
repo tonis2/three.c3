@@ -52,6 +52,14 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 {
 	mcp::Server server = mcp::new_server({ .name = "three.c3", .version = VERSION });
 
+	// A script reached through a tool gets a longer default than one reached
+	// through a window — `JS_MCP_BUDGET_MS` has the argument. Here rather than at
+	// the `run` below, so that it is the *default* that moves and not the run:
+	// `three.budget` still works, still clamps, and still persists exactly as it
+	// documents. Serving is what changes it, which is why this is in the function
+	// that builds the tools.
+	if (host != null && host.runtime != null) host.runtime.script_budget_ns = JS_MCP_BUDGET_MS * 1_000_000;
+
 	server.add_tool({
 		.name = "run_script",
 		.description =
@@ -139,6 +147,17 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 
 	report.append_string(`,"log":`);
 	append_json_string(&report, result.log);
+
+	// Beside `log` and only when there is something in it. The two are different
+	// facts — one is what the script printed and the other is what the renderer
+	// noticed about it — and an agent that cannot tell them apart stops reading
+	// either. Absent on nearly every run, which is what keeps it worth reading on
+	// the runs it appears in.
+	if (result.warnings.len > 0)
+	{
+		report.append_string(`,"warnings":`);
+		append_json_lines(&report, result.warnings);
+	}
 
 	// Spliced rather than escaped: it is already JSON, and quoting it would hand
 	// the agent the characters of its own result instead of the result.
@@ -420,6 +439,34 @@ fn void append_json_string(DString* out, String text)
 }
 
 <*
+ One newline-separated string as a JSON array of strings.
+
+ The shape `RunResult.warnings` arrives in, and the reason an array is built here
+ rather than in `advice.c3`: the sink has fixed storage and no allocator, and
+ this has a `DString` already open. Splitting on newlines is exact because the
+ sink flattens a message's own newlines to spaces on the way in — `advice.c3` has
+ that rule and this is the reader it exists for.
+*>
+fn void append_json_lines(DString* out, String text)
+{
+	out.append_char('[');
+	usz from = 0;
+	bool first = true;
+	for (usz i = 0; i <= text.len; i++)
+	{
+		if (i < text.len && text[i] != '\n') continue;
+		if (i > from)
+		{
+			if (!first) out.append_char(',');
+			append_json_string(out, text[from:i - from]);
+			first = false;
+		}
+		from = i + 1;
+	}
+	out.append_char(']');
+}
+
+<*
  The stats block, camelCase, matching what `three.stats()` hands a script.
 
  The same names on both sides on purpose: an agent that reads `drawCalls` off a
@@ -443,7 +490,7 @@ fn void append_json_string(DString* out, String text)
 fn void append_stats(DString* out, SceneStats stats, FrameTiming timing)
 {
 	out.appendf(
-		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"culledLastFrame":%d,"shadowCulled":%d,"gpuMs":%f,"prepareMs":%f,"shadowMs":%f,"sceneMs":%f,"postMs":%f,"presentMs":%f}`,
+		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"geometryBytes":%d,"targetBytes":%d,"postBytes":%d,"shadowBytes":%d,"culledLastFrame":%d,"shadowCulled":%d,"gpuMs":%f,"prepareMs":%f,"shadowMs":%f,"sceneMs":%f,"postMs":%f,"presentMs":%f}`,
 		stats.draw_calls,
 		stats.unique_meshes,
 		stats.instances,
@@ -453,6 +500,10 @@ fn void append_stats(DString* out, SceneStats stats, FrameTiming timing)
 		stats.vertices,
 		stats.textures,
 		stats.texture_bytes,
+		stats.geometry_bytes,
+		stats.target_bytes,
+		stats.post_bytes,
+		stats.shadow_bytes,
 		stats.culled_last_frame,
 		stats.shadow_culled_last_frame,
 		timing.total,

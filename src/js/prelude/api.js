@@ -24,7 +24,7 @@ import { ShaderMaterial } from './shader.js';
 import { LayeredMaterial } from './layers.js';
 import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
-import { liveScene, Scene, liveObject, objectForHandle } from './scene.js';
+import { liveScene, Scene, liveObject, objectForHandle, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
 import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry, RibbonGeometry } from './geometry.js';
 import { Field, scatter, catmullRom } from './field.js';
@@ -1528,6 +1528,47 @@ export const three = {
 	// The rendered scene's. `scene.stats()` is how a scene that is not being
 	// rendered answers for itself.
 	stats() { return H.stats(); },
+
+	// Every scene that exists, as { id, active, held, nodes }.
+	//
+	// **This is the number that goes wrong quietly.** `new three.Scene()` shows
+	// a new world without freeing the one before it — that is what makes
+	// building the next level while the current one is on screen possible — so
+	// a script that builds a scene per call, or a game that transitions eight
+	// times, holds every one of them: a node pool, a physics world and a set of
+	// asset references apiece, drawn by nothing and costing frame time nothing.
+	// `stats().scenes` has always been the count. This is what the count is
+	// made of.
+	//
+	// `held` is the half that says whether you can still do anything about it
+	// from here: false means the Scene object that built it is gone, which is
+	// what happens to every scene built inside a run_script that has ended.
+	// three.sceneById(id) is how you get a handle back, and
+	// three.disposeInactive() is how you get rid of them without one.
+	get scenes() { return sceneOverview(); },
+
+	// The Scene for a host id — the one you built, or a handle onto one whose
+	// wrapper is gone.
+	//
+	// Identity holds where it can: three.sceneById(s.id) === s for a scene this
+	// script still holds. For one it does not, the handle is real and every
+	// verb that goes through the host works on it — activate, dispose, stats,
+	// export, background, raycast — but `children` is empty, because the
+	// objects that filled it belonged to a script that ended.
+	sceneById(id) { return sceneForId(id); },
+
+	// Free every scene except the one being rendered, and sweep.
+	//
+	// The level transition, minus the step everybody forgets. The ritual is
+	// activate the next one, dispose the rest, three.unloadUnused(); this is
+	// the last two, and it cannot go wrong in the way doing it by hand does
+	// because the host refuses to dispose the scene being rendered.
+	//
+	// Answers with { scenes, assets, textures, bytes } — how many worlds went,
+	// and what the sweep actually gave back afterwards. The second is often
+	// zero and that is right: two scenes over one kit means disposing either
+	// frees nothing.
+	disposeInactive() { return disposeInactiveScenes(); },
 
 	// Free every asset no live mesh names, and every texture that goes with
 	// it. scene.unload() is this plus emptying the scene, and is what a level

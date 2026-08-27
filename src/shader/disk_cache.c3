@@ -169,7 +169,7 @@ fn void shader_cache_set_dir(String dir)
 	}
 	if (dir.len > SHADER_CACHE_DIR_MAX)
 	{
-		io::eprintfn("shader cache: '%s' is longer than %d bytes; cache disabled", dir, SHADER_CACHE_DIR_MAX);
+		@advise("shader cache: '%s' is longer than %d bytes; cache disabled", dir, SHADER_CACHE_DIR_MAX);
 		cache_dir = "";
 		return;
 	}
@@ -330,7 +330,7 @@ fn void cache_store(String path, String compiler, String args, String source, Sh
 		// the directory, and one that never compiles never touches the filesystem.
 		if (catch err = path::mkdir(cache_dir, recursive: true))
 		{
-			io::eprintfn("shader cache: cannot create %s (%s); compiling every run", cache_dir, err);
+			@advise("shader cache: cannot create %s (%s); compiling every run", cache_dir, err);
 			return;
 		}
 		// One write of the whole file rather than a stream of fields. A crash
@@ -339,7 +339,7 @@ fn void cache_store(String path, String compiler, String args, String source, Sh
 		// being able to produce.
 		if (catch err = file::save(path, (char[])out.str_view()))
 		{
-			io::eprintfn("shader cache: cannot write %s (%s); compiling every run", path, err);
+			@advise("shader cache: cannot write %s (%s); compiling every run", path, err);
 			return;
 		}
 		cache_counters.stores++;

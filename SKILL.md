@@ -165,14 +165,26 @@ starts; the HTTP transport needs the server already running.
 top-level `await` and `return` both work. Answers with two content blocks,
 **whether or not the script succeeded**:
 
-1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw
+1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw and
+   `warnings` when the renderer had something to say
 2. a PNG of the frame
 
 `stats` is `drawCalls, uniqueMeshes, instances, nodes, assets, triangles,
-vertices, textures, textureBytes, culledLastFrame, shadowCulled` plus six
-timings — `gpuMs` is the frame and `prepareMs / shadowMs / sceneMs / postMs /
-presentMs` are what it was spent on. The `...Ms` fields measure the last frame
-drawn, so they move when nothing about the scene has.
+vertices, textures, textureBytes, geometryBytes, targetBytes, postBytes,
+shadowBytes, culledLastFrame, shadowCulled` plus six timings — `gpuMs` is the
+frame and `prepareMs / shadowMs / sceneMs / postMs / presentMs` are what it was
+spent on. The `...Ms` fields measure the last frame drawn, so they move when
+nothing about the scene has.
+
+`warnings` is an array and is **advice, not errors** — the run still succeeded.
+It is what the host noticed: live scenes climbing, live materials climbing, a
+shadow map that just cost 134 MB, a shader that would not compile. Absent on
+nearly every run, which is what makes it worth reading on the runs it appears
+in. Read it as separate from `log`, which is what your own script printed.
+
+The script budget through `run_script` is **30 s**, not the 5 s a windowed run
+gets. `three.budget = 60000;` at the top of the script raises it, up to ten
+minutes.
 
 **`screenshot`** — takes `{ path }` (optional). Renders and returns the PNG.
 Takes no view arguments; move `three.camera` from a script instead.
@@ -288,6 +300,12 @@ can be built early, but only the active scene's world is stepped.
 **Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
 `three.renderSize()`. Nothing is freed until you say so — a scene included:
 `scene.dispose()`, and `stats().scenes` is how many are still resident.
+`three.scenes` is the list behind that count (`{ id, active, held, nodes }`),
+`three.sceneById(id)` gets a handle back onto one whose `Scene` object is gone,
+and `three.disposeInactive()` frees every scene except the one being rendered
+and sweeps afterwards. `stats()`'s four `...Bytes` beyond `textureBytes` —
+`geometryBytes, targetBytes, postBytes, shadowBytes` — are where the memory
+actually is.
 
 **Math** — `three.clamp/smoothstep/pingpong/moveTowards/wrapAngle/mixColor/
 damp/smoothDamp`, `three.seed(n)`/`three.hash`, `three.catmullRom`, `Vector3`,
@@ -369,7 +387,10 @@ These are the differences that actually break scripts.
   then `three.unloadUnused()`. Only the active scene is drawn, queried and
   **stepped**, so bodies in a scene nobody is looking at stand still; a nav bake
   is the exception and works ahead of time. `stats().scenes` is the count a
-  transition has to bring back down.
+  transition has to bring back down, `three.scenes` is the list it is made of,
+  and `three.disposeInactive()` is the whole ritual minus the `activate()`. A
+  scene built inside a `run_script` that has ended is still alive and no longer
+  named by anything — that is the leak, and `three.scenes` is where you see it.
 - **The look belongs to the scene.** `scene.background`, `three.lights` and
   `three.light.shadow` are the active scene's, and `activate()` brings back the
   ones that scene had — every light, not just the sun — so a level looks the way

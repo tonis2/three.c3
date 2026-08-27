@@ -698,7 +698,7 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 	defer mod.free();
 	if (!mod.ok)
 	{
-		io::eprintfn("three: the shadow shader would not compile: %s", mod.diagnostic);
+		@advise("three: the shadow shader would not compile: %s", mod.diagnostic);
 		return SHADER_MISSING_ENTRY_POINT~;
 	}
 
@@ -1262,6 +1262,18 @@ fn void ShadowMap.destroy_static_image(&self, Gpu* gpu)
 	self.static_created = 0;
 	self.invalidate_static();
 }
+
+<*
+ What the map costs, in bytes, and 0 before there is one.
+
+ Two D32 images at `size` squared once a scene has a static caster, one before
+ that — which is why this is read off the allocations rather than computed from
+ `size`. The number matters out of all proportion to how easy it is to set:
+ `three.light.shadow.size = 4096` is a single assignment and 134 MB, larger than
+ everything else in a frame put together, and until this there was nothing in
+ `stats()` that moved when it was written.
+*>
+fn usz ShadowMap.bytes(&self) => (usz)(self.memory.size + self.static_memory.size);
 
 <*
  Everything the map owns, including the pipeline.
