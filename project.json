@@ -4,82 +4,11 @@
 	"authors": [],
 	"version": "0.1.0",
 	"dependency-search-paths": ["lib"],
-	// **`./setup.sh` does all of the below**, and is safe to re-run. What follows
-	// is why each of its steps exists — three dependencies carry binaries that
-	// are deliberately not in git, and none of the three fails cleanly when its
-	// step is skipped, which is the part worth reading before debugging one.
-	//
-	// quickjs and mcp arrived with M3, which is what `js/` and `mcp/` are.
-	//
-	// **quickjs has a submodule of its own** — `vendor/quickjs-ng`, which its
-	// shim `#include`s. A checkout without `--recursive` leaves that directory
-	// empty and the build fails in the C compiler rather than anywhere that
-	// mentions submodules. `git submodule update --init --recursive` fixes it.
-	//
-	// **slang arrived with M4** and is the one dependency needing a step of its
-	// own: it links a Slang SDK, which is 35 MB of somebody else's build and
-	// machine-specific, so `lib/slang.c3l/lib/` holds symlinks that are not in
-	// git. Run `./lib/slang.c3l/native/stage-slang.sh` once per checkout — it
-	// uses an installed SDK if there is one and downloads the pinned release,
-	// checksum-verified, if there is not.
-	//
-	// **The macOS Vulkan driver is fetched too, since M6.** vulkan.c3l bundles
-	// KosmicKrisp for macOS, but it is 15 MB and is rebuilt on every Mesa bump,
-	// so it lives on that repository's `driver` orphan branch — amended and
-	// force-pushed, one revision however many bumps — rather than on main where
-	// git would keep every version of it for ever. It is therefore absent from a
-	// plain submodule checkout, and absent is not an error: `vk::findBundledDriver`
-	// falls back to the loader's own ICD discovery, so three runs on some other
-	// installed driver, or finds no device, and neither says anything about a
-	// missing file. `./setup.sh driver` is the whole fix.
-	//
-	// **It does not always fail at the linker when you forget.** A machine with
-	// another Slang on the default search path — /usr/local/lib, from an
-	// installer — links against that one instead and dies at startup in dyld
-	// naming a version nobody asked for. Measured; see slang.c3l's README.
-	//
-	// **ktx arrived ahead of the milestone that uses it** — `game.md` G6 — and is
-	// listed here rather than left unlisted so that a test could hold it to
-	// compiling and linking. That test was never written: this comment named
-	// `test/ktx_test.c3` as though it existed, and `grep -rn ktx src test` finds
-	// nothing at all. So the dependency is declared, imported by nobody, and
-	// rotting silently — which is the exact outcome the sentence above was
-	// written to prevent. `plan.md` §4 carries it as work.
-	//
-	// **It needs no staging step, unlike slang.** `libzstd.a` is checked in per
-	// target under `lib/ktx.c3l/lib/<target>/` and reached through the library's
-	// own `linklib-dir`, so a plain checkout links. Worth saying because slang
-	// trained this project to expect the opposite.
-	//
-	// **`--recursive` is not needed for it either**, unlike quickjs. ktx.c3l has
-	// submodules of its own — getopt and image — but its manifest builds only
-	// `src/ktx/**`, deliberately leaving the CLI out, and those two are the CLI's.
-	//
-	// **`ktx::vk` is not `vk`.** ktx's format-table module and vulkan.c3l's
-	// binding want the same name; reach the former fully qualified.
 	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang", "ktx"],
-
 	"features": [],
-	// c3c defaults to 11.0 and the Slang SDK is built for 15.0, so every link
-	// drew "building for macOS-11.0, but linking with dylib ... built for newer
-	// version 15.0". Raising it states the truth rather than hiding it: a binary
-	// that links libslang cannot claim to run where libslang will not load, and
-	// a warning on every build is how a real one gets missed. It has to be set
-	// here — c3c rejects `macos-min-version` in a dependency's manifest, so
-	// slang.c3l can only document it.
-	"macos-min-version": "15.0",
+	"macos-min-version": "26.0",
 	"script-dir": "./",
-	// Compiled into `c3c test` alongside the default target's sources, so a
-	// check here reaches anything in src/ without needing a target of its own.
 	"test-sources": ["test/**"],
-	// **No `shaders` prepare target, as of M4.** `shaders/mesh.slang` is
-	// compiled at startup by `src/shader/compile.c3`, so there is no `slangc`
-	// invocation anywhere in this project and no `.spv` to go stale. That
-	// removes two traps at once: crig's (a prepare target without --trust=full
-	// silently does nothing and reports success) and this project's own from M2
-	// (the manifest's slangc line and the shader's documented one drifted apart
-	// on -force-glsl-scalar-layout, producing two different modules and no
-	// error). The flags now live in exactly one place, `SLANG_ARGUMENTS`.
 	"targets": {
 		"three": {
 			"type": "executable",
