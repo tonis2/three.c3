@@ -39,6 +39,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "setSide", &js_set_side, 2);
 	self.bind(host, "setOpacity", &js_set_opacity, 2);
 	self.bind(host, "getOpacity", &js_get_opacity, 1);
+	self.bind(host, "setSurface", &js_set_surface, 4);
+	self.bind(host, "getSurface", &js_get_surface, 1);
 	self.bind(host, "setMap", &js_set_map, 2);
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
@@ -573,6 +575,62 @@ fn void js_get_opacity(
 	qjs::Context js = qjs::wrap(ctx);
 
 	*out = qjs::number_value((double)self.pass.material_opacity((uint)arg_int(&js, argc, args, 0)));
+}
+
+<*
+ `material.roughness` / `.metalness` / `.reflectance` — how the light behaves
+ where it lands, as opposed to what colour it finds there.
+
+ One verb for the three, because they are one `float4` in the draw record and
+ setting them separately would be three crossings to write one value. Free to
+ animate for `js_set_opacity`'s reason — nothing is rebuilt.
+
+ **A material nobody touches is `{1, 0, 0}`, and that is a surface with no
+ highlight at all.** The specular term is off until a script asks; the argument
+ for that default is in `scene/material.c3` and it is the same argument shadows
+ being off by default rests on.
+
+ The prelude has already refused a value outside 0..1 by name.
+*>
+fn void js_set_surface(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	if (catch self.pass.set_material_surface(
+		index,
+		arg_float(&js, argc, args, 1),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3)
+	))
+	{
+		*out = js.raise(
+			"that material is not in this context, or it is a built-in one that every node shares"
+		);
+	}
+}
+
+<*
+ `material.roughness`, `.metalness` and `.reflectance` — what they read back as,
+ as `[roughness, metalness, reflectance]`.
+
+ An index that names nothing answers the defaults rather than throwing, which is
+ `getOpacity`'s rule.
+*>
+fn void js_get_surface(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float[4] surface = self.pass.material_surface((uint)arg_int(&js, argc, args, 0));
+	qjs::Value list = js.array();
+	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(surface[i]));
+	*out = list;
 }
 
 <*

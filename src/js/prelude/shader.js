@@ -219,7 +219,7 @@ export class ShaderMaterial extends Material {
 		// left to whoever is generating the script to remember.
 		const fragment = (typeof options.fragment === 'string' && options.fragment.trim().length > 0)
 			? options.fragment
-			: (vertex ? 'float3 shade(Surface s) { return s.albedo * lambert(s.normal); }' : options.fragment);
+			: (vertex ? 'float3 shade(Surface s) { return standard(s); }' : options.fragment);
 		if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 			throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
 		}
@@ -285,6 +285,11 @@ export class ShaderMaterial extends Material {
 		this.vertex = vertex;
 		this.bounds = bounds;
 		if (options.opacity !== undefined) this.opacity = options.opacity;
+		// A body that never calls `specular(s)` or `standard(s)` is unaffected by
+		// these, which is why they are accepted rather than refused on a material
+		// whose shading is the agent's: they are three numbers on the surface, and
+		// what reads them is the body.
+		Material._applySurface(this, options);
 		this._rows = {};
 		for (const [i, name] of names.entries()) this._rows[name] = shapes[i][1];
 

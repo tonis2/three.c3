@@ -98,9 +98,9 @@ fn bool AssetId.equals(self, AssetId other) @operator(==) => self.index == other
 
  The extension's `MaterialLayer` as this renderer can actually use it, which is
  deliberately less than the file carries: the PBR half — metallic, roughness,
- subsurface — is dropped rather than stored, because `lambert()` is the whole of
- the built-in light and a field nothing evaluates is worse than an absence.
- Height and bump go the same way.
+ subsurface — is dropped rather than stored. The specular term reads one roughness
+ and one metalness for a whole material, so a per-layer pair is a field nothing
+ evaluates, which is worse than an absence. Height and bump go the same way.
 
  The texture fields are indices into `Assets.textures`, or -1, and each holds one
  reference for as long as this record does — released by `GpuMesh.release_layers`
@@ -175,10 +175,11 @@ struct GpuLayers
 	            `normal` — the same path a hand-written one takes.
 	 emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
 	 occlusion  nothing built in. A `shade` body multiplies by it in one line.
-	 metallic-  nothing built in, and blocked rather than missing: a roughness
-	 roughness  value feeds a specular term, and there is no specular term.
-	            Loaded anyway, because a `shade` body is free to do something
-	            else with it and "we parsed it and threw it away" is worse.
+	 metallic-  nothing built in, and that is a decision rather than a gap: the
+	 roughness  specular term reads one roughness and one metalness per material
+	            — `material.roughness`, `material.metalness` — and this map is
+	            per texel. Loaded anyway, because a `shade` body is free to do
+	            something with it and "we parsed it and threw it away" is worse.
 
  ## The colourspaces are the load-bearing part
 
@@ -2517,11 +2518,13 @@ fn int? Assets.load_material_texture(
 
  `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`, `subsurface`,
  `heightTexture` and `bump` are all parsed by `gltf.c3l` and none of them is copied
- out. `plan.md` §12: `lambert()` is the whole of the built-in light, so these are
- inputs to an equation nothing evaluates, and a field carried to the JS side would
- be an API surface that provably changes no pixel. The images they name are not
- uploaded either, which is the part that costs something — a file with a roughness
- map per layer pays nothing for it here.
+ out. There is a specular term now, and it reads one roughness and one metalness
+ for a whole material — `material.roughness` and `material.metalness` — so a
+ *layer's* pair is still an input to an equation nothing evaluates, and the other
+ four have nothing behind them at all. A field carried to the JS side would be an
+ API surface that provably changes no pixel. The images they name are not uploaded
+ either, which is the part that costs something — a file with a roughness map per
+ layer pays nothing for it here.
 
  Fails with whatever an upload failed with. A material without the extension
  cannot fail, because it does nothing.

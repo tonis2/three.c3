@@ -262,6 +262,9 @@ const String[*] MATERIAL_RESERVED @local = {
 	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
 	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
 	"srgb_to_linear",
+	// The lighting the template hands a body: the struct in the frame block, the
+	// two intrinsics beside `lambert`, and the function all three of them share.
+	"Light", "specular", "standard", "specular_light",
 	// The spilled uniform table's pointer and its struct, generated only for a
 	// material whose uniforms do not fit the push block — but reserved for every
 	// material, because whether a name collides must not depend on how many other

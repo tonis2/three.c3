@@ -291,14 +291,16 @@ fn void a_layers_alpha_and_its_opacity_are_folded_together() @test
 }
 
 <*
- The PBR half of the extension is dropped by the importer rather than carried.
+ The per-layer PBR half of the extension is dropped by the importer rather than
+ carried.
 
- `plan.md` §12: `lambert()` is the whole of the built-in light, so metallic,
- roughness and subsurface are inputs to an equation nothing evaluates. The fixture
- writes a metallicFactor and a roughnessFactor on its first layer and a
- heightTexture on the base; none of them may appear in what a script is handed,
- because an API surface that provably changes no pixel costs more to discover than
- it is worth.
+ There is a specular term now, and it reads one roughness and one metalness for a
+ whole material — `material.roughness` and `material.metalness`. A *layer's* pair
+ still has nothing behind it, and subsurface, height and bump have nothing behind
+ them at all. The fixture writes a metallicFactor and a roughnessFactor on its
+ first layer and a heightTexture on the base; none of them may appear in what a
+ script is handed, because an API surface that provably changes no pixel costs
+ more to discover than it is worth.
 *>
 fn void the_parts_with_no_equation_behind_them_do_not_cross() @test
 {
@@ -572,7 +574,9 @@ fn void a_stack_refuses_what_this_renderer_cannot_shade() @test
 			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
 			return ({
 				roughness: refuse(() => new three.LayeredMaterial({ layers: [{ roughness: 0.5 }] })),
-				metalness: refuse(() => new three.LayeredMaterial({ metalness: 1, layers: [] })),
+				metalness: refuse(() => new three.LayeredMaterial({ layers: [{ metalness: 1 }] })),
+				metallicRoughness: refuse(() => new three.LayeredMaterial({ layers: [{ metallicRoughness: tex }] })),
+				subsurface: refuse(() => new three.LayeredMaterial({ layers: [{ subsurface: 1 }] })),
 				height: refuse(() => new three.LayeredMaterial({ layers: [{ height: tex }] })),
 				typo: refuse(() => new three.LayeredMaterial({ layers: [{ uvscale: 4 }] })),
 				blend: refuse(() => new three.LayeredMaterial({ layers: [{ blend: "burn" }] })),
@@ -588,9 +592,17 @@ fn void a_stack_refuses_what_this_renderer_cannot_shade() @test
 		// The two ways of naming a weight that cannot both be meant.
 		test::@check(answer.contains("'texture' or from 'vertexColor'"), "a misspelled source lists both: %s", answer);
 		test::@check(answer.contains("drop whichever is not meant"), "and naming both is refused: %s", answer);
-		// The two that point at the lighting rather than at the caller.
-		test::@check(answer.contains("no specular term"), "roughness and metalness name the gap: %s", answer);
-		test::@check(answer.contains("12"), "and where the decision is written down: %s", answer);
+		// The ones that point at the lighting rather than at the caller. Roughness and
+		// metalness stopped being missing when the specular term arrived and are
+		// refused for a different reason now: the term reads one of each per
+		// material, so the sentence has to send the script to the material.
+		test::@check(answer.contains("set `roughness` on the LayeredMaterial"),
+			"a layer's roughness names where the real one is: %s", answer);
+		test::@check(answer.contains("set `metalness` on the LayeredMaterial"),
+			"and so does a layer's metalness: %s", answer);
+		test::@check(answer.contains("varies per texel"),
+			"a metallic-roughness map says what this renderer's is instead: %s", answer);
+		test::@check(answer.contains("light transport"), "subsurface names the gap: %s", answer);
 		test::@check(answer.contains("displacement or parallax"), "height says what it needs: %s", answer);
 		// The three that are ordinary mistakes.
 		test::@check(answer.contains("uvScale"), "a misspelled option lists the real ones: %s", answer);
@@ -708,7 +720,7 @@ fn void an_empty_stack_is_the_default_look() @test
 		defer answer.free(mem);
 
 		test::@check(answer.contains("float3 c = s.albedo;"), "it starts at the base material: %s", answer);
-		test::@check(answer.contains("return c * lambert(n);"), "and returns the built-in light: %s", answer);
+		test::@check(answer.contains("return standard(s, c, n);"), "and returns the built-in shading: %s", answer);
 		test::@check(!answer.contains("lerp"), "with nothing mixed over it: %s", answer);
 	};
 }

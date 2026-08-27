@@ -139,8 +139,13 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "clockRateGet", &js_clock_rate_get, 0);
 	self.bind(host, "clockRateSet", &js_clock_rate_set, 1);
 	self.bind(host, "clockAdvance", &js_clock_advance, 1);
-	self.bind(host, "lightGet", &js_light_get, 0);
-	self.bind(host, "lightSet", &js_light_set, 4);
+	self.bind(host, "lightCount", &js_light_count, 0);
+	self.bind(host, "lightGet", &js_light_get, 1);
+	self.bind(host, "lightSet", &js_light_set, 8);
+	self.bind(host, "lightAdd", &js_light_add, 7);
+	self.bind(host, "lightRemove", &js_light_remove, 1);
+	self.bind(host, "ambientGet", &js_ambient_get, 0);
+	self.bind(host, "ambientSet", &js_ambient_set, 1);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
 	self.bind(host, "shadowSet", &js_shadow_set, 5);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
@@ -499,7 +504,7 @@ fn void js_scene_active(
 
  The look is *loaded*, not defaulted. Nothing has to be saved on the way out
  because `Scene.look` is where a script's writes land in the first place — the
- renderer's `clear`, `light` and `shadows` are the frame's live copy of the
+ renderer's `clear`, `lighting` and `shadows` are the frame's live copy of the
  active scene's, refreshed here and nowhere else.
 *>
 fn void JsRuntime.activate_scene(&self, Scene* target)
@@ -511,7 +516,7 @@ fn void JsRuntime.activate_scene(&self, Scene* target)
 	// here: they are the machine rather than the world, and they survive a switch
 	// on purpose.
 	if (self.renderer != null) self.renderer.clear = target.look.clear;
-	self.pass.light = target.look.light;
+	self.pass.lighting = target.look.lighting;
 	// The image and the pipeline are **not** freed — see `ShadowMap.apply`, which
 	// keeps them and forgets only what the outgoing scene's fit meant.
 	self.pass.shadows.apply(target.look.shadow);
@@ -523,20 +528,20 @@ fn void JsRuntime.activate_scene(&self, Scene* target)
 }
 
 <*
- The one directional light, on the frame and on the scene that owns it.
+ The lights and the ambient floor, on the frame and on the scene that owns them.
 
  Two writes because there are two copies and they have different jobs: the pass
  shades this frame from its own, and the scene keeps the one that outlives not
- being on screen. Written here rather than at the two call sites, so that a third
- caller cannot set one and forget the other.
+ being on screen. Written here rather than at each of the five call sites, so that
+ a sixth cannot set one and forget the other.
 *>
-fn void JsRuntime.set_light(&self, float[4] light)
+fn void JsRuntime.set_lighting(&self, Lighting lighting)
 {
-	self.pass.light = light;
-	if (self.pass.scene != null) self.pass.scene.look.light = light;
+	self.pass.lighting = lighting;
+	if (self.pass.scene != null) self.pass.scene.look.lighting = lighting;
 }
 
-// The shadow settings, on the frame and on the scene, for `set_light`'s reason.
+// The shadow settings, on the frame and on the scene, for `set_lighting`'s reason.
 // The live copy is assigned rather than `apply`-ed: `apply` forgets the cached
 // static half, which is right when the world changes and wrong when a script
 // nudges the bias.
@@ -1731,10 +1736,50 @@ fn void js_clock_advance(
 }
 
 <*
- `lightGet()` — the one directional light, as `[x, y, z, ambient]`.
+ `lightCount()` — how many lights are lit, 1 to `MAX_LIGHTS`.
+*>
+fn void js_light_count(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value((double)self.pass.lighting.count);
+}
 
- The direction is surface-to-light in world space; the ambient is the floor a
- face gets when it is turned right away from it.
+<*
+ Which slot a light verb was handed, or `MAX_LIGHTS` and a raise on `out`.
+
+ One function because five verbs take an index and the message has to be the
+ same one every time: a script that indexed past the end has a bug, and telling it
+ how many there are is the whole of the answer.
+
+ @param first : `The lowest slot this caller accepts. One for lightRemove, which will not take the sun; zero for everything else.`
+*>
+fn uint arg_light(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, uint first, qjs::Value* out) @local
+{
+	int asked = arg_int(js, argc, args, at);
+	if (asked < (int)first || asked >= (int)self.pass.lighting.count)
+	{
+		*out = js.raise(
+			string::tformat(
+				"there is no light %d — this scene has %d, numbered 0 to %d",
+				asked, self.pass.lighting.count, self.pass.lighting.count - 1
+			)
+		);
+		return MAX_LIGHTS;
+	}
+	return (uint)asked;
+}
+
+<*
+ `lightGet(index)` — one light, as `[x, y, z, r, g, b, intensity]`.
+
+ The direction is surface-to-light in world space, unnormalized — see `Light`.
+ The colour is linear rgb and the intensity multiplies it.
+
+ Six numbers and a seventh in one array rather than an object, for the reason
+ `pointer()` gives: an array crosses in a third of the time an object does, and
+ the JS side reads it positionally.
 *>
 fn void js_light_get(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1743,29 +1788,34 @@ fn void js_light_get(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
+
+	Light light = self.pass.lighting.lights[index];
 	qjs::Value list = js.array();
-	for (uint i = 0; i < 4; i++) js.set_index(list, i, qjs::number_value(self.pass.light[i]));
+	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(light.direction[i]));
+	for (uint i = 0; i < 4; i++) js.set_index(list, i + 3, qjs::number_value(light.color[i]));
 	*out = list;
 }
 
 <*
- `lightSet(x, y, z, ambient)` — the one directional light.
+ `lightSet(index, x, y, z, r, g, b, intensity)` — one light, whole.
 
- ## Why there is one, and why it is not an Object3D
+ ## Why there is a list of four and why none of them is an Object3D
 
- `render/pass.c3` ships a single `float4` in `FrameBlock` and both shaders read
- it. That is the whole lighting model, and it had no verb at all until now — not
- as a decision, it simply had not been done, which cost every north-west face in
- `examples/village` sitting at the ambient floor and a scene-wide fudge of
- multiplying per-copy colours by 1.22 to compensate. That fudge lifts the lit
- faces exactly as much as the shadowed ones, so it trades a wrong answer for a
- flatter one.
+ `render/pass.c3` ships four `Light`s in `FrameBlock` and the shading shaders loop
+ over as many as `lighting.y` says are lit. Four because the fifth is the trigger
+ for clustered forward — `plan.md` §19 — and one was the whole model until this
+ existed, which cost every scene that wanted a fill light a second material.
 
  Three.js's answer is `scene.add(new THREE.DirectionalLight(...))`, and this is
- deliberately not that: a light that could be added, removed, coloured and
- duplicated would be an API promising four things the renderer cannot do. It is
- `plan.md` §4's half-match rule — a name Three.js does not have, so nobody reads
- it as one that behaves like Three.js's.
+ still deliberately not that. A light here is not in the graph: it has no
+ position, nothing can be parented to it, and `scene.remove` does not reach it.
+ Putting it in the graph would promise all three. `three.lights` is a list of four
+ slots and says so.
+
+ **Only light zero casts a shadow**, because only light zero is what the shadow
+ map was fitted around. `Light` has the price of the second one.
 
  ## The direction is not normalized here
 
@@ -1783,17 +1833,152 @@ fn void js_light_set(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float x = arg_float(&js, argc, args, 0);
-	float y = arg_float(&js, argc, args, 1);
-	float z = arg_float(&js, argc, args, 2);
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
 
-	if (x * x + y * y + z * z <= 0.0f)
+	Light light;
+	if (!read_light(&js, argc, args, 1, &light, out)) return;
+
+	Lighting lighting = self.pass.lighting;
+	lighting.lights[index] = light;
+	self.set_lighting(lighting);
+}
+
+<*
+ `lightAdd(x, y, z, r, g, b, intensity)` — a light in the next free slot, whose
+ index it answers with.
+
+ Refused rather than silently dropped once four are lit. A fifth light that did
+ nothing would be a scene lit differently from the one the script describes, with
+ nothing anywhere saying which light went missing.
+*>
+fn void js_light_add(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.pass.lighting.count >= MAX_LIGHTS)
 	{
-		*out = js.raise("three.light.direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term");
+		*out = js.raise(
+			string::tformat(
+				"three.lights holds %d lights and all of them are in use — set one you already have, or remove it first",
+				MAX_LIGHTS
+			)
+		);
 		return;
 	}
 
-	self.set_light({ x, y, z, math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f) });
+	Light light;
+	if (!read_light(&js, argc, args, 0, &light, out)) return;
+
+	Lighting lighting = self.pass.lighting;
+	lighting.lights[lighting.count] = light;
+	lighting.count++;
+	self.set_lighting(lighting);
+	*out = qjs::number_value((double)(lighting.count - 1));
+}
+
+<*
+ `lightRemove(index)` — takes a light out and closes the gap.
+
+ The slots above it move down, exactly as `Array.prototype.splice` does, which is
+ what makes `three.lights[i]` mean the i-th light rather than the i-th slot that
+ was ever filled. A script holding an index across a remove is holding a
+ different light, and that is the same rule an array index has always had.
+
+ **Light zero cannot be removed.** It is the one the shadow map is fitted around,
+ so removing it would silently move every shadow in the scene onto whichever light
+ happened to be next. Turning it off is `three.light.intensity = 0`.
+*>
+fn void js_light_remove(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int asked = arg_int(&js, argc, args, 0);
+	if (asked == 0)
+	{
+		*out = js.raise("three.lights[0] is the light the shadow map is fitted around and cannot be removed — set its intensity to 0 to turn it off");
+		return;
+	}
+
+	uint index = arg_light(self, &js, argc, args, 0, 1, out);
+	if (index == MAX_LIGHTS) return;
+
+	Lighting lighting = self.pass.lighting;
+	for (uint i = index; i + 1 < lighting.count; i++) lighting.lights[i] = lighting.lights[i + 1];
+	lighting.count--;
+	self.set_lighting(lighting);
+}
+
+<*
+ One light off the argument list, or a raise on `out`.
+
+ Shared by `lightSet` and `lightAdd` because the only difference between them is
+ where the light goes, and a second copy of the zero-direction check is a second
+ place for it to be forgotten.
+
+ @param at : `Where the seven numbers start.`
+ @param light : `Written only when this answers true.`
+ @return `False when the direction was refused, with the raise already on out.`
+*>
+fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* light, qjs::Value* out) @local
+{
+	float x = arg_float(js, argc, args, at);
+	float y = arg_float(js, argc, args, at + 1);
+	float z = arg_float(js, argc, args, at + 2);
+
+	if (x * x + y * y + z * z <= 0.0f)
+	{
+		*out = js.raise("a light's direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term");
+		return false;
+	}
+
+	*light = {
+		.direction = { x, y, z, 0 },
+		.color = {
+			math::clamp(arg_float(js, argc, args, at + 3), 0.0f, 1.0f),
+			math::clamp(arg_float(js, argc, args, at + 4), 0.0f, 1.0f),
+			math::clamp(arg_float(js, argc, args, at + 5), 0.0f, 1.0f),
+			math::max(arg_float(js, argc, args, at + 6), 0.0f),
+		},
+	};
+	return true;
+}
+
+<*
+ `ambientGet()` — the floor a face gets when it is turned right away from every
+ light.
+*>
+fn void js_ambient_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value(self.pass.lighting.ambient);
+}
+
+<*
+ `ambientSet(a)` — that floor, clamped to 0..1.
+
+ Frame-wide rather than per light, and not itself a light: it is what stands in
+ for every bounce this renderer does not simulate, so four lights do not mean four
+ floors. `Lighting.ambient` has the rest of that argument.
+*>
+fn void js_ambient_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Lighting lighting = self.pass.lighting;
+	lighting.ambient = math::clamp(arg_float(&js, argc, args, 0), 0.0f, 1.0f);
+	self.set_lighting(lighting);
 }
 
 <*

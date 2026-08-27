@@ -121,20 +121,28 @@ const MASK_SOURCES = new Set(['texture', 'vertexColor']);
 
 const TOP_KEYS = new Set([
 	'map', 'normal', 'mask', 'layers', 'side', 'transparent', 'blending', 'opacity',
+	'roughness', 'metalness', 'reflectance',
 ]);
 
 // The parts of the extension this renderer parses and cannot evaluate, and the
 // sentence each is refused with.
 //
 // **Refused rather than ignored, and that is the whole point of the table.** A
-// roughness this accepted and dropped would be a material property that provably
-// changes no pixel — `plan.md` §12 says so in as many words — and the script that
-// set it would spend its next hour on the lighting rather than on the one line
-// that says the term does not exist yet. The refusal is where that hour is saved.
+// value this accepted and dropped would be a material property that provably
+// changes no pixel, and the script that set it would spend its next hour on the
+// lighting rather than on the one line that says so. The refusal is where that
+// hour is saved.
+//
+// The first three are refused *per layer* and are available on the material:
+// there is a specular term now, and it reads one roughness and one metalness for
+// the whole surface rather than one per layer. Blending them per texel is a
+// second set of maps and a second blend chain in the generated body — worth
+// doing when something wants moss that is rougher than the stone under it, and
+// not before.
 const UNSUPPORTED = {
-	metalness: 'there is no specular term in this renderer yet — `lambert()` is the whole of the built-in light, so metalness is an input to an equation nothing evaluates (plan.md §12)',
-	roughness: 'there is no specular term in this renderer yet — `lambert()` is the whole of the built-in light, so roughness is an input to an equation nothing evaluates (plan.md §12)',
-	metallicRoughness: 'there is no specular term in this renderer yet (plan.md §12)',
+	metalness: 'a layer cannot change metalness — the specular term reads one value for the whole surface, so set `metalness` on the LayeredMaterial itself',
+	roughness: 'a layer cannot change roughness — the specular term reads one value for the whole surface, so set `roughness` on the LayeredMaterial itself',
+	metallicRoughness: 'a metallic-roughness map varies per texel and this renderer\'s roughness is one number per material — set `roughness` and `metalness` on the LayeredMaterial instead',
 	subsurface: 'subsurface scattering needs a light transport this renderer does not have',
 	height: 'there is no displacement or parallax here — a height map has nowhere to go until one exists',
 	bump: 'there is no displacement or parallax here — bump parameters have nowhere to go until one exists',
@@ -518,7 +526,11 @@ function emit(base, layers) {
 	// Without a normal map anywhere in the stack there is nothing to decode and
 	// the interpolated normal is used as it arrives.
 	body.push(anyNormal ? '    float3 n = mapped_normal(s, nt);' : '    float3 n = s.normal;');
-	body.push(anyEmissive ? '    return c * lambert(n) + e;' : '    return c * lambert(n);');
+	// `standard(s, c, n)` rather than `c * lambert(n)`: the blended colour and the
+	// mapped normal are the body's own, and the roughness, metalness and
+	// reflectance are the material's. On a stack that set none of the three it is
+	// the same arithmetic `c * lambert(n)` was, so nothing already written moves.
+	body.push(anyEmissive ? '    return standard(s, c, n) + e;' : '    return standard(s, c, n);');
 	body.push('}');
 
 	return { fragment: body.join('\n'), textures, uniforms };
@@ -630,10 +642,14 @@ export class LayeredMaterial extends ShaderMaterial {
 			);
 		}
 		for (const key of Object.keys(options)) {
+			// `TOP_KEYS` first, because `roughness` and `metalness` are in both
+			// tables: they are the material's to set and not a layer's, and the
+			// entry in `UNSUPPORTED` is the sentence a *layer* is refused with.
+			if (TOP_KEYS.has(key)) continue;
 			if (UNSUPPORTED[key] !== undefined) {
 				throw new TypeError(`LayeredMaterial: ${key} is not supported — ${UNSUPPORTED[key]}`);
 			}
-			if (!TOP_KEYS.has(key)) {
+			{
 				throw new TypeError(
 					`LayeredMaterial has no option called '${key}' — it takes ${[...TOP_KEYS].join(', ')}`
 				);
@@ -687,6 +703,9 @@ export class LayeredMaterial extends ShaderMaterial {
 			...(options.transparent !== undefined ? { transparent: options.transparent } : {}),
 			...(options.blending !== undefined ? { blending: options.blending } : {}),
 			...(options.opacity !== undefined ? { opacity: options.opacity } : {}),
+			...(options.roughness !== undefined ? { roughness: options.roughness } : {}),
+			...(options.metalness !== undefined ? { metalness: options.metalness } : {}),
+			...(options.reflectance !== undefined ? { reflectance: options.reflectance } : {}),
 		});
 
 		// The base map goes through the inherited `map` setter rather than through

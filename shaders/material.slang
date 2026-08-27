@@ -39,14 +39,24 @@ struct Instance
     uint pose;
 };
 
-// What every draw in the frame shares, written once per frame. 184 bytes, and
+// One light, byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare.
+// Light zero is the sun and the only one that casts; see `mesh.slang`.
+struct Light
+{
+    float4 direction;
+    float4 color;
+};
+
+// What every draw in the frame shares, written once per frame. 328 bytes, and
 // the size is pinned against this declaration by `FRAME_BLOCK_FIELDS` in
 // `src/gpu/pipeline.c3` — three files declare this struct and a field added to
 // two of them is a buffer read at the wrong offset with nothing to say so.
 struct FrameBlock
 {
     float4x4 view_projection;
-    float4 light;           // xyz: surface-to-light, world space. w: ambient floor.
+    // x: the ambient floor. y: how many of `lights` are lit this frame. zw
+    // unused. See `mesh.slang`.
+    float4 lighting;
     // This frame's live joint matrices, for characters posed from their bone nodes
     // rather than from a baked clip. One buffer per frame rather than per bucket,
     // which is what keeps a live character and a baked one in the same draw call.
@@ -62,6 +72,12 @@ struct FrameBlock
     // `three.debug.view` — x is the mode. See `mesh.slang`, which carries the
     // account of what each mode draws.
     float4 debug;
+    // Where the camera is, in world space. Read by the specular term and by
+    // nothing else.
+    float4 camera;
+    // The frame's lights, `lighting.y` of them. At the end of the block so that
+    // every offset above it is the one it had when there was a single light.
+    Light lights[4];
 };
 
 // One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
@@ -106,6 +122,14 @@ struct Draw
     uint skin_stride;
     // xy repeat, zw offset. See `mesh.slang`.
     float4 uv_transform;
+    // What the light does when it hits, as opposed to what colour it finds
+    // there: x roughness, y metalness, z reflectance, w unused.
+    //
+    // `{1, 0, 0, 0}` is a matte dielectric with no highlight at all, which is
+    // what every material is until a script says otherwise, and is exactly the
+    // surface this renderer had before there was a specular term. See
+    // `scene/material.c3`, which has why 0 rather than glTF's own defaults.
+    float4 surface;
 };
 
 // **The three mesh fields come first, in this order, and material uniforms only
@@ -247,6 +271,20 @@ struct Surface
     // a body that behaved differently "when shadows are off" would be a body that
     // renders differently for a reason it cannot see.
     float shadow;
+    // How rough this surface is, 0 to 1. 1 is the default and is a perfectly
+    // diffuse surface — the value every material had before there was a term that
+    // read one.
+    float roughness;
+    // How metallic it is, 0 to 1. 0 is the default. A metal has no diffuse: it
+    // reflects, and its colour comes back through the highlight instead — see
+    // `specular_light`, which also has why a metal here is dark without a sky to
+    // reflect.
+    float metalness;
+    // How strongly a *non*-metal reflects, 0 to 1. **0 is the default, and it is
+    // this renderer's own rather than the physical one**: 0.5 is the 4% real
+    // dielectrics reflect, and turning that on for everything would have relit
+    // every scene already written. `scene/material.c3` has the argument.
+    float reflectance;
     // Which row of this material's table this copy selected, **already clamped**
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
@@ -484,20 +522,136 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
 
 static float g_shadow = 1.0;
 
-// `mesh.slang`'s light as a single factor, so a body can ask for the default
-// look without reproducing it. `return s.albedo * lambert(s.normal);` is the
-// same arithmetic `mesh.slang`'s `fragmentMain` performs — which is the property
-// that makes a material a change of *shading* rather than a second renderer.
+// The direct light reaching this point, as a colour, so a body can ask for the
+// built-in diffuse without reproducing it. `return s.albedo * lambert(s.normal);`
+// is the same arithmetic `mesh.slang` performs for a mesh with no material at all
+// — which is the property that makes a material a change of *shading* rather than
+// a second renderer, and the reason this function is duplicated there character
+// for character.
 //
-// **The shadow is in here**, folded into the direct term and not into the
-// ambient floor, exactly as `mesh.slang` folds it. A body that wants the two
-// apart has `s.shadow`.
-float lambert(float3 normal)
+// **A colour rather than a factor**, since `three.lights` gave every light one.
+// `s.albedo * lambert(s.normal)` did not change meaning by it — a float3 times a
+// float3 is the per-channel product it always was — and the one body that stops
+// compiling is one that assigned the answer to a `float`.
+//
+// **Every light, not just the sun.** The loop runs `three.lights.length` times,
+// and light zero is the only one the shadow applies to because it is the only one
+// the map was fitted around.
+//
+// **The shadow is in here**, folded into the direct term and not into the ambient
+// floor, exactly as `mesh.slang` folds it. A body that wants the two apart has
+// `s.shadow`.
+//
+// **This is the diffuse half and nothing else.** `specular(s)` is the other half
+// and `standard(s)` is both — a body written against `lambert` alone is a matte
+// surface, which is what every body written before the specular term existed
+// asked for and still gets.
+float3 lambert(float3 normal)
 {
-    float4 light = push.frame[0].light;
-    float n_dot_l = max(dot(normal, normalize(light.xyz)), 0.0);
-    float ambient = light.w;
-    return ambient + (1.0 - ambient) * n_dot_l * g_shadow;
+    float ambient = push.frame[0].lighting.x;
+    uint count = (uint)push.frame[0].lighting.y;
+    float3 direct = float3(0.0, 0.0, 0.0);
+    for (uint i = 0u; i < count; i++)
+    {
+        Light light = push.frame[0].lights[i];
+        float n_dot_l = max(dot(normal, normalize(light.direction.xyz)), 0.0);
+        if (i == 0u) n_dot_l *= g_shadow;
+        direct += light.color.rgb * light.color.w * n_dot_l;
+    }
+    return ambient + (1.0 - ambient) * direct;
+}
+
+// The specular highlight, over the same lights `lambert` sums the diffuse over.
+//
+// **The same function, character for character, in `mesh.slang` and in
+// `material.slang`**, for `lambert`'s reason.
+//
+// Cook-Torrance: a GGX distribution, Smith's masking under the Schlick-GGX
+// approximation, and Schlick's Fresnel with Filament's `f90`. Those four names
+// are here because the constants below are unreadable without them, and the
+// mapping from `reflectance` to `f0` is Filament's too — 0.5 is the 4% that
+// ordinary dielectrics reflect and 1 is about the most any of them do.
+//
+// **A default material's highlight is exactly zero, not merely small.** That is
+// what `f90` buys: with `reflectance` at 0 the plain Schlick term would still
+// climb to 1 at a grazing angle, which would have put a rim of light on every
+// surface in every scene already written against a Lambert renderer. Filament's
+// `f90` collapses with `f0`, so the term is off until something asks for it —
+// `scene/material.c3` has why that is the default rather than the 4%.
+//
+// **Metalness kills the diffuse rather than tinting it.** A metal reflects and
+// does not scatter, so `standard` scales the albedo by `1 - metalness` and the
+// colour comes back through `f0`. With no environment map to reflect, a fully
+// metallic surface is therefore its highlights and nothing else — dark, and
+// correctly so; `plan.md` §4's sky is what makes metal look like metal.
+float3 specular_light(float3 normal, float3 position, float3 albedo, float roughness, float metalness, float reflectance)
+{
+    float3 view = normalize(push.frame[0].camera.xyz - position);
+    float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
+    float f90 = clamp(dot(f0, float3(16.5, 16.5, 16.5)), 0.0, 1.0);
+    // Away from a perfect mirror: at zero roughness the GGX lobe is a spike, and a
+    // light with no area to reflect lands on either no fragment or one.
+    float a = max(roughness * roughness, 1e-3);
+    float a2 = a * a;
+    float n_dot_v = max(dot(normal, view), 1e-4);
+    float k = a * 0.5;
+
+    float3 sum = float3(0.0, 0.0, 0.0);
+    uint count = (uint)push.frame[0].lighting.y;
+    for (uint i = 0u; i < count; i++)
+    {
+        Light light = push.frame[0].lights[i];
+        float3 to_light = normalize(light.direction.xyz);
+        float n_dot_l = max(dot(normal, to_light), 0.0);
+        if (n_dot_l <= 0.0) continue;
+
+        float3 half_vector = normalize(to_light + view);
+        float n_dot_h = max(dot(normal, half_vector), 0.0);
+        float v_dot_h = max(dot(view, half_vector), 0.0);
+
+        float denominator = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+        float distribution = a2 / (3.14159265 * denominator * denominator);
+        float geometry = (n_dot_l / (n_dot_l * (1.0 - k) + k)) * (n_dot_v / (n_dot_v * (1.0 - k) + k));
+        float3 fresnel = f0 + (float3(f90, f90, f90) - f0) * pow(1.0 - v_dot_h, 5.0);
+
+        // The shadow multiplies the light rather than the geometry term, unlike in
+        // `lambert` where the two are the same multiply: an occluded light delivers
+        // less energy, it does not change the shape of the microfacets.
+        float occlusion = i == 0u ? g_shadow : 1.0;
+        sum += light.color.rgb * light.color.w * occlusion
+             * distribution * geometry * fresnel / (4.0 * n_dot_v);
+    }
+    return sum;
+}
+
+// This surface's highlight, so a body can have one without reproducing the four
+// terms above. `s.roughness`, `s.metalness` and `s.reflectance` are what it
+// reads, and a material nobody set them on answers zero.
+float3 specular(Surface s)
+{
+    return specular_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance);
+}
+
+// The built-in shading with a colour and a normal the body worked out for
+// itself — which is what a body that blends layers or reads a normal map has.
+//
+// The overload below is this one with the surface's own two, and is what a body
+// that changed neither wants.
+float3 standard(Surface s, float3 albedo, float3 normal)
+{
+    return albedo * lambert(normal) * (1.0 - s.metalness)
+         + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance);
+}
+
+// The built-in shading, whole: exactly what a mesh with no ShaderMaterial draws.
+//
+// `return standard(s);` is the body to start from when the material is meant to
+// look like the default and differ somewhere; `s.albedo * lambert(s.normal)` is
+// the body to start from when it is meant to be matte, which is what every body
+// written before the specular term existed asked for and still gets.
+float3 standard(Surface s)
+{
+    return standard(s, s.albedo, s.normal);
 }
 
 // A tangent-space normal map applied to a surface that carries no tangents.
@@ -715,6 +869,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // never calls it at all.
     s.shadow = shadow_factor(s.position, s.normal);
     g_shadow = s.shadow;
+    // Straight off the record, unclamped: `setSurface` clamps at the boundary, so
+    // a second clamp here would be a second place for the range to be decided.
+    s.roughness = draw.surface.x;
+    s.metalness = draw.surface.y;
+    s.reflectance = draw.surface.z;
 
     // Before `shade`, so a debug view of a scene whose bodies are expensive is
     // still one render — and so a body that cannot compile is still diagnosable.

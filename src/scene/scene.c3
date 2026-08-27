@@ -567,9 +567,10 @@ struct SceneLook
 	// `scene.background`, already clamped, with alpha pinned at one —
 	// `js_background_set` has why there is no alpha to set.
 	float[4] clear;
-	// `three.light`: xyz is surface-to-light in world space, w is the ambient
-	// floor. The active scene's is the one that shades the frame.
-	float[4] light;
+	// `three.light` and `three.lights`: every light this world is lit by, and the
+	// ambient floor under them. The active scene's is the one that shades the
+	// frame.
+	Lighting lighting;
 	// `three.light.shadow`, the five settings and none of the device objects.
 	ShadowSettings shadow;
 }
@@ -579,7 +580,7 @@ struct SceneLook
 // does not render the same first frame.
 const SceneLook DEFAULT_LOOK = {
 	.clear = DEFAULT_CLEAR,
-	.light = DEFAULT_LIGHT,
+	.lighting = DEFAULT_LIGHTING,
 	.shadow = DEFAULT_SHADOW,
 };
 

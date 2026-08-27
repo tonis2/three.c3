@@ -835,3 +835,420 @@ fn void a_new_scene_restores_the_default_light() @test
 			"and its direction: %s", result.value);
 	};
 }
+
+// ============================================================================
+// The light list
+// ============================================================================
+
+<*
+ A second light lights what the first one cannot.
+
+ **The regression this exists for is a shading loop that runs once.** Everything
+ about a list of lights can be right — the slot, the getter, the frame block —
+ while the shader still reads `lights[0]` and nothing else, and the symptom is a
+ scene that is exactly as lit as it was before the list existed. Only a pixel can
+ tell the difference.
+
+ The sun is pointed *away* from the plane and the ambient floor is zero, so every
+ photon in the frame has to have come through slot one.
+
+ Proved by injection: change the loop bound in `lambert` from `count` to `1u` and
+ the plane comes back black.
+*>
+fn void a_second_light_lights_what_the_first_cannot() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2)));
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.direction = [0, 0, -1];
+			three.render(scene);
+			return three.lights.length;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "1", "one light so far: %s", result.value);
+
+		image::Image dark = renderer.capture()!!;
+		defer dark.free();
+		char[3] unlit = centre_pixel(&dark);
+
+		three::RunResult second = run.run(`
+			three.lights.add([0, 0, 1]);
+			three.render(three.scene);
+			return three.lights.length;
+		`);
+		defer second.free();
+		test::@check(second.ok, "the second script succeeded: %s", second.error);
+		test::@check(second.value == "2", "and two after the add: %s", second.value);
+
+		image::Image lit = renderer.capture()!!;
+		defer lit.free();
+		char[3] filled = centre_pixel(&lit);
+
+		test::@check(unlit[0] < 10,
+			"with the sun turned away and no floor the plane is black, got %d", (int)unlit[0]);
+		test::@check(filled[0] > 150,
+			"and the second light lights it, got %d,%d,%d",
+			(int)filled[0], (int)filled[1], (int)filled[2]);
+	};
+}
+
+<*
+ Every light carries its own colour, and they add.
+
+ **The regression this exists for is a colour that is really one white factor.**
+ A `Light.color` written into the frame block but read as a scalar — or read from
+ slot zero for every light — renders a plausible picture: lit is lit. Two lights
+ of two different colours on one surface is the arrangement where a single factor
+ cannot produce the right answer at all.
+
+ Red from the sun and blue from slot one, both square on to the plane, so the
+ result is magenta and neither channel can have come from the other light.
+
+ Proved by injection: read `lights[0].color` inside the loop instead of
+ `lights[i].color` and the blue channel goes to the red one's value.
+*>
+fn void every_light_carries_its_own_colour() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2)));
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.set([0, 0, 1]);
+			three.light.color = [1, 0, 0];
+			three.lights.add([0, 0, 1], 0x0000ff);
+			three.render(scene);
+			return { sun: three.light.color, fill: three.lights[1].color };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"sun":[1,0,0]`), "the sun reads back red: %s", result.value);
+		test::@check(result.value.contains(`"fill":[0,0,1]`), "and the fill blue: %s", result.value);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		char[3] pixel = centre_pixel(&shot);
+
+		test::@check(pixel[0] > 150 && pixel[2] > 150 && pixel[1] < 10,
+			"two lights of two colours make magenta, got %d,%d,%d",
+			(int)pixel[0], (int)pixel[1], (int)pixel[2]);
+	};
+}
+
+<*
+ An intensity of zero is how a light is turned off, which is the only way to turn
+ the sun off.
+
+ **The regression this exists for is an intensity the shader never multiplies
+ in.** It reads back from the host either way, and a scene lit by one light at
+ full strength looks entirely reasonable — so the check is a light whose intensity
+ is the only thing standing between the frame and black.
+
+ It is also the sentence `lightRemove` points at: slot zero cannot be removed
+ because the shadow map is fitted around it, so "no sun" has to mean something.
+
+ Proved by injection: drop the `* light.color.w` from `lambert` and the plane
+ stays lit.
+*>
+fn void an_intensity_of_zero_turns_a_light_off() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2)));
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.direction = [0, 0, 1];
+			three.light.intensity = 0;
+			three.render(scene);
+			const refused = (() => {
+				try { three.lights.remove(0); return "removed"; } catch (e) { return e.message; }
+			})();
+			return { intensity: three.light.intensity, refused };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"intensity":0`), "it reads back as zero: %s", result.value);
+		test::@check(result.value.contains("cannot be removed"),
+			"and removing the sun is refused, pointing at this: %s", result.value);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		char[3] pixel = centre_pixel(&shot);
+		test::@check(pixel[0] < 10,
+			"a light at zero intensity delivers nothing, got %d,%d,%d",
+			(int)pixel[0], (int)pixel[1], (int)pixel[2]);
+	};
+}
+
+<*
+ The list is four slots long, a fifth is refused, and removing one closes the gap.
+
+ **The regression this exists for is a fifth light that renders as nothing.** The
+ frame block holds four; a script that added five and got no error would be
+ describing a scene the renderer is not drawing, with nothing anywhere naming the
+ light that went missing.
+
+ The gap closing is the other half and is what makes `three.lights[i]` mean the
+ i-th light rather than the i-th slot ever filled — `Array.prototype.splice`'s
+ rule, and the one an index held across a remove has always had.
+
+ Proved by injection: let `js_light_add` write past `MAX_LIGHTS` and the refusal
+ becomes a buffer overrun instead of a message.
+*>
+fn void the_list_is_four_long_and_closes_its_gaps() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			three.lights.add([1, 0, 0], 0xff0000);
+			three.lights.add([0, 1, 0], 0x00ff00);
+			three.lights.add([0, 0, 1], 0x0000ff);
+			const full = (() => {
+				try { three.lights.add([1, 1, 1]); return "added"; } catch (e) { return e.message; }
+			})();
+			const before = three.lights.length;
+			three.lights.remove(three.lights[1]);
+			const colours = [...three.lights].map((l) => l.color);
+			return { max: three.lights.max, before, full, after: three.lights.length, colours };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"max":4`), "four slots: %s", result.value);
+		test::@check(result.value.contains(`"before":4`), "all four filled: %s", result.value);
+		test::@check(result.value.contains("all of them are in use"),
+			"a fifth is refused by name: %s", result.value);
+		test::@check(result.value.contains(`"after":3`), "and removing one leaves three: %s", result.value);
+		// The green one was slot 1; blue moves down into it rather than a hole
+		// staying where it was.
+		test::@check(result.value.contains(`"colours":[[1,1,1],[0,1,0],[0,0,1]]`),
+			"the slots above the removed one moved down: %s", result.value);
+	};
+}
+
+<*
+ The whole list travels with the scene, not just the sun.
+
+ **The regression this exists for is a `SceneLook` that carries light zero.**
+ `activate()` restoring one light out of four is a level that comes back half lit,
+ and it is exactly what a switch written before the list existed would do.
+
+ Proved by injection: copy only `lights[0]` in `activate_scene` and `back` comes
+ back as one light.
+*>
+fn void every_light_travels_with_the_scene() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			three.lights.add([1, 0, 0], 0xff0000, 0.5);
+			const set = { count: three.lights.length, colour: three.lights[1].color };
+
+			const second = new three.Scene();
+			const fresh = three.lights.length;
+
+			first.activate();
+			return {
+				set, fresh,
+				back: three.lights.length,
+				colour: three.lights[1].color,
+				intensity: three.lights[1].intensity,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"count":2`), "two lights were set: %s", result.value);
+		test::@check(result.value.contains(`"fresh":1`),
+			"a new scene starts on one: %s", result.value);
+		test::@check(result.value.contains(`"back":2`),
+			"and activating the first brings both back: %s", result.value);
+		test::@check(result.value.contains(`"colour":[1,0,0]`),
+			"with the colour it had: %s", result.value);
+		test::@check(result.value.contains(`"intensity":0.5`),
+			"and the strength: %s", result.value);
+	};
+}
+
+// ============================================================================
+// The specular term
+// ============================================================================
+
+<*
+ `reflectance` is the switch on the highlight, and at zero there is not a small
+ one.
+
+ **The regression this exists for is every scene in this project quietly gaining
+ a sheen.** Schlick's Fresnel climbs to 1 at a grazing angle whatever `f0` is, so
+ a specular term written the obvious way puts a rim of light on every surface
+ already authored against a Lambert renderer — a change nobody asked for, in every
+ frame, that reads as "the lighting looks different now" rather than as a bug.
+ Filament's `f90` is what collapses it, and this is what says so.
+
+ A plane square on to both the camera and the light, so the centre fragment is
+ the mirror direction and gets the whole lobe.
+
+ Proved by injection: write the plain `f0 + (1 - f0) * pow(...)` Fresnel in
+ `specular_light` and `off` stops matching `plain`.
+*>
+fn void reflectance_is_the_switch_on_the_highlight() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			globalThis.material = new three.MeshLambertMaterial();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), material));
+			// Square on, and the angle before the fit — a highlight is the one thing
+			// here that depends on where the camera is, and frameAll fits against
+			// whatever angle it finds.
+			three.camera.orbit(0, 0);
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.direction = [0, 0, 1];
+			three.render(scene);
+			return material.reflectance;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "0", "a material starts with no reflectance: %s", result.value);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		char[3] matte = centre_pixel(&plain);
+
+		three::RunResult polished = run.run(`
+			material.roughness = 0.1;
+			material.reflectance = 1;
+			three.render(scene);
+			return [material.roughness, material.reflectance];
+		`);
+		defer polished.free();
+		test::@check(polished.ok, "the second script succeeded: %s", polished.error);
+
+		image::Image shiny = renderer.capture()!!;
+		defer shiny.free();
+		char[3] highlight = centre_pixel(&shiny);
+
+		test::@check(highlight[0] > (int)matte[0] + 30,
+			"reflectance puts a highlight on it: %d against %d", (int)highlight[0], (int)matte[0]);
+
+		// And back to nothing, byte for byte — which is the half that says the term
+		// is off rather than merely faint.
+		three::RunResult off = run.run(`
+			material.reflectance = 0;
+			three.render(scene);
+			return 1;
+		`);
+		defer off.free();
+		test::@check(off.ok, "the third script succeeded: %s", off.error);
+
+		image::Image again = renderer.capture()!!;
+		defer again.free();
+		char[3] back = centre_pixel(&again);
+
+		test::@check(back[0] == matte[0] && back[1] == matte[1] && back[2] == matte[2],
+			"and at zero it is the matte pixel exactly, %d,%d,%d against %d,%d,%d",
+			(int)back[0], (int)back[1], (int)back[2], (int)matte[0], (int)matte[1], (int)matte[2]);
+	};
+}
+
+<*
+ A metal has no diffuse, and with nothing to reflect it is dark.
+
+ **The regression this exists for is `metalness` that only adds.** A specular term
+ that gives a metal its highlight without taking away its diffuse renders a
+ brighter surface rather than a metallic one, and the mistake is invisible in a
+ scene with an environment map — which this renderer does not have, so it is
+ invisible nowhere.
+
+ The darkness is the honest answer rather than a broken one: a mirror with nothing
+ around it reflects nothing. `plan.md` §4's sky is what changes it, and until then
+ this is what the doc comments promise.
+
+ Proved by injection: drop the `(1 - s.metalness)` from `standard` and the metal
+ comes back as bright as the matte surface.
+*>
+fn void a_metal_has_no_diffuse() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			globalThis.material = new three.MeshLambertMaterial();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), material));
+			three.camera.frameAll();
+			three.light.ambient = 0;
+			three.light.direction = [0, 0, 1];
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		char[3] matte = centre_pixel(&plain);
+
+		three::RunResult metal = run.run(`
+			material.metalness = 1;
+			three.render(scene);
+			return material.metalness;
+		`);
+		defer metal.free();
+		test::@check(metal.ok, "the second script succeeded: %s", metal.error);
+		test::@check(metal.value == "1", "it reads back: %s", metal.value);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		char[3] dark = centre_pixel(&shot);
+
+		test::@check((int)dark[0] * 2 < (int)matte[0],
+			"a metal with nothing to reflect is far darker than the matte surface, %d against %d",
+			(int)dark[0], (int)matte[0]);
+	};
+}
+
+<*
+ The three surface numbers round-trip and refuse what is out of range.
+
+ The boundary half of the pair above: a value the host clamped silently would read
+ back as something the script did not write, and one it accepted out of range
+ would put a NaN through `pow` in the Fresnel term.
+*>
+fn void the_surface_numbers_round_trip_and_refuse_by_name() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const material = new three.MeshLambertMaterial({
+				roughness: 0.25, metalness: 0.5, reflectance: 0.75,
+			});
+			const refuse = (fn) => { try { fn(); return "accepted"; } catch (e) { return e.message; } };
+			return {
+				read: [material.roughness, material.metalness, material.reflectance],
+				high: refuse(() => { material.roughness = 2; }),
+				low: refuse(() => { material.metalness = -1; }),
+				text: refuse(() => { material.reflectance = "shiny"; }),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"read":[0.25,0.5,0.75]`),
+			"the three read back as written: %s", result.value);
+		test::@check(result.value.contains("`roughness` wants a number from 0 to 1"),
+			"above the range is refused by name: %s", result.value);
+		test::@check(result.value.contains("`metalness` wants a number from 0 to 1"),
+			"and below it: %s", result.value);
+		test::@check(result.value.contains("`reflectance` wants a number from 0 to 1"),
+			"and so is a string: %s", result.value);
+	};
+}

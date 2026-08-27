@@ -76,6 +76,9 @@ somebody has one.
       drains.
 - [ ] **The sky.** A cubemap or an equirect, a pipeline drawing at far depth with
       depth-write off, and an environment term if it is to light anything.
+      **`material.metalness` is what wants this now**: a metal reflects and does
+      not scatter, so with nothing around it to reflect it renders dark. The four
+      punctual lights give it a highlight and nothing else.
 
 ## 5. UI and text
 
@@ -133,17 +136,6 @@ Cheap to decide, expensive to discover. Both gate §8.
 - [ ] **Move `test/resize_test.c3` into `lib/window.c3l`.** Its `@test` is
       commented out here, so the swapchain resize path is covered by nothing.
 
-## 12. Lighting
-
-- [ ] **A second light, or a list.**
-- [ ] **A colour per light rather than white.**
-- [ ] **A specular term.** **This is the gate on roughness and metalness
-      everywhere** — §4's maps, §14's PBR fields, §16's export. Do not add a
-      roughness field anywhere before the term that reads it exists, or it is a
-      material property that provably changes no pixel.
-- [ ] **The exporter writes no light.** One directional light and an ambient
-      floor map onto a glTF `directional` light and nothing else.
-
 ## 13. The pass system
 
 What the chain does not cover, roughly in the order it would grow:
@@ -169,11 +161,17 @@ count is not the trigger and never was.
 
 - [ ] **Parallax**, from the height data the extension already carries and the
       importer already drops. `heightTexture` and `bump` are refused by name.
-- [ ] **The PBR half is §12's.** `metalness`, `roughness`,
-      `metallicRoughnessTexture` and `subsurface` are parsed, dropped at the
-      importer and refused at the JS boundary. When the specular term exists,
-      `GpuLayer` in `scene/asset.c3` is where they go back in and the refusals in
-      `js/prelude/layers.js` are what get deleted.
+- [ ] **The PBR half is per material and not per layer.** `material.roughness`,
+      `.metalness` and `.reflectance` exist and the specular term reads them; a
+      *layer's* pair is still refused, and `subsurface` has no light transport
+      behind it either way. Blending roughness per texel is a second set of maps
+      and a second blend chain in the body `layers.js` generates — worth doing
+      when something wants moss rougher than the stone under it.
+- [ ] **The importer does not apply the file's `metallicFactor` and
+      `roughnessFactor`.** `GpuMaterial` carries both and a script can read them,
+      but `instantiate({ materials: true })` leaves them alone: glTF's defaults
+      are 1 and 1, so a file that says nothing is a fully metallic surface, and a
+      metal with no environment to reflect renders dark. Do this with §4's sky.
 
 ## 15. The draw buffer
 

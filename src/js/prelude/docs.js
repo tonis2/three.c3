@@ -39,7 +39,7 @@ export const DOCS = {
 		'one-module': 'The vertex body and the fragment body compile into ONE Slang module, vertex first. So a helper function may be declared in only one of them — declaring `float3 ripple(float2 q)` in both is `error[E30201]: function \'ripple\' already has a body`, which is correct and surprising. Put shared helpers in `vertex`, which comes first, and call them from `fragment`.',
 		'material-samplers': 'A ShaderMaterial or a post pass may declare up to four samplers of its own: { textures: { noise_map: tex } } makes noise_map.Sample(uv) work in the body. You never write a binding number — the shader is generated with the bindings in it and the host resolves each name through the compiled module\'s reflection, so adding one at the front of the list renumbers nothing. material.map is separate and is still the base colour image. A sampler declared and left null reads 1x1 white rather than reading nothing, and both objects are live: mat.textures.noise_map = other swaps the image with no compile.',
 		'no-colour-management': 'Colours are linear rgb in 0..1 (hex is divided by 255, not de-gamma\'d): there is no colour management here, and half of one would be worse than none.',
-		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). The look travels with the scene — scene.background, three.light and three.light.shadow are the ACTIVE scene\'s, and activating a scene again brings back the ones it had, so a level does not come home to the default sky. Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, and a game that transitions eight times and never disposes holds eight worlds.',
+		'many-scenes': 'A Scene is an ordinary object and you can hold as many as you like. new three.Scene() makes one and shows it; it does NOT empty or free the one before it, which keeps its objects, its bodies and its nav bake until you call dispose() on it. Exactly one scene is rendered at a time — scene.activate() is the switch, scene.isActive says which — and only that one is drawn, culled, queried and stepped. That is the level transition: build the next scene while the current one is on screen, activate it, dispose the old one, then three.unloadUnused(). The look travels with the scene — scene.background, every light in three.lights and three.light.shadow are the ACTIVE scene\'s, and activating a scene again brings back the ones it had, all four lights included, so a level does not come home to the default sky. Two consequences worth knowing before you rely on it. Bodies you add to a scene that is not active are correct and MOTIONLESS, because the frame steps one world; a nav bake is not, because baking is voxelization over that scene\'s own triangles and needs no frame at all, so the next level\'s pathfinding can be solved before anybody sees it. And nothing frees a scene for you: stats().scenes is the count, and a game that transitions eight times and never disposes holds eight worlds.',
 		'manual-free': 'Nothing is freed until you say so. scene.unload() empties the scene and gives back every asset and texture nothing else holds; scene.dispose() frees the whole scene, its bodies and its bake with it; three.unloadUnused() does the freeing without the emptying. None of them is a garbage collector — resident memory that depended on when the interpreter felt like collecting would be the worst possible property for the one number a game watches — and stats().assets is how you watch it work.',
 		'stale-handles': 'An asset handle goes stale when the asset is unloaded, because the host reuses the slot. Naming one throws a sentence saying so, and it throws at the new three.Mesh() that named it rather than waiting for the scene.add() that would have drawn it — so the line that is wrong is the line that is blamed, which matters in a script that builds a subtree and adds it at the end. Loading the file again gives a fresh handle. Object handles go stale the same way, and the event is scene.dispose() rather than new three.Scene() — a scene you stopped rendering still holds its objects, so its handles still resolve.',
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
@@ -57,7 +57,9 @@ export const DOCS = {
 		'camera-follow': 'The camera can FOLLOW something: three.camera.attach(object, { offset, distance, lag }) puts the orbit point on that object every frame, after the animation, the physics and your animation callback have all moved it — so the camera is never a frame behind, which is what makes a trailing camera look like the character sliding. three.camera.detach() stops, three.camera.attached is what it is following or null. A drag still orbits and the wheel still zooms while attached; a PAN is the one gesture that stops working, because a pan writes the orbit point and the next frame writes it back. There is one camera and it follows something in the scene being RENDERED: attaching it to an object in a scene that is not throws, and activating a scene detaches it, because a follow into a graph nobody is drawing would silently stop following.',
 		'camera-first-person': 'FIRST PERSON is distance 0, and it is not a mode: the eye sits on the point it orbits, so three.camera.attach(character, { offset: [0, 1.7, 0], distance: 0 }) is a person and scrolling back out is a third-person camera again with nothing to switch. The offset is where the head is, in WORLD space — [0, 1.7, 0] is the same vector whichever way a character faces. Aim it with three.camera.orbit(yaw, pitch), leaving the distance argument off, and three.input.pointer.dx/dy is what a mouse look feeds it.',
 		'camera-planes-derived': 'The near and far planes are derived, not set: from the orbit distance and from the scene\'s own bounds, every time the camera moves. Three.js makes them constructor arguments to PerspectiveCamera. Read them — three.camera.near and .far — when something has stopped being drawn, because geometry past far is absent rather than dim and is culled as well as clipped. Assigning either throws rather than being ignored.',
-		'one-light': 'There is one light and it is not an Object3D: three.light.direction is a world-space surface-to-light vector and three.light.ambient is the floor an unlit face gets, 0 to 1. three.light.set(direction, ambient) does both. Not scene.add(new DirectionalLight(...)), because there is no second light and no colour per light — the name is different so nothing reads as a promise the renderer cannot keep. The direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Defaults to [0.35, 0.8, 0.45] with an ambient of 0.25, and a new Scene restores that.',
+		'lights': 'Up to FOUR directional lights, and none of them is an Object3D. three.lights is the list and three.lights[0] === three.light is the sun — the only one that casts a shadow, which is why the shadow settings hang off it. Each has direction (a world-space surface-to-light vector, live: three.light.direction.y = -1 writes through), color (white by default) and intensity (1 by default, and it multiplies the colour, so it is how a light goes brighter than white). three.lights.add([1, 0, 0], 0x4060ff, 0.5) fills the next slot and answers with it; three.lights.remove(i) closes the gap; light 0 cannot be removed, set its intensity to 0 instead. Not scene.add(new DirectionalLight(...)), because a light here has no position, nothing can be parented to it and scene.remove does not reach it — a name Three.js has would promise all three. A direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than turning every shaded pixel into a NaN. Adding a fifth throws.',
+		'ambient': 'three.light.ambient is the floor a face turned right away from EVERY light gets, 0 to 1: at 0 it is black, at 1 there is no shading at all and everything is its own flat colour. It is on three.light rather than on each light because it is not a light — it stands in for every bounce this renderer does not simulate, and four of them summed would be four times the same fudge. three.light.set(direction, ambient) sets the sun and the floor at once; the second argument is the floor and not a colour, which it was before lights had colours. Defaults to 0.25, and a new Scene restores it.',
+		'specular': 'There is a specular term, and it is off on every material until you ask. material.reflectance is the switch: 0 by default (no highlight at all — the surface every material here had before the term existed) and 0.5 is the 4% that ordinary dielectrics reflect, which is what to use for anything wet, polished or glazed. material.roughness spreads the highlight out, 1 by default and perfectly diffuse. material.metalness moves a surface\'s colour out of the diffuse and into the highlight — and with no environment map to reflect, a fully metallic surface is its highlights and the ambient floor and nothing else, which is correct and is dark. In a ShaderMaterial body, standard(s) is the whole built-in shading, specular(s) is the highlight alone, and lambert(s.normal) is the diffuse alone — a body written against lambert is matte and stays matte.',
 		'shadows-off-by-default': 'It does cast a shadow, and it is off until you ask: three.light.shadow = true, or three.light.shadow = { enabled: true, size: 4096 }. The four properties are enabled, size (texels per side, clamped to 256..8192 and rounded down to a power of two), bias (extra depth offset in the light\'s clip space, 0 by default) and intensity (how dark, 0 to 1). Nothing is allocated and no shader is compiled until the first frame with it on, and a new Scene turns it back off.',
 		'shadow-cast-receive': 'Everything opaque casts and everything shaded receives — there is no castShadow or receiveShadow per object, because two copies of one mesh disagreeing about it would be two draw calls and this renderer is built to refuse that trade. A transparent material casts nothing (a shadow map holds one depth per texel, so glass would have to be either solid or absent, and absent is the better wrong answer) and neither does a debug helper. A ShaderMaterial receives shadows with no change to its body: lambert() already has the shadow folded into the direct term, and s.shadow is the raw factor for a body that wants it separately.',
 		'shadow-one-map': 'One map, fitted around the whole scene every frame, so its resolution is size divided by however wide the scene is. If shadows look blocky the scene is large, not the map small: raise three.light.shadow.size, or draw the part that matters and leave the rest out. There are no cascades. Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and if they do, three.light.shadow.bias is the knob, in small numbers like 0.0005.',
@@ -118,10 +120,10 @@ export const DOCS = {
 				'nav (this scene\'s own navigation bake — three.nav is whichever scene is active)',
 				'static (marks the whole scene as not moving again — see the static-casters topic)',
 				'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default — this scene\'s own, so setting it on a scene that is not being rendered paints nothing until you activate it)',
-				// three.light rather than a scene property, even though its value
-				// travels with the scene: there is one light, three.light is the
-				// active scene's, and listing it here would suggest a scene that is
-				// not on screen could be lit through it.
+				// three.light and three.lights rather than scene properties, even
+				// though their values travel with the scene: they are the active
+				// scene's, and listing them here would suggest a scene that is not on
+				// screen could be lit through them.
 				'collides (on the root, which draws nothing — set it on the meshes)',
 			],
 			details: {
@@ -180,6 +182,9 @@ export const DOCS = {
 				'transparent (whether it blends; derived from blending, and read-only — see blending)',
 				'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
 				'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
+				'roughness (0 to 1, 1 by default: how spread out the highlight is. 1 is perfectly diffuse and is what every material here was before there was a specular term)',
+				'metalness (0 to 1, 0 by default: a metal has no diffuse — its colour moves into the highlight. With no environment map to reflect, a fully metallic surface is its highlights and the ambient floor and nothing else)',
+				'reflectance (0 to 1, 0 by default: how strongly a NON-metal reflects, and the switch that turns the specular term on at all. 0.5 is the 4% ordinary dielectrics reflect — use it for anything wet, polished or glazed. A name Three.js does not have, because Three.js defaults every material to having a highlight and this one defaults to none)',
 				'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 				'offset ([u, v]: where the map starts, in whole repeats)',
 				'alive (false once dispose() has been called on it)',
@@ -242,12 +247,13 @@ export const DOCS = {
 			methods: ['read(into)', 'dispose()', 'toJSON()', 'toString()'],
 		},
 		MeshLambertMaterial: {
-			construct: 'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity })',
+			construct: 'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity, roughness, metalness, reflectance })',
 			note:
 				'The built-in shader with an image on it — the material to reach for when what you '
 				+ 'want is a picture on a shape. It compiles nothing and cannot fail with a shader '
-				+ 'diagnostic. Lambert is what it actually computes: one directional light and an '
-				+ 'ambient floor, no specular and no environment. It has no color, because mesh.color '
+				+ 'diagnostic. Lambert is what it actually computes by default: the lights, an '
+				+ 'ambient floor, and no highlight until material.reflectance or material.metalness '
+				+ 'asks for one. There is no environment. It has no color, because mesh.color '
 				+ 'is the per-copy channel and multiplies into the sampled texel — so one material '
 				+ 'tints a thousand copies differently and is still one draw call. With no map it is '
 				+ 'the cheapest way to ask for a side, which is what a skydome needs.',
@@ -257,6 +263,9 @@ export const DOCS = {
 				'transparent (whether it blends; derived from blending, and read-only — see blending)',
 				'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
 				'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
+				'roughness (0 to 1, 1 by default: how spread out the highlight is. 1 is perfectly diffuse and is what every material here was before there was a specular term)',
+				'metalness (0 to 1, 0 by default: a metal has no diffuse — its colour moves into the highlight. With no environment map to reflect, a fully metallic surface is its highlights and the ambient floor and nothing else)',
+				'reflectance (0 to 1, 0 by default: how strongly a NON-metal reflects, and the switch that turns the specular term on at all. 0.5 is the 4% ordinary dielectrics reflect — use it for anything wet, polished or glazed. A name Three.js does not have, because Three.js defaults every material to having a highlight and this one defaults to none)',
 				'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 				'offset ([u, v]: where the map starts, in whole repeats)',
 				'alive (false once dispose() has been called on it)',
@@ -264,16 +273,18 @@ export const DOCS = {
 			methods: ['dispose()', 'toJSON()'],
 		},
 		ShaderMaterial: {
-			construct: "new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, transparent, blending, opacity })",
+			construct: "new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, transparent, blending, opacity, roughness, metalness, reflectance })",
 			note:
 				'fragment is a Slang function `float3 shade(Surface s)` returning linear rgb. '
 				+ 'Surface has albedo, normal, uv, position, color (this copy\'s own, already in albedo), '
 				+ 'vertex_color (the mesh\'s own COLOR_0 attribute, interpolated across the triangle, '
 				+ 'white where the file carried none, and NOT already in albedo — it is the one value '
 				+ 'here that varies across a surface, so it is a painted weight as often as a tint), '
-				+ 'shadow (how much of the directional light reaches this point, 1 in the open and 0 '
+				+ 'shadow (how much of the sun reaches this point, 1 in the open and 0 '
 				+ 'under something; 1 everywhere with shadows off, and already folded into lambert() '
-				+ 'so a body does not have to read it to be shadowed) '
+				+ 'so a body does not have to read it to be shadowed), '
+				+ 'roughness, metalness and reflectance (the material\'s own three, which specular() '
+				+ 'and standard() read) '
 				+ 'and variant (its row of the table, clamped). Each uniform is readable in the body by '
 				+ 'its own name; a uniform written as an array of arrays is a table column, read as '
 				+ 'name[s.variant]. textures is the same idea for images: { noise_map: tex } declares a '
@@ -283,11 +294,15 @@ export const DOCS = {
 				+ 'own reflection. Sample with any uv you like, which is the point — s.uv + float2(t, 0) '
 				+ 'scrolls, s.uv * 4 tiles, float2(k, 0.5) reads a gradient as a lookup table. A sampler '
 				+ 'left null, or one you never fill, reads as 1x1 opaque white rather than as nothing. '
-				+ 'Three helpers are already in scope in a body. lambert(normal) is the built-in '
-				+ 'directional light as a single factor, so `return s.albedo * lambert(s.normal)` '
-				+ 'IS the default look — the shadow is inside it, on the direct term and not on the '
-				+ 'ambient floor, so a material written before shadows existed lands in the same '
-				+ 'shadow the default shading does. srgb_to_linear(c) decodes a colour you wrote down yourself. '
+				+ 'Five helpers are already in scope in a body. standard(s) IS the built-in shading, '
+				+ 'whole — `return standard(s);` draws exactly what a mesh with no ShaderMaterial draws — '
+				+ 'and standard(s, albedo, normal) is the same with a colour and a normal you worked out '
+				+ 'yourself, which is what a body that blends layers or reads a normal map wants. '
+				+ 'lambert(normal) is the DIFFUSE half alone, as a colour, summed over every light with '
+				+ 'the shadow folded into the sun\'s term rather than into the ambient floor — so '
+				+ '`return s.albedo * lambert(s.normal)` is a matte surface, which is what every body '
+				+ 'written before there was a specular term asked for and still gets. specular(s) is the '
+				+ 'other half. srgb_to_linear(c) decodes a colour you wrote down yourself. '
 				+ 'And mapped_normal(s, texel) applies a tangent-space NORMAL MAP: hand it the '
 				+ 'map\'s rgb exactly as sampled and it answers with a world-space normal to give '
 				+ 'lambert — `float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb); return s.albedo '
@@ -332,6 +347,9 @@ export const DOCS = {
 				'transparent (whether it blends; derived from blending, and read-only — see blending)',
 				'blending (three.NoBlending, three.NormalBlending or three.AdditiveBlending; decided at construction and NOT settable — this device bakes blending into the pipeline, so a change is a new material, which is one line)',
 				'opacity (0 to 1, settable and free — it rides the push block. Does NOTHING unless the material was built transparent, because an opaque pipeline discards the alpha; that is the hardware\'s answer and Three.js behaves the same way)',
+				'roughness (0 to 1, 1 by default: how spread out the highlight is. 1 is perfectly diffuse and is what every material here was before there was a specular term)',
+				'metalness (0 to 1, 0 by default: a metal has no diffuse — its colour moves into the highlight. With no environment map to reflect, a fully metallic surface is its highlights and the ambient floor and nothing else)',
+				'reflectance (0 to 1, 0 by default: how strongly a NON-metal reflects, and the switch that turns the specular term on at all. 0.5 is the 4% ordinary dielectrics reflect — use it for anything wet, polished or glazed. A name Three.js does not have, because Three.js defaults every material to having a highlight and this one defaults to none)',
 				'repeat ([u, v], or one number for both: how many times the map is laid across the surface. 1 by default; zero throws)',
 				'offset ([u, v]: where the map starts, in whole repeats)',
 				'alive (false once dispose() has been called on it)',
@@ -339,7 +357,7 @@ export const DOCS = {
 			methods: ['dispose()', 'toJSON()'],
 		},
 		LayeredMaterial: {
-			construct: 'new three.LayeredMaterial({ map, normal, mask, layers, side, transparent, blending, opacity })',
+			construct: 'new three.LayeredMaterial({ map, normal, mask, layers, side, transparent, blending, opacity, roughness, metalness, reflectance })',
 			note:
 				'An ordered stack of materials blended over a base one — terrain splatting, weathering, '
 				+ 'decals. It is a ShaderMaterial whose shade() body is GENERATED from the description, so '
@@ -378,9 +396,10 @@ export const DOCS = {
 				+ 'LOAD MASKS AND NORMAL MAPS WITH { colorSpace: three.LinearSRGBColorSpace } — their '
 				+ 'channels are numbers rather than colours, and through the default sRGB every weight '
 				+ 'comes out wrong. '
-				+ 'metalness, roughness, subsurface, height and bump are REFUSED rather than ignored: '
-				+ 'lambert() is the whole of the built-in light, so there is no equation for them to feed, '
-				+ 'and a material property that provably changes no pixel is worse than an error. '
+				+ 'A LAYER\'s metalness, roughness, metallicRoughness, subsurface, height and bump are '
+				+ 'REFUSED rather than ignored: the specular term reads one roughness and one metalness '
+				+ 'for the WHOLE material, so set them on the LayeredMaterial itself, and a material '
+				+ 'property that provably changes no pixel is worse than an error. '
 					+ 'asset.mesh(name).layers hands you a description straight out of a glTF authored with '
 				+ 'CUSTOM_materials_layers, so new three.LayeredMaterial(ref.layers) is the whole import.',
 			properties: [
@@ -388,7 +407,7 @@ export const DOCS = {
 				+ 'layers[i].tint / layers[i].opacity read and write the ones declared animated)',
 				'fragment (the generated Slang — read-only, and the thing to look at first)',
 				'uniforms, textures (the ShaderMaterial proxies, under the generated names)',
-				'map, side, transparent, blending, opacity, repeat, offset, alive (as ShaderMaterial)',
+				'map, side, transparent, blending, opacity, roughness, metalness, reflectance, repeat, offset, alive (as ShaderMaterial)',
 			],
 			methods: ['dispose()', 'toJSON()'],
 		},
@@ -464,9 +483,10 @@ export const DOCS = {
 				+ 'normal map that works and one that leans every surface the same way. It is a '
 				+ 'DESCRIPTION and not a material: what to build from it is yours, and '
 				+ 'asset.instantiate({ materials: true }) is the shorter door. aoMap has no built-in '
-				+ 'term (one line in a shade body multiplies by it) and metalness/roughness have '
-				+ 'nothing to feed, because the built-in light is one lambert factor with no specular — '
-				+ 'they cross so a ShaderMaterial can do something with them. LIKE layers THIS UPLOADS '
+				+ 'term (one line in a shade body multiplies by it) and metalness/roughness cross as '
+				+ 'the FILE\'s numbers without being applied — glTF defaults both to 1, so a file that '
+				+ 'says nothing is fully metallic, and a metal with no sky to reflect is dark. Put them '
+				+ 'on the material yourself when the file means them. LIKE layers THIS UPLOADS '
 				+ 'THE MESH and every read hands back fresh Texture handles holding references, so read '
 				+ 'it once and keep it)',
 			],
@@ -1514,12 +1534,13 @@ export const DOCS = {
 			+ 'uniforms rather than a copy of what was first passed in. '
 			+ 'The scene around the meshes goes too: the camera as a glTF camera and the light as a '
 			+ 'KHR_lights_punctual directional light, each on a node of its own, so the file opens '
-			+ 'framed and lit the way three had it — both are counted in nodes like any other node. '
-			+ 'The light\'s ambient floor has no glTF equivalent and is the one thing lost there. '
+			+ 'framed and lit the way three had it — EVERY light, with its colour and strength, and '
+			+ 'all of them counted in nodes like any other node. The ambient floor has no glTF '
+			+ 'equivalent and is the one thing lost there. '
 			+ 'Materials carry side as doubleSided, repeat and offset as KHR_texture_transform, and a '
-			+ 'source material\'s normal, occlusion and emissive maps. Metalness and roughness are not '
-			+ 'written, because this renderer has no specular term to have shown them, and lines are '
-			+ 'not written yet.',
+			+ 'source material\'s normal, occlusion and emissive maps, and the metalness and '
+			+ 'roughness the specular term drew them with. Reflectance has no glTF slot that round '
+			+ 'trips, and lines are not written yet.',
 		'three.renderSize()': '{ width, height } of the offscreen image — what pick() counts in and what the returned PNG is.',
 	'three.getApiDocs(options)': 'This, and four ways of asking for it. With no argument you get the INDEX: the summary, every difference from Three.js, the stats block, the key names, the examples, and the NAMES of the classes and functions — about a quarter of the whole and the part that is read every time. { search: "shadow" } is the grep: every entry whose name or prose mentions a word, in full, keyed by the path that asks for it again. { section: "classes.ShaderMaterial" } is one entry or one whole section, and a bare "ShaderMaterial" is found too. { all: true } is everything at once. Over MCP these are get_api_docs\'s arguments, plus a `path` that writes the whole surface to a Markdown file — one heading per entry — which is how you grep it with your own tools instead of asking again.',
 	'three.searchDocs(term)': 'Answers the question where does the API mention X, over the WHOLE documentation rather than only the differences: { query, matches, entries }, where entries maps a path like classes.ConvexGeometry or functions.three.load(path) to the text at it. One answer is capped, and anything that did not fit is named in notShown rather than dropped silently. Example: three.searchDocs("keyboard") finds the headless-has-no-keyboard note without dumping the whole documentation object. Same thing as three.getApiDocs({ search: term }).',
@@ -1744,7 +1765,7 @@ export const DOCS = {
 		'mapped_normal(s, texel) — normal maps in a ShaderMaterial':
 			'A tangent-space normal map applied to a surface that carries no tangents. In a '
 			+ 'fragment body: `float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb); return '
-			+ 's.albedo * lambert(n);` where bumps is one of the material\'s declared textures. '
+			+ 'standard(s, s.albedo, n);` where bumps is one of the material\'s declared textures. '
 			+ 'texel is the map\'s rgb exactly as sampled — the decode from [0,1] to a direction '
 			+ 'happens inside, which is why the map has to be loaded with '
 			+ '{ colorSpace: three.LinearSRGBColorSpace }. No mesh here has a TANGENT stream and '
@@ -1919,17 +1940,31 @@ export const DOCS = {
 			+ 'the orbit distance and from the scene\'s own bounds, every time the camera moves. They '
 			+ 'are worth reading when something has stopped being drawn — geometry beyond far is not '
 			+ 'dim, it is absent, and it is culled as well as clipped, so stats().culledLastFrame moves too.',
-		'three.light.direction / three.light.ambient':
-			'The one directional light. direction is a world-space surface-to-light vector — the way a '
-			+ 'face has to point to be fully lit — and is a live Vector3, so three.light.direction.y = -1 '
-			+ 'writes through. It is not normalized, so it reads back as you wrote it, and a zero one '
-			+ 'throws rather than making every shaded pixel a NaN. ambient is the floor a face turned '
-			+ 'right away from the light gets, 0 to 1: at 0 it is black, at 1 there is no shading at all '
-			+ 'and everything is its own flat colour. Defaults to [0.35, 0.8, 0.45] and 0.25.',
+		'three.light.direction / three.light.color / three.light.intensity':
+			'The sun — light zero, and the only one that casts a shadow. direction is a world-space '
+			+ 'surface-to-light vector — the way a face has to point to be fully lit — and is a live '
+			+ 'Vector3, so three.light.direction.y = -1 writes through. It is not normalized, so it reads '
+			+ 'back as you wrote it, and a zero one throws rather than making every shaded pixel a NaN. '
+			+ 'color takes a hex, a triple or an {r,g,b} and answers with the triple; intensity multiplies '
+			+ 'it and is how a light goes brighter than white. Defaults to [0.35, 0.8, 0.45], white, and 1.',
+		'three.light.ambient':
+			'The floor a face turned right away from every light gets, 0 to 1: at 0 it is black, at 1 '
+			+ 'there is no shading at all and everything is its own flat colour. On three.light rather '
+			+ 'than on each light because it is not a light — see the ambient topic. Defaults to 0.25.',
 		'three.light.set(direction, ambient)':
-			'Both at once. ambient may be omitted to leave it alone. There is no second light and no '
-			+ 'colour per light, which is why this is not scene.add(new DirectionalLight(...)) — '
-			+ 'a name Three.js has would be read as a promise of the two things it cannot do.',
+			'The sun and the floor at once. ambient may be omitted to leave it alone, and it is the '
+			+ 'FLOOR rather than a colour — three.light.color is how the sun is coloured. There are up '
+			+ 'to four lights; three.lights is the list.',
+		'three.lights':
+			'The list of lights, four slots, the sun in the first — three.lights[0] === three.light. '
+			+ 'length is how many are lit and max is how many there can be. add(direction, color, '
+			+ 'intensity) fills the next slot and answers with it, and also takes '
+			+ 'add({ direction, color, intensity }); it throws once four are lit rather than dropping '
+			+ 'the fifth. remove(i) or remove(light) takes one out and closes the gap, exactly as '
+			+ 'Array.splice does, so an index held across a remove names a different light. Light zero '
+			+ 'cannot be removed — it is the one the shadow map is fitted around — so turn it off with '
+			+ 'three.light.intensity = 0. It is iterable: for (const l of three.lights). Only light zero '
+			+ 'casts; the rest light and do not shadow.',
 		'three.light.shadow':
 			'The shadow this light casts, off until you ask. three.light.shadow = true turns it on; '
 			+ 'three.light.shadow = { enabled: true, size: 4096 } sets several at once; and the five '

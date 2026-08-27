@@ -170,6 +170,64 @@ export class Material {
 		H.setOpacity(this._index(), v);
 	}
 
+	// How rough this surface is, 0 to 1. 1 is the default and is a perfectly
+	// diffuse surface — no highlight, which is what every material here was
+	// before there was a term that read one.
+	//
+	// Three.js's name, Three.js's range, and Three.js's default. What differs
+	// is `reflectance` below, without which this changes nothing.
+	get roughness() { return H.getSurface(this._index())[0]; }
+
+	set roughness(v) { this._surface(0, v, 'roughness'); }
+
+	// How metallic it is, 0 to 1. 0 is the default.
+	//
+	// A metal has no diffuse: it reflects rather than scatters, so this takes
+	// the albedo out of the diffuse term and puts it into the highlight's
+	// colour — which is what makes gold look like gold rather than like white
+	// plastic.
+	//
+	// **With nothing to reflect, a metal is dark.** There is no environment map
+	// here, so a fully metallic surface is its highlights and the ambient floor
+	// and nothing else. That is the honest answer rather than a broken one, and
+	// the sky in `plan.md` §4 is what changes it.
+	get metalness() { return H.getSurface(this._index())[1]; }
+
+	set metalness(v) { this._surface(1, v, 'metalness'); }
+
+	// How strongly a *non*-metal reflects, 0 to 1. **0 is the default, and this
+	// is the switch that turns the specular term on at all.**
+	//
+	// 0.5 is the 4% that ordinary dielectrics reflect and is the value to reach
+	// for on anything that should look wet, polished or glazed; 1 is about the
+	// most any dielectric reflects. A metal ignores it.
+	//
+	// **A name Three.js does not have**, and deliberately — `plan.md` §4's
+	// half-match rule. Three.js's nearest is `specularIntensity`, which
+	// defaults to 1: every material there has a highlight and every material
+	// here starts without one, because every scene in this project was
+	// authored against a renderer that had no specular term at all and turning
+	// one on for all of them would relight all of them.
+	get reflectance() { return H.getSurface(this._index())[2]; }
+
+	set reflectance(v) { this._surface(2, v, 'reflectance'); }
+
+	// One of the three, written back with the other two beside it.
+	//
+	// The host takes all three at once — they are one float4 in the draw
+	// record — so a setter reads the current triple, replaces its own, and
+	// writes. Shared because three copies of this is three places for the
+	// range check to drift.
+	_surface(at, v, name) {
+		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+			throw new TypeError('`' + name + '` wants a number from 0 to 1, not ' + String(v));
+		}
+		const index = this._index();
+		const s = H.getSurface(index);
+		s[at] = v;
+		H.setSurface(index, s[0], s[1], s[2]);
+	}
+
 	// The base colour image, or null.
 	//
 	// The material's map wins over whatever image the *mesh* carries, so a
@@ -235,6 +293,18 @@ export class Material {
 		const index = this._index();
 		const uv = H.getMaterialUv(index);
 		H.setMaterialUv(index, uv[0], uv[1], u, v);
+	}
+
+	// `{ roughness, metalness, reflectance }` off a constructor's options, for
+	// every constructor that takes options.
+	//
+	// After the handle exists rather than as part of it, exactly as `opacity`
+	// is: these are writes through the handle, and going through the setters is
+	// what keeps the option and the property checked by one piece of code.
+	static _applySurface(material, options) {
+		if (options.roughness !== undefined) material.roughness = options.roughness;
+		if (options.metalness !== undefined) material.metalness = options.metalness;
+		if (options.reflectance !== undefined) material.reflectance = options.reflectance;
 	}
 
 	static _checkSide(v) {
@@ -312,10 +382,12 @@ export class Material {
 // a ShaderMaterial with a one-line body.
 //
 // Lambert rather than Basic or Standard, because that is what the built-in
-// shader actually computes: one directional light, an ambient floor, and no
-// specular term at all. Naming it MeshBasicMaterial would promise unlit and
-// deliver lit; naming it MeshStandardMaterial would promise metalness,
-// roughness and an environment and deliver none of them.
+// shader computes unless asked otherwise: the lights, an ambient floor, and no
+// highlight until `reflectance` or `metalness` is set. Naming it
+// MeshBasicMaterial would promise unlit and deliver lit; naming it
+// MeshStandardMaterial would promise an environment to reflect, which is the one
+// part of the standard model this renderer still does not have — and the part a
+// metal is dark without.
 //
 // It has no `color`. `mesh.color` is the per-copy channel and multiplies into
 // the sampled texel, so one material can tint a thousand copies differently
@@ -325,7 +397,7 @@ export class MeshLambertMaterial extends Material {
 	constructor(options = {}) {
 		if (options === null || typeof options !== 'object') {
 			throw new TypeError(
-				'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity }) wants an options object'
+				'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity, roughness, metalness, reflectance }) wants an options object'
 			);
 		}
 		const { map = null, side = FrontSide } = options;
@@ -349,5 +421,6 @@ export class MeshLambertMaterial extends Material {
 		// part of it — and the setter is what refuses a value outside 0..1, so
 		// the option and the property are checked by exactly one piece of code.
 		if (options.opacity !== undefined) this.opacity = options.opacity;
+		Material._applySurface(this, options);
 	}
 }
