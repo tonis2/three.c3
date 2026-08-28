@@ -6,7 +6,7 @@ import { Object3D } from './object3d.js';
 import { Mesh } from './mesh.js';
 import { Texture } from './texture.js';
 import { LayeredMaterial } from './layers.js';
-import { DoubleSide, FrontSide } from './material.js';
+import { DoubleSide, FrontSide, MeshLambertMaterial } from './material.js';
 import { LinearSRGBColorSpace, SRGBColorSpace, uploadOptions } from './texture.js';
 
 const H = globalThis.__three;
@@ -106,13 +106,17 @@ export class MeshRef {
 	// file, and is the shorter door.
 	//
 	// **What nothing shades yet.** `aoMap` has no built-in term — one line in a
-	// `shade` body multiplies by it. `metalness` and `roughness` cross as the
-	// file's numbers and are **not applied**: glTF's defaults are 1 and 1, so a
-	// file that says nothing is a fully metallic surface, and a metal with no
-	// environment to reflect renders dark. Put them on the material yourself —
-	// `material.metalness`, `material.roughness` — when the file means them.
-	// Their map is per texel and this renderer's pair is per material, so it
-	// crosses for a `ShaderMaterial` body to do something with and nothing else.
+	// `shade` body multiplies by it — and `metalnessRoughnessMap` has none for the
+	// *base* material either: the pair this renderer reads per material is two
+	// numbers, and a map of them varies per texel. A `LayeredMaterial` layer is
+	// where a map of them does something (`metallicRoughness` on a layer), so a
+	// base map is a layer away rather than unreachable.
+	//
+	// `metalness` and `roughness` themselves are applied now.
+	// `instantiate({ materials: true })` puts them on the material it builds, and
+	// they are the file's own numbers — glTF's defaults are 1 and 1, so a file
+	// that says nothing about either is a fully metallic surface and will look
+	// like one. `scene.environment` is what it reflects.
 	//
 	// **Reading this uploads the mesh, and every read holds new references**,
 	// exactly as `layers` does: the images exist only once the primitive is on the
@@ -166,15 +170,29 @@ export class MeshRef {
 	get layers() {
 		const stack = H.meshLayers(this.asset, this.assetGeneration, this.mesh);
 		if (stack === null) return null;
-		const [mask, rows] = stack;
+		const [mask, rows, height, bumpStrength, bumpDistance] = stack;
 		return {
 			// Masks are weights rather than colours, so `load_material_layers`
 			// uploaded this linear. What comes back says which space it really
 			// got rather than which one it should have — see `layerTexture`.
 			mask: layerTexture(mask),
+			// The base material's relief, under the whole stack. It comes from the
+			// extension's `base` object because core glTF has nowhere to put a
+			// height map, which is the same reason it arrives here rather than on
+			// `ref.material` beside the normal map.
+			//
+			// Both or neither: `bump` on its own scales a displacement that is not
+			// there, and a description carrying it would read as relief the material
+			// does not have.
+			...(height === null ? {} : {
+				height: layerTexture(height),
+				bump: { strength: bumpStrength, distance: bumpDistance },
+			}),
 			layers: rows.map(([
 				name, enabled, blend, maskSource, channel, invert, opacity,
 				r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture,
+				metalness, roughness, metallicRoughness, layerHeight,
+				layerBumpStrength, layerBumpDistance,
 			]) => ({
 				name,
 				enabled,
@@ -198,6 +216,32 @@ export class MeshRef {
 				map: layerTexture(map),
 				normal: layerTexture(normal),
 				emissive: layerTexture(emissive),
+				// The file's own two factors, and the map that varies them per texel.
+				//
+				// **Omitted where the file left them at glTF's defaults**, which are 1
+				// and 1 — and the parser cannot tell a layer that wrote them from one
+				// that did not, because the absent value and the written one are the
+				// same number. Carried through as stated, a terrain whose layers say
+				// nothing about metal would import with every layer fully metallic,
+				// which is what a viewer implementing the extension would draw and is
+				// not what anybody authored.
+				//
+				// So the same rule the tint already follows one field up: **a default
+				// is not a statement.** A layer that means "fully rough, fully
+				// metallic" states it with a map, exactly as a layer that means white
+				// paint states it with one. Every exporter that means either writes
+				// both factors, so the case this drops is the case nobody wrote.
+				...(metallicRoughness === null && metalness === 1 && roughness === 1 ? {} : {
+					metalness,
+					roughness,
+					metallicRoughness: layerTexture(metallicRoughness),
+				}),
+				// This layer's own relief, over whatever the base already has. Both or
+				// neither, for the reason the base pair is.
+				...(layerHeight === null ? {} : {
+					height: layerTexture(layerHeight),
+					bump: { strength: layerBumpStrength, distance: layerBumpDistance },
+				}),
 			})),
 		};
 	}
@@ -511,13 +555,28 @@ export class Asset {
 	//    there is no alpha-test path here, and a cutout drawn as a blend is the
 	//    nearer of the two wrong answers.
 	//  - `doubleSided` becomes `side: three.DoubleSide`.
-	//  - Occlusion and metallic-roughness are not applied. Nothing shades them —
-	//    `ref.material` has both and the reason.
+	//  - `metallicFactor` and `roughnessFactor` go on as `metalness` and
+	//    `roughness`, which is what the specular and environment terms read.
+	//    **This is the file's numbers and not a guess**, and glTF's defaults for
+	//    them are 1 and 1 — so a file that never wrote a `pbrMetallicRoughness`
+	//    block imports as a fully metallic surface and looks like one. It is dark
+	//    without a `scene.environment`, correctly: a metal is what it reflects.
+	//  - Occlusion and the metallic-roughness *map* are not applied. Nothing
+	//    shades either — `ref.material` has both and the reason.
+	//
+	// **Two materials come out of this, and which one is the whole economy of it.**
+	// A normal map or a glow needs a generated shading body and so a
+	// `LayeredMaterial`; the surface pair does not, because the built-in shader
+	// already reads it. So a file whose materials differ only in their PBR numbers
+	// — which is most files — gets `MeshLambertMaterial`s, and those compile
+	// nothing at all: the pipeline is the one the renderer built at startup. Going
+	// through the layered path for two floats would have been a shader per glTF
+	// material for a body identical to the built-in one.
 	//
 	// A description with none of that in it builds nothing: an opaque,
-	// single-sided material with no maps is exactly what the default material
-	// already is, and one material per mesh that changes no pixel is a pipeline
-	// per mesh for nothing.
+	// single-sided material with no maps and this renderer's own surface defaults
+	// is exactly what the default material already is, and one material per mesh
+	// that changes no pixel is a handle per mesh for nothing.
 	_importedMaterial(mesh, cache) {
 		const d = new MeshRef(this._a, this._g, mesh, '').material;
 		if (d === null) return null;
@@ -526,13 +585,18 @@ export class Asset {
 		const side = d.doubleSided ? DoubleSide : FrontSide;
 		const glow = d.emissiveMap !== null
 			|| d.emissive[0] > 0 || d.emissive[1] > 0 || d.emissive[2] > 0;
-		if (!transparent && !d.doubleSided && d.normalMap === null && !glow) return null;
+		// Against this renderer's defaults rather than against glTF's, because the
+		// question is whether saying it changes anything. `scene/material.c3` has
+		// why they are 1 and 0.
+		const surface = d.roughness !== 1 || d.metalness !== 0;
+		const body = d.normalMap !== null || glow;
+		if (!transparent && !d.doubleSided && !body && !surface) return null;
 
 		// The images are handles rather than values, so identity is what the key
 		// can be built from — two meshes that resolved the same slot get the same
 		// `_index()`.
 		const key = [
-			transparent, side,
+			transparent, side, d.roughness, d.metalness,
 			d.normalMap ? d.normalMap._index() : -1,
 			d.emissiveMap ? d.emissiveMap._index() : -1,
 			d.emissive.join(','),
@@ -540,19 +604,28 @@ export class Asset {
 		const hit = cache.get(key);
 		if (hit) return hit;
 
-		const built = new LayeredMaterial({
-			normal: d.normalMap,
-			transparent,
-			side,
-			layers: glow
-				? [{
-					name: 'emissive',
-					emissive: d.emissiveMap,
-					emissiveFactor: d.emissive,
-					opacity: 0,
-				}]
-				: [],
-		});
+		const built = body
+			? new LayeredMaterial({
+				normal: d.normalMap,
+				transparent,
+				side,
+				roughness: d.roughness,
+				metalness: d.metalness,
+				layers: glow
+					? [{
+						name: 'emissive',
+						emissive: d.emissiveMap,
+						emissiveFactor: d.emissive,
+						opacity: 0,
+					}]
+					: [],
+			})
+			: new MeshLambertMaterial({
+				transparent,
+				side,
+				roughness: d.roughness,
+				metalness: d.metalness,
+			});
 		cache.set(key, built);
 		return built;
 	}

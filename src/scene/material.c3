@@ -350,11 +350,12 @@ struct Material
 	// physical value is one line away — `material.reflectance = 0.5` — and off
 	// until asked for, exactly as shadows are.
 	//
-	// The same argument is why the glTF importer does not apply the file's
-	// `metallicFactor` and `roughnessFactor`, whose spec defaults are 1 and 1: a
-	// file that says nothing is a fully metallic surface under those, and this
-	// renderer has no environment for a metal to reflect. `GpuMaterial` carries
-	// both so a script can read them and decide.
+	// The importer *does* apply the file's `metallicFactor` and `roughnessFactor`,
+	// and the difference is that those are numbers a file states while this is one
+	// nothing states — glTF has no reflectance, so applying the file's would mean
+	// inventing it. `scene.environment` is what closed the other half: a metal now
+	// has something to reflect, so a file that says it is metallic can be drawn as
+	// one. `js/prelude/asset.js` has the import rule.
 	float metalness;
 	float reflectance;
 	char[PUSH_BUDGET] block;
@@ -446,6 +447,11 @@ struct ScriptLayer
 	// shared mask, which is the ordinary case and the economy the extension's
 	// per-layer channel field exists for.
 	uint mask_binding;
+	// The layer's metallic-roughness map and its height map, packed glTF's way and
+	// read by `parallax_uv` respectively. Zero for a layer with neither, which is
+	// most of them.
+	uint mr_binding;
+	uint height_binding;
 	// Push-block offset of the `float4` holding this layer's tint and opacity for
 	// a layer that asked to be `animated`, or -1 for one whose tint and opacity
 	// were baked into the shader as literals. `Material.layer_params` reads it.
@@ -457,6 +463,16 @@ struct ScriptLayer
 	uint mask_channel;
 	uint mask_source;
 	bool invert;
+	// What the layer said about how light behaves on it, as opposed to what colour
+	// it is. Literals in the generated shader — there is no `animated` for these —
+	// so unlike the tint they are what they were at construction and are read back
+	// from here rather than from the push block.
+	float metallic;
+	float roughness;
+	// The extension's own pair, kept apart. The shader carries their product and
+	// nothing else; a file wants both, so this is where both survive.
+	float bump_strength;
+	float bump_distance;
 }
 
 <*
@@ -481,6 +497,12 @@ struct ScriptLayers
 	// property at all. `scene/export.c3` writes it as the glTF material's own
 	// `normalTexture`.
 	uint base_normal_binding;
+	// The *base* material's height map and bump pair, which the extension puts
+	// under its own `base` object because core glTF has no slot for either. Zero
+	// and unread for a stack with no relief under it.
+	uint base_height_binding;
+	float base_bump_strength;
+	float base_bump_distance;
 	List{ScriptLayer} layers;
 }
 
@@ -744,12 +766,22 @@ fn void Material.bind_table(&self)
  @param mask_binding : `The sampler several layers read a channel of, or 0 for a stack where no two share one.`
  @param base_normal_binding : `The base material's normal map, or 0. Written as the glTF material's own normalTexture rather than as any layer's.`
 *>
-fn void Material.begin_script_layers(&self, uint mask_binding, uint base_normal_binding = 0)
+fn void Material.begin_script_layers(
+	&self,
+	uint mask_binding,
+	uint base_normal_binding = 0,
+	uint base_height_binding = 0,
+	float bump_strength = 1.0,
+	float bump_distance = 1.0
+)
 {
 	self.free_script_layers();
 	self.script_layers.present = true;
 	self.script_layers.mask_binding = mask_binding;
 	self.script_layers.base_normal_binding = base_normal_binding;
+	self.script_layers.base_height_binding = base_height_binding;
+	self.script_layers.base_bump_strength = bump_strength;
+	self.script_layers.base_bump_distance = bump_distance;
 	self.script_layers.layers.init(mem, 4);
 }
 

@@ -46,8 +46,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 	self.bind(host, "disposeMaterial", &js_dispose_material, 1);
-	self.bind(host, "beginMaterialLayers", &js_begin_material_layers, 3);
-	self.bind(host, "addMaterialLayer", &js_add_material_layer, 14);
+	self.bind(host, "beginMaterialLayers", &js_begin_material_layers, 6);
+	self.bind(host, "addMaterialLayer", &js_add_material_layer, 18);
 }
 
 <*
@@ -860,7 +860,10 @@ fn void js_set_material(
 
  `sharedMask` is the sampler several layers read a channel of, or `""` for a
  stack where no two share one. `baseNormal` is the stack's base normal map, which
- becomes the glTF material's own `normalTexture` rather than any layer's.
+ becomes the glTF material's own `normalTexture` rather than any layer's, and
+ `baseHeight` with the bump pair beside it is the relief under the whole stack —
+ the extension's `base` object, which is the only place a height map can go
+ because core glTF has no slot for one.
 *>
 fn void js_begin_material_layers(
 	qjs::ContextRef ctx,
@@ -885,18 +888,24 @@ fn void js_begin_material_layers(
 
 		String shared = arg_text(&js, argc, args, 1, tmem);
 		String base_normal = arg_text(&js, argc, args, 2, tmem);
+		String base_height = arg_text(&js, argc, args, 3, tmem);
 		material.begin_script_layers(
 			shared.len == 0 ? 0 : material.binding_of_texture(shared),
-			base_normal.len == 0 ? 0 : material.binding_of_texture(base_normal)
+			base_normal.len == 0 ? 0 : material.binding_of_texture(base_normal),
+			base_height.len == 0 ? 0 : material.binding_of_texture(base_height),
+			(float)arg_number(&js, argc, args, 4),
+			(float)arg_number(&js, argc, args, 5)
 		);
 	};
 }
 
 <*
  `addMaterialLayer(material, name, samplers, blend, maskSource, maskChannel,
- invert, opacity, r, g, b, er, eg, eb)` — one layer of the stack.
+ invert, opacity, r, g, b, er, eg, eb, metallic, roughness, bumpStrength,
+ bumpDistance)` — one layer of the stack.
 
- `samplers` is `"map,normal,emissive,mask,params"`, each field a sampler name the
+ `samplers` is `"map,normal,emissive,mask,params,metallicRoughness,height"`, each
+ field a sampler name the
  generator chose or empty for a slot the layer does not use — the same shape the
  uniforms take, and safe for the same reason: these are names
  `js/prelude/layers.js` generates as `layer3_map`, so a comma cannot appear in
@@ -936,7 +945,7 @@ fn void js_add_material_layer(
 		}
 
 		List{String} samplers;
-		samplers.init(tmem, 5);
+		samplers.init(tmem, 7);
 		split_commas(arg_text(&js, argc, args, 2, tmem), &samplers);
 
 		ScriptLayer layer = {
@@ -948,6 +957,8 @@ fn void js_add_material_layer(
 			.params_offset = samplers.len() > 4 && samplers[4].len > 0
 				? material.uniform_offset(samplers[4])
 				: -1,
+			.mr_binding = binding_at(material, &samplers, 5),
+			.height_binding = binding_at(material, &samplers, 6),
 			.blend_mode = (uint)arg_int(&js, argc, args, 3),
 			.mask_source = (uint)arg_int(&js, argc, args, 4),
 			.mask_channel = (uint)arg_int(&js, argc, args, 5),
@@ -963,6 +974,10 @@ fn void js_add_material_layer(
 				(float)arg_number(&js, argc, args, 12),
 				(float)arg_number(&js, argc, args, 13),
 			},
+			.metallic = (float)arg_number(&js, argc, args, 14),
+			.roughness = (float)arg_number(&js, argc, args, 15),
+			.bump_strength = (float)arg_number(&js, argc, args, 16),
+			.bump_distance = (float)arg_number(&js, argc, args, 17),
 		};
 		material.add_script_layer(layer);
 	};

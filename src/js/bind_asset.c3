@@ -1329,7 +1329,7 @@ fn void js_split_mesh(
  are named on the far side, which keeps `gltf.c3l`'s enum the single authority
  for what the ordinals mean.
 
- @return `[maskTexture, [layer...]] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture], or null.`
+ @return `[maskTexture, [layer...], height, bumpStrength, bumpDistance] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture, metallic, roughness, metallicRoughness, height, bumpStrength, bumpDistance], or null.`
 *>
 fn void js_mesh_layers(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -1373,12 +1373,25 @@ fn void js_mesh_layers(
 		js.set_index(row, 15, layer_texture_value(&js, &self.pass.assets, layer.normal_texture));
 		js.set_index(row, 16, layer_texture_value(&js, &self.pass.assets, layer.emissive_texture));
 		js.set_index(row, 17, layer_texture_value(&js, &self.pass.assets, layer.mask_texture));
+		js.set_index(row, 18, qjs::number_value(layer.metallic));
+		js.set_index(row, 19, qjs::number_value(layer.roughness));
+		js.set_index(row, 20,
+			layer_texture_value(&js, &self.pass.assets, layer.metallic_roughness_texture));
+		js.set_index(row, 21, layer_texture_value(&js, &self.pass.assets, layer.height_texture));
+		js.set_index(row, 22, qjs::number_value(layer.bump_strength));
+		js.set_index(row, 23, qjs::number_value(layer.bump_distance));
 		js.set_index(layers, (uint)i, row);
 	}
 
 	qjs::Value stack = js.array();
 	js.set_index(stack, 0, layer_texture_value(&js, &self.pass.assets, mesh.layers.mask_texture));
 	js.set_index(stack, 1, layers);
+	// The base material's own relief, which hangs off the stack rather than off any
+	// layer — the extension's `base` object, and the only place core glTF leaves
+	// for a height map.
+	js.set_index(stack, 2, layer_texture_value(&js, &self.pass.assets, mesh.layers.height_texture));
+	js.set_index(stack, 3, qjs::number_value(mesh.layers.bump_strength));
+	js.set_index(stack, 4, qjs::number_value(mesh.layers.bump_distance));
 	*out = stack;
 }
 

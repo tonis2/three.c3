@@ -364,7 +364,7 @@ export const DOCS = {
 			methods: ['dispose()', 'toJSON()'],
 		},
 		LayeredMaterial: {
-			construct: 'new three.LayeredMaterial({ map, normal, mask, layers, side, transparent, blending, opacity, roughness, metalness, reflectance })',
+			construct: 'new three.LayeredMaterial({ map, normal, mask, height, bump, layers, side, transparent, blending, opacity, roughness, metalness, reflectance })',
 			note:
 				'An ordered stack of materials blended over a base one — terrain splatting, weathering, '
 				+ 'decals. It is a ShaderMaterial whose shade() body is GENERATED from the description, so '
@@ -375,6 +375,7 @@ export const DOCS = {
 				+ 'layers is an array, OUTERMOST LAST — each is blended over everything under it as '
 				+ 'lerp(below, blend(below, layer), mask). '
 				+ 'A layer takes: map (its albedo), normal, emissive, emissiveFactor, tint, opacity, '
+				+ 'roughness, metalness, metallicRoughness, height, bump, '
 				+ 'blend, mask, maskSource, maskTexture, invert, uvScale, uvOffset, enabled, animated, name. '
 				+ 'mask is WHICH CHANNEL this layer\'s weight is read from — \'r\', \'g\', \'b\' or \'a\' — '
 				+ 'which is the economy that makes a four-layer terrain one mask image instead of four. '
@@ -397,16 +398,29 @@ export const DOCS = {
 				+ 'layer, which promotes its tint and opacity to a uniform you can write every frame — '
 				+ 'mat.layers[2].opacity = 0.25. That costs 16 of the material\'s 104 uniform bytes, so at '
 				+ 'most six layers may be animated; the rest are free and cost the push block nothing. '
-				+ 'The real ceiling is SAMPLERS: eight, counting one per layer map, normal, emissive and '
-				+ 'own mask, plus one for the shared mask. The base map does not count. { enabled: false } '
+				+ 'The real ceiling is SAMPLERS: eight, counting one per layer map, normal, emissive, '
+				+ 'height, metallicRoughness and own mask, plus one each for the shared mask and the base '
+				+ 'normal and height. The base map does not count. { enabled: false } '
 				+ 'drops a layer and its samplers entirely, which is how you get back under it. '
 				+ 'LOAD MASKS AND NORMAL MAPS WITH { colorSpace: three.LinearSRGBColorSpace } — their '
 				+ 'channels are numbers rather than colours, and through the default sRGB every weight '
 				+ 'comes out wrong. '
-				+ 'A LAYER\'s metalness, roughness, metallicRoughness, subsurface, height and bump are '
-				+ 'REFUSED rather than ignored: the specular term reads one roughness and one metalness '
-				+ 'for the WHOLE material, so set them on the LayeredMaterial itself, and a material '
-				+ 'property that provably changes no pixel is worse than an error. '
+				+ 'A LAYER MAY CHANGE THE SURFACE, not just its colour: roughness and metalness are '
+				+ '0-to-1 numbers and metallicRoughness is a map packed glTF\'s way (green rough, blue '
+				+ 'metal). They blend down the stack by the same weight and the same blend mode the '
+				+ 'colour does, so a moss layer that multiplies its colour also multiplies its roughness. '
+				+ 'State only what the layer means — a layer that says roughness says nothing about '
+				+ 'metalness, and the material\'s own value carries through. '
+				+ 'height IS PARALLAX: bump: { strength, distance } scales it, distance IN METRES, and '
+				+ 'the uv moves under everything sampled after it. A height on the LayeredMaterial itself '
+				+ 'moves the WHOLE stack — base colour, base normal, the mask and every layer; a height '
+				+ 'on a layer moves that layer\'s own maps and nothing else. 0.5 in the map is the plane '
+				+ 'the mesh already has. It is one step rather than a march, so it shifts convincingly '
+				+ 'and does not occlude, and it does nothing in a bake — where the texture slides to is a '
+				+ 'fact about where the camera is. '
+				+ 'A LAYER\'s subsurface is the one thing still REFUSED rather than ignored: it needs a '
+				+ 'light transport this renderer does not have, and a material property that provably '
+				+ 'changes no pixel is worse than an error. '
 					+ 'asset.mesh(name).layers hands you a description straight out of a glTF authored with '
 				+ 'CUSTOM_materials_layers, so new three.LayeredMaterial(ref.layers) is the whole import.',
 			properties: [
@@ -490,10 +504,12 @@ export const DOCS = {
 				+ 'normal map that works and one that leans every surface the same way. It is a '
 				+ 'DESCRIPTION and not a material: what to build from it is yours, and '
 				+ 'asset.instantiate({ materials: true }) is the shorter door. aoMap has no built-in '
-				+ 'term (one line in a shade body multiplies by it) and metalness/roughness cross as '
-				+ 'the FILE\'s numbers without being applied — glTF defaults both to 1, so a file that '
-				+ 'says nothing is fully metallic, and a metal with no sky to reflect is dark. Put them '
-				+ 'on the material yourself when the file means them. LIKE layers THIS UPLOADS '
+				+ 'term (one line in a shade body multiplies by it) and metalnessRoughnessMap has none '
+				+ 'either, because this renderer\'s pair is per material and a map of them is per texel '
+				+ '— a LayeredMaterial layer\'s metallicRoughness is where a map of them does something. '
+				+ 'metalness and roughness themselves are the FILE\'s numbers and instantiate() applies '
+				+ 'them; glTF defaults both to 1, so a file that says nothing is fully metallic and is '
+				+ 'dark without a sky to reflect. LIKE layers THIS UPLOADS '
 				+ 'THE MESH and every read hands back fresh Texture handles holding references, so read '
 				+ 'it once and keep it)',
 			],
