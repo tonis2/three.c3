@@ -861,11 +861,15 @@ fn void? live(
 			// - `is_animating` — a registered callback or handler means the runtime
 			//   has work every frame by definition, and this is `tick`'s own
 			//   early-return condition rather than a second copy of it.
+			// - `is_simulating` — a body still falling. A scene with physics and no
+			//   `setAnimationLoop` is not "animating" by any test above, so without
+			//   this the world advanced only while the mouse was moving.
 			// - `camera_moved` — a coast is still running, and a drag that ends is
 			//   followed by a third of a second of frames nobody asked for.
 			// - `handled` — a tool call may have changed the scene, and the answer
 			//   went out before the frame that shows it.
-			quiet = presented && !runtime.is_animating() && !camera_moved && handled == 0;
+			quiet = presented && !runtime.is_animating() && !runtime.is_simulating()
+				&& !camera_moved && handled == 0;
 		}
 		else
 		{

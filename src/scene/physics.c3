@@ -709,6 +709,44 @@ fn void Physics.set_gravity(&self, Vec3 gravity)
 }
 
 <*
+ Whether the solver still has something to move.
+
+ THE FRAME LOOP SLEEPS. `main.c3` parks in `getEvent(wait: true)` whenever the
+ last frame is still on screen and nothing is known to want another one, which is
+ what keeps an idle window off the CPU. Every term of that condition is something
+ that would be lost by sleeping through it, and a falling body is one of them: a
+ scene with bodies and no `setAnimationLoop` is not "animating" by any test the
+ runtime had, so the world advanced only while the mouse was moving and stood
+ still the moment it stopped.
+
+ Awake, not merely present. A settled scene is supposed to let the window sleep —
+ that is the whole point of the solver's own sleeping — so this asks whether any
+ body is still being integrated rather than whether any body exists. Kinematic
+ bodies are not counted: they move because a script writes their transform, and a
+ script that runs is already a reason to stay awake.
+
+ @return `true while any dynamic rigid body or any soft body is awake.`
+*>
+fn bool Physics.is_moving(&self)
+{
+	if (!self.opened) return false;
+
+	collision::RigidBodyIterator iter = self.world.bodies.value_iter();
+	while (iter.next())
+	{
+		collision::Rigidbody*? body = iter.get();
+		if (catch body) continue;
+		if (body.is_active()) return true;
+	}
+
+	foreach (&sb : self.world.soft_bodies)
+	{
+		if (!sb.sleeping) return true;
+	}
+	return false;
+}
+
+<*
  Pushes whatever a script wrote onto the kinematic bodies, before the step.
 
  `set_kinematic_target` derives a velocity from the delta, which is what lets a

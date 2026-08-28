@@ -637,6 +637,82 @@ fn void a_velocity_set_from_a_script_moves_the_body() @test
 }
 
 <*
+ A falling body is a reason to keep drawing.
+
+ `main.c3` parks the window in `getEvent(wait: true)` whenever the last frame is
+ still on screen and nothing is known to want another one. `is_animating` covers
+ a callback, a handler and a playing clip — and a scene with physics and no
+ `setAnimationLoop` is none of those, so the sleep condition was true while the
+ world was still falling and the simulation advanced only while the mouse moved.
+
+ The second half is the half that makes it a condition rather than a switch: once
+ everything has settled the window is *supposed* to sleep, so this has to go
+ false again on its own.
+*>
+fn void a_falling_body_keeps_the_window_awake() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		test::@check(!run.is_simulating(), "an empty runtime already had something to step");
+
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(60, 1, 60));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const ball = new three.Mesh(new three.SphereGeometry(0.5, 16, 8));
+			ball.position.set(0, 8, 0);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1 });
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		// Nothing is registered, so the runtime says it is not animating. That is
+		// the exact state the sleep condition used to read as "nothing to do".
+		test::@check(!run.is_animating(), "something registered a callback");
+		test::@check(run.is_simulating(), "a ball eight units up was not worth a frame");
+
+		int i = 1;
+		for (; i <= 30; i++) run.tick((double)i * (1000.0 / 60.0));
+		test::@check(run.is_simulating(), "the ball stopped being worth a frame mid-fall");
+
+		// Four seconds, which is eight times the half-second sleep timer.
+		for (; i <= 240; i++) run.tick((double)i * (1000.0 / 60.0));
+		test::@check(!run.is_simulating(), "a settled scene still refuses to let the window sleep");
+	};
+}
+
+// A static body never moves, so a world made only of them is not a reason to
+// spend a frame — the sleep condition asks what is being integrated, not what
+// exists.
+fn void a_world_of_static_bodies_lets_the_window_sleep() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			for (let i = 0; i < 4; i++) {
+				const m = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+				m.position.set(i * 3, 1, 0);
+				scene.add(m);
+				three.physics.add(m, { shape: 'box', mass: 0 });
+			}
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		test::@check(!run.is_simulating(), "four static boxes wanted the CPU");
+		for (int i = 1; i <= 10; i++) run.tick((double)i * (1000.0 / 60.0));
+		test::@check(!run.is_simulating(), "and still wanted it ten frames later");
+	};
+}
+
+<*
  An impulse adds to what the body was already doing, and a sleeping body
  answers it.
 

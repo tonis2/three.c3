@@ -140,6 +140,22 @@ fn bool JsRuntime.is_animating(&self)
 }
 
 <*
+ Whether the solver still owes the world a frame.
+
+ Separate from `is_animating` on purpose, and not folded into it: `is_animating`
+ is `tick`'s early-return condition, and everything it gates is JavaScript —
+ the callback, the handlers, the frame budget. Physics steps *above* that return
+ and needs none of it. What this answers is the other question, the one
+ `main.c3` asks before it lets the window sleep: is anything still falling.
+
+ @return `true while the active scene has a body the solver is still integrating.`
+*>
+fn bool JsRuntime.is_simulating(&self)
+{
+	return self.pass != null && self.pass.scene.physics.is_moving();
+}
+
+<*
  Advances every playing clip by what this frame is worth.
 
  The runtime keeps no clock, and now nothing else does either: the wall-to-game
