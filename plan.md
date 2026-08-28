@@ -158,6 +158,8 @@ followed.
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
+- [] GPU Particles
+
 
 ## 19. Shadows at game scale
 
@@ -267,6 +269,8 @@ not before, and `entity.js`'s header carries the table.
       rules, with nothing in the pack's six or the frame's seven edited. It is
       the same acceptance test both of those sections set themselves and neither
       has been shown.
+
+
 
 ---
 
