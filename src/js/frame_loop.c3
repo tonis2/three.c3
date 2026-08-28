@@ -82,6 +82,10 @@ const uint JS_FRAME_MAX_JOBS = 1_000;
 // frame fills any buffer immediately and the interesting state is the state it is
 // in now.
 const usz JS_FRAME_LOG_BYTES = 8 * 1024;
+// The same ceiling for `three.debug.write` from inside a callback. A system that
+// writes one entry a frame fills this in a few seconds of a running game, and
+// what it costs to overrun is a count rather than a leak.
+const usz JS_FRAME_DEBUG_BYTES = 8 * 1024;
 
 fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 {
@@ -597,6 +601,33 @@ fn void JsRuntime.drain_frame_log(&self)
 
 	self.frame_log.clear();
 	self.frame_dropped = 0;
+}
+
+<*
+ The callbacks' debug entries into the run's, ahead of anything the script writes.
+
+ No `[animation loop]` marker around them, unlike `drain_frame_log`: these are
+ data and not lines, an entry says what it is, and a bare string in the middle of
+ an array of objects would be the noise the marker exists to prevent. The one
+ exception is the overflow count, which has nowhere else to be said.
+*>
+fn void JsRuntime.drain_frame_debug(&self)
+{
+	if (self.frame_debug.len() == 0 && self.frame_debug_dropped == 0) return;
+
+	if (self.frame_debug_dropped > 0)
+	{
+		if (self.debug.len() > 0) self.debug.append_char(',');
+		self.debug.appendf(`"[animation loop, %d later entries dropped]"`, self.frame_debug_dropped)!!;
+	}
+	if (self.frame_debug.len() > 0)
+	{
+		if (self.debug.len() > 0) self.debug.append_char(',');
+		self.debug.append_string(self.frame_debug.str_view());
+	}
+
+	self.frame_debug.clear();
+	self.frame_debug_dropped = 0;
 }
 
 <*

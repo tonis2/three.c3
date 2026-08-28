@@ -152,7 +152,8 @@ every machine, which is exactly what a vsynced window takes away.
   and **still exits 0**. Only a bad flag or an unreadable `--script` path exits
   1. So in a test, assert on stdout or on the PNG — not on the exit code.
 - A script's `return` value is **not** printed on the CLI path. It only comes
-  back as `value` from the `run_script` MCP tool. Use `console.log` in batch.
+  back as `value` from the `run_script` MCP tool. `three.debug.write(x)` is the
+  one that prints here — `debug: [...]` — as well as coming back over MCP.
 
 ## The MCP tools
 
@@ -165,8 +166,9 @@ starts; the HTTP transport needs the server already running.
 top-level `await` and `return` both work. Answers with two content blocks,
 **whether or not the script succeeded**:
 
-1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw and
-   `warnings` when the renderer had something to say
+1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw,
+   `warnings` when the renderer had something to say, and `debug` when the
+   script called `three.debug.write`
 2. a PNG of the frame
 
 `stats` is `drawCalls, uniqueMeshes, instances, nodes, assets, triangles,
@@ -197,7 +199,8 @@ Takes no view arguments; move `three.camera` from a script instead.
 - `{ path: "api.md" }` → **currently writes nothing.** It answers with the
   index and no file appears, for a relative path or an absolute one. Until it
   does, the way to get a file to grep is to log it and redirect — note that a
-  script's `return` value is not printed on the CLI path, only `console.log`:
+  script's `return` value is not printed on the CLI path, only `console.log`
+  and `three.debug.write`:
 
       echo 'console.log(JSON.stringify(three.getApiDocs({ all: true })))' > d.js
       three --headless --script d.js --frames 1 | grep -m1 '^{' > api.json

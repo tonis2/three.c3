@@ -1137,6 +1137,11 @@ fn void? boot_script(JsRuntime* runtime, String path)
 		defer ran.free();
 
 		if (ran.log.len > 0) io::printn(ran.log);
+		// `value` is not printed and this is, which is the difference between them
+		// here: a returned value is an answer to whoever CALLED, and over MCP there
+		// is one. A `--script` run has no caller, so what the script wanted said out
+		// loud is the only half of the pair that has a reader on this path.
+		if (ran.debug.len > 0) io::printfn("debug: %s", ran.debug);
 		if (!ran.ok) io::printfn("three: %s did not run: %s", path, ran.error);
 	};
 }

@@ -698,7 +698,7 @@ console.log(`${houses.length} houses, ${people.length} people, ${NAMES.length} g
 console.log('space holds · . steps a held clock · t swatch board · d shadows · n re-roll · s the cost');
 report();
 
-return {
+three.debug.write({
 	keys: {
 		space: 'hold the clock',
 		'.': 'step a held clock one frame',
@@ -708,4 +708,4 @@ return {
 		s: 'stats',
 	},
 	stats: three.stats(),
-};
+});
