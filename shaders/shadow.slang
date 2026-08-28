@@ -63,6 +63,16 @@ struct FrameBlock
     float4 shadow;
     float4 debug;
     float4 camera;
+    // The sky, as the surfaces that reflect it need it.
+    //
+    //   x  intensity, and **zero means there is no environment**. The one number
+    //      the reflection branches on, so a scene without a sky costs a compare.
+    //   y  rotation about world Y in radians — the same angle `sky.slang` turns
+    //      the background by, so a metal reflects the sky that is on screen.
+    //   z  the environment image's highest mip level, which is what turns
+    //      `roughness` into a blur.
+    //   w  unused.
+    float4 environment;
     Light lights[4];
 };
 

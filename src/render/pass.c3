@@ -123,6 +123,10 @@ struct MeshPass
 	// byte — and it happens once at startup.
 	MeshPipeline* alpha_pipeline;
 	MeshPipeline* additive_pipeline;
+	// `shaders/sky.slang` — a different template and so a second Slang call, not a
+	// fourth state over the mesh one. Null until `init` has run, and recorded only
+	// for a scene that has a background image. See `render/sky.c3`.
+	MeshPipeline* sky_pipeline;
 	// Every material any node can name. Index 0 is `DEFAULT_MATERIAL`, built in
 	// `init` from `pipeline`, so a scene that never mentions a material still has
 	// one. Lives here rather than on `JsRuntime` for the same reason `assets` does:
@@ -347,6 +351,15 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// own, and `create_texture_material` retains per material on top of it.
 		self.alpha_pipeline = self.pipelines.acquire(gpu, target, source, path, ALPHA_STATE)!;
 		self.additive_pipeline = self.pipelines.acquire(gpu, target, source, path, ADDITIVE_STATE)!;
+
+		// The sky is a different template and therefore a second Slang call, unlike
+		// the three above. Built here for their reason: a scene that assigns a
+		// background should not pay a pipeline creation inside the frame that did
+		// it, and a scene that never assigns one records nothing.
+		String sky = shader_source("sky.slang", tmem)!;
+		self.sky_pipeline = self.pipelines.acquire(
+			gpu, target, sky, "sky.slang", SKY_STATE, contract: SKY_PUSH_FIELDS[..]
+		)!;
 	};
 
 	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
@@ -459,6 +472,7 @@ fn void MeshPass.free_scenes(&self)
 {
 	foreach (each : self.scenes)
 	{
+		self.release_sky(each);
 		each.free();
 		mem::free(each);
 	}
@@ -492,7 +506,11 @@ fn Scene* MeshPass.claim_scene(&self)
 	Node* root = first.node(first.root);
 	if (root == null || root.children.len() > 0) return self.new_scene();
 	// Handed out as a brand-new Scene, so it starts on a brand-new Scene's look
-	// rather than on whatever the lines above `new three.Scene()` painted.
+	// rather than on whatever the lines above `new three.Scene()` painted. The sky
+	// goes back through `release_sky` rather than being overwritten with the
+	// default: the look holds two counted references, and assigning over them
+	// would leave two images resident with nothing naming them.
+	self.release_sky(first);
 	first.look = DEFAULT_LOOK;
 	return first;
 }
@@ -526,6 +544,8 @@ fn bool MeshPass.dispose_scene(&self, uint id)
 	foreach (i, each : self.scenes)
 	{
 		if (each.id != id) continue;
+		// Before `free`, which zeroes the look along with everything else.
+		self.release_sky(each);
 		each.free();
 		mem::free(each);
 		self.scenes.remove_at(i);
@@ -791,6 +811,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// of its own to measure. A resize therefore reaches the next fit.
 	self.aspect = aspect;
 	Matrix4f view_projection = self.camera.view_projection(aspect);
+	// Kept here rather than beside the frame block below, because the sky reads it
+	// and the sky draws for a scene with no geometry in it — which is exactly the
+	// case the `buckets.len() == 0` return further down takes.
+	self.frame_view_projection = view_projection;
 
 	// The whole of what `Scene` is told about materials, and deliberately not a
 	// pointer to them. The scene graph has no view of `MeshPass.materials`, and
@@ -912,9 +936,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.shadow = self.shadows.params(),
 		.debug = { (float)self.debug_view, 0, 0, 0 },
 		.camera = { eye.x, eye.y, eye.z, 0 },
+		.environment = self.environment_params(),
 		.lights = self.lighting.lights,
 	};
-	self.frame_view_projection = view_projection;
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
 	self.instance_address = self.write_instances(gpu, slot)!;
@@ -1107,6 +1131,16 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 *>
 fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
+	// First, and the ordering is load-bearing — `render/sky.c3` has why a sky
+	// drawn last would paint over glass.
+	//
+	// **Above the `prepared` guard, not below it.** `prepare` returns early for a
+	// scene with no buckets, and a scene with a background and nothing in it is an
+	// ordinary thing rather than a corner case — a level being framed, a sky an
+	// agent asked to look at. What this actually needs is `ready`: a pipeline, and
+	// the view-projection `prepare` writes before that early return.
+	if (self.ready) self.record_sky(cmd);
+
 	if (!self.prepared) return;
 
 	ulong frame_address = self.frame_address;
@@ -1198,6 +1232,16 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 					? self.shadows.descriptor()
 					: self.assets.texture_at(NO_TEXTURE).descriptor()
 			);
+		}
+		// Binding 2, the third reserved one, on the same terms: the sky when the
+		// scene has one and the white 1x1 when it does not. What stops that white
+		// from putting a mirror finish on everything is `FrameBlock.environment.x`,
+		// which is zero in a frame with no environment — so shading with a sky and
+		// shading without one are one pipeline and one layout.
+		if (pipeline_declares_binding(pipeline, ENVIRONMENT_BINDING))
+		{
+			int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
+			samplers.add(ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
 		}
 		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
@@ -2393,5 +2437,6 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// back — only a pointer that must stop looking live.
 	self.alpha_pipeline = null;
 	self.additive_pipeline = null;
+	self.sky_pipeline = null;
 	self.ready = false;
 }

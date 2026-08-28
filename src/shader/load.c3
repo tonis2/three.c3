@@ -52,14 +52,15 @@ fn String? find_shader(String name, alloc::Allocator allocator = mem)
 }
 
 <*
- The five templates, carried in the binary. Paths are relative to this source
- file. About 90 KB of text against an 8.7 MB executable.
+ The six templates, carried in the binary. Paths are relative to this source
+ file. About 95 KB of text against an 8.7 MB executable.
 *>
 const char[*] EMBED_MESH     = $embed("../../shaders/mesh.slang");
 const char[*] EMBED_MATERIAL = $embed("../../shaders/material.slang");
 const char[*] EMBED_POST     = $embed("../../shaders/post.slang");
 const char[*] EMBED_SHADOW   = $embed("../../shaders/shadow.slang");
 const char[*] EMBED_SKIN     = $embed("../../shaders/skin.slang");
+const char[*] EMBED_SKY      = $embed("../../shaders/sky.slang");
 
 struct EmbeddedShader
 {
@@ -85,12 +86,13 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem)
 		if (try path = find_shader(name, tmem)) return load_source(path, allocator);
 	};
 
-	EmbeddedShader[5] embedded = {
+	EmbeddedShader[6] embedded = {
 		{ "mesh.slang",     (String)EMBED_MESH[..] },
 		{ "material.slang", (String)EMBED_MATERIAL[..] },
 		{ "post.slang",     (String)EMBED_POST[..] },
 		{ "shadow.slang",   (String)EMBED_SHADOW[..] },
 		{ "skin.slang",     (String)EMBED_SKIN[..] },
+		{ "sky.slang",      (String)EMBED_SKY[..] },
 	};
 	foreach (entry : embedded)
 	{

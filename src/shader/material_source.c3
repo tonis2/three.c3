@@ -275,6 +275,11 @@ const String[*] MATERIAL_RESERVED @local = {
 	// naming out loud — a uniform of that name would shadow the value `lambert`
 	// folds into the direct light, and the body would compile and come out lit.
 	"shadow_map", "shadow_factor", "g_shadow",
+	// The sky the same way: the reserved sampler at binding 2, the term that
+	// reads it and the mapping that term projects a direction through. A body
+	// naming any of the three would compile against its own and the reflection
+	// would resolve the binding to a texture the pass never wrote.
+	"environment_map", "environment_light", "environment_uv",
 	// The vertex half of the same contract. `v` and `displace` are the body's own
 	// parameter and function, exactly as `s` and `shade` are the fragment body's;
 	// `Vertex` is the struct both of them name.

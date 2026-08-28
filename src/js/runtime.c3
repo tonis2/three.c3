@@ -384,7 +384,37 @@ struct JsRuntime
 	// the engine and must not move while the context is open.
 	qjs::ModuleLoader modules;
 
+	<*
+	 Meshes a script asked for and has not been given yet — `js/bind_asset.c3`.
+
+	 One entry per `asset.meshAsync` / `instantiateAsync` still in flight, each
+	 holding the two callbacks the promise was built around. Drained a mesh at a
+	 time wherever microtasks are drained, so the uploads land between frames
+	 instead of inside one.
+	*>
+	List{PendingUpload} uploads;
+
 	bool ready;
+}
+
+<*
+ One mesh a script is waiting for, and the promise it is waiting on.
+
+ The promise itself is JavaScript's — `new Promise((ok, no) => ...)` on the far
+ side — and what crosses is only its two settlement functions. That is why there
+ is no promise-capability call in the shim: the engine never has to *make* one,
+ it only has to keep a reference to two functions and call one of them later,
+ which is the same thing every other retained callback here does.
+
+ Both values are retained while the entry lives and released when it settles, or
+ by `clear_uploads` when the context goes down under one.
+*>
+struct PendingUpload
+{
+	AssetId asset;
+	uint mesh;
+	qjs::Value resolve;
+	qjs::Value reject;
 }
 
 <*
@@ -418,6 +448,9 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.frame_log.init(mem, 512);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
+	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
+	// that never asks for one, which is most of them.
+	self.uploads.init(mem, 8);
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
@@ -456,6 +489,7 @@ fn void JsRuntime.close(&self)
 	self.clear_key_handlers();
 	self.clear_click_handler();
 	self.clear_physics_handlers();
+	self.clear_uploads();
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
@@ -614,6 +648,66 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 }
 
 <*
+ Hands one queued mesh to the device and settles the promise waiting on it.
+
+ One per call rather than the whole queue, because the point of the queue is
+ that a kit of ninety pieces does not upload in one breath. Where that matters
+ is a frame: `drain_frame_jobs` calls this once, so a script that asked for
+ ninety meshes gets them over ninety frames and the game keeps drawing.
+
+ A script that is not in a frame drains the queue as fast as it can ask for it,
+ which is the honest answer — there is no frame to protect and nothing to yield
+ to — and it is why `await asset.meshAsync(...)` in a one-shot script costs
+ exactly what the synchronous path costs.
+
+ @return `True when there was something to do, so a caller can loop until there is not.`
+*>
+fn bool JsRuntime.step_upload(&self)
+{
+	if (self.uploads.len() == 0) return false;
+
+	PendingUpload job = self.uploads[0];
+	self.uploads.remove_at(0);
+	defer self.js.release(job.resolve);
+	defer self.js.release(job.reject);
+
+	// The handle can go stale between the ask and the answer: `three.unloadUnused`
+	// is one line and the queue survives it. Rejecting is what lets the `await`
+	// fail at the line that asked rather than hang forever.
+	bool alive = self.pass != null && self.pass.assets.slot(job.asset) != null;
+	if (alive) self.pass.assets.ensure_uploaded(job.asset, job.mesh);
+
+	qjs::Value settle = alive ? job.resolve : job.reject;
+	qjs::Value argument = alive
+		? qjs::undefined_value()
+		: self.js.string("that asset was unloaded before its mesh finished uploading");
+	defer if (!alive) self.js.release(argument);
+
+	qjs::Value[1] arguments = { argument };
+	qjs::Value? called = self.js.call(settle, qjs::undefined_value(), arguments[..]);
+	if (catch called) return true;
+	self.js.release(called);
+	return true;
+}
+
+<*
+ Gives back every queued upload's callbacks without calling either.
+
+ Runs while the context is still open, like the other `clear_` verbs: these are
+ references into an engine that is about to go, and a promise nobody can settle
+ any more is not worth a rejection nobody can observe.
+*>
+fn void JsRuntime.clear_uploads(&self)
+{
+	foreach (job : self.uploads)
+	{
+		self.js.release(job.resolve);
+		self.js.release(job.reject);
+	}
+	self.uploads.free();
+}
+
+<*
  Attaches handlers to the script's promise and runs the microtask queue until it
  settles.
 
@@ -656,9 +750,23 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 	self.js.release(attached);
 
 	uint drained = 0;
-	while (self.js.jobs_waiting() && drained < JS_MAX_JOBS)
+	while (drained < JS_MAX_JOBS)
 	{
-		self.js.step_job();
+		if (self.js.jobs_waiting())
+		{
+			self.js.step_job();
+		}
+		// Nothing runnable and the script has not finished: it can only be waiting
+		// on a queued upload, so hand it one. **Only while it is still waiting** —
+		// a script that started an upload and returned without awaiting it leaves
+		// the queue for the frames to drain, which is the entire point of there
+		// being a queue. Draining it here regardless would make
+		// `instantiateAsync` in a `main.js` cost exactly what the synchronous
+		// path costs, on the one code path where it matters most.
+		else if (self.settled || !self.step_upload())
+		{
+			break;
+		}
 		drained++;
 		if (self.timed_out) break;
 	}

@@ -122,7 +122,11 @@ export const DOCS = {
 				'physics (this scene\'s own physics world — three.physics is whichever scene is active)',
 				'nav (this scene\'s own navigation bake — three.nav is whichever scene is active)',
 				'static (marks the whole scene as not moving again — see the static-casters topic)',
-				'background (the clear colour: [r,g,b], 0x87ceeb, or null for the default — this scene\'s own, so setting it on a scene that is not being rendered paints nothing until you activate it)',
+				'background (the clear colour — [r,g,b], 0x87ceeb, null for the default — or an equirectangular Texture, which draws as a sky. This scene\'s own, so setting it on a scene that is not being rendered paints nothing until you activate it)',
+				'environment (an equirectangular Texture surfaces REFLECT, or null. This is what makes material.metalness mean something: a metal reflects and does not scatter, so with nothing around it, it renders dark. Separate from background, as it is in Three.js — an interior has an environment and a flat wall behind it. material.roughness picks a mip of this image, so a rough metal reflects a blurred sky)',
+				'backgroundIntensity (a multiplier on the backdrop, default 1)',
+				'environmentIntensity (a multiplier on what the scene reflects, default 1 — 0 turns the reflection off without giving the image back)',
+				'environmentRotation (radians about world Y. ONE number that turns both the backdrop and the reflections; Three.js has two and a metal reflecting a sky pointing elsewhere than the one on screen is a bug rather than a feature)',
 				// three.light and three.lights rather than scene properties, even
 				// though their values travel with the scene: they are the active
 				// scene's, and listing them here would suggest a scene that is not on
@@ -223,7 +227,7 @@ export const DOCS = {
 		Texture: {
 			construct: 'three.texture(path, { colorSpace, generateMipmaps })',
 			note:
-				'A PNG or JPEG on the device. Synchronous — it is uploaded by the time the call '
+				'A PNG, JPEG or KTX2 on the device. Synchronous — it is uploaded by the time the call '
 				+ 'returns, so width and height are readable immediately and there is no onLoad. '
 				+ 'The format is read from the file\'s first bytes, not its extension. Images are '
 				+ 'deduplicated by content AND by colourspace: two paths holding the same picture, '
@@ -558,10 +562,15 @@ export const DOCS = {
 		},
 		Asset: {
 			construct: 'three.load(path)',
-			properties: ['path', 'meshes (names, in load order)', 'animations (clip names)'],
+			properties: [
+				'path', 'meshes (names, in load order)', 'animations (clip names)',
+				'images (how many pictures the file holds)',
+			],
 			methods: [
-				'mesh(name)', 'meshAt(index)',
+				'mesh(name)', 'meshAt(index)', 'imageAt(index, { colorSpace, generateMipmaps })',
+				'meshAsync(name)', 'meshAtAsync(index)',
 				'instantiate(name?, { skeleton, skinning, materials })',
+				'instantiateAsync(name?, { skeleton, skinning, materials })',
 				'toJSON()',
 			],
 			note:
@@ -588,7 +597,23 @@ export const DOCS = {
 				+ 'an aim, a foot on a slope. That is the hero-character option and it costs per copy. '
 				+ '{ skinning: \'compute\' } poses the vertices in a compute pass instead of in the vertex '
 				+ 'shader; it splits the character into its own draw call and holds a posed copy of the '
-				+ 'mesh, and only pays off when the same character is drawn more than once a frame.',
+				+ 'mesh, and only pays off when the same character is drawn more than once a frame. '
+				+ 'asset.imageAt(i) is the file\'s own pictures as ordinary Textures, numbered the way the '
+				+ 'glTF numbers them and counted by asset.images — the handle a .glb never had, so '
+				+ 'texture.read() now has something to be called on for one. It answers the SAME slot a '
+				+ 'placed mesh is drawing with, so what you read is what is on screen, and it decodes on '
+				+ 'demand if nothing has placed a mesh yet. It takes the same options three.texture does; '
+				+ 'sRGB is the default and is wrong for a normal or roughness map. null comes back for an '
+				+ 'image nothing here decodes. '
+				+ 'meshAsync / meshAtAsync / instantiateAsync are the same three verbs with the UPLOAD '
+				+ 'awaited: a .glb is parsed at load and its meshes reach the device one at a time when '
+				+ 'something first draws each, so scene.add of a ninety-piece kit does ninety uploads '
+				+ 'inside one frame and that frame hitches. Awaiting hands the engine a queue it drains '
+				+ 'ONE MESH PER FRAME, so the kit arrives over ninety frames with the game still drawing. '
+				+ 'Per mesh and not per file, because a level needs its floor before its ninetieth crate. '
+				+ 'In a one-shot script with no animation loop running there is no frame to protect and '
+				+ 'it costs what the synchronous path costs. They reject if the asset is unloaded before '
+				+ 'their turn comes up.',
 		},
 		Geometry: {
 			construct: 'not constructible — use one of the seven shapes below',
@@ -1798,7 +1823,7 @@ export const DOCS = {
 			+ 'return an object from a script. Objects report their name, transform and children; a '
 			+ 'Vector3 reports [x, y, z]; a ShaderMaterial reports its fragment and uniforms.',
 		'three.texture(path, options)':
-			'Decode a PNG or JPEG and upload it, answering with a Texture. Synchronous. The format '
+			'Decode a PNG, JPEG or KTX2 and upload it, answering with a Texture. Synchronous. A KTX2 may hold Basis (ETC1S or UASTC, which is what KHR_texture_basisu means) or an ordinary Vulkan format, compressed or not; either way it arrives as RGBA8, and a .glb whose textures are KTX2 now loads with them. The format '
 			+ 'comes from the file\'s first bytes rather than its name. Deduplicated by the decoded '
 			+ 'image, so the same picture reached by two paths — or by a path and a .glb — is one '
 			+ 'upload, and three.stats().textures counts it once. options is '

@@ -2,6 +2,7 @@
 // resolve host handles against it.
 
 import { Vector3, DEFAULT_BACKGROUND, readColor, readVector } from './math.js';
+import { Texture } from './texture.js';
 import { Object3D } from './object3d.js';
 import { makeScenePhysics } from './physics.js';
 import { makeSceneNav } from './nav.js';
@@ -36,6 +37,23 @@ const scenesById = new Map();
 // a way for a typo to build a wrapper around a number that names nothing.
 const ADOPT = Symbol('adopt');
 
+// One of the three numbers on a scene's sky, checked so the message names the
+// property rather than arriving as a NaN that renders as a black frame.
+//
+// A NaN reaching the host is the failure worth the check: it multiplies a colour
+// to NaN, the attachment writes whatever the hardware does with one, and the
+// symptom is a sky that is black or white with nothing anywhere saying which
+// line did it.
+function readSkyNumber(v, what, signed = false) {
+	if (typeof v !== 'number' || !Number.isFinite(v)) {
+		throw new TypeError(`${what} wants a finite number, not ${typeof v === 'number' ? v : typeof v}`);
+	}
+	if (!signed && v < 0) {
+		throw new RangeError(`${what} cannot be negative — 0 turns it off`);
+	}
+	return v;
+}
+
 export class Scene extends Object3D {
 	constructor(adopt) {
 		super();
@@ -47,6 +65,12 @@ export class Scene extends Object3D {
 		this._i = i;
 		this._g = g;
 		this._name = 'Scene';
+		// The sky, cached on this side — `_writeSky` has why the host is written
+		// all five fields at once and why this is where the Texture objects live.
+		// Null rather than undefined so `scene.background` and `scene.environment`
+		// answer before anything has been assigned.
+		this._background = null;
+		this._environment = null;
 		this.physics = makeScenePhysics(this);
 		this.nav = makeSceneNav(this);
 		scenesById.set(sid, this);
@@ -140,34 +164,160 @@ export class Scene extends Object3D {
 		return H.stats(this._sid);
 	}
 
-	// The colour every frame starts on.
+	// What every frame starts on: a colour, or an image.
 	//
 	// Three.js's name and Three.js's place — it is a property of the Scene
-	// there too — but a narrower type: a colour, in any of the spellings
-	// `mesh.color` takes, or `null` for the default. Three.js also accepts a
-	// Texture or a CubeTexture here and this does not, because there is no
-	// environment map anywhere in this project and accepting one to ignore it
-	// would be the half-match `plan.md` §4 rules out.
+	// there too — and now Three.js's two types as well:
 	//
-	// A sky that is a *gradient* is still geometry. What this removes is the
-	// case that was costing a mesh for no reason: a daylight scene rendering
-	// against the default near-black, which is not a sky anyone chose.
+	//     scene.background = 0x87ceeb;                      // a colour
+	//     scene.background = three.texture('sky.jpg');      // a sky
 	//
-	// It reads back as `[r, g, b]` rather than as whatever was assigned,
-	// because the components are what the pixel gets — a hex value is
-	// converted on the way in and there is no colour management to convert it
-	// back through.
+	// A Texture here is read as an **equirectangular** image: latitude down,
+	// longitude across, which is the projection every HDRI on the internet
+	// ships in. There is no CubeTexture in this project and
+	// `shaders/sky.slang`'s header has the argument for why one 2D image is the
+	// whole feature rather than half of it.
+	//
+	// Assigning an image does not discard the colour and assigning `null` puts
+	// the colour back, which is what makes turning a sky off one line.
+	//
+	// **A background is a backdrop and lights nothing.** What surfaces reflect
+	// is `scene.environment`, and the two are separate for Three.js's reason: an
+	// interior lit through a window has an environment and a flat wall behind
+	// it. Setting both to the same texture is the ordinary outdoor case and is
+	// two lines rather than one on purpose.
+	//
+	// A colour reads back as `[r, g, b]` rather than as whatever was assigned,
+	// because the components are what the pixel gets. An image reads back as
+	// the very Texture that was assigned.
 	get background() {
 		this._check();
-		return H.backgroundGet(this._sid);
+		return this._background ?? H.backgroundGet(this._sid);
 	}
 
 	set background(v) {
 		this._check();
+		if (v instanceof Texture) {
+			this._background = v;
+			this._writeSky();
+			return;
+		}
 		const c = v === null || v === undefined
 			? DEFAULT_BACKGROUND
 			: readColor(v, 'scene.background');
+		this._background = null;
+		this._writeSky();
 		H.backgroundSet(this._sid, c[0], c[1], c[2]);
+	}
+
+	// The image surfaces reflect — Three.js's `scene.environment`, and the
+	// half of a sky that actually lights anything.
+	//
+	//     const sky = three.texture('sky.jpg');
+	//     scene.background = sky;
+	//     scene.environment = sky;
+	//
+	// **This is what makes `material.metalness` mean something.** A metal
+	// reflects and does not scatter, so a metallic surface takes its colour
+	// from what is around it — and with nothing around it, the four punctual
+	// lights give it a highlight and the rest is black. Set this and it becomes
+	// metal.
+	//
+	// `material.roughness` chooses how blurred the reflection is, by picking a
+	// mip level of this image, so a rough metal wants a texture with a mip
+	// chain — which is what `three.texture` builds by default.
+	//
+	// **The reflection only.** A full image-based light also drives the diffuse
+	// half from the same picture; this does not, because the diffuse floor here
+	// is `three.light.ambient` and adding a second one would light every
+	// existing scene twice the moment somebody set a sky.
+	//
+	// `null` for none, which is what every scene has until this is assigned —
+	// so nothing any scene written before this existed draws has changed.
+	get environment() {
+		this._check();
+		return this._environment ?? null;
+	}
+
+	set environment(v) {
+		this._check();
+		if (v !== null && v !== undefined && !(v instanceof Texture)) {
+			throw new TypeError(
+				'scene.environment wants a Texture — three.texture(path) — or null. A colour is '
+				+ 'scene.background, and three.light.ambient is the flat floor under everything.'
+			);
+		}
+		this._environment = v ?? null;
+		this._writeSky();
+	}
+
+	// How bright the backdrop is drawn, and how much light the scene takes from
+	// its environment. Three.js's two names, and two numbers rather than one
+	// because they answer different questions: a dim sky behind a bright scene
+	// is a look, and so is a bright sky that reflects softly.
+	//
+	// Both default to 1 and are clamped at 0 — a negative multiplier on a
+	// colour is not darker, it is a channel below black that the attachment
+	// clamps anyway.
+	get backgroundIntensity() {
+		this._check();
+		return H.skyGet(this._sid)[2];
+	}
+
+	set backgroundIntensity(v) {
+		this._check();
+		this._backgroundIntensity = readSkyNumber(v, 'scene.backgroundIntensity');
+		this._writeSky();
+	}
+
+	get environmentIntensity() {
+		this._check();
+		return H.skyGet(this._sid)[3];
+	}
+
+	set environmentIntensity(v) {
+		this._check();
+		this._environmentIntensity = readSkyNumber(v, 'scene.environmentIntensity');
+		this._writeSky();
+	}
+
+	// Which way the sky is facing, in radians about world Y.
+	//
+	// **One number, and it turns both.** Three.js has a separate rotation for
+	// the background and for the environment; here they are the same value,
+	// because a metal reflecting a sky pointing somewhere other than the one on
+	// screen is a bug rather than a feature — and turning the sky to put the sun
+	// where a level wants it is the request both names exist to serve.
+	get environmentRotation() {
+		this._check();
+		return H.skyGet(this._sid)[4];
+	}
+
+	set environmentRotation(v) {
+		this._check();
+		this._rotation = readSkyNumber(v, 'scene.environmentRotation', true);
+		this._writeSky();
+	}
+
+	// The five sky fields, written together.
+	//
+	// One host call because two of the five are counted texture references, and
+	// a verb per field would be five places that have to retain and release
+	// correctly — `js_sky_set` has the argument. The cached values are this
+	// side's, so nothing has to be read back first.
+	_writeSky() {
+		// The three numbers are read back rather than defaulted, so a wrapper
+		// adopting a scene somebody else had already set does not silently reset
+		// what it did not touch.
+		const held = H.skyGet(this._sid);
+		H.skySet(
+			this._sid,
+			this._background ? this._background._index() : -1,
+			this._environment ? this._environment._index() : -1,
+			this._backgroundIntensity ?? held[2],
+			this._environmentIntensity ?? held[3],
+			this._rotation ?? held[4],
+		);
 	}
 
 	// Empty the scene and give back everything nothing else holds — the

@@ -58,27 +58,6 @@ somebody has one. The third wants ten minutes with a mouse.
       the code — which means the suite no longer asks the question at all, and
       re-running it somewhere else starts by writing the check back.
 
-## 4. Textures, async load, and a sky
-
-- [ ] **KTX2 decode — do this first and out of order.** `image.c3l` does PNG and
-      JPEG only, so **every shipped `.glb` using `KHR_texture_basisu` loads with
-      its textures missing** (`src/scene/asset.c3:2039`). Small, self-contained,
-      independent of the sky, and it changes this section's value from "skyboxes"
-      to "shipped assets work".
-- [ ] **`test/ktx_test.c3` does not exist.** `ktx` is in `project.json` and
-      imported by nobody.
-- [ ] **`asset.imageAt(i)`.** A `.glb` mesh carries its texture on the `GpuMesh`
-      and exposes no `Texture` handle, so `texture.read()` has nothing to be
-      called on for it.
-- [ ] **Async `asset.mesh(...)` / `asset.instantiate()`** — per mesh, not per
-      file. The promise resolves from the job queue `drain_frame_jobs` already
-      drains.
-- [ ] **The sky.** A cubemap or an equirect, a pipeline drawing at far depth with
-      depth-write off, and an environment term if it is to light anything.
-      **`material.metalness` is what wants this now**: a metal reflects and does
-      not scatter, so with nothing around it to reflect it renders dark. The four
-      punctual lights give it a highlight and nothing else.
-
 ## 5. UI and text
 
 - [ ] **The whole of it.** There is a UI rendering library to bind rather than
@@ -169,8 +148,10 @@ count is not the trigger and never was.
 - [ ] **The importer does not apply the file's `metallicFactor` and
       `roughnessFactor`.** `GpuMaterial` carries both and a script can read them,
       but `instantiate({ materials: true })` leaves them alone: glTF's defaults
-      are 1 and 1, so a file that says nothing is a fully metallic surface, and a
-      metal with no environment to reflect renders dark. Do this with §4's sky.
+      are 1 and 1, so a file that says nothing is a fully metallic surface. The
+      sky it was waiting on is built — `scene.environment` is what a metal
+      reflects — so this is now the one thing between a `.glb`'s own PBR numbers
+      and the frame.
 
 ## 15. The draw buffer
 

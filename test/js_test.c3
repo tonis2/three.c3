@@ -4126,18 +4126,19 @@ fn void removing_an_animated_prop_stops_it() @test
  version of this check written on one repeated body would pass against the cache
  that had the defect.
 
- Four entries are never evictable and are added to the cap here rather than
+ Five entries are never evictable and are added to the cap here rather than
  glossed: the pass holds `mesh.slang` over four render states for its whole life
  — `SOLID_STATE` and `LINE_STATE` for `DEFAULT_MATERIAL` and `LINE_MATERIAL`,
  plus `ALPHA_STATE` and `ADDITIVE_STATE`, which `MeshPass.init` builds up front so
- that `create_texture_material` can stay device-free. The number was two until
- blending arrived; it is written as a number rather than read off the pass
- because the claim being made is about what an *agent's* shaders leave behind,
- and a cap that quietly grew with the built-ins would stop making it.
+ that `create_texture_material` can stay device-free — and `sky.slang` beside
+ them. The number was two until blending arrived and four until the sky; it is
+ written as a number rather than read off the pass because the claim being made
+ is about what an *agent's* shaders leave behind, and a cap that quietly grew
+ with the built-ins would stop making it.
 
  **Proved by injection.** `PipelineCache.trim` returning immediately, which is
  the cache exactly as §1 describes it: "twelve compiles left 16 entries, and the
- cap plus the four built-in ones is 12".
+ cap plus the five built-in ones is 13".
 *>
 fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 {
@@ -4156,9 +4157,10 @@ fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 
 		three::PipelineCache* cache = &run.pass.pipelines;
-		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 4;
+		// Five built-in ones: four states over `mesh.slang` and the sky.
+		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 5;
 		test::@check(cache.entries.len() <= cap,
-			"twelve compiles left %d entries, and the cap plus the four built-in ones is %d",
+			"twelve compiles left %d entries, and the cap plus the five built-in ones is %d",
 			(int)cache.entries.len(), (int)cap);
 		test::@check(cache.evictions > 0, "something was actually evicted: %d", cache.evictions);
 		test::@check(cache.modules.len() <= cap,
@@ -6105,5 +6107,157 @@ fn void scatter_honours_its_constraints() @test
 		test::@check(result.value.contains(`"inCircle":0`), "nothing landed in the keep-out: %s", result.value);
 		test::@check(result.value.contains(`"tooClose":0`), "nothing is closer than the spacing: %s", result.value);
 		test::@check(result.value.contains(`"repeats":true`), "the same seed placed the same points: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Asynchronous uploads — asset.meshAsync / instantiateAsync
+// ============================================================================
+
+<*
+ A file whose meshes have never been drawn.
+
+ Four primitives over one image, which is what makes it the right fixture for
+ counting uploads a frame: four is enough for "one per frame" and "all of them at
+ once" to be different numbers.
+*>
+const String SHARED = "test/fixtures/shared_material.glb";
+
+<*
+ Awaiting a mesh gets it, and gets the same reference `mesh(name)` gives.
+
+ The one-shot case, where there is no frame to protect: the queue drains as fast
+ as the awaits ask for it, so this costs what the synchronous path costs and the
+ only difference is that the upload happened before `scene.add` rather than
+ inside it.
+*>
+fn void awaiting_a_mesh_uploads_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const before = three.stats().textures;
+			const ref = await kit.meshAsync("quad_left");
+			return {
+				before, after: three.stats().textures,
+				name: ref.name, same: ref.mesh === kit.mesh("quad_left").mesh,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"before":0`),
+			"nothing was uploaded before the await: %s", result.value);
+		test::@check(result.value.contains(`"after":1`),
+			"and the mesh's image landed by the time it resolved: %s", result.value);
+		test::@check(result.value.contains(`"same":true`),
+			"what comes back is the ordinary reference: %s", result.value);
+	};
+}
+
+<*
+ A mesh nobody awaited is left for the frames — one of them per frame.
+
+ **This is the whole point of the verb** and it is the half a synchronous check
+ cannot see: `scene.add` of a kit uploads every piece inside one frame, and that
+ frame is the one that hitches. So the script starts four uploads and returns
+ without awaiting any of them, and the assertion is on how many have landed after
+ each tick.
+
+ A one-per-tick answer is what says the queue exists. Four after the first tick
+ would mean the promise was settled by whatever drained the script, and zero
+ after four would mean nothing drains it at all — the two ways this could be
+ wrong and still look asynchronous from a script.
+*>
+fn void an_unawaited_mesh_arrives_a_frame_at_a_time() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.kit = three.load("test/fixtures/shared_material.glb");
+			globalThis.landed = [];
+			three.setAnimationLoop(() => {});
+			for (let i = 0; i < 4; i++) {
+				kit.meshAtAsync(i).then((ref) => globalThis.landed.push(ref.mesh));
+			}
+			return globalThis.kit.meshes.length;
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+		test::@check(started.value == "4", "the fixture has four meshes: %s", started.value);
+
+		int[4] seen;
+		for (uint i = 0; i < 4; i++)
+		{
+			run.tick(16.0);
+			three::RunResult count = run.run("return globalThis.landed.length;", drain_frame: false);
+			defer count.free();
+			seen[i] = count.value.to_int() ?? -1;
+		}
+
+		test::@check(seen[0] == 1 && seen[1] == 2 && seen[2] == 3 && seen[3] == 4,
+			"one mesh a frame, got %d, %d, %d, %d after four ticks", seen[0], seen[1], seen[2], seen[3]);
+	};
+}
+
+<*
+ `instantiateAsync` hands back the tree `instantiate` does, with nothing left to
+ upload.
+
+ The tree is built immediately — it is JavaScript objects over handles — and what
+ is awaited is only the uploads, which is why the answer is the same object and
+ the same shape. A file naming one mesh from several nodes waits once for it,
+ which is what `wanted` being a Set is for.
+*>
+fn void instantiating_asynchronously_leaves_nothing_to_upload() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/shared_material.glb");
+			const root = await kit.instantiateAsync();
+			const uploaded = three.stats().textures;
+
+			const scene = new three.Scene();
+			scene.add(root);
+			let meshes = 0;
+			root.traverse((o) => { if (o.geometry) meshes++; });
+			return { uploaded, after: three.stats().textures, meshes };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"uploaded":1`),
+			"the file's one image was on the device when it resolved: %s", result.value);
+		test::@check(result.value.contains(`"after":1`),
+			"and adding the tree uploaded nothing further: %s", result.value);
+		test::@check(!result.value.contains(`"meshes":0`),
+			"the tree has meshes in it: %s", result.value);
+	};
+}
+
+<*
+ An asset unloaded out from under a queued upload rejects rather than hangs.
+
+ The one thing that can happen between the ask and the answer, and the failure
+ mode without a rejection is the worst kind: an `await` that never returns and a
+ script that reports "it is awaiting something that will not resolve" without
+ saying what.
+*>
+fn void an_unloaded_asset_rejects_what_was_queued() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/shared_material.glb");
+			const waiting = kit.meshAtAsync(0);
+			three.unloadUnused();
+			let caught = "";
+			try { await waiting; } catch (e) { caught = e.message; }
+			return { caught };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("unloaded"),
+			"the await failed with a sentence naming the cause: %s", result.value);
 	};
 }

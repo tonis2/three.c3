@@ -7,7 +7,7 @@ import { Mesh } from './mesh.js';
 import { Texture } from './texture.js';
 import { LayeredMaterial } from './layers.js';
 import { DoubleSide, FrontSide } from './material.js';
-import { LinearSRGBColorSpace, SRGBColorSpace } from './texture.js';
+import { LinearSRGBColorSpace, SRGBColorSpace, uploadOptions } from './texture.js';
 
 const H = globalThis.__three;
 
@@ -264,6 +264,9 @@ export class Asset {
 		// this costs nothing and "does this character have a walk cycle" is
 		// a question worth asking before deciding to place it.
 		this.animations = H.assetClips(index, generation);
+		// How many pictures the file holds, for `imageAt`. Out of the JSON as
+		// well, so a file whose meshes have never been drawn still answers.
+		this.images = H.assetImages(index, generation);
 	}
 
 	mesh(name) {
@@ -280,6 +283,129 @@ export class Asset {
 			throw new RangeError(`mesh index ${i} is outside 0..${this.meshes.length - 1}`);
 		}
 		return new MeshRef(this._a, this._g, i, this.meshes[i]);
+	}
+
+	// One of the file's own images, as an ordinary Texture.
+	//
+	//     const kit = three.load('kit.glb');
+	//     for (let i = 0; i < kit.images; i++) {
+	//         const tex = kit.imageAt(i);
+	//         console.log(i, tex.width, tex.height);
+	//         tex.dispose();
+	//     }
+	//
+	// **The picture the meshes are drawing with**, not a copy of it: an image a
+	// placed mesh already uploaded comes back as that very slot, so `read()` on
+	// it reads what is on screen. A `.glb`'s images had no handle at all before
+	// this — a mesh carried a texture index and nothing wrapped it — so there
+	// was nothing for `texture.read()` to be called on.
+	//
+	// Indexed the way the file numbers its images, so `i` means the same thing
+	// here as in any glTF viewer, and means it before anything has been drawn.
+	// `asset.images` is how many there are.
+	//
+	// **It decodes if nothing has yet**, which is the cost worth knowing about:
+	// asking for image 0 of a kit nothing has placed does the PNG decode and the
+	// upload the first mesh would have done. Asking again is a retain.
+	//
+	// `colorSpace` decides how the bytes are read and defaults to sRGB, which is
+	// right for a picture and wrong for a normal or roughness map — the same
+	// choice `three.texture()` takes, and the reason it is a parameter rather
+	// than something guessed from the image. Asking for one image in both spaces
+	// costs two uploads, because they are two different images.
+	//
+	// The Texture holds a reference of its own, so `dispose()` on it is safe
+	// while meshes go on drawing with the picture, and null comes back for an
+	// image this cannot decode — a format `image.c3l` and `ktx.c3l` do not read
+	// between them, or a 16-bit PNG.
+	imageAt(i, options = null) {
+		if (!Number.isInteger(i)) {
+			throw new TypeError(`asset.imageAt(i) wants a whole-number index, not ${typeof i}`);
+		}
+		if (!(i >= 0 && i < this.images)) {
+			const have = this.images === 0 ? 'it has no images' : `0..${this.images - 1}`;
+			throw new RangeError(`image index ${i} is outside ${have} in ${this.path}`);
+		}
+		const chosen = uploadOptions(options, 'asset.imageAt(i, options)');
+		const handle = H.assetImage(this._a, this._g, i, chosen.code, chosen.mips);
+		// Null rather than a throw: an image that will not decode is the same
+		// thing the importer already survives by drawing the mesh untextured,
+		// and a script walking every image in a kit should not be stopped by one
+		// of them being a format nothing here reads.
+		if (handle === null) return null;
+		// Null path, like every other image that came out of a file rather than
+		// from a name somebody could type — `kit.glb#3` is not somewhere to look.
+		return new Texture(handle, null, chosen.space);
+	}
+
+	// The same reference, once the mesh is actually on the device.
+	//
+	//     const wall = await kit.meshAsync('wall_corner_02');
+	//     scene.add(new three.Mesh(wall));
+	//
+	// **What this buys is where the stall happens, not whether there is one.**
+	// A `.glb` is parsed at `three.load` and its meshes are uploaded one at a
+	// time, when something first draws each of them — so `scene.add` of a kit of
+	// ninety pieces does ninety uploads inside one frame, and that frame is the
+	// one that hitches. Awaiting instead hands the engine a queue it drains a
+	// mesh per frame, so the same kit arrives over ninety frames with the game
+	// still drawing.
+	//
+	// Per mesh, deliberately, and not per file: a level needs its floor before
+	// it needs the ninetieth crate, and a promise that waited for the whole file
+	// could not express that. Ask for what you need first.
+	//
+	// **In a one-shot script it is not slower than the synchronous path**,
+	// because there is no frame to protect: the queue drains as fast as the
+	// awaits ask for it. The difference only appears once an animation loop is
+	// running.
+	//
+	// Rejects if the asset is unloaded before its turn comes up, which is the
+	// one thing that can happen between the ask and the answer.
+	meshAsync(name) {
+		const ref = this.mesh(name);
+		return new Promise((ok, no) => {
+			H.uploadMesh(this._a, this._g, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
+		});
+	}
+
+	// `meshAt` by index, awaited the same way.
+	meshAtAsync(i) {
+		const ref = this.meshAt(i);
+		return new Promise((ok, no) => {
+			H.uploadMesh(this._a, this._g, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
+		});
+	}
+
+	// `instantiate`, with every mesh in the tree on the device before it
+	// resolves — so the `scene.add(root)` that follows uploads nothing.
+	//
+	//     const level = await kit.instantiateAsync();
+	//     scene.add(level);
+	//
+	// The tree is built immediately and the awaiting is only the uploads, which
+	// is why this takes the same arguments and answers with the same object
+	// `instantiate` does. A file whose nodes name one mesh many times waits once
+	// for it: the queue is asked per distinct mesh, not per node.
+	//
+	// It resolves when the last of them lands, so a loop that is running keeps
+	// drawing throughout — a mesh a frame, `meshAsync`'s arrangement, over as
+	// many frames as the file has distinct meshes.
+	async instantiateAsync(name, options = undefined) {
+		const root = this.instantiate(name, options);
+		const wanted = new Set();
+		root.traverse((node) => {
+			const ref = node.geometry;
+			// A Group has no geometry, and a Mesh over a generated shape has one
+			// that belongs to a different asset — neither is ours to upload.
+			if (ref && ref.asset === this._a && ref.assetGeneration === this._g) {
+				wanted.add(ref.mesh);
+			}
+		});
+		await Promise.all([...wanted].map((mesh) => new Promise((ok, no) => {
+			H.uploadMesh(this._a, this._g, mesh, () => ok(mesh), (why) => no(new Error(why)));
+		})));
+		return root;
 	}
 
 	// The file's node hierarchy as an Object3D tree — Three.js's

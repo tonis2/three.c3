@@ -373,16 +373,16 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Two descriptors, and both are reserved by the template: the material's map
-	// at 0 and the shadow map at 1. Derived, not declared — until M4 this was a
-	// literal in `MeshPipeline.init`, and it was one binding until the shadow pass
-	// claimed the second.
+	// Three descriptors, and all three are reserved by the template: the
+	// material's map at 0, the shadow map at 1 and the environment map at 2.
+	// Derived, not declared — until M4 this was a literal in `MeshPipeline.init`,
+	// and it was one binding until the shadow pass claimed the second.
 	//
-	// **The count is checked as well as the two names**, and that is the half that
-	// earns its keep: `MATERIAL_BINDING_FIRST` is 2 because this template reserves
-	// exactly these two, so a third reserved sampler appearing here without that
-	// constant moving is a material's first texture landing on top of it.
-	test::@check(mod.layout.bindings.len() == 2, "two descriptors, got %d", mod.layout.bindings.len());
+	// **The count is checked as well as the names**, and that is the half that
+	// earns its keep: `MATERIAL_BINDING_FIRST` is 3 because this template reserves
+	// exactly these three, so a fourth reserved sampler appearing here without
+	// that constant moving is a material's first texture landing on top of it.
+	test::@check(mod.layout.bindings.len() == 3, "three descriptors, got %d", mod.layout.bindings.len());
 	test::@check(
 		three::MATERIAL_BINDING_FIRST == mod.layout.bindings.len(),
 		"and a material's own samplers start past them, at %d",
@@ -398,13 +398,24 @@ fn void the_mesh_push_block_matches_the_struct() @test
 	}
 
 	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
-	test::@check(shadow != null, "and the other is shadow_map");
+	test::@check(shadow != null, "and the second is shadow_map");
 	if (shadow != null)
 	{
 		test::@check(shadow.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler too");
 		test::@check(
 			shadow.set == 0 && shadow.binding == three::SHADOW_BINDING,
 			"at 0,%d — got %d,%d", three::SHADOW_BINDING, shadow.set, shadow.binding
+		);
+	}
+
+	three::ShaderBinding* sky = mod.layout.binding_of("environment_map");
+	test::@check(sky != null, "and the third is environment_map");
+	if (sky != null)
+	{
+		test::@check(sky.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler as well");
+		test::@check(
+			sky.set == 0 && sky.binding == three::ENVIRONMENT_BINDING,
+			"at 0,%d — got %d,%d", three::ENVIRONMENT_BINDING, sky.set, sky.binding
 		);
 	}
 }
@@ -575,7 +586,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 328, "and the block is 328 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 344, "and the block is 344 bytes, got %d", three::FrameBlock::size);
 }
 
 <*
@@ -825,9 +836,10 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 2, "from two reflected bindings");
+		test::@check(pipeline.shader.bindings.len() == 3, "from three reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
 		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
+		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");
 		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
 			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
 	};
@@ -1105,11 +1117,15 @@ fn void the_pass_prebuilds_the_blended_lambert_variants() @test
 		pass.init(gpu, target)!!;
 		defer pass.free(gpu);
 
-		// Four states over one source: solid, lines, alpha, additive.
-		test::@check(pass.pipelines.builds == 4,
-			"the pass built four pipelines from one shader, got %d", (int)pass.pipelines.builds);
-		test::@check(pass.pipelines.compiles == 1,
-			"with one Slang call, got %d", (int)pass.pipelines.compiles);
+		// Four states over one source — solid, lines, alpha, additive — and the
+		// sky, which is a fifth pipeline over a second source and so a second
+		// Slang call. It is built here for the same reason the four are: a scene
+		// that assigns a background should not pay a compile inside that frame.
+		test::@check(pass.pipelines.builds == 5,
+			"the pass built four pipelines from one shader and one from the sky, got %d",
+			(int)pass.pipelines.builds);
+		test::@check(pass.pipelines.compiles == 2,
+			"with one Slang call for the mesh and one for the sky, got %d", (int)pass.pipelines.compiles);
 
 		uint builds = pass.pipelines.builds;
 		uint compiles = pass.pipelines.compiles;
