@@ -7,6 +7,8 @@
 	three.physics.gravity = [0, -9.8, 0]
 	three.physics.velocity(mesh)                     // and setVelocity
 	three.physics.applyImpulse(mesh, [0, 5, 0])
+	three.physics.joint(door, frame, { type: 'hinge', axis: [0, 1, 0] })
+	three.physics.soft(jelly, { mass: 2 })
 	three.onTrigger(e => ...)
 	three.onContact(e => ...)
 
@@ -45,6 +47,14 @@ fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
 	self.bind(host, "physicsAngularSet", &js_physics_angular_set, 5);
 	self.bind(host, "physicsImpulse", &js_physics_impulse, 8);
 	self.bind(host, "physicsTorqueImpulse", &js_physics_torque_impulse, 5);
+	self.bind(host, "physicsJoint", &js_physics_joint, 15);
+	self.bind(host, "physicsJointRemove", &js_physics_joint_remove, 2);
+	self.bind(host, "physicsSoftAdd", &js_physics_soft_add, 11);
+	self.bind(host, "physicsSoftRemove", &js_physics_soft_remove, 2);
+	self.bind(host, "physicsSoftCount", &js_physics_soft_count, 2);
+	self.bind(host, "physicsSoftPoints", &js_physics_soft_points, 3);
+	self.bind(host, "physicsSoftPin", &js_physics_soft_pin, 7);
+	self.bind(host, "physicsSoftUnpin", &js_physics_soft_unpin, 4);
 	self.bind(host, "onTrigger", &js_on_trigger, 1);
 	self.bind(host, "onContact", &js_on_contact, 1);
 }
@@ -469,6 +479,332 @@ fn void js_physics_count(
 	if (scene == null) return;
 
 	*out = qjs::int_value((int)scene.physics.bodies.len());
+}
+
+// ---------------------------------------------------------------------------
+// Joints
+//
+// The host takes a **limit list** and nothing else: a joint is some of the joint
+// frame's axes held to some range, which is glTF's `KHR_physics_rigid_bodies`
+// description of one and is exactly the two lists `collision::GenericJoint3D`
+// carries. The four familiar words — fixed, point, hinge, slider — are shorthand
+// that `prelude/physics.js` expands before it calls, so nothing here knows what a
+// hinge is and a limit read out of a file needs no translation to be passed in.
+
+// Six floats per limit: kind, axes, min, max, stiffness, damping. Named here and
+// in `prelude/physics.js`, which is the only other place that knows the layout.
+const sz JOINT_LIMIT_FLOATS = 6;
+
+<*
+ `physicsJoint(ai, ag, bi, bg, hasPivot, px, py, pz, ax, ay, az, collide, stiffness, damping, limits)`.
+
+ `limits` is a `Float32Array`'s buffer of six numbers per limit —
+ `kind, axes, min, max, stiffness, damping` — rather than an options array read
+ back one property at a time. A joint is a list of a length only the script knows,
+ and packing it is the same arrangement `physicsSoftPoints` uses in the other
+ direction: one crossing, no per-element property lookups, and the shape of it is
+ written down in `prelude/physics.js` where it is filled in.
+*>
+fn void js_physics_joint(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef a = arg_handle(self, &js, argc, args, 0, out);
+	if (a.scene == null) return;
+	NodeRef b = arg_handle(self, &js, argc, args, 2, out);
+	if (b.scene == null) return;
+	if (a.scene != b.scene)
+	{
+		*out = js.raise(
+			"three.physics.joint needs both objects in the same scene — a world belongs to a scene, "
+			"and a joint is a constraint inside one world"
+		);
+		return;
+	}
+
+	char[] packed = {};
+	if (argc > 14) packed = js.bytes(args[14]);
+	if (packed.len == 0 || packed.len % (JOINT_LIMIT_FLOATS * float::size) != 0)
+	{
+		*out = js.raise("three.physics.joint needs at least one limit");
+		return;
+	}
+
+	@pool()
+	{
+		float[] rows = ((float*)packed.ptr)[:packed.len / float::size];
+		sz count = rows.len / JOINT_LIMIT_FLOATS;
+		JointLimit[] limits = alloc::new_array(tmem, JointLimit, count);
+		for (sz i = 0; i < count; i++)
+		{
+			float[] row = rows[i * JOINT_LIMIT_FLOATS ..][:JOINT_LIMIT_FLOATS];
+			limits[i] = {
+				.angular = row[0] != 0,
+				.axes = (char)row[1],
+				.min = row[2],
+				.max = row[3],
+				.stiffness = row[4],
+				.damping = row[5],
+			};
+		}
+
+		JointSpec spec = {
+			.has_pivot = arg_truth(&js, argc, args, 4),
+			.pivot = {
+				arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7)
+			},
+			.axis = {
+				arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10)
+			},
+			.collide = arg_truth(&js, argc, args, 11),
+			.stiffness = arg_float(&js, argc, args, 12),
+			.damping = arg_float(&js, argc, args, 13),
+			.limits = limits,
+		};
+
+		sz? id = a.scene.physics.add_joint(a.id, b.id, spec);
+		if (catch err = id)
+		{
+			*out = js.raise(joint_message(err));
+			return;
+		}
+		*out = qjs::int_value((int)id);
+	};
+}
+
+<*
+ A sentence for each way `Physics.add_joint` refuses, rather than the fault's
+ name. Each of these is a different thing a script did.
+*>
+fn String joint_message(fault err) @local
+{
+	switch (err)
+	{
+		case JOINT_NEEDS_A_BODY:
+			return "a joint holds two bodies together and one of these objects has none — "
+				"three.physics.add(object) on both first";
+		case JOINT_ON_ONE_BODY:
+			return "a joint needs two different objects; this one is joined to itself";
+		case JOINT_ON_A_TRIGGER:
+			return "a trigger detects overlaps and is never integrated, so a joint could not move it";
+		case JOINT_NEEDS_A_MOVER:
+			return "neither end of this joint can move — a static body's inverse mass is zero and a "
+				"kinematic one is driven by your script, so there is nothing for the constraint to "
+				"solve. Give one of them a mass";
+		case JOINT_HAS_NO_LIMITS:
+			return "a joint with no limits holds nothing — give it a type, or limits of your own";
+		case JOINT_HAS_TOO_MANY_LIMITS:
+			return "more than three limits on one side of this joint, and there are only three axes "
+				"to hold — an axis is named twice";
+		default:
+			return string::tformat("the joint could not be made: %s", err);
+	}
+}
+
+<*
+ `physicsJointRemove(sceneId, id)` — true when there was one.
+
+ The scene crosses explicitly, unlike everywhere else here: a joint is not a node,
+ so there is no handle to find its world from.
+*>
+fn void js_physics_joint_remove(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	*out = qjs::bool_value(scene.physics.remove_joint((sz)arg_int(&js, argc, args, 1)));
+}
+
+// ---------------------------------------------------------------------------
+// Soft bodies
+
+<*
+ `physicsSoftAdd(index, generation, mass, softness, damping, volume, volumeSoftness, bending, bendingSoftness, friction, restitution)`.
+*>
+fn void js_physics_soft_add(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	SoftSpec spec = {
+		.mass = arg_float(&js, argc, args, 2),
+		.softness = arg_float(&js, argc, args, 3),
+		.damping = arg_float(&js, argc, args, 4),
+		.volume = arg_truth(&js, argc, args, 5),
+		.volume_softness = arg_float(&js, argc, args, 6),
+		.bending = arg_truth(&js, argc, args, 7),
+		.bending_softness = arg_float(&js, argc, args, 8),
+		.friction = arg_float(&js, argc, args, 9),
+		.restitution = arg_float(&js, argc, args, 10),
+	};
+
+	if (catch err = ref.scene.physics.add_soft(ref.scene, &self.pass.assets, ref.id, spec))
+	{
+		*out = js.raise(soft_message(err));
+		return;
+	}
+}
+
+<*
+ A sentence for each way `Physics.add_soft` refuses. The two it shares with
+ `physicsAdd` mean the same thing there and are fixed the same way.
+*>
+fn String soft_message(fault err) @local
+{
+	switch (err)
+	{
+		case NODE_HAS_NO_MESH:
+			return "a soft body is a mesh's own vertices, and this object draws nothing — "
+				"give it to a mesh rather than to a group";
+		case NODE_IS_NOT_TOP_LEVEL:
+			return "a soft body has to be a child of the scene, not of another object — "
+				"its particles are world space and a parent transform would fight them";
+		case SOFT_IS_SKINNED:
+			return "a skinned mesh's vertices already belong to its skeleton, so a soft body "
+				"cannot have them as well — soft-body a prop, and animate a character";
+		case SOFT_HAS_NO_POINTS:
+			return "this mesh's points never reached the host, so there is nothing to make "
+				"particles out of — it may not have been drawn yet";
+		default:
+			return string::tformat("the soft body could not be made: %s", err);
+	}
+}
+
+<*
+ `physicsSoftRemove(index, generation)` — true when there was one.
+*>
+fn void js_physics_soft_remove(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::bool_value(ref.scene.physics.remove_soft(ref.id));
+}
+
+<*
+ `physicsSoftCount(index, generation)` — how many particles, and 0 for a node with
+ no soft body.
+*>
+fn void js_physics_soft_count(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::int_value((int)ref.scene.physics.soft_points(ref.id).len);
+}
+
+<*
+ `physicsSoftPoints(index, generation, buffer)` — the particles, in world space,
+ copied into a script-owned `ArrayBuffer` of exactly `count * 3` floats.
+
+ Filled rather than answered, which is `texture.read(into)`'s arrangement and for
+ the same two reasons: a script watching a soft body every frame reuses one array
+ instead of allocating one, and handing back a view onto the solver's own list
+ would be a pointer into storage its next push moves.
+
+ Answers how many particles were written, and 0 when the buffer is the wrong size.
+*>
+fn void js_physics_soft_points(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	Vec3[] points = ref.scene.physics.soft_points(ref.id);
+	if (points.len == 0)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
+
+	char[] into = {};
+	if (argc > 2) into = js.bytes(args[2]);
+	if (into.len != points.len * Vec3::size)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
+
+	mem::copy(into.ptr, (char*)points.ptr, into.len);
+	*out = qjs::int_value((int)points.len);
+}
+
+<*
+ `physicsSoftPin(index, generation, particle, hasAt, x, y, z)` — hold one particle
+ at a world point, or where it already is.
+*>
+fn void js_physics_soft_pin(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	sz particle = (sz)arg_int(&js, argc, args, 2);
+	Vec3[] points = ref.scene.physics.soft_points(ref.id);
+	if (particle < 0 || particle >= points.len)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
+
+	Vec3 at = points[particle];
+	if (arg_truth(&js, argc, args, 3))
+	{
+		at = {
+			arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6)
+		};
+	}
+
+	*out = qjs::bool_value(ref.scene.physics.pin_soft(ref.id, particle, at));
+}
+
+<*
+ `physicsSoftUnpin(index, generation, particle, mass)` — let one particle go.
+*>
+fn void js_physics_soft_unpin(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::bool_value(ref.scene.physics.unpin_soft(
+		ref.id, (sz)arg_int(&js, argc, args, 2), arg_float(&js, argc, args, 3)
+	));
 }
 
 // ---------------------------------------------------------------------------

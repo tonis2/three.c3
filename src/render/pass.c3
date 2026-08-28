@@ -233,6 +233,27 @@ struct MeshPass
 	// bucket the dispatch did not cover, which is most of them.
 	List{uint} posed_offsets;
 
+	// ---- Soft bodies, which are opt-in per object ----------------------------
+	//
+	// Nothing is allocated in a scene with no soft body in it, and nearly every
+	// scene has none.
+
+	<*
+	 This frame's deformed vertices — positions and then normals, one block per
+	 soft body — written by `write_soft_vertices`.
+
+	 Per frame in flight for the palette's reason, and this is the case the rule
+	 bites hardest on: it is host-visible and rewritten every frame, so a single
+	 shared buffer would be overwritten while the GPU was still rasterising the
+	 last frame out of it.
+	*>
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] soft_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] soft_capacity;
+	// Where each bucket's soft vertices start, in `Vec3`s from the base of the
+	// buffer above. Parallel to `Scene.buckets`; `NOT_SOFT` for every bucket that
+	// draws the mesh it was given, which is all of them in most scenes.
+	List{uint} soft_offsets;
+
 	// ---- The shadow pass, which is opt-in for the same reason -----------------
 	//
 	// No image, no shader and no pipeline until a script sets
@@ -268,6 +289,9 @@ struct MeshPass
 	// — `write_tables`.
 	ulong table_address;
 	ulong live_address;
+	// Where this frame's deformed vertices are, or 0 when no soft body drew —
+	// `write_soft_vertices`.
+	ulong soft_address;
 	// False when `prepare` found nothing to draw, which is what `record` returns on
 	// rather than repeating the emptiness checks.
 	bool prepared;
@@ -289,6 +313,10 @@ struct MeshPass
 // A bucket the compute pass did not skin. Not zero, because zero is a legitimate
 // offset for the first bucket that it did.
 const uint NOT_PRESKINNED = uint::max;
+
+// A bucket drawing the vertices its mesh was uploaded with, rather than ones a
+// soft body wrote this frame. Not zero for `NOT_PRESKINNED`'s reason.
+const uint NOT_SOFT = uint::max;
 
 // A bucket that resolved to nothing and is drawn by neither pass — see
 // `MeshPass.build_draw_records`. Not zero for `NOT_PRESKINNED`'s reason.
@@ -314,6 +342,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// One entry per bucket, rewritten every frame. Sized like the instance array
 	// and for the same reason.
 	self.posed_offsets.init(mem, INITIAL_INSTANCES);
+	self.soft_offsets.init(mem, INITIAL_INSTANCES);
 	// Beside it, sized the same and rewritten every frame for the same reason.
 	self.draw_indices.init(mem, INITIAL_INSTANCES);
 	// Off, at the default size, with the default bias and intensity. A function
@@ -957,6 +986,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// barrier before the first draw reads the result.
 	self.skin(gpu, cmd, slot)!;
 
+	// Before the records for the same reason the dispatch is: this sizes and may
+	// reallocate the buffer a soft bucket's record points into, and writes the
+	// offsets that say where in it each one starts.
+	self.soft_address = self.write_soft_vertices(gpu, slot)!;
+
 	// After the dispatch, not before it. A pre-skinned bucket's record points into
 	// the output buffer `skin` just sized and may have just reallocated, and the
 	// offsets it writes are what `FLAG_PRESKINNED` means — so a record built first
@@ -1095,9 +1129,19 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		bool preskinned = skinned && posed_offset != NOT_PRESKINNED;
 		if (preskinned) skinned = false;
 
+		// The one thing here that replaces the mesh's own geometry rather than
+		// adding to it. A soft bucket reads the positions and normals
+		// `write_soft_vertices` produced this frame; everything else — the uvs, the
+		// colours, the index buffer — is still the asset's, because a soft body
+		// moves its vertices and never renumbers them.
+		uint soft_offset = i < self.soft_offsets.len() ? self.soft_offsets[i] : NOT_SOFT;
+		bool soft = soft_offset != NOT_SOFT;
+		ulong soft_positions = self.soft_address + (ulong)soft_offset * Vec3::size;
+		ulong soft_normals = soft_positions + (ulong)mesh.vertex_count * Vec3::size;
+
 		records[recorded] = {
-			.positions = mesh.positions.address,
-			.normals = mesh.has_normals ? mesh.normals.address : 0,
+			.positions = soft ? soft_positions : mesh.positions.address,
+			.normals = soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0),
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
 			.colors = mesh.has_colors ? mesh.colors.address : 0,
 			.joints = skinned ? mesh.joints.address : 0,
@@ -1107,7 +1151,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 				? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size
 				: 0,
 			.base_color = base_color,
-			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
+			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS : 0)
 				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
 				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
 				| (skinned ? FLAG_HAS_SKIN : 0)
@@ -1691,6 +1735,99 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	}
 
 	return self.pose_buffers[slot].address;
+}
+
+<*
+ This frame's deformed vertices, for every soft body that is being drawn.
+
+ Positions and then normals, one block per soft bucket, in one buffer — the same
+ arrangement `write_live_poses` uses and for the same reason: a soft body's
+ vertex count is known only at the moment it is drawn, so one growable buffer per
+ frame in flight beats an allocation per body.
+
+ The positions are written *relative to the node*, which `Physics.write_back_soft`
+ has already put at the particles' average. World positions and an identity model
+ matrix would draw the same picture and would leave `object.position` reading zero
+ for every soft body in the scene, which is the number a script actually asks for.
+
+ The normals are `SoftMesh.normals`, recomputed on the host after each step. They
+ have to be written even for a mesh that had none — a deformed surface lit by the
+ rest pose's normals is lit by a shape that is not there any more — which is why
+ `FLAG_HAS_NORMALS` is forced on for a soft bucket.
+
+ Returns zero when nothing soft is drawn, which is every frame of nearly every
+ scene: the offsets are all `NOT_SOFT` and no record points here.
+*>
+fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
+{
+	self.soft_offsets.clear();
+
+	// Two passes over the buckets, for `write_live_poses`' reason: these offsets
+	// are handed to draw records, so the buffer they index cannot be allowed to
+	// move after they are decided.
+	sz needed = 0;
+	foreach (bucket : self.scene.buckets)
+	{
+		if (!bucket.node.is_set())
+		{
+			self.soft_offsets.push(NOT_SOFT);
+			continue;
+		}
+
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		SoftMesh* record = self.scene.physics.soft_for(bucket.node);
+		// The counts disagreeing would mean the node changed mesh under a live soft
+		// body. Drawing the asset's own vertices is the answer that cannot read off
+		// the end of either array.
+		if (mesh == null || record == null || record.count != mesh.vertex_count || record.map.len == 0)
+		{
+			self.soft_offsets.push(NOT_SOFT);
+			continue;
+		}
+
+		self.soft_offsets.push((uint)needed);
+		needed += 2 * (sz)mesh.vertex_count;
+	}
+	if (needed == 0) return 0;
+
+	if (self.soft_capacity[slot] < needed)
+	{
+		sz capacity = self.soft_capacity[slot] > 0 ? self.soft_capacity[slot] : INITIAL_INSTANCES;
+		while (capacity < needed) capacity *= 2;
+
+		// Safe only because this slot's fence has been waited on — the same rule
+		// every other per-slot buffer here is freed under.
+		if (self.soft_buffers[slot].buffer != null) self.soft_buffers[slot].free();
+
+		self.soft_buffers[slot] = gpu.create_dynamic((sz)(capacity * Vec3::size))!;
+		self.soft_capacity[slot] = capacity;
+	}
+
+	Vec3* vertices = (Vec3*)self.soft_buffers[slot].data();
+
+	foreach (i, bucket : self.scene.buckets)
+	{
+		uint at = self.soft_offsets[i];
+		if (at == NOT_SOFT) continue;
+
+		SoftMesh* record = self.scene.physics.soft_for(bucket.node);
+		if (record == null) continue;
+		collision::SoftBody*? body = self.scene.physics.world.find_softbody(record.id);
+		if (catch body) continue;
+
+		// Through the weld map, so the twenty-four corners of a box read the eight
+		// particles the solver actually moved. The vertex count is what the index
+		// buffer expects, and it has not changed.
+		Vec3 center = record.center;
+		for (sz v = 0; v < record.count; v++)
+		{
+			uint particle = record.map[v];
+			vertices[at + v] = body.positions[particle] - center;
+			vertices[at + (sz)record.count + v] = record.normals[particle];
+		}
+	}
+
+	return self.soft_buffers[slot].address;
 }
 
 <*
@@ -2389,15 +2526,18 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		self.table_capacity[i] = 0;
 		if (self.pose_buffers[i].buffer != null) self.pose_buffers[i].free();
 		if (self.posed_buffers[i].buffer != null) self.posed_buffers[i].free();
+		if (self.soft_buffers[i].buffer != null) self.soft_buffers[i].free();
 		self.draw_capacity[i] = 0;
 		self.pose_capacity[i] = 0;
 		self.posed_capacity[i] = 0;
+		self.soft_capacity[i] = 0;
 	}
 	self.skin_pipeline.free(gpu);
 	// The device is idle by the time a pass is torn down, so the shadow map's
 	// pipeline is destroyed outright rather than retired — see `ShadowMap.free`.
 	self.shadows.free(gpu);
 	self.posed_offsets.free();
+	self.soft_offsets.free();
 	self.draw_indices.free();
 	self.free_scenes();
 	// Before `assets.free`, which frees every texture slot outright: releasing

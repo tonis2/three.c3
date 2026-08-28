@@ -81,11 +81,8 @@ somebody has one. The third wants ten minutes with a mouse.
 
 ## 7. Physics — bindings that do not exist
 
-- [ ] **Joints from a script.** `add_constraint` (`solver/resolver.c3:441`) and
-      `GenericJoint3D` exist; there is no `three.physics.joint(...)`.
 - [ ] **`snapshot`/`restore`.** `solver/lockstep.c3:125` — "what if" as a tool
       call, and what lockstep networking would need.
-- [ ] **Soft bodies.** The library has them; nothing binds them.
 
 ## 8. Hot reload
 

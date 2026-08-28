@@ -293,6 +293,16 @@ solved before it is shown.
 `three.onTrigger/onContact`. Physics **owns the transform** of a body it holds.
 The world belongs to its scene — `scene.physics` — so bodies for the next level
 can be built early, but only the active scene's world is stepped.
+`three.physics.joint(a, b, { limits })` bolts two bodies together and answers
+with an id for `removeJoint`. A joint **is a list of limits** — glTF's
+`KHR_physics_rigid_bodies` shape, so a limit out of a `.glb` passes straight in:
+`{ linearAxes: [0,1,2] }, { angularAxes: [1,2] }` is a hinge about axis 0, and
+**no range is a lock**. `axis` is axis 0; 1 and 2 are derived from it.
+`type: 'fixed' | 'point' | 'hinge' | 'slider'` is shorthand for the four lists
+people want, with `range: [min, max]` for the free axis. The joint is made
+*where the bodies are*. `three.physics.soft(object, { mass })` simulates the
+object's own vertices — no collider, its transform is the solver's, `pin`/`unpin`
+and `points` are how a script reaches it, and it costs a draw call of its own.
 
 **Post** — `three.setPost({ fragment, uniforms, textures })` runs one Slang
 `float3 post(Post p)` over the finished frame; `three.addPass` chains them.
