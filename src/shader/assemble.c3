@@ -40,6 +40,11 @@ import std::io;
 const String MARKER_UNIFORMS @private = "//@uniforms";
 const String MARKER_ROWS @private = "//@rows";
 const String MARKER_DEFINES @private = "//@defines";
+// The line that turns `material.slang` into its unlit, uv-space variant. Replaced
+// by nothing at all when nothing asked for a bake, so an ordinary material's
+// generated source is what it was before the exporter could bake — the same rule
+// `//@table` follows. `render/bake.c3` is the only caller that asks.
+const String MARKER_BAKE @private = "//@bake";
 const String MARKER_TEXTURES @private = "//@textures";
 const String MARKER_VDEFINES @private = "//@vdefines";
 const String MARKER_VERTEX @private = "//@vertex";
@@ -285,6 +290,7 @@ fn uint append_lines(DString* out, String text) @private
  @param body_name : `What the agent's own lines are called in a diagnostic — "material", "post".`
  @param vertex_name : `The same, for the vertex body — "vertex". Unused when there is no vertex body.`
  @param preamble_name : `What everything three.c3 generated is called — "three.material", "three.post".`
+ @param bake : `Define THREE_BAKE, which makes material.slang unlit and rasterised in uv space. Only a material has the marker; nothing else may ask.`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? SHADER_NOT_FOUND : `The template is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
@@ -301,7 +307,10 @@ fn String? assemble_shader(
 	alloc::Allocator allocator,
 	// Only ever true for a material. `post.slang` has no `//@table` marker and no
 	// instances for a table to be indexed by, so its caller never asks.
-	bool spill = false
+	bool spill = false,
+	// The same again for `//@bake`: a post pass shades the whole frame and has no
+	// surface to bake.
+	bool bake = false
 ) @private
 {
 	@pool()
@@ -325,6 +334,14 @@ fn String? assemble_shader(
 			start = end + 1;
 
 			String marker = line.trim();
+			if (marker == MARKER_BAKE)
+			{
+				if (!bake) continue;
+				out.append_string("#define THREE_BAKE 1");
+				out.append_char('\n');
+				physical++;
+				continue;
+			}
 			if (marker == MARKER_TABLE)
 			{
 				// Nothing at all for a material that fits the push block, so the

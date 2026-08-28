@@ -2031,3 +2031,487 @@ fn void the_camera_and_the_light_are_in_the_file() @test
 			"the camera and the lights are nodes like any other: %s", result.value);
 	};
 }
+
+// ============================================================================
+// Baking: getting a ShaderMaterial's shading into the file
+// ============================================================================
+
+<*
+ The three outcomes of a bake, in one scene.
+
+ `scene.export` has always written a `ShaderMaterial`'s geometry and lost its
+ shading, because a material here is a Slang pipeline and glTF describes
+ surfaces. The cost of that is not abstract: a scene whose whole character is its
+ shaders comes back as a correct scene in one grey, since a generated primitive's
+ `base_color` is a single default shared by every one of them.
+
+ `{ bake: N }` runs each body over its own mesh's uv layout — `render/bake.c3` —
+ and the answer lands in the file as one of three things, all three of which are
+ here:
+
+ - a body whose answer varies across the surface becomes a `baseColorTexture`;
+ - a body whose answer is one colour becomes a `baseColorFactor`, because an
+   image for one of those is a megabyte of the same texel;
+ - a body that discards becomes `alphaMode: MASK`, which is what turns a leaf cut
+   out of a quad back into the leaf.
+
+ The flat one is checked against the *exact* value it was given, because a colour
+ that is merely plausible is the failure this whole feature exists to fix.
+*>
+fn void a_shader_material_bakes_into_the_file() @test
+{
+	String path = "build/export_baked.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			const gradient = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), gradient));
+
+			const flat = new three.ShaderMaterial({
+				uniforms: { tint: [0.1, 0.8, 0.3] },
+				fragment: "float3 shade(Surface s) { return tint; }"
+			});
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1), flat);
+			b.position.x = 3;
+			scene.add(b);
+
+			const cut = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { if (s.uv.x > 0.5) discard; return float3(1, 0, 0); }"
+			});
+			const c = new three.Mesh(new three.PlaneGeometry(2, 2), cut);
+			c.position.x = 6;
+			scene.add(c);
+
+			const report = scene.export("build/export_baked.glb", { bake: 128 });
+			return {
+				shaded: report.shaded,
+				bakedImages: report.bakedImages,
+				bakedColors: report.bakedColors,
+				images: report.images,
+				materials: report.materials
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"shaded":0`),
+			"nothing was lost — every body ran and came back: %s", result.value);
+		test::@check(result.value.contains(`"bakedImages":2`),
+			"the gradient and the cutout vary across their surfaces: %s", result.value);
+		test::@check(result.value.contains(`"bakedColors":1`),
+			"and the one that does not is a colour rather than an image: %s", result.value);
+		test::@check(result.value.contains(`"images":2`),
+			"so two images were written, not three: %s", result.value);
+		test::@check(result.value.contains(`"materials":3`),
+			"three bodies are three materials, where without a bake they are one grey: %s",
+			result.value);
+
+		String json = json_chunk(path);
+		// The uniform as it was given, decoded to linear because that is what
+		// `baseColorFactor` is. sRGB is what the target stores and what the PNG
+		// holds; the round trip through eight bits is why this is a prefix.
+		test::@check(json.contains(`"baseColorFactor":[0.0998`),
+			"the flat body's own tint, not a stand-in: %s", json);
+		test::@check(json.contains(`"alphaMode":"MASK"`),
+			"and the body that discards cuts its shape out of the quad: %s", json);
+		test::@check(occurrences(json, `"alphaMode":"MASK"`) == 1,
+			"only that one — a body that covers its surface stays OPAQUE: %s", json);
+	};
+}
+
+<*
+ The same scene with no `bake`, which has to be the file it always was.
+
+ The whole feature is opt-in: it needs a device, which the rest of `export`
+ deliberately does not, and it costs a render and a readback per material. So the
+ default has to be byte-for-byte the old behaviour, and `shaded` has to go back to
+ counting every copy.
+*>
+fn void baking_is_off_unless_it_is_asked_for() @test
+{
+	String path = "build/export_unbaked.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const body = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), body));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1), body);
+			b.position.x = 3;
+			scene.add(b);
+
+			const report = scene.export("build/export_unbaked.glb");
+			return {
+				shaded: report.shaded,
+				bakedImages: report.bakedImages,
+				bakedColors: report.bakedColors,
+				images: report.images
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"shaded":2`),
+			"both copies lost their shader, as they always did: %s", result.value);
+		test::@check(result.value.contains(`"bakedImages":0`) && result.value.contains(`"bakedColors":0`),
+			"and nothing was baked: %s", result.value);
+		test::@check(result.value.contains(`"images":0`),
+			"so the file carries no image at all: %s", result.value);
+	};
+}
+
+<*
+ A bake never splits a batch.
+
+ The renderer's central claim is that a thousand copies of one shape under one
+ material are one draw call, and the exporter's is that they are one instanced
+ node. A body reading `s.position` answers differently at every copy, so the
+ tempting thing is to bake each of them — six images here, six materials, six
+ `mesh` entries, and six draw calls when the file is loaded back.
+
+ So the copies inside a batch share the batch's one answer, and the standalone
+ node beside them — which already had a node of its own — gets one of its own.
+ Two images for seven copies, and the batch is still a batch.
+*>
+fn void a_bake_never_splits_a_batch() @test
+{
+	String path = "build/export_baked_batch.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const world = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(frac(s.position.x), 0.3, 0.6); }"
+			});
+			for (let i = 0; i < 6; i++) {
+				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1), world);
+				m.position.x = i * 2;
+				scene.add(m);
+			}
+			const lone = new three.Mesh(new three.SphereGeometry(1, 8, 6), world);
+			lone.position.y = 5;
+			scene.add(lone);
+
+			const report = scene.export("build/export_baked_batch.glb", { bake: 64 });
+			return {
+				batches: report.batches,
+				instances: report.instances,
+				images: report.images,
+				bakedImages: report.bakedImages,
+				shaded: report.shaded
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"batches":1`),
+			"the six siblings are still one instanced node: %s", result.value);
+		test::@check(result.value.contains(`"instances":7`),
+			"and all seven copies are in the file: %s", result.value);
+		test::@check(result.value.contains(`"images":2`),
+			"one image for the batch and one for the copy that had a node of its own: %s",
+			result.value);
+		test::@check(result.value.contains(`"bakedImages":7`) && result.value.contains(`"shaded":0`),
+			"every copy is counted as baked, whichever image it shares: %s", result.value);
+	};
+}
+
+<*
+ What decides how many bakes a shape needs is the body, not the shape.
+
+ Two copies of one mesh, each written as itself because each has a child. Under a
+ body that reads `s.position` they are two different answers and must be two
+ images; under one that does not they are the same answer and must be one.
+
+ The count that says so is `entries`: a `mesh` entry is one `(geometry,
+ material)` pair, so a second bake is a second material over the same accessors
+ rather than a second copy of the geometry. `meshes` stays 1 either way, which is
+ the half worth checking — a bake must not duplicate vertices.
+*>
+fn void a_body_that_reads_where_it_is_bakes_per_node() @test
+{
+	String moving = "build/export_baked_moving.glb";
+	String still = "build/export_baked_still.glb";
+	defer (void)file::delete(moving);
+	defer (void)file::delete(still);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			function twoCopies(material) {
+				const scene = new three.Scene();
+				for (let i = 0; i < 2; i++) {
+					const m = new three.Mesh(new three.PlaneGeometry(2, 2), material);
+					m.position.x = i * 4;
+					// One group each, so the two copies are not siblings and neither
+					// is collapsed into a batch: each is written as itself, and so
+					// each may have a bake of its own.
+					const holder = new three.Group();
+					holder.add(m);
+					scene.add(holder);
+				}
+				return scene;
+			}
+
+			const moving = twoCopies(new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(frac(s.position.x), s.uv.y, 0.5); }"
+			}));
+			const a = moving.export("build/export_baked_moving.glb", { bake: 64 });
+
+			const still = twoCopies(new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.5); }"
+			}));
+			const b = still.export("build/export_baked_still.glb", { bake: 64 });
+
+			return {
+				moving: { meshes: a.meshes, entries: a.entries, images: a.images },
+				still: { meshes: b.meshes, entries: b.entries, images: b.images }
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"moving":{"meshes":1,"entries":2,"images":2`),
+			"a body that reads where it is gets an answer per placement, over one set of "
+			"vertices: %s", result.value);
+		test::@check(result.value.contains(`"still":{"meshes":1,"entries":1,"images":1`),
+			"and one that does not shares a single answer: %s", result.value);
+	};
+}
+
+<*
+ The baked image lands the right way up, and holds what the body said.
+
+ The one property nothing else here can catch. Every pass in this project sets a
+ negative viewport height so that glTF's coordinate system comes out the right way
+ up in Vulkan's; uv (0, 0) is the *top-left* texel of an image, so a bake that
+ inherited the flip would be mirrored — a picture that is exactly as plausible
+ upside down as the right way up, and wrong in every file.
+
+ So the body is `float3(s.uv.x, s.uv.y, 0)` on a plane whose uv runs 0..1 across
+ it, and the corners of the image are read back off the device after a reload. The
+ values are sRGB, which is what the target stores and what a PNG is defined to
+ hold — there is no conversion anywhere on that path — so 0 and 1 come back as 0
+ and 255 and the gradient between them is not linear.
+*>
+fn void a_baked_texture_lands_the_right_way_up() @test
+{
+	String path = "build/export_baked_uv.glb";
+	defer (void)file::delete(path);
+
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
+	defer renderer.free();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	String diagnostic;
+	uint material = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target,
+		"float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.0); }",
+		{},
+		diagnostic: &diagnostic
+	)!!;
+	defer if (diagnostic.len > 0) diagnostic.free(mem);
+
+	three::AssetId plane = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(plane, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	const uint SIZE = 64;
+	three::ExportReport report = renderer.pass.export_scene(path, bake: SIZE)!!;
+	test::@check(report.images == 1 && report.shaded == 0,
+		"the body baked into one image, got images = %d and shaded = %d",
+		report.images, report.shaded);
+
+	// Loaded and placed: the image reaches the device when something draws with it,
+	// not when the file is read.
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, path)!!;
+	renderer.pass.scene.add_mesh(reloaded, 0);
+	three::GpuMesh* mesh = renderer.pass.assets.mesh(reloaded, 0);
+	test::@check(mesh != null && mesh.texture >= 0,
+		"the reloaded mesh carries the baked image, got texture %d",
+		mesh == null ? -99 : mesh.texture);
+
+	three::Texture* back = renderer.pass.assets.texture_at(mesh.texture);
+	test::@check(back.width == SIZE && back.height == SIZE,
+		"at the size it was asked for, got %dx%d", back.width, back.height);
+
+	char[] pixels = mem::new_array(char, (sz)back.width * back.height * 4);
+	defer free(pixels);
+	back.read_pixels(&renderer.gpu, pixels)!!;
+
+	// Two texels in from each corner, so a seam texel cannot decide the answer.
+	sz row = (sz)SIZE * 4;
+	int top_left_u = (int)pixels[2 * row + 2 * 4];
+	int top_left_v = (int)pixels[2 * row + 2 * 4 + 1];
+	int top_right_u = (int)pixels[2 * row + (SIZE - 3) * 4];
+	int bottom_left_v = (int)pixels[(SIZE - 3) * row + 2 * 4 + 1];
+
+	test::@check(top_left_u < 64 && top_left_v < 64,
+		"uv (0, 0) is the top-left texel, got u = %d and v = %d there", top_left_u, top_left_v);
+	test::@check(top_right_u > 192,
+		"u runs left to right, got %d at the top-right", top_right_u);
+	test::@check(bottom_left_v > 192,
+		"and v runs top to bottom, which is the flip that would otherwise be silent; "
+		"got %d at the bottom-left", bottom_left_v);
+}
+
+<*
+ A baked image carries no transparency unless the body actually cut something out.
+
+ glTF says a viewer ignores the alpha of a base colour map under `OPAQUE`, and
+ that is true of the *material*. It is not true of the image: Blender's importer
+ premultiplies a PNG that has an alpha channel, so a texel the bake left at zero
+ comes back as **black** however good the colour underneath it is. On a mesh whose
+ uv layout is islands — a cylinder's caps, a convex hull's facets — that is a
+ model covered in black wedges in the exact shape of the gaps in its layout, and
+ it was what the first baked export of a real scene looked like in Blender.
+
+ A cylinder is the shape that shows it: its caps are discs, so the corners of the
+ square around each one are never rasterised. The check is that they still come
+ back opaque, and that nothing anywhere in the image is the black the clear left
+ behind — which is `dilate`'s half of the same fix.
+*>
+fn void a_baked_image_is_opaque_unless_the_body_cuts() @test
+{
+	String path = "build/export_baked_opaque.glb";
+	defer (void)file::delete(path);
+
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
+	defer renderer.free();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	String diagnostic;
+	uint material = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target,
+		"float3 shade(Surface s) { return float3(0.9, 0.4 + 0.5 * s.uv.y, 0.2); }",
+		{},
+		diagnostic: &diagnostic
+	)!!;
+	defer if (diagnostic.len > 0) diagnostic.free(mem);
+
+	three::AssetId shape = renderer.pass.assets.primitive(
+		&renderer.gpu, three::cylinder_shape(1, 1, 2, 12)
+	)!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(shape, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	const uint SIZE = 64;
+	three::ExportReport report = renderer.pass.export_scene(path, bake: SIZE)!!;
+	test::@check(report.baked_images == 1,
+		"the body varies across the surface, so it should have baked an image; got %d",
+		report.baked_images);
+
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, path)!!;
+	renderer.pass.scene.add_mesh(reloaded, 0);
+	three::GpuMesh* mesh = renderer.pass.assets.mesh(reloaded, 0);
+	test::@check(mesh != null && mesh.texture >= 0,
+		"the reloaded mesh carries the baked image, got texture %d",
+		mesh == null ? -99 : mesh.texture);
+
+	three::Texture* back = renderer.pass.assets.texture_at(mesh.texture);
+	char[] pixels = mem::new_array(char, (sz)back.width * back.height * 4);
+	defer free(pixels);
+	back.read_pixels(&renderer.gpu, pixels)!!;
+
+	sz texels = (sz)back.width * (sz)back.height;
+	sz see_through = 0;
+	sz black = 0;
+	for (sz i = 0; i < texels; i++)
+	{
+		if (pixels[i * 4 + 3] != 0xff) see_through++;
+		if (pixels[i * 4] < 8 && pixels[i * 4 + 1] < 8 && pixels[i * 4 + 2] < 8) black++;
+	}
+
+	test::@check(see_through == 0,
+		"%d of %d texels are not fully opaque, and an importer that premultiplies turns each "
+		"of them black", see_through, texels);
+	test::@check(black == 0,
+		"%d of %d texels are still the black the target was cleared to, so the seams were not "
+		"filled", black, texels);
+}
+
+<*
+ A `LayeredMaterial` bakes, and its stack is not written a second time.
+
+ A layer stack reaches the frame as a *generated* `ShaderMaterial`, so it goes
+ through the bake like any other body — which is the point: `CUSTOM_materials_
+ layers` is this project's own extension and nothing outside it reads one, so a
+ stack that only ever travelled as the extension arrived in Blender as a flat
+ material. Baked, it arrives as what it looked like.
+
+ What has to *not* happen is both. The stack is already inside the baked answer,
+ so writing the extension beside it means a reader that understands it — this
+ renderer, on the way back in — applies the moss over an image that already has
+ moss in it. The same argument covers the base map: `s.albedo` sampled it during
+ the bake, so writing it as the material's `baseColorTexture` would multiply it
+ in twice.
+
+ Both images are flat here, so the stack resolves to one colour and the whole
+ material comes back as a `baseColorFactor` with nothing else attached — which is
+ exactly the assertion: `images: 0` and `layers: 0`.
+*>
+fn void a_layered_material_bakes_instead_of_writing_its_stack() @test
+{
+	String plain = "build/export_layers_plain.glb";
+	String baked = "build/export_layers_baked.glb";
+	defer (void)file::delete(plain);
+	defer (void)file::delete(baked);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const base = new three.DataTexture(new Uint8Array(8 * 8 * 4).fill(180), 8, 8);
+			const moss = new three.DataTexture(new Uint8Array(8 * 8 * 4).fill(90), 8, 8);
+			const mat = new three.LayeredMaterial({
+				map: base,
+				layers: [{ name: 'moss', map: moss, tint: [0.2, 0.8, 0.3], opacity: 0.7 }]
+			});
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.SphereGeometry(1, 16, 12), mat));
+
+			const a = scene.export("build/export_layers_plain.glb");
+			const b = scene.export("build/export_layers_baked.glb", { bake: 64 });
+			return {
+				plain: { images: a.images, layers: a.layers, shaded: a.shaded },
+				baked: { images: b.images, layers: b.layers, shaded: b.shaded,
+				         bakedColors: b.bakedColors }
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		// Unbaked, both halves travel: the two images and the stack that names them.
+		test::@check(result.value.contains(`"plain":{"images":2,"layers":1,"shaded":1}`),
+			"without a bake a stack is written as the extension and counted as lost: %s",
+			result.value);
+
+		// Baked, the answer travels and nothing else does.
+		test::@check(result.value.contains(`"baked":{"images":0,"layers":0,"shaded":0,"bakedColors":1}`),
+			"a baked stack is the answer alone — no source images, no second copy of the "
+			"stack to apply over it: %s", result.value);
+
+		String json = json_chunk(baked);
+		test::@check(!json.contains("CUSTOM_materials_layers"),
+			"the extension must not be beside the bake: %s", json);
+		test::@check(!json.contains("baseColorTexture"),
+			"and neither must the base map the body already sampled: %s", json);
+	};
+}

@@ -252,7 +252,28 @@ export class Scene extends Object3D {
 	// file a person will open; turn it on for a file that is a payload.
 	//
 	// Answers with { path, meshes, entries, materials, images, nodes,
-	// instances, batches, skipped, shaded, layers, bytes }.
+	// instances, batches, skipped, shaded, bakedImages, bakedColors,
+	// layers, bytes }.
+	//
+	// `bake` is the option that gets a ShaderMaterial's shading into
+	// the file. glTF describes surfaces and a ShaderMaterial is a
+	// program, so without it every mesh drawn under one exports with
+	// whatever base colour its geometry happened to carry — for a
+	// scene whose whole character is its shaders, a correct file in a
+	// single grey.
+	//
+	// With it, each body is run over its mesh's own uv layout and read
+	// back: it becomes a baseColorTexture where the answer varies
+	// across the surface and a baseColorFactor where it does not, and
+	// a body that discards comes back as the shape it cut rather than
+	// as the quad it cut it from. `true` bakes at 512 texels a side; a
+	// number picks another, 16 to 4096. It is unlit on purpose — a
+	// viewer lights what it loads, and a baked-in sun would be applied
+	// twice.
+	//
+	// It needs a GPU, which the rest of export does not, and it costs
+	// a render and a readback per material. bakedImages and
+	// bakedColors say what it managed; whatever is left is in shaded.
 	//
 	// `layers` counts CUSTOM_materials_layers records written. Both
 	// kinds of stack go back into one: an imported stack is read from
@@ -266,6 +287,7 @@ export class Scene extends Object3D {
 			throw new TypeError('scene.export(path) wants a path to write a .glb to');
 		}
 		let flatten = false;
+		let bake = 0;
 		if (options !== undefined && options !== null) {
 			if (typeof options !== 'object') {
 				throw new TypeError('scene.export(path, options) wants an object for its options, like { flatten: true }');
@@ -276,8 +298,24 @@ export class Scene extends Object3D {
 				}
 				flatten = options.flatten;
 			}
+			if (options.bake !== undefined && options.bake !== false) {
+				if (options.bake === true) {
+					bake = 512;
+				} else if (typeof options.bake === 'number' && Number.isFinite(options.bake)) {
+					bake = Math.round(options.bake);
+					if (bake < 16 || bake > 4096) {
+						throw new RangeError(
+							'scene.export options.bake is a size in texels from 16 to 4096, or true for 512; got ' + options.bake
+						);
+					}
+				} else {
+					throw new TypeError(
+						'scene.export options.bake is true, false, or a size in texels from 16 to 4096'
+					);
+				}
+			}
 		}
-		return H.exportScene(path, flatten);
+		return H.exportScene(path, flatten, bake);
 	}
 
 	// -------------------------------------------------------------------

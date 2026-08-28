@@ -19,7 +19,7 @@
 
  ## Where the vertices come from, and why not from the GPU
 
- Nothing is read back off the device. Three sources, in this order:
+ Nothing is read back off the device. Four sources, in this order:
 
  1. A mesh out of a file is re-read from the file, which is still open —
     `Assets.load` parses the JSON and keeps the stream, so the accessors are
@@ -28,7 +28,12 @@
  2. A generated shape is tessellated again from the `Primitive` the asset kept.
     Thirty-two bytes per asset, against the twenty per vertex that keeping the
     streams would cost every scene whether or not it ever exported.
- 3. A convex hull is rebuilt from `hull_positions`/`hull_triangles`, the CPU copy
+ 3. A terrain is rebuilt from the `Heightfield` on its slot, which the asset keeps
+    anyway because `heightAt` is the whole point of the shape. Without this it
+    fell through to the hull below and was written with *projected* uvs — a
+    terrain has a picking tree like everything else, so the fallback was reached
+    and produced coordinates in world units instead of the field's own 0..1.
+ 4. A convex hull is rebuilt from `hull_positions`/`hull_triangles`, the CPU copy
     the picking tree already holds. Its normals are per face and its vertices are
     split per face, so recomputing them from the triangles gives back exactly
     what `build_convex` produced — including its uvs, which are a per-face planar
@@ -209,9 +214,22 @@ struct ExportReport
 	uint batches;
 	// Nodes left out because they were helpers or were switched off.
 	uint skipped;
-	// Nodes drawn under a ShaderMaterial, which was not written. They are in the
-	// file with their glTF material; this is how many lost a custom shader.
+	// Copies drawn under a ShaderMaterial whose shading the file did not keep.
+	//
+	// **Narrowed by baking.** Without `bake` this is every copy under a
+	// ShaderMaterial, as it has always been. With it, a copy whose body was run and
+	// read back is counted in one of the two numbers below instead, and this is
+	// what was left: a mesh with no uvs to rasterise into, a body that would not
+	// compile as a bake, a submission that did not run.
 	uint shaded;
+	// Copies whose ShaderMaterial became a `baseColorTexture` — the body was run
+	// over the mesh's uv layout and the picture went into the file.
+	uint baked_images;
+	// Copies whose ShaderMaterial became a `baseColorFactor`. The body was run and
+	// its answer over that whole surface was one colour, so an image would have
+	// been a megabyte of the same texel. This is also every copy that would have
+	// been a flat grey before baking existed.
+	uint baked_colors;
 	// `CUSTOM_materials_layers` records written, summed over every material that
 	// carried a stack. Zero for a scene whose materials are all plain, which is how
 	// a script tells "this file had no layers" from "the layers were lost" — the
@@ -270,6 +288,10 @@ struct ExportSurface @local
 	// collapse into one on the way out.
 	float[4] surface;
 	bool transparent;
+	// Whether the base colour map has texels the body discarded, which makes this
+	// material `MASK` rather than `OPAQUE`. Only a bake sets it: the alpha of an
+	// imported image is the artist's and glTF already carried it.
+	bool cutout;
 	// `material.side` — `DoubleSide` is the only one glTF has a word for, and the
 	// two single-sided values differ in which face they keep, which glTF cannot say
 	// at all. `FrontSide` and `BackSide` therefore both write `false`.
@@ -305,6 +327,7 @@ fn bool ExportSurface.equals(self, ExportSurface other)
 {
 	if (self.texture != other.texture) return false;
 	if (self.transparent != other.transparent || self.double_sided != other.double_sided) return false;
+	if (self.cutout != other.cutout) return false;
 	if (!self.normal.same_as(other.normal)) return false;
 	if (!self.occlusion.same_as(other.occlusion)) return false;
 	if (!self.emissive.same_as(other.emissive)) return false;
@@ -409,6 +432,47 @@ struct ExportLayerImage @local
 	uint texture;
 }
 
+<*
+ What running one material's body over one mesh came back with.
+
+ Keyed on `(asset, mesh, material)` and, for a body whose answer depends on where
+ the surface is, on the placement as well — `Exporter.bake_for` decides which, and
+ `render/bake.c3` has why the shared case is not optional.
+
+ Three outcomes, and the memo holds all three so that a bake which came to
+ nothing is not attempted again for every copy: an image, one colour, or nothing
+ at all.
+*>
+struct ExportBake @local
+{
+	AssetId asset;
+	uint mesh;
+	uint material;
+	// The placement, or `NO_NODE` when one answer serves every copy.
+	NodeId node;
+	// The document's texture index, or -1 for the other two outcomes.
+	int texture;
+	// The average of what was baked, linear, which is the answer when `texture` is
+	// -1 and `baked` is true. White otherwise, so a caller that multiplies by it
+	// unconditionally is multiplying by the identity.
+	float[3] color;
+	// Whether the body ran and anything came back. False is a material the file
+	// still loses, and `ExportReport.shaded` is where it is counted.
+	bool baked;
+	// Whether some texel came back transparent — a triangle the layout does not
+	// cover, or a `discard`. `ExportSurface.cutout` is what it becomes.
+	bool cutout;
+}
+
+// How close every texel of a bake has to be to their mean before the answer is
+// written as a colour rather than as an image, in 0..255 per channel.
+//
+// Not zero, because a body that is one colour in the arithmetic is not always one
+// colour after a filtered texture sample and a round trip through eight bits. Not
+// large either: at 4 the whole point is to catch the flat case, and a gradient
+// worth exporting is worth an image.
+const int BAKE_FLAT_TOLERANCE @local = 4;
+
 // Everything one export is part-way through, so the walk can be a plain
 // recursive function rather than a closure over nine locals.
 struct Exporter @local
@@ -420,6 +484,14 @@ struct Exporter @local
 	List{ExportEntry} entries;
 	List{ExportImage} images;
 	List{ExportLayerImage} layer_images;
+	// The bake, when one was asked for and a device answered. False for every
+	// export that did not ask, and then nothing on the bake path costs anything.
+	bool baking;
+	MaterialBaker baker;
+	List{ExportBake} bakes;
+	// One bake's pixels, allocated once and reused: they are `size * size * 4`
+	// bytes and every bake fills all of them.
+	char[] texels;
 	ExportReport report;
 }
 
@@ -428,10 +500,11 @@ struct Exporter @local
 
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
+ @param bake : `Texels a side to run each ShaderMaterial's body into, or 0 to write the file the way it always was. Needs a device; without one the export still happens and the report says so through shaded. See render/bake.c3.`
  @return? EXPORT_PATH_IS_EMPTY : `No path was given.`
  @return? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
 *>
-fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
+fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false, uint bake = 0)
 {
 	if (path.len == 0) return EXPORT_PATH_IS_EMPTY~;
 
@@ -445,6 +518,7 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 	state.entries.init(mem, 16);
 	state.images.init(mem, 8);
 	state.layer_images.init(mem, 8);
+	state.bakes.init(mem, 4);
 	defer
 	{
 		state.geometry.free();
@@ -452,6 +526,34 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false)
 		state.entries.free();
 		state.images.free();
 		state.layer_images.free();
+		state.bakes.free();
+		if (state.baking)
+		{
+			state.baker.free();
+			free(state.texels);
+		}
+	}
+
+	if (bake > 0)
+	{
+		if (bake < BAKE_SIZE_MIN) bake = BAKE_SIZE_MIN;
+		if (bake > BAKE_SIZE_MAX) bake = BAKE_SIZE_MAX;
+		// A bake reads `Node.world`, and an export is not a frame: a script that
+		// built a scene and never rendered has never run the walk that fills them.
+		// `flatten_scene` makes the same call a moment later and it costs nothing the
+		// second time — `Scene.matrices_current` turns the traversal into a compare.
+		self.scene.update_world_matrices();
+		// A runtime with no device writes the file without baking rather than
+		// refusing to write it. That is the same call every other optional stage
+		// here makes: a feature that could not run is a file without it, never a
+		// file that does not happen. `ExportReport.shaded` is what says so.
+		MaterialBaker? opened = self.open_baker(bake);
+		if (try opened)
+		{
+			state.baker = opened;
+			state.baking = true;
+			state.texels = mem::new_array(char, state.baker.bytes());
+		}
 	}
 
 	// The root goes in as a node of its own rather than having its children
@@ -503,7 +605,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	{
 		// Tinted: this node is written as itself, so its colour has nowhere to go
 		// but its material. A copy that ends up in a batch takes the other path.
-		entry = self.mesh_entry(node, node.color)!;
+		entry = self.mesh_entry(id, node, node.color, false)!;
 	}
 
 	// A node's own children may all have dropped out; it is still written when it
@@ -534,7 +636,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	if (entry >= 0)
 	{
 		self.report.instances++;
-		if (self.loses_its_shader(node.material)) self.report.shaded++;
+		self.count_shading(id, false);
 	}
 	return (int)written;
 }
@@ -671,7 +773,7 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	//
 	// Reading it off `members[0]` is exact rather than a sample, because the batch
 	// key holds the material: every member resolves to the same surface.
-	int entry = self.mesh_entry(first, NO_TINT)!;
+	int entry = self.mesh_entry(batch.members[0], first, NO_TINT, true)!;
 	if (entry < 0) return -1;
 
 	sz count = batch.members.len();
@@ -729,7 +831,7 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	foreach (member : batch.members)
 	{
 		self.report.instances++;
-		if (self.loses_its_shader(self.pass.scene.node(member).material)) self.report.shaded++;
+		self.count_shading(member, true);
 	}
 	return (int)written;
 }
@@ -837,7 +939,7 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 fn int? Exporter.placed_node(&self, NodeId id)
 {
 	Node* node = self.pass.scene.node(id);
-	int entry = self.mesh_entry(node, node.color)!;
+	int entry = self.mesh_entry(id, node, node.color, false)!;
 	if (entry < 0) return -1;
 
 	Vec3 position;
@@ -848,7 +950,7 @@ fn int? Exporter.placed_node(&self, NodeId id)
 	uint written = self.out.add_node(node.name, entry, -1, position, rotation, scale);
 	self.report.nodes++;
 	self.report.instances++;
-	if (self.loses_its_shader(node.material)) self.report.shaded++;
+	self.count_shading(id, false);
 	return (int)written;
 }
 
@@ -857,9 +959,10 @@ fn int? Exporter.placed_node(&self, NodeId id)
  texture resolve to.
 
  @param tint : `What to multiply the mesh's base colour by — the node's own colour when it is written as itself, and white for a batch, whose copies are tinted per instance instead.`
+ @param shared : `Whether this entry stands for more than one placement, which is what stops a batch from wanting an image per copy. True from instanced_node and from nowhere else.`
  @return `The document's mesh index, or -1 for a mesh whose vertices cannot be written.`
 *>
-fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
+fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool shared)
 {
 	GpuMesh* mesh = self.pass.assets.mesh(node.asset, node.mesh);
 
@@ -890,11 +993,38 @@ fn int? Exporter.mesh_entry(&self, Node* node, float[4] tint)
 		mesh.base_color[2] * linear_tint[2],
 		mesh.base_color[3] * linear_tint[3] * opacity,
 	};
+
+	// A baked material's colour is *in* what was baked: the body ran with the
+	// mesh's own base colour as `s.albedo`, so keeping it in the factor as well
+	// would apply it twice — and for a generated primitive that factor is the one
+	// shared grey this whole feature exists to get rid of. What is left for the
+	// factor is what the bake did not see: this copy's tint, and the alpha, which
+	// the bake deliberately does not carry.
+	//
+	// The tint moving from inside the body to after it is the one approximation
+	// here, and it is the same one glTF instancing already forces: `_COLOR_0`
+	// multiplies a material, and there is no per-copy channel that reaches a shader
+	// body. It is exact for the body that reads `s.albedo` linearly, which is most
+	// of them, and for every copy that is not tinted at all.
+	ExportBake baked = self.bake_for(id, node, shared);
+	if (baked.texture >= 0)
+	{
+		color = { linear_tint[0], linear_tint[1], linear_tint[2], color[3] };
+	}
+	else if (baked.baked)
+	{
+		color = {
+			baked.color[0] * linear_tint[0],
+			baked.color[1] * linear_tint[1],
+			baked.color[2] * linear_tint[2],
+			color[3],
+		};
+	}
 	// A null material is one whose slot was collected while a node still named it,
 	// which `MeshPass.record` draws as nothing at all. Every answer below has the
 	// same shape for it: opaque, single-sided, the identity transform — which is
 	// what every material meant before any of those existed.
-	int material = self.material_for(self.surface_for(node, material_of, color)!);
+	int material = self.material_for(self.surface_for(node, material_of, color, baked)!);
 
 	foreach (&known : self.entries)
 	{
@@ -972,6 +1102,241 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 	self.geometry.push(written);
 	self.report.meshes++;
 	return (int)self.geometry.len() - 1;
+}
+
+<*
+ Whether this material's answer depends on where the surface is.
+
+ The rule the whole bake hangs on, and the reason is placement rather than
+ coordinates. A body reading `s.position` gives a different answer at every copy,
+ so a shape instanced across six hundred nodes would want six hundred images —
+ and splitting the batch to give each one is the trade this renderer exists to
+ refuse. So a body that names it is baked per *node*, and only for a node that was
+ written as itself; a copy inside a batch shares the batch's one answer.
+
+ The test is a substring search over the body the material already holds, which is
+ crude and is meant to be read as crude. `s.position` is the only way a shading
+ body can reach world space, but the word also matches a comment, a local variable
+ and a vertex body's `v.position`. It is biased towards yes on purpose: a shared
+ bake that becomes a per-node one is slower, and a per-node one that becomes
+ shared is wrong.
+*>
+fn bool Exporter.world_space_body(&self, uint material)
+{
+	if (material >= self.pass.materials.len()) return true;
+	return self.pass.materials[material].fragment.contains("position")
+		|| self.pass.materials[material].vertex.contains("position");
+}
+
+<*
+ Whether this material's body cuts its own shape out of its geometry.
+
+ The same crude test as `world_space_body` and biased the *other* way, because the
+ two mistakes cost different things. A bake leaves the texels no triangle covered
+ transparent, and a uv layout of islands has a great many of those — so treating
+ every transparent texel as a `discard` would write `alphaMode: MASK` on a mesh
+ whose gaps are seams, and a cliff would come back full of holes. Missing a real
+ cutout costs the leaf its shape, which is what the file has always carried.
+
+ So the word has to be in the body. A body that only mentions it in a comment
+ covers its surface anyway, and a bake with nothing transparent in it is not a
+ cutout whatever this answers.
+*>
+fn bool Exporter.body_discards(&self, uint material)
+{
+	if (material >= self.pass.materials.len()) return false;
+	return self.pass.materials[material].fragment.contains("discard");
+}
+
+<*
+ What this node's material baked to, run once per key and remembered.
+
+ Answers a record with `baked` false for every export that did not ask for a bake,
+ for every material that is not a `ShaderMaterial`, and for every bake that came
+ to nothing — so a caller can use the answer unconditionally and the three
+ outcomes are one shape.
+
+ @param shared : `Whether this entry stands for more than one placement. True from an instanced node, whose copies must not each get an image.`
+*>
+fn ExportBake Exporter.bake_for(&self, NodeId id, Node* node, bool shared)
+{
+	ExportBake key = {
+		.asset = node.asset,
+		.mesh = node.mesh,
+		.material = node.material,
+		.node = NO_NODE,
+		.texture = -1,
+		.color = { 1, 1, 1 },
+	};
+	if (!self.baking || !self.loses_its_shader(node.material)) return key;
+
+	if (!shared && self.world_space_body(node.material)) key.node = id;
+
+	foreach (known : self.bakes)
+	{
+		if (known.asset == key.asset && known.mesh == key.mesh
+			&& known.material == key.material && known.node == key.node)
+		{
+			return known;
+		}
+	}
+
+	ExportBake made = self.run_bake(key, node);
+	self.bakes.push(made);
+	return made;
+}
+
+<*
+ Runs one bake and decides what the file should carry: an image, a colour, or
+ nothing.
+
+ The placement is the node's world transform rather than the identity, and that is
+ not only for a body that reads `s.position`. `s.normal` is rotated by the
+ instance, and a body reading it — most of them — baked at identity would shade a
+ rotated mesh as though it were lying down.
+
+ ## Why a flat answer is not written as an image
+
+ A body that resolves to one colour over the whole surface is common: a tint, a
+ palette lookup, a constant with the lighting taken out of it by `THREE_BAKE`. An
+ image for one of those is a megabyte of the same texel, and a scene of thirteen
+ such materials is thirteen megabytes of nothing. So every bake is measured
+ against its own mean, and the ones that do not vary become a `baseColorFactor` —
+ which is the number those materials should have had all along, instead of the
+ one grey their geometry happened to carry.
+*>
+fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
+{
+	BakeRequest request = {
+		.asset = key.asset,
+		.mesh = key.mesh,
+		.material = key.material,
+		.model = node.world,
+		.normal = node.normal,
+		.variant = node.variant,
+	};
+	if (!self.baker.bake(request, self.texels)) return key;
+
+	sz count = (sz)self.baker.size * (sz)self.baker.size;
+
+	// A texel no triangle covered and a texel the body discarded are the same
+	// transparent value — `MaterialBaker.record` clears to it — so one count is
+	// both, which is exactly what `alphaMode: MASK` needs to know.
+	double[3] sum;
+	sz covered = 0;
+	sz clear = 0;
+	for (sz i = 0; i < count; i++)
+	{
+		if (self.texels[i * 4 + 3] < 128) { clear++; continue; }
+		covered++;
+		for (sz c = 0; c < 3; c++) sum[c] += (double)self.texels[i * 4 + c];
+	}
+	// Nothing at all: a uv layout that collapses to a point, or a body that
+	// discarded every fragment. Neither is an answer the file can use.
+	if (covered == 0) return key;
+
+	key.baked = true;
+	key.cutout = clear > 0 && self.body_discards(key.material);
+
+	char[3] mean;
+	for (sz c = 0; c < 3; c++) mean[c] = (char)(sum[c] / (double)covered + 0.5);
+
+	// Over the covered texels only, so a mesh whose uv layout has gaps in it can
+	// still resolve to a colour — most props are laid out in islands, and an image
+	// of one colour for each of them is where a bake turns into fifty megabytes.
+	//
+	// A cutout never takes this path however flat it is: the shape it cut out is
+	// the whole reason it was baked.
+	bool flat = !key.cutout;
+	for (sz i = 0; flat && i < count; i++)
+	{
+		if (self.texels[i * 4 + 3] < 128) continue;
+		for (sz c = 0; c < 3; c++)
+		{
+			int delta = (int)self.texels[i * 4 + c] - (int)mean[c];
+			if (delta < 0) delta = -delta;
+			if (delta <= BAKE_FLAT_TOLERANCE) continue;
+			flat = false;
+			break;
+		}
+	}
+
+	// The target stores sRGB and glTF's `baseColorFactor` is linear, so the mean
+	// crosses that boundary here — the same decode the tint beside it goes through
+	// in `mesh_entry`. The image does not: a PNG is defined to hold sRGB, which is
+	// what the readback already is.
+	float[4] linear = srgb_to_linear_rgb({
+		(float)mean[0] / 255.0f, (float)mean[1] / 255.0f, (float)mean[2] / 255.0f, 1
+	});
+	key.color = { linear[0], linear[1], linear[2] };
+	if (flat) return key;
+
+	// Before the encode and only on the image path: the texels no triangle covered
+	// are black until this runs, and a viewer filtering across a seam reads them.
+	self.baker.dilate(self.texels);
+
+	// And then the alpha goes away entirely unless it means something.
+	//
+	// glTF says a viewer ignores the alpha of a base colour map under `OPAQUE`, and
+	// that is true of the *material*. It is not true of the image: Blender's
+	// importer premultiplies a PNG that has an alpha channel, so a texel this bake
+	// left at zero comes back as black however good the colour under it is — which
+	// is a rock covered in black wedges in the exact shape of the gaps in its uv
+	// layout. Filling it in costs one pass and removes the whole class.
+	if (!key.cutout)
+	{
+		for (sz i = 0; i < count; i++) self.texels[i * 4 + 3] = 0xff;
+	}
+
+	image::Image decoded = {
+		.width = self.baker.size,
+		.height = self.baker.size,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		.pixels = self.texels,
+		.allocator = mem,
+	};
+	char[]? encoded = png::save_bytes(&decoded);
+	// An encode that failed leaves the colour standing, which is still a better
+	// file than the one grey it replaces.
+	if (catch encoded) return key;
+	defer free(encoded);
+
+	// No memo entry: `ExportImage` is keyed on a device slot and a bake has none.
+	// Two keys that baked the same picture write it twice, which is the honest
+	// answer — they are two surfaces that agreed, not one image shared.
+	uint image = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
+	key.texture = (int)self.out.add_texture(image);
+	self.report.images++;
+	return key;
+}
+
+<*
+ Counts one copy's material against what the file kept of it.
+
+ One place rather than three, because the three call sites — a node written as
+ itself, a member of a batch, a node in a flattened export — have to agree about
+ which of `shaded`, `baked_images` and `baked_colors` a copy lands in. The bake is
+ already in the memo by the time this runs: `mesh_entry` put it there.
+*>
+fn void Exporter.count_shading(&self, NodeId id, bool shared)
+{
+	Node* node = self.pass.scene.node(id);
+	if (node == null || !self.loses_its_shader(node.material)) return;
+
+	ExportBake baked = self.bake_for(id, node, shared);
+	if (baked.texture >= 0)
+	{
+		self.report.baked_images++;
+	}
+	else if (baked.baked)
+	{
+		self.report.baked_colors++;
+	}
+	else
+	{
+		self.report.shaded++;
+	}
 }
 
 <*
@@ -1464,7 +1829,14 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		roughness: surface.surface[0],
 		base_color_texture: uv_texture_ref(surface.texture, surface.uv_transform),
 		double_sided: surface.double_sided,
-		alpha_mode: surface.transparent ? gltf::AlphaMode.BLEND : gltf::AlphaMode.OPAQUE,
+		// `MASK` is the third answer and only a bake produces it: the alpha of a
+		// baked image is the body's `discard` and nothing else, so a leaf cut out of
+		// a quad comes back as the leaf rather than as the quad. Blending still wins
+		// where a material asked for it — the alpha does the cutting there too, and
+		// with a soft edge.
+		alpha_mode: surface.transparent
+			? gltf::AlphaMode.BLEND
+			: (surface.cutout ? gltf::AlphaMode.MASK : gltf::AlphaMode.OPAQUE),
 	);
 	self.out.set_material_maps(
 		written,
@@ -1516,16 +1888,41 @@ fn int Exporter.material_for(&self, ExportSurface surface)
  Not the metallic-roughness *map*: this renderer's roughness and metalness are one
  number each for a whole material rather than a texel-by-texel pair, so there is
  nothing to write one from. The two factors do go across — see `material_for`.
+
+ ## What a bake replaces
+
+ Everything the body already looked at. `s.albedo` arrives multiplied by the
+ mesh's own image, and a `LayeredMaterial` *is* a generated body — so a baked
+ material writes neither the source image nor the layer stack beside its answer.
+ Writing them would apply each of them twice: the moss once in the image and once
+ in `CUSTOM_materials_layers`, the base map once inside the bake and once as the
+ texture the factor multiplies.
+
+ The normal map is the exception and stays. A bake carries colour and no surface
+ detail — it is flat by construction, being unlit — so the one map that adds
+ something the image cannot is the one glTF understands natively.
+
+ @param baked : `What running this node's body came back with, or an empty record. A baked image is the base colour map, and a baked colour is the base colour factor; either way the mesh's own image is not written, because the body already sampled it.`
 *>
-fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color)
+fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color, ExportBake baked)
 {
 	ExportSurface surface = {
 		.base_color = color,
-		.texture = self.texture_for(node)!,
+		// `texture_for` is skipped entirely when the body ran, not merely
+		// overridden: it writes the image into the document on the way past, and an
+		// image the bake already sampled has no reader left.
+		.texture = baked.baked ? baked.texture : self.texture_for(node)!,
+		.cutout = baked.cutout && baked.texture >= 0,
 		// A null material is one whose slot was collected while a node still named
 		// it, which `MeshPass.record` draws as nothing at all. Every answer here has
 		// the same shape for it — opaque, single-sided, the identity transform.
-		.uv_transform = material_of == null ? UV_IDENTITY : material_of.uv_transform_or_identity(),
+		// A baked image is indexed by the mesh's own TEXCOORD_0 with nothing applied
+		// to it — `material.slang` rasterises the bake into the attribute as the file
+		// carries it, and the body's own sampling already went through the transform
+		// inside the bake. Writing the transform again would apply it twice.
+		.uv_transform = baked.texture >= 0 || material_of == null
+			? UV_IDENTITY
+			: material_of.uv_transform_or_identity(),
 		.surface = material_of == null ? (float[4]) { 1, 0, 0, 0 } : material_of.surface(),
 		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
 		.double_sided = material_of != null && material_of.cull == CULL_MODE_NONE,
@@ -1546,6 +1943,9 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 				self.device_texture_for(script.textures.at(script.script_layers.base_normal_binding))
 			);
 		}
+		// After the normal map, which survives a bake, and before the return: the
+		// stack does not. See the header above.
+		if (baked.baked) surface.script_material = -1;
 		return surface;
 	}
 
@@ -1560,7 +1960,9 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	surface.emissive_factor = {
 		source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z
 	};
-	if (source.has_layers())
+	// The imported stack, on the same terms as the script's one above: a body that
+	// baked has already applied it.
+	if (source.has_layers() && !baked.baked)
 	{
 		surface.layers_asset = node.asset;
 		surface.layers_material = source_material;
@@ -1621,6 +2023,17 @@ fn bool Assets.read_geometry(&self, AssetId id, uint mesh, GeometryBuilder* out)
 	if (asset.has_primitive)
 	{
 		asset.primitive.build(out);
+		return out.positions.len() > 0;
+	}
+
+	// Before the hull, and that order is the whole of it: a terrain has a picking
+	// tree like every other shape, so without this branch it reached the fallback
+	// below and was written with the hull's *projected* uvs — world units, tens or
+	// hundreds of them across the field, where the shape's own uv runs 0..1. Any
+	// texture on an exported terrain then tiled once per world unit.
+	if (asset.has_terrain)
+	{
+		asset.terrain.build(out);
 		return out.positions.len() > 0;
 	}
 

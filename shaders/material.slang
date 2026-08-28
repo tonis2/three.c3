@@ -25,6 +25,20 @@
 // `the_material_push_block_keeps_the_mesh_contract`, which reflects an assembled
 // material and checks it field by field against `MESH_PUSH_FIELDS`.
 
+// **The bake variant.** Replaced by `#define THREE_BAKE 1` when the exporter asks
+// for one, and by nothing at all otherwise — so an ordinary material's generated
+// source is byte for byte what it was before this existed, the same rule
+// `//@table` follows.
+//
+// It is at the top because of what it guards. A bake is the agent's own body
+// rasterised into a texture in uv space, and it has to be *unlit*: a glTF viewer
+// lights what it loads, so a baked-in sun would be applied twice. Every function
+// below that adds light is therefore two functions, and `vertexMain` places the
+// triangle by its uv rather than by the camera. The body itself is unchanged and
+// never sees the define — which is what makes this one template rather than a
+// second copy of a 44 000-byte shader to keep in step.
+//@bake
+
 // One instance: where a copy of the mesh is, how its normals rotate, and the
 // three things copies of one mesh may disagree about without costing a draw call.
 // Byte for byte what `mesh.slang` and `scene/scene.c3` declare; 152 bytes.
@@ -402,6 +416,12 @@ float3 srgb_to_linear(float3 c)
 // function and not the argument.
 float shadow_factor(float3 position, float3 normal)
 {
+#ifdef THREE_BAKE
+    // Nothing is occluded in a bake, which is also what lets the bake pipeline
+    // leave binding 1 unbound: with the sampler unread, Slang drops it from the
+    // layout and `pipeline_declares_binding` answers no.
+    return 1.0;
+#else
     float4 params = push.frame[0].shadow;
     if (params.w <= 0.0) return 1.0;
 
@@ -425,6 +445,7 @@ float shadow_factor(float3 position, float3 normal)
     }
 
     return 1.0 - params.w * (1.0 - lit / 9.0);
+#endif
 }
 
 // This fragment's shadow, looked up **once** and left where `lambert` can reach
@@ -487,8 +508,14 @@ float shadow_factor(float3 position, float3 normal)
 // @return `true when this frame is a debug view and the shading should not be used.`
 bool debug_view(float3 position, float3 normal, out float3 answer)
 {
-    float mode = push.frame[0].debug.x;
     answer = float3(0.0);
+#ifdef THREE_BAKE
+    // A bake is not a frame and must not follow `three.debug.view`: an export run
+    // while somebody was looking at the shadow factor would write the shadow
+    // factor into the file.
+    return false;
+#else
+    float mode = push.frame[0].debug.x;
     if (mode < 0.5) return false;
 
     if (mode < 1.5)
@@ -518,6 +545,7 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
 
     answer = float3(shadow_map.SampleLevel(uv, 0.0).r);
     return true;
+#endif
 }
 
 static float g_shadow = 1.0;
@@ -548,6 +576,11 @@ static float g_shadow = 1.0;
 // asked for and still gets.
 float3 lambert(float3 normal)
 {
+#ifdef THREE_BAKE
+    // The identity, so `s.albedo * lambert(s.normal)` — the body most materials
+    // here are — bakes the albedo and nothing else.
+    return float3(1.0, 1.0, 1.0);
+#else
     float ambient = push.frame[0].lighting.x;
     uint count = (uint)push.frame[0].lighting.y;
     float3 direct = float3(0.0, 0.0, 0.0);
@@ -559,6 +592,7 @@ float3 lambert(float3 normal)
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
     return ambient + (1.0 - ambient) * direct;
+#endif
 }
 
 // The specular highlight, over the same lights `lambert` sums the diffuse over.
@@ -586,6 +620,12 @@ float3 lambert(float3 normal)
 // correctly so; `plan.md` §4's sky is what makes metal look like metal.
 float3 specular_light(float3 normal, float3 position, float3 albedo, float roughness, float metalness, float reflectance)
 {
+#ifdef THREE_BAKE
+    // A highlight is a fact about where the camera is, and a baked texture is
+    // looked at from everywhere. It is also the term that would put the sun into
+    // the base colour as a white blob that never moves.
+    return float3(0.0, 0.0, 0.0);
+#else
     float3 view = normalize(push.frame[0].camera.xyz - position);
     float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
     float f90 = clamp(dot(f0, float3(16.5, 16.5, 16.5)), 0.0, 1.0);
@@ -622,6 +662,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
     return sum;
+#endif
 }
 
 // This surface's highlight, so a body can have one without reproducing the four
@@ -639,8 +680,16 @@ float3 specular(Surface s)
 // that changed neither wants.
 float3 standard(Surface s, float3 albedo, float3 normal)
 {
+#ifdef THREE_BAKE
+    // The colour and not the colour times `1 - metalness`. With `lambert` at 1 and
+    // the highlight at 0 the expression below would already be unlit, and it would
+    // bake a metal as black — a surface whose colour comes back entirely through a
+    // reflection the file has no environment for.
+    return albedo;
+#else
     return albedo * lambert(normal) * (1.0 - s.metalness)
          + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance);
+#endif
 }
 
 // The built-in shading, whole: exactly what a mesh with no ShaderMaterial draws.
@@ -800,13 +849,41 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     v.local = local;
     v.index = vid;
 
+#ifdef THREE_BAKE
+    // **The mesh's own TEXCOORD_0, kept before `displace` can rewrite it.**
+    //
+    // The two uvs are not the same question. What the body *samples* with is
+    // whatever it ends up as — a vertex body computing `v.uv` from `v.local` is
+    // the ordinary case — but where the answer is *stored* has to be the layout
+    // the exported file carries, which is the attribute as the mesh holds it.
+    // Rasterising into the computed one instead writes a picture the file then
+    // indexes with different coordinates: a correct bake, sampled wrong, which
+    // reads as the mesh having lost its texture rather than as a mix-up here.
+    float2 bake_uv = v.uv;
+#endif
+
     displace(v);
 
     output.world = v.position;
+#ifdef THREE_BAKE
+    // The bake rasterises in **uv space**: the triangle is placed by where it lands
+    // in the texture, and everything else — the world position, the normal, the uv
+    // the body will sample with — crosses into the fragment stage exactly as it
+    // would in a frame. So a body reading `s.position` gets the position this copy
+    // really has, and one reading `s.uv` gets the uv its own vertex body computed.
+    //
+    // `displace` still runs first, and `bake_uv` above is why that is safe.
+    //
+    // The viewport is set *unflipped* for this — `MaterialBaker` does it — because
+    // uv (0,0) is the top-left texel of an image and every other pass in the
+    // project flips Y to put world space the right way up.
+    output.sv_position = float4(bake_uv * 2.0 - 1.0, 0.0, 1.0);
+#else
     // Built from the displaced position, which is the whole point: a vertex that
     // moved and a clip position that did not would be geometry lit and textured
     // as though it were somewhere it is not drawn.
     output.sv_position = mul(push.frame[0].view_projection, float4(v.position, 1.0));
+#endif
     output.normal = v.normal;
     output.uv = v.uv;
     output.color = v.color;

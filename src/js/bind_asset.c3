@@ -871,6 +871,13 @@ fn void js_wireframe(
  The second argument is `flatten`, which gives up the hierarchy to batch copies
  that are not siblings — the ones `asset.instantiate()` produces, each in a group
  of its own.
+
+ The third is the bake resolution, or 0 for none. It is the one part of an export
+ that needs a device: each `ShaderMaterial` is run over its mesh's uv layout and
+ read back, so a body's answer reaches the file as a `baseColorTexture` or a
+ `baseColorFactor` instead of being lost. `render/bake.c3` is the whole of it, and
+ `bakedImages` and `bakedColors` are what it did — both of them copies that would
+ have been counted in `shaded` without it.
 *>
 fn void js_export(
 	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
@@ -913,7 +920,12 @@ fn void js_export(
 		// nothing here reads a property off a JavaScript value — an argument list
 		// this side stays a list of scalars, which keeps the two sides from
 		// disagreeing about defaults.
-		ExportReport? report = self.pass.export_scene(writing, arg_truth(&js, argc, args, 1));
+		// The prelude has turned `bake: true` into a resolution and refused anything
+		// outside the range by name, so this is a number and nothing else.
+		int bake = arg_int(&js, argc, args, 2);
+		ExportReport? report = self.pass.export_scene(
+			writing, arg_truth(&js, argc, args, 1), bake > 0 ? (uint)bake : 0
+		);
 		if (catch err = report)
 		{
 			if (err == EXPORT_HAS_NOTHING_TO_WRITE)
@@ -939,6 +951,8 @@ fn void js_export(
 		js.set_property(described, "batches", qjs::int_value((int)report.batches));
 		js.set_property(described, "skipped", qjs::int_value((int)report.skipped));
 		js.set_property(described, "shaded", qjs::int_value((int)report.shaded));
+		js.set_property(described, "bakedImages", qjs::int_value((int)report.baked_images));
+		js.set_property(described, "bakedColors", qjs::int_value((int)report.baked_colors));
 		js.set_property(described, "layers", qjs::int_value((int)report.layers));
 		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
 		*out = described;

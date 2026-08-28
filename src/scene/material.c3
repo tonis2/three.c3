@@ -253,6 +253,22 @@ struct Material
 	// The vertex body, owned, or an empty slice for a material that has none.
 	// Kept for `toJSON` and for the same reason `fragment` is.
 	String vertex;
+	<*
+	 What the body was assembled *from*: the uniform and sampler declarations, with
+	 their names owned here.
+
+	 Kept so the exporter can assemble the same module a second time with
+	 `THREE_BAKE` set — see `render/bake.c3`. Reflection gives the offsets back but
+	 not the widths and row counts they were generated from, so a bake that guessed
+	 at the layout would put a script's uniform bytes in the wrong fields: the same
+	 material, the same push bytes, a different picture, and nothing anywhere
+	 saying so.
+
+	 Empty for every material that is not a `ShaderMaterial`, which costs those two
+	 zero slices and no allocation.
+	*>
+	MaterialUniform[] declared_uniforms;
+	MaterialTexture[] declared_textures;
 	// How far this material's vertex body can move a vertex, in world units.
 	//
 	// A cull margin and nothing else. `build_draw_list` tests a mesh's own bounds
@@ -793,10 +809,47 @@ fn int Material.uniform_offset(&self, String name)
 	return (int)field.offset;
 }
 
+<*
+ The declarations a material has to keep, copied out of the caller's slices.
+
+ `MaterialUniform.name` and `MaterialTexture.name` are borrowed from whoever
+ described the material — for a script that is a QuickJS string that dies with
+ the call — so the names are copied too. `free_declarations` is the other half.
+*>
+fn MaterialUniform[] copy_uniform_declarations(MaterialUniform[] from)
+{
+	if (from.len == 0) return {};
+	MaterialUniform[] made = mem::new_array(MaterialUniform, from.len);
+	foreach (i, uniform : from)
+	{
+		made[i] = { .name = uniform.name.copy(mem), .components = uniform.components, .rows = uniform.rows };
+	}
+	return made;
+}
+
+fn MaterialTexture[] copy_texture_declarations(MaterialTexture[] from)
+{
+	if (from.len == 0) return {};
+	MaterialTexture[] made = mem::new_array(MaterialTexture, from.len);
+	foreach (i, texture : from) made[i] = { .name = texture.name.copy(mem) };
+	return made;
+}
+
+fn void Material.free_declarations(&self)
+{
+	foreach (uniform : self.declared_uniforms) if (uniform.name.len > 0) uniform.name.free(mem);
+	foreach (texture : self.declared_textures) if (texture.name.len > 0) texture.name.free(mem);
+	if (self.declared_uniforms.len > 0) mem::free(self.declared_uniforms);
+	if (self.declared_textures.len > 0) mem::free(self.declared_textures);
+	self.declared_uniforms = {};
+	self.declared_textures = {};
+}
+
 fn void Material.free(&self)
 {
 	if (self.fragment.len > 0) self.fragment.free(mem);
 	if (self.vertex.len > 0) self.vertex.free(mem);
+	self.free_declarations();
 	if (self.table.len > 0) mem::free(self.table);
 	self.table = {};
 	self.free_script_layers();

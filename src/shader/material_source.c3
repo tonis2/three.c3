@@ -560,6 +560,7 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
  @param fragment : `The agent's body. Must define float3 shade(Surface s); everything else is theirs.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
+ @param bake : `Assemble the unlit, uv-space variant instead — see //@bake in material.slang. The exporter's, and nothing else's.`
  @return `The whole module, allocated from allocator and owned by the caller.`
  @return? MATERIAL_BODY_EMPTY : `The body is empty. material_diagnostic() has the sentence.`
  @return? MATERIAL_NAME_INVALID : `A uniform or texture name, or a uniform width, is one this cannot generate. material_diagnostic() names it.`
@@ -575,7 +576,8 @@ fn String? material_source(
 	// predates textures passes the allocator positionally, and putting this where
 	// it belongs would silently turn one of those into a texture list.
 	MaterialTexture[] textures = {},
-	String vertex = ""
+	String vertex = "",
+	bool bake = false
 )
 {
 	validate_material(fragment, uniforms, textures)!;
@@ -590,6 +592,7 @@ fn String? material_source(
 		MATERIAL_PREAMBLE_NAME,
 		MATERIAL_BINDING_FIRST,
 		allocator,
-		material_spills(uniforms)
+		material_spills(uniforms),
+		bake
 	);
 }

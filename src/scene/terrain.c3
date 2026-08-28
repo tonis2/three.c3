@@ -274,6 +274,22 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
  A wall around the border, dropping to `skirt` below the lowest sample.
 
  Four strips, each walked so its front face points away from the field.
+
+ ## The uv is the border texel, and the wall has no area in uv space
+
+ A wall vertex takes the uv of the point on the *field* it hangs from — top and
+ bottom alike — so a strip is a line rather than a rectangle in uv, and a splat
+ mask reaches down the wall in the colour of the edge it belongs to. That is the
+ answer somebody painting a mask would expect, and it is the only one that leaves
+ `Heightfield.build`'s promise true: the uv runs 0..1 across the whole field, and
+ across nothing else.
+
+ It used to run 0..1 down each wall instead, which put four more copies of the
+ unit square on top of the field's one. Nothing in a frame noticed, because a
+ wall is normally below the sand and out of sight. `scene.export({ bake: ... })`
+ noticed immediately: a bake rasterises a mesh *by its uv*, so the four walls
+ were drawn over the whole texture after the ground was, and a beach came out as
+ vertical stripes of the cliff behind it.
 *>
 fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 {
@@ -310,9 +326,10 @@ fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 			float x = -half_w + (float)i / (float)self.segments * self.width;
 			float z = -half_d + (float)j / (float)self.segments * self.depth;
 			float y = self.sample((int)i, (int)j);
-			float u = (float)step / (float)self.segments;
-			out.vertex({ x, y, z }, normal, { u, 0 });
-			out.vertex({ x, floor_y, z }, normal, { u, 1 });
+			float u = (float)i / (float)self.segments;
+			float v = (float)j / (float)self.segments;
+			out.vertex({ x, y, z }, normal, { u, v });
+			out.vertex({ x, floor_y, z }, normal, { u, v });
 		}
 		for (uint step = 0; step + 1 < side; step++)
 		{
