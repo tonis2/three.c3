@@ -1428,7 +1428,7 @@ export const three = {
 		return new Asset(H.load(path));
 	},
 
-	// Decode a PNG or JPEG and upload it. Synchronous, for three.load's
+	// Decode a PNG, JPEG or KTX2 and upload it. Synchronous, for three.load's
 	// reason, and under --assets the path is inside the game directory and
 	// cannot climb out of it.
 	//
@@ -1446,7 +1446,7 @@ export const three = {
 	//                                  { colorSpace: three.LinearSRGBColorSpace });
 	texture(path, options = null) {
 		if (typeof path !== 'string' || path.length === 0) {
-			throw new TypeError('three.texture(path) wants a path to a .png or .jpg');
+			throw new TypeError('three.texture(path) wants a path to a .png, .jpg or .ktx2');
 		}
 		const chosen = uploadOptions(options, 'three.texture(path, options)');
 		return new Texture(H.texture(path, chosen.code, chosen.mips), path, chosen.space);

@@ -597,6 +597,9 @@ struct SceneLook
 	Lighting lighting;
 	// `three.light.shadow`, the five settings and none of the device objects.
 	ShadowSettings shadow;
+	// `scene.background` when it is an image, and `scene.environment` — see
+	// `SkyLook`. Both are counted references and `Scene.free_sky` gives them back.
+	SkyLook sky;
 }
 
 // What a scene starts on, and what `new three.Scene()` therefore shows: the
@@ -606,6 +609,7 @@ const SceneLook DEFAULT_LOOK = {
 	.clear = DEFAULT_CLEAR,
 	.lighting = DEFAULT_LIGHTING,
 	.shadow = DEFAULT_SHADOW,
+	.sky = DEFAULT_SKY,
 };
 
 <*

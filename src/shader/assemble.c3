@@ -70,8 +70,8 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  Two numbers that happen to be equal, and writing them as one constant is the
  mistake this comment exists to prevent. They were 1 and 1 while both templates
  reserved one binding; 1 and 2 once a post pass reserved `prev` and `scene`; 2
- and 2 now that a material reserves `base_color_map` and `shadow_map`. A shared
- constant would mean every material sampler being silently renumbered by whichever
+ and 4 once a material reserved `base_color_map` and `shadow_map`; 3 and 4 now
+ that `environment_map` is beside those two. A shared constant would mean every material sampler being silently renumbered by whichever
  *other* template moved — reflection agreeing with itself the whole way, and the
  only symptom being textures arriving in the wrong slots of shaders nobody had
  touched.
@@ -83,7 +83,7 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  that could write `[vk::binding(3, 0)]` itself could collide with the reserved
  names.
 *>
-const uint MATERIAL_BINDING_FIRST = 2;
+const uint MATERIAL_BINDING_FIRST = 3;
 
 // Where a post pass's own samplers begin: after `prev` at 0, `scene` at 1, the
 // frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST`
@@ -109,6 +109,19 @@ const uint POST_TAP_BINDING = 3;
  and why it is still asked.
 *>
 const uint SHADOW_BINDING = 1;
+
+<*
+ Where the environment map is bound, in every shader that shades a surface.
+
+ `SHADOW_BINDING`'s argument, one binding along: only the pass knows this image
+ is the scene's sky, and a material that declared a texture called
+ `environment_map` would otherwise claim it.
+
+ Like the shadow map it is always bound and is white when there is no sky —
+ `FrameBlock.environment.x` is what says whether to read it, so shading with an
+ environment and shading without one are one pipeline.
+*>
+const uint ENVIRONMENT_BINDING = 2;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the

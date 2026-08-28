@@ -2830,7 +2830,8 @@ fn void GpuMesh.release_layers(&self, Assets* assets, Gpu* gpu)
  @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
 *>
 fn int? Assets.decode_material_texture(
-	&self, Gpu* gpu, gltf::GltfStream* stream, int image_index, ColorSpace space = ColorSpace.SRGB
+	&self, Gpu* gpu, gltf::GltfStream* stream, int image_index, ColorSpace space = ColorSpace.SRGB,
+	bool mips = true
 )
 {
 	char[]? encoded = stream.get_image_data((uint)image_index);
@@ -2874,7 +2875,88 @@ fn int? Assets.decode_material_texture(
 		return -1;
 	}
 
-	return self.claim_texture(gpu, decoded, space);
+	return self.claim_texture(gpu, decoded, space, mips);
+}
+
+<*
+ One of a loaded file's own images, by its index in the glTF `images` array —
+ the handle `asset.imageAt(i)` is.
+
+ **A `.glb`'s pictures had no name a script could say.** A texture slot reached
+ the device the moment a mesh naming it was uploaded and then existed only as an
+ `int` inside a `GpuMesh`; there was no `Texture` to call `read()` on, so a
+ script could place a kit and still not answer "what colour is that wall". Every
+ other image in this API — a `.png`, a `DataTexture`, a layer's map — has a
+ handle, and these are the ones that did not.
+
+ Indexed by the *file's* image array rather than by anything this side invented,
+ so the number matches what a glTF viewer shows and it means the same thing
+ before and after any mesh has been drawn. The alternative — indexing the memo —
+ would number the images in the order meshes happened to be placed, which is a
+ different answer on the same file depending on what a script did first.
+
+ **The memo is shared with the importer**, so asking for an image a mesh already
+ uploaded costs a retain and nothing else, and the handle a script gets is the
+ very slot the mesh is drawing with. That is the point: `read()` on it reads what
+ is on screen.
+
+ It skips the memo when `mips` is false, because the memo remembers the image and
+ its colourspace and not its level count. Answering a request for an exact
+ lookup table with the mipped copy the importer built would be the wrong picture
+ for a caller who asked precisely to avoid it; `claim_texture` still dedupes the
+ two by content, so the cost is one decode and one upload rather than a second
+ copy of every image.
+
+ The reference is the caller's, exactly as `three.texture()` of a file already in
+ the table hands back one of its own.
+
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
+ @return `An index into Assets.textures, or -1 when there is no such image or it would not decode.`
+*>
+fn int? Assets.load_asset_image(
+	&self, Gpu* gpu, AssetId id, int image_index, ColorSpace space = ColorSpace.SRGB, bool mips = true
+)
+{
+	Asset* owner = self.slot(id);
+	if (owner == null || !owner.has_stream) return -1;
+	if (image_index < 0 || image_index >= owner.stream.gltf.images.len()) return -1;
+
+	if (mips)
+	{
+		foreach (memo : owner.images)
+		{
+			if (memo.image != image_index || memo.space != space) continue;
+			self.retain_texture(memo.texture);
+			return memo.texture;
+		}
+	}
+
+	int resolved = self.decode_material_texture(gpu, &owner.stream, image_index, space, mips)!;
+	// Re-read rather than reuse: the decode took `&self` and grew the texture
+	// table, and the pointer above was taken before it.
+	owner = self.slot(id);
+	if (owner == null) return -1;
+	// The fresh slot's one reference goes to the caller, and the memo holds
+	// none — the same arrangement `load_material_texture` makes, where every
+	// *consumer* counts and the memo only remembers where to find it.
+	if (mips && resolved >= 0)
+	{
+		owner.images.push({ .image = image_index, .space = space, .texture = resolved });
+	}
+	return resolved;
+}
+
+<*
+ How many images the file carries, whether or not any of them has been decoded.
+
+ Read out of the JSON, so it answers before a mesh has been placed — which is
+ what lets `asset.imageAt(i)` range-check without uploading anything.
+*>
+fn uint Assets.asset_image_count(&self, AssetId id)
+{
+	Asset* owner = self.slot(id);
+	if (owner == null || !owner.has_stream) return 0;
+	return (uint)owner.stream.gltf.images.len();
 }
 
 <*
@@ -2953,6 +3035,9 @@ const char[8] PNG_SIGNATURE = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
 <*
  What these bytes are, by their first few rather than by the name of the file.
 
+ PNG, JPEG and KTX2 — the three `decode_image` reads, and the same three every
+ door on this side accepts.
+
  **A file named `.png` that holds a JPEG is a thing that happens** — an export
  step renamed it, or a browser download did — and dispatching on the extension
  would hand PNG bytes to the JPEG decoder, which reports a corrupt file. That
@@ -2984,11 +3069,13 @@ fn image::Image? decode_by_signature(char[] encoded)
 		return jpeg::load_bytes(encoded);
 	}
 
+	if (is_ktx2(encoded)) return decode_ktx2(encoded);
+
 	return TEXTURE_FORMAT_UNKNOWN~;
 }
 
 <*
- A PNG or JPEG on disk to a texture slot — `three.texture(path)`'s half of it.
+ A PNG, JPEG or KTX2 on disk to a texture slot — `three.texture(path)`'s half of it.
 
  Goes through `claim_texture`, so it shares the table, the content hash and the
  refcount with every texture a glTF brought in. The reference it starts at
@@ -3006,7 +3093,7 @@ fn image::Image? decode_by_signature(char[] encoded)
  @param mips : `False for pixels meant to be indexed exactly. A full chain otherwise.`
  @return `An index into Assets.textures, at one reference.`
  @return? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
- @return? TEXTURE_FORMAT_UNKNOWN : `Not a PNG or a JPEG, by its first bytes.`
+ @return? TEXTURE_FORMAT_UNKNOWN : `Not a PNG, a JPEG or a KTX2, by its first bytes.`
  @return? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
 *>
 fn int? Assets.load_texture_file(
@@ -3031,11 +3118,16 @@ fn int? Assets.load_texture_file(
 }
 
 <*
- PNG and JPEG, which is what `image.c3l` decodes.
+ PNG, JPEG and KTX2 — `image.c3l` for the first two, `src/scene/ktx.c3` for the
+ third.
 
- KTX2 (KHR_texture_basisu) is the notable absence and it is common in shipped
- assets. Anything else is not an error the load should die on — see
- `load_material_texture`.
+ BMP and GIF are what is left, and neither is an error the load should die on —
+ see `load_material_texture`.
+
+ A file that states no mime type at all is read by its first bytes rather than
+ refused. glTF only requires one for an embedded image, and a `.gltf` naming a
+ `.ktx2` beside it is a URI with nothing to declare: `gltf.c3l` reports
+ `IMAGE_UNKNOWN` for it, and the bytes are still perfectly identifiable.
 *>
 fn image::Image? decode_image(gltf::ImageType mime, char[] encoded)
 {
@@ -3045,8 +3137,10 @@ fn image::Image? decode_image(gltf::ImageType mime, char[] encoded)
 			return png::load_bytes(encoded);
 		case gltf::ImageType.IMAGE_JPEG:
 			return jpeg::load_bytes(encoded);
+		case gltf::ImageType.IMAGE_KTX2:
+			return decode_ktx2(encoded);
 		default:
-			return UNSUPPORTED_IMAGE~;
+			return decode_by_signature(encoded) ?? UNSUPPORTED_IMAGE~;
 	}
 }
 

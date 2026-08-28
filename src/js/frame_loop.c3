@@ -244,6 +244,10 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 		// kept, or a world stepping under a scene with no callback grows a list
 		// nobody ever reads.
 		self.drop_physics_events();
+		// The upload queue is a script's promise and not the callback's business,
+		// so a scene that registered no loop still gets a mesh a frame rather than
+		// waiting for whatever runs next.
+		if (self.uploads.len() > 0) self.drain_frame_jobs();
 		return false;
 	}
 
@@ -494,6 +498,12 @@ fn bool JsRuntime.is_thenable(&self, qjs::Value value)
 *>
 fn void JsRuntime.drain_frame_jobs(&self)
 {
+	// One queued mesh, at most, and before the jobs — so the promise it settles
+	// is one of the microtasks this frame goes on to run. A kit a script asked
+	// for asynchronously therefore arrives a mesh a frame, which is the whole
+	// difference between it and `scene.add`.
+	self.step_upload();
+
 	uint drained = 0;
 	while (self.js.jobs_waiting() && drained < JS_FRAME_MAX_JOBS)
 	{

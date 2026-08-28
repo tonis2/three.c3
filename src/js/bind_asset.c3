@@ -1048,6 +1048,128 @@ fn void js_mesh_bounds(
 }
 
 <*
+ `uploadMesh(index, generation, mesh, onDone, onFail)` — queue one mesh's upload
+ and settle a promise when it lands.
+
+ **The promise is JavaScript's and the queue is the engine's.** What crosses is
+ the two settlement functions of a `new Promise(...)` the prelude built, which
+ the runtime retains and calls later — so there is no promise-capability call in
+ the shim and no second definition of what a promise is. Settling one queues a
+ microtask, and `drain_frame_jobs` already drains those; that is the whole of the
+ machinery.
+
+ One mesh a frame comes out of `step_upload` rather than from anything here, and
+ it is what separates this from `scene.add`: adding a kit of ninety pieces
+ uploads ninety meshes inside one frame, and asking for them this way spreads
+ them over ninety.
+
+ Nothing is uploaded during this call. A script that wants the mesh *now* should
+ place it and let `add` do it, which is still the shorter path and always will
+ be.
+*>
+fn void js_upload_mesh(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	if (argc < 5 || !js.is_function(args[3]) || !js.is_function(args[4]))
+	{
+		*out = js.raise("uploadMesh wants the two settlement functions of a promise");
+		return;
+	}
+
+	self.uploads.push({
+		.asset = id,
+		.mesh = (uint)arg_int(&js, argc, args, 2),
+		.resolve = js.retain(args[3]),
+		.reject = js.retain(args[4]),
+	});
+	*out = qjs::undefined_value();
+}
+
+<*
+ `assetImages(index, generation)` — how many images the file carries.
+
+ Out of the JSON chunk, so it costs nothing and answers before any mesh has been
+ placed. `asset.imageAt(i)` range-checks against it, which is what keeps an
+ out-of-range index a `RangeError` naming the count rather than a `null` that
+ could equally mean "the picture would not decode".
+*>
+fn void js_asset_images(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	*out = qjs::int_value((int)self.pass.assets.asset_image_count(id));
+}
+
+<*
+ `assetImage(index, generation, image, space, mips)` — one of the file's own
+ images as a texture handle.
+
+ The verb `texture.read()` had nothing to be called on for a `.glb`. A picture
+ inside a file reached the device as an `int` on a `GpuMesh` and stopped there,
+ so a script could draw a kit and still have no way to look at what it drew
+ with.
+
+ It decodes rather than requiring the mesh to have been placed, which is the
+ difference between "the images this file has" and "the images something has
+ already drawn". When a mesh *has* been placed, the asset's memo means this is
+ the same slot — so what comes back is the image on screen and not a second copy
+ of it.
+
+ It retains, like every other handle that crosses: the `Texture` the prelude
+ wraps this in owns a reference, and disposing it cannot take the picture out
+ from under a mesh still drawing it.
+
+ @return `[index, width, height, levels], or null when the image would not decode.`
+*>
+fn void js_asset_image(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("asset.imageAt needs a GPU device and this context has none");
+		return;
+	}
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	int image = arg_int(&js, argc, args, 2);
+	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
+	bool mips = arg_truth_or(&js, argc, args, 4, true);
+
+	int? index = self.pass.assets.load_asset_image(&self.renderer.gpu, id, image, space, mips);
+	if (catch err = index)
+	{
+		*out = js.raise(string::tformat("could not read image %d: %s", image, err));
+		return;
+	}
+	if (index < 0)
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	*out = texture_value(&js, index, self.pass.assets.texture_at(index));
+}
+
+<*
  `meshMaterial(index, generation, mesh)` — what the primitive's glTF material
  said, beyond the base colour that is already on the mesh.
 

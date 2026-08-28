@@ -216,6 +216,25 @@ struct FrameBlock
 	*>
 	float[4] camera;
 	<*
+	 The sky, as the surfaces that reflect it need it.
+
+	   x  intensity, and **zero means there is no environment** — the one number
+	      the shading branches on, so a scene with no sky and a scene whose sky
+	      is turned all the way down are the same frame.
+	   y  rotation about world Y in radians, the same angle `shaders/sky.slang`
+	      turns the background by. One number in one place, or a metal would
+	      reflect a sky pointing somewhere else than the one on screen.
+	   z  the highest mip level of the environment image, which is what turns
+	      `roughness` into a blur.
+	   w  unused.
+
+	 Beside `camera` rather than folded into its spare `w`, for the reason the
+	 debug view is a whole `float4`: the block is aligned to sixteen bytes
+	 already, so this costs nothing a scalar would not, and packing two unrelated
+	 things into one vector is how the second one ends up in the wrong shader.
+	*>
+	float[4] environment;
+	<*
 	 The frame's lights, `lighting[1]` of them, light zero first. The rest of the
 	 array is whatever was there last frame and no loop reaches it.
 
@@ -370,7 +389,7 @@ $assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer 
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert DrawRecord::size == 120 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 328 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 344 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
@@ -443,7 +462,8 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
 	shadow                 152    16
 	debug                  168    16
 	camera                 184    16
-	lights                 200   128    = 328, and no tail padding
+	environment            200    16
+	lights                 216   128    = 344, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "view_projection",         0,  64 },
@@ -453,7 +473,8 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "shadow",                152,  16 },
 	{ "debug",                 168,  16 },
 	{ "camera",                184,  16 },
-	{ "lights",                200, 128 },
+	{ "environment",           200,  16 },
+	{ "lights",                216, 128 },
 };
 
 <*
@@ -1051,9 +1072,12 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
  @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
  @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
 *>
-fn MeshPipeline? MeshPipeline.init(&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state)
+fn MeshPipeline? MeshPipeline.init(
+	&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state,
+	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..]
+)
 {
-	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..])!;
+	self.build_layouts(gpu, mod, contract)!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
@@ -1570,7 +1594,8 @@ fn MeshPipeline*? PipelineCache.acquire(
 	String source,
 	String name,
 	PipelineState state,
-	String* diagnostic = null
+	String* diagnostic = null,
+	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..]
 )
 {
 	// The module first, and by source alone. A state this cache has not seen before
@@ -1591,7 +1616,7 @@ fn MeshPipeline*? PipelineCache.acquire(
 	// Built into a local first, so a pipeline that fails to build leaves nothing
 	// half-allocated behind. Nothing here can fail after this line.
 	MeshPipeline built;
-	built.init(gpu, target, &compiled.mod, state)!;
+	built.init(gpu, target, &compiled.mod, state, contract)!;
 	self.builds++;
 
 	CachedPipeline* entry = mem::new(CachedPipeline);

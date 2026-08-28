@@ -1757,3 +1757,155 @@ fn void building_a_mip_chain_leaves_no_level_in_the_wrong_layout() @test
 	test::@check(count_magenta(&shot) > 100,
 		"and the mipped checkerboard still draws, got %d magenta pixels", count_magenta(&shot));
 }
+
+// ============================================================================
+// asset.imageAt — a .glb's own pictures, as handles
+// ============================================================================
+
+<*
+ A file's images are readable without a mesh having been placed.
+
+ The gap this closes: a `.glb`'s picture reached the device as an `int` on a
+ `GpuMesh` and stopped there, so `texture.read()` — the verb that exists so an
+ agent can look at what it drew — had nothing to be called on for anything that
+ came out of a file.
+
+ `textured.glb` holds two glTF images whose bytes are identical, which makes
+ this two assertions in one: `asset.images` counts what the *file* says, and the
+ two of them still land in one slot, because the content hash does not care that
+ they were numbered separately.
+*>
+fn void a_files_images_are_readable_before_anything_draws_them() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const before = three.stats().textures;
+			const a = kit.imageAt(0);
+			const b = kit.imageAt(1);
+			const px = a.read();
+			let magenta = 0, dark = 0;
+			for (let i = 0; i < px.length; i += 4) {
+				if (px[i] > 200 && px[i + 2] > 200 && px[i + 1] < 60) magenta++;
+				else if (px[i] < 60 && px[i + 1] < 60 && px[i + 2] < 60) dark++;
+			}
+			return {
+				images: kit.images, before, after: three.stats().textures,
+				w: a.width, h: a.height, path: a.path, magenta, dark,
+				same: b.width === a.width && b.height === a.height,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"images":2`),
+			"the file states two images and asset.images says so: %s", result.value);
+		test::@check(result.value.contains(`"before":0`),
+			"nothing was on the device before the ask: %s", result.value);
+		test::@check(result.value.contains(`"after":1`),
+			"two images holding one picture is one upload: %s", result.value);
+		test::@check(!result.value.contains(`"magenta":0`),
+			"the checkerboard's magenta came back: %s", result.value);
+		test::@check(!result.value.contains(`"dark":0`),
+			"and its dark squares: %s", result.value);
+		test::@check(result.value.contains(`"path":null`),
+			"an image inside a file has no path anyone could type: %s", result.value);
+	};
+}
+
+<*
+ The handle names the slot the mesh is drawing with, not a second copy of it.
+
+ This is what makes `read()` on one of these worth anything: if `imageAt` had
+ decoded its own copy, it would report the picture the *file* holds while the
+ frame could be showing something else entirely — and the two would agree in
+ every test that did not deliberately break the importer.
+
+ So the mesh is placed first, and the assertion is that asking afterwards adds no
+ texture. One upload, two handles, one of which a script may dispose.
+*>
+fn void the_handle_is_the_slot_the_mesh_draws_with() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(kit.mesh("quad_left")));
+			const drawn = three.stats().textures;
+
+			const tex = kit.imageAt(0);
+			const asked = three.stats().textures;
+			tex.dispose();
+			return { drawn, asked, after: three.stats().textures };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"drawn":1`),
+			"placing the mesh uploaded the picture: %s", result.value);
+		test::@check(result.value.contains(`"asked":1`),
+			"and asking for it again is a retain, not an upload: %s", result.value);
+		test::@check(result.value.contains(`"after":1`),
+			"disposing the handle leaves the mesh's own reference: %s", result.value);
+	};
+}
+
+<*
+ The colourspace is asked for rather than guessed, and asking for both costs two.
+
+ The same rule every other image in this API follows — `claim_texture`'s header
+ has why a picture and a table are two different images even when the bytes
+ match — stated here because `imageAt` is the one door where a caller might
+ expect the importer's answer to be handed back regardless of what they asked
+ for.
+*>
+fn void an_image_asked_for_twice_over_is_two_images() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			const srgb = kit.imageAt(0);
+			const linear = kit.imageAt(0, { colorSpace: three.LinearSRGBColorSpace });
+			return {
+				textures: three.stats().textures,
+				a: srgb.colorSpace, b: linear.colorSpace,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"textures":2`),
+			"one picture in two spaces is two images: %s", result.value);
+		test::@check(result.value.contains(`"a":"srgb"`) && result.value.contains(`"b":"srgb-linear"`),
+			"and each handle reports the space it asked for: %s", result.value);
+	};
+}
+
+<*
+ An index outside the file is a sentence naming the count.
+
+ `null` would have been the other answer and it is the worse one: it is already
+ what an undecodable image gives, so the two failures — "there is no image 9"
+ and "image 9 is a format nothing here reads" — would be indistinguishable from
+ a script.
+*>
+fn void an_index_past_the_end_says_how_many_there_are() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/textured.glb");
+			let caught = "";
+			try { kit.imageAt(9); } catch (e) { caught = e.constructor.name + ": " + e.message; }
+			let typed = "";
+			try { kit.imageAt("0"); } catch (e) { typed = e.constructor.name; }
+			return { caught, typed };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("RangeError") && result.value.contains("0..1"),
+			"the message names the range: %s", result.value);
+		test::@check(result.value.contains(`"typed":"TypeError"`),
+			"a string index is a TypeError rather than a silent coercion: %s", result.value);
+	};
+}

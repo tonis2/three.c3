@@ -147,6 +147,16 @@ struct FrameBlock
     // depends on which way a surface is being looked at, and the view-projection
     // above is not invertible cheaply enough to ask it per fragment.
     float4 camera;
+    // The sky, as the surfaces that reflect it need it.
+    //
+    //   x  intensity, and **zero means there is no environment**. The one number
+    //      the reflection branches on, so a scene without a sky costs a compare.
+    //   y  rotation about world Y in radians — the same angle `sky.slang` turns
+    //      the background by, so a metal reflects the sky that is on screen.
+    //   z  the environment image's highest mip level, which is what turns
+    //      `roughness` into a blur.
+    //   w  unused.
+    float4 environment;
     // The frame's lights, `lighting.y` of them, light zero first.
     //
     // **At the end of the block on purpose.** Everything above kept the offset it
@@ -304,8 +314,9 @@ static const uint POSE_MASK = 0x7fffffffu;
 
 // **Binding 1 is the shadow map, in every shader that shades a surface.** It is
 // reserved the way `base_color_map` is — declared by the template rather than by
-// anything a script writes — which is why `MATERIAL_BINDING_FIRST` is 2 and an
-// agent's first sampler is numbered from there. `shader/assemble.c3` has the
+// anything a script writes — which, with the environment map below it, is why
+// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// there. `shader/assemble.c3` has the
 // argument for why reserving a binding is a constant and never a shared bump.
 //
 // **Always bound and always valid, exactly like binding 0.** With no shadow pass
@@ -316,6 +327,22 @@ static const uint POSE_MASK = 0x7fffffffu;
 // and turning them on is a different image in the same slot rather than a
 // recompile.
 [vk::binding(1, 0)] Sampler2D shadow_map;
+
+// **Binding 2 is the environment map, in every shader that shades a surface.**
+// The third and last binding a template reserves, which is why
+// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// there.
+//
+// Always bound and always valid, exactly like the two above: with no sky it
+// carries the same 1x1 opaque white image, and what stops that white from
+// putting a mirror finish on every metal in every scene is
+// `push.frame[0].environment.x`, which is zero then. One number rather than a
+// second pipeline, for binding 1's reason.
+//
+// Equirectangular — one 2D image, latitude down and longitude across — so this
+// is an ordinary `Sampler2D` and there is no cube view anywhere in the project.
+// `shaders/sky.slang`'s header has the argument.
+[vk::binding(2, 0)] Sampler2D environment_map;
 
 // The four influences of one vertex, blended into the matrix that poses it.
 //
@@ -623,7 +650,8 @@ float3 lambert(float3 normal)
 // does not scatter, so `standard` scales the albedo by `1 - metalness` and the
 // colour comes back through `f0`. With no environment map to reflect, a fully
 // metallic surface is therefore its highlights and nothing else — dark, and
-// correctly so; `plan.md` §4's sky is what makes metal look like metal.
+// correctly so. `scene.environment` is what gives it something to reflect, and
+// `environment_light` below is the term that reads it.
 float3 specular_light(float3 normal, float3 position, float3 albedo, float roughness, float metalness, float reflectance)
 {
     float3 view = normalize(push.frame[0].camera.xyz - position);
@@ -663,6 +691,68 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     }
     return sum;
 }
+
+
+// A world direction to a texel of the equirectangular environment image, with
+// the frame's sky rotation applied.
+//
+// **The same mapping and the same rotation as `shaders/sky.slang`**, which is
+// the whole point of `environment.y` being a frame field: a metal that reflected
+// an unrotated sky while the background drew a rotated one would be wrong in a
+// way that only shows when somebody turns it.
+float2 environment_uv(float3 direction)
+{
+    const float ENVIRONMENT_PI = 3.14159265358979;
+    float angle = push.frame[0].environment.y;
+    float s = sin(angle);
+    float c = cos(angle);
+    float3 turned = float3(
+        c * direction.x - s * direction.z, direction.y, s * direction.x + c * direction.z
+    );
+    float u = atan2(turned.x, -turned.z) / (2.0 * ENVIRONMENT_PI) + 0.5;
+    float v = acos(clamp(turned.y, -1.0, 1.0)) / ENVIRONMENT_PI;
+    return float2(u, v);
+}
+
+// The environment's contribution to a surface, which is the reflection and
+// nothing else.
+//
+// **This is what makes a metal look like metal.** `specular_light` sums over the
+// four punctual lights, and a metal has no diffuse to fall back on — `standard`
+// scales the albedo by `1 - metalness` — so a fully metallic surface with no sky
+// is its highlights and a great deal of black. What it is missing is everything
+// it should be reflecting, and this is that.
+//
+// **The reflection and not the irradiance.** A full image-based light also feeds
+// the diffuse half from the same image, and deliberately does not here: the
+// diffuse floor in this renderer is `three.light.ambient`, a scene already sets
+// it, and adding a second one would light every existing scene twice the moment
+// somebody set a sky. The reflection has no such double — nothing else in this
+// shader produces one.
+//
+// `roughness` picks a mip level rather than integrating a lobe, which is the
+// approximation every real-time renderer makes and is why `environment.z`
+// carries the chain length. A rough surface reflects a blurred sky; a smooth one
+// reflects the texels. The Fresnel is Schlick's with roughness folded into the
+// grazing term, so a rough metal does not turn into a mirror at the silhouette.
+float3 environment_light(float3 normal, float3 position, float3 albedo, float roughness, float metalness, float reflectance)
+{
+    float intensity = push.frame[0].environment.x;
+    if (intensity <= 0.0) return float3(0.0, 0.0, 0.0);
+
+    float3 view = normalize(push.frame[0].camera.xyz - position);
+    float3 reflected = reflect(-view, normal);
+
+    float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
+    float n_dot_v = max(dot(normal, view), 1e-4);
+    float3 grazing = max(float3(1.0 - roughness), f0);
+    float3 fresnel = f0 + (grazing - f0) * pow(1.0 - n_dot_v, 5.0);
+
+    float lod = clamp(roughness, 0.0, 1.0) * push.frame[0].environment.z;
+    float3 sky = environment_map.SampleLevel(environment_uv(reflected), lod).rgb;
+    return sky * fresnel * intensity;
+}
+
 
 
 // **The debug views, and the whole of `plan.md` §20.2's first two items.**
@@ -770,7 +860,8 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float4 surface = draw.surface;
     return float4(
         albedo * lambert(normal) * (1.0 - surface.y)
-            + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z),
+            + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z)
+            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z),
         draw.base_color.a * input.color.a
     );
 }

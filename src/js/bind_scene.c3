@@ -64,6 +64,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "assetPath", &js_asset_path, 2);
 	self.bind(host, "meshNames", &js_mesh_names, 2);
 	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
+	self.bind(host, "assetImages", &js_asset_images, 2);
+	self.bind(host, "assetImage", &js_asset_image, 5);
+	self.bind(host, "uploadMesh", &js_upload_mesh, 5);
 	self.bind(host, "meshLayers", &js_mesh_layers, 3);
 	self.bind(host, "meshMaterial", &js_mesh_material, 3);
 	self.bind(host, "splitMesh", &js_split_mesh, 3);
@@ -131,6 +134,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "backgroundGet", &js_background_get, 1);
 	self.bind(host, "backgroundSet", &js_background_set, 4);
+	self.bind(host, "skyGet", &js_sky_get, 1);
+	self.bind(host, "skySet", &js_sky_set, 6);
 	self.bind(host, "budgetGet", &js_budget_get, 0);
 	self.bind(host, "budgetSet", &js_budget_set, 1);
 	self.bind(host, "clockTime", &js_clock_time, 0);
@@ -1514,6 +1519,87 @@ fn void js_background_set(
 		clear[i] = math::clamp(arg_float(&js, argc, args, i + 1), 0.0f, 1.0f);
 	}
 	self.set_clear(scene, clear);
+}
+
+<*
+ `skyGet(sceneId)` — the scene's sky, as
+ `[background, environment, backgroundIntensity, environmentIntensity, rotation]`.
+
+ The two textures are indices into `Assets.textures`, or -1 for none. They cross
+ as numbers rather than as handles because the prelude keeps the `Texture` object
+ a script assigned and hands that same object back — what this is for is the
+ numbers beside them and the check that the far side's cache has not drifted from
+ the host's truth.
+*>
+fn void js_sky_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	SkyLook sky = scene.look.sky;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::int_value(sky.background));
+	js.set_index(list, 1, qjs::int_value(sky.environment));
+	js.set_index(list, 2, qjs::number_value(sky.background_intensity));
+	js.set_index(list, 3, qjs::number_value(sky.environment_intensity));
+	js.set_index(list, 4, qjs::number_value(sky.rotation));
+	*out = list;
+}
+
+<*
+ `skySet(sceneId, background, environment, backgroundIntensity, environmentIntensity, rotation)`
+ — the whole of a scene's sky, written at once.
+
+ **One verb for five fields**, unlike the lights and the shadows next door, and
+ for a reason those two do not have: two of the five are counted texture
+ references. A verb per field would be five places that have to retain and
+ release correctly, and the one that got it wrong would be a picture freed while
+ a frame was still sampling it. `set_scene_sky` is the only door, and this calls
+ it twice.
+
+ -1 clears a texture. A script that only wanted to change the rotation reads the
+ other four back first, which is what `prelude.js` does — it has them cached
+ anyway, because it keeps the `Texture` objects.
+*>
+fn void js_sky_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("a sky needs a GPU device to sample its image, and this context has none");
+		return;
+	}
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	int background = arg_int(&js, argc, args, 1);
+	int environment = arg_int(&js, argc, args, 2);
+	if (background != NO_TEXTURE && !self.pass.assets.texture_alive(background))
+	{
+		*out = js.raise("scene.background was given a texture that has been disposed");
+		return;
+	}
+	if (environment != NO_TEXTURE && !self.pass.assets.texture_alive(environment))
+	{
+		*out = js.raise("scene.environment was given a texture that has been disposed");
+		return;
+	}
+
+	self.pass.set_scene_sky(scene, true, background);
+	self.pass.set_scene_sky(scene, false, environment);
+	scene.look.sky.background_intensity = math::max(arg_float(&js, argc, args, 3), 0.0f);
+	scene.look.sky.environment_intensity = math::max(arg_float(&js, argc, args, 4), 0.0f);
+	scene.look.sky.rotation = arg_float(&js, argc, args, 5);
 }
 
 <*
