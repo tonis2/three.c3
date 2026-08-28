@@ -756,7 +756,7 @@ fn void js_set_transform(
 	// a merge.
 	if (ref.scene.physics.owns_transform(id))
 	{
-		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
+		*out = js.raise(ref.scene.physics.transform_refusal(id));
 		return;
 	}
 
@@ -801,7 +801,7 @@ fn void js_set_quaternion(
 	// solver through the one door that was left open.
 	if (ref.scene.physics.owns_transform(ref.id))
 	{
-		*out = js.raise(PHYSICS_OWNS_TRANSFORM);
+		*out = js.raise(ref.scene.physics.transform_refusal(ref.id));
 		return;
 	}
 

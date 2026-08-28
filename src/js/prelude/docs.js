@@ -1747,6 +1747,79 @@ export const DOCS = {
 	'three.physics.applyTorqueImpulse(object, [x, y, z])':
 		'A spin with no shove, so "make this rotate" does not mean solving for an offset and a force '
 		+ 'that happen to produce the spin you wanted.',
+	'three.physics.joint(a, b, options)':
+		'Bolt two body-backed objects together, and answer with the joint\'s id — which is what '
+		+ 'removeJoint takes, because a joint is not a node and has nothing else to be named by. '
+		+ 'A JOINT IS A LIST OF LIMITS: some of the joint frame\'s axes, held to some range. That is '
+		+ 'glTF\'s description of one (KHR_physics_rigid_bodies) and it is what the solver stores, so '
+		+ 'a limit read out of a .glb and a limit written by hand are the same object. '
+		+ '{ limits: [{ linearAxes: [0,1,2], angularAxes: [0,1,2], min, max, stiffness, damping }], '
+		+ 'axis: [x, y, z], pivot: [x, y, z], stiffness, damping, collide }. '
+		+ 'AXIS 0 IS `axis` (default [0, 1, 0]); axes 1 and 2 are derived perpendicular to it, so a '
+		+ 'limit naming [1, 2] means "the plane the axle is normal to" whichever way the axle points. '
+		+ 'NO RANGE IS A LOCK — a limit with no min and max holds its axes at zero, which is glTF\'s '
+		+ 'default for both and the opposite of what "no limit" sounds like. A hinge is therefore '
+		+ 'limits: [{ linearAxes: [0,1,2] }, { angularAxes: [1,2] }] — everything held but the axle. '
+		+ 'A mask of several axes becomes one limit per axis, which agrees with the file format '
+		+ 'exactly for a lock and differs for a range: a box rather than glTF\'s cone. '
+		+ 'THE JOINT IS MADE WHERE THE BODIES ARE — the pivot defaults to halfway between the two '
+		+ 'centres and the relative orientation is whatever they are turned to right now — so place '
+		+ 'both objects and then join them, rather than describing the rest pose in numbers. '
+		+ '`stiffness` IS A SPRING CONSTANT AND 0 IS THE RIGID END: the solver reads it as '
+		+ '(1 / stiffness) / dt^2 and special-cases 0 to no give, so bigger is stiffer and something '
+		+ 'felt on a one-kilogram prop is in the low thousands. `damping` is carried into the joint '
+		+ 'and is NOT read by the solver yet; it is accepted so a limit out of a file survives. '
+		+ 'At least one end has to be dynamic — two static bodies have no inverse mass between them '
+		+ 'and there would be nothing to solve. `collide` is false by default, because two things '
+		+ 'bolted together usually overlap where they are bolted. A linear axis is a WORLD direction '
+		+ 'and does not turn with the bodies, so a slider on something that rotates is not a thing '
+		+ 'this expresses; angular axes do turn with them.',
+	'three.physics.joint (the four shorthand types)':
+		'`type` names one of four limit lists, expanded in the prelude, so anything it can say can '
+		+ 'also be said by hand and it is the only place that knows what a hinge is. '
+		+ '\'fixed\' welds — every linear and angular axis held. \'point\' is a ball and socket — the '
+		+ 'three linear axes held and nothing else. \'hinge\' turns about axis 0 — linear held, '
+		+ 'angular [1, 2] held. \'slider\' runs along axis 0 — linear [1, 2] held, angular all held. '
+		+ 'The default is \'fixed\'. `range: [min, max]` bounds the one free axis a hinge or a slider '
+		+ 'has; it is refused on fixed and point, which have none, and [0, 0] is refused because it '
+		+ 'would LOCK that axis and weld the joint shut rather than bound it. Give `limits` instead '
+		+ 'and `type` and `range` are ignored — the list is the joint.',
+	'three.physics.removeJoint(id)':
+		'Let one joint go, by the id joint() answered with. False when the id names nothing, so '
+		+ 'removing twice is not an error. Removing either body removes the joints holding it, so a '
+		+ 'script that destroys things does not have to track their joints as well.',
+	'three.physics.soft(object, options)':
+		'Simulate this object\'s own vertices as particles held together by the mesh\'s edges, and '
+		+ 'answer with the object. { mass: 1, softness: 0, damping: 0.99, volume: false, '
+		+ 'bending: false, friction: 0.5, restitution: 0.2 }. There is no `shape`: a soft body has no '
+		+ 'collider, because the thing that collides IS the drawing — so how it deforms is decided by '
+		+ 'how the mesh was modelled, and a denser mesh is a more expensive and more detailed one. '
+		+ '`softness` is XPBD compliance on the links: 0 cannot stretch. `volume` holds the enclosed '
+		+ 'volume, which is a balloon rather than a bag; `bending` resists folding, which is what '
+		+ 'stops cloth creasing flat; each takes true or a compliance number. '
+		+ 'TWO THINGS FOLLOW that a rigid body does not have. Its TRANSFORM IS THE SOLVER\'S — '
+		+ 'object.position reads where the particles average out to and writing it throws, so a script '
+		+ 'pushes one with pin() and nothing else. And it COSTS A DRAW CALL OF ITS OWN: two copies of '
+		+ 'one BoxGeometry are one draw, but two soft ones are two, because each is writing its own '
+		+ 'vertices. It is refused on a skinned mesh, whose vertices already belong to its skeleton.',
+	'three.physics.removeSoft(object)':
+		'Take the soft body away, and answer whether there was one. The mesh goes back to the shape it '
+		+ 'was modelled as, where the last step left it, and the transform is yours again.',
+	'three.physics.points(object, into) / softCount(object)':
+		'The particles, in world space, as a Float32Array of count * 3 — and how many there are. '
+		+ 'ONE PARTICLE PER DISTINCT POINT in the mesh, not one per vertex: a BoxGeometry has '
+		+ 'twenty-four vertices and eight particles, because a box that shades with hard edges stores '
+		+ 'each corner three times and the solver has to treat those as one or the box falls into six '
+		+ 'loose squares. This is how a script finds the index to pin — read them and pick by '
+		+ 'position, since a particle has no other name. `into` is optional and lets you reuse one '
+		+ 'array across frames, the way texture.read does.',
+	'three.physics.pin(object, particle, at) / unpin(object, particle, mass)':
+		'Hold one particle at a world point — or where it already is, with no third argument — and '
+		+ 'let it go again. THIS IS THE ONLY WAY TO PUSH A SOFT BODY: it has no velocity to set and no '
+		+ 'centre to shove. A pin is absolute and is reapplied after every substep, so a pin MOVED '
+		+ 'each frame carries the body with it, which is how a soft thing is dragged, thrown or '
+		+ 'attached to a hand. unpin\'s `mass` is what the particle weighs afterwards and defaults to '
+		+ 'the body\'s own per-particle share.',
 	'object.body':
 		'What kind of body three.physics.add would give this object, and what it gave it: { shape, mass, friction, restitution, kind }. Set it yourself to describe one, or read it back after add to see the defaults filled in. null once the body is removed.',
 	'three.onTrigger(fn)':

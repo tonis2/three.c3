@@ -101,6 +101,17 @@ struct Bucket
 	uint count;
 
 	<*
+	 The one node in this bucket, when a soft body writes its vertices, and
+	 `NO_NODE` otherwise.
+
+	 The only place a bucket names a node, and it can only exist because a soft
+	 bucket holds exactly one copy by construction. `MeshPass.write_soft_vertices`
+	 is what reads it: the vertices it writes are per node, and every other field
+	 here describes something shared.
+	*>
+	NodeId node;
+
+	<*
 	 How many of `count` the camera can see, and they are the first ones.
 
 	 Two passes read one instance array, and this is the whole of how. The shadow
@@ -372,6 +383,11 @@ struct Draw @local
 	// the same reason `visible` is: it decides where a copy sits inside its bucket,
 	// not which bucket it lands in.
 	bool is_static;
+	// Whether a soft body is writing this copy's vertices. Not a sort key at all,
+	// unlike `preskinned`: it does not group copies, it *separates* them — a soft
+	// body's vertices are its own, so the coalescing loop opens a bucket for one
+	// and closes it again immediately. See `Bucket.node`.
+	bool soft;
 }
 
 <*
@@ -2064,6 +2080,11 @@ fn void Scene.build_draw_list(
 		// nothing and draws nothing anyway.
 		bool is_transparent = node.material < transparent.len && transparent[node.material];
 
+		// Free in a scene with no soft body in it, which is nearly every scene —
+		// `Physics.soft_for` returns on an empty list before it looks at anything.
+		NodeId id = { (uint)slot, node.generation };
+		SoftMesh* soft = self.physics.soft_for(id);
+
 		// The world box has two readers and neither wants it unconditionally: the
 		// frustum test wants it when culling is on, and a transparent draw wants its
 		// centre for the depth sort whether culling is on or not. Computed once for
@@ -2096,6 +2117,10 @@ fn void Scene.build_draw_list(
 				Asset* owner = assets.slot(node.asset);
 				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
 			}
+			// A soft body is not the shape it was modelled as, and the mesh's own
+			// bounds describe the shape it stopped being. The box the solver
+			// measured this frame is the one it is actually drawn at.
+			if (soft != null) local = soft.bounds;
 			collision::Aabb3 box = local.transform_matrix(node.world);
 
 			// A material with a vertex body draws geometry its own bounds do not
@@ -2146,6 +2171,7 @@ fn void Scene.build_draw_list(
 			.visible = visible,
 			.preskinned = node.preskinned && node.skin >= 0,
 			.is_static = node.static_caster,
+			.soft = soft != null,
 		});
 	}
 
@@ -2215,6 +2241,10 @@ fn void Scene.build_draw_list(
 	ulong open = self.draws[0].key + 1;
 	uint open_material = self.draws[0].material;
 	bool open_preskinned = self.draws[0].preskinned;
+	// Whether the bucket standing open belongs to a soft body. One of the two
+	// halves of "a soft copy never shares": this one closes the bucket a soft
+	// draw opened, and the `draw.soft` test below is what opens it.
+	bool open_soft = false;
 	// Where the next copy goes, counted rather than read off `self.instances`,
 	// because in a counting build there is no instance array to read it off. The two
 	// are the same number in every build that writes one.
@@ -2222,11 +2252,18 @@ fn void Scene.build_draw_list(
 	foreach (draw : self.draws)
 	{
 		Node* node = &self.nodes[draw.slot];
-		if (draw.key != open || draw.material != open_material || draw.preskinned != open_preskinned)
+		// `draw.soft || open_soft` rather than a key comparison, and it is not a
+		// tiebreak the sort could do: two soft copies of one mesh agree about every
+		// key there is and still cannot share, because each one's vertices are its
+		// own buffer. So a soft draw always opens a bucket, and always closes it
+		// behind itself.
+		if (draw.key != open || draw.material != open_material || draw.preskinned != open_preskinned
+			|| draw.soft || open_soft)
 		{
 			open = draw.key;
 			open_material = draw.material;
 			open_preskinned = draw.preskinned;
+			open_soft = draw.soft;
 			// Read off the node rather than unpacked from the key, which only carries
 			// the slot index. Every node in a bucket names the same live asset, so
 			// any of them supplies the generation.
@@ -2240,6 +2277,7 @@ fn void Scene.build_draw_list(
 				.static_first = 0,
 				.static_count = 0,
 				.preskinned = draw.preskinned,
+				.node = draw.soft ? (NodeId) { draw.slot, node.generation } : NO_NODE,
 			});
 		}
 

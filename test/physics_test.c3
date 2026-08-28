@@ -9,6 +9,7 @@ import qjs;
 import std::core::test;
 import std::io;
 import std::math;
+import image;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {
@@ -26,6 +27,39 @@ macro @with_gpu_js(; @body(three::JsRuntime* run))
 	defer runtime.close();
 
 	@body(&runtime);
+}
+
+// A device, a runtime and a renderer whose frames can be read back — the same
+// harness as `@with_gpu_js` with the renderer handed out, for the two checks
+// that are about the picture rather than about the numbers.
+macro @with_gpu_frames(; @body(three::JsRuntime* run, three::Renderer* renderer))
+{
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 240, 180)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, &renderer)!!;
+	defer runtime.close();
+
+	@body(&runtime, &renderer);
+}
+
+// How many bytes two frames of the same size disagree about.
+fn sz differing_pixels(image::Image* a, image::Image* b)
+{
+	if (a.width != b.width || a.height != b.height) return sz::max;
+	sz count = 0;
+	foreach (i, byte : a.pixels)
+	{
+		if (byte != b.pixels[i]) count++;
+	}
+	return count;
 }
 
 // A ball dropped on a floor comes to rest on it, and gets there by falling.
@@ -975,6 +1009,659 @@ fn void the_debug_view_is_selected_by_name() @test
 		test::@check(
 			checked.value.contains("off,shadow,shadowMap,refused,shadowMap,shadowMap,off"),
 			"got %s", checked.value
+		);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Joints — `plan.md` §7.
+
+<*
+ A point joint holds two bodies together while they fall.
+
+ The floor is deliberately absent: what is being measured is the constraint and
+ not the contact, so both bodies fall freely and the only thing that can keep
+ them the same distance apart is the joint.
+*>
+fn void a_point_joint_keeps_two_bodies_together() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+
+			const anchor = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			anchor.position.set(0, 8, 0);
+			scene.add(anchor);
+			three.physics.add(anchor, { shape: 'box', mass: 1 });
+
+			const hanging = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			hanging.position.set(2, 8, 0);
+			scene.add(hanging);
+			three.physics.add(hanging, { shape: 'box', mass: 1 });
+
+			globalThis.a = anchor;
+			globalThis.b = hanging;
+			globalThis.id = three.physics.joint(anchor, hanging, { type: 'point' });
+			return typeof globalThis.id;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the joint was made: %s", built.error);
+		test::@check(built.value == "\"number\"", "joint() answers with an id, got '%s'", built.value);
+
+		for (int i = 1; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const gap = Math.hypot(
+				globalThis.a.position.x - globalThis.b.position.x,
+				globalThis.a.position.y - globalThis.b.position.y,
+				globalThis.a.position.z - globalThis.b.position.z);
+			return [gap.toFixed(2), globalThis.a.position.y < 0];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the pair back: %s", after.error);
+		// Pinned at the midpoint, so the two centres are held one unit apart
+		// each side of it — the same two units they started at.
+		test::@check(
+			after.value == "[\"2.00\",true]",
+			"the pair fell together and kept its spacing, got '%s'", after.value
+		);
+	};
+}
+
+<*
+ A hinge onto a static body holds position and gives up rotation.
+
+ The door swings and stays on its frame. Both halves matter: a joint that held
+ nothing would let it fall, and a joint that locked everything would be a weld.
+*>
+fn void a_hinge_swings_and_stays_attached() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+
+			const frame = new three.Mesh(new three.BoxGeometry(0.4, 4, 0.4));
+			frame.position.set(0, 2, 0);
+			scene.add(frame);
+			three.physics.add(frame, { shape: 'box', mass: 0 });
+
+			const door = new three.Mesh(new three.BoxGeometry(2, 4, 0.2));
+			door.position.set(1.2, 2, 0);
+			scene.add(door);
+			three.physics.add(door, { shape: 'box', mass: 1 });
+
+			globalThis.door = door;
+			globalThis.start = [door.position.x, door.position.y, door.position.z];
+			// About world Y, at the frame's own centre line.
+			three.physics.joint(frame, door, { type: 'hinge', axis: [0, 1, 0], pivot: [0, 2, 0] });
+			// A shove along Z, which a hinge about Y is free to answer with a turn.
+			three.physics.applyImpulse(door, [0, 0, 6], [1, 0, 0]);
+			return three.physics.count;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the door was hung: %s", built.error);
+
+		// A sixth of a second, and the shortness is deliberate: the door is free
+		// about its axle, so it goes on turning and a longer run would be asking
+		// where in the circle it happened to stop.
+		for (int i = 1; i <= 10; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const p = globalThis.door.position;
+			// How far the door's centre is from the hinge line, which the
+			// joint holds however far it has swung.
+			const reach = Math.hypot(p.x, p.z);
+			return [reach.toFixed(1), Math.abs(p.y - 2) < 0.2, Math.abs(p.z) > 0.5];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the door back: %s", after.error);
+		test::@check(
+			after.value == "[\"1.2\",true,true]",
+			"the door swung about the hinge and stayed on it, got '%s'", after.value
+		);
+	};
+}
+
+<*
+ A joint between two immovable bodies is refused, and each other refusal has its
+ own sentence.
+*>
+fn void a_joint_says_what_it_will_not_hold() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult said = run.run(`
+			const scene = new three.Scene();
+			const wall = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(wall);
+			three.physics.add(wall, { shape: 'box', mass: 0 });
+
+			const post = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			post.position.x = 2;
+			scene.add(post);
+			three.physics.add(post, { shape: 'box', mass: 0 });
+
+			const bare = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			bare.position.x = 4;
+			scene.add(bare);
+
+			const said = [];
+			const tell = fn => { try { fn(); said.push('no throw'); } catch (e) { said.push(e.message); } };
+
+			tell(() => three.physics.joint(wall, post, { type: 'fixed' }));
+			tell(() => three.physics.joint(wall, bare, { type: 'fixed' }));
+			tell(() => three.physics.joint(wall, wall, { type: 'fixed' }));
+			tell(() => three.physics.joint(wall, post, { type: 'welded' }));
+			tell(() => three.physics.joint(wall, post, { type: 'hinge', range: [0, 0] }));
+			return said.map(s => s.slice(0, 28));
+		`);
+		defer said.free();
+		test::@check(said.ok, "the refusals were collected: %s", said.error);
+		test::@check(
+			said.value == "[\"neither end of this joint ca\",\"a joint holds two bodies tog\","
+				"\"a joint needs two different \",\"'welded' is not a joint type\","
+				"\"a range of [0, 0] would LOCK\"]",
+			"each refusal says what it is, got '%s'", said.value
+		);
+	};
+}
+
+<*
+ Removing a joint lets go, and removing a body takes its joints with it.
+
+ The second half is the one that could take the process down rather than merely
+ misbehave: the world prunes its own copy of a joint when a body goes, and a
+ rebuild that put ours back would hand the solver a body id that resolves to
+ nothing.
+*>
+fn void a_joint_goes_when_it_is_removed_or_its_body_does() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const hook = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			hook.position.set(0, 8, 0);
+			scene.add(hook);
+			three.physics.add(hook, { shape: 'box', mass: 0 });
+
+			const make = (x) => {
+				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				m.position.set(x, 6, 0);
+				scene.add(m);
+				three.physics.add(m, { shape: 'box', mass: 1 });
+				return m;
+			};
+
+			globalThis.cut = make(0);
+			globalThis.orphan = make(3);
+			globalThis.kept = make(-3);
+
+			globalThis.cutId = three.physics.joint(hook, globalThis.cut, { type: 'point' });
+			three.physics.joint(hook, globalThis.orphan, { type: 'point' });
+			three.physics.joint(hook, globalThis.kept, { type: 'point' });
+
+			return [three.physics.removeJoint(globalThis.cutId), three.physics.removeJoint(globalThis.cutId)];
+		`);
+		defer built.free();
+		test::@check(built.ok, "the joints were made: %s", built.error);
+		test::@check(built.value == "[true,false]", "removing twice is not an error, got '%s'", built.value);
+
+		run.tick(1000.0 / 60.0);
+
+		three::RunResult cut = run.run("three.physics.remove(globalThis.orphan); return true;");
+		defer cut.free();
+		test::@check(cut.ok, "the second body was removed: %s", cut.error);
+
+		for (int i = 2; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			return [globalThis.cut.position.y < 2, globalThis.kept.position.y > 4];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the three back: %s", after.error);
+		test::@check(
+			after.value == "[true,true]",
+			"the cut one fell and the kept one is still hanging, got '%s'", after.value
+		);
+	};
+}
+
+<*
+ A hinge written out as limits and a hinge asked for by name are the same joint.
+
+ The shorthand is expanded in `prelude/physics.js` and nothing below it knows
+ what a hinge is, so this is the check that keeps the two from drifting: two
+ doors, one of each, given the same shove and landing in the same place.
+
+ It is also the check that says the generic form is complete. If `limits` could
+ not say what `type: 'hinge'` says, the four words would be the API and the list
+ would be decoration.
+*>
+fn void a_hinge_by_name_and_a_hinge_by_limits_agree() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+
+			const hang = (x, options) => {
+				const post = new three.Mesh(new three.BoxGeometry(0.4, 4, 0.4));
+				post.position.set(x, 2, 0);
+				scene.add(post);
+				three.physics.add(post, { shape: 'box', mass: 0 });
+
+				const door = new three.Mesh(new three.BoxGeometry(2, 4, 0.2));
+				door.position.set(x + 1.2, 2, 0);
+				scene.add(door);
+				three.physics.add(door, { shape: 'box', mass: 1 });
+
+				three.physics.joint(post, door, Object.assign({ axis: [0, 1, 0], pivot: [x, 2, 0] }, options));
+				three.physics.applyImpulse(door, [0, 0, 4], [1, 0, 0]);
+				return door;
+			};
+
+			globalThis.named = hang(-8, { type: 'hinge' });
+			// The same thing, said in glTF's terms: pinned, no twist and no tilt,
+			// and axis 0 — the axle — left out of the angular list entirely.
+			globalThis.spelled = hang(8, {
+				limits: [
+					{ linearAxes: [0, 1, 2] },
+					{ angularAxes: [1, 2] },
+				],
+			});
+			return true;
+		`);
+		defer built.free();
+		test::@check(built.ok, "both doors were hung: %s", built.error);
+
+		for (int i = 1; i <= 10; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			// Each door's offset from its own post, which is the only thing that
+			// can be compared between two of them eight units apart.
+			const local = (door, x) => [door.position.x - x, door.position.y, door.position.z];
+			const a = local(globalThis.named, -8);
+			const b = local(globalThis.spelled, 8);
+			return a.map((n, i) => Math.abs(n - b[i]) < 1e-3);
+		`);
+		defer after.free();
+		test::@check(after.ok, "read both doors back: %s", after.error);
+		test::@check(
+			after.value == "[true,true,true]",
+			"the two hinges swung to the same place, got '%s'", after.value
+		);
+	};
+}
+
+<*
+ A limit carries its own range and its own stiffness, and both are felt.
+
+ Two doors given the same shove, hinged with the same stop, differing only in
+ whether that stop is a wall or a spring. Three facts come out of it: the range
+ holds at all — a free hinge sampled over two seconds reaches pi and these do not
+ — a rigid stop holds close to where it was set, and a soft one gives.
+
+ **`stiffness` is a spring constant, not a compliance**, and 0 is the rigid end
+ rather than the soft one. The solver reads it as `(1 / stiffness) / dt²`
+ (`solver/joint.c3`), so bigger is stiffer and 0 is special-cased to no give at
+ all — which is why 800 below is loose and 0 is a wall.
+*>
+fn void a_limit_carries_its_own_range_and_stiffness() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+
+			const hang = (x, stiffness) => {
+				const post = new three.Mesh(new three.BoxGeometry(0.4, 4, 0.4));
+				post.position.set(x, 2, 0);
+				scene.add(post);
+				three.physics.add(post, { shape: 'box', mass: 0 });
+
+				const door = new three.Mesh(new three.BoxGeometry(2, 4, 0.2));
+				door.position.set(x + 1.2, 2, 0);
+				scene.add(door);
+				three.physics.add(door, { shape: 'box', mass: 1 });
+
+				three.physics.joint(post, door, {
+					axis: [0, 1, 0],
+					pivot: [x, 2, 0],
+					limits: [
+						{ linearAxes: [0, 1, 2] },
+						{ angularAxes: [1, 2] },
+						{ angularAxes: [0], min: -0.6, max: 0.6, stiffness },
+					],
+				});
+				// Hard enough to spin a free hinge several times round.
+				three.physics.applyImpulse(door, [0, 0, 12], [1, 0, 0]);
+				return { door, x, peak: 0 };
+			};
+
+			globalThis.stopped = hang(-8, 0);
+			globalThis.sprung = hang(8, 800);
+
+			// Every frame, not just the last one: a hinge sampled once has a fair
+			// chance of being caught near its start whatever it did in between, so
+			// what is measured is the furthest each one ever got.
+			three.setAnimationLoop(() => {
+				for (const it of [globalThis.stopped, globalThis.sprung]) {
+					const p = it.door.position;
+					it.peak = Math.max(it.peak, Math.abs(Math.atan2(p.z, p.x - it.x)));
+				}
+			});
+			return true;
+		`);
+		defer built.free();
+		test::@check(built.ok, "both doors were hung: %s", built.error);
+
+		for (int i = 1; i <= 120; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const stopped = globalThis.stopped.peak;
+			const sprung = globalThis.sprung.peak;
+			return [
+				stopped < 0.9,          // held near the 0.6 it was given
+				sprung > stopped,       // the spring let it past
+				sprung < 2.0,           // and still nothing like a free hinge's pi
+			];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read both doors back: %s", after.error);
+		test::@check(
+			after.value == "[true,true,true]",
+			"the stop held, the spring gave, and neither spun, got '%s'", after.value
+		);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Soft bodies — `plan.md` §7.
+
+<*
+ A soft body falls, lands on the floor and is still one object.
+
+ The last clause is the whole test. The particles have to stay a shape: a soft
+ body whose links did not hold would land as a puddle of loose points, and the
+ spread of the particles is what says which happened.
+*>
+fn void a_soft_body_falls_and_lands_in_one_piece() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const jelly = new three.Mesh(new three.SphereGeometry(1, 12, 8));
+			jelly.position.set(0, 5, 0);
+			scene.add(jelly);
+			three.physics.soft(jelly, { mass: 2 });
+
+			globalThis.jelly = jelly;
+			globalThis.spread = () => {
+				const p = three.physics.points(jelly);
+				let lo = Infinity, hi = -Infinity;
+				for (let i = 0; i < p.length; i += 3) { lo = Math.min(lo, p[i]); hi = Math.max(hi, p[i]); }
+				return hi - lo;
+			};
+			globalThis.wide = globalThis.spread();
+			return [three.physics.softCount(jelly) > 0, Math.abs(jelly.position.y - 5) < 0.3];
+		`);
+		defer built.free();
+		test::@check(built.ok, "the jelly was made: %s", built.error);
+		// Near where it was placed rather than exactly on it: the node sits at the
+		// PARTICLES' average, and a sphere's vertices are not spread evenly through
+		// the volume they enclose.
+		test::@check(built.value == "[true,true]", "it starts where it was put, got '%s'", built.value);
+
+		for (int i = 1; i <= 180; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const y = globalThis.jelly.position.y;
+			const now = globalThis.spread();
+			return [y < 4, y > 0, (now / globalThis.wide) < 2];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the jelly back: %s", after.error);
+		test::@check(
+			after.value == "[true,true,true]",
+			"it fell, stopped on the floor and stayed one shape, got '%s'", after.value
+		);
+	};
+}
+
+<*
+ A box's twenty-four vertices are eight particles.
+
+ The weld, stated as the number it produces. Without it a soft `BoxGeometry` is
+ six squares that fall away from each other, because a box that shades with hard
+ edges shares no vertex between two faces and the links are taken from the
+ triangles.
+*>
+fn void a_soft_box_welds_its_corners() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			cube.position.set(0, 4, 0);
+			scene.add(cube);
+			three.physics.soft(cube, { mass: 1 });
+			globalThis.cube = cube;
+			return three.physics.softCount(cube);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the cube was made soft: %s", built.error);
+		test::@check(built.value == "8", "a box is eight particles, got '%s'", built.value);
+
+		// And it holds together in free fall: eight loose particles would keep the
+		// spacing gravity gives them, six loose faces would not.
+		for (int i = 1; i <= 60; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const p = three.physics.points(globalThis.cube);
+			let lo = Infinity, hi = -Infinity;
+			for (let i = 0; i < p.length; i += 3) { lo = Math.min(lo, p[i]); hi = Math.max(hi, p[i]); }
+			return (hi - lo).toFixed(1);
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the cube back: %s", after.error);
+		test::@check(after.value == "\"1.0\"", "the cube is still a cube, got '%s'", after.value);
+	};
+}
+
+<*
+ A pinned particle holds the body up, and letting it go drops it.
+*>
+fn void a_pin_holds_a_soft_body_where_it_is_put() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const cloth = new three.Mesh(new three.PlaneGeometry(2, 2, 6, 6));
+			cloth.position.set(0, 6, 0);
+			scene.add(cloth);
+			three.physics.soft(cloth, { mass: 1 });
+
+			// The two highest particles, which for a plane standing in XY are its
+			// top edge corners.
+			const p = three.physics.points(cloth);
+			let top = -Infinity;
+			for (let i = 1; i < p.length; i += 3) top = Math.max(top, p[i]);
+			globalThis.pins = [];
+			for (let i = 0; i < p.length / 3; i++) {
+				if (p[i * 3 + 1] > top - 0.01) globalThis.pins.push(i);
+			}
+			for (const i of globalThis.pins) three.physics.pin(cloth, i);
+
+			globalThis.cloth = cloth;
+			return globalThis.pins.length > 0;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the cloth was pinned: %s", built.error);
+		test::@check(built.value == "true", "something was pinned, got '%s'", built.value);
+
+		for (int i = 1; i <= 180; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult hanging = run.run("return globalThis.cloth.position.y > 3;");
+		defer hanging.free();
+		test::@check(hanging.ok, "read the cloth back: %s", hanging.error);
+		test::@check(hanging.value == "true", "the pins are holding it up, got '%s'", hanging.value);
+
+		three::RunResult freed = run.run(`
+			for (const i of globalThis.pins) three.physics.unpin(globalThis.cloth, i);
+			return true;
+		`);
+		defer freed.free();
+		test::@check(freed.ok, "the pins were let go: %s", freed.error);
+
+		for (int i = 181; i <= 400; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult fell = run.run("return globalThis.cloth.position.y < 0;");
+		defer fell.free();
+		test::@check(fell.ok, "read the cloth back again: %s", fell.error);
+		test::@check(fell.value == "true", "letting go drops it, got '%s'", fell.value);
+	};
+}
+
+<*
+ A soft body's transform is the solver's, and the refusal says so in its own
+ words rather than a rigid body's.
+*>
+fn void the_solver_refuses_a_write_to_a_soft_body() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult said = run.run(`
+			const scene = new three.Scene();
+			const jelly = new three.Mesh(new three.SphereGeometry(1, 8, 6));
+			scene.add(jelly);
+			three.physics.soft(jelly, { mass: 1 });
+
+			let message = 'no throw';
+			try { jelly.position.y = 4; } catch (e) { message = e.message; }
+			three.physics.removeSoft(jelly);
+			jelly.position.y = 4;
+			return [message.slice(0, 34), jelly.position.y];
+		`);
+		defer said.free();
+		test::@check(said.ok, "the write was refused: %s", said.error);
+		test::@check(
+			said.value == "[\"this object's transform belongs to\",4]",
+			"the soft body owns its transform until it is removed, got '%s'", said.value
+		);
+	};
+}
+
+<*
+ A soft body is drawn, and it is drawn on its own.
+
+ Two copies of one mesh are one draw call; two soft copies are two, because each
+ one is writing its own vertices. That is the exception to the thesis this whole
+ feature buys, and it is worth a number rather than a paragraph.
+*>
+fn void two_soft_copies_of_one_mesh_are_two_draws() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult counted = run.run(`
+			const scene = new three.Scene();
+			const geometry = new three.SphereGeometry(1, 8, 6);
+
+			const a = new three.Mesh(geometry);
+			a.position.set(-2, 3, 0);
+			scene.add(a);
+			const b = new three.Mesh(geometry);
+			b.position.set(2, 3, 0);
+			scene.add(b);
+
+			const shared = three.stats().drawCalls;
+			three.physics.soft(a, { mass: 1 });
+			three.physics.soft(b, { mass: 1 });
+			return [shared, three.stats().drawCalls];
+		`);
+		defer counted.free();
+		test::@check(counted.ok, "the two were counted: %s", counted.error);
+		test::@check(
+			counted.value == "[1,2]",
+			"one draw shared, two once each is soft, got '%s'", counted.value
+		);
+	};
+}
+
+
+<*
+ A soft body is drawn as the shape the solver left it in, not as the shape it was
+ modelled as.
+
+ The comparison is against *the same mesh at the same place with the soft body
+ taken off*, which is the only pair that isolates the thing being checked. A frame
+ taken before the drop and one taken after would differ for a reason that has
+ nothing to do with the vertices — the node moved. These two frames have the node
+ in one position and the same camera, and the only difference between them is
+ whether `MeshPass.write_soft_vertices` had anything to say.
+*>
+fn void a_soft_body_is_drawn_as_the_solver_left_it() @test
+{
+	@with_gpu_frames(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			three.light.set([0.3, 1.0, 0.4], 0.35);
+
+			const floor = new three.Mesh(new three.BoxGeometry(6, 1, 6));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const jelly = new three.Mesh(new three.SphereGeometry(1, 16, 10));
+			jelly.position.set(0, 3, 0);
+			scene.add(jelly);
+			three.physics.soft(jelly, { mass: 2, volume: true });
+			globalThis.jelly = jelly;
+
+			// Framed once, and never again: both captures have to be the same
+			// camera or they differ for the wrong reason.
+			three.camera.frameAll();
+			return three.stats().drawCalls;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		test::@check(built.value == "2", "the floor and the jelly, got '%s'", built.value);
+
+		// Long enough to land and settle into a squashed shape.
+		for (int i = 1; i <= 240; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		image::Image squashed = renderer.capture()!!;
+		defer squashed.free();
+
+		three::RunResult undone = run.run(`
+			const at = globalThis.jelly.position.y;
+			three.physics.removeSoft(globalThis.jelly);
+			// Allowed now, and the same place the solver had it — so the two
+			// frames differ by the vertices and by nothing else.
+			globalThis.jelly.position.y = at;
+			return true;
+		`);
+		defer undone.free();
+		test::@check(undone.ok, "the soft body was taken off: %s", undone.error);
+
+		image::Image rest = renderer.capture()!!;
+		defer rest.free();
+
+		sz changed = differing_pixels(&squashed, &rest);
+		test::@check(
+			changed > 200,
+			"the deformed sphere and the rest sphere are different pictures, %d bytes apart", changed
 		);
 	};
 }
