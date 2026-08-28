@@ -94,7 +94,7 @@ export const DOCS = {
 		'physics-owns-transform': 'The solver owns a dynamic body\'s transform, and writing to it throws. That is the one place in this API where two writers are not resolved by last-writer-wins — a solver and a script writing the same transform every frame produce jitter rather than a compromise. Give the body kind \'kinematic\' to drive it from a script, or three.physics.remove(object) to take the body away. A body with mass 0 is static and is not owned, because it never moves.',
 		'physics-fixed-60hz': 'Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host\'s rather than the animation callback\'s — so a slow frame stutters instead of spending the script budget and stopping the callback for good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between a stutter and a spiral. What it steps by is GAME time, so three.clock.timeScale scales the world and 0 stops it falling; three.clock.fixedRate is the gameplay rate and does not touch the solver\'s.',
 		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, \'heightfield\' is a TerrainGeometry\'s own grid of heights — one shape for a whole landscape, at any slope, where the alternative is a chain of invisible boxes and a path forced flat to have them — and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
-		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Siblings that share a shape but not a material do not batch either — a colour travels per copy in _COLOR_0, a texture or a blend mode has no per-copy channel — so they come back as the two draws they were. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs.',
+		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Siblings that share a shape but not a material do not batch either — a colour travels per copy in _COLOR_0, a texture or a blend mode has no per-copy channel — so they come back as the two draws they were. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs — unless you pass { bake: true }, which runs each shader body over its mesh\'s uv layout and writes the answer as a baseColorTexture or a baseColorFactor, and is the difference between a file that is your scene and a file that is your scene in one grey.',
 		'static-casters': 'A shadow pass rasterises every caster every frame, which for a village is the largest thing in the frame. Say object.static = true on whatever will not move again — buildings, ground, walls, scenery — and those are drawn into the shadow map once and kept; each frame after that draws only what moved. It costs no draw call in the colour pass, so marking ten thousand crates is free, and moving one afterwards is safe (the map is rebuilt) rather than wrong. scene.traverse(o => o.static = true) is the usual way to say it. Watch three.stats().shadowStaticDraws: 0 on most frames means the cache is holding. Refused on skinned meshes — a pose changes the silhouette without the transform moving — and reading .static back is how you see that.',
 		'return-is-the-value': 'Return a value from your script with `return`; it comes back as the `value` field.',
 
@@ -1540,7 +1540,7 @@ export const DOCS = {
 			+ 'Empty when three was not started with --assets, since there is then no directory to describe.',
 		'scene.export(path)':
 			'Write the scene to a .glb, and answer with { path, meshes, entries, materials, images, '
-			+ 'nodes, instances, batches, skipped, shaded, layers, bytes }. One mesh per unique (asset, mesh), '
+			+ 'nodes, instances, batches, skipped, shaded, bakedImages, bakedColors, layers, bytes }. One mesh per unique (asset, mesh), '
 			+ 'so a thousand walls from one kit are one mesh in the file exactly as they are one draw '
 			+ 'call in the frame. Sibling copies of one shape are written as a single node carrying an '
 			+ 'array of transforms — EXT_mesh_gpu_instancing, which any glTF reader can place — with a '
@@ -1560,6 +1560,23 @@ export const DOCS = {
 			+ 'are not in the file (skipped counts them) and a ShaderMaterial is not either, because it '
 			+ 'is a Slang pipeline and glTF describes surfaces rather than programs — those meshes are '
 			+ 'exported with the base colour and texture their geometry carries, and shaded counts them. '
+			+ 'PASS { bake: true } TO GET THE SHADERS BACK. Each ShaderMaterial body is run over its '
+			+ 'own mesh\'s uv layout and read off the device, so what the frame showed reaches the file: '
+			+ 'a baseColorTexture where the answer varies across the surface, a baseColorFactor where it '
+			+ 'turns out to be one colour, and alphaMode MASK where the body discards — so leaves and '
+			+ 'netting come back as the shapes they cut rather than as solid quads. Without it a scene '
+			+ 'whose character is thirteen shaders exports as a correct scene in a single grey, which is '
+			+ 'the thing to check for: nine materials all carrying the same baseColorFactor. bakedImages '
+			+ 'and bakedColors count the copies it managed, and whatever is left is still in shaded — a '
+			+ 'mesh with no uvs has no layout to rasterise into. true bakes at 512 texels a side and a '
+			+ 'number picks another, 16 to 4096. The cost is one render, one readback and one PNG per '
+			+ 'BAKE, and a body that reads s.position needs one per node rather than one per shape — on '
+			+ 'a 2909-copy scene of world-space shaders that is 308 images: 14 MB at 256, 22 MB at 512, '
+			+ '44 MB at 1024, against 9.4 MB with no shading at all. Pick the size against the scene. '
+			+ 'It is UNLIT on purpose — a viewer lights what it loads, and a baked-in sun '
+			+ 'would land twice — and it needs a GPU, which the rest of export does not. A body that '
+			+ 'reads s.position is baked per node rather than once, and never for a copy inside an '
+			+ 'instanced node: a bake never splits a batch, so those copies share their batch\'s answer. '
 			+ 'A material layer stack is the exception to that last part, whichever way it was built. '
 			+ 'A mesh loaded from a .glb carrying CUSTOM_materials_layers is written back with the stack '
 			+ 'it came in with, read out of the source document; a three.LayeredMaterial built in a '

@@ -1886,6 +1886,10 @@ fn uint? MeshPass.create_material(
 			// carries a zero slice rather than a pointer into static memory that
 			// `Material.free` would hand to the allocator.
 			.vertex = vertex.len > 0 ? vertex.copy(mem) : (String){},
+			// What the source above was generated from, so the exporter can generate
+			// it again as a bake — `Material.declared_uniforms` has the argument.
+			.declared_uniforms = copy_uniform_declarations(uniforms),
+			.declared_textures = copy_texture_declarations(textures),
 			.bounds = bounds,
 			// A `ShaderMaterial` can be given a `map` afterwards like any other
 			// material — `material.slang` declares the same binding 0 that

@@ -630,6 +630,11 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					// The identity, which is what a material without a `vertex:`
 					// gets — one line, and the same one every time.
 					want.push("void displace(inout Vertex v) { }");
+				case "//@bake":
+					// Nothing: this is a frame's material and not an export's, so the
+					// unlit uv-space variant is not asked for and the marker is
+					// replaced by zero lines. `three_tests::export` has the bake.
+					break;
 				case "//@table":
 					// Nothing: this material's uniforms fit the push block, so no
 					// table struct is generated and the marker is replaced by zero

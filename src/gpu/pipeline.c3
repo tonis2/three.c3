@@ -670,6 +670,25 @@ const PipelineState ADDITIVE_STATE = {
 	.blend = BlendMode.ADDITIVE,
 };
 
+<*
+ What a material bakes with: solid triangles, no depth at all, nothing blended.
+
+ Not `SOLID_STATE` with a comment, because every difference is load-bearing. A
+ bake rasterises the mesh in *uv* space, so depth is meaningless — every triangle
+ sits at z = 0, and a depth test would let whichever one the rasteriser reached
+ first hide the rest of the layout. Blending is off so the answer written is the
+ body's own rather than the body's over whatever the last mesh left there.
+
+ The cull mode is dynamic, as it is for everything here, and `MaterialBaker` sets
+ it to none: a triangle's winding in uv space says nothing about which way it
+ faces in the world.
+*>
+const PipelineState BAKE_STATE = {
+	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+	.depth_test = false,
+	.depth_write = false,
+};
+
 fn ulong PipelineState.hash(self)
 {
 	return ((ulong)self.topology * 0xbf58476d1ce4e5b9)

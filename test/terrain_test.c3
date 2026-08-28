@@ -274,3 +274,68 @@ fn void a_wrong_sized_field_is_refused() @test
 		test::@check(sized == three::TERRAIN_SIZE_INVALID, "a zero-width terrain was accepted");
 	};
 }
+
+<*
+ The skirt does not put a second copy of the unit square on top of the field.
+
+ `Heightfield.build` promises the uv runs 0..1 across the whole field, and for a
+ long time the wall broke it silently: each of the four strips ran its own u from
+ 0 to 1 and its own v from 0 at the top to 1 at the bottom, so a mesh with a
+ skirt carried five overlapping copies of the unit square. A frame never noticed,
+ because a wall is normally below the ground and out of sight.
+
+ `scene.export({ bake: ... })` noticed at once. A bake rasterises a mesh **by its
+ uv**, so the walls were drawn over the whole texture after the ground was, and a
+ 560 m beach came out as vertical stripes of the cliff behind it.
+
+ The assertion is the property rather than the values: every wall vertex sits on
+ the *edge* of the unit square, and the two ends of a wall column share one uv, so
+ a strip has no area in uv at all and can overwrite nothing.
+*>
+fn void the_skirt_does_not_overlap_the_fields_uv() @test
+{
+	const uint SEGMENTS = 6;
+	three::Heightfield field = make_field(40.0f, 20.0f, SEGMENTS, &shallow);
+	defer field.heights.free();
+	field.skirt = 2.0f;
+
+	three::GeometryBuilder built;
+	built.init();
+	defer built.free();
+	field.build(&built);
+
+	// The grid comes first and the wall after it, which is what makes the split a
+	// count rather than a search.
+	sz side = (sz)SEGMENTS + 1;
+	sz grid = side * side;
+	test::@check(built.uvs.len() > grid, "the skirt wrote no vertices at all");
+
+	sz off_edge = 0;
+	sz mismatched = 0;
+	for (sz i = grid; i < built.uvs.len(); i++)
+	{
+		float u = built.uvs[i][0];
+		float v = built.uvs[i][1];
+		bool on_edge = math::abs(u) < 1e-5f || math::abs(u - 1.0f) < 1e-5f
+			|| math::abs(v) < 1e-5f || math::abs(v - 1.0f) < 1e-5f;
+		if (!on_edge) off_edge++;
+		// The strip is written as pairs — the top of a column, then its foot. The
+		// parity is counted from where the wall starts, not from zero: the grid
+		// above it has an odd vertex count whenever `side` is odd.
+		if ((i - grid) % 2 == 1)
+		{
+			float pu = built.uvs[i - 1][0];
+			float pv = built.uvs[i - 1][1];
+			if (math::abs(u - pu) > 1e-5f || math::abs(v - pv) > 1e-5f) mismatched++;
+		}
+	}
+
+	test::@check(off_edge == 0,
+		"%d of the skirt's %d vertices have a uv inside the field's own square, which is a "
+		"second copy of it laid over the first",
+		off_edge, built.uvs.len() - grid);
+	test::@check(mismatched == 0,
+		"%d wall columns have a different uv at the foot than at the top, so the strip covers "
+		"area in uv space and a bake would draw it over the ground",
+		mismatched);
+}

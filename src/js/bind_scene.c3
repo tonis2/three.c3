@@ -74,7 +74,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "playAnimation", &js_play_animation, 6);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
-	self.bind(host, "exportScene", &js_export, 1);
+	self.bind(host, "exportScene", &js_export, 3);
 
 	// The graph
 	self.bind(host, "sceneCreate", &js_scene_create, 0);
