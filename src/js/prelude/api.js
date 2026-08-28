@@ -33,10 +33,8 @@ import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, Tr
 import { steer, NavField, makeSceneNav } from './nav.js';
 import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
-import { cast, Cast, NO_ENTITY } from './cast.js';
 import { cooldown, Cooldown } from './cooldown.js';
-import { kind, Kind, kindOf } from './kind.js';
-import { assemble } from './assemble.js';
+import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport } from './entity.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -1356,23 +1354,6 @@ export const three = {
 	// HUD that wants a bar rather than a number.
 	systemLoad,
 
-	// N things of ONE KIND, stored as columns and stepped by named systems —
-	// the critters, the crates, the pickups. Not the whole world: that
-	// restriction is what keeps every column dense and every bulk verb one
-	// call, and it is why this is not an archetype graph.
-	//
-	// The point is that a column IS the buffer the bulk verbs take, so there is
-	// no marshalling step between the storage and the verb:
-	// three.steer(cast.live(position), ...), three.moveAndSlideAll(..., { self:
-	// cast.live(cast.handles) }), field.sample(...), then cast.flush() draws
-	// the lot in one more crossing.
-	cast,
-	Cast,
-	// What cast.spawn() answers with when there is no room, and what
-	// cast.indexOf() answers for anything despawned. Full is an answer rather
-	// than an error, as three.nav.field answering null is.
-	NO_ENTITY,
-
 	// A scalar gameplay timer — the player's spin, a hurt window, coyote time
 	// — for the `if (x > 0) x -= dt` pattern examples/ used to write out by
 	// hand. Ticked by a lazily-registered three.systems entry rather than
@@ -1382,30 +1363,55 @@ export const three = {
 	cooldown,
 	Cooldown,
 
-	// N things of one kind addressed by OBJECT IDENTITY — the other half of
-	// three.cast, and the one a level's crates, pickups and props want. A Kind
-	// owns the object -> record map, the spawn ritual and the physics body, so
-	// kind.of(hit.object) is the record and kind.remove(record) is the whole
-	// removal: the body, the trigger volume, the node and the record, in that
-	// order, on this tick.
+	// §23. A class is the entity, and three.track is what makes it one: it owns
+	// the object -> instance map, the spawn ritual, the body, the trigger
+	// volume, the live list and the deferred compaction. c.hp is an ordinary
+	// field; the two or three fields a BULK VERB reads are declared as
+	// { columns } and the instance holds a subarray window onto the shared
+	// column, so three.steer(Critter.column('position'), ...) is handed the
+	// storage itself and nothing is ever gathered.
 	//
-	// A cast is for a crowd, because a column IS the buffer three.steer and
-	// three.moveAndSlideAll take. A kind is for the things a query, a raycast
-	// or three.onTrigger hands you back, which never appear in a bulk verb and
-	// are only ever named by the object you hit.
-	kind,
-	Kind,
-	// Which Kind owns this object — the drawn node or its trigger volume — or
-	// null. The global reverse of kind.of, for the caller holding two objects
-	// and no idea what either is.
-	kindOf,
+	// Class.spawn(...) rather than new Class(...) — the slot has to exist
+	// before the constructor runs, and the answer three.track gives back is a
+	// Proxy that says so instead of letting an untracked instance through.
+	track,
+
+	// The base class, and the form the docs lead with:
+	//
+	//     class Critter extends three.Entity {
+	//         static capacity = 32;
+	//         static columns = { position: 3, motion: 3 };
+	//         constructor(at) { super(); this.position[0] = at.x; ... }
+	//     }
+	//
+	// There is no three.track call beside it — the class registers itself on
+	// first use, reading its own statics. `super()` first is where the refusal
+	// of a bare `new Critter()` lives, which is the one thing the wrapper form
+	// needed a Proxy for.
+	Entity,
+
+	// Which instance owns this object — a drawn node, one of its meshes, or a
+	// trigger volume — or null. Walks up the parent chain, because a raycast
+	// answers with the leaf it hit, and an assembled character is a Group of
+	// eleven meshes. What a rule keyed on "what are these two things" opens with.
+	instanceOf,
+
+	// The game raising its own event: three.emit(player, 'use', door) reaches
+	// Door.on('use', Player, fn) exactly as a trigger reaches an 'enter' rule.
+	// It dispatches AT ONCE, where an engine event is queued and drained by the
+	// `rules` system — the game knows when it is safe to delete something and
+	// the solver does not.
+	emit,
+
+	// Every registered rule and what it has cost. The pair-dispatch half of
+	// three.systems.report().
+	rules: rulesReport,
 
 	// A compound mesh from a description of its parts: one shared unit geometry
 	// per SHAPE with the size in mesh.scale, `pivot` for a limb that swings
 	// about a hip, `mirror` for the pair, and every part named in the answer.
 	// It replaces the five statements per body part that every hand-built
 	// character in examples/ is made of.
-	assemble,
 
 	// The helpers. Ordinary meshes over line assets — they cost a draw call
 	// each and nothing else, they are not pickable, and they draw over the
@@ -1757,19 +1763,9 @@ export const three = {
 	// onMouseDown beside this.
 	//
 	// One handler, and binding again replaces it. null unbinds.
-	onClick(fn) {
-		if (fn === null || fn === undefined) { H.onClick(null); return; }
-		if (typeof fn !== 'function') {
-			throw new TypeError('three.onClick(fn) wants a function, or null to unbind');
-		}
-		if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
-			throw new TypeError(
-				'a click handler must be synchronous — an async one returns before it has done '
-				+ 'anything, and the frame does not wait. Do the awaiting in a run_script.'
-			);
-		}
-		H.onClick((raw, x, y) => fn(asIntersection(raw), x, y));
-	},
+	// entity.js owns the host slot so a 'click' rule and this handler can both
+	// have it; the contract here is unchanged.
+	onClick(fn) { setScriptHandler('click', fn, 'three.onClick'); },
 
 	// The physics world of the Scene being rendered. See DOCS.classes.Physics.
 	//
@@ -1790,27 +1786,13 @@ export const three = {
 	// { type: 'enter' | 'exit', trigger, other }.
 	// One handler; binding again replaces, null unbinds, and it is stopped
 	// for good if it throws — the same rules onClick follows.
-	onTrigger(fn) {
-		bindPhysicsHandler(fn, 'three.onTrigger', H.onTrigger, event => ({
-			type: event.type,
-			trigger: objectForHandle(event.trigger),
-			other: objectForHandle(event.other),
-		}));
-	},
+	onTrigger(fn) { setScriptHandler('trigger', fn, 'three.onTrigger'); },
 
 	// Two bodies touched or came apart:
 	// { type: 'start' | 'end', a, b, normal, point }.
 	// `normal` and `point` mean something on a start and are zero on an end
 	// — there is no contact left to describe by then.
-	onContact(fn) {
-		bindPhysicsHandler(fn, 'three.onContact', H.onContact, event => ({
-			type: event.type,
-			a: objectForHandle(event.a),
-			b: objectForHandle(event.b),
-			normal: new Vector3(null, event.normal[0], event.normal[1], event.normal[2]),
-			point: new Vector3(null, event.point[0], event.point[1], event.point[2]),
-		}));
-	},
+	onContact(fn) { setScriptHandler('contact', fn, 'three.onContact'); },
 
 	// The documentation, designed to be READ rather than dumped. With no
 	// argument this is the index — everything short in full, and the names of
@@ -1822,24 +1804,6 @@ export const three = {
 	getApiDocs(options) { return docsQuery(options); },
 	searchDocs(term) { return docsSearch(term); },
 };
-
-// Shared by onTrigger and onContact, including the async refusal a key
-// handler and a click handler already make: a handler that returns before
-// it has done anything is not a handler, and the frame does not wait.
-function bindPhysicsHandler(fn, where, bind, shape) {
-	if (fn === null || fn === undefined) { bind(null); return; }
-	if (typeof fn !== 'function') {
-		throw new TypeError(`${where}(fn) wants a function, or null to unbind`);
-	}
-	if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
-		throw new TypeError(
-			`a ${where.replace('three.on', '').toLowerCase()} handler must be synchronous — an async one `
-			+ 'returns before it has done anything, and the frame does not wait. '
-			+ 'Do the awaiting in a run_script.'
-		);
-	}
-	bind(event => fn(shape(event)));
-}
 
 // Shared by both, including the async refusal: a key handler runs inside a
 // frame for the same reason the animation callback does, and an async one
@@ -1857,3 +1821,9 @@ function bindKey(key, down, fn) {
 	}
 	H.onKey(String(key), down, fn);
 }
+
+// entity.js owns the host's three handler slots so that a rule and a script's
+// own handler can both have one. It needs the intersection shaper to answer a
+// 'click' rule with what `three.onClick` would have been handed, and the shaper
+// is this file's — so it is passed over once here rather than written twice.
+setClickShaper(asIntersection);

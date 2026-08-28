@@ -1,33 +1,18 @@
-// wumpa_run.js — a Crash-shaped run down a jungle hollow, built on §17
+// wumpa_run.js — a Crash-shaped run down a jungle hollow.
 //
-// The six things the request asked for, one each:
+// A whole small game in one file: a terrain that is also the collision mesh, a
+// player who runs and spins, crates that break, fruit to collect, and a pack of
+// critters that finds its way to you over baked navigation.
 //
-//   heightfield      one three.Field whose floor follows the path's own
-//                    elevation and whose walls are a function of the distance
-//                    to it — so the hollow is a corridor by construction, and
-//                    the corridor CLIMBS instead of being flat at y=0
-//   material layers  three.LayeredMaterial over the terrain: one splat mask
-//                    packed by three.Field.mask, four layers — trail(r),
-//                    jungle(g), cliff(b), leaf litter(a)
-//   textures         every pixel generated here, so the file runs with no
-//                    assets on disk: ground, bark, crates, fruit, critters
-//   colliders        four kinds, on purpose — the terrain is ONE
-//                    shape:'heightfield' body, crates are dynamic boxes that
-//                    tumble, boulders are convex hulls, fruit are triggers, and
-//                    the player carries a kinematic capsule so it shoves what
-//                    it runs into and trips the triggers
-//   player           three.moveAndSlide. The canyon wall IS the fence: there is
-//                    no invisible corridor to be pushed back into, no ground
-//                    snap written by hand, and no circle test per boulder
-//   navigation       three.nav.bake over the finished level, then ONE
-//                    three.nav.field re-solved at the player a few times a
-//                    second, sampled for the whole pack by three.steer
+// Nothing is loaded from disk. Every texture is generated here, so the file runs
+// on a clean checkout.
 //
-//   Run it:
 //   ./build/three --script examples/wumpa_run.js
-//   One frame, no window:
+//
+//   # one frame, no window
 //   ./build/three --headless --script examples/wumpa_run.js --screenshot out.png
-//   Play it without a window — the fixed loop steps, keys latch, nav runs:
+//
+//   # play it without a window — the fixed loop steps, keys latch, nav runs
 //   ./build/three --headless --script examples/wumpa_run.js --frames 900 \
 //       --screenshot run-%03d.png --every 150
 //
@@ -39,113 +24,30 @@
 //   Q E                swing the camera        R F   tilt it
 //   drag               look                    wheel  zoom
 //
-// ## What is different from examples/crash_canyon.js
+// ## The shape of the file
 //
-// The same level idea, and the movement half is 62 lines against 117 — one
-// `playerStep` against a `playerStep`, a `groundAt` and a list of blocker
-// circles. What went away is all the arithmetic that was standing in for
-// collision: `nearestOnPath` shoving the player back into the corridor,
-// `groundAt` snapping y to the terrain, a circle test per boulder, and the
-// whole vertical block. One `three.moveAndSlide` does the four of them against
-// the geometry that is actually drawn — which is why the floor here is allowed
-// to climb, where crash_canyon's corridor is dead flat because a chain of
-// axis-aligned boxes is the only shape its fence could take.
+//   arithmetic     helpers, then the trail's own curve
+//   the level      one three.Field carved into a corridor, then a
+//                  LayeredMaterial over it and one heightfield body
+//   the things     Crate, Wumpa, Player and Critter, each a three.Entity
+//   the rules      two of them: fruit is collected, a critter that reaches you
+//                  costs a life
+//   the frame      every system, in declared order
 //
-// The saving went into the pack. crash_canyon has no NPCs at all, because a
-// critter that walks round a boulder needs a graph and there was none.
-//
-// ## What building it found, and what building it cost after the fixes
-//
-// Four things in §17 were wrong or missing, and this file was where each one
-// showed. Every one of them is now in the engine rather than worked around
-// here, and the three places to look are:
-//
-//   `collides`      the cast is not collision geometry. It replaces hiding
-//                   every character's Group around the whole movement phase,
-//                   which was the only way to exclude a subtree from a sweep
-//                   and cost the spatial index a rebuild per toggle. It is a
-//                   line of `three.assemble`'s defaults now
-//   the wumpa kind  `collides = false` is what stops a drawn pickup being a
-//                   bollard; the wider volume beside it is reach, not a dodge
-//   the nav bake    `radius` is the critter's own again — the erosion used to
-//                   cut any descending floor into islands — and `components`
-//                   is the counter that says so at bake time
-//
-// ## And what §21 then did to the shape of it
-//
-// Three things went, and none of them was an optimisation:
-//
-//   the arithmetic   the eight helpers this file used to open with — `smooth`,
-//                    `lerp`, `clamp01`, `step`, `band`, `tint`, `mixc`,
-//                    `hash2` — plus a `valueNoise` and an `fbm` over them, are
-//                    `three`'s. Four of the eight examples had the same block
-//                    and the copies had drifted
-//   `packStep`       101 lines of one function are six named systems declared
-//                    beside the pack. Three of them are ONE crossing each for
-//                    the whole pack — `field.sample`, `three.steer`,
-//                    `three.moveAndSlideAll` — where the old shape called the
-//                    single-agent verb ten times
-//   the callback     the ninety-line `setAnimationLoop` is seven systems in a
-//                    declared order, and `three.systems.report()` says what
-//                    each one costs. It reports the PLAYER as the most
-//                    expensive thing in the frame, at more than the whole pack
-//                    put together, which is not what anyone would have guessed
-//
-// **The test of it is what a second kind of enemy costs.** A wasp that flies
-// would be a second `three.cast`, its own columns, and its own systems declared
-// beside it. Nothing in the pack's six changes, nothing in the frame's seven
-// changes, and the running order stays readable because `order` is a number
-// rather than a position in a function.
-//
-// ## And what kinds and assemble did to it
-//
-// Two more things, and again neither of them is an optimisation:
-//
-//   the ritual       the crates, the fruit and the critters each carried an
-//                    array, a Map from node back to record, an `alive` flag and
-//                    a four-line removal that had to remember the body, the
-//                    node, the map and the flag in that order — three copies of
-//                    one thing, and the fruit's copy had a fifth line for the
-//                    trigger volume. Two of them are `three.kind` now:
-//                    `crate.of(hit.object)` is the lookup, `crate.remove(c)` is
-//                    the whole removal, and the volume is the kind's to carry
-//   the bodies       `buildPlayer` and `buildCritter` were five statements per
-//                    body part — a Mesh, a scale, a position, a colour and an
-//                    add — and both ended with a `noCollide` traverse. They are
-//                    `three.assemble` descriptions, and `noCollide` is a line
-//                    of the defaults
-//
-// The converted parts are **177 lines of code against 110**. It shows most in
-// the critter, which is 21 lines against 6, and least in `spin`, which was
-// mostly arithmetic already and only lost two Map lookups.
-//
-// **The test of it is again what a second sort of thing costs.** A gem, a
-// checkpoint or a locked gate is one `three.kind(...)` and nothing else: no
-// array, no Map, no flag, and a removal that cannot forget half of itself.
-//
-// ## And what three.cooldown did to the player
-//
-// Four countdowns — spin's window, its own 0.14s recovery, hurt's re-entry
-// refusal, coyote's re-arm while grounded — are three `three.cooldown`s now.
-// `ctl.spin.start()` is `playerStep`'s old readiness check; `if (!ctl.hurt.
-// start()) return` at the top of `hurt` is the refusal that used to sit below
-// `ctl.hurt = 1.4`.
+// An entity class owns its own spawn, lookup, body, collision volume and
+// removal, so there is no array-plus-map-plus-alive-flag anywhere below, and
+// `c.remove()` is the whole removal. The pack is the only one with `columns`:
+// its position, motion and so on are one shared array per field, which is what
+// three.steer, field.sample and three.moveAndSlideAll are handed directly.
+// Everything else is an ordinary property on an ordinary object.
 
 three.budget = 60000;   // a cold build: the terrain fill is 2.6M distance tests
 
 // ---------------------------------------------------------------------------
-// Arithmetic — all of it three's now.
+// Arithmetic. All of it three's — these are just shorter local names.
 //
-// This file used to open with eight helpers written out by hand: `smooth`,
-// `lerp`, `clamp01`, `step`, `band`, `tint`, `mixc` and `hash2`, plus a
-// `valueNoise` and an `fbm` over them. Four of the eight examples had the same
-// block and the copies had already drifted. They are `math.js` now.
-//
-// **The one thing to read twice is the argument order.** GLSL's smoothstep is
-// `(edge0, edge1, x)` and Three.js's — which is what `three.smoothstep` is — is
-// `(x, min, max)`, the VALUE FIRST. The local `step(lo, hi, x)` this file used
-// to carry was the GLSL one, so every call site below is written the other way
-// round now on purpose rather than being wrapped back.
+// Watch the argument order: `three.smoothstep` is Three.js's `(x, min, max)`,
+// the VALUE FIRST, not GLSL's `(edge0, edge1, x)`.
 // ---------------------------------------------------------------------------
 const { lerp, clamp, clamp01, smoothstep, band, hash } = three;
 const mixc = three.mixColor;
@@ -153,10 +55,8 @@ const tint = three.tintColor;
 const hash2 = hash;
 const smooth = t => smoothstep(t, 0, 1);
 
-// A tileable fbm image, from the point sampler. `period` is what makes the left
-// edge meet the right, and `fbm2` scales it per octave — which is the one part
-// of a tiling fbm that is wrong when it is written by hand, and the reason the
-// version this replaces had to build a grid per octave to get it.
+// A tileable fbm image. `period` is what makes the left edge meet the right,
+// and fbm2 scales it per octave — the part a hand-written tiling fbm gets wrong.
 function fbm(size, cells, seed, octaves) {
 	const out = new Float32Array(size * size);
 	for (let y = 0; y < size; y++) {
@@ -290,15 +190,13 @@ const field = new three.Field({ width: W, depth: D, segments: SEG });
 	}
 }
 
-// Shelves to jump up onto. Levelled into the field before the terrain is
-// built, because a pad has to be flat before it is ground.
+// Shelves to jump up onto, levelled into the field before the terrain is built
+// — a pad has to be flat before it is ground.
 //
-// Every one of them is OFF the centreline and no wider than half the corridor.
-// A pad across the trail is a wall the height of its own step, and `step` is
-// 0.45 — so a 2.3-unit shelf in the middle of the path is not a platform, it is
-// a full stop with no way over it and nothing that reports as ground to jump
-// from. The first two are a staircase: 1.4 is inside one jump from the floor,
-// 3.0 is not, and is inside one jump from the step below it.
+// Keep them OFF the centreline: a pad across the trail is a wall, not a
+// platform, since nothing that tall reports as ground to jump from. The first
+// two are a staircase — 1.4 is one jump from the floor, 3.0 is one jump from
+// the step below it.
 const SHELVES = [
 	{ s: 50, off: 4.0, w: 5, d: 5, up: 1.4 },
 	{ s: 57, off: 4.2, w: 5, d: 5, up: 3.0 },
@@ -420,7 +318,8 @@ const mLitter = new three.Field(mopts);
 }
 const splat = three.Field.mask({ r: mTrail, g: mJungle, b: mCliff, a: mLitter });
 
-const ground = new three.Mesh(terrain, new three.LayeredMaterial({
+const ground = new three.Mesh(terrain, 
+	new three.LayeredMaterial({
 	map: tex.trail,
 	mask: splat,
 	layers: [
@@ -451,6 +350,36 @@ const BALL = new three.SphereGeometry(0.5, 12, 9);
 const CYL = new three.CylinderGeometry(0.5, 0.5, 1, 10);
 const CONE = new three.ConeGeometry(0.5, 1, 12);
 const CHIP = new three.BoxGeometry(0.28, 0.28, 0.28);
+
+// A body part: the unit box above under a scale. `look` is a colour, which the
+// flat material carries per mesh, or a material of its own.
+function box(size, pos, look) {
+	const m = new three.Mesh(BOX, typeof look === 'number' ? mat.flat : look);
+	m.scale.set(size[0], size[1], size[2]);
+	m.position.set(pos[0], pos[1], pos[2]);
+	if (typeof look === 'number') m.color = look;
+	return m;
+}
+function cone(radius, height, pos, color) {
+	const m = new three.Mesh(CONE, mat.flat);
+	m.scale.set(radius * 2, height, radius * 2);
+	m.position.set(pos[0], pos[1], pos[2]);
+	m.color = color;
+	return m;
+}
+
+// A limb hangs from a Group at the JOINT with its mesh below that, which is what
+// makes `arm[0].rotation.x` swing from the shoulder rather than roll about the
+// arm's own middle. Answers with the pair, left first.
+function limbs(parent, joint, size, pos, look) {
+	return [-1, 1].map(side => {
+		const pivot = new three.Group();
+		pivot.position.set(side * joint[0], joint[1], joint[2]);
+		pivot.add(box(size, pos, look));
+		parent.add(pivot);
+		return pivot;
+	});
+}
 
 const mat = {
 	bark: new three.MeshLambertMaterial({ map: tex.bark }),
@@ -546,11 +475,11 @@ for (let s = 8; s < PATH_LEN - 8; s += 11) {
 }
 
 // ---------------------------------------------------------------------------
-// Crates.
+// Crates — dynamic boxes.
 //
-// Dynamic boxes. They are drawable, so moveAndSlide walks INTO them and stops
-// — Crash does not push crates, he breaks them — and they are rigid bodies, so
-// the kinematic capsule shoves them and a spin sends them tumbling.
+// Drawable, so moveAndSlide walks INTO them and stops: Crash breaks crates, he
+// does not push them. They are also rigid bodies, so the player's capsule
+// shoves them and a spin sends them tumbling.
 // ---------------------------------------------------------------------------
 const CRATE = 1.35;
 const CRATE_KIND = {
@@ -573,124 +502,360 @@ const CRATE_PLAN = [
 	{ s: 186, off: 0, k: 'wood' }, { s: 186, off: -2.2, k: 'wood' }, { s: 190, off: 1.4, k: 'arrow' },
 ];
 
-// A KIND owns the object -> record map, the spawn and the removal — plan.md
-// §22. What used to be here was an array, a Map from node back to record, an
-// `alive` flag and a four-line removal ritual, written out three times in this
-// file. `build` and `data` are the only two things about a crate that are not
-// about being a thing in the world.
-const crate = three.kind('crate', {
-	build: p => {
-		const m = new three.Mesh(BOX, CRATE_KIND[p.k].mat);
-		m.scale.set(CRATE, CRATE, CRATE);
-		return m;
-	},
-	body: { shape: 'box', mass: 5, friction: 0.7, restitution: 0.05 },
-	data: p => ({ ...CRATE_KIND[p.k], variant: p.k }),
-});
+// The class owns the object -> instance map, the spawn and the removal, so the
+// only thing written here is what a crate IS.
+class Crate extends three.Entity {
+	static body = { shape: 'box', mass: 5, friction: 0.7, restitution: 0.05 };
+
+	constructor(at, k, yaw) {
+		super();
+		Object.assign(this, CRATE_KIND[k]);
+		this.variant = k;
+		this.object = new three.Mesh(BOX, CRATE_KIND[k].mat);
+		this.object.scale.set(CRATE, CRATE, CRATE);
+		this.object.position.set(at[0], at[1], at[2]);
+		this.object.rotation.y = yaw;
+	}
+
+	// Answers with how many broke — a TNT takes its neighbours, so the count is
+	// the caller's to add to their own score.
+	//
+	// `remove()` takes the body, the node and the map entry away NOW: a crate
+	// broken inside a spin has to stop colliding on this tick. Only the live
+	// list waits for the frame boundary, which is what makes the loops below
+	// safe to remove from. It answers false for one already gone, which is the
+	// recursion guard a TNT chain needs.
+	break() {
+		const p = this.object.position;
+		const [px, py, pz] = [p.x, p.y, p.z];
+		if (!this.remove()) return 0;
+		throwChips(px, py, pz, this.variant === 'tnt' ? 0xb03a2c : 0xa4763e, this.variant === 'tnt' ? 10 : 6);
+		for (let i = 0; i < this.fruit; i++) {
+			const f = Wumpa.spawn(px + (Math.random() - 0.5) * 1.4, py + 0.4 + i * 0.5, pz + (Math.random() - 0.5) * 1.4);
+			f.free = true;
+		}
+		let broke = 1;
+
+		// A TNT takes its neighbours and anything loose with it.
+		if (this.tnt) {
+			for (const o of Crate) {
+				const q = o.object.position;
+				if (Math.hypot(q.x - px, q.y - py, q.z - pz) < 3.4) broke += o.break();
+			}
+			for (const b of BOULDERS) {
+				const q = b.mesh.position;
+				const d = Math.hypot(q.x - px, q.z - pz);
+				if (d < 5) throwChips(q.x, q.y + b.r, q.z, 0x7d7a72, 3);
+			}
+			// The live ones, as instances. Removal is deferred to the frame
+			// boundary, so this loop is safe even though a launch can end in a
+			// retirement.
+			for (const c of Critter) {
+				const q = c.position;
+				const d = Math.hypot(q[0] - px, q[2] - pz);
+				if (d < 5.5) c.launch((q[0] - px) / (d || 1), (q[2] - pz) / (d || 1), 13);
+			}
+		}
+		return broke;
+	}
+}
+
 for (const c of CRATE_PLAN) {
 	const at = onPath(c.s, c.off);
 	const base = c.on !== undefined ? SHELVES[c.on].y : groundY(at.x, at.z);
-	crate.spawn([at.x, base + CRATE / 2 + (c.stack || 0) * CRATE, at.z], { k: c.k, yaw: at.yaw });
+	Crate.spawn([at.x, base + CRATE / 2 + (c.stack || 0) * CRATE, at.z], c.k, at.yaw);
 }
 
 // ---------------------------------------------------------------------------
-// Wumpa fruit — trigger volumes.
+// Wumpa fruit.
 //
-// **`collides = false` is what stops a pickup being a bollard.** A drawn mesh
-// is swept against, so a fruit lying on the path used to bounce the player off
-// unless it was made invisible before he reached it; the flag says "this is
-// scenery, not a wall" and leaves it out of every spatial query while it still
-// draws. Physics is a separate world and does not read it, which is why the
-// trigger below still works.
+// **`collides = false` is what stops a pickup being a bollard.** Drawn meshes
+// are swept against, so a fruit on the path would bounce the player off it; the
+// flag takes it out of every spatial query while it still draws. Physics is a
+// separate world and ignores the flag, which is why the trigger still fires.
 //
-// The second node is no longer a workaround — it is REACH. A body's collider is
-// taken from its mesh, so the only way to be collected at 1.3 units rather than
-// at 0.73 is a wider volume. It is invisible because there is nothing to see.
-//
-// A trigger needs two BODIES to overlap, and moveAndSlide gives the player
-// none. That is what the player's kinematic capsule is for: it is driven from
-// the controller's answer, it shoves crates, and it trips these.
+// The trigger volume is REACH, not a workaround: a collider is taken from its
+// mesh, so collecting at 0.9 rather than at 0.31 needs a wider shape.
 // ---------------------------------------------------------------------------
 const FRUIT_R = 0.62;      // the drawn fruit
 const PICKUP_R = 0.9;      // the volume that collects it — a WORLD radius, so
                            // the reach is 0.9 + the player's 0.42, as before
-const wumpa = three.kind('wumpa', {
-	build: () => {
-		const m = new three.Mesh(BALL, mat.fruit);
-		m.scale.set(FRUIT_R, FRUIT_R, FRUIT_R);
-		return m;
-	},
-	// The second node is the kind's now, and so is carrying it: a volume is a
-	// SIBLING of the thing it belongs to, because a body-backed node has to be
-	// a direct child of the scene, so something has to move it when the fruit
-	// bobs. `wumpa.follow` is that something and it runs after this file's own
-	// systems — see the `fruit` system, which no longer writes the volume.
-	collides: false,
-	trigger: { shape: 'sphere', radius: PICKUP_R },
-	data: p => ({ spin: hash2(p.x * 13 | 0, p.z * 7 | 0, 5) * 6.28, bob: hash2(p.x | 0, p.z | 0, 8) * 6.28 }),
-});
-const dropFruit = (x, y, z) => wumpa.spawn([x, y, z], { x, z });
+class Wumpa extends three.Entity {
+	static collides = false;
+	// A volume is a SIBLING — a body-backed node has to be a direct child of
+	// the scene — so `Wumpa.follow` carries it. The `bob` system never touches
+	// it; follow runs after and picks up wherever bob left the fruit.
+	static trigger = { shape: 'sphere', radius: PICKUP_R };
+
+	constructor(x, y, z) {
+		super();
+		this.object = new three.Mesh(BALL, mat.fruit);
+		this.object.scale.set(FRUIT_R, FRUIT_R, FRUIT_R);
+		this.object.position.set(x, y, z);
+		this.spin = hash2((x * 13) | 0, (z * 7) | 0, 5) * 6.28;
+		this.bob = hash2(x | 0, z | 0, 8) * 6.28;
+		this.free = false;
+	}
+}
 
 for (let s = 12; s < PATH_LEN - 10; s += 7.5) {
 	const off = Math.sin(s * 0.21) * 2.6;
 	const at = onPath(s, off);
-	dropFruit(at.x, groundY(at.x, at.z) + 1.05, at.z);
+	Wumpa.spawn(at.x, groundY(at.x, at.z) + 1.05, at.z);
 }
 
 // ---------------------------------------------------------------------------
 // The player.
+//
+// Where he is, what he is doing and what he has collected are fields; `step`,
+// `spin`, `hurt`, `collect`, `look` and `pose` are the verbs. There is one
+// `player`, and everything about him is on it.
+//
+// `static volume` IS the kinematic capsule — moveAndSlide raises no contact, so
+// without a body the player could not shove a crate or trip a trigger. A volume
+// is a SIBLING node, carried by `Player.follow`, and a `near` rule measures
+// against it rather than the drawn root, which sits at his feet.
 // ---------------------------------------------------------------------------
 const HEIGHT = 1.75, RADIUS = 0.42;
 const SPEED = 9.2, GRAV = 26, JUMP = 10.4;
 const SPIN_TIME = 0.42, SPIN_R = 2.5;
+const MOVE = { radius: RADIUS, height: HEIGHT, step: 0.45, slope: 52, skin: 0.02, snap: 0.4 };
 
-// A part is one line — plan.md §22. `spinner` has no shape and a `parts`, so it
-// is a plain Group everything else hangs from and rotates with; `pivot` puts an
-// arm's Group at the shoulder with the mesh below it, which is what makes
-// `P.arm[0].rotation.x` swing rather than roll; and `mirror: 'x'` builds the
-// pair in `[-x, +x]` order, so the pose code below reads exactly as it did when
-// it was `for (const sx of [-1, 1])`.
-const P = three.assemble({
-	spinner: { parts: {
-		body: { box: [0.78, 0.82, 0.62], at: [0, 0.86, 0], color: 0xd86a1e },
-		head: { box: [0.66, 0.56, 0.6], at: [0, 1.52, 0.02], color: 0xe2762a },
-		ear: { mirror: 'x', cone: [0.13, 0.4], at: [0.2, 1.92, 0], color: 0xc95c18 },
-		eye: { mirror: 'x', box: [0.14, 0.16, 0.06], at: [0.16, 1.6, 0.32], color: 0xf5f0e2 },
-		arm: { mirror: 'x', pivot: [0.52, 1.16, 0], box: [0.2, 0.62, 0.2], at: [0, -0.3, 0], color: 0xd86a1e },
-		leg: { mirror: 'x', pivot: [0.22, 0.46, 0], box: [0.26, 0.5, 0.3], at: [0, -0.23, 0], color: 0x4a3b2c },
-	} },
-}, { material: mat.flat, collides: false, name: 'player' });
-groups.player.add(P.root);
+// The spin's broad-phase answer, kept OUTSIDE the loop that reads it.
+const hits = three.query.buffer(64);
 
-// The kinematic capsule: a body the size of the controller's own capsule,
-// driven from the controller's answer. It shoves crates and trips triggers;
-// it does not decide where the player may go.
-const capsule = new three.Mesh(CYL, mat.flat);
-capsule.scale.set(RADIUS * 2, HEIGHT, RADIUS * 2);
-capsule.visible = false;
-capsule.name = 'player-capsule';
-scene.add(capsule);
-three.physics.add(capsule, { shape: 'capsule', mass: 0, kinematic: true });
-
-const spawn = onPath(4, 0);
-const ctl = {
-	x: spawn.x, y: groundY(spawn.x, spawn.z) + 0.05, z: spawn.z,
-	// The three hand-rolled countdowns this file used to carry — spin's
-	// active window plus its 0.14s cooldown in one three.cooldown, the
-	// grace window after leaving the ground, and the hurt window's own
-	// re-entry refusal — are three.cooldown now. See notes.md §22.
-	vy: 0, grounded: false, coyote: three.cooldown(0.12),
-	yaw: (spawn.yaw * 180) / Math.PI + 180, pitch: 20, dist: 12,
-	heading: spawn.yaw, moving: false, walkT: 0,
-	spin: three.cooldown(SPIN_TIME, { recover: 0.14 }), spinAngle: 0,
-	hurt: three.cooldown(1.4), s: 0,
+const held = k => three.input.isDown(k);
+const axis = (a, b) => ((a.some(held) ? 1 : 0) - (b.some(held) ? 1 : 0));
+const KEYS = {
+	forward: ['w', 'arrowup'], back: ['s', 'arrowdown'],
+	left: ['a', 'arrowleft'], right: ['d', 'arrowright'],
+	jump: ['space'], spin: ['j', 'k', 'shift'],
+	yawL: ['q'], yawR: ['e'], pitchU: ['r'], pitchD: ['f'],
 };
-const state = { fruit: 0, lives: 4, broken: 0, done: false, best: 0 };
+
+class Player extends three.Entity {
+	static parent = groups.player;
+	static volume = { shape: 'capsule', radius: RADIUS, height: HEIGHT, offset: [0, HEIGHT / 2, 0] };
+	// The drawn body is not collision geometry — the capsule above is. Without
+	// this the player's own meshes are in every sweep he makes.
+	static collides = false;
+
+	constructor(at) {
+		super();
+		// root -> spinner -> everything. The spinner draws nothing; it is the
+		// Group the whole body rotates with when he spins, which is why it is
+		// between the root and the parts rather than being the root.
+		const root = new three.Group();
+		const spinner = new three.Group();
+		root.add(spinner);
+
+		spinner.add(box([0.78, 0.82, 0.62], [0, 0.86, 0], 0xd86a1e));    // body
+		spinner.add(box([0.66, 0.56, 0.6], [0, 1.52, 0.02], 0xe2762a));  // head
+		for (const side of [-1, 1]) {
+			spinner.add(cone(0.13, 0.4, [side * 0.2, 1.92, 0], 0xc95c18));            // ear
+			spinner.add(box([0.14, 0.16, 0.06], [side * 0.16, 1.6, 0.32], 0xf5f0e2)); // eye
+		}
+
+		this.object = root;
+		this.spinner = spinner;
+		this.arm = limbs(spinner, [0.52, 1.16, 0], [0.2, 0.62, 0.2], [0, -0.3, 0], 0xd86a1e);
+		this.leg = limbs(spinner, [0.22, 0.46, 0], [0.26, 0.5, 0.3], [0, -0.23, 0], 0x4a3b2c);
+
+		// Where he is, and where the camera is looking from.
+		this.x = at.x; this.y = groundY(at.x, at.z) + 0.05; this.z = at.z;
+		this.vy = 0; this.grounded = false;
+		this.yaw = (at.yaw * 180) / Math.PI + 180; this.pitch = 20; this.dist = 12;
+		this.heading = at.yaw; this.moving = false; this.walkT = 0; this.spinAngle = 0;
+		this.s = 0;
+
+		// The three hand-rolled countdowns this file used to carry — the spin's
+		// active window plus its 0.14s recovery in one three.cooldown, the grace
+		// window after leaving the ground, and the hurt window's own re-entry
+		// refusal. The nouns are the countdowns; the verbs below are the methods.
+		this.coyote = three.cooldown(0.12);
+		this.spinning = three.cooldown(SPIN_TIME, { recover: 0.14 });
+		this.hurting = three.cooldown(1.4);
+
+		// Edges mean something once per FRAME; the fixed loop runs zero to eight
+		// times per frame. `latch` fills this, `step` empties it.
+		this.intent = { jump: false, spin: false };
+
+		// The run, scored by the one who is running it.
+		this.fruit = 0; this.lives = 4; this.broken = 0; this.best = 0; this.done = false;
+	}
+
+	// The controller. The whole collision half is one moveAndSlide: no corridor
+	// fence, no ground snap, no per-boulder circle test, because the wall, the
+	// floor and the boulder are all triangles it sweeps against.
+	step(dt) {
+		// --- run, in the camera's frame ---
+		const move = three.camera.planarMove(axis(KEYS.forward, KEYS.back), axis(KEYS.right, KEYS.left));
+		this.moving = move.length() > 0;
+		if (this.moving) this.heading = Math.atan2(move.x, move.z);
+
+		// --- spin --- the readiness check lives inside spin()'s start()
+		if (this.intent.spin) this.spin();
+		this.intent.spin = false;
+		if (this.spinning.active) this.spinAngle += dt * 34;
+		else this.spinAngle *= 0.72;
+
+		// --- vertical --- restart() every grounded frame keeps the window open
+		// the whole time he is on the ground; cancel() is the "spent it".
+		if (this.grounded) this.coyote.start({ restart: true });
+		if (this.intent.jump && this.coyote.active) { this.vy = JUMP; this.coyote.cancel(); this.grounded = false; }
+		this.intent.jump = false;
+		this.vy = Math.max(this.vy - GRAV * dt, -42);
+
+		// --- one call: the wall, the floor, the ledge and the boulder ---
+		const speed = this.hurting.active ? SPEED * 0.45 : SPEED;
+		const motion = [move.x * speed * dt, this.vy * dt, move.z * speed * dt];
+		const r = three.moveAndSlide([this.x, this.y + HEIGHT / 2, this.z], motion, MOVE);
+
+		this.x = r.position.x;
+		this.y = r.position.y - HEIGHT / 2;
+		this.z = r.position.z;
+
+		// Landing on a crate breaks it and bounces — Crash's other verb, and the
+		// reason the vertical half is spelled out rather than handed to a helper.
+		if (this.vy < 0 && r.grounded) {
+			const c = Crate.of(r.ground);
+			if (c) {
+				const bounce = c.bounce;
+				this.broken += c.break();
+				this.vy = bounce ? JUMP * 1.15 : JUMP * 0.72;
+				this.grounded = false;
+			} else {
+				this.vy = 0; this.grounded = true;
+			}
+		} else if (r.grounded) {
+			if (this.vy < 0) this.vy = 0;
+			this.grounded = true;
+		} else {
+			this.grounded = false;
+			// Hitting a ceiling: stop climbing rather than hanging under it.
+			if (this.vy > 0 && r.remaining.y > 1e-4) this.vy = 0;
+		}
+
+		// Fell off the world.
+		if (this.y < -6) this.hurt(true);
+
+		// --- how far down the hollow ---
+		const near = nearestOnPath(this.x, this.z);
+		this.s = near.s;
+		if (near.s > this.best) this.best = near.s;
+		if (!this.done && near.s > PATH_LEN - 8) {
+			this.done = true;
+			console.log(`Made it. ${this.fruit} wumpa, ${this.broken} crates, ${this.lives} lives.`);
+		}
+	}
+
+	// The spin, as its own verb. `three.query.sphere` answers with a broad-phase
+	// list of NODES, and what each one is comes from asking the classes rather
+	// than from a name. Crates in reach break; critters in reach fly.
+	spin() {
+		// start() answers false while active or still recovering, which is the
+		// readiness check step() used to make before calling this.
+		if (!this.spinning.start()) return 0;
+		const centre = [this.x, this.y + HEIGHT / 2, this.z];
+		const n = three.query.sphere(centre, SPIN_R, hits);
+		for (const o of hits.objects()) {
+			const c = Crate.of(o);
+			if (c) {
+				// Broad phase answers with boxes, so check the real distance
+				// before breaking something whose corner merely reached.
+				const p = c.object.position;
+				if (Math.abs(p.y - centre[1]) < 1.9 && Math.hypot(p.x - this.x, p.z - this.z) < SPIN_R) {
+					this.broken += c.break();
+				}
+				continue;
+			}
+			// `of` answers with the INSTANCE, which stays valid next frame even
+			// though its column slot may move under it.
+			const c2 = Critter.of(o);
+			if (c2 && !c2.launched) {
+				const q = c2.position;
+				const d = Math.hypot(q[0] - this.x, q[2] - this.z);
+				if (d < SPIN_R + 0.4) c2.launch((q[0] - this.x) / (d || 1), (q[2] - this.z) / (d || 1), 15);
+			}
+		}
+		// Anything with a body just outside the break radius gets thrown instead.
+		for (const c of Crate) {
+			const p = c.object.position;
+			const d = Math.hypot(p.x - this.x, p.z - this.z);
+			if (d > SPIN_R + 2.4 || d < 1e-4) continue;
+			three.physics.applyImpulse(c.object, [((p.x - this.x) / d) * 20, 8, ((p.z - this.z) / d) * 20]);
+		}
+		return n;
+	}
+
+	// Taking a hit. The Cooldown ticks itself; start() answering false IS the
+	// re-entry refusal that used to be a hand-written `if (hurtT > 0) return`.
+	hurt(fell) {
+		if (!this.hurting.start()) return false;
+		this.lives--;
+		const back = onPath(Math.max(2, this.best - 12), 0);
+		if (fell || this.lives <= 0) {
+			this.x = back.x; this.z = back.z; this.y = groundY(back.x, back.z) + 0.4; this.vy = 0;
+		}
+		if (this.lives <= 0) {
+			this.lives = 4;
+			this.fruit = Math.max(0, this.fruit - 10);
+			console.log('Out of lives — back down the trail.');
+		} else {
+			console.log(`Ouch. ${this.lives} lives left.`);
+		}
+		return true;
+	}
+
+	// One wumpa. Twenty-five of them is a life.
+	collect() {
+		this.fruit++;
+		if (this.fruit % 25 === 0) {
+			this.lives++;
+			console.log(`25 wumpa — an extra life. ${this.lives} left.`);
+		}
+	}
+
+	look(dt) {
+		const ptr = three.input.pointer;
+		if (ptr.down) { this.yaw -= ptr.dx * 0.24; this.pitch += ptr.dy * 0.2; }
+		this.yaw += axis(KEYS.yawL, KEYS.yawR) * 120 * dt;
+		this.pitch += axis(KEYS.pitchU, KEYS.pitchD) * 60 * dt;
+		this.pitch = clamp(this.pitch, -4, 70);
+		this.dist = clamp(this.dist + ptr.scroll, 6, 22);
+		three.camera.orbit(this.yaw, this.pitch, this.dist);
+	}
+
+	// He is one character, so it is the SINGLE-agent verbs all the way through,
+	// including the ordinary property writes here. A column of one would be a
+	// crossing saved that was never spent. The capsule is not written here any
+	// more: `Player.follow` carries it.
+	pose(dt) {
+		this.object.position.set(this.x, this.y, this.z);
+		this.object.rotation.y = this.heading;
+		this.spinner.rotation.y = this.spinAngle;
+		if (this.moving && this.grounded) this.walkT += dt * 13;
+		const swing = this.moving && this.grounded ? Math.sin(this.walkT) * 0.62 : 0;
+		this.leg[0].rotation.x = swing; this.leg[1].rotation.x = -swing;
+		const out = this.spinning.active ? 1 : 0;
+		this.arm[0].rotation.x = -swing * 0.7 * (1 - out);
+		this.arm[1].rotation.x = swing * 0.7 * (1 - out);
+		this.arm[0].rotation.z = out * 1.5;
+		this.arm[1].rotation.z = -out * 1.5;
+		if (!this.grounded) { this.leg[0].rotation.x = 0.5; this.leg[1].rotation.x = -0.3; }
+	}
+}
+
+const player = Player.spawn(onPath(4, 0));
 
 // A handle for driving this from a run_script or a headless probe. `three.c3`
-// has no UI yet (plan.md §5), so the score lives here and in console.log —
-// and a scene that cannot be inspected from outside cannot be tested at all.
-globalThis.__wumpa = { ctl, state, get pack() { return pack; }, get positions() { return P_POS; } };
+// has no UI yet, so the score lives on the player and in console.log — and a
+// scene that cannot be inspected from outside cannot be tested at all.
+globalThis.__wumpa = {
+	player, Crate, Wumpa,
+	get Critter() { return Critter; },
+	get positions() { return Critter.column('position'); },
+};
 
 // ---------------------------------------------------------------------------
 // Debris — a pool of chips, thrown by hand rather than given bodies.
@@ -714,187 +879,146 @@ function throwChips(x, y, z, colour, n) {
 }
 
 // ---------------------------------------------------------------------------
-// Breaking a crate.
-// ---------------------------------------------------------------------------
-// `crate.remove(c)` is the body, the node and the record in one call, and it
-// happens NOW: a crate broken inside a spin has to stop colliding and stop
-// drawing on this tick. Only the kind's live LIST waits for the end of the
-// frame, which is what makes the loop below safe to remove from. It answers
-// false for a crate that is already gone, which is the recursion guard the
-// `alive` flag used to be.
-function breakCrate(c) {
-	if (!c) return;
-	const p = c.object.position;
-	const [px, py, pz] = [p.x, p.y, p.z];
-	if (!crate.remove(c)) return;
-	throwChips(px, py, pz, c.variant === 'tnt' ? 0xb03a2c : 0xa4763e, c.variant === 'tnt' ? 10 : 6);
-	for (let i = 0; i < c.fruit; i++) {
-		const f = dropFruit(px + (Math.random() - 0.5) * 1.4, py + 0.4 + i * 0.5, pz + (Math.random() - 0.5) * 1.4);
-		f.free = true;
-	}
-	state.broken++;
-
-	// A TNT takes its neighbours and anything loose with it.
-	if (c.tnt) {
-		for (const o of crate) {
-			const q = o.object.position;
-			if (Math.hypot(q.x - px, q.y - py, q.z - pz) < 3.4) breakCrate(o);
-		}
-		for (const b of BOULDERS) {
-			const q = b.mesh.position;
-			const d = Math.hypot(q.x - px, q.z - pz);
-			if (d < 5) throwChips(q.x, q.y + b.r, q.z, 0x7d7a72, 3);
-		}
-		// Over the cast's live range, which is a plain indexed loop — an id is
-		// what you keep across frames and an index is what you use inside one.
-		for (let i = 0; i < pack.count; i++) {
-			if ((pack.state[i] & 1) === 0) continue;
-			const at = i * 3;
-			const d = Math.hypot(P_POS[at] - px, P_POS[at + 2] - pz);
-			if (d < 5.5) launch(i, (P_POS[at] - px) / (d || 1), (P_POS[at + 2] - pz) / (d || 1), 13);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // The pack.
 //
-// Every one of these is a critter that has to get round a boulder to reach
-// you, which is what the nav bake is for. The shape is the documented one: ONE
-// field re-solved at the player a few times a second, three.steer sampling it
-// for the whole pack in one crossing, and moveAndSlide per agent so they
-// collide with the walls, the crates and the ground they are actually on.
+// Each critter has to get round a boulder to reach you, which is what the nav
+// bake is for: ONE field re-solved at the player a few times a second,
+// three.steer sampling it for the whole pack in one crossing, then a sweep per
+// agent so they collide with the walls, the crates and the ground.
 // ---------------------------------------------------------------------------
 const PACK_N = 10;
 const CRITTER_R = 0.38, CRITTER_H = 1.15;
+const CRITTER_MOVE = { radius: CRITTER_R, height: CRITTER_H, step: 0.4, slope: 48, snap: 0.35 };
 
-// The cast is not collision geometry.
-//
-// **`collides = false` is the whole of what used to be a hide/show dance.**
-// Every drawable mesh is swept against, so a character built out of eight boxes
-// collided with its own chest, and the only way to exclude a whole subtree was
-// to hide it — which cost the spatial index a rebuild per toggle, twenty-two of
-// them a step. Now it is a per-mesh flag set once, at build time.
-//
-// Not inherited, so it is a traverse rather than one write on the Group: it
-// says what one piece of geometry IS, and a Group is not geometry.
-//
-// The per-call alternative is `{ ignore: group }` on moveAndSlide, which leaves
-// that subtree out of ONE sweep and holds up to eight of them. It is the right
-// tool when the exclusion is about the call — a projectile ignoring whoever
-// fired it. It is the wrong tool here twice over: there are eleven characters
-// and nobody may block anybody, which is more pairs than an ignore set holds,
-// and "you run through the enemies" is a property of the enemies rather than of
-// any one sweep. Crash runs through the ones that hurt him.
-//
-// They still collide with the ground, the crates, the boulders and the palms,
-// which is everything that should stop them.
-//
-// `collides: false` in the defaults is the whole of it now: `three.assemble`
-// walks the meshes it built and writes the flag to each, which is what the
-// `noCollide` traverse that used to sit here did by hand for both characters.
-const buildCritter = () => three.assemble({
-	body: { box: [0.7, 0.62, 0.86], at: [0, 0.5, 0], material: mat.critter },
-	head: { box: [0.5, 0.44, 0.44], at: [0, 0.92, 0.3], material: mat.critter },
-	leg: { mirror: 'x', pivot: [0.24, 0.24, 0], box: [0.18, 0.3, 0.24], at: [0, -0.12, 0], color: 0x5b4a2e },
-	eye: { mirror: 'x', box: [0.11, 0.12, 0.05], at: [0.13, 0.98, 0.53], color: 0xf2ead6 },
-}, { material: mat.flat, collides: false });
 
-// The pack is a CAST — plan.md §21.
+// The pack — the one class here with COLUMNS.
 //
-// Ten critters as COLUMNS rather than as ten objects with fields, and the
-// reason is not cache locality: `notes.md` §17 measured every JavaScript-side
-// layout inside the noise floor of the measurement itself. The reason is that
-// **a column is the buffer a bulk verb takes.** `position` below is handed
-// straight to `three.steer`, to `field.sample` and to `three.moveAndSlideAll`
-// with nothing marshalled in between, and the three of them are three crossings
-// for the whole pack instead of thirty.
+// **A column is the buffer a bulk verb takes.** `position` is handed straight
+// to field.sample, three.steer and three.moveAndSlideAll with nothing
+// marshalled in between: three crossings for the whole pack instead of thirty.
+// That is the only reason to declare one, and the rule for deciding is simply
+// whether a bulk verb reads the field.
 //
-// One Cast is one KIND of thing. A second sort of enemy is a second Cast and
-// its own systems, and nothing in this file changes to make room for it.
-const pack = three.cast({ capacity: PACK_N, name: 'pack' });
+// So `stun`, `walk`, `homeS` and `chasing` are ordinary properties — nothing
+// takes those in bulk.
+class Critter extends three.Entity {
+	static parent = groups.pack;
+	static capacity = PACK_N;
+	// Nobody in the pack is collision geometry: you run THROUGH the critters,
+	// and the `near` rule is what happens when you do. They still collide with
+	// the ground, the crates and the boulders, which is everything that should
+	// stop them.
+	static collides = false;
+	static columns = {
+		position: 3,   // the capsule CENTRE, moved in place
+		foot: 3,       // where the nav field is sampled
+		velocity: 3,   // what three.steer wants them to do
+		motion: 3,     // what this step actually asks for
+		arc: 3,        // the free flight of a launched one
+		cost: 1,       // ground distance to the player, written by field.sample
+		move: three.moveResult.stride,
+	};
 
-const P_POS = pack.vec3('position');      // the capsule CENTRE, moved in place
-const P_FOOT = pack.vec3('foot');         // where the nav field is sampled
-const P_VEL = pack.vec3('velocity');      // what three.steer wants them to do
-const P_MOTION = pack.vec3('motion');     // what this step actually asks for
-const P_ARC = pack.vec3('arc');           // the free flight of a launched one
-const P_MOVE = pack.buffer('move', three.moveResult.stride);
-const P_COST = pack.float('cost');        // ground distance to the player
-const P_HEADING = pack.float('heading');
-const P_WALK = pack.float('walk');        // the leg-swing phase
-const P_VY = pack.float('vy');
-const P_STUN = pack.float('stun');
-const P_LIFE = pack.float('life');        // how long a launch lasts
-const P_TUMBLE = pack.float('tumble');
-const P_BUILD = pack.float('build');      // which critter was built, for the legs
-const P_HOME_S = pack.float('homeS');
-const P_HOME_OFF = pack.float('homeOff');
+	constructor(i, s, off) {
+		super();
+		const at = onPath(s, off);
+		this.position[0] = at.x;
+		this.position[1] = groundY(at.x, at.z) + CRITTER_H / 2;
+		this.position[2] = at.z;
 
-const CHASING = pack.tag('chasing');
-const MOVING = pack.tag('moving');
-const LAUNCHED = pack.tag('launched');
+		this.heading = at.yaw;
+		this.walk = hash2(i, 9, 5) * 6;    // the leg-swing phase
+		this.vy = 0;
+		this.stun = 0;
+		this.life = 0;                     // how long a launch lasts
+		this.tumble = 0;
+		this.homeS = s;
+		this.homeOff = off;
+		this.chasing = false;
+		this.moving = false;
+		this.launched = false;
+		this.build = i;                    // which critter was built, not which slot it is in
 
-// The legs are an ordinary `three.batch`, not part of the cast, and the two
-// compose exactly as they should: a cast slot MOVES when something above it
-// dies, and a batch's membership does not. So the batch is indexed by the
-// critter's build number — which is what `P_BUILD` is — and a dead critter's
-// legs are left in it, where the host skips them because its Group has left the
-// scene. One crossing for twenty leg pivots.
-const legObjects = [];
+		const root = new three.Group();
+		root.add(box([0.7, 0.62, 0.86], [0, 0.5, 0], mat.critter));    // body
+		root.add(box([0.5, 0.44, 0.44], [0, 0.92, 0.3], mat.critter)); // head
+		for (const side of [-1, 1]) {
+			root.add(box([0.11, 0.12, 0.05], [side * 0.13, 0.98, 0.53], 0xf2ead6)); // eye
+		}
+		this.object = root;
+
+		// Its two leg pivots, and where they sit in the pack's leg batch.
+		this.legs = limbs(root, [0.24, 0.24, 0], [0.18, 0.3, 0.24], [0, -0.12, 0], 0x5b4a2e);
+		this.legAt = i * 2;
+	}
+
+	// The flow field the whole pack steers down: one solve, kept and re-aimed at
+	// the player a few times a second. It belongs to the pack, not to any one
+	// critter, so it is a static.
+	static flow = null;
+	static flowAge = 0;
+
+	static resolve() {
+		const next = three.nav.field([player.x, player.y + 0.2, player.z]);
+		if (next) {
+			if (Critter.flow) Critter.flow.dispose();
+			Critter.flow = next;
+		}
+		// A null answer means the player is off the mesh — mid-jump, or on a
+		// shelf the bake found too small. Keep the last good field, so the pack
+		// waits at the bottom of a ledge instead of forgetting you exist.
+		Critter.flowAge = 0;
+	}
+
+	// Twenty leg pivots in one crossing. A batch rather than a column because a
+	// leg is a separate NODE under the critter's root: `Critter.flush()` writes
+	// the roots, this writes what swings below them.
+	//
+	// Indexed by `legAt` and not by the slot — a slot moves when something above
+	// it dies, and a batch's membership does not. A dead critter's legs stay in
+	// it, where the host skips them because their Group has left the scene.
+	//
+	// Built on first draw, so the membership is whoever is alive then. The whole
+	// pack spawns before frame one; a critter spawned later would walk stiff.
+	static legBatch = null;
+
+	static swingLegs() {
+		if (Critter.legBatch === null) {
+			const pivots = [];
+			for (const c of Critter) pivots.push(c.legs[0], c.legs[1]);
+			Critter.legBatch = three.batch(pivots, { euler: true });
+		}
+		const b = Critter.legBatch;
+		for (const c of Critter) {
+			const swing = c.launched ? 0 : (c.moving ? Math.sin(c.walk) * 0.5 : 0);
+			b.positions[b.rotationAt(c.legAt)] = swing;
+			b.positions[b.rotationAt(c.legAt + 1)] = -swing;
+		}
+		return b.flush();
+	}
+
+	// Sent flying — by a spin, by a TNT, by anything with a direction and a
+	// number. The `arc` system below is what happens next, and it is the only
+	// thing that reads `life` and `launched`.
+	launch(dx, dz, power) {
+		this.arc[0] = dx * power;
+		this.arc[1] = 7.5;
+		this.arc[2] = dz * power;
+		this.life = 1.5;
+		this.stun = 1.5;
+		this.launched = true;
+	}
+}
 
 for (let i = 0; i < PACK_N; i++) {
-	const s = 26 + (i / PACK_N) * (PATH_LEN - 50);
-	const off = (hash2(i, 3, 77) - 0.5) * 5.2;
-	const at = onPath(s, off);
-	const built = buildCritter();
-	built.root.name = `critter${i}`;
-	groups.pack.add(built.root);
-	legObjects.push(built.leg[0], built.leg[1]);
-
-	const id = pack.spawn();
-	const slot = pack.indexOf(id);
-	// `pack.attach` is what makes `pack.of(object)` work, so the Map that used
-	// to sit beside this loop is one line of the cast now.
-	pack.attach(id, built.root);
-
-	P_POS[slot * 3] = at.x;
-	P_POS[slot * 3 + 1] = groundY(at.x, at.z) + CRITTER_H / 2;
-	P_POS[slot * 3 + 2] = at.z;
-	P_HEADING[slot] = at.yaw;
-	P_WALK[slot] = hash2(i, 9, 5) * 6;
-	P_BUILD[slot] = i;
-	P_HOME_S[slot] = s;
-	P_HOME_OFF[slot] = off;
-}
-const legs = three.batch(legObjects, { euler: true });
-
-// Retire one. `despawn` hands the Group back rather than removing it, because a
-// Cast is not a lifetime manager — and putting the removal at the call site is
-// what makes it obvious that the mesh outlives the entity by exactly as long as
-// this line takes.
-function retire(slot) {
-	const id = pack.idOf(slot);
-	if (id < 0) return;
-	groups.pack.remove(pack.despawn(id));
+	Critter.spawn(i, 26 + (i / PACK_N) * (PATH_LEN - 50), (hash2(i, 3, 77) - 0.5) * 5.2);
 }
 
-function launch(slot, dx, dz, power) {
-	P_ARC[slot * 3] = dx * power;
-	P_ARC[slot * 3 + 1] = 7.5;
-	P_ARC[slot * 3 + 2] = dz * power;
-	P_LIFE[slot] = 1.5;
-	P_STUN[slot] = 1.5;
-	pack.state[slot] |= LAUNCHED;
-}
-
-// The bake. AFTER the level is built — nothing bakes for you, and the whole
-// point of the number below is that you find out what it cost.
+// The bake, AFTER the level is built — nothing bakes for you.
 //
-// `bounds` is the one option that is not about the agent, and it is what keeps
-// this a level-boundary operation: the hollow's walls reach 21 units above a
-// floor that is never below zero, but nothing walks above the corridor, so
-// there is no reason to voxelize the sky over the cliffs.
+// `bounds` is the only option not about the agent, and it is what keeps the
+// cost down: the walls reach 21 units up, but nothing walks above the corridor,
+// so there is no reason to voxelize the sky over the cliffs.
 const pathBox = PATH.reduce((b, p) => ({
 	x0: Math.min(b.x0, p[0]), x1: Math.max(b.x1, p[0]),
 	z0: Math.min(b.z0, p[1]), z1: Math.max(b.z1, p[1]),
@@ -904,28 +1028,14 @@ const navBounds = {
 	min: [pathBox.x0 - NAV_PAD, -2, pathBox.z0 - NAV_PAD],
 	max: [pathBox.x1 + NAV_PAD, 16, pathBox.z1 + NAV_PAD],
 };
-// `radius` is the critter's own, which is worth saying because it could not be
-// until the erosion was fixed. The bake used to reserve the agent's width by
-// dilating the whole SOLID set horizontally; on a trail that descends — 5.7
-// degrees here, nothing a 48 degree slope limit would refuse — the uphill
-// column's floor cell landed in the downhill column at the uphill height, which
-// is exactly the cell the downhill agent had to stand in, and the graph came
-// apart into islands one dilation wide. A field solved at the player reached
-// four units and stopped, and the pack stood around looking like the steering
-// was broken. It now dilates the WALLS instead, so ground you stand on is not
-// something to keep clear of.
+// **Read `components`.** A fragmented bake looks healthy from every other
+// number — a big `walkable`, a live field, a plausible `bakeMs` — and the graph
+// coming apart shows up as the pack standing around as if the steering broke.
 //
-// **Read `components`.** It is the counter that would have caught that in one
-// line: everything else about a fragmented bake looks healthy — a big
-// `walkable`, a live field, a plausible `bakeMs` — and the only other way to
-// find out is to ask a second point whether it is reachable.
-//
-// More than one region is not automatically wrong, and this level is why: the
-// top of a crate and the top of a boulder are standing room nothing can walk
-// UP to, so they are honestly their own regions. The number to watch is
-// `largest` against `walkable` — 5190 of 5597 here, and the 407 left over are
-// the crate lids. A broken bake does not look like that; it looks like the
-// largest region being a fraction of the whole.
+// More than one region is not wrong by itself: the top of a crate is standing
+// room nothing can walk up to, so it is honestly its own region. Watch
+// `largest` against `walkable` — 5190 of 5597 here, and the rest are crate
+// lids. A broken bake has the largest region at a fraction of the whole.
 const bake = three.nav.bake({
 	cell: 0.75,
 	radius: CRITTER_R,
@@ -939,354 +1049,162 @@ if (bake && bake.largest < bake.walkable * 0.75) {
 		+ ' wherever they are. Look at the geometry before touching cell or radius.');
 }
 
-let flow = null;          // the kept solve, re-aimed at the player
-let flowAge = 0;
-const FLOW_EVERY = 0.35;  // seconds
-
-function resolveFlow() {
-	const next = three.nav.field([ctl.x, ctl.y + 0.2, ctl.z]);
-	if (next) {
-		if (flow) flow.dispose();
-		flow = next;
-	}
-	// A null answer means the player is off the mesh — mid-jump over a gap, on
-	// a shelf the bake found too small. Keep the last good field rather than
-	// dropping the pack, which is what makes them wait at the bottom of a ledge
-	// instead of forgetting you exist.
-	flowAge = 0;
-}
-
 // ---------------------------------------------------------------------------
-// The spin, as its own verb.
+// Picking up fruit — one rule.
+// ---------------------------------------------------------------------------
+// The rule resolves the trigger volume back to the fruit that owns it and hands
+// the handler its SUBJECT first, what it met second. No type test, no lookup.
 //
-// three.query.sphere with a buffer kept OUTSIDE the loop: the answer is a
-// broad-phase list of nodes, and what each one IS comes from asking the kind
-// and the cast rather than from a name. Crates in reach break; critters in
-// reach fly.
-// ---------------------------------------------------------------------------
-const hits = three.query.buffer(64);
-
-function spin() {
-	// start() answers false while active or still recovering, which is the
-	// readiness check playerStep used to make before calling this.
-	if (!ctl.spin.start()) return 0;
-	const centre = [ctl.x, ctl.y + HEIGHT / 2, ctl.z];
-	const n = three.query.sphere(centre, SPIN_R, hits);
-	for (const o of hits.objects()) {
-		const c = crate.of(o);
-		if (c) {
-			// Broad phase answers with boxes, so check the real distance before
-			// breaking something whose corner merely reached.
-			const p = c.object.position;
-			if (Math.abs(p.y - centre[1]) < 1.9 && Math.hypot(p.x - ctl.x, p.z - ctl.z) < SPIN_R) breakCrate(c);
-			continue;
-		}
-		// `pack.of` answers with an ID rather than an index, because a query
-		// answers with objects and an index is only good for the frame it was
-		// read in — `indexOf` is the one line that turns the durable name back
-		// into this frame's slot.
-		const i = pack.indexOf(pack.of(o));
-		if (i >= 0 && (pack.state[i] & LAUNCHED) === 0) {
-			const at = i * 3;
-			const d = Math.hypot(P_POS[at] - ctl.x, P_POS[at + 2] - ctl.z);
-			if (d < SPIN_R + 0.4) launch(i, (P_POS[at] - ctl.x) / (d || 1), (P_POS[at + 2] - ctl.z) / (d || 1), 15);
-		}
-	}
-	// Anything with a body just outside the break radius gets thrown instead.
-	for (const c of crate) {
-		const p = c.object.position;
-		const d = Math.hypot(p.x - ctl.x, p.z - ctl.z);
-		if (d > SPIN_R + 2.4 || d < 1e-4) continue;
-		three.physics.applyImpulse(c.object, [((p.x - ctl.x) / d) * 20, 8, ((p.z - ctl.z) / d) * 20]);
-	}
-	return n;
-}
+// Engine events queue and drain in the `rules` system at the top of the frame
+// rather than firing inside the solver, so removing the fruit here is safe.
+Wumpa.on('enter', Player, (f, p) => { f.remove(); p.collect(); });
 
 // ---------------------------------------------------------------------------
-// Picking up fruit. The trigger fires from inside the frame.
-// ---------------------------------------------------------------------------
-three.onTrigger(e => {
-	if (e.type !== 'enter' || !e.trigger) return;
-	// The trigger hands back the VOLUME, and `of` takes either door — the same
-	// record answers to the drawn fruit and to the reach around it.
-	const f = wumpa.of(e.trigger);
-	if (!f || e.other !== capsule) return;
-	wumpa.remove(f);
-	state.fruit++;
-	if (state.fruit % 25 === 0) {
-		state.lives++;
-		console.log(`25 wumpa — an extra life. ${state.lives} left.`);
-	}
-});
-
-// ---------------------------------------------------------------------------
-// The controller.
-//
-// The whole of the collision half is one call. There is no corridor fence, no
-// ground snap and no per-boulder circle test, because the wall, the floor and
-// the boulder are all just triangles it sweeps against.
-// ---------------------------------------------------------------------------
-// Nobody in the cast is collision geometry — `collides: false` in the critter's
-// assemble defaults, set once at build time, is the whole of what this used to
-// need.
-//
-// The fixed phase decides and the frame phase draws, which is now a property of
-// the system list rather than of where the code happens to sit. That ordering
-// is not load-bearing for correctness — a moved node has its entry RE-FILED
-// rather than the index rebuilt, so writing between two sweeps is cheap — and
-// it is kept because it is the clearer shape and because it is free.
-
-const held = k => three.input.isDown(k);
-const axis = (a, b) => ((a.some(held) ? 1 : 0) - (b.some(held) ? 1 : 0));
-const KEYS = {
-	forward: ['w', 'arrowup'], back: ['s', 'arrowdown'],
-	left: ['a', 'arrowleft'], right: ['d', 'arrowright'],
-	jump: ['space'], spin: ['j', 'k', 'shift'],
-	yawL: ['q'], yawR: ['e'], pitchU: ['r'], pitchD: ['f'],
-};
-// Edges mean something once per FRAME; the fixed loop runs zero to eight times
-// per frame. Latch in the animation callback, consume in the step.
-const intent = { jump: false, spin: false };
-
-const MOVE = { radius: RADIUS, height: HEIGHT, step: 0.45, slope: 52, skin: 0.02, snap: 0.4 };
-const CRITTER_MOVE = { radius: CRITTER_R, height: CRITTER_H, step: 0.4, slope: 48, snap: 0.35 };
-
-function playerStep(dt) {
-	// --- run, in the camera's frame ---
-	const move = three.camera.planarMove(axis(KEYS.forward, KEYS.back), axis(KEYS.right, KEYS.left));
-	ctl.moving = move.length() > 0;
-	if (ctl.moving) ctl.heading = Math.atan2(move.x, move.z);
-
-	// --- spin --- the readiness check now lives inside spin()'s start()
-	if (intent.spin) spin();
-	intent.spin = false;
-	if (ctl.spin.active) ctl.spinAngle += dt * 34;
-	else ctl.spinAngle *= 0.72;
-
-	// --- vertical --- restart() every grounded frame keeps the window open
-	// the whole time the player is on the ground, same as ctl.coyote = 0.12
-	// did; cancel() is the immediate "spent it" ctl.coyote = 0 was.
-	if (ctl.grounded) ctl.coyote.start({ restart: true });
-	if (intent.jump && ctl.coyote.active) { ctl.vy = JUMP; ctl.coyote.cancel(); ctl.grounded = false; }
-	intent.jump = false;
-	ctl.vy = Math.max(ctl.vy - GRAV * dt, -42);
-
-	// --- one call: the wall, the floor, the ledge and the boulder ---
-	const speed = ctl.hurt.active ? SPEED * 0.45 : SPEED;
-	const motion = [move.x * speed * dt, ctl.vy * dt, move.z * speed * dt];
-	const r = three.moveAndSlide([ctl.x, ctl.y + HEIGHT / 2, ctl.z], motion, MOVE);
-
-	ctl.x = r.position.x;
-	ctl.y = r.position.y - HEIGHT / 2;
-	ctl.z = r.position.z;
-
-	// Landing on a crate breaks it and bounces — Crash's other verb, and the
-	// reason the vertical half is spelled out rather than handed to a helper.
-	if (ctl.vy < 0 && r.grounded) {
-		const c = crate.of(r.ground);
-		if (c) {
-			breakCrate(c);
-			ctl.vy = c.bounce ? JUMP * 1.15 : JUMP * 0.72;
-			ctl.grounded = false;
-		} else {
-			ctl.vy = 0; ctl.grounded = true;
-		}
-	} else if (r.grounded) {
-		if (ctl.vy < 0) ctl.vy = 0;
-		ctl.grounded = true;
-	} else {
-		ctl.grounded = false;
-		// Hitting a ceiling: stop climbing rather than hanging under it.
-		if (ctl.vy > 0 && r.remaining.y > 1e-4) ctl.vy = 0;
-	}
-
-	// Fell off the world.
-	if (ctl.y < -6) hurt(true);
-
-	// --- how far down the hollow ---
-	const near = nearestOnPath(ctl.x, ctl.z);
-	ctl.s = near.s;
-	if (near.s > state.best) state.best = near.s;
-	if (!state.done && near.s > PATH_LEN - 8) {
-		state.done = true;
-		console.log(`Made it. ${state.fruit} wumpa, ${state.broken} crates, ${state.lives} lives.`);
-	}
-}
-
-function hurt(fell) {
-	// The Cooldown ticks itself; start() answering false IS this refusal.
-	if (!ctl.hurt.start()) return;
-	state.lives--;
-	const back = onPath(Math.max(2, state.best - 12), 0);
-	if (fell || state.lives <= 0) {
-		ctl.x = back.x; ctl.z = back.z; ctl.y = groundY(back.x, back.z) + 0.4; ctl.vy = 0;
-	}
-	if (state.lives <= 0) {
-		state.lives = 4;
-		state.fruit = Math.max(0, state.fruit - 10);
-		console.log('Out of lives — back down the trail.');
-	} else {
-		console.log(`Ouch. ${state.lives} lives left.`);
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The pack's step.
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// The pack's systems.
-//
-// What used to be one hundred and one lines of `packStep` is six named things
-// that run in a declared order, and `three.systems.report()` says what each one
-// costs. Three of the six are one crossing apiece for the whole pack.
+// The pack's systems — six named things in a declared order. Three of them are
+// one crossing apiece for the whole pack, whatever its size.
 // ---------------------------------------------------------------------------
 
 // The kept solve, re-aimed at the player a few times a second.
-pack.system('flow', (dt) => {
-	flowAge += dt;
-	if (flow === null || flowAge >= FLOW_EVERY) resolveFlow();
+const FLOW_EVERY = 0.35;  // seconds
+Critter.system('flow', (dt) => {
+	Critter.flowAge += dt;
+	if (Critter.flow === null || Critter.flowAge >= FLOW_EVERY) Critter.resolve();
 }, { phase: 'fixed', order: 1 });
 
 // How far everyone is from the player, ALONG THE GROUND — one crossing, and
 // `field.cost` in a loop is what it replaces. A NEGATIVE cost is unreachable
 // here where `cost()` answers Infinity, which is the one place the convenient
 // form and the flat form disagree about a value.
-pack.system('sense', () => {
-	const n = pack.count;
-	for (let i = 0; i < n; i++) {
-		P_FOOT[i * 3] = P_POS[i * 3];
-		P_FOOT[i * 3 + 1] = P_POS[i * 3 + 1] - CRITTER_H / 2 + 0.2;
-		P_FOOT[i * 3 + 2] = P_POS[i * 3 + 2];
+Critter.system('sense', () => {
+	for (const c of Critter) {
+		c.foot[0] = c.position[0];
+		c.foot[1] = c.position[1] - CRITTER_H / 2 + 0.2;
+		c.foot[2] = c.position[2];
 	}
-	if (flow) {
-		flow.sample(pack.live(P_FOOT), { costs: pack.live(P_COST) });
+	if (Critter.flow) {
+		Critter.flow.sample(Critter.column('foot'), { costs: Critter.column('cost') });
 	} else {
-		pack.live(P_COST).fill(-1);
+		Critter.column('cost').fill(-1);
 	}
 	// Out of earshot: hold station near home rather than sprinting the whole
 	// level at you, which is what makes a hollow feel populated.
-	for (let i = 0; i < n; i++) {
-		const heard = P_COST[i] >= 0 && P_COST[i] < 26 && P_STUN[i] <= 0;
-		if (heard) pack.state[i] |= CHASING; else pack.state[i] &= ~CHASING;
+	for (const c of Critter) {
+		c.chasing = c.cost[0] >= 0 && c.cost[0] < 26 && c.stun <= 0;
 	}
 }, { phase: 'fixed', order: 2 });
 
 // Seek, arrive and separation for the whole pack in one crossing. What comes
 // back is a DESIRED velocity — going there is still moveAndSlide's decision.
-pack.system('steer', () => {
-	if (flow) {
-		three.steer(pack.live(P_POS), pack.live(P_VEL), {
-			field: flow, maxSpeed: 4.6, arrive: 1.6, separation: 1.5, separationWeight: 1.5,
+Critter.system('steer', () => {
+	if (Critter.flow) {
+		three.steer(Critter.column('position'), Critter.column('velocity'), {
+			field: Critter.flow, maxSpeed: 4.6, arrive: 1.6, separation: 1.5, separationWeight: 1.5,
 		});
 	} else {
-		pack.live(P_VEL).fill(0);
+		Critter.column('velocity').fill(0);
 	}
 }, { phase: 'fixed', order: 3 });
 
-// The whole pack's collision, in one call.
-//
-// A launched critter is given zero motion here and has its position overwritten
-// by `arc` below, so its sweep is wasted work — a handful of agents for a
-// second and a half apiece, against branching the one call that is the reason
-// any of this is fast.
-pack.system('walk', (dt) => {
-	const n = pack.count;
-	for (let i = 0; i < n; i++) {
-		const at = i * 3;
-		if ((pack.state[i] & LAUNCHED) !== 0) {
-			P_MOTION[at] = 0; P_MOTION[at + 1] = 0; P_MOTION[at + 2] = 0;
+// The whole pack's collision, in one call. A launched critter is given zero
+// motion and has its position overwritten by `arc` below, so its sweep is
+// wasted — cheaper than branching the one call that makes this fast.
+Critter.system('walk', (dt) => {
+	for (const c of Critter) {
+		if (c.launched) {
+			c.motion[0] = 0; c.motion[1] = 0; c.motion[2] = 0;
 			continue;
 		}
-		if (P_STUN[i] > 0) P_STUN[i] -= dt;
+		if (c.stun > 0) c.stun -= dt;
 
-		let vx = P_VEL[at], vz = P_VEL[at + 2];
-		if ((pack.state[i] & CHASING) === 0) {
-			const h = onPath(P_HOME_S[i] + Math.sin(three.clock.time * 0.5 + i) * 5, P_HOME_OFF[i]);
-			const dx = h.x - P_POS[at], dz = h.z - P_POS[at + 2], d = Math.hypot(dx, dz);
+		let vx = c.velocity[0], vz = c.velocity[2];
+		if (!c.chasing) {
+			const h = onPath(c.homeS + Math.sin(three.clock.time * 0.5 + c.build) * 5, c.homeOff);
+			const dx = h.x - c.position[0], dz = h.z - c.position[2], d = Math.hypot(dx, dz);
 			vx = d > 0.4 ? (dx / d) * 1.7 : 0;
 			vz = d > 0.4 ? (dz / d) * 1.7 : 0;
-		} else if (P_STUN[i] > 0) {
+		} else if (c.stun > 0) {
 			vx *= 0.2; vz *= 0.2;
 		}
 
-		P_VY[i] = Math.max(P_VY[i] - GRAV * dt, -40);
-		P_MOTION[at] = vx * dt;
-		P_MOTION[at + 1] = P_VY[i] * dt;
-		P_MOTION[at + 2] = vz * dt;
+		c.vy = Math.max(c.vy - GRAV * dt, -40);
+		c.motion[0] = vx * dt;
+		c.motion[1] = c.vy * dt;
+		c.motion[2] = vz * dt;
 
-		const moving = Math.hypot(vx, vz) > 0.25;
-		if (moving) P_HEADING[i] = Math.atan2(vx, vz);
-		if (moving) pack.state[i] |= MOVING; else pack.state[i] &= ~MOVING;
-		P_WALK[i] += dt * ((pack.state[i] & CHASING) ? 15 : 9) * (moving ? 1 : 0);
+		c.moving = Math.hypot(vx, vz) > 0.25;
+		if (c.moving) c.heading = Math.atan2(vx, vz);
+		c.walk += dt * (c.chasing ? 15 : 9) * (c.moving ? 1 : 0);
 	}
 
-	three.moveAndSlideAll(pack.live(P_POS), pack.live(P_MOTION), {
+	// `Critter.handles` is both things a crowd needs in one array: the `self`
+	// column that keeps an agent from colliding with its own mesh, and the
+	// handle array the flush below writes through.
+	three.moveAndSlideAll(Critter.column('position'), Critter.column('motion'), {
 		...CRITTER_MOVE,
-		results: pack.live(P_MOVE),
-		self: pack.live(pack.handles),
+		results: Critter.column('move'),
+		self: Critter.handles,
 	});
 
-	for (let i = 0; i < n; i++) {
-		if ((pack.state[i] & LAUNCHED) !== 0) continue;
-		const grounded = (P_MOVE[i * 8 + three.moveResult.flags] | 0) & three.moveResult.GROUNDED;
-		if (grounded && P_VY[i] < 0) P_VY[i] = 0;
-		if (P_POS[i * 3 + 1] < -6) retire(i);
+	for (const c of Critter) {
+		if (c.launched) continue;
+		const grounded = (c.move[three.moveResult.flags] | 0) & three.moveResult.GROUNDED;
+		if (grounded && c.vy < 0) c.vy = 0;
+		if (c.position[1] < -6) c.remove();
 	}
 }, { phase: 'fixed', order: 4 });
 
 // The ones a spin or a TNT sent flying: a free arc, no steering, and the only
 // thing they collide with is the ground they land on.
-pack.system('arc', (dt) => {
-	for (let i = 0; i < pack.count; i++) {
-		if ((pack.state[i] & LAUNCHED) === 0) continue;
-		const at = i * 3;
-		P_LIFE[i] -= dt;
-		P_ARC[at + 1] -= GRAV * 0.7 * dt;
-		P_POS[at] += P_ARC[at] * dt;
-		P_POS[at + 1] += P_ARC[at + 1] * dt;
-		P_POS[at + 2] += P_ARC[at + 2] * dt;
-		P_TUMBLE[i] += dt * 16;
+Critter.system('arc', (dt) => {
+	for (const c of Critter) {
+		if (!c.launched) continue;
+		c.life -= dt;
+		c.arc[1] -= GRAV * 0.7 * dt;
+		c.position[0] += c.arc[0] * dt;
+		c.position[1] += c.arc[1] * dt;
+		c.position[2] += c.arc[2] * dt;
+		c.tumble += dt * 16;
 
-		const foot = P_POS[at + 1] - CRITTER_H / 2;
-		const ground = groundY(P_POS[at], P_POS[at + 2]);
-		if (foot > ground && P_LIFE[i] > 0) continue;
+		const foot = c.position[1] - CRITTER_H / 2;
+		const ground = groundY(c.position[0], c.position[2]);
+		if (foot > ground && c.life > 0) continue;
 
-		P_POS[at + 1] = Math.max(P_POS[at + 1], ground + CRITTER_H / 2);
-		pack.state[i] &= ~LAUNCHED;
-		P_VY[i] = 0;
-		if (Math.abs(P_POS[at]) > W / 2 - 4 || Math.abs(P_POS[at + 2]) > D / 2 - 4 || foot < -4) retire(i);
+		c.position[1] = Math.max(c.position[1], ground + CRITTER_H / 2);
+		c.launched = false;
+		c.vy = 0;
+		if (Math.abs(c.position[0]) > W / 2 - 4 || Math.abs(c.position[2]) > D / 2 - 4 || foot < -4) c.remove();
 	}
 }, { phase: 'fixed', order: 5 });
 
-// Reaching the player costs a life — unless you are spinning, in which case it
-// is the critter that loses.
-pack.system('touch', () => {
-	for (let i = 0; i < pack.count; i++) {
-		if ((pack.state[i] & 1) === 0 || (pack.state[i] & LAUNCHED) !== 0) continue;
-		const at = i * 3;
-		const d = Math.hypot(ctl.x - P_POS[at], ctl.z - P_POS[at + 2]);
-		if (d >= 0.95 || ctl.hurt.active) continue;
-		const nx = (P_POS[at] - ctl.x) / (d || 1), nz = (P_POS[at + 2] - ctl.z) / (d || 1);
-		if (ctl.spin.active) { launch(i, nx, nz, 15); } else { hurt(false); launch(i, nx, nz, 7); }
-	}
-}, { phase: 'fixed', order: 6 });
+// Reaching the player costs a life — unless you are spinning, in which case the
+// critter loses.
+//
+// **`near` is the event physics never raises**, because moveAndSlide produces
+// no contact. `{ within }` is the hand-written hypot loop, in the engine, once.
+// It reads the critter's position COLUMN and the player's collision VOLUME, so
+// it tests where they actually are rather than where the draw last put them.
+Critter.on('near', Player, (c, p) => {
+	if (c.launched || p.hurting.active) return;
+	const d = Math.hypot(c.position[0] - p.x, c.position[2] - p.z) || 1;
+	const nx = (c.position[0] - p.x) / d, nz = (c.position[2] - p.z) / d;
+	if (p.spinning.active) c.launch(nx, nz, 15);
+	else { p.hurt(false); c.launch(nx, nz, 7); }
+}, { within: 0.95 });
 
-// Drawing them: two crossings for the whole pack, whatever its size. `pose`
-// carries the capsule-centre-to-feet offset, because the capsule's centre and
-// the model's origin are never the same point.
-pack.system('draw', () => {
-	pack.pose(P_POS, { lift: -CRITTER_H / 2, heading: P_HEADING });
-	for (let i = 0; i < pack.count; i++) {
-		if ((pack.state[i] & LAUNCHED) !== 0) {
-			pack.transform[i * 9 + 4] = P_TUMBLE[i];
-		}
-		const build = P_BUILD[i] | 0;
-		const swing = (pack.state[i] & LAUNCHED) ? 0 : ((pack.state[i] & MOVING) ? Math.sin(P_WALK[i]) * 0.5 : 0);
-		legs.positions[legs.rotationAt(build * 2)] = swing;
-		legs.positions[legs.rotationAt(build * 2 + 1)] = -swing;
+// Drawing them: two crossings for the whole pack, whatever its size. `lift`
+// carries the capsule-centre-to-feet offset — those are never the same point —
+// and `heading` here is an ordinary field, which pose reads just as happily as
+// a column.
+Critter.system('draw', () => {
+	Critter.pose('position', { lift: -CRITTER_H / 2, heading: 'heading' });
+	const t = Critter.transform;
+	let slot = 0;
+	for (const c of Critter) {
+		if (c.launched) t[slot * 9 + 4] = c.tumble;
+		slot++;
 	}
-	pack.flush();
-	legs.flush();
+	Critter.flush();
+	Critter.swingLegs();
 }, { order: 40 });
 
 // ---------------------------------------------------------------------------
@@ -1309,80 +1227,46 @@ const sky = three.setPost({
 });
 
 // ---------------------------------------------------------------------------
-// The frame, as a list of named things — plan.md §21.
+// The frame, as a list of named things.
 //
-// This used to be one ninety-line `setAnimationLoop` doing the camera look, the
-// key latching, the transform write-back for every character, the player's
-// pose, the fruit's bob and the debris, none of which knew about each other.
-// Adding a sixth thing meant editing that function.
+// Gameplay runs in the FIXED phase, at a dt that is the same every call.
+// Drawing the consequence runs in the frame phase, which is also the only
+// place a key EDGE means anything.
 //
-// `three.systems.report()` says what each of these costs, most expensive first,
-// which is the CPU half of what `three.stats()` has always given the GPU half.
-// `three.systems.list()` is the running order; the pack's own six are declared
-// beside the pack.
-//
-// Gameplay is in the FIXED phase, at a dt that is the same every call. Drawing
-// the consequence is in the frame phase, which is also the only place a key
-// EDGE means anything.
+// `three.systems.list()` is the running order and `three.systems.report()` says
+// what each one costs, most expensive first. The pack's six are declared beside
+// the pack; these are what is left.
 // ---------------------------------------------------------------------------
-three.camera.attach(P.root, { offset: [0, 1.5, 0], distance: ctl.dist, lag: 95 });
+three.camera.attach(player.object, { offset: [0, 1.5, 0], distance: player.dist, lag: 95 });
 three.controls.enabled = false;
-three.camera.orbit(ctl.yaw, ctl.pitch, ctl.dist);
+three.camera.orbit(player.yaw, player.pitch, player.dist);
 
 sky.uniforms.viewFar = three.camera.far;
 
-three.systems.add('player', dt => {
+// Declared on the class, so they report as `Player.step`, `Player.pose` and so
+// on, and `Player.dispose()` would take them with it. What each one does is a
+// method; where it runs is the option beside it.
+Player.system('step', dt => {
 	if (three.clock.paused) return;
-	playerStep(dt);
+	player.step(dt);
 }, { phase: 'fixed', order: 0 });
 
-three.systems.add('look', dt => {
-	const ptr = three.input.pointer;
-	if (ptr.down) { ctl.yaw -= ptr.dx * 0.24; ctl.pitch += ptr.dy * 0.2; }
-	ctl.yaw += axis(KEYS.yawL, KEYS.yawR) * 120 * dt;
-	ctl.pitch += axis(KEYS.pitchU, KEYS.pitchD) * 60 * dt;
-	ctl.pitch = clamp(ctl.pitch, -4, 70);
-	ctl.dist = clamp(ctl.dist + ptr.scroll, 6, 22);
-	three.camera.orbit(ctl.yaw, ctl.pitch, ctl.dist);
-}, { order: 10 });
+Player.system('look', dt => player.look(dt), { order: 10 });
 
-// Edges mean something once per FRAME; the fixed loop runs zero to eight times
-// per frame. Latched here, consumed there — which is why this is a system of
-// its own rather than three lines at the top of another one.
-three.systems.add('latch', () => {
-	if (KEYS.jump.some(k => three.input.pressed(k))) intent.jump = true;
-	if (KEYS.spin.some(k => three.input.pressed(k))) intent.spin = true;
+// Edges mean something once per FRAME, and the fixed loop runs zero to eight
+// times per frame — so latch here, consume in `step`.
+Player.system('latch', () => {
+	if (KEYS.jump.some(k => three.input.pressed(k))) player.intent.jump = true;
+	if (KEYS.spin.some(k => three.input.pressed(k))) player.intent.spin = true;
 }, { order: 20 });
 
-// The player is one character, so it is the SINGLE-agent verbs all the way
-// through — including the ordinary property writes here. A cast of one would be
-// a column of one and a crossing saved that was never spent.
-three.systems.add('player.pose', dt => {
-	P.root.position.set(ctl.x, ctl.y, ctl.z);
-	capsule.position.set(ctl.x, ctl.y + HEIGHT / 2, ctl.z);
-	P.root.rotation.y = ctl.heading;
-	P.spinner.rotation.y = ctl.spinAngle;
-	if (ctl.moving && ctl.grounded) ctl.walkT += dt * 13;
-	const swing = ctl.moving && ctl.grounded ? Math.sin(ctl.walkT) * 0.62 : 0;
-	P.leg[0].rotation.x = swing; P.leg[1].rotation.x = -swing;
-	const out = ctl.spin.active ? 1 : 0;
-	P.arm[0].rotation.x = -swing * 0.7 * (1 - out);
-	P.arm[1].rotation.x = swing * 0.7 * (1 - out);
-	P.arm[0].rotation.z = out * 1.5;
-	P.arm[1].rotation.z = -out * 1.5;
-	if (!ctl.grounded) { P.leg[0].rotation.x = 0.5; P.leg[1].rotation.x = -0.3; }
-}, { order: 30 });
+Player.system('pose', dt => player.pose(dt), { order: 30 });
 
-// The fruit is deliberately NOT a cast, and it is worth saying why: each one is
-// a drawn mesh plus a trigger volume the solver owns, and what the pickup is
-// keyed by is the volume's OBJECT IDENTITY, arriving through three.onTrigger.
-// A cast buys nothing where the loop is over two dozen things that are already
-// addressed by object, and it would cost a second index to get back to them.
-// The volume is no longer written here: `wumpa.follow` carries it, at an order
-// far above this one, so it sees whatever this system decided the fruit's
-// height was.
-three.systems.add('fruit', dt => {
-	for (const f of wumpa) {
+// No columns: nothing takes two dozen bobbing fruit in bulk. The trigger volume
+// is not written here either — `Wumpa.follow` runs later and picks up wherever
+// this left the fruit.
+Wumpa.system('bob', dt => {
+	for (const f of Wumpa) {
 		f.spin += dt * 3;
 		f.object.rotation.y = f.spin;
 		if (f.free) {
@@ -1415,11 +1299,11 @@ three.systems.add('chips', dt => {
 three.systems.add('sky', () => { sky.uniforms.viewFar = three.camera.far; }, { order: 70 });
 
 // ---------------------------------------------------------------------------
-// What the level cost to build, which is the honest way to report a bake.
+// What the level cost to build.
 // ---------------------------------------------------------------------------
 const nav = three.nav.stats();
-console.log(`hollow: ${PATH_LEN.toFixed(0)} units of trail, ${crate.count} crates, `
-	+ `${wumpa.count} wumpa, ${pack.alive} critters`);
+console.log(`hollow: ${PATH_LEN.toFixed(0)} units of trail, ${Crate.count} crates, `
+	+ `${Wumpa.count} wumpa, ${Critter.count} critters`);
 if (nav) {
 	console.log(`nav: cell ${nav.cell}, ${nav.voxels} voxels, ${nav.walkable} walkable, `
 		+ `${nav.components} regions (largest ${nav.largest}), baked in ${nav.bakeMs.toFixed(1)} ms`);
@@ -1429,9 +1313,9 @@ if (nav) {
 
 return {
 	trail: Math.round(PATH_LEN),
-	crates: crate.count,
-	wumpa: wumpa.count,
-	critters: pack.alive,
+	crates: Crate.count,
+	wumpa: Wumpa.count,
+	critters: Critter.count,
 	nav: bake && {
 		cell: bake.cell, voxels: bake.voxels, walkable: bake.walkable,
 		components: bake.components, largest: bake.largest, bakeMs: +bake.bakeMs.toFixed(1),

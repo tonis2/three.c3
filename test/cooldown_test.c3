@@ -373,7 +373,7 @@ fn void an_invalid_duration_is_refused() @test
 }
 
 // A typo in an option key is a thrown sentence naming both the typo and what
-// the call actually takes — `three.assemble`'s `PART_KEYS` refusal, reused.
+// the call actually takes.
 fn void an_unknown_option_key_is_refused() @test
 {
 	@with_gpu_js(; three::JsRuntime* run)

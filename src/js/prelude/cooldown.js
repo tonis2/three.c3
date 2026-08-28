@@ -91,7 +91,7 @@ function _unregister(coolDown) {
 }
 
 // Every key in `options` must be one `keys` names, or the call is refused —
-// the typo protection `three.assemble`'s `PART_KEYS` check gives a part spec.
+// the typo protection an options object deserves.
 function _checkOptions(options, keys, where) {
 	if (options === null || options === undefined) return;
 	if (typeof options !== 'object') {
