@@ -1027,6 +1027,33 @@ const debug = {
 		}
 		H.debugViewSet(index);
 	},
+
+	// What the run answers with, without returning it. Every argument becomes one
+	// entry in the `debug` array of the result, beside `value`, as JSON rather
+	// than as text inside the log — so an object stays an object.
+	//
+	// A `return` is one expression at one place, and inside a system there is no
+	// return at all. This can be called wherever the number was worked out:
+	//
+	//   three.debug.write({ crates: Crate.count, wumpa: Wumpa.count });
+	//   Player.system('score', p => { if (p.done) three.debug.write(p.fruit); });
+	//
+	// Written from a callback, entries are held and reported by the NEXT run
+	// rather than lost, the way console.log from one is.
+	//
+	// Beside `view` because both are the same question — what is this run doing
+	// that the frame does not show — answered once in pixels and once in numbers.
+	write(...values) {
+		// A cycle throws in JSON.stringify and a function stringifies to nothing.
+		// Settled here, where String(value) is at hand, rather than in the host:
+		// an entry that arrived as text is worth more than one that vanished.
+		for (const value of values) {
+			let keep = value;
+			try { if (JSON.stringify(value) === undefined) keep = String(value); }
+			catch (e) { keep = String(value); }
+			H.debugWrite(keep);
+		}
+	},
 };
 
 // -----------------------------------------------------------------------

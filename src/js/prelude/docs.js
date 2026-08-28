@@ -1470,6 +1470,17 @@ export const DOCS = {
 			+ 'not a guarantee: the sampler gives up after a bounded number of tries and returns a '
 			+ 'shorter list rather than spinning, so read .length. The same seed places the same points, '
 			+ 'which is what makes a screenshot comparable to yesterday\'s.',
+		'three.debug.write(...values)':
+			'Answers with a value without returning it. Every argument becomes one entry in the '
+			+ 'debug array of the result, beside value, as JSON rather than as text inside the log — '
+			+ 'so an object stays an object instead of arriving escaped in a string. Two things a '
+			+ 'return cannot do: it can be called from wherever the number was worked out rather '
+			+ 'than gathered into one expression at the last line, and it works inside a system or '
+			+ 'an animation callback, where there is no return at all. Entries written in a frame '
+			+ 'are held and reported by the NEXT run, the way console.log from a callback is. A '
+			+ 'value with no JSON form — a cycle, a function, undefined — arrives as the text '
+			+ 'String(value) would have shown rather than punching a hole in the array. '
+			+ 'Example: three.debug.write({ crates: Crate.count, wumpa: Wumpa.count }).',
 		'three.stats()':
 			'The numbers below, for the whole scene, with culling off. The six ...Ms are the exception: '
 			+ 'they are not facts about the scene but measurements of the last frame drawn, so they move '

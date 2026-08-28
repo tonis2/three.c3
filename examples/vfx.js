@@ -669,7 +669,7 @@ three.camera.orbit(22, 12, 26);
 // origin — which puts the fresnel inside the dome and lights the whole thing.
 V.shieldMat.uniforms.eye = V.eye();
 
-return {
+three.debug.write({
 	keys: {
 		space: 'fire — shield ring and a shockwave through the post pass',
 		d: 'dissolve the crates and bring them back',
@@ -691,4 +691,4 @@ return {
 		post: Object.keys(V.pass.textures),
 	},
 	stats: three.stats(),
-};
+});

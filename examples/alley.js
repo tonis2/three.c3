@@ -187,8 +187,8 @@ A.rerack();
 three.camera.lookAt(0, 1.6, -3);
 three.camera.orbit(24, 14, 20);
 
-return {
+three.debug.write({
 	keys: { space: 'roll', r: 're-rack', b: 'bomb the stack', a: 'auto on/off' },
 	auto: 'rolls every ~7.7s on its own',
 	stats: three.stats(),
-};
+});

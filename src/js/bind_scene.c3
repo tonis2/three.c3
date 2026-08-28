@@ -129,6 +129,7 @@ fn void JsRuntime.install_bindings(&self)
 
 	// The frame
 	self.bind(host, "stats", &js_stats, 1);
+	self.bind(host, "debugWrite", &js_debug_write, 1);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);

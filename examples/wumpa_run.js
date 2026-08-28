@@ -1311,7 +1311,7 @@ if (nav) {
 	console.log('nav: the bake found no standing room — the pack will hold station');
 }
 
-return {
+three.debug.write({
 	trail: Math.round(PATH_LEN),
 	crates: Crate.count,
 	wumpa: Wumpa.count,
@@ -1321,4 +1321,4 @@ return {
 		components: bake.components, largest: bake.largest, bakeMs: +bake.bakeMs.toFixed(1),
 	},
 	stats: three.stats(),
-};
+});

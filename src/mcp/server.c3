@@ -73,9 +73,11 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 			"Run a JavaScript scene script and get back everything it logged, the value it "
 			"returned, the scene's stats, and a PNG of the frame. The API is Three.js-shaped: "
 			"three.load, three.Scene, three.Mesh, three.Group, position/rotation/scale, add/remove. "
-			"Call get_api_docs first if you have not seen it. Use `return` to send a value back.",
+			"Call get_api_docs first if you have not seen it. Use `return` to send a value back, "
+			"or three.debug.write(x) to send one from anywhere in the script — including from "
+			"inside a system, where there is no return.",
 		.input_schema =
-			`{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await and return both work."}},"required":["source"]}`,
+			`{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await and return both work. three.debug.write(x) answers with x without returning; it arrives in the debug field, beside value."}},"required":["source"]}`,
 		.handler = &tool_run_script,
 		.user_data = host,
 		.raw_content = true,
@@ -170,6 +172,16 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 	// the agent the characters of its own result instead of the result.
 	report.append_string(`,"value":`);
 	report.append_string(result.value.len > 0 ? result.value : "null");
+
+	// Beside `value` and only when the script wrote one, for the reason `warnings`
+	// sits beside `log`: what a script SAID on its way through and what it ANSWERED
+	// with are two facts, and a caller that has to guess which one it is holding
+	// reads neither. Spliced for the same reason `value` is — it is already JSON.
+	if (result.debug.len > 0)
+	{
+		report.append_string(`,"debug":`);
+		report.append_string(result.debug);
+	}
 
 	if (!result.ok)
 	{

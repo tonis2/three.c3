@@ -194,6 +194,10 @@ struct RunResult
 	// not the same as returning null, and JSON is why: `null` is four characters
 	// and `undefined` has no JSON form at all.
 	String value;
+	// What `three.debug.write` collected, as a JSON array. Empty when nothing was
+	// written, and a different fact from `value`: this is what the script SAID on
+	// its way through, `value` is what it answered with at the end.
+	String debug;
 	// The message and, when the throw carried one, the stack. Empty when `ok`.
 	String error;
 	<*
@@ -241,6 +245,7 @@ fn void RunResult.free(&self)
 {
 	if (self.log.ptr != null) self.log.free(mem);
 	if (self.value.ptr != null) self.value.free(mem);
+	if (self.debug.ptr != null) self.debug.free(mem);
 	if (self.error.ptr != null) self.error.free(mem);
 	if (self.warnings.ptr != null) self.warnings.free(mem);
 	if (self.frame_error.ptr != null) self.frame_error.free(mem);
@@ -264,6 +269,11 @@ struct JsRuntime
 
 	DString log;
 	DString value;
+	// `three.debug.write`, as comma-separated JSON entries with no brackets —
+	// `debug_json` puts those on at the end. A sink rather than a return value so
+	// that a script can answer from three places instead of gathering everything
+	// it wants to say into one live object at the last line.
+	DString debug;
 	DString error;
 	// What `advice.c3` had to say during the run, copied out of the sink so that
 	// `RunResult` can own a string like the three above rather than a view into a
@@ -314,6 +324,12 @@ struct JsRuntime
 	long frame_ticks;
 	DString frame_log;
 	long frame_dropped;
+	// `three.debug.write` from inside a callback, held for the next run to report
+	// exactly as `frame_log` is. A system that writes every frame writes when no
+	// run is listening, and without this its entries would land in `debug` and be
+	// cleared unread at the top of the next one.
+	DString frame_debug;
+	long frame_debug_dropped;
 	DString frame_error;
 	// The game frame policy, set by `--assets` through `set_assets_root`: a game
 	// is warned and counted where an agent is stopped.
@@ -440,8 +456,10 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.log.init(mem, 1024);
 	self.advice.init(mem, 256);
 	self.value.init(mem, 256);
+	self.debug.init(mem, 256);
 	self.error.init(mem, 256);
 	self.frame_log.init(mem, 512);
+	self.frame_debug.init(mem, 256);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
 	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
@@ -491,8 +509,10 @@ fn void JsRuntime.close(&self)
 	self.log.free();
 	self.advice.free();
 	self.value.free();
+	self.debug.free();
 	self.error.free();
 	self.frame_log.free();
+	self.frame_debug.free();
 	self.frame_error.free();
 	self.input_text.free();
 	self.modules.free();
@@ -534,6 +554,7 @@ fn RunResult JsRuntime.run_module(&self, String specifier)
 	{
 		self.log.clear();
 		self.value.clear();
+		self.debug.clear();
 		self.error.clear();
 		self.error.appendf("could not read %s: %s", specifier, err)!!;
 		self.rejected = true;
@@ -542,6 +563,7 @@ fn RunResult JsRuntime.run_module(&self, String specifier)
 			.ok = false,
 			.log = self.log.copy_str(mem),
 			.value = self.value.copy_str(mem),
+			.debug = self.debug.copy_str(mem),
 			.error = self.error.copy_str(mem),
 			.warnings = self.advice.copy_str(mem),
 			.frame_error = self.frame_error.copy_str(mem),
@@ -559,10 +581,14 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 {
 	self.log.clear();
 	self.value.clear();
+	self.debug.clear();
 	self.error.clear();
 	// Into the log before the script has written a line of its own, so the two
 	// arrive in the order they happened. `drain_frame_log` labels both halves.
 	if (drain_frame) self.drain_frame_log();
+	// The same window, and ahead of the script for the same reason: what a system
+	// wrote between the two runs happened first, so it reads first.
+	if (drain_frame) self.drain_frame_debug();
 	// The fourth thing cleared, for the same reason as the other three: what the
 	// device complained about during *this* run is what this run answers with.
 	if (self.renderer != null) self.renderer.gpu.begin_capture();
@@ -630,6 +656,7 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.ok = !self.rejected && self.settled,
 		.log = self.log.copy_str(mem),
 		.value = self.value.copy_str(mem),
+		.debug = self.debug_json(mem),
 		.error = self.error.copy_str(mem),
 		// Copied unconditionally like the three above, and for `frame_error`'s
 		// second reason: `RunResult.free` frees whatever pointer it finds.
@@ -1092,4 +1119,71 @@ fn String display(qjs::Context* js, qjs::Value value, Allocator allocator) @loca
 		json.free(allocator);
 	}
 	return js.text(value, allocator);
+}
+
+<*
+ `three.debug.write` — a value the run answers with, without returning it.
+
+ The sink `console.log` writes to is a string, so anything structured put there
+ arrives at the caller escaped inside one, mixed with every other line. This is
+ the same crossing with the structure kept: entries are JSON and reach the tool
+ result as JSON, which is what `value` gets for returning and nothing else did.
+
+ Why a sink at all when `return` exists: a return is one expression at one place,
+ and it does not exist at all inside a frame callback. This can be called from
+ wherever the number was computed, as many times as there are numbers.
+
+ Each argument is its own entry, the way `console.log`'s are their own words.
+*>
+fn void js_debug_write(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	DString* sink = self.in_frame ? &self.frame_debug : &self.debug;
+
+	for (int i = 0; i < argc; i++)
+	{
+		// The frame's sink is the one that grows while nobody is reading, so it is
+		// the one with a ceiling. Oldest kept rather than newest: an entry boundary
+		// is not findable by scanning, because a comma inside a string looks like
+		// the comma between two entries.
+		if (self.in_frame && (usz)sink.len() >= JS_FRAME_DEBUG_BYTES)
+		{
+			self.frame_debug_dropped++;
+			continue;
+		}
+
+		// Authoritative here rather than in the prelude: `__three` is reachable from
+		// a script, and a caller that handed this a string of its own devising would
+		// otherwise put whatever it liked into the caller's JSON. `null` for what has
+		// no JSON form, so the array is always parseable — the prelude turns those
+		// into text before they arrive, so this is the floor and not the common path.
+		String entry = js.json(args[i], mem);
+		defer entry.free(mem);
+
+		if (sink.len() > 0) sink.append_char(',');
+		sink.append_string(entry.len > 0 ? entry : "null");
+	}
+}
+
+<*
+ The debug sink as the JSON array a caller reads.
+
+ Bracketed here rather than kept bracketed in the sink, because every append
+ would then have to reopen it and `drain_frame_debug` would have to splice two.
+
+ @return `Owned by the caller. Empty — not "[]" — when nothing was written, which is what tells a caller the script said nothing.`
+*>
+fn String JsRuntime.debug_json(&self, Allocator allocator)
+{
+	if (self.debug.len() == 0) return self.debug.copy_str(allocator);
+	return string::format(allocator, "[%s]", self.debug.str_view());
 }
