@@ -1628,6 +1628,75 @@ fn void the_alpha_mode_survives_the_round_trip() @test
 }
 
 <*
+ The file's own roughness and metalness reach the frame.
+
+ The importer carried both and applied neither for a long time, because glTF
+ defaults them to 1 and 1 — so a file that never wrote a `pbrMetallicRoughness`
+ block is a fully metallic surface, and a metal with nothing to reflect renders
+ dark. `scene.environment` is what closed that, so the numbers go on now.
+
+ Two files, because "the number crossed" and "the number was applied" are
+ different claims and so are "we wrote what the frame had" and "we read what the
+ file said":
+
+ - A box this test exported with a roughness and a metalness of its own. Both are
+   read back off the document through `ref.material`, and then read again off the
+   material `instantiate({ materials: true })` built — which is the half that was
+   missing.
+ - `textured.glb`, which states neither. It comes back as 1 and 1, which is glTF's
+   answer and not this renderer's, and is exactly the surprise the entry warned
+   about. Asserting it is what makes the surprise a decision rather than a bug.
+
+ The material it builds is a `MeshLambertMaterial` and that is also checked. A
+ surface pair needs no generated shading body — the built-in shader already reads
+ it — so going through `LayeredMaterial` for it would compile a program per glTF
+ material whose body is what the built-in one already does.
+*>
+fn void the_surface_numbers_survive_the_round_trip() @test
+{
+	String path = "build/export_surface.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const round = (v) => Math.round(v * 1000) / 1000;
+			const scene = new three.Scene();
+			const shiny = new three.MeshLambertMaterial({ roughness: 0.2, metalness: 0.6 });
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), shiny));
+			scene.export("build/export_surface.glb");
+
+			const applied = (asset) => {
+				const root = asset.instantiate("back", { materials: true });
+				let found = null;
+				root.traverse((o) => {
+					if (!o.material) return;
+					found = [round(o.material.metalness), round(o.material.roughness), o.material.toJSON().type];
+				});
+				return found === null ? "none" : found.join(",");
+			};
+
+			const back = three.load("build/export_surface.glb");
+			const ref = back.meshAt(0).material;
+			return {
+				read: [round(ref.metalness), round(ref.roughness)].join(","),
+				applied: applied(back),
+				silent: applied(three.load("test/fixtures/textured.glb")),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"read":"0.6,0.2"`),
+			"the exporter wrote what the frame drew with: %s", result.value);
+		test::@check(result.value.contains(`"applied":"0.6,0.2,MeshLambertMaterial"`),
+			"and the importer put it back on a material that compiles nothing: %s", result.value);
+		test::@check(result.value.contains(`"silent":"1,1,MeshLambertMaterial"`),
+			"a file that states neither is glTF's own fully metallic default: %s", result.value);
+	};
+}
+
+<*
  A `CUSTOM_materials_layers` stack goes out and comes back.
 
  The extension is the one thing here that is *not* recovered from the frame. A
@@ -1777,10 +1846,15 @@ fn void a_vertex_colour_mask_takes_its_attribute_with_it() @test
  is a difference no script could see.
 
  What is checked is the same thing in both directions: the blend mode, the
- channel, the inversion, and the images. The images matter most here, because
- they are the half that has no file behind it — a `DataTexture` is pixels on the
- device, so `device_texture_for` has to read them back and encode them, where the
- imported path copies bytes it already had.
+ channel, the inversion, the images, and — since they acquired somewhere to go —
+ the surface pair and the relief. The images matter most here, because they are
+ the half that has no file behind it — a `DataTexture` is pixels on the device, so
+ `device_texture_for` has to read them back and encode them, where the imported
+ path copies bytes it already had.
+
+ The relief is written in two places and both are checked: `bump` on the material
+ goes into the extension's `base` object, which is the only slot a height map has
+ because core glTF has none, and `bump` on a layer goes on the layer.
 *>
 fn void a_stack_a_script_built_survives_the_round_trip() @test
 {
@@ -1790,17 +1864,28 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 	@with_js(; three::JsRuntime* run)
 	{
 		three::RunResult result = run.run(`
+			const round = (v) => Math.round(v * 1000) / 1000;
 			const scene = new three.Scene();
 
 			const grass = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(60), 4, 4);
 			const gravel = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(200), 4, 4);
 			const splat = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(128), 4, 4);
+			const data = { colorSpace: three.LinearSRGBColorSpace };
+			const relief = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(90), 4, 4, data);
+			const bumps = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(30), 4, 4, data);
+			const surface = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(160), 4, 4, data);
 
 			const mat = new three.LayeredMaterial({
 				map: grass,
 				mask: splat,
+				height: relief,
+				bump: { strength: 0.5, distance: 0.2 },
 				layers: [
-					{ name: 'gravel', map: gravel, mask: 'r', blend: 'multiply', opacity: 0.5 },
+					{
+						name: 'gravel', map: gravel, mask: 'r', blend: 'multiply', opacity: 0.5,
+						roughness: 0.3, metalness: 0.7, metallicRoughness: surface,
+						height: bumps, bump: { strength: 0.25, distance: 0.08 },
+					},
 					{ name: 'snow', tint: [0.9, 0.95, 1], mask: 'g', invert: true, blend: 'screen' },
 				],
 			});
@@ -1822,6 +1907,21 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 				snowHasMap: stack.layers[1].map === null,
 				shared: stack.mask !== null,
 				tint: stack.layers[1].tint.map(c => Math.round(c * 100)).join(","),
+				baseRelief: [
+					stack.height !== null, stack.bump.strength, round(stack.bump.distance),
+				].join(","),
+				gravelSurface: [
+					round(stack.layers[0].metalness), round(stack.layers[0].roughness),
+					stack.layers[0].metallicRoughness !== null,
+				].join(","),
+				gravelRelief: [
+					stack.layers[0].height !== null,
+					round(stack.layers[0].bump.strength), round(stack.layers[0].bump.distance),
+				].join(","),
+				// The layer that said nothing about either still says nothing on the
+				// way back: glTF writes 1 and 1 for it, and a default is not a
+				// statement.
+				snowSurface: "metalness" in stack.layers[1],
 			};
 		`);
 		defer result.free();
@@ -1855,6 +1955,18 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 		// answer different questions and this is the scene where that shows.
 		test::@check(result.value.contains(`"shaded":1`),
 			"the material is still a program the file cannot hold: %s", result.value);
+
+		// The surface pair and the relief, which had nowhere to go until the second
+		// blend chain and `parallax_uv` existed, and so were not written at all. The bump numbers are the pair rather than their
+		// product: the shader carries one number and the file wants two.
+		test::@check(result.value.contains(`"baseRelief":"true,0.5,0.2"`),
+			"the material's own height went into the extension's base object: %s", result.value);
+		test::@check(result.value.contains(`"gravelSurface":"0.7,0.3,true"`),
+			"and the layer's pair and its map: %s", result.value);
+		test::@check(result.value.contains(`"gravelRelief":"true,0.25,0.08"`),
+			"with the layer's own relief beside them: %s", result.value);
+		test::@check(result.value.contains(`"snowSurface":false`),
+			"the layer that stated neither did not acquire one: %s", result.value);
 	};
 }
 

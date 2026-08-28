@@ -107,7 +107,8 @@ const CHANNELS = { r: 'r', g: 'g', b: 'b', a: 'a' };
 const LAYER_KEYS = new Set([
 	'name', 'map', 'normal', 'emissive', 'emissiveFactor', 'tint', 'opacity',
 	'blend', 'mask', 'maskSource', 'maskTexture', 'invert', 'uvScale', 'uvOffset',
-	'enabled', 'animated',
+	'enabled', 'animated', 'roughness', 'metalness', 'metallicRoughness',
+	'height', 'bump',
 ]);
 
 // Where a layer's weight comes from, in the extension's own two words.
@@ -121,7 +122,7 @@ const MASK_SOURCES = new Set(['texture', 'vertexColor']);
 
 const TOP_KEYS = new Set([
 	'map', 'normal', 'mask', 'layers', 'side', 'transparent', 'blending', 'opacity',
-	'roughness', 'metalness', 'reflectance',
+	'roughness', 'metalness', 'reflectance', 'height', 'bump',
 ]);
 
 // The parts of the extension this renderer parses and cannot evaluate, and the
@@ -133,19 +134,13 @@ const TOP_KEYS = new Set([
 // lighting rather than on the one line that says so. The refusal is where that
 // hour is saved.
 //
-// The first three are refused *per layer* and are available on the material:
-// there is a specular term now, and it reads one roughness and one metalness for
-// the whole surface rather than one per layer. Blending them per texel is a
-// second set of maps and a second blend chain in the generated body — worth
-// doing when something wants moss that is rougher than the stone under it, and
-// not before.
+// One entry left, and it is the only one whose gap is in the *lighting* rather
+// than in this file: roughness, metalness and their map blend per layer now, and
+// a height map moves the uv under everything sampled after it. Subsurface needs
+// a light transport that does not exist, so there is nothing for a layer to say
+// it to.
 const UNSUPPORTED = {
-	metalness: 'a layer cannot change metalness — the specular term reads one value for the whole surface, so set `metalness` on the LayeredMaterial itself',
-	roughness: 'a layer cannot change roughness — the specular term reads one value for the whole surface, so set `roughness` on the LayeredMaterial itself',
-	metallicRoughness: 'a metallic-roughness map varies per texel and this renderer\'s roughness is one number per material — set `roughness` and `metalness` on the LayeredMaterial instead',
 	subsurface: 'subsurface scattering needs a light transport this renderer does not have',
-	height: 'there is no displacement or parallax here — a height map has nowhere to go until one exists',
-	bump: 'there is no displacement or parallax here — bump parameters have nowhere to go until one exists',
 };
 
 // A number as Slang source.
@@ -199,6 +194,58 @@ function checkTexture(v, what) {
 		throw new TypeError(`${what} wants a three.texture(path) or a three.DataTexture, or null for none`);
 	}
 	return v;
+}
+
+// A 0-to-1 number a layer stated, or null for one it left out.
+//
+// **Null rather than a default, and the pair is the reason.** glTF's own defaults
+// for `metallicFactor` and `roughnessFactor` are 1 and 1, so filling them in here
+// would turn `{ roughness: 0.2 }` — a layer asking to be smooth — into a layer
+// that is also fully metallic, which is the trap the importer spent this long
+// avoiding. A layer states what it states, and says nothing about the other.
+function factor(v, what) {
+	if (v === undefined || v === null) return null;
+	if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+		throw new TypeError(`${what} wants a number from 0 to 1, not ${String(v)}`);
+	}
+	return v;
+}
+
+// Whether a layer says anything about how light behaves on it, as opposed to
+// what colour it is. Asked twice — once to decide whether the stack needs a
+// second chain at all, and once per layer to decide whether it joins it.
+function surfaces(layer) {
+	return layer.roughness !== null || layer.metalness !== null
+		|| layer.metallicRoughness !== null;
+}
+
+// `{ strength, distance }` — the extension's own two numbers, and Blender's Bump
+// node's before that.
+//
+// **`distance` is in metres**, which is what it means in the file and in the node
+// it came out of. `parallax_uv` solves the uv gradient per pixel, so it stays
+// metres whatever the surface is tiled at rather than becoming a number that has
+// to be retuned per mesh. `strength` is the 0-to-1 amount beside it, and the two
+// multiply into the single depth the generated source carries — nothing needs
+// them apart except the exporter, which is handed both.
+function readBump(raw, what) {
+	if (raw === null || raw === undefined) return { strength: 1, distance: 1 };
+	if (typeof raw !== 'object' || Array.isArray(raw)) {
+		throw new TypeError(`${what}: bump wants { strength, distance }, like { distance: 0.05 }`);
+	}
+	for (const key of Object.keys(raw)) {
+		if (key !== 'strength' && key !== 'distance') {
+			throw new TypeError(`${what}: bump has no option called '${key}' — it takes strength, distance`);
+		}
+	}
+	const strength = raw.strength ?? 1;
+	const distance = raw.distance ?? 1;
+	for (const pair of [['strength', strength], ['distance', distance]]) {
+		if (typeof pair[1] !== 'number' || !Number.isFinite(pair[1])) {
+			throw new TypeError(`${what}: bump.${pair[0]} wants a finite number, not ${String(pair[1])}`);
+		}
+	}
+	return { strength, distance };
 }
 
 // One layer, checked and reduced to the handful of facts the emitter needs.
@@ -307,6 +354,20 @@ function readLayer(raw, at) {
 		throw new TypeError(`${label}: emissiveFactor wants three numbers`);
 	}
 
+	// The other half of what a layer can say about its surface, and the half
+	// that used to be refused. `metallicRoughness` is packed glTF's way — green
+	// is roughness and blue is metalness — and the two factors multiply it,
+	// exactly as they do on a core material.
+	const metallicRoughness = checkTexture(raw.metallicRoughness, `${label}: metallicRoughness`);
+	const roughness = factor(raw.roughness, `${label}: roughness`);
+	const metalness = factor(raw.metalness, `${label}: metalness`);
+
+	// The relief. `height` with no `bump` beside it takes the extension's own
+	// defaults, which are a strength and a distance of 1 — a metre of relief,
+	// which is a great deal of it and is what the file says when it says nothing.
+	const height = checkTexture(raw.height, `${label}: height`);
+	const bump = readBump(raw.bump, label);
+
 	return {
 		at,
 		label,
@@ -315,6 +376,15 @@ function readLayer(raw, at) {
 		normal: checkTexture(raw.normal, `${label}: normal`),
 		emissive: emissiveTexture,
 		emissiveFactor,
+		metallicRoughness,
+		roughness,
+		metalness,
+		height,
+		bump,
+		// What the shader carries: one number, because that is all it needs. The
+		// two survive separately beside it for the exporter, which writes the
+		// extension's own pair back.
+		depth: bump.strength * bump.distance,
 		tint,
 		opacity,
 		blend,
@@ -335,6 +405,10 @@ function readLayer(raw, at) {
 
 // The uv a layer's detail maps are sampled at.
 //
+// `surface` is `s.uv` for an ordinary stack and the parallax-shifted uv for one
+// with a base height map, which is what makes a layer's tiling sit on the relief
+// rather than beside it.
+//
 // `s.uv` already carries `material.repeat` and `material.offset` — the fragment
 // stage applies them before the body runs (`shaders/material.slang`) — so this
 // composes with them rather than replacing them: the material's transform moves
@@ -343,10 +417,10 @@ function readLayer(raw, at) {
 // a specific surface and tiling it would repeat the whole terrain; the detail
 // maps are the things that want to repeat, which is the entire reason the two
 // numbers are separate.
-function layerUv(layer) {
+function layerUv(layer, surface) {
 	const [su, sv] = layer.uvScale;
 	const [ou, ov] = layer.uvOffset;
-	let uv = 's.uv';
+	let uv = surface;
 	if (su !== 1 || sv !== 1) uv = `${uv} * float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`;
 	if (ou !== 0 || ov !== 0) uv = `${uv} + float2(${num(ou, 'uvOffset[0]')}, ${num(ov, 'uvOffset[1]')})`;
 	return uv;
@@ -390,15 +464,54 @@ function emit(base, layers) {
 
 	const anyNormal = base.normal !== null || layers.some(l => l.normal !== null);
 	const anyEmissive = layers.some(l => l.emissive !== null || l.emissiveFactor.some(c => c !== 0));
+	// Whether anything in the stack has an opinion about how light behaves here,
+	// as opposed to what colour it finds. A stack with none pays nothing: no
+	// second chain, and `standard` reads the material's own pair exactly as it
+	// did before a layer could say anything about it.
+	const anySurface = layers.some(l => surfaces(l));
 
 	body.push('float3 shade(Surface s)');
 	body.push('{');
+
+	// The uv everything on this surface is sampled at.
+	//
+	// **A base height map moves it, and then it moves for everything** — the base
+	// colour, the base normal, the shared mask and every layer's own tiling.
+	// Relief is a property of the surface rather than of one image on it, so a
+	// stack whose mask stayed put while its colour slid would come apart at
+	// exactly the grazing angles parallax exists for.
+	//
+	// The height is sampled at the *unshifted* uv, because that is the one step
+	// this does: the pixel asks what is under it and the answer says where to
+	// look instead.
+	let surface = 's.uv';
+	let albedo = 's.albedo';
+	if (base.height !== null && base.depth !== 0) {
+		textures.base_height_map = base.height;
+		body.push(
+			`    float2 puv = parallax_uv(s, s.uv, base_height_map.Sample(s.uv).r, `
+			+ `${num(base.depth, 'LayeredMaterial: bump')});`
+		);
+		surface = 'puv';
+		// `s.albedo` was sampled at `s.uv` by the template before this body ran, so
+		// the base colour is the one thing parallax cannot reach by moving a uv —
+		// it has to be built again. `base_albedo` is the template's own line.
+		albedo = 'base_albedo(s, puv)';
+	}
+
 	// `s.albedo` is the base colour factor times `map` times the instance's own
 	// colour, already assembled by the template. So the bottom of the stack costs
 	// nothing here and a `LayeredMaterial` with no layers at all shades exactly as
 	// a MeshLambertMaterial does.
-	body.push('    float3 c = s.albedo;');
+	body.push(`    float3 c = ${albedo};`);
 	if (anyEmissive) body.push('    float3 e = float3(0.0, 0.0, 0.0);');
+	// The second chain, starting where the first one does: at what the material
+	// itself says. `material.roughness` and `material.metalness` are the bottom of
+	// the stack for these two exactly as the base colour is for the first.
+	if (anySurface) {
+		body.push('    float rough = s.roughness;');
+		body.push('    float metal = s.metalness;');
+	}
 	if (anyNormal) {
 		// Flat, in tangent space: 0.5 is "no tilt" on the x and y axes and 1.0 is
 		// straight out along z. The layers lerp *texels* over this and one
@@ -406,16 +519,16 @@ function emit(base, layers) {
 		// whole stack rather than one per layer.
 		if (base.normal !== null) {
 			textures.base_normal_map = base.normal;
-			body.push('    float3 nt = base_normal_map.Sample(s.uv).rgb;');
+			body.push(`    float3 nt = base_normal_map.Sample(${surface}).rgb;`);
 		} else {
 			body.push('    float3 nt = float3(0.5, 0.5, 1.0);');
 		}
 	}
-	if (shared) body.push('    float4 mask = layer_mask.Sample(s.uv);');
+	if (shared) body.push(`    float4 mask = layer_mask.Sample(${surface});`);
 
 	for (const layer of layers) {
 		const i = layer.at;
-		const uv = layerUv(layer);
+		let uv = layerUv(layer, surface);
 		body.push('');
 		body.push(`    // ${layer.label}${layer.blend === 'mix' ? '' : `, ${layer.blend}`}`);
 
@@ -433,14 +546,19 @@ function emit(base, layers) {
 		const paints = layer.animated || layer.map !== null || layer.tint.some(c => c !== 1);
 		const shapes = layer.normal !== null;
 		const glows = layer.emissive !== null || layer.emissiveFactor.some(c => c !== 0);
-		if (!paints && !shapes && !glows) {
+		const rough = surfaces(layer);
+		if (!paints && !shapes && !glows && !rough) {
 			// Left in the source rather than dropped silently. A stack imported from
-			// a file has one of these wherever a layer changed only roughness or
-			// metalness — real statements this renderer cannot evaluate (see
-			// `UNSUPPORTED`) — and reading "nothing to apply" in the generated body
-			// is what tells whoever is debugging it that the layer arrived and was
-			// understood, rather than that the importer lost it.
-			body.push(`    // nothing to apply — no map, tint, normal or emissive`);
+			// a file has one of these wherever a layer states only something this
+			// renderer has no equation for — subsurface is the one left — and reading
+			// "nothing to apply" in the generated body is what tells whoever is
+			// debugging it that the layer arrived and was understood, rather than
+			// that the importer lost it.
+			//
+			// A height map alone lands here too, and correctly: parallax moves the uv
+			// a layer samples *its own* maps at, so a layer with relief and no images
+			// has moved nothing.
+			body.push(`    // nothing to apply — no map, tint, normal, emissive or surface`);
 			continue;
 		}
 
@@ -475,6 +593,23 @@ function emit(base, layers) {
 		}
 
 		body.push(`    float w${i} = ${w};`);
+
+		// This layer's own relief, on top of whatever the base already shifted.
+		// Local to the layer: it moves this layer's map, normal, emissive and
+		// metallic-roughness and nothing else, because that is where the extension
+		// puts a per-layer height and it is the only reading under which two layers
+		// can each have their own.
+		if (layer.height !== null && layer.depth !== 0) {
+			const name = `layer${i}_height`;
+			textures[name] = layer.height;
+			layer.samplers.height = name;
+			body.push(`    float2 uv${i} = ${uv};`);
+			body.push(
+				`    uv${i} = parallax_uv(s, uv${i}, ${name}.Sample(uv${i}).r, `
+				+ `${num(layer.depth, `${layer.label}: bump`)});`
+			);
+			uv = `uv${i}`;
+		}
 
 		// This layer's own colour, before it is blended with what is below. Only
 		// emitted when the layer states one — see `paints` above.
@@ -518,18 +653,65 @@ function emit(base, layers) {
 			}
 			body.push(`    e = lerp(e, ${emissive.join(' * ')}, w${i});`);
 		}
+
+		// The second chain: roughness and metalness, mixed by the same weight and
+		// through the same blend mode as the colour.
+		//
+		// **The same blend mode, deliberately.** Every entry in `BLEND` is
+		// arithmetic that works on a scalar as well as it does on a float3, and a
+		// layer that multiplies its colour down almost always means to multiply its
+		// roughness the same way — moss over stone is one statement, not two. Two
+		// rules where one will do is a thing to look up rather than a thing to know.
+		if (rough) {
+			if (layer.metallicRoughness !== null) {
+				const name = `layer${i}_surface`;
+				textures[name] = layer.metallicRoughness;
+				layer.samplers.metallicRoughness = name;
+				// glTF's packing, unchanged: green is roughness and blue is metalness,
+				// and red is the occlusion channel this renderer has no term for.
+				body.push(`    float2 mr${i} = ${name}.Sample(${uv}).gb;`);
+			}
+			const pair = [
+				['rough', 'roughness', layer.roughness, `mr${i}.x`],
+				['metal', 'metalness', layer.metalness, `mr${i}.y`],
+			];
+			for (const [into, what, given, sampled] of pair) {
+				const parts = [];
+				// The factor multiplies the map, which is glTF's own rule — and a
+				// factor of 1 beside a map is the map, so it is left out of the source
+				// rather than written as a multiply by one.
+				if (given !== null && (layer.metallicRoughness === null || given !== 1)) {
+					parts.push(num(given, `${layer.label}: ${what}`));
+				}
+				if (layer.metallicRoughness !== null) parts.push(sampled);
+				if (parts.length === 0) continue;
+				body.push(`    float ${into}${i} = ${parts.join(' * ')};`);
+				body.push(`    ${into} = lerp(${into}, ${BLEND[layer.blend](into, `${into}${i}`)}, w${i});`);
+			}
+		}
 	}
 
 	body.push('');
+	// Back onto the surface, because `standard` is what reads them and it reads
+	// them off `s`. Clamped once here for the blend modes that can leave the range
+	// — `add` and `screen` both can — which is the same clamp `setSurface` applies
+	// at the other door into these two numbers.
+	if (anySurface) {
+		body.push('    s.roughness = saturate(rough);');
+		body.push('    s.metalness = saturate(metal);');
+	}
 	// `mapped_normal` is the template's own — a tangent frame rebuilt per pixel
 	// from the screen-space derivatives, because no mesh here carries tangents.
 	// Without a normal map anywhere in the stack there is nothing to decode and
 	// the interpolated normal is used as it arrives.
 	body.push(anyNormal ? '    float3 n = mapped_normal(s, nt);' : '    float3 n = s.normal;');
 	// `standard(s, c, n)` rather than `c * lambert(n)`: the blended colour and the
-	// mapped normal are the body's own, and the roughness, metalness and
-	// reflectance are the material's. On a stack that set none of the three it is
-	// the same arithmetic `c * lambert(n)` was, so nothing already written moves.
+	// mapped normal are the body's own, and so are the roughness and metalness by
+	// the time this line runs — the two lines above put them back on `s`, which is
+	// where `standard` reads them. `reflectance` stays the material's; no layer has
+	// one, because the extension has no field for it. On a stack that changed none
+	// of them it is the same arithmetic `c * lambert(n)` was, so nothing already
+	// written moves.
 	body.push(anyEmissive ? '    return standard(s, c, n) + e;' : '    return standard(s, c, n);');
 	body.push('}');
 
@@ -573,6 +755,12 @@ class LayerView {
 
 	get maskTexture() { return this._owner.textures[this._sampler('mask')]; }
 	set maskTexture(v) { this._owner.textures[this._sampler('mask')] = v; }
+
+	get height() { return this._owner.textures[this._sampler('height')]; }
+	set height(v) { this._owner.textures[this._sampler('height')] = v; }
+
+	get metallicRoughness() { return this._owner.textures[this._sampler('metallicRoughness')]; }
+	set metallicRoughness(v) { this._owner.textures[this._sampler('metallicRoughness')] = v; }
 
 	// The two that are only there when the layer said `animated: true`.
 	//
@@ -621,6 +809,14 @@ class LayerView {
 			maskSource: this._layer.vertexMask ? 'vertexColor' : 'texture',
 			invert: this._layer.invert,
 			animated: this._layer.animated,
+			// Read back rather than settable, unlike the tint beside them. They are
+			// literals in the generated source and there is no `animated` for them:
+			// a second float4 per layer would double what the stack spends of the
+			// uniform budget for two numbers that describe a material rather than
+			// something moving.
+			roughness: this._layer.roughness,
+			metalness: this._layer.metalness,
+			bump: this._layer.height !== null ? { ...this._layer.bump } : null,
 			samplers: { ...this._layer.samplers },
 		};
 	}
@@ -660,10 +856,17 @@ export class LayeredMaterial extends ShaderMaterial {
 		if (!Array.isArray(raw)) {
 			throw new TypeError('`layers` wants an array of layer descriptions, outermost last');
 		}
+		const bump = readBump(options.bump, 'LayeredMaterial');
 		const base = {
 			map: checkTexture(options.map, 'LayeredMaterial: map'),
 			normal: checkTexture(options.normal, 'LayeredMaterial: normal'),
 			mask: checkTexture(options.mask, 'LayeredMaterial: mask'),
+			// The base material's own relief, which is where the extension puts it
+			// too — under `base`, beside nothing else, because core glTF has no slot
+			// for a height map at all. It moves the uv for the whole stack.
+			height: checkTexture(options.height, 'LayeredMaterial: height'),
+			bump,
+			depth: bump.strength * bump.distance,
 		};
 
 		// Read every layer before rejecting any of them for budget, so that a
@@ -690,8 +893,8 @@ export class LayeredMaterial extends ShaderMaterial {
 			throw new TypeError(
 				`this stack needs ${count} samplers and a material may declare ${TEXTURE_LIMIT}: `
 				+ `${layers.length} layers over ${base.mask ? 'a shared mask' : 'no shared mask'}. `
-				+ 'Pack the masks into the four channels of one texture, drop a layer\'s normal map, '
-				+ 'or turn a layer off with { enabled: false }.'
+				+ 'Pack the masks into the four channels of one texture, drop a layer\'s normal, '
+				+ 'height or metallicRoughness map, or turn a layer off with { enabled: false }.'
 			);
 		}
 
@@ -733,6 +936,9 @@ export class LayeredMaterial extends ShaderMaterial {
 			this._index(),
 			textures.layer_mask !== undefined ? 'layer_mask' : '',
 			textures.base_normal_map !== undefined ? 'base_normal_map' : '',
+			textures.base_height_map !== undefined ? 'base_height_map' : '',
+			base.bump.strength,
+			base.bump.distance,
 		);
 		for (const l of layers) {
 			H.addMaterialLayer(
@@ -741,6 +947,7 @@ export class LayeredMaterial extends ShaderMaterial {
 				[
 					l.samplers.map ?? '', l.samplers.normal ?? '', l.samplers.emissive ?? '',
 					l.samplers.mask ?? '', l.samplers.params ?? '',
+					l.samplers.metallicRoughness ?? '', l.samplers.height ?? '',
 				].join(','),
 				BLEND_BY_ORDINAL.indexOf(l.blend),
 				l.vertexMask ? MASK_VERTEX_COLOR : (l.channel !== null ? MASK_TEXTURE : MASK_NONE),
@@ -749,6 +956,15 @@ export class LayeredMaterial extends ShaderMaterial {
 				l.opacity,
 				l.tint[0], l.tint[1], l.tint[2],
 				l.emissiveFactor[0], l.emissiveFactor[1], l.emissiveFactor[2],
+				// The extension's own defaults where the layer said nothing, because
+				// this is the file's vocabulary rather than the description's: `null`
+				// means "stated nothing" here and there is no such value in a glTF.
+				// A layer that never mentioned either writes the two numbers a layer
+				// that never mentioned either is read back as.
+				l.metalness ?? 1,
+				l.roughness ?? 1,
+				l.bump.strength,
+				l.bump.distance,
 			);
 		}
 	}

@@ -132,24 +132,6 @@ What the chain does not cover, roughly in the order it would grow:
 pass's output another pass reads, where the answer is not its predecessor. Pass
 count is not the trigger and never was.
 
-## 14. Material layers
-
-- [ ] **Parallax**, from the height data the extension already carries and the
-      importer already drops. `heightTexture` and `bump` are refused by name.
-- [ ] **The PBR half is per material and not per layer.** `material.roughness`,
-      `.metalness` and `.reflectance` exist and the specular term reads them; a
-      *layer's* pair is still refused, and `subsurface` has no light transport
-      behind it either way. Blending roughness per texel is a second set of maps
-      and a second blend chain in the body `layers.js` generates — worth doing
-      when something wants moss rougher than the stone under it.
-- [ ] **The importer does not apply the file's `metallicFactor` and
-      `roughnessFactor`.** `GpuMaterial` carries both and a script can read them,
-      but `instantiate({ materials: true })` leaves them alone: glTF's defaults
-      are 1 and 1, so a file that says nothing is a fully metallic surface. The
-      sky it was waiting on is built — `scene.environment` is what a metal
-      reflects — so this is now the one thing between a `.glb`'s own PBR numbers
-      and the frame.
-
 ## 15. The draw buffer
 
 - [ ] **`vkCmdDrawIndexedIndirect`. Trigger:** a consolidated geometry arena and

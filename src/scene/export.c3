@@ -1538,11 +1538,9 @@ fn int source_image_index(Asset* asset, GpuMesh* mesh) @local
  `CUSTOM_materials_layers` stack lives.
 
  `GpuMesh.layers` is the other candidate for the stack and is the wrong one,
- three times over. It is deliberately lossy — `Assets.load_material_layers` drops
- `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`, `subsurface`,
- `heightTexture` and `bump`, because `lambert()` is the whole of the built-in
- light — so writing it back would state a document the file never contained. It
- is rearranged: `hoist_shared_mask` moves a mask every layer reads into a slot of
+ three times over. It is still lossy — `Assets.load_material_layers` drops
+ `subsurface`, because nothing shades it — so writing it back would state a
+ document the file never contained. It is rearranged: `hoist_shared_mask` moves a mask every layer reads into a slot of
  the stack's own, which is right for the bindings budget and wrong for a file. And
  it exists only after `ensure_uploaded`, which this path deliberately never calls
  — a mesh that has been added but not yet drawn would export as a mesh with no
@@ -1691,12 +1689,14 @@ fn int Exporter.script_material_index(&self, Node* node)
  The mirror of `write_layers`, and the differences are all consequences of where
  the description came from.
 
- No height map and no bump, because `LayeredMaterial` refuses both by name —
- there is no parallax in this renderer, so a script cannot state one. The same
- goes for the PBR half: `metalness` and `roughness` are refused because nothing
- evaluates them. That is why this is lossless where writing `GpuLayers` back
- would not be: the description is the whole of what the script said, not a
- reduction of a file.
+ Height, bump, roughness, metalness and the metallic-roughness map all cross,
+ because a script can now state every one of them. That is what keeps this
+ lossless where writing `GpuLayers` back would not be: the description is the
+ whole of what the script said, not a reduction of a file.
+
+ `subsurface` is the one thing left out, and it is left out because a script
+ cannot say it either — there is no light transport for it to mean anything to,
+ so a stack that round-trips through here never had one.
 
  The tint and the opacity are read now, not remembered. `Material.layer_params`
  answers with the shader's baked literals for a plain layer and with the live
@@ -1713,7 +1713,14 @@ fn int Exporter.script_material_index(&self, Node* node)
 *>
 fn void Exporter.write_script_layers(&self, uint material, Material* source)
 {
-	uint stack = self.out.add_material_layers(material);
+	uint stack = self.out.add_material_layers(
+		material,
+		self.script_layer_texture(source, source.script_layers.base_height_binding),
+		{
+			.strength = source.script_layers.base_bump_strength,
+			.distance = source.script_layers.base_bump_distance,
+		}
+	);
 	int shared_mask = source.textures.at(source.script_layers.mask_binding);
 
 	foreach (&layer : source.script_layers.layers)
@@ -1726,6 +1733,11 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 		written.baseColorTexture = self.script_layer_texture(source, layer.map_binding);
 		written.normalTexture = self.script_layer_texture(source, layer.normal_binding);
 		written.emissiveTexture = self.script_layer_texture(source, layer.emissive_binding);
+		written.metallicRoughnessTexture = self.script_layer_texture(source, layer.mr_binding);
+		written.metallicFactor = layer.metallic;
+		written.roughnessFactor = layer.roughness;
+		written.heightTexture = self.script_layer_texture(source, layer.height_binding);
+		written.bump = { .strength = layer.bump_strength, .distance = layer.bump_distance };
 		written.emissiveFactor = {
 			layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2]
 		};

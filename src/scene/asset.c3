@@ -116,6 +116,18 @@ struct GpuLayer
 	int normal_texture;
 	int emissive_texture;
 	int mask_texture;
+	// Packed glTF's way — green is roughness, blue is metalness — and multiplied
+	// by the two factors below, exactly as a core material's is.
+	int metallic_roughness_texture;
+	// The relief, read by `parallax_uv` in the generated body.
+	int height_texture;
+	float metallic;
+	float roughness;
+	// The extension's own bump pair, kept apart rather than multiplied together
+	// here: the JS side wants both, because a stack exported again has to write
+	// the two numbers the file had.
+	float bump_strength;
+	float bump_distance;
 	// The extension's `LayerBlendMode` and `LayerMaskChannel` ordinals, passed
 	// through to the JS side as numbers and turned into names there. Kept as the
 	// enum's own numbering rather than re-spelled, so the two ends cannot drift.
@@ -151,6 +163,12 @@ struct GpuLayers
 	// layer carries its own or none of them has one. Holds a reference like the
 	// per-layer textures do.
 	int mask_texture;
+	// The *base* material's height map and its bump pair — the extension's own
+	// `base` object, which is where a height map has to live because core glTF has
+	// no slot for one. -1 for a material with no relief under its stack.
+	int height_texture;
+	float bump_strength;
+	float bump_distance;
 	List{GpuLayer} layers;
 }
 
@@ -2559,17 +2577,19 @@ fn int? Assets.load_material_texture(
  Getting this right is most of what this function is for. `ImageMemo` carrying the
  space is what makes it possible for one glTF image to be both.
 
- ## The PBR half is dropped here rather than stored
+ ## What is left behind
 
- `metallicFactor`, `roughnessFactor`, `metallicRoughnessTexture`, `subsurface`,
- `heightTexture` and `bump` are all parsed by `gltf.c3l` and none of them is copied
- out. There is a specular term now, and it reads one roughness and one metalness
- for a whole material — `material.roughness` and `material.metalness` — so a
- *layer's* pair is still an input to an equation nothing evaluates, and the other
- four have nothing behind them at all. A field carried to the JS side would be an
- API surface that provably changes no pixel. The images they name are not uploaded
- either, which is the part that costs something — a file with a roughness map per
- layer pays nothing for it here.
+ `subsurface`, and nothing else. It needs a light transport this renderer does not
+ have, so a field carried to the JS side would be an API surface that provably
+ changes no pixel — and the image it would name is not uploaded either, which is
+ the part that costs something.
+
+ The rest of the PBR half crosses now. `metallicFactor` and `roughnessFactor` and
+ the map that varies them per texel blend per layer, and `heightTexture` with the
+ `bump` pair beside it becomes the parallax the generated body applies. Both were
+ dropped here for years for one reason — nothing evaluated them — and both stopped
+ being true at the same place: `js/prelude/layers.js` grew a second blend chain
+ and a uv the height map moves.
 
  Fails with whatever an upload failed with. A material without the extension
  cannot fail, because it does nothing.
@@ -2587,7 +2607,17 @@ fn void? Assets.load_material_layers(
 
 	out.present = true;
 	out.mask_texture = -1;
+	out.bump_strength = material.layers_ext.bump.strength;
+	out.bump_distance = material.layers_ext.bump.distance;
 	out.layers.init(mem, material.layers_ext.layers.len());
+
+	// Linear, like the mask and the normal map beside it: a height is a distance
+	// and not a picture, and an sRGB view would bend every one of them towards the
+	// dark end — which reads as the relief being wrong rather than as the image
+	// being misread. `load_material_texture`'s header measures it.
+	out.height_texture = self.load_material_texture(
+		gpu, stream, images, material.layers_ext.heightTexture, ColorSpace.LINEAR
+	)!;
 
 	foreach (source : material.layers_ext.layers)
 	{
@@ -2603,6 +2633,12 @@ fn void? Assets.load_material_layers(
 			.normal_texture = -1,
 			.emissive_texture = -1,
 			.mask_texture = -1,
+			.metallic_roughness_texture = -1,
+			.height_texture = -1,
+			.metallic = source.metallicFactor,
+			.roughness = source.roughnessFactor,
+			.bump_strength = source.bump.strength,
+			.bump_distance = source.bump.distance,
 			.blend_mode = (uint)source.blend_mode.ordinal,
 			.mask_channel = (uint)source.mask.channel.ordinal,
 			.mask_source = (uint)source.mask.source.ordinal,
@@ -2622,6 +2658,11 @@ fn void? Assets.load_material_layers(
 			layer.normal_texture =
 				self.load_material_texture(gpu, stream, images, source.normalTexture, ColorSpace.LINEAR)!;
 			layer.emissive_texture = self.load_material_texture(gpu, stream, images, source.emissiveTexture)!;
+			layer.metallic_roughness_texture = self.load_material_texture(
+				gpu, stream, images, source.metallicRoughnessTexture, ColorSpace.LINEAR
+			)!;
+			layer.height_texture =
+				self.load_material_texture(gpu, stream, images, source.heightTexture, ColorSpace.LINEAR)!;
 			if (source.mask.source == gltf::LayerMaskSource.TEXTURE)
 			{
 				layer.mask_texture =
@@ -2804,12 +2845,15 @@ fn void GpuMesh.release_layers(&self, Assets* assets, Gpu* gpu)
 	if (!self.layers.present) return;
 
 	assets.release_texture(gpu, self.layers.mask_texture);
+	assets.release_texture(gpu, self.layers.height_texture);
 	foreach (layer : self.layers.layers)
 	{
 		assets.release_texture(gpu, layer.texture);
 		assets.release_texture(gpu, layer.normal_texture);
 		assets.release_texture(gpu, layer.emissive_texture);
 		assets.release_texture(gpu, layer.mask_texture);
+		assets.release_texture(gpu, layer.metallic_roughness_texture);
+		assets.release_texture(gpu, layer.height_texture);
 	}
 	self.free_layers();
 }

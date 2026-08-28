@@ -863,6 +863,94 @@ float3 mapped_normal(Surface s, float3 texel)
     );
 }
 
+// The base colour, sampled somewhere other than where the template sampled it.
+//
+// `s.albedo` is `base_color` times this copy's colour times `base_color_map` at
+// `s.uv`, assembled in `fragmentMain` before the body runs. A body that *moves*
+// the uv — parallax is the one that does — needs that same product at the uv it
+// moved to, and cannot scale its way there from `s.albedo`: the texel that went
+// into the product is not recoverable from it.
+//
+// So this is `fragmentMain`'s own two lines again, with a uv of the caller's
+// choosing. It reads the push block, which is why it lives here rather than in
+// generated source — a body sees `Surface` and nothing else.
+float3 base_albedo(Surface s, float2 uv)
+{
+    Draw draw = push.draw[0];
+    float3 albedo = draw.base_color.rgb * s.color.rgb;
+    if ((draw.flags & FLAG_HAS_UVS) != 0) albedo *= base_color_map.Sample(uv).rgb;
+    return albedo;
+}
+
+// Where to sample a surface with a height map on it, so that its relief reads as
+// relief instead of as a picture of one.
+//
+// Parallax mapping: the ray the camera actually sent hit the *displaced* surface
+// before it reached the flat one the mesh has, so the texel belonging to this
+// pixel is not the one under it. One step, no march — which is the version that
+// costs a handful of instructions and shifts a texture convincingly, and is not
+// the version that occludes or self-shadows.
+//
+// **`depth` is in metres, and that is what the derivatives buy.** The screen-space
+// steps of the world position and of the uv are the same two steps measured two
+// ways, so dividing one by the other leaves how far a unit of u and a unit of v
+// reach across this surface — a property of the mesh and its uvs, with the screen
+// cancelled out. A `bump.distance` of 0.1 therefore means a tenth of a metre of
+// relief on a surface tiled once and a tenth of a metre on the same surface tiled
+// fifty times, rather than meaning two different things.
+//
+// `height` is the map's red channel as sampled, and **0.5 is the plane the mesh
+// already has**: half the map stands out of it and half sinks in, so a stack that
+// turns parallax on does not slide as a whole.
+//
+// Two things it declines to do, both for the same reason a highlight does:
+//
+//  - **Nothing in a bake.** Where the texture slides to is a fact about where the
+//    camera is, and a baked image is looked at from everywhere.
+//  - **Nothing without a uv gradient.** A degenerate uv has no frame to solve, so
+//    the uv comes back as it went in rather than as an infinity — which the
+//    rasteriser would be entitled to draw as anything at all.
+//
+// **Fragment stage only**, exactly like `mapped_normal`, and a compile error in a
+// `vertex:` body rather than a wrong picture.
+float2 parallax_uv(Surface s, float2 uv, float height, float depth)
+{
+#ifdef THREE_BAKE
+    return uv;
+#else
+    if (depth == 0.0) return uv;
+
+    float3 n = normalize(s.normal);
+    float3 view = normalize(push.frame[0].camera.xyz - s.position);
+
+    float3 dp_dx = ddx(s.position);
+    float3 dp_dy = ddy(s.position);
+    float2 duv_dx = ddx(uv);
+    float2 duv_dy = ddy(uv);
+
+    float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
+    if (abs(det) < 1e-12) return uv;
+
+    // The world directions one unit of u and one unit of v run along, by solving
+    // the two screen steps against each other.
+    float3 du = (dp_dx * duv_dy.y - dp_dy * duv_dx.y) / det;
+    float3 dv = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / det;
+    float du2 = dot(du, du);
+    float dv2 = dot(dv, dv);
+    if (du2 <= 0.0 || dv2 <= 0.0) return uv;
+
+    // The view flattened into the surface. Its length is the sine of the angle to
+    // the normal, which is the offset limiting everybody uses: head-on it is zero
+    // and nothing moves, and at a grazing angle it is one rather than the
+    // infinity a divide by `dot(view, n)` would give — and that infinity is the
+    // texture sliding off the model at the silhouette.
+    float3 along = view - n * dot(view, n);
+    float lift = (height - 0.5) * depth;
+
+    return uv + lift * float2(dot(along, du) / du2, dot(along, dv) / dv2);
+#endif
+}
+
 // The agent's vertex body, bracketed by `#line` exactly as the fragment one is
 // and preceded by its own copy of the uniform `#define`s — which are `#undef`ed
 // again immediately after it. **Two scoped copies rather than one block covering
