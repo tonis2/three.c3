@@ -637,6 +637,185 @@ fn void a_velocity_set_from_a_script_moves_the_body() @test
 }
 
 <*
+ A vertex no triangle uses does not become a particle.
+
+ A mesh's position array may carry a point its index buffer never names —
+ `SphereGeometry` emits one at a pole, whose degenerate cap triangle is dropped.
+ Welded into a particle it is an ORPHAN: no triangle means no edge, so no
+ distance constraint, no volume gradient and no contact reaches it. It is then
+ the one thing in the body still in free fall while the rest of it rests on the
+ floor, and it falls forever — measured at y = -132 under a blob sitting on the
+ ground, drawn as a spike hanging through the floor and dragging the body's
+ bounds and centre down with it.
+
+ The whole-body checks miss this by construction: the mesh looks right, the node
+ is in the right place, and `evict_diverged` is about a body that has left, not
+ about one particle in a body that has not. So this reads the particles.
+*>
+fn void no_particle_is_left_out_of_the_mesh() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;                 // its top face is y = 0
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			// A UV sphere, which is the shape that has the stray pole vertex.
+			const blob = new three.Mesh(new three.SphereGeometry(1.2, 20, 14));
+			blob.position.set(0, 3, 0);
+			scene.add(blob);
+			three.physics.soft(blob, { mass: 1.5, volume: true });
+			globalThis.blob = blob;
+
+			globalThis.below = () => {
+				const p = three.physics.points(globalThis.blob);
+				let n = 0, lowest = Infinity;
+				for (let i = 1; i < p.length; i += 3) {
+					lowest = Math.min(lowest, p[i]);
+					if (p[i] < -0.5) n++;
+				}
+				return { n: n, lowest: lowest };
+			};
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		// Long enough to land and then sit there: an orphan keeps going, so the
+		// longer this runs the further out of the body it is.
+		for (int i = 1; i <= 400; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			const r = globalThis.below();
+			return { escaped: r.n, sane: r.lowest > -0.5, lowest: r.lowest };
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the particles back: %s", after.error);
+		test::@check(
+			after.value.contains(`"escaped":0`) && after.value.contains(`"sane":true`),
+			"a particle went through the floor and kept going: %s", after.value
+		);
+	};
+}
+
+<*
+ A soft body actually STOPS on a rigid one.
+
+ `a_soft_body_falls_and_lands_in_one_piece` asserts `y > 0` after 180 frames from
+ a start of 5, and a soft body descends at about a unit a second — so it was
+ still in the air when that test read it and the landing was never exercised. It
+ stayed green while a jelly fell straight through the floor and kept going.
+
+ What was wrong is in `generate_rigidbody_collisions`: the projection test picked
+ the vertices that were already CLEAR of the body rather than the ones inside it,
+ and the constraints it made were no-ops besides — `solve_collision_constraint`
+ measures d = (p - contact_point) . normal and returns on `d >= 0`, which is
+ every constraint that selection could produce. Twelve contacts a frame, none of
+ them pushing.
+
+ Started close and given long enough to settle, so this is about the contact and
+ not about how fast a soft body falls.
+*>
+fn void a_soft_body_stops_on_a_rigid_floor() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;                 // its top face is y = 0
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			const jelly = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+			jelly.position.set(0, 1.6, 0);
+			scene.add(jelly);
+			three.physics.soft(jelly, { mass: 2, volume: true });
+			globalThis.jelly = jelly;
+			return 1;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		for (int i = 1; i <= 300; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult rest = run.run(`
+			const y = globalThis.jelly.position.y;
+			// A two-unit cube resting on y = 0 has its centre at 1. Loose on the
+			// low side because it squashes, but it must not be under the floor.
+			return { y: y, onTop: y > 0.6, sunk: y < -0.1 };
+		`);
+		defer rest.free();
+		test::@check(rest.ok, "read the jelly back: %s", rest.error);
+		test::@check(rest.value.contains(`"onTop":true`) && rest.value.contains(`"sunk":false`),
+			"the jelly did not come to rest on the floor: %s", rest.value);
+	};
+}
+
+<*
+ A pressurised soft body that is touching nothing still steps.
+
+ `solve_soft_bodies` PARTITIONS: a soft body whose collision constraints name a
+ rigidbody mutates that body while solving, so it runs sequentially on the main
+ thread — and one touching nothing is handed to the worker pool. The volume
+ solver builds a per-particle gradient buffer, and a C3 list that has not been
+ given an allocator seats itself on the *temp* allocator on its first push. A
+ worker thread has none, so the process aborted inside the solver:
+
+     Use '@pool_init()' to enable the temp allocator on a new thread
+       in collision.SoftBody.solve_volume_constraint
+
+ Every soft-body test before this one dropped its jelly straight onto a rigid
+ floor, which is the coupled path and the main thread — so the whole suite was
+ green and any scene with a balloon still falling through the air took the
+ process down. The distinguishing detail is the AIR: this one must not touch the
+ floor within the frames it runs.
+*>
+fn void a_pressurised_soft_body_falls_untouched_without_crashing() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			// Three of them, high up and far enough apart to touch neither the
+			// floor nor each other: uncoupled, which is the worker-thread path.
+			globalThis.balloons = [];
+			for (let i = 0; i < 3; i++) {
+				const b = new three.Mesh(new three.SphereGeometry(1, 16, 10));
+				b.position.set(i * 4 - 4, 30, 0);
+				scene.add(b);
+				three.physics.soft(b, { mass: 1.5, volume: true, bending: true });
+				globalThis.balloons.push(b);
+			}
+			return globalThis.balloons.length;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		// Half a second, all of it in the air — thirty units up at 9.8 m/s²
+		// falls about 1.2, so nothing has reached the floor.
+		for (int i = 1; i <= 30; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult fell = run.run(`
+			const y = globalThis.balloons.map(b => b.position.y);
+			return { falling: y.every(v => v < 29.9 && v > 27), n: y.length };
+		`);
+		defer fell.free();
+		test::@check(fell.ok, "the reading script succeeded: %s", fell.error);
+		test::@check(fell.value.contains(`"falling":true`),
+			"the balloons did not fall as three untouched bodies: %s", fell.value);
+	};
+}
+
+<*
  A falling body is a reason to keep drawing.
 
  `main.c3` parks the window in `getEvent(wait: true)` whenever the last frame is

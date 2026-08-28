@@ -1361,21 +1361,45 @@ fn uint weld_bits(float value) @local => bitcast(value == 0 ? 0.0f : value, uint
 
  It also stops the seam of a UV sphere being a slit the solver can open.
 
+ **Only points the triangles actually use become particles.** A vertex array may
+ carry a point the index buffer never names — `SphereGeometry` emits one at a
+ pole, whose degenerate cap triangle is dropped, and an exported mesh can carry
+ any number. Made into a particle it is an ORPHAN: no triangle means no edge,
+ which means no distance constraint, no volume gradient and no contact, so it is
+ the one thing in the body still in free fall while the rest of it rests on the
+ floor. Measured at y = -132 under a blob sitting on the ground, drawn as a spike
+ hanging through it, and it drags the body's bounds and centre down with it.
+
+ An unused vertex still has to be drawn, so it rides the nearest particle there
+ is. That is exact for the usual case — a duplicate of a point some triangle does
+ use, which is welded onto it anyway — and for a genuinely stray point it is the
+ only answer that keeps it attached to the surface.
+
  @param positions : `The mesh's vertices, in mesh order.`
- @param particles : `Filled with one entry per distinct point, in first-seen order.`
+ @param triangles : `The mesh's own indices, which decide what is a particle.`
+ @param particles : `Filled with one entry per distinct used point, in first-seen order.`
  @return `Vertex index to particle index, owned by the caller.`
 *>
-fn uint[] weld_vertices(Vec3[] positions, List{Vec3}* particles)
+fn uint[] weld_vertices(Vec3[] positions, collision::Triangle[] triangles, List{Vec3}* particles)
 {
 	uint[] map = mem::new_array(uint, positions.len);
 
 	@pool()
 	{
+		bool[] used = mem::temp_array(bool, positions.len);
+		foreach (tri : triangles)
+		{
+			used[tri.x] = true;
+			used[tri.y] = true;
+			used[tri.z] = true;
+		}
+
 		WeldMap seen;
 		seen.tinit();
 
 		foreach (i, at : positions)
 		{
+			if (!used[i]) continue;
 			WeldKey key = { weld_bits(at.x), weld_bits(at.y), weld_bits(at.z) };
 			uint? found = seen.get(key);
 			if (try found)
@@ -1387,6 +1411,28 @@ fn uint[] weld_vertices(Vec3[] positions, List{Vec3}* particles)
 			particles.push(at);
 			seen.set(key, slot);
 			map[i] = slot;
+		}
+
+		// The leftovers, onto the nearest particle. Second pass, so a stray point
+		// picks from every particle rather than from the ones seen before it.
+		foreach (i, at : positions)
+		{
+			if (used[i]) continue;
+			WeldKey key = { weld_bits(at.x), weld_bits(at.y), weld_bits(at.z) };
+			uint? found = seen.get(key);
+			if (try found)
+			{
+				map[i] = found;
+				continue;
+			}
+			uint best = 0;
+			float best_sq = float::max;
+			foreach (slot, candidate : *particles)
+			{
+				float d = (candidate - at).length_sq();
+				if (d < best_sq) { best_sq = d; best = (uint)slot; }
+			}
+			map[i] = best;
 		}
 	};
 
@@ -1503,7 +1549,7 @@ fn void? Physics.add_soft(&self, Scene* scene, Assets* assets, NodeId node_id, S
 	List{Vec3} points;
 	points.init(mem, slot.hull_positions.len);
 	defer points.free();
-	uint[] map = weld_vertices(slot.hull_positions, &points);
+	uint[] map = weld_vertices(slot.hull_positions, slot.hull_triangles, &points);
 
 	@pool()
 	{
@@ -1528,6 +1574,18 @@ fn void? Physics.add_soft(&self, Scene* scene, Assets* assets, NodeId node_id, S
 
 		collision::SoftBody body = collision::create_softbody_from_mesh(&source, spec.mass, id, mem);
 		if (spec.softness > 0) body.set_distance_compliance(spec.softness);
+
+		// ONE substep, because the step above it already takes four.
+		// `Physics.step` calls `run_step(dt, 1, 4)`, and `run_step` runs the whole
+		// soft phase inside each of those four — so a body that also substeps four
+		// times is integrated SIXTEEN times a frame. The simulated time still adds
+		// up, but two things scale with the count and should not: the cost, four
+		// times over, and `damping`, which the solver applies once per substep.
+		// Sixteen applications of 0.99 is 0.85 a frame, which is a terminal
+		// velocity of about a unit a second — a jelly that sinks like it is in
+		// syrup instead of falling. One here means four a frame, the same as the
+		// rigid bodies beside it.
+		body.substeps = 1;
 		body.damping = spec.damping;
 		body.material.static_friction = spec.friction;
 		body.material.dynamic_friction = spec.friction;
