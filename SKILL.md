@@ -277,9 +277,25 @@ with its own chest.
 **Crowds** — `three.moveAndSlideAll`, `three.steer`, `field.sample` and
 `three.batch(objects).flush()` each act on a whole column in one crossing.
 Measured at 200 agents: 2.20 ms with the single verbs, 0.51 ms with these.
-`three.cast(options)` stores n things of one kind as columns; `three.kind(name,
-spec)` is the same idea addressed by object identity; `three.assemble(parts)`
-builds a compound mesh from a description.
+
+**Entities and rules** — `class Critter extends three.Entity`, with no
+registration call beside it: the class registers itself on first use from
+`static capacity` / `columns` / `parent` / `body` / `volume` / `collides`, and
+`super()` is where a bare `new Critter()` is refused. `Critter.spawn(...)` is the
+way in, `Critter.of(hit.object)` walks up to the instance, `c.remove()` is the
+whole removal. `static columns = { position: 3 }` gives each instance a subarray
+WINDOW over one shared array, so `three.steer(Critter.column('position'), ...)`
+is handed the storage — nothing is gathered. Declare only what a bulk verb reads;
+copying costs a flat 115–148 ns per entity, so columns are worth it in the low
+thousands and not before. `Critter.on(event, matcher, fn)` is the rules half —
+`enter`/`exit`, `touch`/`separate`, `click`, `near` with `{ within }`, or your own
+through `three.emit(a, verb, b)` — dispatched SUBJECT FIRST, so the handler gets
+`(critter, player)` in that order. `static volume = { shape: 'capsule', radius,
+height, offset }` is an invisible kinematic body beside the drawn node, carried
+by `<Class>.follow`; `static trigger` is the same with `trigger: true`. It is
+what gives a player moved by `three.moveAndSlide` something to trip a trigger
+with, and what a `near` rule measures against. `three.track(Class, options)` is
+the same registration for a class that cannot extend.
 
 **Terrain and navigation** — `TerrainGeometry` + `Field` (`field.fill/carve/
 stroke/sample`), `three.scatter(options)` places a hundred trees,

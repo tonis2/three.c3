@@ -45,7 +45,8 @@ export const DOCS = {
 		'camera-is-a-turntable': 'There is one camera, a turntable: three.camera.orbit(yaw, pitch, distance) and three.camera.frameAll(). It is read-ONLY through accessors — camera.yaw/.pitch/.distance/.fov/.near/.far read back, camera.position()/forward()/right() give the eye and the look/strafe directions in world space, and camera.planarMove(fwd, strafe) turns a W/A/S/D input into a world direction. There is no camera.position to assign, and yaw/pitch/distance throw if assigned.',
 		'spatial-queries': 'There are BULK SPATIAL QUERIES, and they go through an index rather than a scan: three.query.sphere(point, radius), three.query.box(box), three.query.raycastAll(origin, direction) and three.query.sweep(from, to, { radius, height }). scene.raycast goes through the same index, which is why it stopped being linear in the node count — it used to test EVERY node in the scene before it reached any BVH, and a hundred agents casting one ground ray apiece cost 2.1 ms in a 500-node demo. The index is refreshed by the first query after anything moved and by nothing else, so a frame that asks nothing pays nothing and the hundredth ray in a frame costs a cell walk. MOVING SOMETHING AND THEN ASKING ABOUT IT IS FINE: a moved node has its entry re-filed rather than the whole index rebuilt, so a gameplay step that moves eleven characters between its sweeps costs what one that moved none does. Toggling object.visible costs the index nothing at all — an invisible node is skipped when a query ANSWERS, so hiding things is the free way to keep them out of a sweep. What does still rebuild it is structure: adding a node, removing one, re-parenting one, or setting object.collides. Every verb comes in two forms: three.query.sphere(p, r) allocates an Array of objects and is right for a click or a one-off, and three.query.sphere(p, r, buffer) fills a three.query.buffer(n) you keep and answers with a count, which is right for the loop. box and sphere are BROAD phase — box against box — so a node whose box overlaps and whose triangles do not is included; raycastAll and sweep are exact.',
 		'not-collision-geometry': 'Every drawable mesh is swept and raycast against, so a pickup lying on a path is a bollard and a field of grass is a fence. object.collides = false is the fix: it takes that ONE mesh out of the spatial index entirely — three.moveAndSlide walks through it, three.query.sphere does not report it, scene.raycast misses it — while it still draws exactly as before. three.physics is untouched by it, so a mesh with collides = false and a { trigger: true } body is the ordinary way to write a pickup you can walk INTO and cannot walk into; before this the shape that worked was two nodes, the thing you see and an invisible volume beside it. It is NOT inherited: set it on the meshes rather than on a Group, because it says what one piece of geometry is. Hiding a whole character from ONE sweep is { ignore } on that call, and hiding something from the frame is object.visible = false — which is free and costs the index nothing, where toggling collides costs an index rebuild. It is an authoring flag, not a per-frame one. stats().colliders is how many meshes are in the index, and reading it beside stats().nodes is how you find out that a level is mostly scenery pretending to be walls.',
-		'systems-and-casts': 'A BIG ANIMATION LOOP IS THE PROBLEM THIS SOLVES, not a slow one. three.systems.add(name, fn, { phase, order }) is an ordered, named list that replaces the one callback setAnimationLoop and setFixedLoop each take, with three.systems.report() giving per-system milliseconds over three.clock.wall — which is the CPU half of what three.stats() has done for the GPU half all along. setAnimationLoop and setFixedLoop are systems under reserved names, so nothing a script already wrote changes, and a system that throws does not stop the others. three.cooldown(duration, { recover, phase }) is a third rider on the same registry: a scalar timer — active, ready, recovering, remaining, progress — ticked by a lazily-registered system rather than read off three.clock, because the clock only advances once per host tick and a coyote-sized window can span several fixed steps of that one tick. three.cast({ capacity, name }) is the storage half: N things of ONE KIND as columns, with generational ids, named tag bits, deferred compaction at the end of the frame, and columns that ARE the buffers three.steer / three.moveAndSlideAll / field.sample take. A cast is not the whole world — one per kind is what keeps every column dense. three.kind(name, spec) is the OTHER half of the storage: N things of one kind addressed by OBJECT IDENTITY rather than by index, which is what the crates and the pickups are, because a query, a raycast and three.onTrigger all hand back an object. It owns the object-to-record map, the spawn ritual, the physics body and the trigger volume, so kind.of(hit.object) is the record and kind.remove(record) is the whole removal. three.assemble(parts, defaults) is the building half beside it: a compound mesh from a description, one shared unit geometry per shape, pivots for limbs that swing and mirrored pairs named in the answer. Neither is required and neither makes a frame faster: every JavaScript-side data layout measured inside the noise floor. What they buy is a frame that reads as a list of named things and a slow one you can attribute.',
+		'systems-and-casts': 'A BIG ANIMATION LOOP IS THE PROBLEM THIS SOLVES, not a slow one. three.systems.add(name, fn, { phase, order }) is an ordered, named list that replaces the one callback setAnimationLoop and setFixedLoop each take, with three.systems.report() giving per-system milliseconds over three.clock.wall — which is the CPU half of what three.stats() has done for the GPU half all along. setAnimationLoop and setFixedLoop are systems under reserved names, so nothing a script already wrote changes, and a system that throws does not stop the others. three.cooldown(duration, { recover, phase }) is a second rider on the same registry: a scalar timer — active, ready, recovering, remaining, progress — ticked by a lazily-registered system rather than read off three.clock, because the clock only advances once per host tick and a coyote-sized window can span several fixed steps of that one tick. The STORAGE half is three.Entity — see entities-and-rules — and it registers a compaction of its own on the same registry. None of this makes a frame faster: every JavaScript-side data layout measured inside the noise floor. What it buys is a frame that reads as a list of named things and a slow one you can attribute.',
+		'entities-and-rules': 'A GAME IS ENTITIES AND THE RULES BETWEEN THEM, and class Critter extends three.Entity is how a plain JavaScript class becomes one. There is no registration call beside the declaration: the class registers itself on first use, reading static capacity / columns / parent / body / volume / trigger / collides off itself, and super() in the constructor is where a bare new Critter() is refused. three.track(Class, options) is the same registration for a class that already has a parent and cannot extend this one; it takes the options as an argument instead. It owns the object -> instance map, the spawn ritual, the physics body, the collision volume, the live list and the deferred compaction, so Class.of(hit.object) is the instance and c.remove() is the whole removal: body, volume, node and map entry, on this tick. static volume = { shape: \'capsule\', radius, height, offset } is an invisible kinematic body beside the drawn node, carried by <Class>.follow, and static trigger is the same declaration with trigger: true — which is what gives a player moved by three.moveAndSlide something to trip a trigger with, and what a near rule measures against. c.hp = 3 is an ordinary field on an ordinary object. The two or three fields a BULK VERB reads are declared as { columns: { position: 3 }, capacity: N } and the instance holds a subarray WINDOW onto the shared column, so three.steer(Critter.column(\'position\'), ...) is handed the storage itself and nothing is ever gathered \u2014 which is the whole difference between this and copying entities into a staging array every frame. Class.spawn(...) rather than new Class(...), because the slot has to exist before the constructor runs. The rules are the other half: Class.on(event, matcher, fn, options) dispatches on a PAIR, SUBJECT FIRST \u2014 the rule lives on Critter, so the handler is handed (critter, player) in that order and the class IS the argument-order declaration. The matcher is a tracked class, an Object3D, \'*\', or a class name as a string for a forward reference. Events: enter/exit from a trigger, touch/separate from a contact, click from the raycast, near from { within } \u2014 a distance test the engine runs, and the one physics never raises, because three.moveAndSlide produces no contact at all. Anything else is the game\'s own, through three.emit(a, verb, b). Engine events QUEUE and are drained by one system named rules; three.emit dispatches at once, because the game knows when it is safe to delete something and the solver does not. Rules replace by name so a hot reload does not double them, and one that throws is contained, named and counted rather than stopping the rest. It replaces three.cast and three.kind, whose defect was that the storage choice was made at declaration time and was irreversible at every call site.',
 		'crowds-in-one-crossing': 'THE THREE VERBS THAT SCALE WITH A PACK, and the rule behind them is that a verb called once per agent per frame answers into memory you already own. three.steer(positions, velocities, options) is seek, arrive and separation for the whole crowd. three.moveAndSlideAll(positions, motions, options) is the character controller for the whole crowd, updating positions IN PLACE, with self as the column of handles that keeps each agent out of its own mesh and an optional three.moveBuffer(n) for the grounded/slope/normal answers. field.sample(positions, { costs, directions }) is the flow field for the whole crowd. three.batch(objects, { euler: true }).flush() then draws them in one more crossing. Measured at 200 agents: the same frame written with the single-agent verbs is 2.20 ms and written with these is 0.51 ms, and the difference is almost entirely the per-agent JavaScript objects the single forms build. The single forms are not deprecated and are the right choice for one character — the player, the thing riding the moving platform — because they answer with node handles and a readable object; the bulk ones are the right choice the moment there is a loop around the call. A NEGATIVE COST IS UNREACHABLE in the bulk sampler where field.cost answers Infinity, and that is the one place the two disagree.',
 		'move-and-slide': 'three.moveAndSlide(position, motion, options) is the character controller: it sweeps a capsule, slides along what it hits, climbs a ledge under the step height and reports whether it is standing on anything. It takes a POSITION and answers with a position — it does not own an object, integrates nothing and remembers nothing between calls, so gravity, the velocity and the jump stay yours. Options are { radius, height, step, slope, skin, snap, ignore }; height is the whole capsule, and slope in degrees decides grounded, whether a ledge is climbed and whether a contact is a floor or a wall, all from one number so three cannot disagree. Pass the character\'s own object as ignore or it collides with its own mesh, and pass the GROUP rather than one mesh out of it — ignore leaves the whole SUBTREE out, so a character built from a body, a head and four limbs does not collide with its own chest. It takes an array too, for up to eight things. It is kinematic and touches no rigidbody: a character built out of physics is pushed by contacts, tips over and answers a frame late.',
 		'navigation': 'three.nav.bake({ cell, radius, height, slope }) voxelizes the scene\'s standing room, and NOTHING bakes it for you — call it after the level is built. Then TWO verbs, and the split is the design: three.nav.path(from, to) is one agent\'s route, and three.nav.field(goals) is a solve KEPT that a whole crowd samples. A path solves the entire reachable set and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has direction(point), cost(point) — Infinity for unreachable — and dispose(). Paths come back shortened against the actual geometry with a capsule sweep at the agent\'s own size, so they do not look like they are walking cell centres, and their waypoints sit on the floor. cell decides everything: it is the resolution AND the largest step that can be climbed, because two cells are connected when they are adjacent and one cell up. three.nav.stats() reports voxels, walkable and bakeMs so you can find out whether the bake is a level-boundary operation or a loading screen.',
@@ -814,59 +815,70 @@ export const DOCS = {
 			properties: ['handles', 'capacity', 'count', 'full'],
 			methods: ['objects()', 'toString()'],
 		},
-		Cast: {
-			construct: 'three.cast({ capacity, name })',
+		Entity: {
+			construct: 'class Critter extends three.Entity { ... }, then Critter.spawn(...)',
 			note:
-				'A cast of actors of ONE KIND: columns, entities and systems. cast.vec3(name), '
-				+ 'cast.float(name), cast.flags(name) and cast.buffer(name, stride) each answer with a '
-				+ 'typed array of capacity * stride and answer with the SAME array every time — one name '
-				+ 'is one column. cast.live(column) is the live part as a cached subarray and is what to '
-				+ 'hand a bulk verb. cast.transform is a built-in nine-float column (position, an xyz '
-				+ 'EULER triple, then scale) and cast.flush() sends it to the nodes in ONE crossing; '
-				+ 'cast.handles is a built-in two-int column that is both the self column '
-				+ 'three.moveAndSlideAll takes and the handle array that flush uses. '
-				+ 'INDICES ARE VALID FOR THE FRAME YOU GOT THEM IN. spawn() answers with an id carrying a '
-				+ 'generation, the same contract NodeId has; despawn(id) kills the id immediately and '
-				+ 'leaves the SLOT until the end of the frame with its ALIVE bit clear, because a system '
-				+ 'whose indices moved under it is a bug that looks like the wrong entity taking damage. '
-				+ 'An internal system named <cast>.compact closes the gaps last in the frame phase, and '
-				+ 'compact() is public for a game driving its own loop. Compaction is STABLE rather than '
-				+ 'a swap-remove: a crowd that reorders itself whenever something dies makes '
+				'AN ENTITY IS A CLASS, and this is the base to extend. There is no registration call '
+				+ 'beside the declaration: the class registers itself on first use, reading static '
+				+ 'capacity, columns, parent, body, volume, trigger, collides and name off itself. super() FIRST '
+				+ 'in the constructor, and it is not a formality — that is where a bare new Critter() is '
+				+ 'refused, which is the one check a class with no columns cannot get any other way, '
+				+ 'because an untracked instance has no node in the scene, no body in the solver and no '
+				+ 'place in the live list and the first sign of it is a thing that never appears. '
+				+ 'COLUMNS ARE A WINDOW, NOT A COPY. static columns = { position: 3 } with a capacity '
+				+ 'gives each instance a subarray over one shared Float32Array, so this.position[1] and '
+				+ 'Critter.column(\'position\') are the same memory and three.steer / field.sample / '
+				+ 'three.moveAndSlideAll are handed the storage itself with nothing gathered. Declare '
+				+ 'only the fields a BULK VERB reads; hp, stun and heading are ordinary properties, '
+				+ 'because nothing takes those in bulk. Measured, so it is a choice and not a rule: the '
+				+ 'copying alternative costs a flat 115-148 ns per entity, which is 0.02 per cent of a '
+				+ 'frame at ten and 1.4 per cent at a thousand — declare columns in the low thousands and '
+				+ 'not before. A column CANNOT GROW, because every live window into it would dangle, '
+				+ 'which is why a capacity is required beside them and why a full class throws rather '
+				+ 'than reallocating. A columned field has a getter and no setter: c.position[1] = 5 '
+				+ 'writes the column and c.position = [0, 5, 0] throws, because swapping the window for '
+				+ 'a plain array would silently stop that entity steering. '
+				+ 'A REMOVAL IS IMMEDIATE AND THE LIST COMPACTS AT THE END OF THE FRAME. c.remove() takes '
+				+ 'the body, the volume and the node away and makes of() answer null before it '
+				+ 'returns, because a crate broken inside a spin has to stop colliding and stop drawing '
+				+ 'on this tick; only the live list waits, which is what makes for (const c of Critter) '
+				+ 'safe to remove from. An internal system named <Class>.compact closes the gaps last in '
+				+ 'the frame phase, moving the column floats down and re-numbering the slots — a view is '
+				+ 'a function of the SLOT, so nothing has to be re-seated, but a subarray HELD across a '
+				+ 'frame boundary points at whatever moved into that slot. Compaction is STABLE rather '
+				+ 'than a swap-remove: a crowd that reorders itself whenever something dies makes '
 				+ 'three.steer\'s separation, which reads neighbours out of the same array, behave '
-				+ 'differently for reasons nothing in the game can see. The one place an index moves '
-				+ 'mid-frame is a spawn that finds the cast full with dead slots in it, and that only '
-				+ 'happens to a cast whose capacity is too small — watch cast.free. '
-				+ 'A FULL CAST ANSWERS three.NO_ENTITY rather than throwing, as three.nav.field answers '
-				+ 'null: a pool running out is ordinary for debris and projectiles and a game should drop '
-				+ 'the spark rather than stop. '
-				+ 'indexOf(id) is the slot or NO_ENTITY; idOf(slot) is the reverse and is what to keep '
-				+ 'across frames, because an index is only good for the frame it was read in. '
-				+ 'attach(id, object) fills the handle column and seeds the transform column from where '
-				+ 'the object already is; despawn HANDS THE OBJECT BACK rather than removing it, because '
-				+ 'a Cast is not a lifetime manager — scene.remove(pack.despawn(id)) is the line and it '
-				+ 'says at the call site what happens to the mesh. detach(id) takes it back without '
-				+ 'retiring the entity and objectAt(slot) reads it. of(object) is the reverse of '
-				+ 'objectAt and answers with the entity ID rather than the slot, because a query, a '
-				+ 'raycast and three.onTrigger all hand back an object and what a script wants back is '
-				+ 'the thing it can still hold next frame; cast.indexOf(cast.of(o)) is this frame\'s slot. '
-				+ 'tag(name) allocates a named bit in the state column — 31 of them, because bit 0 is '
-				+ 'ALIVE — so a system filter is a mask test rather than a property lookup. '
-				+ 'pose(position, { lift, heading }) copies a vec3 column into the transform column with '
-				+ 'a vertical offset and an optional heading, which is the three lines every presentation '
-				+ 'system writes because the capsule centre and the model origin are never the same '
-				+ 'point. sync() copies the transform column back onto the Object3Ds and carries the same '
-				+ 'trap three.batch does — a flush writes the NODE, so the objects go stale and writing '
-				+ 'any single component of one afterwards undoes the flush for that entity. '
-				+ 'system(name, fn, options) registers into three.systems under <cast>.<name> with the '
-				+ 'cast as the callback\'s second argument; dispose() takes them all back out. '
-				+ 'THE CAPACITY IS FIXED, and that follows from the columns being the API: a growing cast '
-				+ 'would reallocate them and every reference a script holds would point at the old memory.',
-			properties: ['capacity', 'name', 'count', 'alive', 'free', 'state', 'handles', 'transform'],
+				+ 'differently for reasons nothing in the game can see. '
+				+ 'A VOLUME IS A SECOND NODE, and it is what a class that has to overlap something declares. '
+				+ 'static volume = { shape: \'capsule\' | \'sphere\' | \'box\', radius, height | size, offset } '
+				+ 'builds an invisible kinematic body beside the drawn one and an internal system named '
+				+ '<Class>.follow carries it every frame; static trigger = { ... } is the same '
+				+ 'declaration with trigger: true, for reach that reports rather than shoves. A class '
+				+ 'gets ONE, because a second would need a second field to hold it. It is a SIBLING and '
+				+ 'not a child: a body-backed node has to be a direct child of the scene, since the '
+				+ 'solver works in world space — which is also why the drawn node may have a parent '
+				+ 'while its volume may not, and why follow reads a world position when it does. A near '
+				+ 'rule measures against the VOLUME when there is one, because a character\'s node sits '
+				+ 'at its feet and its capsule sits at its middle and half a body height is most of a '
+				+ 'within radius. It is what gives a player moved by three.moveAndSlide something to '
+				+ 'trip a trigger with, since a sweep raises no contact at all. '
+				+ 'of(object) resolves UP THE PARENT CHAIN, so a raycast hitting one mesh of an assembled '
+				+ 'eleven-part character answers with the instance, and so does a volume. '
+				+ 'pose(field, { lift, heading }) copies a 3-float column into the transform with a '
+				+ 'vertical offset — the capsule centre and the model origin are never the same point — '
+				+ 'and heading may be a column or an ordinary field. flush() sends the transform to the '
+				+ 'nodes in ONE crossing; handles is both the self column three.moveAndSlideAll takes and '
+				+ 'the handle array flush uses. sync() copies it back and carries the same trap '
+				+ 'three.batch does: a flush writes the NODE, so the objects go stale and writing any '
+				+ 'single component of one afterwards undoes the flush for that entity. '
+				+ 'There is NO update() to override, on purpose — continuous work is a system with a '
+				+ 'readable { order }, and a per-entity update method is the ninety-line animation '
+				+ 'callback again, once per class. onSpawn() and onRemove() are the hooks there are.',
+			properties: ['count', 'free', 'capacity', 'trackName', 'handles', 'transform'],
 			methods: [
-				'vec3(name)', 'float(name)', 'flags(name)', 'buffer(name, stride)', 'live(column)',
-				'tag(name)', 'spawn()', 'despawn(id)', 'indexOf(id)', 'idOf(slot)',
-				'attach(id, object)', 'detach(id)', 'objectAt(slot)', 'of(object)', 'compact()', 'flush()', 'sync()',
-				'pose(position, options)', 'system(name, fn, options)', 'dispose()', 'toString()',
+				'spawn(...args)', 'of(object)', 'remove(instance)', 'column(field)', 'all()',
+				'compact()', 'clear()', 'dispose()', 'on(event, matcher, fn, options)', 'off(name)',
+				'system(name, fn, options)', 'pose(field, options)', 'flush()', 'sync()',
 			],
 		},
 		Cooldown: {
@@ -895,56 +907,6 @@ export const DOCS = {
 				'active', 'ready', 'recovering', 'remaining', 'progress', 'elapsed',
 			],
 			methods: ['start(options)', 'cancel()', 'dispose()', 'toString()'],
-		},
-		Kind: {
-			construct: 'three.kind(name, spec)',
-			note:
-				'N things of ONE KIND addressed by OBJECT IDENTITY — the crates, the pickups, the props. '
-				+ 'The other half of three.cast, and the half a level wants: a cast stores columns because '
-				+ 'a column IS the buffer three.steer and three.moveAndSlideAll take, and the things a '
-				+ 'query, a raycast or three.onTrigger hands back never appear in a bulk verb at all. '
-				+ 'A KIND OWNS THE RITUAL. spawn(position, params) calls spec.build(params) for the '
-				+ 'Object3D, names it <name>#<n>, places it (position is a Vector3, an {x,y,z} or an '
-				+ '[x,y,z]; params.yaw, if it is a number, is written to rotation.y), applies '
-				+ 'spec.collides to every mesh in the subtree, adds it to the scene, gives it '
-				+ 'spec.body through three.physics.add, builds the trigger volume if there is one, and '
-				+ 'answers with a RECORD: whatever spec.data(params) returned, with object, volume and '
-				+ 'kind attached. Those three names are reserved and data() answering with one of them '
-				+ 'throws. A record is a plain object you can put your own fields on. '
-				+ 'of(object) is the record for a drawn node OR for its trigger volume, or null — both, '
-				+ 'because a query answers with what is drawn and three.onTrigger answers with the volume '
-				+ 'and a caller should not have to know which door it came through. three.kindOf(object) '
-				+ 'is the same question across every kind. '
-				+ 'REMOVAL IS IMMEDIATE AND THE LIST COMPACTS AT THE END OF THE FRAME, which is the '
-				+ 'opposite of a Cast\'s rule and deliberate: a cast is indexed by slot, so closing the '
-				+ 'gap on the spot would move somebody else\'s index, while a kind is addressed by an '
-				+ 'object and an object does not move. So remove(record) takes the body away, takes the '
-				+ 'node out of the scene and makes of() answer null before it returns — a crate broken '
-				+ 'inside a spin has to stop colliding and stop drawing on this tick — and only the LIVE '
-				+ 'LIST waits, compacted by a system named <kind>.compact last in the frame phase, so a '
-				+ 'for (const c of kind) that removes things is safe. Removing twice is false rather '
-				+ 'than an error, because a TNT reaching the same crate twice is ordinary. compact() is '
-				+ 'public for a game driving its own loop. '
-				+ 'A TRIGGER VOLUME IS A SIBLING, NOT A CHILD: a body-backed node has to be a direct '
-				+ 'child of the scene because the solver works in world space, so spec.trigger — '
-				+ '{ shape: \'sphere\', radius } or { shape: \'box\', size }, with an optional offset — '
-				+ 'makes an invisible second node beside the drawn one and registers <kind>.follow, a '
-				+ 'frame system at order 1e6 that carries each volume to its object. radius is a WORLD '
-				+ 'radius, not a scale. A system that must run after the volume moved says so with a '
-				+ 'larger order. spec.parent hangs the built objects from a Group instead of the scene '
-				+ 'and is REFUSED alongside a body or a trigger, for that same world-space reason. '
-				+ 'A DUPLICATE NAME THROWS, unlike three.systems.add, which replaces: a kind owns '
-				+ 'entities, and replacing one silently would leave a scene full of nodes and bodies '
-				+ 'nothing can name. dispose() removes every entity, unregisters the systems and gives '
-				+ 'the name back, after which a spawn on that kind throws — there would be no '
-				+ 'compaction system behind it and no name to find it by; clear() removes the '
-				+ 'entities and keeps the kind. count is how many are '
-				+ 'ALIVE, all() is them as an Array, and iterating the kind walks them in spawn order.',
-			properties: ['name', 'count'],
-			methods: [
-				'spawn(position, params)', 'of(object)', 'remove(record)', 'all()',
-				'compact()', 'follow()', 'clear()', 'dispose()', 'toString()',
-			],
 		},
 		TransformBatch: {
 			construct: 'three.batch(objects, { trs })  |  three.batch(objects, { euler: true })',
@@ -1381,67 +1343,64 @@ export const DOCS = {
 			+ 'shorter than one fixed step would see no time pass across a multi-step catch-up frame; '
 			+ 'a paused clock still freezes it for free either way. See the Cooldown class for start, '
 			+ 'cancel, active, ready, recovering, remaining, progress and elapsed.',
-		'three.cast(options)':
-			'N THINGS OF ONE KIND, stored as columns and stepped by named systems — the critters, the '
-			+ 'crates, the pickups. NOT the whole world, and that restriction is the design rather than a '
-			+ 'simplification: every bulk verb here takes a contiguous typed array, so three.steer, '
-			+ 'three.moveAndSlideAll and field.sample are one call each only while the things they act on '
-			+ 'are one dense column. A general store with an archetype graph would have to gather before '
-			+ 'every call, and the gather is the cost those verbs exist to remove. So a COLUMN IS THE '
-			+ 'BUFFER THE BULK VERB TAKES and nothing is marshalled. Takes { capacity, name }; the name '
-			+ 'prefixes every system it registers, so a report says pack.chase rather than chase. '
-			+ 'three.NO_ENTITY is what cast.spawn() answers when the cast is full and what cast.indexOf() '
-			+ 'answers for anything despawned — full is an answer rather than an error, as '
-			+ 'three.nav.field answering null is. See the Cast class for the rest.',
-		'three.kind(name, spec)':
-			'N THINGS OF ONE KIND ADDRESSED BY OBJECT IDENTITY — the crates, the pickups, the props — '
-			+ 'and the other half of three.cast. A cast stores columns because a column IS the buffer '
-			+ 'three.steer and three.moveAndSlideAll take; the things a query, a raycast or '
-			+ 'three.onTrigger hands back never appear in a bulk verb, and what a script needs for them '
-			+ 'is the way BACK from the object to whatever it knows about it. Hand-rolling that is an '
-			+ 'array, a Map from object to record, an alive flag, and a four-line removal ritual at '
-			+ 'every call site that can destroy one — examples/wumpa_run.js wrote it three times. '
-			+ 'The spec is { build, data, body, trigger, collides, parent, name }: build(params) is the '
-			+ 'only required one and answers with the Object3D; data(params) is the record\'s own fields '
-			+ '(object, volume and kind are the kind\'s and are refused); body is the options object '
-			+ 'three.physics.add takes, or a function of params answering one; trigger is '
-			+ '{ shape, radius | size, offset } for an invisible volume beside the drawn node; collides '
-			+ 'is written to every mesh in the built subtree; parent hangs them from a Group instead of '
-			+ 'the scene and is refused alongside a body or a trigger, because the solver works in world '
-			+ 'space; name prefixes the node names, which are <name>#<n>. '
-			+ 'See the Kind class for spawn, of, remove and the frame rules.',
-		'three.kindOf(object)':
-			'Which Kind owns this object — a drawn node or a trigger volume — or null. The global '
-			+ 'reverse of kind.of(object), for the caller holding two objects and no idea what either '
-			+ 'is: asking every kind in turn is the loop this exists to remove.',
-		'three.assemble(parts, defaults)':
-			'A COMPOUND MESH FROM A DESCRIPTION OF ITS PARTS, and what it replaces is five statements '
-			+ 'per body part — a Mesh, a scale, a position, a colour and an add — which is what every '
-			+ 'hand-built character in examples/ is made of. It answers with a plain '
-			+ '{ root, <partName>: Object3D | [Object3D, Object3D] }, where root is the Group to add to '
-			+ 'the scene; nothing is added for you, because a root is a detached description until the '
-			+ 'caller adds it. Part names are FLAT in the answer even when the parts are nested, so '
-			+ 'P.leg[0] works whether or not the legs hang from a spinner, and a duplicate name throws. '
-			+ 'A part takes exactly one shape — box: [w, h, d], sphere: r, cylinder: [rTop, rBottom, h], '
-			+ 'cone: [r, h], or geometry: <a geometry you supplied> with an optional scale — plus at, '
-			+ 'rotation (an xyz Euler triple in radians), pivot, mirror, color, material, name and '
-			+ 'parts. An unknown key throws and the message lists the allowed ones, because the failure '
-			+ 'it catches is a typo and a part that came out white in the wrong place is debugged by '
-			+ 'looking at the picture. '
-			+ 'ONE GEOMETRY PER SHAPE, NOT PER PART: box is a single unit BoxGeometry(1, 1, 1) cached '
-			+ 'at module scope with the size in mesh.scale, and so on, which is the rule that keeps a '
-			+ 'hundred assembled characters a hundred copies of four shapes. cylinder is cached by its '
-			+ 'taper ratio, because a taper is not a scale. '
-			+ 'PIVOT IS WHAT MAKES A LIMB SWING: it wraps the mesh in a Group placed at the pivot with '
-			+ 'the mesh at `at` inside it, and THE GROUP is what comes back as the part, so '
-			+ 'P.leg[0].rotation.x = swing swings from the hip. Without a pivot the part is the mesh. '
-			+ 'MIRROR: \'x\' | \'y\' | \'z\' builds two, negating that axis of the pivot (or of at, when '
-			+ 'there is no pivot), and answers with [negative, positive] — for (const sx of [-1, 1])\'s '
-			+ 'order, so pose code written against a hand-built pair ports unchanged. '
-			+ 'A part with no shape and a parts is a plain GROUP, which is what a spinner is. '
-			+ 'defaults is { material, collides, name }: material is what a part with none falls back '
-			+ 'on and is required if any part lacks one, collides is written to every MESH in the result '
-			+ '(a Group is not geometry), and name names the root.',
+		'three.Entity':
+			'THE BASE CLASS, and the shortest way to an entity: class Critter extends three.Entity, with '
+			+ 'no registration call beside it. The class registers itself on first use — a spawn, a rule, '
+			+ 'an of() — reading its own statics: capacity, columns, parent, body, volume, trigger, collides, and '
+			+ 'name (which is the class name unless a static name overrides it). super() FIRST in the '
+			+ 'constructor, and it is not a formality: that is where a bare new Critter() is refused, '
+			+ 'which is the one check a class with no columns cannot get any other way — an untracked '
+			+ 'instance has no node in the scene, no body in the solver and no place in the live list, '
+			+ 'and the first sign of it is a thing that never appears. Everything three.track installs is '
+			+ 'inherited: spawn, of, remove, column, all, count, free, compact, clear, dispose, on, off, '
+			+ 'system, pose, flush, sync, handles, transform, and iteration. There is NO update() to '
+			+ 'override, on purpose — continuous work is a system with a readable { order }, and a '
+			+ 'per-entity update method is the ninety-line animation callback again, once per class.',
+		'three.track(Class, options)':
+			'THE SAME REGISTRATION AS three.Entity, for a class that already has a parent and cannot '
+			+ 'extend it — the options are the argument here and the statics there, and nothing else '
+			+ 'differs. It answers with a Proxy that refuses a bare new Class(); capturing it is optional, '
+			+ 'because every static is installed on the class itself and a class that declares columns is '
+			+ 'caught anyway by the getter having no slot to resolve. '
+			+ 'A PLAIN CLASS BECOMES AN ENTITY. It owns the '
+			+ 'object -> instance map, the spawn ritual, the body, the volume, the live list and '
+			+ 'a compaction registered as <Class>.compact — so Class.of(hit.object) is the instance and '
+			+ 'c.remove() is the whole removal. Options are { parent, columns, capacity, body, volume, '
+			+ 'trigger, collides, name }: columns is { position: 3, motion: 3 } and needs a capacity, '
+			+ 'because a column cannot grow without dangling every live window into it; body is what '
+			+ 'three.physics.add takes, or a function of the instance answering one; volume is '
+			+ '{ shape: \'capsule\' | \'sphere\' | \'box\', radius, height | size, offset } for an invisible '
+			+ 'kinematic body beside the drawn node, carried by <Class>.follow, and trigger is the same '
+			+ 'thing with trigger: true; collides is written to every mesh in this.object\'s subtree; '
+			+ 'parent hangs the nodes off a Group and is refused alongside a body — a body-backed node '
+			+ 'has to be a direct child of the scene — but is allowed alongside a volume, which is its '
+			+ 'own node and reads a world position to follow. The constructor sets this.object to the Mesh or Group, and '
+			+ 'may write this.position[0] on line one — the column slot exists before it runs. '
+			+ 'Class.spawn(...args) is the only way in: new Class() throws, because an untracked '
+			+ 'instance has no slot, no body and no place in the live list and every one of those '
+			+ 'failures is silent. Statics: spawn, of, remove, column(field), all(), count, free, '
+			+ 'capacity, compact(), clear(), dispose(), on(), off(), and iteration — '
+			+ 'for (const c of Critter). Instance hooks: onSpawn() and onRemove(). There is NO update() '
+			+ 'to override, on purpose: continuous work is a system with a readable { order }, and a '
+			+ 'per-entity update method is the ninety-line animation callback again, once per class.',
+		'three.instanceOf(object)':
+			'Which tracked instance owns this object — a drawn node, one of its child meshes, or a '
+			+ 'volume — or null. It walks UP the parent chain, because a raycast and a query '
+			+ 'answer with the leaf that was hit and an assembled character is a Group of eleven meshes. '
+			+ 'The global reverse of Class.of(object), and what a rule keyed on "what are these two '
+			+ 'things" opens with.',
+		'three.emit(a, verb, b)':
+			'THE GAME RAISING ITS OWN EVENT: three.emit(player, \'use\', door) reaches '
+			+ 'Door.on(\'use\', Player, fn) exactly as a trigger reaches an \'enter\' rule, so a rule cannot '
+			+ 'tell whether a solver or a keypress raised it. Either argument may be an instance or an '
+			+ 'Object3D. It dispatches AT ONCE, where an engine event is queued and delivered by the '
+			+ '`rules` system — a handler that deletes a body from inside the solver is a hazard the '
+			+ 'game cannot see, and the game knows when it is safe where the solver does not. Answers '
+			+ 'with how many rules fired.',
+		'three.rules()':
+			'Every registered rule: { name, event, subject, matcher, order, enabled, failures }. The '
+			+ 'pair-dispatch half of three.systems.report(), and how you find the rule that is throwing '
+			+ 'sixty times a second after its message has stopped repeating in the log.',
 		'three.moveAndSlideAll(positions, motions, options) / three.moveBuffer(n) / three.moveResult':
 			'three.moveAndSlide for a whole crowd, in ONE call — the same controller, the same sweeps, and '
 			+ 'it exists for the SHAPE OF THE ANSWER rather than for the crossing. The single form measures '
