@@ -118,11 +118,11 @@ const PATH_CTRL = [
 ];
 const PATH = three.catmullRom(PATH_CTRL, { samples: 8 });
 
-const CUM = [0];
+const TRAIL = [0];
 for (let i = 1; i < PATH.length; i++) {
-	CUM.push(CUM[i - 1] + Math.hypot(PATH[i][0] - PATH[i - 1][0], PATH[i][1] - PATH[i - 1][1]));
+	TRAIL.push(TRAIL[i - 1] + Math.hypot(PATH[i][0] - PATH[i - 1][0], PATH[i][1] - PATH[i - 1][1]));
 }
-const PATH_LEN = CUM[CUM.length - 1];
+const PATH_LEN = TRAIL[TRAIL.length - 1];
 
 // The corridor floor climbs and dips. This is the one number the whole terrain
 // is hung off, and it is why the level is not flat: a heightfield that only
@@ -134,10 +134,10 @@ function pathY(s) {
 function along(s) {
 	const t = clamp(s, 0, PATH_LEN);
 	let i = 1;
-	while (i < CUM.length - 1 && CUM[i] < t) i++;
+	while (i < TRAIL.length - 1 && TRAIL[i] < t) i++;
 	const a = PATH[i - 1], b = PATH[i];
-	const seg = Math.max(1e-6, CUM[i] - CUM[i - 1]);
-	const k = (t - CUM[i - 1]) / seg;
+	const seg = Math.max(1e-6, TRAIL[i] - TRAIL[i - 1]);
+	const k = (t - TRAIL[i - 1]) / seg;
 	const tx = (b[0] - a[0]) / seg, tz = (b[1] - a[1]) / seg;
 	return { x: lerp(a[0], b[0], k), z: lerp(a[1], b[1], k), tx, tz, nx: -tz, nz: tx, yaw: Math.atan2(tx, tz) };
 }
@@ -157,7 +157,7 @@ function nearestOnPath(x, z) {
 		t = clamp01(t);
 		const px = ax + dx * t, pz = az + dz * t;
 		const d = Math.hypot(x - px, z - pz);
-		if (d < bd) { bd = d; bx = px; bz = pz; bs = lerp(CUM[i - 1], CUM[i], t); }
+		if (d < bd) { bd = d; bx = px; bz = pz; bs = lerp(TRAIL[i - 1], TRAIL[i], t); }
 	}
 	return { d: bd, x: bx, z: bz, s: bs };
 }
