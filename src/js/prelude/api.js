@@ -1071,12 +1071,12 @@ const debug = {
 		H.debugViewSet(index);
 	},
 
-	// What the run answers with, without returning it. Every argument becomes one
-	// entry in the `debug` array of the result, beside `value`, as JSON rather
-	// than as text inside the log — so an object stays an object.
+	// What the run answers with. Every argument becomes one entry in the `debug`
+	// array of the result, as JSON rather than as text inside the log — so an
+	// object stays an object. On the command line it prints as `debug: [...]`.
 	//
-	// A `return` is one expression at one place, and inside a system there is no
-	// return at all. This can be called wherever the number was worked out:
+	// One place is not enough: a number is worked out inside a system, or a
+	// frame, or halfway down. This can be called wherever that is:
 	//
 	//   three.debug.write({ crates: Crate.count, wumpa: Wumpa.count });
 	//   Player.system('score', p => { if (p.done) three.debug.write(p.fruit); });

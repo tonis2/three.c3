@@ -70,14 +70,15 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	server.add_tool({
 		.name = "run_script",
 		.description =
-			"Run a JavaScript scene script and get back everything it logged, the value it "
-			"returned, the scene's stats, and a PNG of the frame. The API is Three.js-shaped: "
+			"Run a JavaScript scene script and get back everything it logged, everything it "
+			"wrote with three.debug.write, the scene's stats, and a PNG of the frame. The API "
+			"is Three.js-shaped: "
 			"three.load, three.Scene, three.Mesh, three.Group, position/rotation/scale, add/remove. "
-			"Call get_api_docs first if you have not seen it. Use `return` to send a value back, "
-			"or three.debug.write(x) to send one from anywhere in the script — including from "
-			"inside a system, where there is no return.",
+			"Call get_api_docs first if you have not seen it. Use three.debug.write(x) to send a "
+			"value back — from anywhere in the script, including from inside a system or an "
+			"animation callback.",
 		.input_schema =
-			`{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await and return both work. three.debug.write(x) answers with x without returning; it arrives in the debug field, beside value."}},"required":["source"]}`,
+			`{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"required":["source"]}`,
 		.handler = &tool_run_script,
 		.user_data = host,
 		.raw_content = true,
