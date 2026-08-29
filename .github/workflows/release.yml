@@ -316,8 +316,10 @@ jobs:
 
           # No shaders/, no launcher and no Slang. src/shader/load.c3 carries
           # the five templates in the binary and the compiler is linked in, so
-          # the bundle is the executable plus, on macOS, the one library that
-          # has to stay a file: the driver.
+          # the only file that has to travel BESIDE the executable is, on
+          # macOS, the driver. Everything else in the zip — SKILL.md, LICENSE,
+          # README.md and examples/ — is documentation, not linkage, and its
+          # absence costs a reader rather than breaking a run.
 
           # macOS arm64 is the only platform that bundles a driver; setup.sh
           # skips the fetch everywhere else and Linux/Windows use the system's.
@@ -330,6 +332,34 @@ jobs:
 
           cp SKILL.md LICENSE "$out/" 2>/dev/null || true
           cp packaging/bundle-README.md "$out/README.md"
+
+          # The examples ship too. They are five self-contained scripts, ~156 KB
+          # all told, and they load NOTHING off disk — every mesh and texture in
+          # them is arithmetic — so they run from the extracted folder with no
+          # assets directory behind them and no paths to rewrite. That is what
+          # makes them cheap enough to bundle; an example that wanted a .glb
+          # would not be.
+          #
+          # Guarded rather than `|| true` like the line above it, and the
+          # difference is what the failure costs: a missing SKILL.md is a
+          # missing file, but an empty examples/ zips, uploads and publishes
+          # looking exactly like a full one, against a README that promises
+          # five scenes by name.
+          # `|| true` inside the substitution for the reason publish-static.sh
+          # spells out at its own nm call: an unmatched glob makes ls exit 2,
+          # `set -o pipefail` hands that to the assignment, and `set -e` then
+          # kills the step one line before the message that explains it — so
+          # the empty case would fail silently, which is the case this guard
+          # exists for.
+          count=$({ ls examples/*.js 2>/dev/null || true; } | wc -l | tr -d ' ')
+          [ "$count" -gt 0 ] || {
+            echo "::error::examples/ holds no .js files. README.md in this bundle"
+            echo "::error::lists them by name, so shipping the zip without them"
+            echo "::error::would be a broken promise rather than a smaller download."
+            exit 1; }
+          mkdir -p "$out/examples"
+          cp examples/*.js "$out/examples/"
+          echo "examples: $count scripts"
 
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "out=$out"   >> "$GITHUB_OUTPUT"
