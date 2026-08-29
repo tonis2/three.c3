@@ -63,9 +63,8 @@ jobs:
   build:
     name: ${{ matrix.bundle }}
     runs-on: ${{ matrix.runner }}
-    # Kept for the legs that are commented out of the matrix below: a red
-    # experimental leg must not withhold the other zips from a release. With
-    # only macOS in the matrix this evaluates false and does nothing.
+    # A red experimental leg must not withhold the other zips from a release.
+    # linux-x64 and windows-x64 keep the flag until each has one green build.
     continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
@@ -86,32 +85,29 @@ jobs:
             target: macos-aarch64
             exe: three
           # ---------------------------------------------------------------
-          # **Linux is still commented out; Windows is on now.** The bundle
-          # links Slang IN, and the archives come off slang.c3l's `static`
-          # release, which carries macos-aarch64 and windows-x64. Slang cannot
-          # be cross-built — its build runs code generators it compiled for the
-          # host — so linux-x64 has to be produced on a linux-x64 machine:
+          # Linux builds like the others now. slang.c3l's `static` release
+          # carries libslang-linux-x64.a, and the manifest's linux-x64 entry
+          # names `-lstdc++` — a static Slang does not carry its own C++
+          # runtime dependency the way the dylib did, and without it the link
+          # ends in hundreds of undefined std:: symbols.
+          #
+          # Slang cannot be cross-built — its build runs code generators it
+          # compiled for the host — so a Slang bump means rebuilding this
+          # archive on a linux-x64 machine before the tag:
           #
           #     ./lib/slang.c3l/native/build-slang.sh
           #     ./lib/slang.c3l/native/publish-static.sh
           #
-          # Uncomment the leg once its archive is on that release. It also
-          # needs `-lstdc++` (or `-static-libstdc++`) in slang.c3l's
-          # manifest.json link-args, the way macos-aarch64 has `-lc++` — a
-          # static Slang does not carry its own C++ runtime dependency the way
-          # the dylib did, and without it the link ends in hundreds of
-          # undefined std:: symbols. That entry is already written, so this
-          # block is the only thing standing between here and a Linux zip.
-          #
-          # The Linux-only steps below — the apt install, the quickjs PIC
-          # rebuild — are left in place and simply never fire.
-          #
-          # - bundle: three-linux-x64
-          #   runner: ubuntu-22.04
-          #   c3c_asset: c3-linux-static.tar.gz
-          #   target: linux-x64
-          #   exe: three
-          #
+          # Two steps below fire only for this leg: the apt install, because
+          # the runner has no graphics stack at all, and the quickjs PIC
+          # rebuild. `experimental` until it has one green build on this image.
+          - bundle: three-linux-x64
+            runner: ubuntu-22.04
+            c3c_asset: c3-linux-static.tar.gz
+            target: linux-x64
+            exe: three
+            experimental: true
+
           # windows-x64's archive is published, and the bundle has been built
           # and linked end to end on a real Windows toolchain — MSVC 14.44
           # against a slang.lib built with CMAKE_MSVC_RUNTIME_LIBRARY set to
