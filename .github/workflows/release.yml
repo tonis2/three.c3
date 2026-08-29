@@ -101,8 +101,30 @@ jobs:
           # Two steps below fire only for this leg: the apt install, because
           # the runner has no graphics stack at all, and the quickjs PIC
           # rebuild. `experimental` until it has one green build on this image.
+          #
+          # **ubuntu-24.04 rather than 22.04, and the ARCHIVE is what decides
+          # that.** libslang.a is compiled on whichever linux-x64 machine ran
+          # build-slang.sh, and it records whatever its host's headers resolved
+          # to. The current one was built on glibc 2.42 / GCC 15, so it carries
+          # references jammy cannot satisfy — the versions in brackets are the
+          # floor each one sets:
+          #
+          #   __isoc23_strtol,ll,ull   [GLIBC_2.38]     jammy has 2.35
+          #   __cxa_call_terminate     [CXXABI_1.3.15]  i.e. GCC 13; jammy has 12
+          #   ..._M_replace_cold       [GLIBCXX_3.4.31] same
+          #
+          # On 22.04 the link ended in `undefined reference to
+          # __isoc23_strtoull`, naming a file this repository does not own.
+          # noble has glibc 2.39 and a GCC 14 libstdc++, which clears all five.
+          #
+          # Moving the runner gives nothing up. Those references live INSIDE
+          # the archive, so the bundle already cannot start on a glibc older
+          # than 2.38 whatever image links it. Lowering that floor is a
+          # different job — rebuild the archive against an older libc, in a
+          # jammy container, and republish — and not a runner choice. Any
+          # Slang bump inherits the build host's floor the same way.
           - bundle: three-linux-x64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
             c3c_asset: c3-linux-static.tar.gz
             target: linux-x64
             exe: three
