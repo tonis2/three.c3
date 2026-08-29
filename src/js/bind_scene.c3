@@ -131,6 +131,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "stats", &js_stats, 1);
 	self.bind(host, "debugWrite", &js_debug_write, 1);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
+	// Hot reload (reload.c3)
+	self.bind(host, "reload", &js_reload, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "backgroundGet", &js_background_get, 1);

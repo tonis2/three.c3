@@ -1543,6 +1543,34 @@ export const DOCS = {
 			+ 'no images answers 0; stats().geometryBytes before and after is the other half. '
 			+ 'scene.unload() is this plus emptying the scene and is what a level transition wants. An asset loaded but never added '
 			+ 'has no references either, so it goes too — load the next level after unloading, not before.',
+		'three.reload()':
+			'Boot this game again from its own source, the same thing shift+R does in the window. '
+			+ 'A NEW JavaScript context: the animation loop, every handler, every live object and every '
+			+ 'module the script imported are gone, and main.js runs again from the top. What survives is '
+			+ 'the machine rather than the world — loaded assets (three.load answers out of memory, no file '
+			+ 'is reopened), compiled pipelines (a material rebuilt from the same shader source is a cache '
+			+ 'hit, no Slang runs), the camera, and three.persist. Physics bodies and the nav bake go with '
+			+ 'their scene, which is freed. The materials and textures the old script held HANDLES to are '
+			+ 'given back — nothing else would ever dispose them — so stats().materials and the images a '
+			+ 'three.texture() made drop to zero, while an image a resident asset owns stays with it. '
+			+ 'It returns immediately and the reload has not happened yet: the '
+			+ 'host performs it between this frame and the next, because doing it on the call would free the '
+			+ 'engine the call is running in. Over --mcp that is the point — edit a .js, call this, and the '
+			+ 'next screenshot is of the edited file. A run with no host loop (a --frames batch) takes the '
+			+ 'request and never acts on it.',
+		'three.persist':
+			'The one object that survives three.reload(), and the whole of what does. Written by the game '
+			+ 'and read by the game; carried across as JSON, so what may go in it is what JSON.stringify '
+			+ 'accepts. Put NUMBERS in it, not handles — a Mesh, a Scene or a body is an index into a pool '
+			+ 'that is about to be freed, and the index means nothing on the far side. A value it cannot '
+			+ 'serialise (a cycle, a Map, a function) is reported on the terminal and dropped rather than '
+			+ 'half-kept. Empty on a first boot. The shape is: '
+			+ 'if (three.reloaded) player.position.set(...three.persist.at); and an animation loop that '
+			+ 'keeps three.persist.at up to date.',
+		'three.reloaded':
+			'False on the first boot of a process and true on every boot after a three.reload() or a '
+			+ 'shift+R. The only way a script can tell the two apart, and what decides whether '
+			+ 'three.persist means anything.',
 		'three.inventory()':
 			'Every .glb and .gltf under the assets directory, described without loading any of it: '
 			+ '[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name], '

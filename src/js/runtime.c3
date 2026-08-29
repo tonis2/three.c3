@@ -406,6 +406,28 @@ struct JsRuntime
 	*>
 	List{PendingUpload} uploads;
 
+	<*
+	 How many texture references this context has handed to JavaScript, one
+	 count per `Assets.textures` slot — `js/bind_asset.c3`.
+
+	 A texture index crossing into a script *takes* a reference, always and only
+	 through `texture_value`, and `three.texture.dispose()` is the one thing that
+	 gives one back. So a context that ends holding some is a context whose
+	 handles will never dispose, and this is the record of how many that is.
+	 `release_script_textures` is what acts on it.
+
+	 Indexed by slot rather than a list of outstanding handles, because both
+	 operations then cost nothing and the table is bounded by the number of
+	 images resident rather than by how many handles a script has made.
+	*>
+	List{uint} texture_handles;
+
+	// A `three.reload()` a script has asked for and the loop has not performed
+	// yet — `reload.c3`. Deferred rather than done on the call, because the call
+	// is made from inside the context a reload destroys; the loop reads it
+	// between `pump` and the tick, where nothing of JavaScript's is on the stack.
+	bool reload_wanted;
+
 	bool ready;
 }
 
@@ -465,6 +487,8 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
 	// that never asks for one, which is most of them.
 	self.uploads.init(mem, 8);
+	// One entry per resident image, grown on demand — `hold_texture`.
+	self.texture_handles.init(mem, 8);
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
@@ -504,6 +528,11 @@ fn void JsRuntime.close(&self)
 	self.clear_click_handler();
 	self.clear_physics_handlers();
 	self.clear_uploads();
+	// The same idea as the five above, for the one resource whose reference is
+	// held by a *handle* rather than by a callback: the images this context's
+	// `Texture` objects own, which will never be disposed now that the context
+	// is going. See `release_script_textures`.
+	self.release_script_textures();
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
@@ -515,6 +544,7 @@ fn void JsRuntime.close(&self)
 	self.frame_debug.free();
 	self.frame_error.free();
 	self.input_text.free();
+	self.texture_handles.free();
 	self.modules.free();
 	*self = {};
 }
