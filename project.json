@@ -7,12 +7,7 @@
 	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang", "ktx"],
 	"features": [],
 	"macos-min-version": "26.0",
-	// Set here so it wins: vulkan.c3l's manifest asks for "static", and a
-	// library's choice is adopted whenever the project makes none. Slang's
-	// archive is built /MD, so a static CRT ends the Windows link in
-	//   lld-link: /failifmismatch: mismatch detected for 'RuntimeLibrary'
-	// naming slang.lib against libcpmt.lib. c3c warns that it is ignoring the
-	// library's setting, which is the intent.
+
 	"wincrt": "dynamic",
 	"script-dir": "./",
 	"test-sources": ["test/**"],
