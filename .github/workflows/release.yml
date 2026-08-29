@@ -64,7 +64,7 @@ jobs:
     name: ${{ matrix.bundle }}
     runs-on: ${{ matrix.runner }}
     # A red experimental leg must not withhold the other zips from a release.
-    # linux-x64 and windows-x64 keep the flag until each has one green build.
+    # linux-x64 keeps the flag until it has one green build.
     continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
@@ -108,20 +108,19 @@ jobs:
             exe: three
             experimental: true
 
-          # windows-x64's archive is published, and the bundle has been built
-          # and linked end to end on a real Windows toolchain — MSVC 14.44
-          # against a slang.lib built with CMAKE_MSVC_RUNTIME_LIBRARY set to
-          # MultiThreadedDLL, which is what c3c's default `--wincrt=dynamic`
-          # link wants. What has NOT happened is a run on this image, so the
-          # leg keeps `experimental` for its first green build: a failure here
-          # must not withhold the macOS zip from a release. Drop the flag once
-          # it passes.
+          # windows-x64 has built green on this image, so no `experimental`.
+          # The one thing it is fussy about is the CRT: slang.lib is built with
+          # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL, so the link has to be
+          # dynamic. c3c defaults to that, but it adopts a *library's* `wincrt`
+          # whenever the project states none — and vulkan.c3l's manifest asks
+          # for "static", which ends the link in
+          #   lld-link: /failifmismatch: mismatch detected for 'RuntimeLibrary'
+          # project.json states "dynamic" so that the project's choice wins.
           - bundle: three-windows-x64
             runner: windows-2022
             c3c_asset: c3-windows.zip
             target: windows-x64
             exe: three.exe
-            experimental: true
 
     steps:
       - uses: actions/checkout@v4
