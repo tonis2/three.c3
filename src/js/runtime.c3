@@ -335,7 +335,9 @@ struct JsRuntime
 	// is warned and counted where an agent is stopped.
 	bool game_frames;
 	long frame_overruns;
-	bool frame_overrun_warned;
+	// Where the last frame went, split by span — `frame_loop.c3`'s `FrameSpend`,
+	// filled by every `tick` and read by the overrun report and `three.frame.ms`.
+	FrameSpend frame_spend;
 
 	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at worst
 	// and is replaced whole by every tick; `input_text` backs its `text`, which
