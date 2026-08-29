@@ -111,14 +111,90 @@ fn ColorSpace color_space_of(int code) @local
  handle reporting the request rather than the result would make `tex.levels` a
  restatement of the caller's own argument.
 *>
-fn qjs::Value texture_value(qjs::Context* js, int index, Texture* uploaded) @local
+fn qjs::Value texture_value(JsRuntime* self, qjs::Context* js, int index, Texture* uploaded) @local
 {
+	// Counted here because this is the only door. Every one of the four verbs
+	// that hands a texture to a script takes a reference on the way through, and
+	// they all come here to build the array — so a fifth one cannot be written
+	// that forgets, which is the property a tally kept at the call sites would
+	// not have.
+	self.hold_texture(index);
+
 	qjs::Value fields = js.array();
 	js.set_index(fields, 0, qjs::int_value(index));
 	js.set_index(fields, 1, qjs::int_value((int)uploaded.width));
 	js.set_index(fields, 2, qjs::int_value((int)uploaded.height));
 	js.set_index(fields, 3, qjs::int_value((int)uploaded.levels));
 	return fields;
+}
+
+<*
+ One more reference handed to a script, counted against its slot.
+
+ Called by `texture_value` and nowhere else. The slot index is an ordinary
+ position in `Assets.textures`, so the tally is a parallel array that grows to
+ whatever the largest live slot is — a table of at most one `uint` per resident
+ image, which is smaller than the image's own name.
+*>
+fn void JsRuntime.hold_texture(&self, int index)
+{
+	if (index < 0) return;
+	while (self.texture_handles.len() <= (sz)index) self.texture_handles.push(0);
+	self.texture_handles[index]++;
+}
+
+<*
+ One given back — `three.texture.dispose()`.
+
+ Clamped at zero rather than trusted. The prelude's `Texture` marks itself dead
+ on the first `dispose()` so a second never reaches the host, but the tally is
+ what decides how many images get freed when a context ends, and a count that
+ could go negative through some path nobody has thought of yet would free an
+ image a material is still drawing with. Refusing to go below zero makes the
+ worst case a texture that outstays its welcome, which is where this started.
+*>
+fn void JsRuntime.drop_texture(&self, int index)
+{
+	if (index < 0 || (sz)index >= self.texture_handles.len()) return;
+	if (self.texture_handles[index] == 0) return;
+	self.texture_handles[index]--;
+}
+
+<*
+ Gives back every texture reference the context still holds, on its way out.
+
+ The texture half of `MeshPass.release_script_materials`, and it exists for the
+ same reason: a `Texture` is freed by its *handle* being disposed, and a context
+ that closes takes every handle with it without disposing one. A reload is where
+ that shows — ten of them over an editing session is ten copies of the same
+ image resident, none of them named by anything — and process teardown is where
+ it does not, because `Assets.free` was going to destroy them anyway.
+
+ It is a *release* and not a free, so a texture a material or a mesh is still
+ using stays exactly where it is; what goes is only the reference the script's
+ own handle was holding. That is what makes this safe to do unconditionally
+ rather than only when nothing else could be pointing at the image.
+
+ The counts are cleared rather than the list freed: `close` frees it a few lines
+ later, and a `reset` here would make this unusable from anywhere else.
+*>
+fn void JsRuntime.release_script_textures(&self)
+{
+	if (self.pass == null)
+	{
+		self.texture_handles.clear();
+		return;
+	}
+
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	foreach (i, count : self.texture_handles)
+	{
+		for (uint held = 0; held < count; held++)
+		{
+			self.pass.assets.release_texture(gpu, (int)i);
+		}
+	}
+	self.texture_handles.clear();
 }
 
 <*
@@ -180,7 +256,7 @@ fn void js_texture(
 			return;
 		}
 
-		*out = texture_value(&js, index, self.pass.assets.texture_at(index));
+		*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
 	};
 }
 
@@ -291,7 +367,7 @@ fn void js_data_texture(
 	// here and the device is invisible from JavaScript. Written as an echo first,
 	// and a `.width`/`.height` swap injected into the `Image` above passed the
 	// whole suite.
-	*out = texture_value(&js, index, self.pass.assets.texture_at(index));
+	*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
 }
 
 <*
@@ -354,6 +430,9 @@ fn void js_texture_dispose(
 
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
 	self.pass.assets.release_texture(gpu, index);
+	// After the release and only when one happened, so the tally and the table
+	// agree: a dispose the guard above turned away gave nothing back.
+	self.drop_texture(index);
 }
 
 <*
@@ -1166,7 +1245,7 @@ fn void js_asset_image(
 		return;
 	}
 
-	*out = texture_value(&js, index, self.pass.assets.texture_at(index));
+	*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
 }
 
 <*
@@ -1219,12 +1298,12 @@ fn void js_mesh_material(
 	js.set_index(row, 4, qjs::number_value(material.emissive_factor[0]));
 	js.set_index(row, 5, qjs::number_value(material.emissive_factor[1]));
 	js.set_index(row, 6, qjs::number_value(material.emissive_factor[2]));
-	js.set_index(row, 7, layer_texture_value(&js, &self.pass.assets, material.occlusion_texture));
+	js.set_index(row, 7, layer_texture_value(self, &js, material.occlusion_texture));
 	js.set_index(row, 8, qjs::number_value(material.metallic));
 	js.set_index(row, 9, qjs::number_value(material.roughness));
-	js.set_index(row, 10, layer_texture_value(&js, &self.pass.assets, material.normal_texture));
-	js.set_index(row, 11, layer_texture_value(&js, &self.pass.assets, material.metallic_roughness_texture));
-	js.set_index(row, 12, layer_texture_value(&js, &self.pass.assets, material.emissive_texture));
+	js.set_index(row, 10, layer_texture_value(self, &js, material.normal_texture));
+	js.set_index(row, 11, layer_texture_value(self, &js, material.metallic_roughness_texture));
+	js.set_index(row, 12, layer_texture_value(self, &js, material.emissive_texture));
 	*out = row;
 }
 
@@ -1369,27 +1448,27 @@ fn void js_mesh_layers(
 		js.set_index(row, 11, qjs::number_value(layer.emissive_factor[0]));
 		js.set_index(row, 12, qjs::number_value(layer.emissive_factor[1]));
 		js.set_index(row, 13, qjs::number_value(layer.emissive_factor[2]));
-		js.set_index(row, 14, layer_texture_value(&js, &self.pass.assets, layer.texture));
-		js.set_index(row, 15, layer_texture_value(&js, &self.pass.assets, layer.normal_texture));
-		js.set_index(row, 16, layer_texture_value(&js, &self.pass.assets, layer.emissive_texture));
-		js.set_index(row, 17, layer_texture_value(&js, &self.pass.assets, layer.mask_texture));
+		js.set_index(row, 14, layer_texture_value(self, &js, layer.texture));
+		js.set_index(row, 15, layer_texture_value(self, &js, layer.normal_texture));
+		js.set_index(row, 16, layer_texture_value(self, &js, layer.emissive_texture));
+		js.set_index(row, 17, layer_texture_value(self, &js, layer.mask_texture));
 		js.set_index(row, 18, qjs::number_value(layer.metallic));
 		js.set_index(row, 19, qjs::number_value(layer.roughness));
 		js.set_index(row, 20,
-			layer_texture_value(&js, &self.pass.assets, layer.metallic_roughness_texture));
-		js.set_index(row, 21, layer_texture_value(&js, &self.pass.assets, layer.height_texture));
+			layer_texture_value(self, &js, layer.metallic_roughness_texture));
+		js.set_index(row, 21, layer_texture_value(self, &js, layer.height_texture));
 		js.set_index(row, 22, qjs::number_value(layer.bump_strength));
 		js.set_index(row, 23, qjs::number_value(layer.bump_distance));
 		js.set_index(layers, (uint)i, row);
 	}
 
 	qjs::Value stack = js.array();
-	js.set_index(stack, 0, layer_texture_value(&js, &self.pass.assets, mesh.layers.mask_texture));
+	js.set_index(stack, 0, layer_texture_value(self, &js, mesh.layers.mask_texture));
 	js.set_index(stack, 1, layers);
 	// The base material's own relief, which hangs off the stack rather than off any
 	// layer — the extension's `base` object, and the only place core glTF leaves
 	// for a height map.
-	js.set_index(stack, 2, layer_texture_value(&js, &self.pass.assets, mesh.layers.height_texture));
+	js.set_index(stack, 2, layer_texture_value(self, &js, mesh.layers.height_texture));
 	js.set_index(stack, 3, qjs::number_value(mesh.layers.bump_strength));
 	js.set_index(stack, 4, qjs::number_value(mesh.layers.bump_distance));
 	*out = stack;
@@ -1417,13 +1496,14 @@ fn void js_mesh_layers(
  by mistake would still *report* linear, and the one test aimed at that class of
  bug would pass.
 *>
-fn qjs::Value layer_texture_value(qjs::Context* js, Assets* assets, int index) @local
+fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) @local
 {
 	if (index < 0) return qjs::null_value();
+	Assets* assets = &self.pass.assets;
 	Texture* uploaded = assets.texture_at(index);
 	if (uploaded == null) return qjs::null_value();
 	assets.retain_texture(index);
-	qjs::Value fields = texture_value(js, index, uploaded);
+	qjs::Value fields = texture_value(self, js, index, uploaded);
 	js.set_index(fields, 4, qjs::int_value(uploaded.space == ColorSpace.LINEAR ? 1 : 0));
 	return fields;
 }

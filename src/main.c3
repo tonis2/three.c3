@@ -678,28 +678,7 @@ fn void? live(
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
 	// attaches to should be the one `main.js` built.
-	if (assets.len > 0)
-	{
-		runtime.set_assets_root(assets);
-		RunResult booted = runtime.run_module(ENTRY_MODULE);
-		defer booted.free();
-
-		if (booted.log.len > 0) io::printn(booted.log);
-		if (!booted.ok)
-		{
-			// Printed and carried on with, rather than returned as a fault. A boot
-			// that failed is exactly when someone wants to look at it — with `--mcp`
-			// that means attaching and asking, and with a window it means seeing an
-			// empty scene beside the reason for it.
-			io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
-		}
-	}
-
-	// After the game and before the first frame. Both orders are defensible and
-	// this one composes: `--assets ./game --script probe.js` runs the script
-	// against the world `main.js` built, which is what the same two things would do
-	// through the server.
-	if (script.len > 0) boot_script(&runtime, script)!;
+	boot_world(&runtime, assets, script)!;
 
 	// The bounded run, which is how a game is checked without a person watching it
 	// — and the only path in this function that is not an endless loop. The ticks
@@ -742,6 +721,7 @@ fn void? live(
 	else
 	{
 		io::printn("     drag to orbit, right-drag to pan, scroll to zoom");
+		io::printn("     shift+R reloads the script, escape quits");
 	}
 
 	// No `Controls` of its own: the runtime holds the one this loop drives, so that
@@ -837,6 +817,22 @@ fn void? live(
 
 		// Nothing to pump when there is no listener; a game alone still ticks.
 		usz handled = serving ? listener.pump(&server) : 0;
+
+		// After `pump` and before the tick, which is the one point in an iteration
+		// with nothing of JavaScript's on the stack — a reload frees the engine the
+		// call asking for it was made from. So a `three.reload()` in a tool call is
+		// honoured on the iteration that answered it, one from a frame callback on
+		// the next, and shift+R before the world it is replacing gets a last frame.
+		//
+		// `runtime` is a different object on the far side of this. Nothing below
+		// holds a pointer into it — `controls` is read as `runtime.controls` every
+		// frame for exactly this kind of reason.
+		if (runtime.reload_wanted || (window != null && wants_reload(input)))
+		{
+			Clock took = clock::now();
+			reload(&runtime, &renderer.pass, renderer, window, assets, script)!;
+			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
+		}
 
 		long elapsed_ns = (long)since_start.to_now();
 
@@ -1093,6 +1089,43 @@ fn String frame_path(String pattern, uint index)
 	out.append(number);
 	out.append(pattern[stop..]);
 	return out.str_view();
+}
+
+<*
+ Runs whatever put a world on screen: a game directory, a script, or both.
+
+ A function rather than two blocks inside `live`, because `reload` needs the same
+ two things in the same order — a reload *is* this, with a teardown in front of
+ it — and a second spelling of "how a game boots" is how the two would come to
+ disagree about which of them runs first.
+
+ Both orders are defensible and this one composes: `--assets ./game --script
+ probe.js` runs the script against the world `main.js` built, which is what the
+ same two things would do through the server.
+
+ A game that failed to boot is printed and carried on with rather than returned
+ as a fault. That is exactly when someone wants to look at it — with `--mcp` that
+ means attaching and asking, and with a window it means seeing an empty scene
+ beside the reason for it.
+
+ @return? SCRIPT_NOT_READABLE : `Only from --script: nothing at that path. A game directory that will not boot is reported and not raised.`
+*>
+fn void? boot_world(JsRuntime* runtime, String assets, String script)
+{
+	if (assets.len > 0)
+	{
+		runtime.set_assets_root(assets);
+		RunResult booted = runtime.run_module(ENTRY_MODULE);
+		defer booted.free();
+
+		if (booted.log.len > 0) io::printn(booted.log);
+		if (!booted.ok)
+		{
+			io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
+		}
+	}
+
+	if (script.len > 0) boot_script(runtime, script)!;
 }
 
 <*

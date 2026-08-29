@@ -1668,6 +1668,45 @@ export const three = {
 	// merely wasteful.
 	unloadUnused() { return H.unloadUnused(); },
 
+	// Boot this game again from its own source — §8.
+	//
+	// The same thing shift+R does in the window, and the reason it is a verb
+	// too is `--mcp`: an agent edits a .js, calls this, and the next
+	// screenshot is of the edited file. It returns immediately and the
+	// reload has not happened yet — the host performs it between this
+	// frame and the next, because doing it on the call would free the
+	// engine this call is running in.
+	//
+	// A new JavaScript context: the animation loop, every handler, every
+	// live object and every module this script imported are gone, and
+	// `main.js` runs again from the top. What survives is the machine —
+	// loaded assets, compiled pipelines, the camera — and `persist`.
+	//
+	// A run with no host loop to perform it (a `--frames` batch, a test)
+	// takes the request and never acts on it.
+	reload() { H.reload(); },
+
+	// The one object that survives a reload, and the whole of what does.
+	//
+	// Written by the game, read by the game, and carried across as JSON —
+	// so what may go in it is what `JSON.stringify` accepts. A Mesh, a
+	// Scene or a body is an index into a pool that is about to be freed;
+	// put the numbers in, not the handles. A value it cannot serialise
+	// (a cycle, a Map, a function) is reported and dropped rather than
+	// silently half-kept.
+	//
+	//   if (three.reloaded) player.position.set(...three.persist.at);
+	//   three.setAnimationLoop(() => { three.persist.at = player.position.toArray(); });
+	//
+	// Empty on a first boot, and never touched by anything but the game.
+	persist: {},
+
+	// Whether this boot came from a reload rather than from starting the
+	// process. False on the first, true on every one after it, and the
+	// only way a script can tell the difference — a game reads it to
+	// decide whether `persist` means anything.
+	reloaded: false,
+
 	// Three.js's own name for this, on the renderer, and the only name for
 	// it that is: `requestAnimationFrame` is the browser's, and Three.js has
 	// no frame loop in core either.
