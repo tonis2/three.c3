@@ -97,8 +97,6 @@ export const DOCS = {
 		'collider-from-mesh': 'A collider comes from the mesh, not from numbers you supply: \'box\' and \'sphere\' are its own bounds, \'capsule\' is the bounds about Y, \'heightfield\' is a TerrainGeometry\'s own grid of heights — one shape for a whole landscape, at any slope, where the alternative is a chain of invisible boxes and a path forced flat to have them — and \'hull\' is the convex hull of its points — which is the same collision::quickhull that built a ConvexGeometry, so a convex rock\'s collider is exactly its own geometry rather than an approximation of it.',
 		'export-round-trips': 'The scene comes back OUT with scene.export(path, options) — a .glb with one mesh per unique geometry, so what the file says about sharing is what the frame says. Round-trips: export it, three.load it, and the draw-call count is the same, per-copy colours included. Sibling copies of one shape are written as a single node carrying an array of transforms (EXT_mesh_gpu_instancing, which any glTF reader can place) with a _COLOR_0 array beside them holding each copy\'s mesh.color; a reader that does not know _COLOR_0 gets them in the material\'s own colour rather than in the wrong place. A copy with no sibling drawing the same shape keeps its name and its own material instead, which costs no draw call, and groups are never collapsed. Siblings that share a shape but not a material do not batch either — a colour travels per copy in _COLOR_0, a texture or a blend mode has no per-copy channel — so they come back as the two draws they were. Two things are left out on purpose — helpers and hidden subtrees, because the export is what the frame shows, and ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than programs — unless you pass { bake: true }, which runs each shader body over its mesh\'s uv layout and writes the answer as a baseColorTexture or a baseColorFactor, and is the difference between a file that is your scene and a file that is your scene in one grey.',
 		'static-casters': 'A shadow pass rasterises every caster every frame, which for a village is the largest thing in the frame. Say object.static = true on whatever will not move again — buildings, ground, walls, scenery — and those are drawn into the shadow map once and kept; each frame after that draws only what moved. It costs no draw call in the colour pass, so marking ten thousand crates is free, and moving one afterwards is safe (the map is rebuilt) rather than wrong. scene.traverse(o => o.static = true) is the usual way to say it. Watch three.stats().shadowStaticDraws: 0 on most frames means the cache is holding. Refused on skinned meshes — a pose changes the silhouette without the transform moving — and reading .static back is how you see that.',
-		'return-is-the-value': 'Return a value from your script with `return`; it comes back as the `value` field.',
-
 	},
 	classes: {
 		Scene: {
@@ -1471,12 +1469,12 @@ export const DOCS = {
 			+ 'shorter list rather than spinning, so read .length. The same seed places the same points, '
 			+ 'which is what makes a screenshot comparable to yesterday\'s.',
 		'three.debug.write(...values)':
-			'Answers with a value without returning it. Every argument becomes one entry in the '
-			+ 'debug array of the result, beside value, as JSON rather than as text inside the log — '
-			+ 'so an object stays an object instead of arriving escaped in a string. Two things a '
-			+ 'return cannot do: it can be called from wherever the number was worked out rather '
-			+ 'than gathered into one expression at the last line, and it works inside a system or '
-			+ 'an animation callback, where there is no return at all. Entries written in a frame '
+			'How a script answers with a value. Every argument becomes one entry in the '
+			+ 'debug array of the result, as JSON rather than as text inside the log — '
+			+ 'so an object stays an object instead of arriving escaped in a string. It can be '
+			+ 'called from wherever the number was worked out rather than gathered into one '
+			+ 'expression at the last line, and it works inside a system or an animation '
+			+ 'callback. On the command line it prints as debug: [...]. Entries written in a frame '
 			+ 'are held and reported by the NEXT run, the way console.log from a callback is. A '
 			+ 'value with no JSON form — a cycle, a function, undefined — arrives as the text '
 			+ 'String(value) would have shown rather than punching a hole in the array. '

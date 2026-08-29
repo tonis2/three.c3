@@ -151,9 +151,9 @@ every machine, which is exactly what a vsynced window takes away.
 - A script that throws prints `three: <path> did not run: <error>` with a stack
   and **still exits 0**. Only a bad flag or an unreadable `--script` path exits
   1. So in a test, assert on stdout or on the PNG — not on the exit code.
-- A script's `return` value is **not** printed on the CLI path. It only comes
-  back as `value` from the `run_script` MCP tool. `three.debug.write(x)` is the
-  one that prints here — `debug: [...]` — as well as coming back over MCP.
+- `three.debug.write(x)` is how a script answers with a value rather than a log
+  line. It prints here as `debug: [...]`, and comes back in the `debug` field
+  over MCP.
 
 ## The MCP tools
 
@@ -163,8 +163,8 @@ from a local catalog even when no app is up, so tools list before the app
 starts; the HTTP transport needs the server already running.
 
 **`run_script`** — takes `{ source }`. Runs as an async function body, so
-top-level `await` and `return` both work. Answers with two content blocks,
-**whether or not the script succeeded**:
+top-level `await` works. Answers with two content blocks, **whether or not the
+script succeeded**:
 
 1. a JSON report — `{ ok, log, value, stats }`, plus `error` when it threw,
    `warnings` when the renderer had something to say, and `debug` when the
@@ -198,9 +198,8 @@ Takes no view arguments; move `three.camera` from a script instead.
 - `{ section: "classes.ShaderMaterial" }` → one entry or one whole section
 - `{ path: "api.md" }` → **currently writes nothing.** It answers with the
   index and no file appears, for a relative path or an absolute one. Until it
-  does, the way to get a file to grep is to log it and redirect — note that a
-  script's `return` value is not printed on the CLI path, only `console.log`
-  and `three.debug.write`:
+  does, the way to get a file to grep is to log it and redirect — `console.log`
+  and `three.debug.write` are what print on the CLI path:
 
       echo 'console.log(JSON.stringify(three.getApiDocs({ all: true })))' > d.js
       three --headless --script d.js --frames 1 | grep -m1 '^{' > api.json
@@ -325,6 +324,17 @@ and `points` are how a script reaches it, and it costs a draw call of its own.
 
 **Post** — `three.setPost({ fragment, uniforms, textures })` runs one Slang
 `float3 post(Post p)` over the finished frame; `three.addPass` chains them.
+
+**Hot reload** — `three.reload()` boots the game again from its own source,
+and shift+R does the same from the window. It is a **new JavaScript context**:
+the animation loop, every handler, every live object and every module the
+script imported are gone, and `main.js` runs from the top. What survives is the
+machine rather than the world — loaded assets, compiled pipelines, the camera —
+plus `three.persist`, one object carried across as JSON. `three.reloaded` tells
+a boot which kind it is. Put **numbers** in `persist`, not handles: a `Mesh` is
+an index into a pool that is about to be freed. The call returns before the
+reload happens (the host does it between frames), so over MCP the shape is
+`run_script` with `three.reload()`, then `screenshot`.
 
 **Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
 `three.renderSize()`. Nothing is freed until you say so — a scene included:
