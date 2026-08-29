@@ -1877,6 +1877,27 @@ export const DOCS = {
 			+ 'the step that follows from it, in seconds. It does NOT change the solver\'s rate, '
 			+ 'which is 60 Hz and is the solver\'s business: a script asking for 30 Hz gameplay must '
 			+ 'not quietly halve the accuracy of every contact in the scene.',
+		'three.frame':
+			'HOW THE FRAMES HAVE GONE, AND WHERE THE LAST ONE WENT. { running, ticks, overruns, ms }. '
+			+ 'overruns is how many frames spent more than 8 ms in JavaScript — half a 60 Hz frame, '
+			+ 'the point at which the script has stopped leaving room for the draw it sets up. '
+			+ 'NOTHING IS LOGGED WHEN IT HAPPENS — a long frame is counted here and split in ms, and '
+			+ 'that is all the engine says about it, so this is the number to read if you suspect '
+			+ 'hitching. Under --mcp alone it stays 0, because there an overrun stops the callback '
+			+ 'instead of counting it. '
+			+ 'ms is the LAST FINISHED frame, split five ways — read it from inside a system and it '
+			+ 'describes the frame before, which is complete. { handlers, fixed, frame, jobs } are '
+			+ 'the four spans that add up to total and are what the 8 ms is measured against: '
+			+ 'handlers is key, click and physics-trigger handlers; fixed is every fixed step this '
+			+ 'frame owed, together; frame is the animation callback and the frame-phase systems; '
+			+ 'jobs is one queued mesh upload and the microtasks it settled. '
+			+ 'SOLVER IS OUTSIDE TOTAL because it is outside the budget: the physics step runs above '
+			+ 'the script\'s window and is the host\'s own work, so a callback is never stopped or '
+			+ 'counted for it. It is reported because a frame that spends 10 ms in the solver and '
+			+ '3 ms in script is a frame whose script is not the problem, and reading only total '
+			+ 'there is how you end up optimising the wrong file. '
+			+ 'three.systems.report() is the rolling per-system version and the one to reach for '
+			+ 'next: this splits a frame into four spans, that splits two of those spans by name.',
 		'toJSON() / toString()':
 			'What JSON.stringify sees, and therefore what comes back in the `value` field when you '
 			+ 'return an object from a script. Objects report their name, transform and children; a '
