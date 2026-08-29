@@ -33,11 +33,30 @@ the one file that still has to travel with it — see "Moving the binary".
 `--script` and `--assets` keep running after the script returns, so a
 non-interactive run needs `--frames` or `--screenshot` to bound it.
 
+## The examples
+
+`examples/` holds five scenes that build everything they draw in code. There
+are no models and no textures on disk — the geometry and the images are
+arithmetic — so they need no assets folder behind them and run straight out of
+this directory:
+
+    ./three --script examples/alley.js       # material.repeat / offset, and the physics verbs
+    ./three --script examples/village.js     # a street, a crowd, and nine textures that are arithmetic
+    ./three --script examples/tank_yard.js   # a Battle City in four API pieces
+    ./three --script examples/vfx.js         # what a material's own samplers are for
+    ./three --script examples/wumpa_run.js   # a Crash-shaped run down a jungle hollow
+
+Each file opens with a comment saying what it demonstrates and which keys it
+answers to. Add `--mcp` to any of them to attach an agent to the scene while
+it runs. Those headers spell the command `./build/three`, which is the path in
+a source checkout; from this folder it is `./three`.
+
 ## What is in here
 
     three            the engine, with the Slang shader compiler linked in
     libvulkan_*      the GPU driver (macOS only — see below)
     SKILL.md         the guide
+    examples/        five scenes to run — see below
     LICENSE
 
 That is the whole list. Earlier releases also carried `libslang-*.dylib`

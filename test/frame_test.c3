@@ -705,10 +705,10 @@ fn void a_boot_from_a_command_line_counts_a_slow_frame() @test
 		three::RunResult result = run.run("return 1;");
 		defer result.free();
 		test::@check(result.frame_overruns == 2, "both frames counted, got %d", result.frame_overruns);
-		test::@check(
-			result.frame_error.contains("over the 8 ms a frame has"),
-			"and the first one said so: '%s'", result.frame_error
-		);
+		// Counted and NOT said. `frame_error` carries the reasons a callback was
+		// stopped, and a frame that merely ran long stopped nothing — a line about it
+		// there would be a line between a reader and a loop that really did die.
+		test::@check(result.frame_error.len == 0, "and neither of them was logged: '%s'", result.frame_error);
 	};
 
 	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
@@ -721,5 +721,99 @@ fn void a_boot_from_a_command_line_counts_a_slow_frame() @test
 		defer result.free();
 		test::@check(result.frame_overruns == 0, "a served run counts nothing, got %d", result.frame_overruns);
 		test::@check(result.frame_error.len == 0, "and says nothing: '%s'", result.frame_error);
+	};
+}
+
+<*
+ A long frame is attributed to the span that ran long, and not to the animation
+ callback by default.
+
+ `tick` measures one window and six things happen inside it, so a reading that
+ covered the window and was labelled with the callback was a wrong answer rather
+ than a vague one: on `examples/wumpa_run.js` a long frame is a nav solve in a
+ fixed system and a burst of trigger handlers, and the callback is 2.5 ms of the
+ 20.
+
+ So the callback here does nothing at all and the fixed loop takes thirty
+ milliseconds, and the check is on both halves — that the cost lands on `fixed`,
+ and that `frame` stays under a millisecond.
+*>
+fn void a_slow_fixed_loop_is_not_charged_to_the_animation_callback() @test
+{
+	String slow_fixed = `
+		three.setAnimationLoop(() => {});
+		three.setFixedLoop(() => {
+			const until = Date.now() + 30;
+			while (Date.now() < until) {}
+		});
+	`;
+
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.play_frames();
+		@ok(run, slow_fixed);
+		// Twenty milliseconds is one step of a sixtieth and no more, so exactly one
+		// slow fixed call happens and the frame it happens in is the one measured.
+		run.tick(0);
+		run.tick(20);
+
+		three::RunResult result = run.run("return 1;");
+		defer result.free();
+		test::@check(result.frame_overruns == 1, "the frame with a step in it counted, got %d", result.frame_overruns);
+
+		String on_fixed = @answer(run, "return three.frame.ms.fixed > three.frame.ms.total * 0.9;");
+		defer on_fixed.free(mem);
+		test::@check(on_fixed == "true", "the fixed loop is where it went, got '%s'", on_fixed);
+
+		String on_frame = @answer(run, "return three.frame.ms.frame < 1;");
+		defer on_frame.free(mem);
+		test::@check(on_frame == "true", "and not the callback, which did nothing: '%s'", on_frame);
+	};
+}
+
+<*
+ `three.frame` is the only way to find out that frames ran long, so it has to
+ work from a script.
+
+ Nothing is logged about a long frame, and until this binding the count lived
+ only in the `frame` block of an MCP `run_script` result — so the two boots that
+ can produce an overrun at all, `--script` and `--assets`, were the two that
+ could not read it.
+
+ `ms` is checked on the same frame, because the split is the point: a reader who
+ knows the number is 30 and cannot see which of the four spans it was knows
+ nothing useful.
+*>
+fn void the_frame_counters_are_readable_from_javascript() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.play_frames();
+		@ok(run, `
+			three.setAnimationLoop(() => {
+				const until = Date.now() + 30;
+				while (Date.now() < until) {}
+			});
+		`);
+		run.tick(0);
+		run.tick(16);
+
+		String counted = @answer(run, "return three.frame.overruns;");
+		defer counted.free(mem);
+		test::@check(counted == "2", "both overruns are readable from a script, got '%s'", counted);
+
+		// The last finished frame is the second tick, whose thirty milliseconds were
+		// all the callback's. Asserted as "most of the total" rather than on a
+		// number, because the busy loop overshoots by however long its last
+		// iteration took.
+		String share = @answer(run, "return three.frame.ms.frame > three.frame.ms.total * 0.9;");
+		defer share.free(mem);
+		test::@check(share == "true", "and the split puts it in the callback's span, got '%s'", share);
+
+		// Under a millisecond rather than zero: the span is the gap between two clock
+		// reads, so a phase with nothing registered in it still costs the reads.
+		String fixed = @answer(run, "return three.frame.ms.fixed < 1;");
+		defer fixed.free(mem);
+		test::@check(fixed == "true", "and nothing worth a millisecond on the fixed loop, which never ran: '%s'", fixed);
 	};
 }
