@@ -56,17 +56,27 @@ import qjs;
 const long JS_FRAME_BUDGET_MS = 100;
 
 <*
- What a *game's* frame callback may take before anyone is told about it.
+ What a *game's* frame may spend in JavaScript before it is counted as a long one.
 
- Eight milliseconds is half a 60Hz frame, the point at which a callback has
- stopped leaving room for the draw it exists to set up.
+ Eight milliseconds is half a 60Hz frame, the point at which a frame's script
+ work has stopped leaving room for the draw it exists to set up.
 
- Exceeding it is a report, not a death, and that is the whole difference between
+ It covers everything `tick` spends above JavaScript — the input and physics
+ handlers, the fixed steps, the animation callback, and the microtasks any of
+ them queued — because all four compete with the same draw. Which of them spent
+ it is `FrameSpend`'s question, and nothing here guesses at the answer.
+
+ Exceeding it is a count, not a death, and that is the whole difference between
  the two boot modes. Stopping the callback for good is right for an agent — a
  runaway loop must not wedge the tool surface, and the agent is sitting there to
  be told. It is wrong for a game, where the thing that trips a
  hundred-millisecond budget once is a garbage collection, and killing the game
  loop over one is a crash with a polite message.
+
+ It is not wrong quietly either: a game says nothing at all about a long frame.
+ `frame_overruns` counts them and `three.frame.ms` splits the last one, and both
+ are read when somebody goes looking rather than printed at somebody who was
+ reading a log for another reason.
 
  The hard wall does not go away in game mode; it becomes `JS_BUDGET_MS`.
 *>
@@ -91,6 +101,7 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 {
 	self.bind(host, "setFrame", &js_set_frame, 1);
 	self.bind(host, "setFixed", &js_set_fixed, 1);
+	self.bind(host, "frameStats", &js_frame_stats, 0);
 }
 
 <*
@@ -102,6 +113,49 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 *>
 const String FRAME_CALLBACK = "the animation callback";
 const String FIXED_CALLBACK = "the fixed loop";
+
+<*
+ Where one frame went, in nanoseconds.
+
+ Four spans and the solver, kept apart rather than summed, because the only
+ useful question about a frame that ran long is which of them did it and a total
+ answers that for none of them. `tick` fills this every frame and
+ `three.frame.ms` is these numbers in milliseconds.
+
+ **Nothing here is logged.** A frame that runs long is counted in
+ `frame_overruns` and split here for anyone who goes looking; the engine does not
+ say anything about it. It used to, and the sentence it said named the animation
+ callback for whatever the whole window had spent — which on
+ `examples/wumpa_run.js` was a nav solve in a fixed system, with the callback it
+ named 2.5 ms of the 20. A line that has to be read past is worse than a reading
+ that has to be asked for.
+
+ Four extra clock reads a frame, against the two per system the registry already
+ takes to fill `three.systems.report()`.
+
+ `solver_ns` is the odd one out: the solver runs *above* the budgeted window in
+ `tick` and is not counted against it, because it is the host's work and
+ stopping a script for it would take the wrong thing away. It is measured anyway,
+ because a frame whose solver costs four times its script is a frame whose script
+ is not the problem, and `total` alone would send somebody to the wrong file.
+*>
+struct FrameSpend
+{
+	long handlers_ns;
+	long fixed_ns;
+	long frame_ns;
+	long jobs_ns;
+	long solver_ns;
+}
+
+<*
+ What the frame spent in JavaScript — the four spans the budget is measured
+ against, and not the solver.
+*>
+fn long FrameSpend.script_ns(&self)
+{
+	return self.handlers_ns + self.fixed_ns + self.frame_ns + self.jobs_ns;
+}
 
 <*
  Says that the frames belong to a program somebody is watching, not to an agent.
@@ -242,7 +296,15 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// JavaScript's — an accumulator in the callback would run inside the script
 	// budget, so a spiral of death would trip the budget and stop the callback for
 	// good rather than merely stutter.
+	Clock solver_started = clock::now();
 	self.pass.scene.physics.step(self.pass.scene, delta_ms);
+	// Gathered in a local and published whole at the end of the frame, on every
+	// path out. What `three.frame.ms` answers with is therefore always one
+	// *finished* frame: a system reading it mid-frame is told about the frame
+	// before, which is complete, rather than about this one, which is three spans
+	// short of existing. Half a frame beside a whole solver would be two frames in
+	// one answer.
+	FrameSpend spend = { .solver_ns = (long)solver_started.to_now() };
 	self.report_diverged_bodies();
 
 	// Last of everything, on every path out of this function, which is what the
@@ -267,7 +329,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 		// The upload queue is a script's promise and not the callback's business,
 		// so a scene that registered no loop still gets a mesh a frame rather than
 		// waiting for whatever runs next.
-		if (self.uploads.len() > 0) self.drain_frame_jobs();
+		if (self.uploads.len() > 0)
+		{
+			Clock jobs_started = clock::now();
+			self.drain_frame_jobs();
+			spend.jobs_ns = (long)jobs_started.to_now();
+		}
+		self.frame_spend = spend;
 		return false;
 	}
 
@@ -288,6 +356,10 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// Input first, then the animation. A handler that moves something and a
 	// callback that draws the consequence in the same frame is the order a person
 	// expects; the other way round shows every keypress one frame late.
+	// Each span is read off `started` rather than timed with a clock of its own, so
+	// the four of them add up to exactly what the budget is checked against and no
+	// frame goes missing between them. See `FrameSpend` for what four clock reads
+	// buy.
 	self.dispatch_keys();
 	// Each step is skipped once the budget is gone, rather than called and
 	// interrupted on its first instruction: a callback stopped for someone else's
@@ -297,40 +369,41 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// already happened, so a handler that reacts to a hit and a callback that draws
 	// the consequence run in that order within one frame.
 	if (!self.timed_out) self.dispatch_physics_events();
+	long after_handlers = (long)self.started.to_now();
 	// Fixed steps before the frame callback, so a callback drawing the consequence
 	// of a gameplay step draws this frame's rather than last frame's. The same
 	// ordering argument the clip and the solver make one level up, and it is why
 	// both of those are above the early return while this is not: they are the
 	// host's work and this is a script's.
 	if (!self.timed_out && self.fixed_active) self.call_fixed(fixed_steps);
+	long after_fixed = (long)self.started.to_now();
 	if (!self.timed_out && self.frame_active) self.call_frame(self.pass.clock.time * 1000.0);
+	long after_frame = (long)self.started.to_now();
 	if (!self.timed_out) self.drain_frame_jobs();
+	long after_jobs = (long)self.started.to_now();
+
+	spend.handlers_ns = after_handlers;
+	spend.fixed_ns = after_fixed - after_handlers;
+	spend.frame_ns = after_frame - after_fixed;
+	spend.jobs_ns = after_jobs - after_frame;
+	self.frame_spend = spend;
 
 	self.in_frame = false;
 	self.budget_ns = budget;
 
-	// Measured after the callback rather than interrupted during it: a frame that
-	// ran long has already cost what it cost, and the only useful thing left to do
-	// with that fact is count it where somebody can read it.
-	if (self.game_frames && !self.timed_out)
+	// Measured after the frame rather than interrupted during it: a frame that ran
+	// long has already cost what it cost, and the only useful thing left to do with
+	// that fact is count it where somebody can read it.
+	//
+	// Counted and not said. `frame_error` is for a callback that was STOPPED — a
+	// throw, a promise, the hard wall — and every one of those is a thing the
+	// script has to be told about because its loop is gone. A frame that merely
+	// ran long is still running, and a line about it is a line between the reader
+	// and the reasons a loop actually stopped. `frame_overruns` and
+	// `three.frame.ms` are there for whoever wants to know.
+	if (self.game_frames && !self.timed_out && spend.script_ns() > JS_GAME_FRAME_SOFT_MS * 1_000_000)
 	{
-		long spent_ns = (long)self.started.to_now();
-		if (spent_ns > JS_GAME_FRAME_SOFT_MS * 1_000_000)
-		{
-			self.frame_overruns++;
-			// Once, and then never again: a callback that overruns every frame
-			// would otherwise write sixty lines a second into a log an agent reads
-			// in one piece. The count carries the rest.
-			if (!self.frame_overrun_warned)
-			{
-				self.frame_overrun_warned = true;
-				self.report_frame_failure(string::tformat(
-					"the animation callback took %d ms, over the %d ms a frame has — "
-					"the count in `frame.overruns` is every time since",
-					spent_ns / 1_000_000, JS_GAME_FRAME_SOFT_MS
-				));
-			}
-		}
+		self.frame_overruns++;
 	}
 
 	self.trim_frame_log();
@@ -712,6 +785,47 @@ fn void js_set_frame(
 
 	self.frame_fn = js.retain(args[0]);
 	self.frame_active = true;
+}
+
+<*
+ `__three.frameStats()` — `three.frame`: how the frames have gone and where the
+ last one went.
+
+ `overruns` is here because the report tells a reader to go and look at it, and
+ until this binding the only place it existed was the `frame` block of an MCP
+ `run_script` result — so the one boot mode that can produce an overrun,
+ `--script` or `--assets` with no server, was the one that could not read the
+ count it was being pointed at.
+
+ `ms` is one finished frame rather than an average — the last one, so a system
+ reading it is told about the frame before, which is complete. The rolling
+ averages are `three.systems.report()`, which splits the two callback spans by
+ system where this only splits them from each other.
+*>
+fn void js_frame_stats(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	FrameSpend spend = self.frame_spend;
+
+	qjs::Value ms = js.object();
+	js.set_property(ms, "total", qjs::number_value(spend.script_ns() / 1e6));
+	js.set_property(ms, "handlers", qjs::number_value(spend.handlers_ns / 1e6));
+	js.set_property(ms, "fixed", qjs::number_value(spend.fixed_ns / 1e6));
+	js.set_property(ms, "frame", qjs::number_value(spend.frame_ns / 1e6));
+	js.set_property(ms, "jobs", qjs::number_value(spend.jobs_ns / 1e6));
+	// Outside `total`, as it is outside the budget. See `FrameSpend`.
+	js.set_property(ms, "solver", qjs::number_value(spend.solver_ns / 1e6));
+
+	qjs::Value object = js.object();
+	js.set_property(object, "running", qjs::bool_value(self.frame_active));
+	js.set_property(object, "ticks", qjs::number_value((double)self.frame_ticks));
+	js.set_property(object, "overruns", qjs::number_value((double)self.frame_overruns));
+	js.set_property(object, "ms", ms);
+	*out = object;
 }
 
 <*

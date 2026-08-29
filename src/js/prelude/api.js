@@ -844,6 +844,49 @@ const clock = {
 };
 
 // -----------------------------------------------------------------------
+// The frame
+//
+// How the frames have gone, and where the last one went. Not a Three.js
+// API — Three.js has no frame loop in core and so has nothing to report
+// about one.
+//
+// `overruns` is how many frames spent more than 8 ms in JavaScript — half
+// a 60 Hz frame, the point at which the script has stopped leaving room for
+// the draw it sets up. NOTHING IS LOGGED when it happens: a long frame is
+// counted here and split in `ms`, and that is the whole of what the engine
+// says about it. Under `--mcp` alone it stays 0, because there an overrun
+// stops the callback instead of counting it.
+//
+// `ms` is the last FINISHED frame, split five ways, and the split is the
+// point. Read from inside a system it describes the frame before this one,
+// because this one is still three spans short of existing.
+// The four that add up to `total` are what the eight-millisecond budget is
+// measured against:
+//
+//     handlers   key, click and physics-trigger handlers
+//     fixed      every fixed step this frame owed, together
+//     frame      the animation callback — the `frame` phase systems
+//     jobs       one queued mesh upload, and the microtasks it settled
+//
+// `solver` is outside `total` because it is outside the budget: the
+// physics step runs above the script's window and is the host's own work,
+// so it is never what a callback is stopped or counted for. It is reported
+// because a frame that spends 10 ms in the solver and 3 ms in script is a
+// frame whose script is not the problem, and reading only `total` there is
+// how somebody optimises the wrong file.
+//
+// `three.systems.report()` is the rolling per-system version and the one
+// to reach for next: this splits the frame into four spans, that splits
+// two of those spans by name.
+
+const frame = {
+	get running() { return H.frameStats().running; },
+	get ticks() { return H.frameStats().ticks; },
+	get overruns() { return H.frameStats().overruns; },
+	get ms() { return H.frameStats().ms; },
+};
+
+// -----------------------------------------------------------------------
 // The keyboard
 //
 // Not a Three.js API — Three.js has no input layer at all, and this is in
@@ -1072,6 +1115,7 @@ export const three = {
 	lights,
 	controls,
 	clock,
+	frame,
 	debug,
 
 	// How long this script may run before the interrupt stops it, in
