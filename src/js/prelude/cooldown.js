@@ -76,7 +76,15 @@ function _register(coolDown) {
 	const list = _lists[coolDown._phase];
 	list.push(coolDown);
 	if (list.length === 1) {
-		systems.add(_systemNames[coolDown._phase], _tick(coolDown._phase), { phase: coolDown._phase });
+		// `first`, because a timer that has not been advanced yet is a timer
+		// read one step stale, and this system installs itself at whatever
+		// moment the game happens to start its first cooldown — which is a
+		// place in the running order nobody chose. Under the old numeric
+		// scale it landed at 0 and so ran before a game that numbered its own
+		// systems from 10 and after one that did not number them at all, for
+		// no reason either file could see.
+		systems.add(_systemNames[coolDown._phase], _tick(coolDown._phase),
+			{ phase: coolDown._phase, first: true });
 	}
 }
 

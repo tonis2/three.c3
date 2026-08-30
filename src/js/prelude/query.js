@@ -307,10 +307,12 @@ export function moveAndSlide(position, motion, options = null) {
 	pairs[2] = raw.hit ? raw.hit[0] : -1;
 	pairs[3] = raw.hit ? raw.hit[1] : 0;
 
+	const gv = raw.groundVelocity || [0, 0, 0];
 	const result = {
 		position: new Vector3(null, raw.position[0], raw.position[1], raw.position[2]),
 		remaining: new Vector3(null, raw.remaining[0], raw.remaining[1], raw.remaining[2]),
 		normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+		groundVelocity: new Vector3(null, gv[0], gv[1], gv[2]),
 		grounded: raw.grounded,
 		slope: raw.slope,
 		stepped: raw.stepped,

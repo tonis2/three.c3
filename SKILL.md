@@ -259,9 +259,12 @@ the diffuse and into the highlight.
 `three.setFixedLoop(fn)` for gameplay (60 Hz, same `dt` every call — put
 gameplay here, not in an accumulator of your own). The clock is
 `three.clock.dt / .time / .timeScale / .advance()`; `timeScale = 0` stops the
-**world**, not just your arithmetic. `three.systems.add(name, fn)` is the
-ordered registry when one callback isn't enough — it makes nothing faster, it
-makes a slow frame attributable.
+**world**, not just your arithmetic. `three.systems.step(name, fn)` and
+`three.systems.frame(name, fn)` are the ordered registry when one callback isn't
+enough — the verb is the clock, they run in the order you register them, and
+`{ before: 'other' }` moves the one that has to break that. It makes nothing
+faster; it makes a slow frame attributable, and `three.systems.outline()` prints
+the running order.
 
 **Input** — `three.input.isDown/pressed(key)`, `three.input.keys()`,
 `three.input.pointer`, `three.onKeyDown/onClick`, `three.controls.enabled`.
@@ -380,12 +383,12 @@ whole debugging loop:
 
 ```js
 let acc = 0;
-three.systems.add('trace', dt => {
+three.systems.step('trace', dt => {
     acc += dt; if (acc < 4) return; acc = 0;
     console.log(`t=${three.clock.time.toFixed(0)}s at (${ctl.x.toFixed(1)}, `
         + `${ctl.y.toFixed(1)}, ${ctl.z.toFixed(1)}) grounded=${ctl.grounded} `
         + `on=${ctl.on} hit=${ctl.blocked}`);
-}, { phase: 'fixed', order: 90 });
+}, { last: true });
 ```
 
 **Prefer two numbers next to each other to a jump arc.** A climb whose rise is

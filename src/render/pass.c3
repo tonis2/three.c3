@@ -959,7 +959,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	Vec3 eye = self.camera.eye();
 	FrameBlock frame = {
 		.view_projection = view_projection,
-		.lighting = { self.lighting.ambient, (float)self.lighting.count, 0, 0 },
+		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time, 0 },
 		.live_poses = live_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),

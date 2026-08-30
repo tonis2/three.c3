@@ -309,3 +309,247 @@ fn void a_system_is_contained_where_the_animation_callback_is_stopped() @test
 		);
 	};
 }
+
+// ============================================================================
+// The verb, and the neighbours
+// ============================================================================
+
+<*
+ The phase is said in the verb, and saying it twice is refused.
+
+ `{ phase: 'fixed' }` was a string in an options bag that a reader had to know
+ the two legal values of before the line meant anything, and `step`/`frame` is
+ the same decision with the answer in the word. The refusal matters more than it
+ looks: `three.systems.step(name, fn, { phase: 'frame' })` under a silent
+ override runs on a clock the person who wrote it did not choose, and nothing
+ about a system on the wrong clock announces itself — it drifts.
+*>
+fn void the_verb_is_the_phase() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			globalThis.saw = { step: -1, frame: -1 };
+			three.systems.step('walk', dt => { saw.step = dt; });
+			three.systems.frame('look', dt => { saw.frame = dt; });
+			globalThis.refused = [];
+			try { three.systems.step('bad', () => {}, { phase: 'frame' }); }
+			catch (e) { refused.push(e.message.includes('the verb is the phase')); }
+			try { three.systems.frame('bad', () => {}, { phase: 'fixed' }); }
+			catch (e) { refused.push(e.message.includes('the verb is the phase')); }
+		`, 6, `
+			const list = three.systems.list();
+			return [
+				list.find(s => s.name === 'walk').phase,
+				list.find(s => s.name === 'look').phase,
+				Math.abs(saw.step - three.clock.fixedDelta) < 1e-9,
+				Math.abs(saw.frame - three.clock.dt) < 1e-9,
+				refused,
+				list.some(s => s.name === 'bad'),
+			];
+		`, "the verb script ran");
+
+		// The phase each landed in, and then the reading that says the two
+		// verbs really did reach two clocks rather than one clock twice: the
+		// step was handed the step exactly, and the frame was handed what that
+		// frame was worth.
+		test::@check(value == "[\"fixed\",\"frame\",true,true,[true,true],false]",
+			"the verb picks the phase and a second answer is refused; got %s", value);
+	};
+}
+
+<*
+ `after` and `before` name a neighbour, and registration order does the rest.
+
+ The shape is `examples/tank_yard.js`: five systems in the order the file reads,
+ and one at the bottom — the autopilot, which presses the game's own keys — that
+ has to run before something declared three hundred lines above it. That was
+ `order: 10` against `order: 50`, two coordinates whose only meaning was each
+ other.
+
+ The forward reference is checked in the same script on purpose: `draw` names
+ `mark` before `mark` exists, which is the normal case rather than the clever
+ one — a file is read top to bottom and half its neighbours are below.
+
+ What must NOT happen is the rest of the list moving. `fire` is still the first
+ frame system it was, because the only thing asked for was that one system come
+ before it.
+*>
+fn void after_and_before_name_a_neighbour() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			globalThis.seen = [];
+			three.systems.step('walk', () => seen.push('walk'));
+			three.systems.frame('fire', () => seen.push('fire'));
+			three.systems.frame('draw', () => seen.push('draw'), { after: 'mark' });
+			three.systems.frame('autopilot', () => seen.push('autopilot'), { before: 'fire' });
+			three.systems.frame('mark', () => seen.push('mark'));
+		`, 4, `
+			globalThis.seen = [];
+			return [three.systems.list().map(s => s.name).join(',')];
+		`, "the neighbour script ran");
+
+		// Every step before any frame system; `autopilot` pulled in front of
+		// `fire` and nothing else disturbed; `draw` pushed behind the `mark` it
+		// named before there was one.
+		test::@check(value == "[\"walk,autopilot,fire,mark,draw\"]",
+			"a named neighbour moves one system and no others; got %s", value);
+	};
+}
+
+<*
+ `first` and `last` are the two ends of the game's own list, not of the tick.
+
+ A game asking to be last means last among the things it wrote. The entity
+ registry's own systems still bracket it — the rules drain ahead, because an
+ event that fired has to be delivered before anything reads the result of it,
+ and the column write-back and the compaction behind, because those have to see
+ where everything finished. A `{ last: true }` that jumped those would be a
+ script quietly reordering the engine, which is the trap the old numeric scale
+ already sprang: two tests in this repo reached for `order: 1e7` and `order: 1e9`
+ to get past brackets they could not see.
+*>
+fn void first_and_last_sit_inside_the_engines_own_brackets() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			class Critter extends three.Entity {
+				constructor() { super(); this.object = new three.Mesh(new three.BoxGeometry(1, 1, 1)); }
+			}
+			// Reading a static is what registers the class, and the rule is
+			// what puts the drain in — neither needs a scene to exist.
+			Critter.on('click', '*', () => {});
+
+			three.systems.frame('late', () => {}, { last: true });
+			three.systems.frame('middle', () => {});
+			three.systems.frame('early', () => {}, { first: true });
+
+			const at = three.systems.list().map(s => s.name);
+			const seat = name => at.indexOf(name);
+			return [
+				seat('rules') < seat('early'),
+				seat('early') < seat('middle'),
+				seat('middle') < seat('late'),
+				seat('late') < seat('Critter.compact'),
+			];
+		`, "the brackets script ran");
+
+		test::@check(value == "[true,true,true,true]",
+			"first and last are the ends of the script's list, inside the engine's; got %s", value);
+	};
+}
+
+<*
+ A loop is refused, and the registry is left exactly as it was.
+
+ There is no order that satisfies it, so unlike a name that pointed at nothing
+ there is nothing to carry on with — and the `add` that closed the loop is the
+ call still on the screen. The rollback is the part worth a test: a registry
+ that kept the half of the system that landed would fail the NEXT add too, for a
+ reason that has scrolled away by then.
+*>
+fn void a_loop_is_refused_and_changes_nothing() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			three.systems.frame('a', () => {});
+			let said = '';
+			try { three.systems.frame('b', () => {}, { before: 'a', after: 'a' }); }
+			catch (e) { said = e.message; }
+			return [said.includes('loop'), three.systems.list().map(s => s.name).join(',')];
+		`, "the loop script ran");
+
+		test::@check(value == "[true,\"a\"]",
+			"a loop is raised and the registry is untouched; got %s", value);
+	};
+}
+
+<*
+ A neighbour that is not there is said once, and the system still runs.
+
+ Not raised, unlike the loop: the sort runs while systems are being registered,
+ where a name pointing forwards is not yet wrong, and again inside the tick,
+ where a throw would take a whole loop down over a misspelling. Not swallowed
+ either, for the reason every other failure in this file is reported — the
+ system runs, in a place nobody asked for, and an out-of-order frame reads as a
+ bug in whatever ran next.
+*>
+fn void a_neighbour_that_is_not_there_is_said_once() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@value(run, `
+			globalThis.ran = 0;
+			three.systems.frame('lonely', () => { ran++; }, { after: 'nobody' });
+			three.systems.step('walk', () => {}, { before: 'lonely' });
+		`, "the missing-neighbour script ran");
+
+		double at = 0;
+		for (int i = 0; i < 5; i++) { at += 16.0; run.tick(at); }
+
+		three::RunResult result = run.run("return ran;");
+		defer result.free();
+		test::@check(result.ok, "the reading script ran: %s", result.error);
+
+		// It ran every frame regardless of the name it could not find.
+		test::@check(result.value == "5", "the system still runs; got %s", result.value);
+
+		// Once for five frames, not five times — and the cross-phase one says
+		// which of the two it is, because that is the mistake two clocks invite.
+		usz saidOnce = 0;
+		String log = result.log;
+		usz from = 0;
+		while (try found = log[from..].index_of("nothing by that name"))
+		{
+			saidOnce++;
+			from += (usz)(found + 1);
+		}
+		test::@check(saidOnce == 1, "the missing name is said once, not once a frame:\n%s", log);
+		test::@check(
+			log.contains("the phase decides which runs first"),
+			"and a neighbour in the other phase says so:\n%s", log
+		);
+	};
+}
+
+<*
+ `outline()` is the tick as a picture, with the two phases apart.
+
+ One line each because they are two lists — every fixed step this frame owes
+ runs before any frame system — and a flat list is what made the old pair
+ unreadable: `{ phase: 'frame', order: 50 }` sitting between `order: 40` and
+ `order: 60` on two fixed systems looks like it runs between them, and it runs
+ after both.
+*>
+fn void the_outline_keeps_the_two_phases_apart() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			three.systems.step('spawn', () => {});
+			three.systems.step('shots', () => {});
+			three.systems.frame('fire', () => {});
+			three.systems.frame('autopilot', () => {}, { before: 'fire' });
+			three.systems.enable('shots', false);
+
+			const out = three.systems.outline();
+			const lines = out.split('\n');
+			return [
+				lines.length,
+				lines[0].startsWith('step'),
+				lines[0].includes('(shots)'),
+				lines[1].startsWith('frame'),
+				lines[1].indexOf('autopilot') < lines[1].indexOf('fire'),
+			];
+		`, "the outline script ran");
+
+		// Two lines, the steps first, a disabled system still shown and in
+		// brackets, and the frame line in the order it runs.
+		test::@check(value == "[2,true,true,true,true]",
+			"the outline is the tick, phase by phase; got %s", value);
+	};
+}

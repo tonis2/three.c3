@@ -84,6 +84,10 @@ struct Node
 	// Cached. Recomputed by `Scene.update_world_matrices` when this node is
 	// dirty or an ancestor was.
 	Matrix4f world;
+	// World translation as of the previous time this node's matrix was rebuilt.
+	// `move_capsule` subtracts it from the current one to ride a moving floor.
+	Vec3 prev_world;
+	bool had_world;
 	// The inverse transpose of `world`. Only the upper 3x3 means anything; the
 	// rest is identity padding so the GPU record is two `float4x4` and needs no
 	// packing rules of its own. See `normal_matrix`.

@@ -68,8 +68,8 @@ struct Light
 struct FrameBlock
 {
     float4x4 view_projection;
-    // x: the ambient floor. y: how many of `lights` are lit this frame. zw
-    // unused. See `mesh.slang`.
+    // x: the ambient floor. y: how many of `lights` are lit this frame.
+    // z: game clock seconds (`s.time` / `v.time`). w unused. See `mesh.slang`.
     float4 lighting;
     // This frame's live joint matrices, for characters posed from their bone nodes
     // rather than from a baked clip. One buffer per frame rather than per bucket,
@@ -329,6 +329,10 @@ struct Surface
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
     uint variant;
+    // Game clock seconds, `three.clock.time`. The same number `p.time` is, so a
+    // paused world stops waving too. Filled by the template; a body does not
+    // write it.
+    float time;
 };
 
 // **The other contract with the agent**, and the one thing about it worth
@@ -385,6 +389,9 @@ struct Vertex
     // `SV_VertexID`. A per-vertex seed, which is what a hash-driven jitter or a
     // scatter needs and nothing else in here provides.
     uint index;
+    // Game clock seconds. An input, like `local` and `index` — a body that
+    // writes it does not change `Surface.time`.
+    float time;
 };
 
 struct VertexOutput
@@ -1031,6 +1038,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     v.variant = min(instance.variant, MATERIAL_ROWS - 1u);
     v.local = local;
     v.index = vid;
+    v.time = push.frame[0].lighting.z;
 
 #ifdef THREE_BAKE
     // **The mesh's own TEXCOORD_0, kept before `displace` can rewrite it.**
@@ -1134,6 +1142,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.roughness = draw.surface.x;
     s.metalness = draw.surface.y;
     s.reflectance = draw.surface.z;
+    s.time = push.frame[0].lighting.z;
 
     // Before `shade`, so a debug view of a scene whose bodies are expensive is
     // still one render — and so a body that cannot compile is still diagnosable.

@@ -636,7 +636,7 @@ function newRound() {
 // ---------------------------------------------------------------------------
 
 // Enemies arrive at the top corners, a few at a time.
-three.systems.add('spawn', (dt) => {
+three.systems.step('spawn', (dt) => {
 	if (G.over) return;
 	G.since += dt;
 	if (G.since < FOE_EVERY || G.waiting <= 0) return;
@@ -649,11 +649,11 @@ three.systems.add('spawn', (dt) => {
 	Tank.spawn(col, row, true);
 	// A tank materialising is worth a puff of its own.
 	Blast.spawn([cellX(col), 0.7, cellZ(row)], 1.6, 0.5, [0.55, 0.80, 1.0]);
-}, { phase: 'fixed', order: 10 });
+});
 
 // The player. Keys are polled rather than latched, because driving is a state
 // and not an edge — a held key fires no repeat event.
-three.systems.add('player', (dt) => {
+three.systems.step('player', (dt) => {
 	const p = G.player;
 	if (!p) return;
 	let dir = -1;
@@ -663,12 +663,12 @@ three.systems.add('player', (dt) => {
 	else if (three.input.isDown('left') || three.input.isDown('a')) dir = 3;
 	p.drive(dt, dir);
 	if (three.input.isDown('space')) p.fire();
-}, { phase: 'fixed', order: 20 });
+});
 
 // The enemies. Drive at the eagle, turn when something is in the way, fire on
 // the gun's own cooldown — which is a `three.cooldown` rather than a number
 // counted down by hand, so a paused clock pauses it too.
-three.systems.add('foes', (dt) => {
+three.systems.step('foes', (dt) => {
 	const goal = G.eagle ? G.eagle.object.position : null;
 	for (const t of Tank) {
 		if (!t.foe) continue;
@@ -685,18 +685,18 @@ three.systems.add('foes', (dt) => {
 		t.drive(dt, t.dir);
 		t.fire();
 	}
-}, { phase: 'fixed', order: 30 });
+});
 
 // A dynamic body's velocity is recomputed by the solver at the end of every
 // step, so re-asserting it is what keeps a shell flying dead straight instead
 // of drifting off the first thing it grazes.
-three.systems.add('shots', () => {
+three.systems.step('shots', () => {
 	for (const b of Bullet) if (!b.dead) three.physics.setVelocity(b.object, b.velocity);
-}, { phase: 'fixed', order: 40 });
+});
 
 // The fire. Everything here is per-copy — a scale and a colour — which is why
 // twenty blasts are still one draw call.
-three.systems.add('fire', (dt) => {
+three.systems.frame('fire', (dt) => {
 	blastMat.uniforms.t = three.clock.time;
 	for (const b of Blast) {
 		b.age += dt / b.life;
@@ -706,11 +706,11 @@ three.systems.add('fire', (dt) => {
 		b.object.scale.set(s, s, s);
 		b.object.color = [b.tint[0], b.tint[1], b.tint[2], b.age];
 	}
-}, { phase: 'frame', order: 50 });
+});
 
 // The round. The eagle's ruin layer is the one `animated: true` layer in the
 // file, so this is a uniform write per frame rather than a new pipeline.
-three.systems.add('round', (dt) => {
+three.systems.step('round', (dt) => {
 	if (G.over) {
 		eagleMat.layers[0].opacity = three.moveTowards(eagleMat.layers[0].opacity, 1, dt * 2.2);
 		if (three.clock.time - G.over > 3.5) newRound();
@@ -726,7 +726,7 @@ three.systems.add('round', (dt) => {
 		}
 		if (clear) G.player = Tank.spawn(G.home[0], G.home[1], false);
 	}
-}, { phase: 'fixed', order: 60 });
+});
 
 // ---------------------------------------------------------------------------
 // The autopilot
@@ -744,7 +744,7 @@ function press(k) { if (!G.held.has(k)) { three.input.press(k); G.held.add(k); }
 function lift(k) { if (G.held.has(k)) { three.input.release(k); G.held.delete(k); } }
 function liftAll() { for (const k of [...G.held]) lift(k); }
 
-three.systems.add('autopilot', () => {
+three.systems.frame('autopilot', () => {
 	for (const k of ['up', 'down', 'left', 'right', 'w', 'a', 's', 'd', 'space'])
 		if (three.input.isDown(k) && !G.held.has(k)) G.auto = false;
 	if (!G.auto || !G.player) { liftAll(); return; }
@@ -768,7 +768,7 @@ three.systems.add('autopilot', () => {
 	press(KEY_FOR_DIR[dir]);
 	// The gun's own cooldown decides the rate, so holding fire is enough.
 	press('space');
-}, { phase: 'frame', order: 10 });
+}, { before: 'fire' });
 
 three.onKeyDown('p', () => { G.auto = !G.auto; liftAll(); });
 

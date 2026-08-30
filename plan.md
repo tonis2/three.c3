@@ -69,6 +69,11 @@ somebody has one. The third wants ten minutes with a mouse.
 - [ ] **A scene has no way to say which keys it binds.** Seven keys bound to a
       character had to be delivered in a chat message. Smallest possible version
       of this section, and already missed.
+- [ ] **A one-line overlay before the library.** Lives, coins, `r.hit.name` and
+      "you won" have nowhere to go but `console.log`, which the window does not
+      show. `three.debug.overlay(string)` drawn this frame and gone the next.
+      Not widgets; the consume question does not arise. §21's `systems.report()`
+      is waiting on the same pixel.
 
 ## 6. Audio, saving, and the rest
 
@@ -84,23 +89,20 @@ somebody has one. The third wants ten minutes with a mouse.
 - [ ] **`snapshot`/`restore`.** `solver/lockstep.c3:125` — "what if" as a tool
       call, and what lockstep networking would need.
 
-## 8. Hot reload
-
-- [ ] **Re-evaluate `main.js` on a file change.** Small, and unlocked by
-      unloading. Combined with `--mcp` it means an agent edits a `.js`, the game
-      reloads, and the screenshot shows the result. **Gated on §9** — do not land
-      it before the semantics are decided.
-
 ## 9. Open questions
 
-Cheap to decide, expensive to discover. Both gate §8.
+Cheap to decide, expensive to discover.
 
-- [ ] **Hot reload semantics.** What happens to a running `setAnimationLoop`, to
-      live physics bodies, to the camera.
 - [ ] **What `main.js` and `run_script` share.** They share globals by design, so
       what happens when an agent's script redefines something the game holds a
       reference to? Probably nothing good and probably acceptable — but a known
-      answer rather than a discovered one.
+      answer rather than a discovered one. **No longer gates §8**: a reload is a
+      new context, so the hazard is not on that path.
+- [ ] **`run_script` of an Entity game cannot rebuild the level.** `three.reload()`
+      is a new context and does not have this problem; `run_script` shares the
+      class registry. A second `class Player extends three.Entity` throws, and
+      the only way out is killing the process. §23 has the dispose half; this is
+      whether `run_script` should call it, or whether there is a `three.reset()`.
 
 ## 11. Verification
 
@@ -158,7 +160,26 @@ followed.
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
-- [] GPU Particles
+- [ ] **`pressed()` in the fixed loop.** Edges are a frame fact; gameplay is 0–8
+      fixed steps of that frame. `examples/wumpa_run.js` and `examples/mario.js`
+      both grew a `latch` system and an `intent` object to carry `space` across
+      the boundary. Either `pressed` stays true for every fixed step of the frame
+      that saw the edge, or there is a `consume` that is safe in `phase: 'fixed'`.
+      The latch is the first thing a platformer copies, which means it is missing.
+- [ ] **`moveAndSlide` does not see kinematic motion.** A lift the capsule is
+      standing on is ice unless the game adds `dy` by hand after the sweep.
+      `r.groundVelocity`, or adding it inside the call, is the whole of riding.
+      The controller still touches no rigidbody — this is the mesh `r.ground`
+      already named, moving between sweeps.
+- [ ] **`camera.attach` offset is world space.** A third-person follow behind the
+      player is not expressible: the offset does not turn with the object, and
+      `lag` is milliseconds next to a `dt` in seconds. `{ behind, height }` in the
+      object's heading, lag in seconds, is the camera a platformer otherwise
+      writes by guessing yaw.
+- [ ] **`s.time` / `v.time`.** `Post` already has `p.time` on the game clock. A
+      ShaderMaterial still takes a uniform and a system to write it every frame,
+      once per waving material. Same clock, same `timeScale`.
+- [ ] GPU Particles
 
 
 ## 19. Shadows at game scale
@@ -269,7 +290,14 @@ not before, and `entity.js`'s header carries the table.
       rules, with nothing in the pack's six or the frame's seven edited. It is
       the same acceptance test both of those sections set themselves and neither
       has been shown.
-
+- [ ] **`Class.dispose()` after the scene is gone.** `disposeInactive()` frees the
+      nodes and leaves the names. A second `class Player extends three.Entity`
+      then throws "already a tracked class called 'Player'", and calling
+      `Player.dispose()` throws `this Scene was disposed` before it deletes the
+      name — so the only way out is killing the process. `Track.dispose` has to
+      free `byName` even when `remove` cannot unparent. `examples/mario.js` is the
+      script that found it: a `run_script` of the same file is the agent loop,
+      and it is the one that cannot run twice.
 
 
 ---
