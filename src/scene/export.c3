@@ -39,6 +39,56 @@
  what `build_convex` produced — including its uvs, which are a per-face planar
  projection and so are recomputed from the face rather than stored.
 
+ ## The rig, recovered from the file rather than from the frame
+
+ A character goes out as a character: JOINTS_0 and WEIGHTS_0 on the vertices, a
+ skeleton of nodes, a skin naming them, and the asset's clips as glTF animations
+ driving it.
+
+ **None of that can come from the frame**, which is the same exception
+ `CUSTOM_materials_layers` makes below and for a stronger version of its reason.
+ What the renderer holds at draw time is a table of sampled matrices keyed by one
+ integer per copy — `scene/skin.c3` — and there is no way back from a table of
+ matrices to a hierarchy, a name or a curve. So the rig is re-read from the source
+ document, exactly as the vertices are.
+
+ The consequence is that **the skeleton written is the bind pose, not the pose the
+ copy is standing in**. A character mid-stride exports standing, with the stride in
+ the file beside it as a clip a viewer can play. That is the one thing this gives
+ up, and it is what lets a crowd share one set of keyframes.
+
+ What is per copy and what is shared is decided by glTF and not by preference.
+ **A skeleton is per copy**: a reader ignores a skinned mesh node's own transform,
+ so a copy is placed by where its joints are, and two copies standing in two places
+ cannot share a set of them. The mesh, the inverse bind matrices and the keyframes
+ are shared — a clip is written once and given a channel onto each skeleton, so
+ a hundred characters cost a hundred channels a bone and not a hundred curves.
+
+ A rig is refused rather than half-written. Vertices with no JOINTS_0, a skin the
+ asset does not have, a joint pointing past the node list: each leaves the mesh
+ going out in its bind pose exactly as it did before any of this existed, which is
+ a character standing still rather than a character inside out.
+
+ ## Blend shapes, and the one channel that carries them per copy
+
+ Morph targets are the geometry's and are written with it — displacements a
+ hundred copies share, like the positions they displace. The weights are not:
+ `node.weights` is the only per-copy channel glTF has for a morph, since a mesh's
+ own weights belong to the shape and so to everything drawing it. Twelve plants at
+ twelve growth stages are twelve nodes over one mesh, which is how the frame drew
+ them.
+
+ No `mesh.weights` is written at all. glTF's are the shape's defaults and this
+ renderer does not read them — `MorphWeights` seeds every copy to zero whatever the
+ file said — so writing them back would put a number in the file that the frame
+ was not drawn with.
+
+ **A skinned or morphing copy is never batched.** `EXT_mesh_gpu_instancing` has an
+ attribute for a transform and one for a colour and none for a pose or a weight,
+ and a skinned node's transform is ignored anyway — so a batch of characters would
+ be every character in one place wearing one expression. They are written as
+ themselves, which costs a node apiece and never a wrong picture.
+
  ## What is deliberately not in the file
 
  The export is what the frame shows. Helpers and hidden subtrees are not in it —
@@ -49,6 +99,11 @@
  glTF describes surfaces rather than programs. A mesh drawn under one exports
  with the base colour and texture its geometry carries. Nothing is silently
  dropped that a script cannot see — the report names the count.
+
+ A morph *animation* is not in it. A WEIGHTS channel drives a mesh's blend shapes
+ through the node the mesh hangs on, and that node is not a joint and so is not in
+ any skeleton's map — so what each copy's weights *are* goes into the file and the
+ curve that would move them does not. `plan.md` §16 has it.
 
  Lines are not in it yet. A line mesh has no CPU copy of its vertices
  (`upload_built` skips `build_bvh`, and `build_bvh` is what keeps the copy) and a
@@ -236,6 +291,18 @@ struct ExportReport
 	// distinction `shaded` alone cannot make, since a layered material reaches the
 	// frame as a generated `ShaderMaterial` and is counted there too.
 	uint layers;
+	// Skeletons written — one per skinned copy, which is what glTF forces rather
+	// than what would be tidy. `ExportSkeleton` has the argument.
+	uint skins;
+	// Joint nodes written, summed over those skeletons. Counted in `nodes` too, so
+	// this is how a script tells a scene's own nodes from its rigs'.
+	uint bones;
+	// Animation clips written. Zero for a file with rigs and no clips, which is a
+	// character a script poses itself.
+	uint clips;
+	// Copies whose morph weights went into the file on their own node. Not how many
+	// meshes carry blend shapes — how many copies were wearing one.
+	uint morphed;
 	usz bytes;
 }
 
@@ -251,6 +318,59 @@ struct ExportGeometry @local
 	// COLOR_0, or -1. Only a mesh re-read out of a file can have one.
 	int colors;
 	int indices;
+	// JOINTS_0 and WEIGHTS_0, or -1 apiece. A rig is only reachable on the stream
+	// path — a generated shape has no joints and a hull lost them — and both have
+	// to be there or neither is written: a skin over vertices that name no joints
+	// is a claim the geometry does not back.
+	int joints;
+	int skin_weights;
+	// The primitive's morph targets, in the file's own order. Written here with the
+	// rest of the geometry because that is what they are: displacements a hundred
+	// copies share, exactly like the positions they displace. Owned.
+	List{ExportMorphTarget} targets;
+}
+
+// One morph target's accessors. The order of these inside `ExportGeometry.targets`
+// is the addressing — a weight names a target by index and by nothing else.
+struct ExportMorphTarget @local
+{
+	int positions;
+	// NORMAL, or -1 for a target that leaves the base mesh's normals alone. Which
+	// is a real choice an author makes, not a gap: `scene/morph.c3` has why nothing
+	// recomputes them.
+	int normals;
+}
+
+<*
+ One skinned copy's own skeleton, and the map from the asset's nodes to it.
+
+ **One per copy, and that is forced rather than chosen.** glTF says a skinned
+ mesh node's own transform is ignored — a copy is placed by where its joints are —
+ so two copies standing in two places cannot share one set of joint nodes the way
+ they share one set of vertices. The mesh, the accessors and the inverse bind
+ matrices are still written once between them; it is the nodes that multiply.
+
+ The map outlives the walk because the clips are written through it: a channel
+ names an asset node, and every skeleton wearing that rig answers with a
+ different document node.
+*>
+struct ExportSkeleton @local
+{
+	AssetId asset;
+	uint skin;
+	// Asset node index to document node index, or -1 for a node this skeleton had
+	// no reason to write. Owned.
+	int[] map;
+}
+
+// One skin's inverse bind matrices, written once however many copies wear it.
+// They belong to the rig and not to the copy, which is the half of a skeleton
+// that *can* be shared — see `ExportSkeleton` for the half that cannot.
+struct ExportBind @local
+{
+	AssetId asset;
+	uint skin;
+	uint accessor;
 }
 
 <*
@@ -386,6 +506,11 @@ struct ExportBatch @local
 	// `surface_for` is a `.glb` read and an image encode deep; running it during
 	// batching to save a node is the wrong trade.
 	uint material;
+	// Whether this batch refuses company. A skinned or morphing copy is written as
+	// itself — `collapsible` says why — and in the flattened walk, where there is no
+	// `collapsible` to consult, that refusal is this flag: `batch_of` never matches
+	// one, so nothing accumulates into it and it stays a batch of one.
+	bool solo;
 	List{NodeId} members;
 }
 
@@ -484,6 +609,10 @@ struct Exporter @local
 	List{ExportEntry} entries;
 	List{ExportImage} images;
 	List{ExportLayerImage} layer_images;
+	// The rigs, filled during the walk and read after it: the clips cannot be
+	// written until every copy that wears them has been placed.
+	List{ExportSkeleton} skeletons;
+	List{ExportBind} binds;
 	// The bake, when one was asked for and a device answered. False for every
 	// export that did not ask, and then nothing on the bake path costs anything.
 	bool baking;
@@ -519,8 +648,14 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false,
 	state.images.init(mem, 8);
 	state.layer_images.init(mem, 8);
 	state.bakes.init(mem, 4);
+	state.skeletons.init(mem, 2);
+	state.binds.init(mem, 2);
 	defer
 	{
+		foreach (&written : state.geometry) written.targets.free();
+		foreach (&skeleton : state.skeletons) free(skeleton.map);
+		state.skeletons.free();
+		state.binds.free();
 		state.geometry.free();
 		state.materials.free();
 		state.entries.free();
@@ -566,6 +701,10 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false,
 	builder.add_root((uint)root);
 
 	if (state.report.instances == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+
+	// After the walk, because a clip is written once and given a channel per copy
+	// wearing it — so it has to know every copy first.
+	state.write_animations();
 
 	// After the scene and only when there was one to write: a file with nothing in
 	// it should be refused above rather than come back holding a camera and a light
@@ -626,23 +765,14 @@ fn int? Exporter.walk(&self, NodeId id)
 		return -1;
 	}
 
-	uint written = self.out.add_node(
-		node.name,
-		entry,
-		-1,
-		node.position,
-		node.rotation,
-		node.scale,
-	);
-	foreach (child : children) self.out.add_child(written, child);
+	int written = self.draw_node(id, node, entry, node.position, node.rotation, node.scale, &children)!;
 
-	self.report.nodes++;
 	if (entry >= 0)
 	{
 		self.report.instances++;
 		self.count_shading(id, false);
 	}
-	return (int)written;
+	return written;
 }
 
 <*
@@ -734,6 +864,15 @@ fn Node* Exporter.collapsible(&self, NodeId id)
 	if (node.children.len() > 0) return null;
 	if (!node.asset.is_set()) return null;
 	if (self.pass.assets.mesh(node.asset, node.mesh) == null) return null;
+	// Two more the instancing block cannot hold. A skinned copy is placed by where
+	// its joints are and not by its own transform — glTF says a skinned node's is
+	// ignored — so folding a hundred characters into one node would draw them all
+	// in one place. A morphing copy carries weights, and
+	// `EXT_mesh_gpu_instancing` has an attribute for a transform and one for a
+	// colour and none for those. Both are written as themselves, which costs a
+	// node apiece and never a wrong picture.
+	if (node.skin >= 0) return null;
+	if (self.pass.scene.morph_weights(id).len > 0) return null;
 	return node;
 }
 
@@ -745,6 +884,7 @@ fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh, uint mater
 {
 	foreach (i, &known : batches)
 	{
+		if (known.solo) continue;
 		if (known.asset == asset && known.mesh == mesh && known.material == material) return (int)i;
 	}
 	return -1;
@@ -915,10 +1055,16 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 
 	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
-		int index = batch_of(batches, node.asset, node.mesh, node.material);
+		// `collapsible`'s two refusals, in the walk that never consults it: here a
+		// copy *is* a batch, so refusing to share one is how a skinned or morphing
+		// copy keeps a node of its own.
+		bool solo = node.skin >= 0 || self.pass.scene.morph_weights(id).len > 0;
+		int index = solo ? -1 : batch_of(batches, node.asset, node.mesh, node.material);
 		if (index < 0 && self.geometry_for(node.asset, node.mesh)! >= 0)
 		{
-			ExportBatch fresh = { .asset = node.asset, .mesh = node.mesh, .material = node.material };
+			ExportBatch fresh = {
+				.asset = node.asset, .mesh = node.mesh, .material = node.material, .solo = solo
+			};
 			fresh.members.init(mem, 16);
 			batches.push(fresh);
 			index = (int)batches.len() - 1;
@@ -949,11 +1095,473 @@ fn int? Exporter.placed_node(&self, NodeId id)
 	Vec3 scale;
 	decompose(node.world, &position, &rotation, &scale);
 
-	uint written = self.out.add_node(node.name, entry, -1, position, rotation, scale);
-	self.report.nodes++;
+	int written = self.draw_node(id, node, entry, position, rotation, scale, null)!;
 	self.report.instances++;
 	self.count_shading(id, false);
+	return written;
+}
+
+<*
+ One drawing copy, written as itself or as the little tree a rigged one needs.
+
+ Every copy that keeps a node of its own comes through here — the hierarchical
+ walk and the flattened one both — so there is one place that knows what a
+ skinned copy looks like in a file.
+
+ Unrigged, it is the node it always was: one entry, this placement, these
+ children.
+
+ Rigged, it is three things instead. **The placement moves to a wrapper and the
+ mesh node keeps none**, because a reader ignores a skinned node's own transform:
+ a copy goes where its joints are, and its joints hang under the wrapper. The
+ children go on the wrapper too, so anything parented to the character still
+ rides it.
+
+     copy            <- the placement, and the name a person looks for
+     ├── hips        <- this copy's own skeleton, in the file's bind pose
+     │   └── ...
+     ├── Body        <- the mesh, its skin, and its morph weights
+     └── ...         <- whatever the scene hung off the copy
+
+ @param children : `The already-written children to hang under it, or null for the flattened walk, which has none.`
+ @return `The document node index the caller links.`
+*>
+fn int? Exporter.draw_node(
+	&self,
+	NodeId id,
+	Node* node,
+	int entry,
+	Vec3 position,
+	Quaternionf rotation,
+	Vec3 scale,
+	List{uint}* children
+)
+{
+	List{uint} bones;
+	bones.init(mem, 4);
+	defer bones.free();
+
+	int skin = entry >= 0 && node.skin >= 0 ? self.write_skeleton(node, &bones)! : -1;
+
+	if (skin < 0)
+	{
+		uint plain = self.out.add_node(node.name, entry, -1, position, rotation, scale);
+		self.report.nodes++;
+		self.write_node_weights(id, entry, plain);
+		if (children != null) foreach (child : *children) self.out.add_child(plain, child);
+		return (int)plain;
+	}
+
+	uint wrapper = self.out.add_node(node.name, -1, -1, position, rotation, scale);
+	self.report.nodes++;
+	foreach (bone : bones) self.out.add_child(wrapper, bone);
+
+	// Named after the mesh rather than after the copy, so a viewer's outline reads
+	// "gardener > Body" instead of the same name twice with no way to tell which of
+	// the two is the geometry.
+	GpuMesh* drawn = self.pass.assets.mesh(node.asset, node.mesh);
+	String name    = drawn == null || drawn.name.len == 0 ? node.name : drawn.name;
+	uint posed     = self.out.add_node(name, entry, skin);
+	self.report.nodes++;
+	self.write_node_weights(id, entry, posed);
+	self.out.add_child(wrapper, posed);
+
+	if (children != null) foreach (child : *children) self.out.add_child(wrapper, child);
+	return (int)wrapper;
+}
+
+<*
+ What this copy's blend shapes are set to, on its own node.
+
+ `node.weights` is the per-copy channel and the only one glTF has for a morph —
+ the mesh's own weights belong to the shape and so to every copy of it. Twelve
+ plants at twelve stages are therefore twelve nodes carrying twelve pairs of
+ numbers over one mesh, which is exactly how the frame drew them.
+
+ Nothing is written for a copy with no entry in the table: `set_morph_weights`
+ deletes an entry that has gone all-zero, and all-zero is what glTF means by
+ absent.
+*>
+fn void Exporter.write_node_weights(&self, NodeId id, int entry, uint written)
+{
+	if (entry < 0) return;
+	float[] weights = self.pass.scene.morph_weights(id);
+	if (weights.len == 0) return;
+	self.out.set_node_weights(written, weights);
+	self.report.morphed++;
+}
+
+<*
+ One copy's skeleton: a node per joint, and the skin naming them.
+
+ **Recovered from the source document rather than from the frame**, which is the
+ door `CUSTOM_materials_layers` already comes in through and for the same reason:
+ a rig does not survive as far as a frame. What the renderer holds at draw time is
+ a table of matrices keyed by one integer per copy — `scene/skin.c3` — and there
+ is no way back from that to a hierarchy, a name or a curve.
+
+ So the skeleton written here is the file's bind pose and not the pose the copy is
+ standing in. A character mid-stride exports standing, with the stride in the file
+ beside it as a clip. **That is the one thing this gives up**, and giving it up is
+ what lets every copy of a character share one set of keyframes instead of
+ carrying its own.
+
+ A rig is refused rather than half-written. Vertices that name no joints, a skin
+ the asset does not have, a joint pointing past the node list — each of those
+ leaves the mesh going out in its bind pose exactly as it did before any of this,
+ which is a character standing still rather than a character inside out.
+
+ @param roots : `Filled with the document indices of the skeleton's own roots, for the caller to hang under the copy.`
+ @return `The document's skin index, or -1 when there is no rig to write.`
+*>
+fn int? Exporter.write_skeleton(&self, Node* node, List{uint}* roots)
+{
+	Asset* asset = self.pass.assets.slot(node.asset);
+	if (asset == null || node.skin < 0 || asset.nodes.len() == 0) return -1;
+
+	uint index = (uint)node.skin;
+	if (index >= asset.skins.len()) return -1;
+	if (asset.skins[index].joints.len() == 0) return -1;
+
+	// The vertices have to name the joints. A skin over a mesh with no JOINTS_0 is
+	// a claim its geometry cannot back, and a reader handed one poses every vertex
+	// by joint zero.
+	int geometry = self.geometry_for(node.asset, node.mesh)!;
+	if (geometry < 0) return -1;
+	if (self.geometry[(usz)geometry].joints < 0) return -1;
+
+	sz count     = asset.nodes.len();
+	bool[] wants = mem::new_array(bool, count);
+	defer free(wants);
+
+	foreach (joint : asset.skins[index].joints)
+	{
+		if ((sz)joint >= count) return -1;
+		wants[joint] = true;
+	}
+	// And everything between a joint and a root. A joint written without the chain
+	// above it is a bone placed by whatever transform happened to be left over —
+	// the arm without the shoulder that carries it.
+	foreach (root : asset.roots) mark_bones(asset, root, wants);
+
+	int[] map = mem::new_array(int, count);
+	for (sz i = 0; i < count; i++) map[i] = -1;
+
+	foreach (root : asset.roots)
+	{
+		int built = self.emit_bones(asset, root, wants, map);
+		if (built >= 0) roots.push((uint)built);
+	}
+
+	List{uint} joints;
+	joints.init(mem, asset.skins[index].joints.len());
+	defer joints.free();
+	foreach (joint : asset.skins[index].joints)
+	{
+		// Every joint was marked and every node is reachable from some root, so this
+		// is unreachable rather than merely unlikely — and it is here because the
+		// alternative to noticing is a skin naming node -1.
+		if (map[joint] < 0)
+		{
+			free(map);
+			roots.clear();
+			return -1;
+		}
+		joints.push((uint)map[joint]);
+	}
+
+	// `skeleton` is glTF's hint at the common root, and it is only honest when
+	// there is one: a rig arriving as two roots has no single node above both.
+	int common  = roots.len() == 1 ? (int)(*roots)[0] : -1;
+	int binds   = (int)self.bind_matrices(node.asset, index);
+	uint skin   = self.out.add_skin(node.name, joints.array_view(), binds, common);
+
+	self.skeletons.push({ .asset = node.asset, .skin = index, .map = map });
+	self.report.skins++;
+	return (int)skin;
+}
+
+<*
+ Marks every node on the way down to a joint.
+
+ Post-order, so a node is kept when anything beneath it is: the answer for a
+ subtree is the OR of its own mark and its children's. Recursive for
+ `compose_from`'s reason — a glTF hierarchy is a rig, and its depth is single
+ digits in every file that exists.
+
+ @return `Whether this subtree holds a joint, which is what makes its parent one too.`
+*>
+fn bool mark_bones(Asset* asset, uint index, bool[] wants) @local
+{
+	if (index >= asset.nodes.len()) return false;
+	bool keep = wants[index];
+	foreach (child : asset.nodes[index].children)
+	{
+		if (mark_bones(asset, child, wants)) keep = true;
+	}
+	wants[index] = keep;
+	return keep;
+}
+
+<*
+ Writes the marked subtree as glTF nodes and records where each one landed.
+
+ The transforms are the asset's own — the file's bind pose, node by node — so
+ what comes out is the rig as it was authored. Nothing here draws: a bone is a
+ node with a name and a place and no mesh.
+*>
+fn int Exporter.emit_bones(&self, Asset* asset, uint index, bool[] wants, int[] map)
+{
+	if (index >= asset.nodes.len() || !wants[index]) return -1;
+
+	AssetNode* bone = &asset.nodes[index];
+	uint written    = self.out.add_node(bone.name, -1, -1, bone.position, bone.rotation, bone.scale);
+	map[index]      = (int)written;
+	self.report.nodes++;
+	self.report.bones++;
+
+	foreach (child : bone.children)
+	{
+		int built = self.emit_bones(asset, child, wants, map);
+		if (built >= 0) self.out.add_child(written, (uint)built);
+	}
 	return (int)written;
+}
+
+<*
+ One skin's inverse bind matrices, written once however many copies wear it.
+
+ The half of a skeleton that *is* shareable: these say how a vertex gets out of
+ the mesh's bind pose and into a joint's space, which is a property of the rig and
+ not of where a copy is standing. Sixteen floats a joint, so a crowd of sixty-bone
+ characters saves four kilobytes a copy by asking here first.
+
+ Read through `read_inverse_binds`, which is the same call the pose bake makes and
+ is memoised on the asset — including its answer for a skin with no accessor at
+ all, which glTF says is the identity.
+*>
+fn uint Exporter.bind_matrices(&self, AssetId id, uint skin)
+{
+	foreach (&known : self.binds)
+	{
+		if (known.asset == id && known.skin == skin) return known.accessor;
+	}
+
+	Asset* asset = self.pass.assets.slot(id);
+	read_inverse_binds(asset, skin);
+	uint accessor = self.out.add_matrices(asset.skins[skin].inverse_bind.array_view());
+	self.binds.push({ .asset = id, .skin = skin, .accessor = accessor });
+	return accessor;
+}
+
+// One clip's key times, and the accessor they were written to. Held while a clip
+// is being written and thrown away with it — see `clip_times`.
+struct ExportTimes @local
+{
+	// The clip's own array, borrowed. It outlives this list by the whole export.
+	float[] times;
+	uint accessor;
+}
+
+<*
+ The rigs' clips, once each, with a channel per copy wearing them.
+
+ The second thing here recovered from the source document rather than from the
+ frame, and the argument is `write_skeleton`'s: a clip reaches the renderer as a
+ table of sampled matrices, and a table of matrices is not a curve.
+
+ **One set of keyframes however many copies play it.** A channel names one node,
+ so a hundred characters need a hundred channels — but a channel is a pair of
+ integers and the keyframes are the kilobytes, and those are written once and
+ pointed at. That is the same trade the geometry makes one level up.
+
+ Run after the walk and not during it, because a clip cannot be written until
+ every copy that wears it has been placed.
+*>
+fn void Exporter.write_animations(&self)
+{
+	foreach (i, &skeleton : self.skeletons)
+	{
+		// Once per rig, not once per copy: the second character out of one file
+		// finds its clips already written and adds channels to them.
+		bool done = false;
+		for (sz j = 0; j < i; j++)
+		{
+			if (self.skeletons[j].asset == skeleton.asset) done = true;
+		}
+		if (!done) self.write_clips(skeleton.asset);
+	}
+}
+
+<*
+ Every clip of one asset that has something in this file to drive.
+
+ The curves are read here — `ensure_clip` is the same memo the first `play` of a
+ clip goes through, so a character that has been animated pays nothing and one
+ that has only stood there pays for the read once.
+*>
+fn void Exporter.write_clips(&self, AssetId id)
+{
+	Asset* asset = self.pass.assets.slot(id);
+	if (asset == null) return;
+
+	for (sz index = 0; index < asset.clips.len(); index++)
+	{
+		self.pass.assets.ensure_clip(id, (uint)index);
+		AnimationClip* clip = &asset.clips[index];
+		if (!self.drives_a_bone(id, clip)) continue;
+		self.write_clip(id, clip);
+		self.report.clips++;
+	}
+}
+
+<*
+ Whether any of this clip's curves reaches a bone that was written.
+
+ Asked before anything is emitted, so a clip that drives nothing in this file
+ leaves neither an empty animation nor the accessors one would have referenced.
+*>
+fn bool Exporter.drives_a_bone(&self, AssetId id, AnimationClip* clip)
+{
+	foreach (&channel : clip.channels)
+	{
+		if (self.first_target(id, channel.node, channel.path) >= 0) return true;
+	}
+	return false;
+}
+
+<*
+ The first document node this channel drives, or -1.
+
+ Also the answer to "is this channel worth writing at all", which is why the two
+ questions share a function rather than drifting apart.
+
+ **A WEIGHTS channel is never one of them.** It drives a mesh's blend shapes
+ through the node the mesh hangs on, and that node is not a joint and is not in a
+ skeleton's map. What each copy's weights *are* went into the file on the copy's
+ own node; the curve that would move them did not, and `notes.md` §16 is where
+ that would be picked up.
+*>
+fn int Exporter.first_target(&self, AssetId id, uint node, AnimatedPath path)
+{
+	if (path == AnimatedPath.WEIGHTS) return -1;
+	foreach (&skeleton : self.skeletons)
+	{
+		if (!(skeleton.asset == id)) continue;
+		if (node >= skeleton.map.len) continue;
+		if (skeleton.map[node] >= 0) return skeleton.map[node];
+	}
+	return -1;
+}
+
+// One clip: its samplers written once, and a channel onto every skeleton of this
+// asset that has the node the curve names.
+fn void Exporter.write_clip(&self, AssetId id, AnimationClip* clip)
+{
+	uint animation = self.out.add_animation(clip.name);
+
+	List{ExportTimes} times;
+	times.init(mem, 4);
+	defer times.free();
+
+	foreach (&channel : clip.channels)
+	{
+		if (self.first_target(id, channel.node, channel.path) < 0) continue;
+
+		uint sampler = self.out.add_sampler(
+			animation,
+			self.clip_times(&times, channel.times),
+			self.clip_values(channel),
+			channel.interp
+		);
+
+		foreach (&skeleton : self.skeletons)
+		{
+			if (!(skeleton.asset == id)) continue;
+			if (channel.node >= skeleton.map.len || skeleton.map[channel.node] < 0) continue;
+			self.out.add_channel(animation, sampler, (uint)skeleton.map[channel.node], gltf_path(channel.path));
+		}
+	}
+}
+
+<*
+ A channel's key times, deduplicated within the clip.
+
+ Every joint of a rig is keyed on one timeline in every file an exporter wrote, so
+ without this a sixty-bone walk cycle writes sixty identical copies of it. Matched
+ on contents rather than on the array's address: `ensure_clip` gives each channel
+ its own copy, so two channels sharing a glTF accessor arrive here as two arrays.
+*>
+fn uint Exporter.clip_times(&self, List{ExportTimes}* known, float[] times)
+{
+	foreach (&seen : known)
+	{
+		if (seen.times.len != times.len) continue;
+		bool same = true;
+		foreach (i, at : times)
+		{
+			if (seen.times[i] != at)
+			{
+				same = false;
+				break;
+			}
+		}
+		if (same) return seen.accessor;
+	}
+
+	uint accessor = self.out.add_times(times);
+	known.push({ .times = times, .accessor = accessor });
+	return accessor;
+}
+
+<*
+ A channel's values, as the accessor its path wants.
+
+ The count comes off the array rather than off the key count, which is what makes
+ CUBICSPLINE come out right: it stores three values a key — an in-tangent, the
+ value, an out-tangent — and the sampler's interpolation is what tells a reader
+ that is what they are.
+*>
+fn uint Exporter.clip_values(&self, AnimationChannel* channel)
+{
+	if (channel.path == AnimatedPath.ROTATION)
+	{
+		sz keys             = (sz)(channel.values.len / 4);
+		Quaternionf[] turns = mem::new_array(Quaternionf, keys);
+		defer free(turns);
+		for (sz i = 0; i < keys; i++)
+		{
+			turns[i] = {
+				channel.values[i * 4],
+				channel.values[i * 4 + 1],
+				channel.values[i * 4 + 2],
+				channel.values[i * 4 + 3],
+			};
+		}
+		return self.out.add_rotations(turns);
+	}
+
+	sz keys      = (sz)(channel.values.len / 3);
+	Vec3[] moves = mem::new_array(Vec3, keys);
+	defer free(moves);
+	for (sz i = 0; i < keys; i++)
+	{
+		moves[i] = { channel.values[i * 3], channel.values[i * 3 + 1], channel.values[i * 3 + 2] };
+	}
+	return self.out.add_vectors(moves);
+}
+
+// The two enums say the same four things and neither can import the other's, so
+// this is the one place they are married.
+fn gltf::AnimationProperty gltf_path(AnimatedPath path) @local
+{
+	switch (path)
+	{
+		case TRANSLATION: return gltf::AnimationProperty.TRANSLATION;
+		case ROTATION: return gltf::AnimationProperty.ROTATION;
+		case SCALE: return gltf::AnimationProperty.SCALE;
+		case WEIGHTS: return gltf::AnimationProperty.WEIGHTS;
+	}
 }
 
 <*
@@ -1036,7 +1644,7 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 	uint written            = self.out.add_mesh(mesh.name);
 	ExportGeometry* streams = &self.geometry[(usz)geometry];
 
-	gltf::WriteAttribute[4] attributes;
+	gltf::WriteAttribute[6] attributes;
 	usz count = 0;
 	attributes[count++] = { .name = "POSITION", .accessor = (uint)streams.positions };
 	if (streams.normals >= 0) attributes[count++] = { .name = "NORMAL", .accessor = (uint)streams.normals };
@@ -1046,8 +1654,30 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 	// `VERTEX_COLOR` mask names — without it such a layer would come back naming
 	// something the file does not have.
 	if (streams.colors >= 0) attributes[count++] = { .name = "COLOR_0", .accessor = (uint)streams.colors };
+	// The rig, on the geometry rather than on the node: a vertex names its four
+	// joints by their position in whichever skin poses it, so the attribute is the
+	// same for every copy and every skin over one mesh. Which joints those indices
+	// *are* is the skin's business, and `write_skeleton` is where it is settled.
+	if (streams.joints >= 0 && streams.skin_weights >= 0)
+	{
+		attributes[count++] = { .name = "JOINTS_0", .accessor = (uint)streams.joints };
+		attributes[count++] = { .name = "WEIGHTS_0", .accessor = (uint)streams.skin_weights };
+	}
 
-	self.out.add_primitive(written, attributes[:count], streams.indices, material);
+	uint shape = self.out.add_primitive(written, attributes[:count], streams.indices, material);
+	foreach (&target : streams.targets)
+	{
+		gltf::WriteAttribute[2] deltas;
+		usz moved = 0;
+		deltas[moved++] = { .name = "POSITION", .accessor = (uint)target.positions };
+		if (target.normals >= 0) deltas[moved++] = { .name = "NORMAL", .accessor = (uint)target.normals };
+		self.out.add_morph_target(written, shape, deltas[:moved]);
+	}
+	// No `mesh.weights`. glTF's are the shape's defaults and this renderer does not
+	// use them — `MorphWeights` seeds every copy to zero whatever the file said — so
+	// writing them back would put a number in the file that the frame was not
+	// drawn with. What each copy is actually wearing goes out on its own node,
+	// which is the channel that varies per copy anyway.
 	self.entries.push({ .geometry = (uint)geometry, .material = material, .entry = written });
 	self.report.entries++;
 	return (int)written;
@@ -1080,7 +1710,10 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 		.uvs = -1,
 		.colors = -1,
 		.indices = (int)self.out.add_indices(streams.indices.array_view()),
+		.joints = -1,
+		.skin_weights = -1,
 	};
+	written.targets.init(mem, 0);
 	// Short is absent, which is the same test `upload_primitive` applies: a normals
 	// array that does not cover every vertex is one a consumer would read past the
 	// end of.
@@ -1101,9 +1734,134 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 		written.colors = (int)self.out.add_vec4(streams.colors.array_view());
 	}
 
+	self.read_rig(asset, mesh, &written);
 	self.geometry.push(written);
 	self.report.meshes++;
 	return (int)self.geometry.len() - 1;
+}
+
+<*
+ The rig attributes and the blend shapes of a mesh that came out of a file.
+
+ A second read of the same primitive rather than four more lists on
+ `GeometryBuilder`. The builder is the shape of a mesh — `split.c3` and the upload
+ path both fill one — and joints, weights and displacements are none of those
+ things: widening it would put four lists on every caller to serve the one that
+ re-reads a file, and the three other sources here have nothing to put in them.
+ A generated shape has no joints, and a hull's vertices were rebuilt from the
+ picking tree, which never held any.
+
+ Silent about everything it cannot find, and that is the right shape for it: a
+ mesh with no JOINTS_0 is the overwhelming majority of meshes, not a fault.
+*>
+fn void Exporter.read_rig(&self, AssetId id, uint index, ExportGeometry* into)
+{
+	Asset* asset = self.pass.assets.slot(id);
+	if (asset == null || !asset.has_stream) return;
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null || mesh.gltf_mesh < 0 || mesh.vertex_count == 0) return;
+	if (mesh.gltf_mesh >= asset.stream.gltf.meshes.len()) return;
+
+	gltf::Mesh source = asset.stream.gltf.meshes[mesh.gltf_mesh];
+	if (mesh.gltf_primitive < 0 || mesh.gltf_primitive >= source.primitives.len()) return;
+	gltf::Primitive primitive = source.primitives[mesh.gltf_primitive];
+
+	sz vertices = (sz)mesh.vertex_count;
+	self.read_influences(asset, primitive, vertices, into);
+	self.read_targets(asset, primitive, vertices, into);
+}
+
+<*
+ JOINTS_0 and WEIGHTS_0, written only when both cover every vertex.
+
+ Both or neither, because either alone is unusable: joints without weights is
+ four bones and no say in how much each one moves, and weights without joints is
+ four numbers naming nothing. A reader given one of the two has to invent the
+ other, and the invention is visible — a mesh that collapses to the origin, or
+ one that ignores its rig.
+*>
+fn void Exporter.read_influences(&self, Asset* asset, gltf::Primitive primitive, sz vertices, ExportGeometry* into)
+{
+	List{ushort} joints;
+	List{float} weights;
+	joints.init(mem, vertices * 4);
+	weights.init(mem, vertices * 4);
+	defer
+	{
+		joints.free();
+		weights.free();
+	}
+
+	asset.stream.@each_joint(primitive, 0 ; ushort[<4>] influence, sz i)
+	{
+		joints.push(influence[0]);
+		joints.push(influence[1]);
+		joints.push(influence[2]);
+		joints.push(influence[3]);
+	};
+	asset.stream.@each_weight(primitive, 0 ; Vec4 weight, sz i)
+	{
+		weights.push(weight.x);
+		weights.push(weight.y);
+		weights.push(weight.z);
+		weights.push(weight.w);
+	};
+
+	if (joints.len() != vertices * 4 || weights.len() != vertices * 4) return;
+	// Narrowed back to bytes by the writer wherever the joint count allows it,
+	// which is the width most files store them at and the one this reader widened
+	// them from.
+	into.joints = (int)self.out.add_joints(joints.array_view());
+	into.skin_weights = (int)self.out.add_weights(weights.array_view());
+}
+
+<*
+ The primitive's morph targets, in the file's own order.
+
+ **All of them or none.** A target that will not read cannot be skipped, because
+ the index is the addressing: dropping the middle of three would leave the third
+ answering to the second's weight, which is a face wearing the wrong expression
+ rather than a face missing one. So a short target abandons the whole set and the
+ mesh goes out without blend shapes, which is what it did before any of this.
+
+ A target's NORMAL is optional and independent — a target may move positions and
+ leave lighting alone, and that is a choice rather than a gap.
+*>
+fn void Exporter.read_targets(&self, Asset* asset, gltf::Primitive primitive, sz vertices, ExportGeometry* into)
+{
+	if (primitive.targets.len() == 0) return;
+
+	List{Vec3} deltas;
+	deltas.init(mem, vertices);
+	defer deltas.free();
+
+	for (uint t = 0; t < primitive.targets.len(); t++)
+	{
+		deltas.clear();
+		if (catch asset.stream.@each_morph_position(primitive, t ; Vec3 delta, sz i) { deltas.push(delta); })
+		{
+			into.targets.clear();
+			return;
+		}
+		if (deltas.len() != vertices)
+		{
+			into.targets.clear();
+			return;
+		}
+		ExportMorphTarget target = {
+			.positions = (int)self.out.add_positions(deltas.array_view()),
+			.normals = -1,
+		};
+
+		deltas.clear();
+		if (catch asset.stream.@each_morph_normal(primitive, t ; Vec3 delta, sz i) { deltas.push(delta); })
+		{
+			deltas.clear();
+		}
+		if (deltas.len() == vertices) target.normals = (int)self.out.add_vec3(deltas.array_view());
+
+		into.targets.push(target);
+	}
 }
 
 <*

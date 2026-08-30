@@ -142,6 +142,14 @@ count is not the trigger and never was.
 
 - [ ] **Lines do not export.** Two structural changes for the least valuable of
       the six; `mode: LINES` is waiting in the writer.
+- [ ] **A morph animation does not export.** Rigs, clips and blend shapes go out;
+      a WEIGHTS channel does not, because it drives a mesh through the node the
+      mesh hangs on and that node is not a joint in any skeleton's map. What each
+      copy's weights *are* is in the file — the curve that would move them is not.
+- [ ] **A reloaded copy does not get the file's morph weights back.**
+      `MorphWeights` seeds every copy to zero whatever the file said, so a `.glb`
+      written with `node.weights` reads back at rest. The parser now reads them —
+      `Node.weights` — so what is left is `instantiate` applying them.
 
 ## 17. Gameplay
 

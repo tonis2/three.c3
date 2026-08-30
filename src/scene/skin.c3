@@ -162,7 +162,7 @@ fn void? Assets.ensure_poses(&self, Gpu* gpu, AssetId id)
  says an absent `inverseBindMatrices` means: the mesh is already in each joint's
  space.
 *>
-fn void read_inverse_binds(Asset* asset, uint index) @local
+fn void read_inverse_binds(Asset* asset, uint index)
 {
 	AssetSkin* skin = &asset.skins[index];
 	if (skin.loaded) return;

@@ -1074,6 +1074,10 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 		js.set_property(described, "bakedImages", qjs::int_value((int)report.baked_images));
 		js.set_property(described, "bakedColors", qjs::int_value((int)report.baked_colors));
 		js.set_property(described, "layers", qjs::int_value((int)report.layers));
+		js.set_property(described, "skins", qjs::int_value((int)report.skins));
+		js.set_property(described, "bones", qjs::int_value((int)report.bones));
+		js.set_property(described, "clips", qjs::int_value((int)report.clips));
+		js.set_property(described, "morphed", qjs::int_value((int)report.morphed));
 		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
 		*out = described;
 	};
