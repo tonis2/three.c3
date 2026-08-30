@@ -170,6 +170,30 @@ struct Renderer
 	// and only while there is an interface — see `gpu/swapchain.c3`.
 	Composite composite;
 	bool windowed;
+	<*
+	 Whether the offscreen target tracks the window's drawable.
+
+	 True until a script pins it. A window and a picture that disagree about how
+	 many pixels there are is a picture stretched over a window, which is what a
+	 person dragging an edge sees as blur and what "make the window bigger"
+	 obviously does not mean.
+
+	 So the target follows: `rebuild` moves it to whatever the surface settled
+	 on, whether that came from a drag, a `three.window.resize`, a fullscreen
+	 transition or a monitor change. `--width`/`--height` are then the size the
+	 window OPENS at, and go on being the target's own size under `--headless`,
+	 where there is no window to follow.
+
+	 `three.setRenderSize` pins it, because the other reason to set a render size
+	 is to make it deliberately smaller than the window and upscale — the
+	 performance knob — and a follow would undo that on the next configure.
+	 `three.setRenderSize(null)` unpins.
+
+	 Spelled as the pin rather than as the follow so that the zero value is the
+	 default: a `Renderer` is built by assignment in a dozen tests, and a field
+	 whose useful value is `true` would be off in every one of them.
+	*>
+	bool render_size_pinned;
 	// What every render begins with. Reachable from a script as
 	// `scene.background`.
 	float[4] clear;
@@ -211,11 +235,74 @@ fn Renderer? Renderer.init(
 	{
 		self.viewer.init(&self.gpu, surface, width, height)!;
 		image_count = self.viewer.image_count;
+
+		// The picture follows the window from the first frame and not from the
+		// first resize. `width` and `height` are logical points where a window is
+		// concerned, so on a display that is not 1:1 the drawable that comes back
+		// is already bigger than the target just built — and without this the run
+		// would open stretched and only become sharp when somebody dragged an edge.
+		if (self.viewer.extent.width > 0 && self.viewer.extent.height > 0)
+		{
+			self.resize_target(self.viewer.extent.width, self.viewer.extent.height)!;
+		}
 	}
 	self.frames.init(&self.gpu, image_count)!;
 	self.timer.init(&self.gpu)!;
 
 	return *self;
+}
+
+<*
+ Moves the offscreen target to a new extent, between frames.
+
+ The render size is otherwise a boot argument — `--width`/`--height` reach
+ `Target.init` once — and this is what a settings screen changes. It is not the
+ window: the swapchain goes on stretching whatever the target holds over
+ whatever the window is, so this is the call that moves *pixels* and
+ `three.window.resize` is the one that moves the frame around them.
+
+ ## Everything that has to hear about it
+
+ The target's own two images, and the post chain's. Nothing else: the scene's
+ pipelines take their viewport and scissor dynamically, so no pipeline is
+ rebuilt; the swapchain reads `target.extent` when it records the blit, so the
+ destination rect follows on the next frame; the interface is laid out per frame
+ against the attachment it is drawn into; the composite is the window's size and
+ not this one; and the shadow map has a size of its own.
+
+ The chain is told through `ensure_images`, which already compares its own
+ extent against the target's and rebuilds when they differ — the path a window
+ resize used to be the only caller of. Only when there is a chain: an inactive
+ post pass holding images at the old extent is one the next `set` rebuilds
+ anyway, and creating them here would be paying for a chain nobody is running.
+
+ ## Why the device is idled
+
+ This is the only place outside `free` that destroys an attachment, and the
+ command buffers that reference it may still be executing. `retire.c3`'s
+ deferred queue is for objects a frame in flight may name; the target is named
+ by *every* frame in flight, so waiting is both simpler and no slower — a
+ resolution change is a menu click, not a per-frame cost.
+
+ @param width : `Device pixels. Nothing about the window is consulted.`
+ @require width > 0 && height > 0
+*>
+fn void? Renderer.resize_target(&self, uint width, uint height)
+{
+	if (width == self.target.extent.width && height == self.target.extent.height) return;
+
+	// The new one before the old one goes, so a size the device will not
+	// allocate leaves the renderer exactly as it was rather than with no target
+	// at all. Both are resident for the length of this call, which is the price
+	// of the failure being recoverable.
+	Target next;
+	next.init(&self.gpu, width, height)!;
+
+	self.gpu.handle.waitIdle();
+	self.target.free(&self.gpu);
+	self.target = next;
+
+	if (self.post.active()) self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
 }
 
 fn void Renderer.free(&self)
@@ -424,7 +511,46 @@ fn bool? Renderer.rebuild(&self)
 	if (!self.viewer.rebuild(&self.gpu)!) return false;
 	// A rebuild can hand back more images than the last one did.
 	self.frames.ensure_present_semaphores(&self.gpu, self.viewer.image_count)!;
+
+	// The picture follows the window unless a script has pinned it. This is the
+	// one place every window size change arrives — a drag, `three.window.resize`,
+	// a fullscreen transition, a move to a display of a different density — so it
+	// is the one place that has to be told.
+	//
+	self.follow_window();
 	return true;
+}
+
+<*
+ Brings the render size back to the window's, unless a script has pinned it.
+
+ Called from `rebuild`, where a resize has just landed, and again at the top of
+ every frame. The second call is not a backstop for the first: unpinning with
+ `three.setRenderSize(null)` changes nothing about the swapchain, so there is no
+ rebuild to carry it, and without a per-frame reconcile the follow would not
+ resume until somebody happened to drag the window.
+
+ Costs a comparison when the two already agree, which is every frame but the few
+ that changed something — `resize_target` returns on the spot when the extent it
+ is given is the extent it has.
+
+ Failure is reported and dropped rather than raised: the swapchain is already
+ rebuilt, so the frame can be presented at the render size it had, and a window
+ dragged to something the device will not allocate should go blurry rather than
+ take the process down. `resize_target` leaves the old target standing.
+*>
+fn void Renderer.follow_window(&self)
+{
+	if (self.render_size_pinned || !self.windowed) return;
+
+	uint wide = self.viewer.extent.width;
+	uint high = self.viewer.extent.height;
+	if (wide == 0 || high == 0) return;
+
+	if (catch err = self.resize_target(wide, high))
+	{
+		@advise("three: the window is %dx%d and the device would not make a target that size (%s)", wide, high, err);
+	}
 }
 
 <*
@@ -442,6 +568,8 @@ fn bool? Renderer.rebuild(&self)
 fn bool? Renderer.frame(&self)
 {
 	if (!self.windowed) return false;
+
+	self.follow_window();
 
 	vk::Extent2D surface_size = self.viewer.surface_extent(&self.gpu)!;
 	if (surface_size.width != self.viewer.extent.width || surface_size.height != self.viewer.extent.height)

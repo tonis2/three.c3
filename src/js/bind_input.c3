@@ -108,6 +108,10 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "controlsSet", &js_controls_set, 1);
 	self.bind(host, "windowSize", &js_window_size, 0);
 	self.bind(host, "windowResize", &js_window_resize, 2);
+	self.bind(host, "windowTitleGet", &js_window_title_get, 0);
+	self.bind(host, "windowTitleSet", &js_window_title_set, 1);
+	self.bind(host, "windowFullscreenGet", &js_window_fullscreen_get, 0);
+	self.bind(host, "windowFullscreenSet", &js_window_fullscreen_set, 1);
 }
 
 <*
@@ -879,29 +883,188 @@ fn void js_window_resize(
 }
 
 <*
- Says that a bigger window is not a bigger picture, when it is about to not be.
+ Says that a bigger window will be a stretched picture, when it is about to be.
 
- The trap this exists for: "make the window bigger" reads as "render more
- pixels" and here it is neither. The swapchain blits the whole offscreen target
- onto the whole swapchain image, so a window past the target's extent is the same
- picture stretched — softer, and a screenshot comes back at the size it always
- was. Only on the way up, because a window smaller than the target is the same
+ Only reachable with the render size PINNED. The target follows the window
+ otherwise, so a bigger window is a bigger picture and there is nothing to warn
+ about; once `three.setRenderSize` has pinned it, "make the window bigger" no
+ longer renders more pixels and the difference is invisible from a script — a
+ screenshot comes back at the size it was pinned to.
+
+ Only on the way up, because a window smaller than the target is the same
  stretch in the direction nobody complains about.
 *>
 fn void say_window_stretch(Renderer* renderer, uint width, uint height) @local
 {
-	if (renderer == null) return;
+	if (renderer == null || !renderer.render_size_pinned) return;
 	uint image_wide = renderer.target.extent.width;
 	uint image_high = renderer.target.extent.height;
 	if (width <= image_wide && height <= image_high) return;
 
 	@advise(
 		"three: the window was asked for %dx%d and the picture in it is %dx%d stretched to fit. The "
-			"render target is fixed at what --width/--height asked for and resizing the window does not "
-			"move it — three.renderSize() stays what a screenshot and scene.pick count in.",
+			"render size is pinned by three.setRenderSize, so the window no longer moves it — pass null "
+			"to three.setRenderSize to let the picture follow the window again.",
 		width,
 		height,
 		image_wide,
 		image_high
 	);
+}
+
+<*
+ The window's title, kept here because the window outlives every context that
+ names it.
+
+ `c3w` has no `get_title` and two of its four backends could not implement one —
+ Wayland never reads a title back, and Windows would answer with whatever a
+ screen reader last saw. So the value is remembered on the way past, at process
+ scope rather than on `JsRuntime`: a `three.reload()` closes the context and
+ builds a new one while the window stays up with the name it already has, and a
+ title that read back empty after a reload would be reporting the context's
+ memory rather than the window's state.
+
+ A fixed buffer for `disk_cache.c3`'s reason: process-global state with no owner,
+ where a heap copy nothing frees is a leak in a leak-tracked run.
+*>
+const usz WINDOW_TITLE_MAX = 256;
+
+char[WINDOW_TITLE_MAX] window_title_storage @local;
+String window_title @local = WINDOW_DEFAULT_TITLE;
+
+<*
+ `windowTitleGet()` — what the title bar says.
+
+ Answers with the name even under `--headless`, where there is no title bar to
+ put it on. A game reading back what it configured should get what it
+ configured; whether anything is displaying it is `three.window.width`'s
+ question, not this one.
+*>
+fn void js_window_title_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	qjs::Context js = qjs::wrap(ctx);
+	*out = js.string(window_title);
+}
+
+<*
+ `windowTitleSet(text)` — rename the window, and answer with whether there was
+ one to rename.
+
+ The name is remembered either way, so a `--headless` run that titles itself and
+ a windowed one that does read back the same. False means only "nothing is
+ showing this", which is the same shape `three.window.resize` and
+ `three.input.pointerLock` already use.
+*>
+fn void js_window_title_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		String wanted = arg_text(&js, argc, args, 0, tmem);
+		if (wanted.len == 0)
+		{
+			*out = js.raise("three.window.title wants a name; the empty string would leave the title bar blank");
+			return;
+		}
+		if (wanted.len > WINDOW_TITLE_MAX)
+		{
+			*out = js.raise(
+				string::tformat(
+					"three.window.title takes at most %d bytes and was given %d",
+					WINDOW_TITLE_MAX,
+					wanted.len
+				)
+			);
+			return;
+		}
+
+		mem::copy(&window_title_storage[0], wanted.ptr, (sz)wanted.len);
+		window_title = (String)window_title_storage[:wanted.len];
+
+		if (self.window == null)
+		{
+			*out = qjs::bool_value(false);
+			return;
+		}
+		self.window.set_title(window_title);
+		*out = qjs::bool_value(true);
+	};
+}
+
+<*
+ `windowFullscreenGet()` — whether the window is filling a display.
+
+ False under `--headless`, where it is the only true answer.
+
+ What each platform means by it differs and is worth knowing. macOS reads the
+ style mask, so a person using the green button or Mission Control is reflected
+ here without this process being told. The other three report what was last
+ asked for: Windows because there is no OS state that says "fullscreen" — the
+ window is merely borderless and the size of a monitor — and X11 and Wayland
+ because the true answer belongs to a window manager that is free to refuse.
+*>
+fn void js_window_fullscreen_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::bool_value(self.window != null && self.window.fullscreen());
+}
+
+<*
+ `windowFullscreenSet(on)` — go fullscreen, or come back.
+
+ Answers with whether there was a window to ask, not with whether it worked: on
+ three of four platforms the answer arrives later, as a resize, and on X11 it may
+ never arrive at all because a window manager is entitled to say no. A settings
+ screen that wants the truth reads `three.window.fullscreen` back on a later
+ frame, exactly as it would after `resize`.
+
+ The render size does not move. Everything draws into the offscreen target
+ `--width`/`--height` fixed at boot and the swapchain stretches it over whatever
+ the window becomes, so going fullscreen makes the picture bigger and not
+ sharper. `three.setRenderSize` is the other half of that, and a settings screen
+ offering a resolution wants both.
+*>
+fn void js_window_fullscreen_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	bool wanted = arg_truth(&js, argc, args, 0);
+	if (self.window == null)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
+	self.window.set_fullscreen(wanted);
+	*out = qjs::bool_value(true);
 }

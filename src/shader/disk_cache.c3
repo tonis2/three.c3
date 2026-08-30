@@ -122,6 +122,10 @@ const uint SHADER_CACHE_FORMAT_VERSION = 3;
  shell at the project root and `c3c test` all start there. `build/` is
  gitignored, so a warm cache never becomes a diff, and deleting it is the whole
  of "clear the cache".
+
+ It is the default and no longer the whole answer: `main.c3` calls
+ `resolve_cache_dir` at boot, which keeps this one for a checkout and picks the
+ user's cache directory for anything else. `paths.c3` argues the order.
 *>
 const String SHADER_CACHE_DEFAULT_DIR = "build/shader-cache";
 
@@ -132,6 +136,10 @@ const usz SHADER_CACHE_DIR_MAX = 512;
 
 char[SHADER_CACHE_DIR_MAX] cache_dir_storage @local;
 String cache_dir @local = SHADER_CACHE_DEFAULT_DIR;
+// The prebake, in the same fixed-buffer shape and for the same reason. Empty
+// until something points it somewhere, which is every run but a bundled one.
+char[SHADER_CACHE_DIR_MAX] read_dir_storage @local;
+String read_dir @local;
 ShaderCacheStats cache_counters @local;
 
 <*
@@ -178,12 +186,43 @@ fn void shader_cache_set_dir(String dir)
 }
 
 <*
+ A second directory to read from and never write to.
+
+ What a bundle ships warm. A `.slangmod` is keyed on the source and the compiler
+ tag and on nothing about the machine, so the modules a release was built with
+ are the modules any machine running that release would compile for itself —
+ measured on this desk, 3.5s of Slang against 1.6s with them present.
+
+ Read-only is the whole point rather than a caution: an install directory is not
+ writable everywhere, and the thing that *is* per-machine — the driver's pipeline
+ blob — is written by `gpu/driver_cache.c3` into the writable directory beside
+ it. Two destinations, and neither has to know about the other.
+
+ @param dir : `Where a bundle put its modules. Empty turns the second lookup off, which is the default.`
+*>
+fn void shader_cache_set_read_dir(String dir)
+{
+	if (dir.len == 0 || dir.len > SHADER_CACHE_DIR_MAX)
+	{
+		read_dir = "";
+		return;
+	}
+	mem::copy(&read_dir_storage[0], dir.ptr, (sz)dir.len);
+	read_dir = (String)read_dir_storage[:dir.len];
+}
+
+<*
  Where modules are kept, or empty when the cache is off.
 
  `gpu/driver_cache.c3` puts its blob in the same directory: two formats, two
  identity rules, one thing to delete.
 *>
 fn String shader_cache_dir() => cache_dir;
+
+<*
+ The prebake, or empty when there is none.
+*>
+fn String shader_cache_read_dir() => read_dir;
 
 fn ShaderCacheStats shader_cache_stats() => cache_counters;
 
@@ -263,7 +302,7 @@ fn ulong cache_key(String compiler, String args, String source, ShaderEntry[] en
 	return content_hash((char[])key.str_view());
 }
 
-fn String cache_path(ulong key) @local => string::tformat("%s/%016x.slangmod", cache_dir, key);
+fn String cache_path(String dir, ulong key) @local => string::tformat("%s/%016x.slangmod", dir, key);
 
 <*
  Writes one module out.
@@ -434,14 +473,14 @@ fn bool cache_reject() @local
  @param [out] out : `Filled only on true. Untouched otherwise.`
  @return `True if out now holds a module Slang did not have to produce.`
 *>
-fn bool cache_load(String path, String compiler, String args, String source, ShaderModule* out) @local
+fn bool cache_load(String path, String compiler, String args, String source, ShaderModule* out, bool count_miss = true) @local
 {
 	@pool()
 	{
 		char[]? bytes = file::load(tmem, path);
 		if (catch bytes)
 		{
-			cache_counters.misses++;
+			if (count_miss) cache_counters.misses++;
 			return false;
 		}
 
@@ -600,13 +639,30 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 	{
 		String compiler = slang::build_tag();
 		String args     = cache_argument_blob();
-		String path     = cache_path(cache_key(compiler, args, source, entries));
+		ulong key       = cache_key(compiler, args, source, entries);
+		String path     = cache_path(cache_dir, key);
 
+		// The writable directory first, and the miss counted only if there is
+		// nowhere else to look — a lookup is one lookup however many directories
+		// answer it, and `misses` is what the tests read as "Slang ran".
 		ShaderModule loaded;
-		if (cache_load(path, compiler, args, source, &loaded))
+		if (cache_load(path, compiler, args, source, &loaded, count_miss: read_dir.len == 0))
 		{
 			@debug_log("shader cache: %s hit %s", name, path);
 			return loaded;
+		}
+
+		// Then the prebake. Nothing is copied across on a hit: the file that
+		// answered is as good where it is, and writing it into the user's cache
+		// would double a bundle's modules on disk to save no work at all.
+		if (read_dir.len > 0)
+		{
+			String bundled = cache_path(read_dir, key);
+			if (cache_load(bundled, compiler, args, source, &loaded))
+			{
+				@debug_log("shader cache: %s hit %s (bundled)", name, bundled);
+				return loaded;
+			}
 		}
 
 		// The interesting half of the pair: a miss means Slang runs, which is the

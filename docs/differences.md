@@ -324,20 +324,25 @@ many landed. With { trs: true } the stride is ten floats — position, an xyzw Q
 
 ## window-is-not-the-picture
 
-three.window.resize(width, height) makes the WINDOW bigger and does not make the picture bigger.
-Everything renders into an offscreen target fixed at what --width/--height asked for when the
-process started, and the swapchain stretches the whole of that onto the whole window — so a wider
-window is the same pixels spread wider, and three.renderSize(), the PNG a screenshot comes back as
-and the coordinates scene.pick(x, y) counts in are all unchanged. Nothing in the JS API moves the
-render size; it is a boot argument. three.window.width and .height are device pixels read off the
-drawable rather than off the window, so they are current through a live resize drag, and .scale is
-device pixels per logical point. Resizing is a REQUEST: X11's window manager may adjust it and
-Wayland answers with a configure some frames later, so the new size arrives on a later frame. Under
---headless there is no window, the sizes read zero and resize() returns false rather than throwing —
-the same shape three.input.pointerLock uses, so a game that sizes its window still starts where
-there is none. And on WAYLAND the size never reads back at all: that surface answers 'whatever the
-swapchain asks for' instead of a size, so the drawable stays what the process booted at whatever the
-window does.
+The picture follows the window. Everything renders into an offscreen target and the swapchain puts
+that on the window; when the window moves — a drag, three.window.resize, fullscreen, a display of a
+different density — the target moves with it, so what is on screen is its own pixels rather than
+stretched ones. --width/--height are the size the window OPENS at, and go on being the target's own
+size under --headless where there is no window to follow. So three.renderSize(), the PNG a
+screenshot comes back as and the coordinates scene.pick(x, y) counts in all track the window, and on
+a RETINA display that is the device pixel count — twice the logical one, and four times the pixels
+to shade. three.setRenderSize(width, height) PINS it, and that is the render-scale slider a settings
+screen has: a target below the window is upscaled to fill it. While pinned the window no longer
+moves the picture, and resizing past it says so in the run's warnings;
+three.setRenderSize(null) gives the follow back. three.window.width and .height are device pixels
+read off the drawable rather than off the window, so they are current through a live resize drag,
+and .scale is device pixels per logical point. Resizing is a REQUEST: X11's window manager may
+adjust it and Wayland answers with a configure some frames later, so the new size arrives on a later
+frame. Under --headless there is no window, the sizes read zero and resize() returns false rather
+than throwing — the same shape three.input.pointerLock uses, so a game that sizes its window still
+starts where there is none. And on WAYLAND the size never reads back at all: that surface answers
+'whatever the swapchain asks for' instead of a size, so the drawable stays what the process booted
+at whatever the window does, which is also the one platform where the picture cannot follow.
 
 ## the-interface
 

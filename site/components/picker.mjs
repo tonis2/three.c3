@@ -41,7 +41,6 @@ export function downloadPicker({
       <strong>v${version}</strong>
       <span class="asset">${asset ? `${asset.name} · ${size(asset.size)}` : ''}</span>
       <a href="${SITE.repo}/releases">All builds</a>
-      <a href="#first-run">First run</a>
     </p>
     <p class="status" ?hidden=${!status} ?data-error=${error}>${status}</p>`;
 }

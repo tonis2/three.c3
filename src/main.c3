@@ -6,8 +6,8 @@
  --mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
  --mcp-stdio [port]    relay stdin/stdout to a three that is already serving
  --screenshot <path>   render one frame, write a PNG, exit
- --width <n>           offscreen render width  (default 1280)
- --height <n>          offscreen render height (default 720)
+ --width <n>           the window's size in points, or the render size headless
+ --height <n>          the same, vertically
  --headless            no window, no surface, no swapchain
  --script <file.js>    boot one script, then keep the window running
  --assets <dir>        boot a game: evaluate <dir>/main.js as a module
@@ -15,6 +15,7 @@
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
  --debug               validation layers, @debug_log, and the window's own chords
+ --cache-dir <dir>     where compiled shaders are kept — see paths.c3
 
  There is no file argument. A model is loaded from JavaScript — `three.load`
  hands the script an object it can place, parent and dispose — and a model the
@@ -54,6 +55,7 @@ module three;
 
 import std::io;
 import std::io::file;
+import std::io::path;
 import std::math;
 import std::thread;
 import std::time;
@@ -64,6 +66,17 @@ import mcp;
 import qjs;
 
 const String VERSION = "0.1.0";
+
+<*
+ What the title bar says until a game says otherwise.
+
+ There is no `--title`: a player never types a command line, and a settings
+ screen has to be able to change this at runtime anyway. `three.configure({
+ title })` at the top of `main.js` is the boot spelling and
+ `three.window.title = ...` is the live one — both go through
+ `js/bind_input.c3`, which is also where the current value is kept.
+*>
+const String WINDOW_DEFAULT_TITLE = "three.c3";
 
 struct Options
 {
@@ -101,6 +114,18 @@ struct Options
 	// `--debug`. Copied into `three::debugging` before anything reads it — the flag
 	// is the CLI's, the global is what the rest of the engine asks.
 	bool debug;
+	<*
+	 `--cache-dir`, and whether it was written at all.
+
+	 Two fields because an empty value is a decision: `--cache-dir ""` turns the
+	 shader cache off, and is the only way to say so. Nothing but the presence of
+	 the flag tells that apart from never having asked.
+
+	 A developer's flag. A game names nothing here — see `paths.c3` for what a run
+	 that says nothing gets.
+	*>
+	String cache_dir;
+	bool cache_dir_set;
 	bool help;
 }
 
@@ -124,6 +149,10 @@ fn Options? parse_args(String[] args)
 				opts.headless = true;
 			case "--debug":
 				opts.debug = true;
+			case "--cache-dir":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.cache_dir = args[++i];
+				opts.cache_dir_set = true;
 			case "--assets":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.assets = args[++i];
@@ -228,8 +257,8 @@ fn void usage()
 	io::printn("  --mcp [port]          serve the agent tools on 127.0.0.1 (default 8808)");
 	io::printn("  --mcp-stdio [port]    be the stdio end of a three that is already serving");
 	io::printn("  --screenshot <path>   render one frame, write a PNG, exit");
-	io::printn("  --width <n>           offscreen render width  (default 1280)");
-	io::printn("  --height <n>          offscreen render height (default 720)");
+	io::printn("  --width <n>           the window's width, or the render width headless (1280)");
+	io::printn("  --height <n>          the window's height, or the render height headless (720)");
 	io::printn("  --headless            no window, no surface, no swapchain");
 	io::printn("  --script <file.js>    run one script, then keep the window running");
 	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
@@ -237,6 +266,7 @@ fn void usage()
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  --debug               diagnose this run — see below");
+	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
 	io::printn("  -h, --help            this");
 	io::printn("");
 	io::printn("  There is no file argument: a model is loaded from a script, with");
@@ -251,7 +281,10 @@ fn void usage()
 	io::printn("    the device and limits table, at startup");
 	io::printn("    escape to quit and shift+R to reload, in the window");
 	io::printn("");
-	io::printn("  Shaders are read from shaders/ — run from the project root.");
+	io::printn("  The shader templates and the compiler that builds them are inside this");
+	io::printn("  executable, so it runs from any directory. Compiled shaders are cached");
+	io::printn("  under a checkout's build/, and otherwise in the platform's own cache");
+	io::printn("  directory — --cache-dir or THREE_CACHE_DIR move it.");
 }
 
 
@@ -298,6 +331,54 @@ macro @debug_log(format, ...)
 	if (debugging) io::printfn(format, ...$vaarg);
 }
 
+<*
+ Points the shader cache and its prebake somewhere, once, before anything
+ compiles.
+
+ Two directories and one rule each. The writable one is `resolve_cache_dir`'s
+ answer — the flag, then the environment, then a checkout's `build/`, then the
+ user's cache directory; `paths.c3` argues that order. The read-only one is
+ `shader-cache/` beside the executable, which is where a bundle puts the modules
+ it shipped warm and nowhere a run will ever write.
+
+ `--cache-dir ""` is the one value that does not go through the resolver. An
+ empty directory means "no cache at all", and a resolver that fell through to a
+ default on it would make the off switch unreachable.
+
+ The prebake is skipped when it names the writable directory, which is what a
+ checkout does: `build/shader-cache` is both, and looking in one place twice is
+ not a second chance.
+*>
+fn void choose_caches(Options opts)
+{
+	@pool()
+	{
+		if (opts.cache_dir_set && opts.cache_dir.len == 0)
+		{
+			shader_cache_set_dir("");
+			@debug_log("shader cache: off — --cache-dir was given nothing");
+			return;
+		}
+
+		String chosen = resolve_cache_dir(opts.cache_dir, tmem);
+		shader_cache_set_dir(chosen);
+		@debug_log("shader cache: %s", chosen);
+
+		String? beside = executable_dir(tmem);
+		if (catch beside) return;
+		String bundled = string::tformat("%s/shader-cache", beside);
+		if (!path::is_dir((Path)bundled)) return;
+		// Compared absolute, because a checkout reaches the same directory by two
+		// spellings: `build/shader-cache` from the working directory, and the
+		// executable's own `build/` as a full path. Looking in one place twice is
+		// not a second chance.
+		Path? here = chosen.to_absolute_path(tmem);
+		if (try here && (String)here == bundled) return;
+		shader_cache_set_read_dir(bundled);
+		@debug_log("shader cache: reading %s as well", bundled);
+	};
+}
+
 fn int main(String[] args)
 {
 	Options? parsed = parse_args(args);
@@ -311,6 +392,8 @@ fn int main(String[] args)
 	// Before the relay, before the window and before the device: `create_instance`
 	// reads it, and an instance is the one thing that cannot be told afterwards.
 	debugging = opts.debug;
+
+	choose_caches(opts);
 
 	if (opts.help)
 	{
@@ -333,8 +416,9 @@ fn int main(String[] args)
 		// this way, and a flag naming one of them fixed nothing.
 		if (err == SHADER_NOT_FOUND)
 		{
-			io::printn("  shaders/ is not on the search path — mesh, material, post,");
-			io::printn("  shadow and skin are all read from it. Run from the project root.");
+			io::printn("  No template by that name, on the search path or in this binary. The six");
+			io::printn("  are embedded, so this is a typo rather than a missing shaders/ directory");
+			io::printn("  — see shader/load.c3.");
 		}
 		// The path is named here rather than in the fault, because this is the only
 		// place that still has it: a `--script` typo is otherwise a bare fault name
@@ -384,7 +468,7 @@ fn void? run(Options opts)
 	{
 		window = c3w::new(
 			params: { .x = 0, .y = 0, .width = (int)opts.width, .height = (int)opts.height },
-			name: "three.c3"
+			name: WINDOW_DEFAULT_TITLE
 		)!;
 	}
 	defer if (windowed) window.free();
@@ -1022,6 +1106,13 @@ fn void? live(
 		// closes the window on the next iteration rather than inside the click, and
 		// the last frame it built is the last frame shown.
 		if (runtime.quit_wanted) break;
+
+		// Beside the two above and for their reason: a resize frees the images the
+		// frame that asked for it was drawing into, so the animation callback's
+		// request is performed here, where nothing of JavaScript's is on the stack.
+		// A resize made from a tool call or a booting script never reaches this —
+		// `js_render_resize` does those on the spot.
+		runtime.take_render_resize();
 
 		// After `pump` and before the tick, which is the one point in an iteration
 		// with nothing of JavaScript's on the stack — a reload frees the engine the
