@@ -97,7 +97,8 @@ struct FrameBlock
     //      light reaches it. `three.light.ambient`.
     //   y  how many of `lights` are lit this frame, 0 to 4. The rest of the array
     //      is stale bytes the loop never reaches.
-    //   zw unused.
+    //   z  game clock seconds — `three.clock.time`, the same number `p.time` is.
+    //   w unused.
     float4 lighting;
     // This frame's live joint matrices — the characters whose pose is computed
     // from their bone nodes rather than read out of a baked table.

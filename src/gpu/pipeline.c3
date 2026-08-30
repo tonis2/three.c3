@@ -167,7 +167,8 @@ struct Light
 struct FrameBlock
 {
 	Matrix4f view_projection;
-	// x the ambient floor, y how many of `lights` are lit this frame, zw unused.
+	// x the ambient floor, y how many of `lights` are lit this frame,
+	// z game clock seconds (`s.time` / `v.time`), w unused.
 	float[4] lighting;
 	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
 	// frame with no live character.

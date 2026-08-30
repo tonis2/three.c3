@@ -1066,16 +1066,16 @@ Wumpa.on('enter', Player, (f, p) => { f.remove(); p.collect(); });
 
 // The kept solve, re-aimed at the player a few times a second.
 const FLOW_EVERY = 0.35;  // seconds
-Critter.system('flow', (dt) => {
+Critter.step('flow', (dt) => {
 	Critter.flowAge += dt;
 	if (Critter.flow === null || Critter.flowAge >= FLOW_EVERY) Critter.resolve();
-}, { phase: 'fixed', order: 1 });
+});
 
 // How far everyone is from the player, ALONG THE GROUND — one crossing, and
 // `field.cost` in a loop is what it replaces. A NEGATIVE cost is unreachable
 // here where `cost()` answers Infinity, which is the one place the convenient
 // form and the flat form disagree about a value.
-Critter.system('sense', () => {
+Critter.step('sense', () => {
 	for (const c of Critter) {
 		c.foot[0] = c.position[0];
 		c.foot[1] = c.position[1] - CRITTER_H / 2 + 0.2;
@@ -1091,11 +1091,11 @@ Critter.system('sense', () => {
 	for (const c of Critter) {
 		c.chasing = c.cost[0] >= 0 && c.cost[0] < 26 && c.stun <= 0;
 	}
-}, { phase: 'fixed', order: 2 });
+});
 
 // Seek, arrive and separation for the whole pack in one crossing. What comes
 // back is a DESIRED velocity — going there is still moveAndSlide's decision.
-Critter.system('steer', () => {
+Critter.step('steer', () => {
 	if (Critter.flow) {
 		three.steer(Critter.column('position'), Critter.column('velocity'), {
 			field: Critter.flow, maxSpeed: 4.6, arrive: 1.6, separation: 1.5, separationWeight: 1.5,
@@ -1103,12 +1103,12 @@ Critter.system('steer', () => {
 	} else {
 		Critter.column('velocity').fill(0);
 	}
-}, { phase: 'fixed', order: 3 });
+});
 
 // The whole pack's collision, in one call. A launched critter is given zero
 // motion and has its position overwritten by `arc` below, so its sweep is
 // wasted — cheaper than branching the one call that makes this fast.
-Critter.system('walk', (dt) => {
+Critter.step('walk', (dt) => {
 	for (const c of Critter) {
 		if (c.launched) {
 			c.motion[0] = 0; c.motion[1] = 0; c.motion[2] = 0;
@@ -1151,11 +1151,11 @@ Critter.system('walk', (dt) => {
 		if (grounded && c.vy < 0) c.vy = 0;
 		if (c.position[1] < -6) c.remove();
 	}
-}, { phase: 'fixed', order: 4 });
+});
 
 // The ones a spin or a TNT sent flying: a free arc, no steering, and the only
 // thing they collide with is the ground they land on.
-Critter.system('arc', (dt) => {
+Critter.step('arc', (dt) => {
 	for (const c of Critter) {
 		if (!c.launched) continue;
 		c.life -= dt;
@@ -1174,7 +1174,7 @@ Critter.system('arc', (dt) => {
 		c.vy = 0;
 		if (Math.abs(c.position[0]) > W / 2 - 4 || Math.abs(c.position[2]) > D / 2 - 4 || foot < -4) c.remove();
 	}
-}, { phase: 'fixed', order: 5 });
+});
 
 // Reaching the player costs a life — unless you are spinning, in which case the
 // critter loses.
@@ -1195,7 +1195,7 @@ Critter.on('near', Player, (c, p) => {
 // carries the capsule-centre-to-feet offset — those are never the same point —
 // and `heading` here is an ordinary field, which pose reads just as happily as
 // a column.
-Critter.system('draw', () => {
+Critter.frame('draw', () => {
 	Critter.pose('position', { lift: -CRITTER_H / 2, heading: 'heading' });
 	const t = Critter.transform;
 	let slot = 0;
@@ -1205,7 +1205,7 @@ Critter.system('draw', () => {
 	}
 	Critter.flush();
 	Critter.swingLegs();
-}, { order: 40 });
+}, { after: 'Player.pose' });
 
 // ---------------------------------------------------------------------------
 // The sky and the haze, in one post pass. p.depth is in WORLD UNITS and a pixel
@@ -1237,7 +1237,7 @@ const sky = three.setPost({
 // what each one costs, most expensive first. The pack's six are declared beside
 // the pack; these are what is left.
 // ---------------------------------------------------------------------------
-three.camera.attach(player.object, { offset: [0, 1.5, 0], distance: player.dist, lag: 95 });
+three.camera.attach(player.object, { offset: [0, 1.5, 0], distance: player.dist, lag: 0.095 });
 three.controls.enabled = false;
 three.camera.orbit(player.yaw, player.pitch, player.dist);
 
@@ -1246,26 +1246,26 @@ sky.uniforms.viewFar = three.camera.far;
 // Declared on the class, so they report as `Player.step`, `Player.pose` and so
 // on, and `Player.dispose()` would take them with it. What each one does is a
 // method; where it runs is the option beside it.
-Player.system('step', dt => {
+Player.step('step', dt => {
 	if (three.clock.paused) return;
 	player.step(dt);
-}, { phase: 'fixed', order: 0 });
+}, { first: true });
 
-Player.system('look', dt => player.look(dt), { order: 10 });
+Player.frame('look', dt => player.look(dt));
 
 // Edges mean something once per FRAME, and the fixed loop runs zero to eight
 // times per frame — so latch here, consume in `step`.
-Player.system('latch', () => {
+Player.frame('latch', () => {
 	if (KEYS.jump.some(k => three.input.pressed(k))) player.intent.jump = true;
 	if (KEYS.spin.some(k => three.input.pressed(k))) player.intent.spin = true;
-}, { order: 20 });
+});
 
-Player.system('pose', dt => player.pose(dt), { order: 30 });
+Player.frame('pose', dt => player.pose(dt));
 
 // No columns: nothing takes two dozen bobbing fruit in bulk. The trigger volume
 // is not written here either — `Wumpa.follow` runs later and picks up wherever
 // this left the fruit.
-Wumpa.system('bob', dt => {
+Wumpa.frame('bob', dt => {
 	for (const f of Wumpa) {
 		f.spin += dt * 3;
 		f.object.rotation.y = f.spin;
@@ -1279,9 +1279,9 @@ Wumpa.system('bob', dt => {
 			f.object.position.y += Math.sin(f.bob) * 0.4 * dt;
 		}
 	}
-}, { order: 50 });
+});
 
-three.systems.add('chips', dt => {
+three.systems.frame('chips', dt => {
 	for (const c of chips) {
 		if (c.life <= 0) continue;
 		c.life -= dt;
@@ -1294,9 +1294,9 @@ three.systems.add('chips', dt => {
 		c.m.rotation.x += c.spin * dt;
 		c.m.rotation.z += c.spin * 0.7 * dt;
 	}
-}, { order: 60 });
+});
 
-three.systems.add('sky', () => { sky.uniforms.viewFar = three.camera.far; }, { order: 70 });
+three.systems.frame('sky', () => { sky.uniforms.viewFar = three.camera.far; });
 
 // ---------------------------------------------------------------------------
 // What the level cost to build.

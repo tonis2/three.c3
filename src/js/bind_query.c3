@@ -314,6 +314,7 @@ fn void js_move_and_slide(
 	options.slope_limit = arg_float(&js, argc, args, 9);
 	options.skin = arg_float(&js, argc, args, 10);
 	options.snap = arg_float(&js, argc, args, 11);
+	options.dt = (float)self.pass.clock.dt;
 
 	if (!(options.radius > 0.0f))
 	{
@@ -336,6 +337,7 @@ fn void js_move_and_slide(
 		? handle_value(&js, result.ground) : qjs::null_value());
 	js.set_property(value, "hit", result.hit.is_set()
 		? handle_value(&js, result.hit) : qjs::null_value());
+	js.set_property(value, "groundVelocity", vec3_value(&js, result.ground_velocity));
 	*out = value;
 }
 

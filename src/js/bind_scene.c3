@@ -2469,7 +2469,7 @@ fn void js_camera_attach(
 	float lag = arg_float(&js, argc, args, 6);
 	if (lag < 0.0f)
 	{
-		*out = js.raise("three.camera.attach(object, { lag }) wants milliseconds — 0 for rigid, and never a negative");
+		*out = js.raise("three.camera.attach(object, { lag }) wants seconds — 0 for rigid, and never a negative");
 		return;
 	}
 

@@ -34,7 +34,7 @@ import { steer, NavField, makeSceneNav } from './nav.js';
 import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
 import { cooldown, Cooldown } from './cooldown.js';
-import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport } from './entity.js';
+import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -545,25 +545,35 @@ const camera = {
 	// `{ offset: [0, 1.5, 0], distance: 4 }` is a camera over their
 	// shoulder.
 	//
-	// `lag` is milliseconds, and it is a time constant rather than a
-	// fraction: 0 is rigid, 120 is a camera that takes about an eighth of a
-	// second to catch up, and the same number means the same lateness at 60
-	// and at 144 frames a second.
+	// `lag` is seconds, and it is a time constant rather than a fraction: 0
+	// is rigid, 0.12 is a camera that takes about an eighth of a second to
+	// catch up, and the same number means the same lateness at 60 and at 144
+	// frames a second.
 	//
-	// The offset is in **world space**. A head is [0, 1.7, 0] whichever way
-	// a character faces, so this covers first person and a shoulder camera;
-	// what it does not cover is a camera bolted into something that pitches
-	// and rolls.
-	attach(object, { offset = [0, 0, 0], distance = null, lag = 0, local = false } = {}) {
+	// The offset is in **world space** unless `local` is set. A head is
+	// [0, 1.7, 0] whichever way a character faces. `{ behind, height }` is
+	// the third-person follow in the object's own heading — behind along its
+	// -Z, height up — and implies `local`.
+	attach(object, { offset = [0, 0, 0], distance = null, lag = 0, local = false, behind, height } = {}) {
 		const target = liveObject(object, 'three.camera.attach');
-		const [ox, oy, oz] = asTriple(offset, 'three.camera.attach(object, { offset })');
+		let [ox, oy, oz] = asTriple(offset, 'three.camera.attach(object, { offset })');
+		let inLocal = !!local;
+		if (behind !== undefined || height !== undefined) {
+			inLocal = true;
+			if (height !== undefined) oy = +height;
+			if (behind !== undefined) oz -= +behind;
+		}
 		const boom = distance === null ? H.cameraGet()[5] : +distance;
 		if (!Number.isFinite(boom) || boom < 0) {
 			throw new RangeError(
 				`three.camera.attach(object, { distance }) wants zero or more — ${distance} is not a boom length`
 			);
 		}
-		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, +lag, !!local);
+		const lagSec = +lag;
+		if (!Number.isFinite(lagSec) || lagSec < 0) {
+			throw new RangeError(`three.camera.attach(object, { lag }) wants seconds — 0 for rigid, not ${lag}`);
+		}
+		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, lagSec * 1000, inLocal);
 		return this;
 	},
 
@@ -899,10 +909,30 @@ const frame = {
 // something inside the animation callback — between frames they report
 // whatever the last frame happened to see, which is almost always nothing.
 
+// Edges consumed this frame, so `consume('space')` is true once even when the
+// fixed loop runs it eight times. Folded against `frame.ticks` so a new frame
+// starts clean without a host callback.
+let consumeTick = -1;
+const consumedKeys = new Set();
+function consumeFrame() {
+	const t = H.frameStats().ticks;
+	if (t !== consumeTick) { consumedKeys.clear(); consumeTick = t; }
+}
+
 const input = {
 	isDown(key) { return H.inputDown(String(key)); },
 	pressed(key) { return H.inputPressed(String(key)); },
 	released(key) { return H.inputReleased(String(key)); },
+	// The edge, once. Safe in `phase: 'fixed'`: the first call this frame that
+	// sees the key went down answers true, and the rest of the steps do not.
+	consume(key) {
+		consumeFrame();
+		const k = String(key);
+		if (consumedKeys.has(k)) return false;
+		if (!H.inputPressed(k)) return false;
+		consumedKeys.add(k);
+		return true;
+	},
 
 	// -------------------------------------------------------------------
 	// Pressing keys from a script
@@ -1079,7 +1109,7 @@ const debug = {
 	// frame, or halfway down. This can be called wherever that is:
 	//
 	//   three.debug.write({ crates: Crate.count, wumpa: Wumpa.count });
-	//   Player.system('score', p => { if (p.done) three.debug.write(p.fruit); });
+	//   Player.frame('score', p => { if (p.done) three.debug.write(p.fruit); });
 	//
 	// Written from a callback, entries are held and reported by the NEXT run
 	// rather than lost, the way console.log from one is.
@@ -1096,6 +1126,15 @@ const debug = {
 			catch (e) { keep = String(value); }
 			H.debugWrite(keep);
 		}
+	},
+
+	// One line, this frame, gone the next. Lives, coins, `r.hit.name` — the
+	// window has no text yet, so this also prints and lands in the run's
+	// `debug` array as `{ overlay: "..." }` for an agent to read beside the PNG.
+	overlay(text) {
+		const line = String(text);
+		console.log(line);
+		this.write({ overlay: line });
 	},
 };
 
@@ -1696,6 +1735,16 @@ export const three = {
 	// sweep that gave back nothing but geometry reads zero too.
 	// `stats().geometryBytes` before and after is that half.
 	disposeInactive() { return disposeInactiveScenes(); },
+
+	// Give the names back so the same file can run again. Disposes every
+	// tracked class (even after their scene is already gone), clears the
+	// system registry, and drops the post chain. Does not free the scene being
+	// rendered — `new three.Scene()` then `disposeInactive()` is still that half.
+	reset() {
+		disposeAllEntities();
+		systems.clear();
+		this.setPost(null);
+	},
 
 	// Free every asset no live mesh names, and every texture that goes with
 	// it. scene.unload() is this plus emptying the scene, and is what a level

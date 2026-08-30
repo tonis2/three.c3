@@ -73,8 +73,8 @@
 //
 // There is deliberately no `update()` to override. A per-entity update method
 // puts §21's ninety-line callback back once per class, with the running order
-// buried in a hierarchy instead of in `{ order: 40 }` where a person can read
-// it. Continuous work stays a system; discrete work is a rule:
+// buried in a hierarchy instead of on the `Critter.frame(...)` lines where a
+// person can read it. Continuous work stays a system; discrete work is a rule:
 //
 //     Critter.on('near', Player, (c, p) => p.spin.active ? c.launch(p) : p.hurt(),
 //                { within: 0.95 });
@@ -119,6 +119,12 @@ const DRAIN_ORDER = -1e6;
 // move things, before the compaction at Infinity. `follow` is at LATE_ORDER - 2
 // and `near` at LATE_ORDER - 1, in that order, because proximity is measured
 // against the volume.
+//
+// Numbers rather than an `after`, because these have to sit outside EVERY
+// system a game will ever register, including ones registered after these were
+// — which is the one thing naming a neighbour cannot say. It is also why
+// `{ last: true }` lands well short of here: a game's last system still runs
+// before the write-back that has to see where it left things.
 const LATE_ORDER = 1e6;
 
 // How many times one rule may throw the same message before the log stops
@@ -526,15 +532,15 @@ class Track {
 		if (object !== null) {
 			this.of.delete(object);
 			owners.delete(object);
-			if (this.body !== null) three.physics.remove(object);
-			if (object.parent) object.parent.remove(object);
+			silentHost(() => { if (this.body !== null) three.physics.remove(object); });
+			silentHost(() => { if (object.parent) object.parent.remove(object); });
 		}
 		const volume = instance.volume ?? null;
 		if (volume !== null && volume !== undefined) {
 			this.of.delete(volume);
 			owners.delete(volume);
-			three.physics.remove(volume);
-			if (volume.parent) volume.parent.remove(volume);
+			silentHost(() => three.physics.remove(volume));
+			silentHost(() => { if (volume.parent) volume.parent.remove(volume); });
 		}
 		if (typeof instance.onRemove === 'function') instance.onRemove();
 		return true;
@@ -612,8 +618,10 @@ class Track {
 	}
 
 	dispose() {
-		this.clear();
-		for (const name of this.systems) systems.remove(name);
+		try { this.clear(); } catch (_) { /* scene already gone — the name still has to come back */ }
+		for (const name of this.systems) {
+			try { systems.remove(name); } catch (_) {}
+		}
 		this.systems.length = 0;
 		for (let i = rules.length - 1; i >= 0; i--) if (rules[i].track === this) removeRule(rules[i]);
 		if (byName.get(this.name) === this) byName.delete(this.name);
@@ -634,6 +642,21 @@ class Track {
 // live list, and every one of those failures is silent. `const Critter =
 // three.track(class Critter { ... })` is the shape; ignoring the answer costs
 // only that check.
+// Drop every tracked class and give the names back. What `three.reset()` is
+// for: a `run_script` of the same file cannot otherwise redeclare Player.
+export function disposeAll() {
+	for (const t of [...byName.values()]) t.dispose();
+}
+
+// Host verbs that name a node throw once its scene is gone. Dispose still has
+// to free the class name in that case, so those calls are allowed to fail.
+function silentHost(fn) {
+	try { fn(); } catch (e) {
+		const m = String(e && e.message || e);
+		if (!/disposed|no longer in the scene/i.test(m)) throw e;
+	}
+}
+
 export function track(Class, options = null) {
 	const t = register(Class, options, 'three.track(Class, options)');
 
@@ -766,12 +789,15 @@ function register(Class, options, where) {
 	// Registered under this class's name, so a report says `pack.chase` rather
 	// than `chase`. With two classes running, the unprefixed name is the one
 	// thing that makes a report unreadable.
-	define(Class, 'system', (systemName, fn, opts) => {
+	const addSystem = (verb, systemName, fn, opts) => {
 		const full = `${name}.${systemName}`;
-		systems.add(full, fn, opts);
+		systems[verb](full, fn, opts);
 		if (!t.systems.includes(full)) t.systems.push(full);
 		return full;
-	});
+	};
+	define(Class, 'system', (systemName, fn, opts) => addSystem('add', systemName, fn, opts));
+	define(Class, 'step', (systemName, fn, opts) => addSystem('step', systemName, fn, opts));
+	define(Class, 'frame', (systemName, fn, opts) => addSystem('frame', systemName, fn, opts));
 	define(Class, 'off', ruleName => removeRuleByName(ruleName));
 	define(Class, Symbol.iterator, () => t.live());
 	Object.defineProperty(Class, 'count', { configurable: true, get: () => t.count });
@@ -788,12 +814,12 @@ function register(Class, options, where) {
 		});
 	}
 
-	systems.add(`${name}.compact`, () => t.compact(), { phase: 'frame', order: Infinity });
+	systems.frame(`${name}.compact`, () => t.compact(), { order: Infinity });
 	t.systems.push(`${name}.compact`);
 	if (t.volume !== null) {
 		// Two below the proximity pass: a `near` rule measures against the
 		// VOLUME, so the volume has to have caught up first.
-		systems.add(`${name}.follow`, () => t.follow(), { phase: 'frame', order: LATE_ORDER - 2 });
+		systems.frame(`${name}.follow`, () => t.follow(), { order: LATE_ORDER - 2 });
 		t.systems.push(`${name}.follow`);
 	}
 
@@ -867,13 +893,13 @@ export class Entity {
 		return addRule(entityTrack(this, 'on'), event, matcher, fn, options);
 	}
 	static off(name) { return removeRuleByName(name); }
-	static system(name, fn, options) {
-		const t = entityTrack(this, 'system');
-		const full = `${t.name}.${name}`;
-		systems.add(full, fn, options);
-		if (!t.systems.includes(full)) t.systems.push(full);
-		return full;
-	}
+	// `Critter.step(name, fn)` and `Critter.frame(name, fn)` are the two to
+	// reach for — the verb is the clock, the same as on `three.systems`, and
+	// the class is what prefixes the name in a report. `system` is the same
+	// with the phase left as an option, for when it is a variable.
+	static system(name, fn, options) { return entitySystem(this, 'add', name, fn, options); }
+	static step(name, fn, options) { return entitySystem(this, 'step', name, fn, options); }
+	static frame(name, fn, options) { return entitySystem(this, 'frame', name, fn, options); }
 	static get count() { return entityTrack(this, 'count').count; }
 	static get free() {
 		const t = entityTrack(this, 'free');
@@ -891,6 +917,19 @@ export class Entity {
 // and the first `Critter.spawn()` for a registration call to sit in, and
 // inventing one — an explicit `three.track(Critter)` — is the line this form
 // exists to remove.
+// `Critter.step(...)` and the two beside it, which differ only in which door
+// into the registry they take. The class name prefixes the system's, so
+// `three.systems.report()` says `Critter.walk` rather than `walk` — with two
+// classes running, an unprefixed name is the one thing that makes a report
+// unreadable.
+function entitySystem(Class, verb, name, fn, options) {
+	const t = entityTrack(Class, verb === 'add' ? 'system' : verb);
+	const full = `${t.name}.${name}`;
+	systems[verb](full, fn, options);
+	if (!t.systems.includes(full)) t.systems.push(full);
+	return full;
+}
+
 function entityTrack(Class, what) {
 	const had = byClass.get(Class);
 	if (had !== undefined) return had;
@@ -1086,7 +1125,7 @@ export function emit(a, verb, b = null, info = null) {
 function ensureDrain() {
 	if (drainRegistered) return;
 	drainRegistered = true;
-	systems.add('rules', () => drain(), { phase: 'frame', order: DRAIN_ORDER });
+	systems.frame('rules', () => drain(), { order: DRAIN_ORDER });
 }
 
 // Drain the queued engine events. Answers with how many were delivered, which
@@ -1107,7 +1146,7 @@ function ensureNear(t) {
 	const name = `${t.name}.near`;
 	if (t.systems.includes(name)) return;
 	t.systems.push(name);
-	systems.add(name, () => nearPass(t), { phase: 'frame', order: LATE_ORDER - 1 });
+	systems.frame(name, () => nearPass(t), { order: LATE_ORDER - 1 });
 }
 
 // Every 'near' rule on this class, as a distance test over the live lists.

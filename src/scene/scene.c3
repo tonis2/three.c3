@@ -1754,8 +1754,18 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	bool changed = parent_changed || node.dirty;
 	if (changed)
 	{
+		Vec3 before = { node.world.m[12], node.world.m[13], node.world.m[14] };
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
+		if (node.had_world)
+		{
+			node.prev_world = before;
+		}
+		else
+		{
+			node.prev_world = { node.world.m[12], node.world.m[13], node.world.m[14] };
+			node.had_world = true;
+		}
 		node.dirty = false;
 		// Where the cached shadow map is really invalidated, and it is here rather
 		// than in the setters because this is the only place that knows a node

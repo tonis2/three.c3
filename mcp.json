@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "three": {
+      "url": "http://127.0.0.1:8808/mcp",
+      "lifecycle": "eager",
+      "directTools": true,
+      "toolPrefix": "none",
+      "protocolVersion": "legacy",
+      "requestTimeoutMs": 120000
+    }
+  }
+}

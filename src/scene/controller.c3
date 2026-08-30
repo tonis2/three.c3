@@ -101,6 +101,10 @@ struct MoveOptions
 	// dropped, which stops a character in a wedge rather than letting it jitter
 	// between two faces for ever.
 	int max_slides;
+
+	// Seconds this motion covers, for `MoveResult.ground_velocity`. Zero leaves
+	// the velocity at zero and still carries the floor's displacement.
+	float dt;
 }
 
 const int MOVE_DEFAULT_SLIDES = 4;
@@ -179,6 +183,11 @@ struct MoveResult
 	bool stepped;
 
 	uint slides;
+
+	// How fast the floor under the capsule is moving, world units per second.
+	// Zero when airborne. Added into the capsule's position so a lift carries
+	// whoever is standing on it.
+	Vec3 ground_velocity;
 }
 
 <*
@@ -414,6 +423,17 @@ fn MoveResult Scene.move_capsule(
 		if (was_grounded && motion.y <= 0.0f && floor.distance > 0.0f)
 		{
 			at.y -= floor.distance;
+		}
+
+		Node* floor_node = self.node(floor.node);
+		if (floor_node != null && floor_node.had_world)
+		{
+			Vec3 now = { floor_node.world.m[12], floor_node.world.m[13], floor_node.world.m[14] };
+			Vec3 delta = now - floor_node.prev_world;
+			// Carry the capsule with the floor. Jumping (upward motion) is left
+			// alone so a lift does not glue you to itself on the way up.
+			if (was_grounded && motion.y <= 0.0f) at = at + delta;
+			if (options.dt > 1e-6f) result.ground_velocity = delta / options.dt;
 		}
 	}
 
