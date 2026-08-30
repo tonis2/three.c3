@@ -65,20 +65,28 @@ Crossfading, morph targets and sockets are built. What they left open:
 
 ## 5. UI and text
 
-- [ ] **The whole of it.** There is a UI rendering library to bind rather than
-      write; `notes.md` §5 has the three decisions that decide whether the
-      binding is pleasant, and they are made.
+- [x] **Draw the one-line overlay.** `three.debug.overlay(string)` now draws into
+      the offscreen target, so the window, `--screenshot` and the MCP screenshot
+      all carry it. §21's `systems.report()` is the same pixel with more lines.
+- [x] **The frame slot and the owner.** `cui.c3l` is bound: `render/ui.c3` holds
+      the `Ui` and the `CanvasPass`, `Target.begin_overlay` opens the rendering,
+      and `three_tests::ui` holds the two claims — the line appears, the frame
+      under it survives. `UI.md` is the design doc.
+- [ ] **`three.ui.draw(ops)`.** The seven `Painter` primitives — rect, circle,
+      ellipse, line, arc, text, shadow — as a screen-space op list, plus
+      `three.ui.measure`. Crosshair, health arc, damage flash, minimap. `UI.md`
+      §8.1.
+- [ ] **`three.ui.set(tree)`.** `column`, `row`, `stack`, `padding`, `grid`,
+      `clip`, `anchored`, `rect`, `label`, and `draw` as a node. Then callbacks,
+      then `key` → cui id and `three.ui.patch`. `UI.md` §8.2.
 - [ ] **The consume flag is the hard part.** A click on a button must not also
       shoot the gun, and `three.controls.enabled` does not answer it.
-      `MouseTracker`'s edge machinery in `scene/input.c3` is where it belongs.
+      `ui.hovered || ui.captured` and `ui.focused` are the answer; the poll-and-
+      drive block in `main.c3` exists twice and wants factoring into one function
+      first. `UI.md` §5.
 - [ ] **A scene has no way to say which keys it binds.** Seven keys bound to a
       character had to be delivered in a chat message. Smallest possible version
       of this section, and already missed.
-- [ ] **Draw the one-line overlay.** `three.debug.overlay(string)` exists and
-      reaches `console.log` and the run's `debug` array only; the window still
-      shows no text. One line, this frame, gone the next — not widgets, so the
-      consume question does not arise. §21's `systems.report()` waits on the
-      same pixel.
 
 ## 6. Audio, saving, and the rest
 

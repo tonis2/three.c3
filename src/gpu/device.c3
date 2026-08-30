@@ -59,7 +59,8 @@ import std::collections::list;
 import vk;
 
 faultdef
-	NO_BUFFER_DEVICE_ADDRESS, NO_DYNAMIC_RENDERING, NO_PUSH_DESCRIPTOR, NO_SUITABLE_GPU, PORTABILITY_DRIVER_ONLY;
+	NO_BUFFER_DEVICE_ADDRESS, NO_DYNAMIC_RENDERING, NO_PUSH_DESCRIPTOR, NO_SHADER_DRAW_PARAMETERS, NO_SUITABLE_GPU,
+	PORTABILITY_DRIVER_ONLY;
 
 <*
  What the selected device actually reports. Nothing optional is assumed: the
@@ -72,6 +73,12 @@ struct GpuLimits
 	bool buffer_device_address;
 	bool dynamic_rendering;
 	bool push_descriptor;
+	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
+	// instanced draw tells six vertices which drawing they belong to. A
+	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
+	// `deviceCreateInfo` unchanged, so it is enabled exactly where it is
+	// supported. Read here so a device that cannot do it fails by name.
+	bool shader_draw_parameters;
 	bool fill_mode_non_solid;
 	uint max_push_constants_size;
 	// Nanoseconds per timestamp tick. Meaningless unless `timestamps` is true — a
@@ -473,6 +480,7 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
  @return ? NO_BUFFER_DEVICE_ADDRESS : `Geometry reaches the shader through buffer device addresses; there is no vertex-input fallback to degrade to.`
  @return ? NO_DYNAMIC_RENDERING : `There is no VkRenderPass anywhere in this project, by decision.`
  @return ? NO_PUSH_DESCRIPTOR : `There are no descriptor pools and no descriptor sets here at all — the draw loop names the image and the sampler inline. Required rather than probed and worked around, for the same reason dynamic rendering is: it is baseline on every driver this targets, and a fallback path would be a second renderer nobody exercises.`
+ @return ? NO_SHADER_DRAW_PARAMETERS : `The interface layer draws its whole canvas as one instanced call with no vertex input, and reads gl_BaseInstance to tell the instances apart. Required here rather than at the first UI frame, so a device that cannot do it says so by name at startup.`
 *>
 fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool validate = false)
 {
@@ -556,6 +564,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.buffer_device_address = v12.bufferDeviceAddress == vk::TRUE,
 		.dynamic_rendering = v13.dynamicRendering == vk::TRUE,
 		.push_descriptor = push_descriptor.maxPushDescriptors > 0,
+		.shader_draw_parameters = v11.shaderDrawParameters == vk::TRUE,
 		.fill_mode_non_solid = features.features.fillModeNonSolid == vk::TRUE,
 		.max_push_constants_size = properties.limits.maxPushConstantsSize,
 		.timestamp_period = properties.limits
@@ -574,6 +583,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	if (!self.limits.buffer_device_address) return NO_BUFFER_DEVICE_ADDRESS~;
 	if (!self.limits.dynamic_rendering) return NO_DYNAMIC_RENDERING~;
 	if (!self.limits.push_descriptor) return NO_PUSH_DESCRIPTOR~;
+	if (!self.limits.shader_draw_parameters) return NO_SHADER_DRAW_PARAMETERS~;
 
 	vk::DeviceQueueCreateInfo queue_info = vk::deviceQueueCreateInfo().setQueueFamilyIndex(self.graphics.index)
 		.setQueuePriorities({ 1.0 });
@@ -746,6 +756,7 @@ fn void Gpu.report(&self)
 	io::printfn("  bufferDeviceAddress  %s", self.limits.buffer_device_address);
 	io::printfn("  dynamicRendering     %s", self.limits.dynamic_rendering);
 	io::printfn("  pushDescriptor       %s", self.limits.push_descriptor);
+	io::printfn("  shaderDrawParameters %s", self.limits.shader_draw_parameters);
 	io::printfn("  localRead            %s", self.limits.dynamic_rendering_local_read);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);

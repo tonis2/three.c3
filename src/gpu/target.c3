@@ -360,6 +360,58 @@ fn void Target.begin_render_to(
 }
 
 <*
+ Reopens the finished frame as a colour attachment, to draw an interface over it.
+
+ The third way a rendering starts here, and the only one that keeps what is
+ already in the image. `begin_render` clears, `begin_render_to` writes somewhere
+ else — this loads `self.color` and draws on top of it, which is what an overlay
+ is. Ends with `vk::cmdEndRendering` like the others, and `close` still happens
+ once, in `Renderer.record_scene`.
+
+ Three things it does differently, and each of them is a way to get it wrong:
+
+ - **The barrier is not `color_attachment_barrier`.** That one comes from
+   `UNDEFINED` and so discards, which is right for an attachment about to be
+   cleared and destroys the frame here. This is a write-after-write on an image
+   that is already `COLOR_ATTACHMENT_OPTIMAL` — the scene left it there, or the
+   post chain's last pass did — so the layout does not change and only the
+   ordering is asked for.
+ - **`LOAD_OP_LOAD`, and no depth attachment.** cui never tests or writes depth,
+   and the `CanvasPass` is created with `FORMAT_UNDEFINED` to match.
+ - **`flip_y` is false.** Every other pass here flips Y because it rasterises
+   glTF geometry into Vulkan clip space; cui's `ui_view()` already bakes the
+   orientation and the pixel-exact scale into its own view matrix. Flipping again
+   draws the interface upside down while hit-testing it the right way up, which
+   is the worst way for it to be broken.
+*>
+fn void Target.begin_overlay(&self, vk::CommandBuffer cmd)
+{
+	vk::ImageMemoryBarrier2 keep = {
+		...IMAGE_BARRIER,
+		.image = self.color,
+		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ keep }));
+
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(self.color_view)
+		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
+
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+		.setColorAttachments({ color_attachment });
+
+	vk::cmdBeginRendering(cmd, &rendering);
+
+	set_full_viewport(cmd, self.extent, false);
+}
+
+<*
  Viewport and scissor over the whole of `extent`, as every pass in the project
  sets them.
 
