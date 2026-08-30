@@ -3,63 +3,11 @@
 
 	shift+R in the window, or `three.reload()` from a script or a tool call.
 
- ## A reload is a new context over the same device
-
- `JsRuntime.close` releases every callback the old script registered and takes
- the module cache down with the engine, so there is no cache-busting here and no
- way for a stale `import` to survive one. The scenes go too: a world rebuilt on
- top of the old one is the old one plus a copy of itself.
-
- What stays is everything that is the *machine* rather than the world. `Assets`
- is on `MeshPass` and keyed by path, so `three.load` answers the second boot out
- of memory with no file opened and nothing uploaded. `PipelineCache` keys on the
- shader source, so a material rebuilt from the same text is a cache hit and Slang
- does not run. That is the whole reason a reload is worth pressing a key for: it
- costs what re-running the script costs, not what starting the process costs.
-
- ## §9's first answer: the running loop, the bodies, the camera
-
- **The animation loop is gone, not carried over.** `frame_fn` and `fixed_fn` are
- retained references into a context that is about to close, and the new `main.js`
- registers its own — a reload that kept the old callback would be running code
- from a file that has been edited.
-
- **Physics bodies and the nav bake go with their scene**, which is freed. They
- are per-`Scene` by construction and there was never a second choice here.
-
- **The camera stays.** It lives on `MeshPass` beside the assets, so it survives
- without anything being done about it, and that is the right answer rather than a
- convenient one: losing the angle you were looking from on every save is what
- makes a reload not worth pressing. A `main.js` that aims the camera itself
- overwrites it on the way through, as it should.
-
- ## §9's second answer: what a script may keep
-
- One object, and the script has to name it: `three.persist`. It is read out of
- the dying context as JSON and parsed back into the new one, and `three.reloaded`
- is how a boot tells the two cases apart.
-
- A JSON round trip and not something cleverer, because everything else a game
- holds is a handle into an engine that will not exist in a moment — a `Mesh` is
- an index and a generation into a node pool that is being freed, and a closure is
- a pointer into a heap that is being destroyed. What crosses has to be *data*,
- and the shortest honest description of the data that crosses is "whatever
- `JSON.stringify` would have said". A game that wants its player back where it
- left them writes three lines; a game that writes none reloads from its own first
- frame, which is what it did before this file existed.
-
  ## What a reload collects, and what it deliberately does not
 
  The assets stay. `three.unloadUnused()` across a reload would free the exact
  things that make the *next* one fast, and the cost is bounded by the game's own
  asset set rather than by how many times somebody has hit the key.
-
- The two resources held by a script's *handle* rather than by the scene do go
- back, because nothing else would ever give them back: materials, in
- `release_script_materials`, and the images the script's own `Texture` objects
- own, in `JsRuntime.release_script_textures`. Both are releases and not frees —
- an image a mesh is still drawing with stays exactly where it is, and only the
- reference the dead handle was holding goes.
 *>
 module three;
 
