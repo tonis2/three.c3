@@ -165,6 +165,10 @@ struct Renderer
 	// something asks for it, the same way `post` is inert until a script sets a
 	// shader.
 	UiLayer ui;
+	// Where the frame is composed at the window's own resolution so the
+	// interface can be drawn into it sharp. Only the present path touches it,
+	// and only while there is an interface — see `gpu/swapchain.c3`.
+	Composite composite;
 	bool windowed;
 	// What every render begins with. Reachable from a script as
 	// `scene.background`.
@@ -235,6 +239,7 @@ fn void Renderer.free(&self)
 	self.pass.free(&self.gpu);
 	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
+	self.composite.free(&self.gpu);
 	self.viewer.free(&self.gpu);
 	self.target.free(&self.gpu);
 	self.gpu.free();
@@ -275,7 +280,7 @@ fn void Renderer.free(&self)
  ("VUID-VkImageMemoryBarrier2-oldLayout-01197"). Verified by injecting a second
  `self.target.close(cmd)` here: both fail.
 *>
-fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
+fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false)
 {
 	// Read once: `active` must not change between the begin and the end of one
 	// recording, and reading it twice is how that becomes possible.
@@ -355,10 +360,15 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// must not clear what it is drawn over and has no depth to test — see
 	// `Target.begin_overlay`. It writes `target.color` like the stages above it
 	// and, like them, does not close it.
-	if (self.ui.active())
+	//
+	// Unless this frame is being presented, in which case `frame()` draws it
+	// after the blit instead, at the window's own pixels — see `Composite`. It
+	// has to be one or the other and never both: the two copies would composite
+	// over each other, and a translucent panel would darken twice.
+	if (!presenting && self.ui.active())
 	{
 		self.target.begin_overlay(cmd);
-		self.ui.record(cmd, &self.target)!;
+		self.ui.record(cmd, self.target.extent)!;
 		vk::cmdEndRendering(cmd);
 	}
 
@@ -473,15 +483,40 @@ fn bool? Renderer.frame(&self)
 	// `gpu/retire.c3`.
 	self.gpu.begin_frame();
 
+	// Read once, for `posted`'s reason in `record_scene`: what decides where the
+	// interface is drawn must not change between the two places that ask.
+	// Nothing is allocated for a run that never brings an interface up, and the
+	// image is only rebuilt when the window changes size.
+	bool overlaid = self.ui.active();
+	if (overlaid) self.composite.ensure(&self.gpu, self.viewer.extent)!;
+
 	vk::CommandBuffer cmd = self.frames.buffers[slot];
 	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
-	// First and last commands in the buffer. The blit is inside the span on
+	// First and last commands in the buffer. The blits are inside the span on
 	// purpose — `gpu/timing.c3` says why.
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd)!;
-	self.viewer.record_blit(cmd, &self.target, index);
+	self.record_scene(cmd, presenting: overlaid)!;
+
+	if (overlaid)
+	{
+		// Scale the scene up to the window FIRST, then draw the interface into
+		// it. Same picture as the plain blit below for everything the scene
+		// drew, and an interface rasterised at the window's pixels instead of
+		// at the target's and stretched.
+		self.composite.receive(cmd, &self.target);
+		self.composite.begin_overlay(cmd);
+		self.ui.record(cmd, self.composite.extent)!;
+		vk::cmdEndRendering(cmd);
+		self.composite.close(cmd);
+		self.viewer.record_blit_from(cmd, self.composite.color, self.composite.extent, index);
+	}
+	else
+	{
+		self.viewer.record_blit(cmd, &self.target, index);
+	}
+
 	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;

@@ -320,6 +320,11 @@ function normalise(node, path) {
 		out.ch = built;
 	}
 
+	// cui's Scroll asserts that it has exactly one child, and a script writing
+	// an empty one — a list that has not loaded yet — is not a mistake worth
+	// stopping the process over. It gets an empty stack to scroll instead.
+	if (type === 'scroll' && (out.ch === undefined || out.ch.length === 0)) out.ch = [{ k: KIND.stack }];
+
 	return out;
 }
 

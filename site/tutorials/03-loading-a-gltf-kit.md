@@ -6,17 +6,31 @@ summary: Meshes off disk, and how to place them without ever guessing a size.
 
 # Loading a glTF kit
 
-The examples in this repository build everything they draw in code, so nothing
-here needs an assets folder. This tutorial is the other case: a `.glb` you
-downloaded or exported, with a hundred pieces in it, and a level to lay out.
+The examples in this repository build everything they draw in code, so none of
+them needs an assets folder. This tutorial covers the other case: a `.glb`
+file you downloaded or exported, with a hundred pieces inside it, and a level
+to lay out from those pieces.
 
-Start the engine with an assets directory. Paths are then relative to it and
-cannot climb out of it, which is what makes `three.inventory()` paths safe to
-hand straight to `three.load`.
+Start the engine with an assets directory. All paths are then relative to that
+directory and cannot escape it, which is what makes it safe to pass the paths
+from `three.inventory()` straight to `three.load`.
 
 ```bash
 ./three --assets ./assets --script 03-loading-a-gltf-kit.js
 ```
+
+Once the code is your own rather than a tutorial's, move it into the folder as
+`main.js`, and the flag is the whole command:
+
+```bash
+./three --assets ./assets
+```
+
+`main.js` is loaded as an ES module, so a level can be split across files that
+`import` one another. Import paths resolve inside the assets directory, and
+`..` cannot climb out of it. `--script` alongside `--assets` still has a use
+after that: it runs a one-off file against the world that `main.js` has
+already built, which is handy for a probe or a screenshot pass.
 
 ## Look before you load
 
@@ -35,10 +49,10 @@ if (files.length === 0) {
 ```
 
 `three.inventory()` describes every `.glb` and `.gltf` under the assets
-directory **without loading any of it**: path, triangle count, node count,
-skins, mesh names, animation names and bounds, read straight out of the JSON
-chunk. On a 200-piece kit that costs nothing, and it is how you find out what
-is worth loading before you load it.
+directory **without loading any of them**: path, triangle count, node count,
+skins, mesh names, animation names and bounds, all read straight from the
+file's JSON chunk. On a 200-piece kit this costs almost nothing, and it is how
+you find out what is worth loading before you load it.
 
 ```js
 const kitFile = files.sort((a, b) => b.meshes.length - a.meshes.length)[0];
@@ -47,38 +61,40 @@ const kit = kitFile ? three.load(kitFile.path) : null;
 if (kit) three.debug.write({ file: kit.path, meshes: kit.meshes.length, animations: kit.animations });
 ```
 
-`three.load` parses the file and uploads **nothing**. A mesh reaches the GPU
-when a `Mesh` drawing it is added to a scene, so loading a 200-piece kit to
-place twelve costs twelve.
+`three.load` parses the file and uploads **nothing** to the GPU. A mesh
+reaches the GPU only when a `Mesh` that draws it is added to a scene. So
+loading a 200-piece kit and placing twelve pieces costs you twelve.
 
 ## Two doors into an asset
 
-There are exactly two, and picking the wrong one is the usual first mistake:
+There are exactly two ways to get things out of an asset, and picking the
+wrong one is the most common first mistake:
 
 | | what it gives you | use it for |
 |---|---|---|
 | `asset.mesh(name)` | one piece, as a reference you place yourself | placing pieces: walls, props, tiles |
 | `asset.instantiate()` | the file's own node hierarchy, as a `Group` | rigs, multi-part props, a level laid out in Blender |
 
-`instantiate()` is Three.js's `gltf.scene`. It is also the door that animations
-come through — a glTF clip drives a whole subtree, so `play()` lives on the
-`Group` it answers with, not on a mesh.
+`instantiate()` is the equivalent of Three.js's `gltf.scene`. It is also how
+animations come in: a glTF clip drives a whole subtree, so `play()` lives on
+the `Group` that `instantiate()` returns, not on a mesh.
 
 ## Measure, never guess
 
-A kit piece's origin is wherever its exporter left it. A size table written by
-hand into a script is the thing that goes stale and sinks pieces into walls, so
-**everything placeable can be measured**, and you should:
+A kit piece's origin is wherever its exporter put it. A size table typed by
+hand into a script is exactly the kind of thing that goes stale and sinks
+pieces into walls. So **everything you can place can be measured**, and you
+should measure it:
 
-- `asset.mesh(name).bounds` and `geometry.bounds` — a `Box3` in the piece's own
-  space, read out of the glTF JSON, so it costs no upload.
-- `object.boundingBox()` — the world-space box of a whole subtree.
-- `object.boundsInParent()` — the same box in the parent's frame, and it works
-  *before* `add()`.
+- `asset.mesh(name).bounds` and `geometry.bounds` — a `Box3` in the piece's
+  own space, read from the glTF JSON, so it costs no upload.
+- `object.boundingBox()` — the world-space box around a whole subtree.
+- `object.boundsInParent()` — the same box in the parent's coordinate frame.
+  It works *before* `add()`.
 
-Then place with `align` rather than with arithmetic. `align(axis, edge, at)`
-moves an object until one face of its box sits at a coordinate, and `alignTo`
-says the same thing against a sibling.
+Then place with `align` instead of arithmetic. `align(axis, edge, at)` moves an
+object until one face of its box sits at a coordinate, and `alignTo` does the
+same relative to a sibling.
 
 ```js
 const row = new three.Group();
@@ -103,14 +119,14 @@ if (kit) {
 }
 ```
 
-Twelve pieces butted edge to edge, and not one number in that loop came from a
-size table. Both verbs work in the **parent's** frame, because that is the
-frame a script writes positions in — and set rotation and scale first, since
-they are inputs to where the box is.
+Twelve pieces placed edge to edge, and not one number in that loop came from a
+size table. Both `align` verbs work in the **parent's** frame, because that is
+the frame a script writes positions in. Set rotation and scale first, since
+they affect where the box ends up.
 
 ## When a piece is somewhere you did not expect
 
-Reach for debug draw early; it is the cheap move.
+Reach for debug drawing early; it is the cheap option.
 
 ```js
 const helpers = new three.Group();
@@ -119,17 +135,17 @@ helpers.add(new three.GridHelper(30, 30));
 for (const piece of row.children) helpers.add(new three.BoxHelper(piece));
 ```
 
-`BoxHelper(object)` boxes what an object actually occupies, `GridHelper` says
-where the ground is, `AxesHelper` shows which way a pivot faces, and
-`WireframeHelper` draws a mesh's own edges — which is how two faces 0.01 apart
-are found, because a z-fighting starburst is invisible in a solid render.
+`BoxHelper(object)` draws the box an object actually occupies, `GridHelper`
+shows where the ground is, `AxesHelper` shows which way a pivot faces, and
+`WireframeHelper` draws a mesh's own edges. The wireframe is how you find two
+faces 0.01 apart — a z-fighting starburst is invisible in a solid render.
 
-Helpers draw **over** everything: the line pipeline tests no depth, unlike
-Three.js's helpers, because the times you ask where something is are the times
-it is inside a wall. The cost is the other direction — a helper is an ordinary
-mesh, so it is inside `boundingBox()` and inside `frameAll()`. That is why they
-hang from a `Group` of their own above, and why the camera is framed on the row
-rather than on the scene:
+Helpers draw **on top of** everything. Unlike helpers in Three.js, the line
+pipeline does no depth testing, because the moments you ask where something is
+are the moments it is inside a wall. The trade-off goes the other way too: a
+helper is an ordinary mesh, so it counts in `boundingBox()` and in
+`frameAll()`. That is why the helpers above hang from their own `Group`, and
+why the camera is framed on the row rather than on the whole scene:
 
 ```js
 three.camera.frameAll();
@@ -137,18 +153,18 @@ three.camera.orbit(28, 20, Math.max(12, row.children.length * 1.6));
 three.debug.write(scene.stats());
 ```
 
-A thousand helpers are still one draw call each by kind, `helper.color` is per
-copy and free, and they are **not** pickable — a click goes through the box onto
-the thing inside it.
+A thousand helpers are still one draw call per kind, `helper.color` is per
+copy and free, and helpers are **not** pickable — a click goes through the box
+to the object inside it.
 
 ## What it cost
 
-Twelve pieces off one file is twelve instances, and every group of them sharing
-a mesh name is one draw call. If the kit has materials you want — a `.glb`
-authored with `alphaMode BLEND`, normal maps, emissive maps — pass
-`{ materials: true }` to `instantiate()`; it is off by default because it
-compiles a shader per distinct glTF material, which a scene that was happy
-without them should not pay for.
+Twelve pieces from one file is twelve instances, and every group of pieces
+sharing a mesh name is one draw call. If the kit has materials you want — a
+`.glb` authored with `alphaMode BLEND`, normal maps, emissive maps — pass
+`{ materials: true }` to `instantiate()`. This is off by default because it
+compiles a shader for every distinct glTF material, and a scene that looks
+fine without them should not pay for that.
 
 Next: [Animation and skinning](04-animation-and-skinning.html) — playing the
 clips that came in the file, and what a hundred of the same character costs.
