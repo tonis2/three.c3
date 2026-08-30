@@ -1,7 +1,7 @@
 <*
  Hot reload — §8, and the two answers §9 wanted before it could land.
 
-	shift+R in the window, or `three.reload()` from a script or a tool call.
+ shift+R in the window, or `three.reload()` from a script or a tool call.
 
  ## What a reload collects, and what it deliberately does not
 
@@ -23,15 +23,15 @@ import qjs;
 
  1. `take_persist` **before** the close, because it runs JavaScript.
  2. `close` before the world is touched, because every retained callback is a
-    reference into the context and releasing one afterwards releases it into an
-    engine that is no longer there.
+ reference into the context and releasing one afterwards releases it into an
+ engine that is no longer there.
  3. The post chain before the scenes, because `PostPass.clear` gives images back
-    to the same `Assets` table `Scene.free` is about to release nodes against.
+ to the same `Assets` table `Scene.free` is about to release nodes against.
  4. `activate_scene` **before** the script rather than after: a `main.js` that
-    never calls `new three.Scene()` still has to start on a default background
-    and no camera follow, and the fresh scene is what carries those.
+ never calls `new three.Scene()` still has to start on a default background
+ and no camera follow, and the fresh scene is what carries those.
  5. `restore_persist` before the script and after the prelude, which is the only
-    window in which `three` exists and `main.js` has not read it yet.
+ window in which `three` exists and `main.js` has not read it yet.
 
  A boot that throws is printed and carried on with, exactly as the first one is —
  there is nothing to roll back to, since the world it replaced has already been
@@ -43,11 +43,15 @@ import qjs;
  @param window : `Put back on the new runtime, which is otherwise the one thing a fresh context could not find out for itself.`
  @param assets : `The game directory this process booted from, or empty.`
  @param script : `The one .js file this process booted from, or empty.`
- @return? JS_ENGINE_FAILED : `The engine would not start a second time, which is out of memory and nothing else.`
+ @return ? JS_ENGINE_FAILED : `The engine would not start a second time, which is out of memory and nothing else.`
 *>
 fn void? reload(
-	JsRuntime* runtime, MeshPass* pass, Renderer* renderer = null,
-	c3w::Window* window = null, String assets = "", String script = ""
+	JsRuntime* runtime,
+	MeshPass* pass,
+	Renderer* renderer = null,
+	c3w::Window* window = null,
+	String assets = "",
+	String script = ""
 )
 {
 	Gpu* gpu = renderer != null ? &renderer.gpu : null;
@@ -110,7 +114,7 @@ fn void MeshPass.reset_world(&self, Gpu* gpu)
 	self.free_scenes();
 	self.init_scenes();
 	self.release_script_materials(gpu);
-	self.follow = {};
+	self.follow = { };
 }
 
 <*
@@ -243,9 +247,7 @@ fn void JsRuntime.restore_persist(&self, String json)
  that threw under `--frames` would make a game unrunnable in the mode that checks
  it.
 *>
-fn void js_reload(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_reload(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	self.reload_wanted = true;

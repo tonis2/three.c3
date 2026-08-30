@@ -22,22 +22,22 @@
  Nothing is read back off the device. Four sources, in this order:
 
  1. A mesh out of a file is re-read from the file, which is still open —
-    `Assets.load` parses the JSON and keeps the stream, so the accessors are
-    right there. This is exact: the normals and uvs written out are the bytes
-    that were read in.
+ `Assets.load` parses the JSON and keeps the stream, so the accessors are
+ right there. This is exact: the normals and uvs written out are the bytes
+ that were read in.
  2. A generated shape is tessellated again from the `Primitive` the asset kept.
-    Thirty-two bytes per asset, against the twenty per vertex that keeping the
-    streams would cost every scene whether or not it ever exported.
+ Thirty-two bytes per asset, against the twenty per vertex that keeping the
+ streams would cost every scene whether or not it ever exported.
  3. A terrain is rebuilt from the `Heightfield` on its slot, which the asset keeps
-    anyway because `heightAt` is the whole point of the shape. Without this it
-    fell through to the hull below and was written with *projected* uvs — a
-    terrain has a picking tree like everything else, so the fallback was reached
-    and produced coordinates in world units instead of the field's own 0..1.
+ anyway because `heightAt` is the whole point of the shape. Without this it
+ fell through to the hull below and was written with *projected* uvs — a
+ terrain has a picking tree like everything else, so the fallback was reached
+ and produced coordinates in world units instead of the field's own 0..1.
  4. A convex hull is rebuilt from `hull_positions`/`hull_triangles`, the CPU copy
-    the picking tree already holds. Its normals are per face and its vertices are
-    split per face, so recomputing them from the triangles gives back exactly
-    what `build_convex` produced — including its uvs, which are a per-face planar
-    projection and so are recomputed from the face rather than stored.
+ the picking tree already holds. Its normals are per face and its vertices are
+ split per face, so recomputing them from the triangles gives back exactly
+ what `build_convex` produced — including its uvs, which are a per-face planar
+ projection and so are recomputed from the face rather than stored.
 
  ## What is deliberately not in the file
 
@@ -215,7 +215,7 @@ struct ExportReport
 	// Nodes left out because they were helpers or were switched off.
 	uint skipped;
 	// Copies drawn under a ShaderMaterial whose shading the file did not keep.
-	//
+	// 
 	// **Narrowed by baking.** Without `bake` this is every copy under a
 	// ShaderMaterial, as it has always been. With it, a copy whose body was run and
 	// read back is counted in one of the two numbers below instead, and this is
@@ -281,7 +281,7 @@ struct ExportSurface @local
 	// never set one, which writes no `KHR_texture_transform` at all.
 	float[4] uv_transform;
 	// `Material.surface` — x roughness, y metalness, z reflectance, w unused.
-	//
+	// 
 	// glTF carries the first two directly and has no word for the third, so the
 	// reflectance is here for the dedup key rather than for the writer: two
 	// materials that differ only in it are two materials here and would otherwise
@@ -298,7 +298,7 @@ struct ExportSurface @local
 	bool double_sided;
 	// The three core maps, already resolved to this document's texture indices
 	// rather than named by where they came from.
-	//
+	// 
 	// That is the difference between a key that dedups and one that does not. Two
 	// source materials of two different files can name two different images whose
 	// bytes are identical; `ExportImage` collapses those to one exported texture,
@@ -311,7 +311,7 @@ struct ExportSurface @local
 	// The `CUSTOM_materials_layers` stack, named by where it was read from: the
 	// asset, and the index of the material inside that asset's own document.
 	// `NO_ASSET`/-1 for a material with no layers.
-	//
+	// 
 	// An identity rather than a resolved value, because a stack is a list of
 	// eighteen-field records and two nodes naming one material of one asset have
 	// the same layers by construction.
@@ -466,7 +466,7 @@ struct ExportBake @local
 
 // How close every texel of a bake has to be to their mean before the answer is
 // written as a colour rather than as an image, in 0..255 per channel.
-//
+// 
 // Not zero, because a body that is one colour in the arithmetic is not always one
 // colour after a filtered texture sample and a round trip through eight bits. Not
 // large either: at 4 the whole point is to catch the flat case, and a gradient
@@ -501,8 +501,8 @@ struct Exporter @local
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
  @param bake : `Texels a side to run each ShaderMaterial's body into, or 0 to write the file the way it always was. Needs a device; without one the export still happens and the report says so through shaded. See render/bake.c3.`
- @return? EXPORT_PATH_IS_EMPTY : `No path was given.`
- @return? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
+ @return ? EXPORT_PATH_IS_EMPTY : `No path was given.`
+ @return ? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
 *>
 fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false, uint bake = 0)
 {
@@ -611,7 +611,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	// A node's own children may all have dropped out; it is still written when it
 	// draws, and dropped when it does not, so an exported document has no groups
 	// standing over nothing.
-	//
+	// 
 	// Heap-backed rather than `tmem`: this recurses, and a temp allocation per
 	// level of a deep hierarchy is not freed until the enclosing pool exits —
 	// which for a caller that opened none is never.
@@ -627,8 +627,12 @@ fn int? Exporter.walk(&self, NodeId id)
 	}
 
 	uint written = self.out.add_node(
-		node.name, entry, -1,
-		node.position, node.rotation, node.scale,
+		node.name,
+		entry,
+		-1,
+		node.position,
+		node.rotation,
+		node.scale,
 	);
 	foreach (child : children) self.out.add_child(written, child);
 
@@ -690,7 +694,7 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 	foreach (child : node.children)
 	{
 		Node* copy = self.collapsible(child);
-		int index = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh, copy.material);
+		int index  = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh, copy.material);
 		if (index >= 0)
 		{
 			ExportBatch* batch = batches.get_ref((usz)index);
@@ -770,10 +774,10 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	// Untinted, deliberately: the material is what a reader without `_COLOR_0`
 	// falls back to, so it has to be the shape's own colour rather than the first
 	// copy's. The tints go in the array below.
-	//
+	// 
 	// Reading it off `members[0]` is exact rather than a sample, because the batch
 	// key holds the material: every member resolves to the same surface.
-	int entry = self.mesh_entry(batch.members[0], first, NO_TINT, true)!;
+	int entry   = self.mesh_entry(batch.members[0], first, NO_TINT, true)!;
 	if (entry < 0) return -1;
 
 	sz count = batch.members.len();
@@ -793,16 +797,16 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 		colors.free();
 	}
 
-	bool turned = false;
+	bool turned  = false;
 	bool resized = false;
-	bool tinted = false;
+	bool tinted  = false;
 	foreach (member : batch.members)
 	{
 		Node* copy = self.pass.scene.node(member);
 
-		Vec3 position = copy.position;
+		Vec3 position        = copy.position;
 		Quaternionf rotation = copy.rotation;
-		Vec3 scale = copy.scale;
+		Vec3 scale           = copy.scale;
 		if (world) decompose(copy.world, &position, &rotation, &scale);
 
 		translations.push(position);
@@ -818,12 +822,12 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	gltf::WriteAttribute[4] attributes;
 	usz used = 0;
 	attributes[used++] = { .name = "TRANSLATION", .accessor = self.out.add_vec3(translations.array_view()) };
-	if (turned)  attributes[used++] = { .name = "ROTATION",  .accessor = self.out.add_vec4(rotations.array_view()) };
-	if (resized) attributes[used++] = { .name = "SCALE",     .accessor = self.out.add_vec3(scales.array_view()) };
-	if (tinted)  attributes[used++] = { .name = "_COLOR_0",  .accessor = self.out.add_vec4(colors.array_view()) };
+	if (turned) attributes[used++] = { .name = "ROTATION", .accessor = self.out.add_vec4(rotations.array_view()) };
+	if (resized) attributes[used++] = { .name = "SCALE", .accessor = self.out.add_vec3(scales.array_view()) };
+	if (tinted) attributes[used++] = { .name = "_COLOR_0", .accessor = self.out.add_vec4(colors.array_view()) };
 
 	GpuMesh* mesh = self.pass.assets.mesh(batch.asset, batch.mesh);
-	uint written = self.out.add_node(mesh.name, entry, -1);
+	uint written  = self.out.add_node(mesh.name, entry, -1);
 	self.out.add_instancing(written, attributes[:used]);
 
 	self.report.nodes++;
@@ -875,15 +879,13 @@ fn int? Exporter.flatten_scene(&self)
 
 	foreach (&batch : batches)
 	{
-		int built = batch.members.len() > 1
-			? self.instanced_node(batch, true)!
-			: self.placed_node(batch.members[0])!;
+		int built = batch.members.len() > 1 ? self.instanced_node(batch, true)! : self.placed_node(batch.members[0])!;
 		if (built >= 0) children.push((uint)built);
 	}
 
 	if (children.len() == 0) return -1;
 
-	Node* root = self.pass.scene.node(self.pass.scene.root);
+	Node* root   = self.pass.scene.node(self.pass.scene.root);
 	uint written = self.out.add_node(root == null ? "" : root.name);
 	foreach (child : children) self.out.add_child(written, child);
 	self.report.nodes++;
@@ -939,7 +941,7 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 fn int? Exporter.placed_node(&self, NodeId id)
 {
 	Node* node = self.pass.scene.node(id);
-	int entry = self.mesh_entry(id, node, node.color, false)!;
+	int entry  = self.mesh_entry(id, node, node.color, false)!;
 	if (entry < 0) return -1;
 
 	Vec3 position;
@@ -972,21 +974,21 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 	// `mesh.color` multiplies albedo in the shader, and glTF's baseColorFactor
 	// multiplies the base colour texture the same way — so the product is exactly
 	// what the pixel was.
-	//
+	// 
 	// The two halves are in different spaces and only one is converted.
 	// `base_color` is already linear, because that is what glTF's
 	// `baseColorFactor` is. The tint is `mesh.color`, a script's sRGB value, and it
 	// goes through the same decode the shader applies to it. Multiplying them raw
 	// means baking a stand-in colour is a choice between matching this engine and
 	// matching a colour-managed viewer.
-	//
+	// 
 	// Opacity is the third factor, for the same reason: `MeshPass.record`
 	// multiplies `material.opacity()` into `base_color.a` before the draw, so the
 	// alpha the file states is only the alpha the frame had if it carries all
 	// three.
 	Material* material_of = self.pass.material(node.material);
-	float opacity = material_of == null ? 1.0f : material_of.opacity();
-	float[4] linear_tint = srgb_to_linear_rgb(tint);
+	float opacity         = material_of == null ? 1.0f : material_of.opacity();
+	float[4] linear_tint  = srgb_to_linear_rgb(tint);
 	float[4] color = {
 		mesh.base_color[0] * linear_tint[0],
 		mesh.base_color[1] * linear_tint[1],
@@ -1000,7 +1002,7 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 	// shared grey this whole feature exists to get rid of. What is left for the
 	// factor is what the bake did not see: this copy's tint, and the alpha, which
 	// the bake deliberately does not carry.
-	//
+	// 
 	// The tint moving from inside the body to after it is the one approximation
 	// here, and it is the same one glTF instancing already forces: `_COLOR_0`
 	// multiplies a material, and there is no per-copy channel that reaches a shader
@@ -1031,7 +1033,7 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 		if (known.geometry == (uint)geometry && known.material == material) return (int)known.entry;
 	}
 
-	uint written = self.out.add_mesh(mesh.name);
+	uint written            = self.out.add_mesh(mesh.name);
 	ExportGeometry* streams = &self.geometry[(usz)geometry];
 
 	gltf::WriteAttribute[4] attributes;
@@ -1124,8 +1126,9 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 fn bool Exporter.world_space_body(&self, uint material)
 {
 	if (material >= self.pass.materials.len()) return true;
-	return self.pass.materials[material].fragment.contains("position")
-		|| self.pass.materials[material].vertex.contains("position");
+	return self.pass.materials[material].fragment.contains(
+		"position"
+	) || self.pass.materials[material].vertex.contains("position");
 }
 
 <*
@@ -1174,8 +1177,8 @@ fn ExportBake Exporter.bake_for(&self, NodeId id, Node* node, bool shared)
 
 	foreach (known : self.bakes)
 	{
-		if (known.asset == key.asset && known.mesh == key.mesh
-			&& known.material == key.material && known.node == key.node)
+		if (known.asset == key.asset && known.mesh == key.mesh && known.material == key.material
+			&& known.node == key.node)
 		{
 			return known;
 		}
@@ -1224,10 +1227,14 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	// both, which is exactly what `alphaMode: MASK` needs to know.
 	double[3] sum;
 	sz covered = 0;
-	sz clear = 0;
+	sz clear   = 0;
 	for (sz i = 0; i < count; i++)
 	{
-		if (self.texels[i * 4 + 3] < 128) { clear++; continue; }
+		if (self.texels[i * 4 + 3] < 128)
+		{
+			clear++;
+			continue;
+		}
 		covered++;
 		for (sz c = 0; c < 3; c++) sum[c] += (double)self.texels[i * 4 + c];
 	}
@@ -1244,7 +1251,7 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	// Over the covered texels only, so a mesh whose uv layout has gaps in it can
 	// still resolve to a colour — most props are laid out in islands, and an image
 	// of one colour for each of them is where a bake turns into fifty megabytes.
-	//
+	// 
 	// A cutout never takes this path however flat it is: the shape it cut out is
 	// the whole reason it was baked.
 	bool flat = !key.cutout;
@@ -1265,9 +1272,9 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	// crosses that boundary here — the same decode the tint beside it goes through
 	// in `mesh_entry`. The image does not: a PNG is defined to hold sRGB, which is
 	// what the readback already is.
-	float[4] linear = srgb_to_linear_rgb({
-		(float)mean[0] / 255.0f, (float)mean[1] / 255.0f, (float)mean[2] / 255.0f, 1
-	});
+	float[4] linear = srgb_to_linear_rgb(
+		{ (float)mean[0] / 255.0f, (float)mean[1] / 255.0f, (float)mean[2] / 255.0f, 1 }
+	);
 	key.color = { linear[0], linear[1], linear[2] };
 	if (flat) return key;
 
@@ -1276,7 +1283,7 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	self.baker.dilate(self.texels);
 
 	// And then the alpha goes away entirely unless it means something.
-	//
+	// 
 	// glTF says a viewer ignores the alpha of a base colour map under `OPAQUE`, and
 	// that is true of the *material*. It is not true of the image: Blender's
 	// importer premultiplies a PNG that has an alpha channel, so a texel this bake
@@ -1419,15 +1426,15 @@ fn int? Exporter.texture_for(&self, Node* node)
 		if (known.device == slot) return (int)known.texture;
 	}
 
-	char[] encoded = {};
+	char[] encoded       = { };
 	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
-	bool own = false;
+	bool own             = false;
 
 	// The source-file path, and only when the slot really is the one this mesh's
 	// own glTF brought. A material's map is a different image entirely, and
 	// reaching for the mesh's source bytes for it would write the wrong picture.
 	GpuMesh* gpu_mesh = self.pass.assets.mesh(node.asset, node.mesh);
-	Asset* asset = self.pass.assets.slot(node.asset);
+	Asset* asset      = self.pass.assets.slot(node.asset);
 	if (gpu_mesh != null && slot == gpu_mesh.texture && asset != null && asset.has_stream && gpu_mesh.gltf_mesh >= 0)
 	{
 		int source = source_image_index(asset, gpu_mesh);
@@ -1451,7 +1458,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 	}
 	defer if (own) free(encoded);
 
-	uint image = self.out.add_image("", encoded, mime);
+	uint image   = self.out.add_image("", encoded, mime);
 	// No sampler: a texture that names none takes the viewer's default, which is
 	// repeat with mipmapped linear filtering — what `Assets` uploads with.
 	uint texture = self.out.add_texture(image);
@@ -1476,7 +1483,7 @@ fn char[]? Exporter.encode_from_device(&self, int slot)
 	if (!self.pass.assets.texture_alive(slot)) return EXPORT_HAS_NOTHING_TO_WRITE~;
 
 	Texture* texture = self.pass.assets.texture_at(slot);
-	sz size = (sz)texture.width * (sz)texture.height * 4;
+	sz size          = (sz)texture.width * (sz)texture.height * 4;
 
 	char[] pixels = mem::new_array(char, size);
 	defer free(pixels);
@@ -1678,9 +1685,7 @@ fn int Exporter.script_material_index(&self, Node* node)
 {
 	Material* material = self.pass.material(node.material);
 	if (material == null) return -1;
-	return material.script_layers.present && material.script_layers.layers.len() > 0
-		? (int)node.material
-		: -1;
+	return material.script_layers.present && material.script_layers.layers.len() > 0 ? (int)node.material : -1;
 }
 
 <*
@@ -1738,21 +1743,18 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 		written.roughnessFactor = layer.roughness;
 		written.heightTexture = self.script_layer_texture(source, layer.height_binding);
 		written.bump = { .strength = layer.bump_strength, .distance = layer.bump_distance };
-		written.emissiveFactor = {
-			layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2]
-		};
+		written.emissiveFactor = { layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2] };
 		written.blend_mode = (gltf::LayerBlendMode)layer.blend_mode;
 		written.mask = {
 			.source = (gltf::LayerMaskSource)layer.mask_source,
-			.channel = (gltf::LayerMaskChannel)layer.mask_channel,
-			// A layer with no mask sampler of its own reads a channel of the stack's
-			// shared one, which is the arrangement the generator produces and the one
-			// the extension's per-layer `channel` field exists for. Written per layer
-			// because that is how the file spells the sharing — several layers naming
-			// one textureInfo — which is what `hoist_shared_mask` undoes on the way
-			// back in.
-			.texture = layer.mask_binding != 0
-				? self.script_layer_texture(source, layer.mask_binding)
+			.channel = (gltf::LayerMaskChannel)layer
+				.mask_channel, // A layer with no mask sampler of its own reads a channel of the stack's
+				// shared one, which is the arrangement the generator produces and the one
+				// the extension's per-layer `channel` field exists for. Written per layer
+				// because that is how the file spells the sharing — several layers naming
+				// one textureInfo — which is what `hoist_shared_mask` undoes on the way
+				// back in.
+			.texture = layer.mask_binding != 0 ? self.script_layer_texture(source, layer.mask_binding)
 				: gltf::texture_ref(self.device_texture_for(shared_mask)),
 			.attribute = "",
 			.invert = layer.invert,
@@ -1796,7 +1798,7 @@ fn int Exporter.device_texture_for(&self, int slot)
 	if (catch encoded) return -1;
 	defer free(encoded);
 
-	uint image = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
+	uint image   = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
 	uint texture = self.out.add_texture(image);
 	self.images.push({ .device = slot, .texture = texture });
 	self.report.images++;
@@ -1821,14 +1823,14 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 	// `roughness: 1, metallic: 0` — fully rough and not metallic — which is both
 	// this renderer's default and the surface a glTF viewer draws closest to what
 	// it saw here.
-	//
+	// 
 	// `reflectance` has no slot. `KHR_materials_specular` is where it would go, and
 	// it is not written: this renderer's 0 is that extension's 1, so a file
 	// carrying the extension would reload here as a material with no highlight and
 	// a file without it would reload in a viewer as one that has always had one.
 	// Neither direction round-trips, and the one that loses less is the one that
 	// stays silent. The dedup key carries it anyway — see `ExportSurface`.
-	//
+	// 
 	// `BLEND` rather than `MASK`, because that is what this renderer does: the
 	// alpha is a blend factor, not a cutoff, and `alpha_cutoff` is left at its
 	// default because `BLEND` does not read it. An opaque material stays `OPAQUE`
@@ -1840,14 +1842,13 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		metallic: surface.surface[1],
 		roughness: surface.surface[0],
 		base_color_texture: uv_texture_ref(surface.texture, surface.uv_transform),
-		double_sided: surface.double_sided,
-		// `MASK` is the third answer and only a bake produces it: the alpha of a
-		// baked image is the body's `discard` and nothing else, so a leaf cut out of
-		// a quad comes back as the leaf rather than as the quad. Blending still wins
-		// where a material asked for it — the alpha does the cutting there too, and
-		// with a soft edge.
-		alpha_mode: surface.transparent
-			? gltf::AlphaMode.BLEND
+		double_sided: surface
+			.double_sided, // `MASK` is the third answer and only a bake produces it: the alpha of a
+			// baked image is the body's `discard` and nothing else, so a leaf cut out of
+			// a quad comes back as the leaf rather than as the quad. Blending still wins
+			// where a material asked for it — the alpha does the cutting there too, and
+			// with a soft edge.
+		alpha_mode: surface.transparent ? gltf::AlphaMode.BLEND
 			: (surface.cutout ? gltf::AlphaMode.MASK : gltf::AlphaMode.OPAQUE),
 	);
 	self.out.set_material_maps(
@@ -1855,9 +1856,7 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		normal: surface.normal,
 		occlusion: surface.occlusion,
 		emissive: surface.emissive,
-		emissive_factor: {
-			surface.emissive_factor[0], surface.emissive_factor[1], surface.emissive_factor[2]
-		}
+		emissive_factor: { surface.emissive_factor[0], surface.emissive_factor[1], surface.emissive_factor[2] }
 	);
 
 	// After `add_material`, because the stack hangs off the material that was just
@@ -1873,9 +1872,10 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		if (asset != null && asset.has_stream && surface.layers_material < asset.stream.gltf.materials.len())
 		{
 			self.write_layers(
-				written, surface.layers_asset,
-				&asset.stream.gltf.materials.get_ref((usz)surface.layers_material).layers_ext
-			);
+				written,
+				surface.layers_asset,
+				&asset.stream.gltf.materials.get_ref((usz)surface.layers_material)
+				.layers_ext);
 		}
 	}
 
@@ -1919,21 +1919,20 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color, ExportBake baked)
 {
 	ExportSurface surface = {
-		.base_color = color,
-		// `texture_for` is skipped entirely when the body ran, not merely
+		.base_color = color, // `texture_for` is skipped entirely when the body ran, not merely
 		// overridden: it writes the image into the document on the way past, and an
 		// image the bake already sampled has no reader left.
 		.texture = baked.baked ? baked.texture : self.texture_for(node)!,
-		.cutout = baked.cutout && baked.texture >= 0,
-		// A null material is one whose slot was collected while a node still named
-		// it, which `MeshPass.record` draws as nothing at all. Every answer here has
-		// the same shape for it — opaque, single-sided, the identity transform.
-		// A baked image is indexed by the mesh's own TEXCOORD_0 with nothing applied
-		// to it — `material.slang` rasterises the bake into the attribute as the file
-		// carries it, and the body's own sampling already went through the transform
-		// inside the bake. Writing the transform again would apply it twice.
-		.uv_transform = baked.texture >= 0 || material_of == null
-			? UV_IDENTITY
+		.cutout = baked.cutout
+			&& baked
+				.texture >= 0, // A null material is one whose slot was collected while a node still named
+				// it, which `MeshPass.record` draws as nothing at all. Every answer here has
+				// the same shape for it — opaque, single-sided, the identity transform.
+				// A baked image is indexed by the mesh's own TEXCOORD_0 with nothing applied
+				// to it — `material.slang` rasterises the bake into the attribute as the file
+				// carries it, and the body's own sampling already went through the transform
+				// inside the bake. Writing the transform again would apply it twice.
+		.uv_transform = baked.texture >= 0 || material_of == null ? UV_IDENTITY
 			: material_of.uv_transform_or_identity(),
 		.surface = material_of == null ? (float[4]) { 1, 0, 0, 0 } : material_of.surface(),
 		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
@@ -1964,14 +1963,12 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	int source_material = self.source_material_of(node);
 	if (source_material < 0) return surface;
 
-	Asset* asset = self.pass.assets.slot(node.asset);
+	Asset* asset           = self.pass.assets.slot(node.asset);
 	gltf::Material* source = asset.stream.gltf.materials.get_ref((usz)source_material);
 	surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
 	surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
 	surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
-	surface.emissive_factor = {
-		source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z
-	};
+	surface.emissive_factor = { source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z };
 	// The imported stack, on the same terms as the script's one above: a body that
 	// baked has already applied it.
 	if (source.has_layers() && !baked.baked)
@@ -2070,15 +2067,27 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 	if (mesh.gltf_primitive < 0 || mesh.gltf_primitive >= source.primitives.len()) return false;
 
 	gltf::Primitive primitive = source.primitives[mesh.gltf_primitive];
-	asset.stream.@each_position(primitive; Vec3 position, sz i) { out.positions.push(position); };
+	asset.stream.@each_position(primitive ; Vec3 position, sz i)
+	{
+		out.positions.push(position);
+	};
 	if (out.positions.len() == 0) return false;
 
-	asset.stream.@each_normal(primitive; Vec3 normal, sz i) { out.normals.push(normal); };
-	asset.stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { out.uvs.push(uv); };
+	asset.stream.@each_normal(primitive ; Vec3 normal, sz i)
+	{
+		out.normals.push(normal);
+	};
+	asset.stream.@each_texcoord(primitive, 0 ; Vec2 uv, sz i)
+	{
+		out.uvs.push(uv);
+	};
 	// Set 0 only. `CUSTOM_materials_layers` lets a mask name an attribute, and every
 	// attribute it can name that this renderer reads is COLOR_0 —
 	// `Assets.load_material_layers` uploads one colour stream per mesh.
-	asset.stream.@each_color(primitive, 0; Vec4 color, sz i) { out.colors.push(color); };
+	asset.stream.@each_color(primitive, 0 ; Vec4 color, sz i)
+	{
+		out.colors.push(color);
+	};
 
 	read_indices(&asset.stream, primitive, &out.indices);
 	// A primitive with no index accessor is a plain vertex list, and glTF lets a
@@ -2117,8 +2126,9 @@ fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 		uint c = triangle[2];
 		if (a >= out.positions.len() || b >= out.positions.len() || c >= out.positions.len()) continue;
 
-		Vec3 face = (mesh.hull_positions[b] - mesh.hull_positions[a])
-			.cross(mesh.hull_positions[c] - mesh.hull_positions[a]);
+		Vec3 face = (mesh.hull_positions[b] - mesh.hull_positions[a]).cross(
+			mesh.hull_positions[c] - mesh.hull_positions[a]
+		);
 		out.normals[a] = out.normals[a] + face;
 		out.normals[b] = out.normals[b] + face;
 		out.normals[c] = out.normals[c] + face;
@@ -2133,7 +2143,7 @@ fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 		float length = math::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
 		// A vertex no triangle reached keeps a zero normal rather than a NaN one.
 		// glTF requires unit normals, and zero is the lesser of the two lies.
-		out.normals[i] = length > 0 ? normal / length : (Vec3){ 0, 0, 0 };
+		out.normals[i] = length > 0 ? normal / length : (Vec3) { 0, 0, 0 };
 	}
 
 	// Now that the normals are unit, the projection. A vertex no triangle reached
@@ -2183,11 +2193,7 @@ fn void Exporter.write_camera(&self)
 		camera.near_plane,
 		zfar: camera.far_plane
 	);
-	uint node = self.out.add_node(
-		"camera",
-		translation: camera.eye(),
-		rotation: rotation_towards(camera.orbit_dir())
-	);
+	uint node = self.out.add_node("camera", translation: camera.eye(), rotation: rotation_towards(camera.orbit_dir()));
 	self.out.set_node_camera(node, written);
 	self.out.add_root(node);
 	self.report.nodes++;
@@ -2223,7 +2229,7 @@ fn void Exporter.write_light(&self)
 {
 	for (uint i = 0; i < self.pass.lighting.count; i++)
 	{
-		Light light = self.pass.lighting.lights[i];
+		Light light   = self.pass.lighting.lights[i];
 		Vec3 to_light = { light.direction[0], light.direction[1], light.direction[2] };
 		// A light of zero length points nowhere, and normalising it would put NaNs
 		// into the node's rotation. Nothing is written rather than something wrong.
@@ -2258,7 +2264,7 @@ fn void Exporter.write_light(&self)
 fn Quaternionf rotation_towards(Vec3 forward) @local
 {
 	Vec3 up = math::abs(forward.y) > 0.999f ? (Vec3) { 0, 0, 1 } : (Vec3) { 0, 1, 0 };
-	Vec3 x = up.cross(forward).normalize();
-	Vec3 y = forward.cross(x);
+	Vec3 x  = up.cross(forward).normalize();
+	Vec3 y  = forward.cross(x);
 	return quat_from_basis(x, y, forward);
 }

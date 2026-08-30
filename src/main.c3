@@ -1,19 +1,19 @@
 <*
  three.c3 — boot, CLI, the window loop, and the MCP server.
 
-	three [options]
+ three [options]
 
-	--mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
-	--mcp-stdio [port]    relay stdin/stdout to a three that is already serving
-	--screenshot <path>   render one frame, write a PNG, exit
-	--width <n>           offscreen render width  (default 1280)
-	--height <n>          offscreen render height (default 720)
-	--headless            no window, no surface, no swapchain
-	--script <file.js>    boot one script, then keep the window running
-	--assets <dir>        boot a game: evaluate <dir>/main.js as a module
-	--frames <n>          run n frames, then stop. Implies --headless
-	--every <n>           with --frames, also shoot every n frames — see frame_path
-	--camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
+ --mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
+ --mcp-stdio [port]    relay stdin/stdout to a three that is already serving
+ --screenshot <path>   render one frame, write a PNG, exit
+ --width <n>           offscreen render width  (default 1280)
+ --height <n>          offscreen render height (default 720)
+ --headless            no window, no surface, no swapchain
+ --script <file.js>    boot one script, then keep the window running
+ --assets <dir>        boot a game: evaluate <dir>/main.js as a module
+ --frames <n>          run n frames, then stop. Implies --headless
+ --every <n>           with --frames, also shoot every n frames — see frame_path
+ --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
 
  There is no file argument. A model is loaded from JavaScript — `three.load`
  hands the script an object it can place, parent and dispose — and a model the
@@ -418,9 +418,15 @@ fn void? run(Options opts)
 	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0)
 	{
 		live(
-			&renderer, windowed ? &window : null, opts.mcp_port,
-			assets: opts.assets, screenshot: opts.screenshot, script: opts.script,
-			frames: opts.frames, every: opts.every, camera: opts.camera
+			&renderer,
+			windowed ? &window : null,
+			opts.mcp_port,
+			assets: opts.assets,
+			screenshot: opts.screenshot,
+			script: opts.script,
+			frames: opts.frames,
+			every: opts.every,
+			camera: opts.camera
 		)!;
 		return;
 	}
@@ -459,7 +465,7 @@ fn void? run(Options opts)
 	long last_ns;
 	// Nothing but the mouse can change this window, so it sleeps between gestures —
 	// see `serve`, which has more to wait for and says why there.
-	bool quiet = false;
+	bool quiet        = false;
 
 	while (!window.should_close())
 	{
@@ -472,19 +478,30 @@ fn void? run(Options opts)
 		last_ns = now_ns;
 
 		float[<2>] at = window.getMousePos();
-		float scroll = window.get_scroll();
-		Cursor cursor = window_view(&renderer, &window).cursor(
-			at, events.is_pressed(LEFT_MOUSE),
-			right: events.is_pressed(RIGHT_MOUSE), middle: events.is_pressed(MIDDLE_MOUSE),
-			scroll: scroll, scroll_x: window.get_scroll_x()
-		);
+		float scroll  = window.get_scroll();
+		Cursor cursor = window_view(&renderer, &window)
+			.cursor(
+				at,
+				events.is_pressed(LEFT_MOUSE),
+				right: events.is_pressed(RIGHT_MOUSE),
+				middle: events.is_pressed(MIDDLE_MOUSE),
+				scroll: scroll,
+				scroll_x: window.get_scroll_x()
+			);
 		bool moved = drive_camera(
-			renderer: &renderer, window: &window, controls: &controls,
-			events: events, at: at, dt_ms: dt_ms, scroll: scroll
+			renderer: &renderer,
+			window: &window,
+			controls: &controls,
+			events: events,
+			at: at,
+			dt_ms: dt_ms,
+			scroll: scroll
 		);
-		show_cursor(&window, &shown, cursor_shape(
-			cursor.inside, controls.dragging, ask_hover(&renderer, &hover, cursor, controls.dragging)
-		));
+		show_cursor(
+			&window,
+			&shown,
+			cursor_shape(cursor.inside, controls.dragging, ask_hover(&renderer, &hover, cursor, controls.dragging))
+		);
 
 		bool presented = renderer.frame()!;
 		quiet = presented && !moved;
@@ -547,9 +564,10 @@ fn bool ask_hover(Renderer* renderer, Hover* hover, Cursor cursor, bool dragging
 
 	if (hover.stale(cursor))
 	{
-		hover.keep(cursor, renderer.pass.hits(
-			cursor.x, cursor.y, renderer.target.extent.width, renderer.target.extent.height
-		));
+		hover.keep(
+			cursor,
+			renderer.pass.hits(cursor.x, cursor.y, renderer.target.extent.width, renderer.target.extent.height)
+		);
 	}
 
 	return hover.over;
@@ -582,13 +600,19 @@ fn bool ask_hover(Renderer* renderer, Hover* hover, Cursor cursor, bool dragging
  @return `true when the camera moved — a drag, a scroll, or a coast still running.`
 *>
 fn bool drive_camera(
-	Renderer* renderer, c3w::Window* window, Controls* controls, c3w::EventMap events,
-	float[<2>] at, float dt_ms, float scroll = 0
+	Renderer* renderer,
+	c3w::Window* window,
+	Controls* controls,
+	c3w::EventMap events,
+	float[<2>] at,
+	float dt_ms,
+	float scroll = 0
 )
 {
 	PointerState pointer = {
-		.orbit = events.is_pressed(LEFT_MOUSE),
-		// Middle alongside right because a trackpad has no third button and a
+		.orbit = events.is_pressed(
+			LEFT_MOUSE
+		), // Middle alongside right because a trackpad has no third button and a
 		// three-button mouse has no natural second drag; both spellings are in use
 		// and neither is worth making somebody look up.
 		.pan = events.is_pressed(RIGHT_MOUSE) || events.is_pressed(MIDDLE_MOUSE),
@@ -597,7 +621,7 @@ fn bool drive_camera(
 		.scroll = scroll,
 	};
 
-	float scale = window.get_scale();
+	float scale  = window.get_scale();
 	// Zero while minimised, and negative never — but the division is guarded rather
 	// than assumed, because the fallback is "pan does nothing this frame" and the
 	// alternative is an infinity in the camera target.
@@ -660,9 +684,15 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
 fn void? live(
-	Renderer* renderer, c3w::Window* window, int port,
-	String assets = "", String screenshot = "", String script = "",
-	uint frames = 0, uint every = 0, String camera = ""
+	Renderer* renderer,
+	c3w::Window* window,
+	int port,
+	String assets = "",
+	String screenshot = "",
+	String script = "",
+	uint frames = 0,
+	uint every = 0,
+	String camera = ""
 )
 {
 	bool serving = port > 0;
@@ -694,7 +724,7 @@ fn void? live(
 	// Addressed by pointer from every tool, so it must not move while the server
 	// lives — which is why it is a local of the function that owns the loop rather
 	// than something returned from a builder.
-	ToolHost host = { .runtime = &runtime, .renderer = renderer };
+	ToolHost host      = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = new_mcp_server(&host);
 
 	mcp::Listener listener;
@@ -743,15 +773,15 @@ fn void? live(
 	// monotonic across every registration a script makes — which is what Three.js's
 	// `setAnimationLoop` argument is, and what a callback computing a rotation from
 	// it assumes.
-	Clock since_start = clock::now();
-	long last_tick_ns = 0;
+	Clock since_start  = clock::now();
+	long last_tick_ns  = 0;
 	long last_frame_ns = 0;
 
 	// Whether the last iteration left nothing to do. Read at the top of the next
 	// one, which is the only place the question can be asked: the answer has to be
 	// known *before* the events are fetched, and everything that decides it happens
 	// after.
-	bool quiet = false;
+	bool quiet        = false;
 	bool camera_moved = false;
 
 	while (true)
@@ -771,42 +801,57 @@ fn void? live(
 			// the click wants a position in image pixels, and two readings of the
 			// same instant are two chances for them to disagree.
 			float[<2>] at = window.getMousePos();
-			float scroll = window.get_scroll();
-			Cursor cursor = window_view(renderer, window).cursor(
-				at, events.is_pressed(LEFT_MOUSE),
-				right: events.is_pressed(RIGHT_MOUSE), middle: events.is_pressed(MIDDLE_MOUSE),
-				scroll: scroll, scroll_x: window.get_scroll_x(),
-				// The platform's own movement, and whether it is the reading that
-				// counts this frame — `three.input.pointerLock`. Asked of the window
-				// rather than of the runtime, because the runtime records what a
-				// script *wanted* and only the window knows whether the platform
-				// gave it.
-				raw: window.getMouseDelta(), locked: window.pointerLocked()
-			);
+			float scroll  = window.get_scroll();
+			Cursor cursor = window_view(renderer, window)
+				.cursor(
+					at,
+					events.is_pressed(LEFT_MOUSE),
+					right: events.is_pressed(RIGHT_MOUSE),
+					middle: events.is_pressed(MIDDLE_MOUSE),
+					scroll: scroll,
+					scroll_x: window
+						.get_scroll_x(), // The platform's own movement, and whether it is the reading that
+						// counts this frame — `three.input.pointerLock`. Asked of the window
+						// rather than of the runtime, because the runtime records what a
+						// script *wanted* and only the window knows whether the platform
+						// gave it.
+					raw: window.getMouseDelta(),
+					locked: window.pointerLocked()
+				);
 
 			// Before `pump`, so a drag and a script that arrives in the same
 			// iteration resolve in the order they happened rather than the script's
 			// camera being overwritten by a stale anchor.
 			camera_moved = drive_camera(
-				renderer: renderer, window: window, controls: &runtime.controls,
-				events: events, at: at, dt_ms: dt_ms, scroll: scroll
+				renderer: renderer,
+				window: window,
+				controls: &runtime.controls,
+				events: events,
+				at: at,
+				dt_ms: dt_ms,
+				scroll: scroll
 			);
-			show_cursor(window, &shown, cursor_shape(
-				cursor.inside, runtime.controls.dragging,
-				ask_hover(renderer, &hover, cursor, runtime.controls.dragging)
-			));
+			show_cursor(
+				window,
+				&shown,
+				cursor_shape(
+					cursor.inside,
+					runtime.controls.dragging,
+					ask_hover(renderer, &hover, cursor, runtime.controls.dragging)
+				)
+			);
 
 			// Sampled here rather than at the tick, because this is where the events
 			// are: `getEvent` clears the typed text on its next call, and the edges
 			// are a difference against what the *previous* call saw.
-			//
+			// 
 			// The clock is this iteration's own, and not the tick's below. A click
 			// is timed from when the button was *sampled*, and what happens between
 			// here and the tick is a whole `pump` — which on the iteration that runs
 			// a slow tool call is seconds, and would turn every click that straddled
 			// it into a hold.
-			input = keyboard.step(
-				// The queue as well as the latch: a key pressed and released between
+			input = keyboard
+				.step(// The queue as well as the latch: a key pressed and released between
 				// two frames is in one and not the other.
 				read_events(events, window.events()),
 				window.get_text(),
@@ -823,7 +868,7 @@ fn void? live(
 		// call asking for it was made from. So a `three.reload()` in a tool call is
 		// honoured on the iteration that answered it, one from a frame callback on
 		// the next, and shift+R before the world it is replacing gets a last frame.
-		//
+		// 
 		// `runtime` is a different object on the far side of this. Nothing below
 		// holds a pointer into it — `controls` is read as `runtime.controls` every
 		// frame for exactly this kind of reason.
@@ -850,7 +895,7 @@ fn void? live(
 
 			// When the next fetch is allowed to sleep in the kernel. Every term is
 			// something that would be lost by sleeping through it:
-			//
+			// 
 			// - `presented` — a frame that rebuilt the swapchain instead of drawing
 			//   has not shown the current state yet, so the loop owes one more
 			//   iteration before it may rest.
@@ -864,8 +909,7 @@ fn void? live(
 			//   followed by a third of a second of frames nobody asked for.
 			// - `handled` — a tool call may have changed the scene, and the answer
 			//   went out before the frame that shows it.
-			quiet = presented && !runtime.is_animating() && !runtime.is_simulating()
-				&& !camera_moved && handled == 0;
+			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0;
 		}
 		else
 		{
@@ -935,8 +979,12 @@ fn void? live(
  @param camera : `A yaw,pitch,distance override, applied before every capture so a follow camera cannot take the shot back.`
 *>
 fn void? play_frames(
-	Renderer* renderer, JsRuntime* runtime, uint frames,
-	String screenshot = "", uint every = 0, String camera = ""
+	Renderer* renderer,
+	JsRuntime* runtime,
+	uint frames,
+	String screenshot = "",
+	uint every = 0,
+	String camera = ""
 )
 {
 	// Once here as well as before each shot: a callback that reads the camera on
@@ -966,7 +1014,7 @@ fn void? play_frames(
 		// `stats().shadowDraws` and `three.light.shadow.fit` answered "nothing
 		// happened" from inside a callback that had been running for four frames:
 		// the fit is computed in `prepare`, and `prepare` is part of drawing.
-		//
+		// 
 		// Exactly one render per frame either way — `screenshot` draws before it
 		// reads back, so a frame that is being captured must not also be drawn.
 		if (!shot)
@@ -1027,8 +1075,8 @@ fn bool aim_camera(Renderer* renderer, String spec)
 			value[i] = (float)number;
 		}
 
-		renderer.pass.camera.yaw      = value[0];
-		renderer.pass.camera.pitch    = value[1];
+		renderer.pass.camera.yaw = value[0];
+		renderer.pass.camera.pitch = value[1];
 		renderer.pass.camera.distance = value[2];
 		renderer.pass.camera.clamp_angles();
 		renderer.pass.derive_camera_planes();
@@ -1054,15 +1102,15 @@ fn bool aim_camera(Renderer* renderer, String spec)
 *>
 fn String frame_path(String pattern, uint index)
 {
-	usz at    = 0;
-	usz stop  = 0;
-	usz width = 0;
+	usz at     = 0;
+	usz stop   = 0;
+	usz width  = 0;
 	bool found = false;
 
 	for (usz i = 0; i + 1 < pattern.len && !found; i++)
 	{
 		if (pattern[i] != '%') continue;
-		usz j = i + 1;
+		usz j      = i + 1;
 		usz digits = 0;
 		while (j < pattern.len && pattern[j] >= '0' && pattern[j] <= '9')
 		{
@@ -1071,8 +1119,8 @@ fn String frame_path(String pattern, uint index)
 		}
 		if (j < pattern.len && pattern[j] == 'd')
 		{
-			at    = i;
-			stop  = j + 1;
+			at = i;
+			stop = j + 1;
 			width = digits;
 			found = true;
 		}
@@ -1108,7 +1156,7 @@ fn String frame_path(String pattern, uint index)
  means attaching and asking, and with a window it means seeing an empty scene
  beside the reason for it.
 
- @return? SCRIPT_NOT_READABLE : `Only from --script: nothing at that path. A game directory that will not boot is reported and not raised.`
+ @return ? SCRIPT_NOT_READABLE : `Only from --script: nothing at that path. A game directory that will not boot is reported and not raised.`
 *>
 fn void? boot_world(JsRuntime* runtime, String assets, String script)
 {
@@ -1151,7 +1199,7 @@ fn void? boot_world(JsRuntime* runtime, String assets, String script)
  A script that throws is printed and carried on with, exactly as a game that
  fails to boot is.
 
- @return? SCRIPT_NOT_READABLE : `Nothing at that path, or it is a directory — a typo on the command line, not something to debug in a running scene.`
+ @return ? SCRIPT_NOT_READABLE : `Nothing at that path, or it is a directory — a typo on the command line, not something to debug in a running scene.`
 *>
 fn void? boot_script(JsRuntime* runtime, String path)
 {
@@ -1220,8 +1268,8 @@ const long HEADLESS_FRAME_MS = 16;
 *>
 fn int serve_relay(int port)
 {
-	ToolHost catalog_host = {};
-	mcp::Server catalog = new_mcp_server(&catalog_host);
+	ToolHost catalog_host = { };
+	mcp::Server catalog   = new_mcp_server(&catalog_host);
 	mcp::relay("127.0.0.1", port, &catalog);
 	return 0;
 }

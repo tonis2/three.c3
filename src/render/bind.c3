@@ -38,7 +38,7 @@ import vk;
 // reserved bindings plus what an agent may declare on top of them. A material
 // reserves one and a post pass reserves two — see `MATERIAL_BINDING_FIRST`.
 const uint MATERIAL_BINDINGS_END = MATERIAL_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
-const uint POST_BINDINGS_END = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
+const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
 
 <*
  The most sampler bindings one draw can carry: whichever kind of shader wants
@@ -51,9 +51,7 @@ const uint POST_BINDINGS_END = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  than a per-kind number: one struct holds either kind's slots, indexed by the
  binding itself.
 *>
-const uint MAX_SAMPLED_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END
-	? MATERIAL_BINDINGS_END
-	: POST_BINDINGS_END;
+const uint MAX_SAMPLED_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
 
 <*
  The image writes for one draw, gathered before any of them is pushed.
@@ -89,10 +87,10 @@ fn void SampledBindings.add(&self, uint binding, vk::DescriptorImageInfo info)
 
 	self.infos[self.count] = info;
 	self.writes[self.count] = vk::writeDescriptorSet().setDstBinding(binding)
-		.setDescriptorType(DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-		// A one-element slice of the struct's own array, so the pointer this
-		// stores outlives the expression — see the struct's note.
-		.setImageInfo(self.infos[self.count : 1]);
+		.setDescriptorType(
+			DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+		)/* A one-element slice of the struct's own array, so the pointer this *//* stores outlives the expression — see the struct's note. */
+		.setImageInfo(self.infos[self.count:1]);
 	self.count++;
 }
 
@@ -195,12 +193,5 @@ fn void SampledBindings.push(&self, vk::CommandBuffer cmd, MeshPipeline* pipelin
 {
 	if (self.count == 0) return;
 
-	vk::cmdPushDescriptorSetKHR(
-		cmd,
-		PIPELINE_BIND_POINT_GRAPHICS,
-		pipeline.layout,
-		0,
-		self.count,
-		&self.writes[0]
-	);
+	vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, self.count, &self.writes[0]);
 }

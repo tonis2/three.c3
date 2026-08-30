@@ -15,11 +15,11 @@
  it wrong:
 
  - the filename in a `#line` directive must be a double-quoted string, or the
-   preprocessor dies with `E15102`;
+ preprocessor dies with `E15102`;
  - the directive numbers the line that *follows* it, so a body starts at 1;
  - the restore number is the physical line of the text after the directive, which
-   only the assembler can know — every marker replacement changes it, so
-   `physical` is counted rather than computed.
+ only the assembler can know — every marker replacement changes it, so
+ `physical` is counted rather than computed.
 
  A second implementation would be a second chance to get all three right, and the
  half that is wrong is the half nobody notices: a restore directive off by one
@@ -38,21 +38,21 @@ import std::io;
 // `post.slang` has no `//@rows`, because a post pass has no instances for a table
 // to be indexed by.
 const String MARKER_UNIFORMS @private = "//@uniforms";
-const String MARKER_ROWS @private = "//@rows";
-const String MARKER_DEFINES @private = "//@defines";
+const String MARKER_ROWS @private     = "//@rows";
+const String MARKER_DEFINES @private  = "//@defines";
 // The line that turns `material.slang` into its unlit, uv-space variant. Replaced
 // by nothing at all when nothing asked for a bake, so an ordinary material's
 // generated source is what it was before the exporter could bake — the same rule
 // `//@table` follows. `render/bake.c3` is the only caller that asks.
-const String MARKER_BAKE @private = "//@bake";
+const String MARKER_BAKE @private     = "//@bake";
 const String MARKER_TEXTURES @private = "//@textures";
 const String MARKER_VDEFINES @private = "//@vdefines";
-const String MARKER_VERTEX @private = "//@vertex";
-const String MARKER_SHADE @private = "//@shade";
+const String MARKER_VERTEX @private   = "//@vertex";
+const String MARKER_SHADE @private    = "//@shade";
 // The spilled uniform table's struct, at global scope above the push block. Only
 // `material.slang` has it, and only a material whose uniforms overflow the block
 // gets anything written into it — see `material_spills`.
-const String MARKER_TABLE @private = "//@table";
+const String MARKER_TABLE @private    = "//@table";
 
 <*
  What a material with no vertex body gets instead of one.
@@ -71,7 +71,8 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  mistake this comment exists to prevent. They were 1 and 1 while both templates
  reserved one binding; 1 and 2 once a post pass reserved `prev` and `scene`; 2
  and 4 once a material reserved `base_color_map` and `shadow_map`; 3 and 4 now
- that `environment_map` is beside those two. A shared constant would mean every material sampler being silently renumbered by whichever
+ that `environment_map` is beside those two. A shared constant would mean every material sampler being silently
+ renumbered by whichever
  *other* template moved — reflection agreeing with itself the whole way, and the
  only symptom being textures arriving in the wrong slots of shaders nobody had
  touched.
@@ -269,7 +270,7 @@ fn usz shader_note_into(char[] buffer, String message) @private
 fn uint append_lines(DString* out, String text) @private
 {
 	uint lines = 0;
-	usz start = 0;
+	usz start  = 0;
 	while (start < text.len)
 	{
 		usz end = start;
@@ -305,7 +306,7 @@ fn uint append_lines(DString* out, String text) @private
  @param preamble_name : `What everything three.c3 generated is called — "three.material", "three.post".`
  @param bake : `Define THREE_BAKE, which makes material.slang unlit and rasterised in uv space. Only a material has the marker; nothing else may ask.`
  @return `The whole module, allocated from allocator and owned by the caller.`
- @return? SHADER_NOT_FOUND : `The template is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
+ @return ? SHADER_NOT_FOUND : `The template is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
 fn String? assemble_shader(
 	String template_name,
@@ -317,11 +318,9 @@ fn String? assemble_shader(
 	String vertex_name,
 	String preamble_name,
 	uint binding_first,
-	alloc::Allocator allocator,
-	// Only ever true for a material. `post.slang` has no `//@table` marker and no
+	alloc::Allocator allocator, // Only ever true for a material. `post.slang` has no `//@table` marker and no
 	// instances for a table to be indexed by, so its caller never asks.
-	bool spill = false,
-	// The same again for `//@bake`: a post pass shades the whole frame and has no
+	bool spill = false, // The same again for `//@bake`: a post pass shades the whole frame and has no
 	// surface to bake.
 	bool bake = false
 ) @private
@@ -429,10 +428,7 @@ fn String? assemble_shader(
 					// made and never has to know about.
 					if (spill && uniform_rows_of(uniform) > 1)
 					{
-						out.appendf(
-							"#define %s (push.%s[0].%s)",
-							uniform.name, MATERIAL_TABLE_FIELD, uniform.name
-						)!!;
+						out.appendf("#define %s (push.%s[0].%s)", uniform.name, MATERIAL_TABLE_FIELD, uniform.name)!!;
 					}
 					else
 					{
@@ -462,7 +458,9 @@ fn String? assemble_shader(
 						{
 							out.appendf(
 								"#define %s (push.%s[0].%s)",
-								uniform.name, MATERIAL_TABLE_FIELD, uniform.name
+								uniform.name,
+								MATERIAL_TABLE_FIELD,
+								uniform.name
 							)!!;
 						}
 						else
@@ -519,11 +517,7 @@ fn String? assemble_shader(
 				// names for both.
 				foreach (i, texture : textures)
 				{
-					out.appendf(
-						"[vk::binding(%d, 0)] Sampler2D %s;",
-						binding_first + (uint)i,
-						texture.name
-					)!!;
+					out.appendf("[vk::binding(%d, 0)] Sampler2D %s;", binding_first + (uint)i, texture.name)!!;
 					out.append_char('\n');
 					physical++;
 				}

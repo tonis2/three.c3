@@ -4,11 +4,11 @@
  A compile produces two things: SPIR-V, and a *diagnostic*. On the failure path
  the diagnostic is the whole product, and Slang's are unusually good:
 
-     error[E30015]: undefined identifier
-       --> mesh.slang:10:26
-        |
-     10 | output.sv_position = notAFunction(vid);
-        |                      ^^^^^^^^^^^^ undefined identifier 'notAFunction'.
+ error[E30015]: undefined identifier
+ --> mesh.slang:10:26
+ |
+ 10 | output.sv_position = notAFunction(vid);
+ |                      ^^^^^^^^^^^^ undefined identifier 'notAFunction'.
 
  A line, a column, the source line and a caret span. Routing that verbatim into
  the thrown JS exception is most of what makes shader iteration work, so
@@ -35,9 +35,7 @@ import std::collections::list;
 import slang;
 
 faultdef
-	SHADER_COMPILE_FAILED,
-	SHADER_NOT_SPIRV,
-	SLANG_UNAVAILABLE;
+	SHADER_COMPILE_FAILED, SHADER_NOT_SPIRV, SLANG_UNAVAILABLE;
 
 <*
  The flags every compile in this project passes, in one place.
@@ -51,11 +49,10 @@ faultdef
  way.
 *>
 const String[*] SLANG_ARGUMENTS = {
-	"-target", "spirv",
-	// Straight to SPIR-V rather than through GLSL. The via-GLSL path loses the
+	"-target",
+	"spirv", // Straight to SPIR-V rather than through GLSL. The via-GLSL path loses the
 	// physical-storage-buffer pointers this project's whole geometry model is.
-	"-emit-spirv-directly",
-	// Keeps `vertexMain` called `vertexMain` in the module rather than `main`,
+	"-emit-spirv-directly", // Keeps `vertexMain` called `vertexMain` in the module rather than `main`,
 	// which is what `gpu/pipeline.c3` names its stages by.
 	//
 	// It is a no-op on the SDK this was built against — the module is
@@ -63,12 +60,10 @@ const String[*] SLANG_ARGUMENTS = {
 	// and `the_entry_points_keep_their_names` does not fail when it is removed.
 	// Kept because it is in the documented invocation, costs nothing, and a
 	// default that changed once can change back.
-	"-fvk-use-entrypoint-name",
-	// Not optional: without it the tightly packed float3 and float2 streams
+	"-fvk-use-entrypoint-name", // Not optional: without it the tightly packed float3 and float2 streams
 	// uploaded by `gpu/buffer.c3` are read at std430 strides, and geometry
 	// arrives a third of the way off with nothing reporting an error.
-	"-force-glsl-scalar-layout",
-	// `slangc` defaults to this and the compile-request API does not.
+	"-force-glsl-scalar-layout", // `slangc` defaults to this and the compile-request API does not.
 	//
 	// It is not in `mesh.slang`'s documented command line because it was the
 	// CLI's default; the API's default is row-major, so passing the documented
@@ -79,8 +74,7 @@ const String[*] SLANG_ARGUMENTS = {
 	//
 	// Two invocations passing the same flags is not enough when the defaults
 	// underneath them differ.
-	"-matrix-layout-column-major",
-	// Slang's default is -O1, and at -O1 it hands the SPIR-V it just generated
+	"-matrix-layout-column-major", // Slang's default is -O1, and at -O1 it hands the SPIR-V it just generated
 	// to `spirv-opt` — which lives inside libslang-glslang and is loaded by
 	// name at runtime, not linked. -emit-spirv-directly does not change that:
 	// it picks the codegen path, and the optimiser runs after codegen either
@@ -135,7 +129,7 @@ fn void ShaderModule.free(&self)
 	self.layout.free();
 	foreach (entry : self.entries) if (entry.name.ptr != null) entry.name.free(mem);
 	self.entries.free();
-	*self = {};
+	*self = { };
 }
 
 // The process-wide session. See the header for why it is a global and why it is
@@ -145,7 +139,7 @@ slang::Session shared_session @local = null;
 <*
  The Slang session, started on first use.
 
- @return? SLANG_UNAVAILABLE : `Slang would not start. Slang is linked into the binary, so this is not a missing library; there is no compile request to ask for a diagnostic yet either, which is what makes it opaque.`
+ @return ? SLANG_UNAVAILABLE : `Slang would not start. Slang is linked into the binary, so this is not a missing library; there is no compile request to ask for a diagnostic yet either, which is what makes it opaque.`
 *>
 fn slang::Session? slang_session()
 {
@@ -167,8 +161,8 @@ fn slang::Session? slang_session()
 
  @param name : `What the source is called in diagnostics. Not a path and never opened.`
  @param entries : `Named rather than discovered. A shader whose entry point is spelled differently is then an error with a sentence attached, instead of a module the pipeline cannot use.`
- @return? SLANG_UNAVAILABLE : `The session would not start.`
- @return? SHADER_NOT_SPIRV : `Slang reported success and returned no module, or one that does not begin with the SPIR-V magic number.`
+ @return ? SLANG_UNAVAILABLE : `The session would not start.`
+ @return ? SHADER_NOT_SPIRV : `Slang reported success and returned no module, or one that does not begin with the SPIR-V magic number.`
 *>
 fn ShaderModule? compile_slang(String source, String name, ShaderEntry[] entries)
 {
@@ -178,12 +172,14 @@ fn ShaderModule? compile_slang(String source, String name, ShaderEntry[] entries
 	defer alloc::free(mem, wanted);
 	foreach (i, entry : entries) wanted[i] = { .name = entry.name, .stage = entry.stage };
 
-	slang::Compiled compiled = session.compile({
-		.name = name,
-		.source = source,
-		.entries = wanted,
-		.arguments = SLANG_ARGUMENTS[..],
-	})!;
+	slang::Compiled compiled = session.compile(
+		{
+			.name = name,
+			.source = source,
+			.entries = wanted,
+			.arguments = SLANG_ARGUMENTS[..],
+		}
+	)!;
 	// Everything `compiled` points at is interior to the request and the next
 	// request reuses the address, so this runs after the copies below.
 	defer compiled.free();

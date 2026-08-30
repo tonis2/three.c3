@@ -14,11 +14,11 @@
  `run` is built for the tool call and every one of its habits is wrong here:
 
  - It clears `log`, `value` and `error`. Per frame, that erases the result an
-   agent is about to read.
+ agent is about to read.
  - It starts a fresh GPU validation capture, which would attribute a frame's
-   messages to a script that finished minutes ago.
+ messages to a script that finished minutes ago.
  - It wraps the source in `(async()=>{})()`, allocating a promise sixty times a
-   second to run a function that already exists.
+ second to run a function that already exists.
 
  So a tick calls the retained `qjs::Value` directly. What it shares with `run` is
  the interrupt handler, and only because there is one of those per context.
@@ -91,7 +91,7 @@ const uint JS_FRAME_MAX_JOBS = 1_000;
 // oldest lines are dropped rather than the newest, because a loop that logs every
 // frame fills any buffer immediately and the interesting state is the state it is
 // in now.
-const usz JS_FRAME_LOG_BYTES = 8 * 1024;
+const usz JS_FRAME_LOG_BYTES   = 8 * 1024;
 // The same ceiling for `three.debug.write` from inside a callback. A system that
 // writes one entry a frame fills this in a few seconds of a running game, and
 // what it costs to overrun is a count rather than a leak.
@@ -258,7 +258,7 @@ fn void JsRuntime.step_animations(&self, double dt_ms)
  @param input : `This frame's keyboard and mouse. Default-empty, for a host that has no window and for the checks that only care about the callback.`
  @return `true when something ran, false when nothing is registered — so a caller can tell an idle loop from a running one without asking twice.`
 *>
-fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
+fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 {
 	// Keys a script is holding folded in beside the window's, before anything
 	// reads them — so `three.input.pressed`, `isDown` and every `onKeyDown`
@@ -291,7 +291,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// Physics next, and above the early return, for the same two reasons: a
 	// callback should read where a body got to *this* frame, and a scene with
 	// bodies but no `setAnimationLoop` still has to fall.
-	//
+	// 
 	// The fixed-rate accumulator is inside `Physics.step` and is C3's, not
 	// JavaScript's — an accumulator in the callback would run inside the script
 	// budget, so a spiral of death would trip the budget and stop the callback for
@@ -309,13 +309,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 
 	// Last of everything, on every path out of this function, which is what the
 	// `defer` buys.
-	//
+	// 
 	// Last, because every other step here can move the thing being followed: the
 	// clip advances a character, the solver drops it, and the callback below walks
 	// it. A follow that ran before any of those would put the camera where the
 	// character *was*, and one frame of lateness on a camera reads as the
 	// character sliding rather than as the camera trailing.
-	//
+	// 
 	// Every path, because a scene with a falling body and no `setAnimationLoop`
 	// takes the early return below and still has a camera that has to keep up.
 	defer self.follow_camera(delta_ms);
@@ -394,7 +394,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = {})
 	// Measured after the frame rather than interrupted during it: a frame that ran
 	// long has already cost what it cost, and the only useful thing left to do with
 	// that fact is count it where somebody can read it.
-	//
+	// 
 	// Counted and not said. `frame_error` is for a callback that was STOPPED — a
 	// throw, a promise, the hard wall — and every one of those is a thing the
 	// script has to be told about because its loop is gone. A frame that merely
@@ -468,9 +468,10 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what)
 
 		if (catch err = answer)
 		{
-			self.report_frame_failure(self.timed_out
-				? self.loop_timeout_message(what)
-				: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem)));
+			self.report_frame_failure(
+				self.timed_out ? self.loop_timeout_message(what)
+					: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem))
+			);
 			survived = false;
 		}
 		else
@@ -483,11 +484,13 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what)
 
 			if (promised)
 			{
-				self.report_frame_failure(string::tformat(
-					"%s returned a promise. It has to finish inside the frame, "
-					"so it must be synchronous — do the awaiting in a run_script instead",
-					what
-				));
+				self.report_frame_failure(
+					string::tformat(
+						"%s returned a promise. It has to finish inside the frame, "
+							"so it must be synchronous — do the awaiting in a run_script instead",
+						what
+					)
+				);
 				survived = false;
 			}
 		}
@@ -564,7 +567,8 @@ fn String JsRuntime.loop_timeout_message(&self, String what)
 {
 	return string::tformat(
 		"%s ran for longer than %d ms in one frame and was stopped",
-		what, self.budget_ns / 1_000_000
+		what,
+		self.budget_ns / 1_000_000
 	);
 }
 
@@ -624,7 +628,7 @@ fn void JsRuntime.trim_frame_log(&self)
 	if ((usz)self.frame_log.len() <= JS_FRAME_LOG_BYTES) return;
 
 	String text = self.frame_log.str_view();
-	usz cut = text.len - JS_FRAME_LOG_BYTES;
+	usz cut     = text.len - JS_FRAME_LOG_BYTES;
 	while (cut < text.len && text[cut] != '\n') cut++;
 	if (cut < text.len) cut++;
 
@@ -764,7 +768,12 @@ fn void JsRuntime.take_frame_output(&self, DString* out)
  forever after.
 *>
 fn void js_set_frame(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -803,7 +812,12 @@ fn void js_set_frame(
  system where this only splits them from each other.
 *>
 fn void js_frame_stats(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -839,7 +853,12 @@ fn void js_frame_stats(
  independence a fixed step exists for would be an `if` inside it.
 *>
 fn void js_set_fixed(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -885,7 +904,7 @@ fn void JsRuntime.follow_camera(&self, double dt_ms)
 	Node* node = self.pass.scene.node(self.pass.follow.node);
 	if (node == null)
 	{
-		self.pass.follow = {};
+		self.pass.follow = { };
 		return;
 	}
 

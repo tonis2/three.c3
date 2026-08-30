@@ -19,11 +19,11 @@
 
  ## The frame
 
-	  wait fence  ->  acquire  ->  record  ->  submit  ->  present
-	                     |                                    |
-	                     +------- OUT_OF_DATE / resized ------+
-	                                      |
-	                                   rebuild
+ wait fence  ->  acquire  ->  record  ->  submit  ->  present
+ |                                    |
+ +------- OUT_OF_DATE / resized ------+
+ |
+ rebuild
 
  Recording is the same one call whether or not there is a window, because the
  target is offscreen either way: `record_scene` begins the target, draws and ends
@@ -216,7 +216,7 @@ fn void Renderer.free(&self)
 	// Before the target, because it holds an image created at the target's
 	// extent, and after the idle, because it frees a pipeline outright rather
 	// than retiring it.
-	//
+	// 
 	// Also before the mesh pass: the post shader's own samplers hold references
 	// into `pass.assets`, and `MeshPass.free` frees every texture slot outright,
 	// so giving them back afterwards would be reading a table that no longer
@@ -288,7 +288,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// rendering of its own, so it has to be here and not inside the block below;
 	// it records nothing at all in a frame with shadows off, so an unshadowed
 	// frame is byte-identical to one from before this existed.
-	//
+	// 
 	// It does not touch `target.color` and so does not touch the invariant the
 	// rest of this function holds.
 	self.pass.record_shadow(cmd);
@@ -325,8 +325,12 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	if (posted)
 	{
 		self.post.record_chain(
-			cmd, &self.target, &self.pass.assets, self.pass.clock.time,
-			self.pass.camera.near_plane, self.pass.camera.far_plane
+			cmd,
+			&self.target,
+			&self.pass.assets,
+			self.pass.clock.time,
+			self.pass.camera.near_plane,
+			self.pass.camera.far_plane
 		)!;
 	}
 
@@ -410,8 +414,8 @@ fn bool? Renderer.frame(&self)
 		return false;
 	}
 
-	uint slot        = self.frames.slot;
-	vk::Fence fence  = self.frames.fences[slot];
+	uint slot              = self.frames.slot;
+	vk::Fence fence        = self.frames.fences[slot];
 	vk::Semaphore acquired = self.frames.image_available[slot];
 
 	fence.wait(self.gpu.handle)!;

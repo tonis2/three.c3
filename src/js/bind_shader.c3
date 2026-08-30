@@ -103,13 +103,13 @@ fn void js_create_material(
 	@pool()
 	{
 		String fragment = arg_text(&js, argc, args, 0, tmem);
-		String names = arg_text(&js, argc, args, 1, tmem);
-		String widths = arg_text(&js, argc, args, 2, tmem);
+		String names    = arg_text(&js, argc, args, 1, tmem);
+		String widths   = arg_text(&js, argc, args, 2, tmem);
 		// A third joined list, for the same reason as the second: the shape of a
 		// uniform is two numbers, and a table's row count has to cross with its
 		// width or the shader declares a scalar where the script wrote a column.
 		// Absent means every uniform is one row.
-		String rows = arg_text(&js, argc, args, 3, tmem);
+		String rows     = arg_text(&js, argc, args, 3, tmem);
 
 		List{String} name_list;
 		List{String} width_list;
@@ -140,10 +140,7 @@ fn void js_create_material(
 			if (components < 1 || components > 4)
 			{
 				*out = js.raise(
-					string::tformat(
-						"uniform '%s' must be a number or an array of two, three or four numbers",
-						name
-					)
+					string::tformat("uniform '%s' must be a number or an array of two, three or four numbers", name)
 				);
 				return;
 			}
@@ -151,28 +148,28 @@ fn void js_create_material(
 			int declared_rows = row_list.len() > 0 ? (row_list[i].to_int() ?? 0) : 1;
 			if (declared_rows < 1)
 			{
-				*out = js.raise(
-					string::tformat("uniform '%s' is a table with no rows in it", name)
-				);
+				*out = js.raise(string::tformat("uniform '%s' is a table with no rows in it", name));
 				return;
 			}
 
-			uniforms.push({
-				.name = name,
-				.components = (uint)components,
-				.rows = (uint)declared_rows,
-			});
+			uniforms.push(
+				{
+					.name = name,
+					.components = (uint)components,
+					.rows = (uint)declared_rows,
+				}
+			);
 		}
 
 		// The diagnostic is the product here, not a side effect: a bad shader has
 		// to throw a JS error carrying the Slang text, so it is collected whether
 		// the compile failed or only warned, and the warning path logs rather than
 		// throws.
-		//
+		// 
 		// Absent `side` means `SIDE_FRONT`, which is what every material meant
 		// before a side could be named — `cull_for_side` maps anything it does not
 		// know there too, and the prelude has already refused an unknown value.
-		int side = argc > 4 ? arg_int(&js, argc, args, 4) : SIDE_FRONT;
+		int side     = argc > 4 ? arg_int(&js, argc, args, 4) : SIDE_FRONT;
 		// Absent means `BLENDING_NONE`, which is what every material meant before
 		// one could ask to blend — and what `Material._resolveBlending` answers for
 		// a script that named neither `transparent` nor `blending`.
@@ -184,7 +181,7 @@ fn void js_create_material(
 		// which is what `textures: { noise_map: null }` means: the sampler exists,
 		// the body may read it, and white is what comes back.
 		String texture_names = arg_text(&js, argc, args, 6, tmem);
-		String texture_ids = arg_text(&js, argc, args, 7, tmem);
+		String texture_ids   = arg_text(&js, argc, args, 7, tmem);
 
 		List{String} texture_name_list;
 		List{String} texture_id_list;
@@ -207,7 +204,7 @@ fn void js_create_material(
 		// and a margin of zero. The pair travels together because a displacement
 		// nobody declared a bound for is geometry that culls wrong.
 		String vertex = argc > 8 ? arg_text(&js, argc, args, 8, tmem) : "";
-		float bounds = argc > 9 ? arg_float(&js, argc, args, 9) : 0;
+		float bounds  = argc > 9 ? arg_float(&js, argc, args, 9) : 0;
 
 		String diagnostic;
 		uint? made = self.pass.create_material(
@@ -219,8 +216,7 @@ fn void js_create_material(
 			blending,
 			textures.array_view(),
 			vertex,
-			bounds,
-			// Named, so an argument arriving between the bounds and the diagnostic
+			bounds, // Named, so an argument arriving between the bounds and the diagnostic
 			// does not have to be threaded through here.
 			diagnostic: &diagnostic
 		);
@@ -252,7 +248,7 @@ fn void js_create_material(
 		// Filled after the compile, because a binding index is something only the
 		// compiled module knows: the names went in as a list and come back as a
 		// reflected layout, and `set_material_texture` is the join.
-		//
+		// 
 		// A failure here disposes the material it just made. The script is about to
 		// be thrown at, so nothing will ever hold the handle — and a material nobody
 		// can name still holds a pipeline until the process ends.
@@ -291,7 +287,7 @@ fn String material_texture_failure(fault err, String name) @local
 		case MATERIAL_SAMPLER_UNKNOWN:
 			return string::tformat(
 				"this material's shader has no sampler called '%s' — either the name is not the one the body uses, "
-				"or the body never samples it and Slang dropped it from the module",
+					"or the body never samples it and Slang dropped it from the module",
 				name
 			);
 		case MATERIAL_TEXTURE_UNKNOWN:
@@ -325,15 +321,15 @@ fn void js_set_material_texture(
 	@pool()
 	{
 		uint material = (uint)arg_int(&js, argc, args, 0);
-		String name = arg_text(&js, argc, args, 1, tmem);
-		int texture = arg_int(&js, argc, args, 2);
+		String name   = arg_text(&js, argc, args, 1, tmem);
+		int texture   = arg_int(&js, argc, args, 2);
 
 		Gpu* gpu = self.renderer != null ? &self.renderer.gpu : null;
 		if (catch err = self.pass.set_material_texture(gpu, material, name, texture))
 		{
 			*out = js.raise(
-				err == MATERIAL_UNKNOWN
-					? "that material cannot take a texture — it is the default material or it was disposed"
+				err
+					== MATERIAL_UNKNOWN ? "that material cannot take a texture — it is the default material or it was disposed"
 					: material_texture_failure(err, name)
 			);
 			return;
@@ -377,9 +373,9 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
 		{
 			return string::tformat(
 				"%s\n\nthat line is generated, not yours. Each uniform is spliced in as "
-				"`#define <name> (push.<name>)` across the whole module, so a parameter, a local "
-				"or a helper named after one of this material's uniforms (%s) is rewritten and "
-				"breaks the line it was spliced into. Rename it.",
+					"`#define <name> (push.<name>)` across the whole module, so a parameter, a local "
+					"or a helper named after one of this material's uniforms (%s) is rewritten and "
+					"breaks the line it was spliced into. Rename it.",
 				diagnostic,
 				uniforms
 			);
@@ -439,7 +435,7 @@ fn void js_set_uniform(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	uint index = (uint)arg_int(&js, argc, args, 0);
+	uint index         = (uint)arg_int(&js, argc, args, 0);
 	Material* material = self.pass.material(index);
 	if (material == null)
 	{
@@ -466,24 +462,30 @@ fn void js_set_uniform(
 		// Absent means the plain case, so a caller that predates tables — a script
 		// reaching for `__three.setUniform` itself — still writes the one value it
 		// means to.
-		int row = argc > 7 ? arg_int(&js, argc, args, 7) : 0;
+		int row  = argc > 7 ? arg_int(&js, argc, args, 7) : 0;
 		int rows = argc > 8 ? arg_int(&js, argc, args, 8) : 1;
 		if (rows < 1) rows = 1;
 		if (row < 0 || row >= rows)
 		{
-			*out = js.raise(string::tformat(
-				"uniform '%s' has %d row%s and row %d is not one of them", name, rows, rows == 1 ? "" : "s", row
-			));
+			*out = js.raise(
+				string::tformat(
+					"uniform '%s' has %d row%s and row %d is not one of them",
+					name,
+					rows,
+					rows == 1 ? "" : "s",
+					row
+				)
+			);
 			return;
 		}
 
 		if (catch err = material.set_uniform(name, values[:count], (uint)row, (uint)rows))
 		{
 			*out = js.raise(
-				err == MATERIAL_UNIFORM_WIDTH
-					? string::tformat(
-						"uniform '%s' was declared with a different number of components", name
-					)
+				err == MATERIAL_UNIFORM_WIDTH ? string::tformat(
+					"uniform '%s' was declared with a different number of components",
+					name
+				)
 					: string::tformat("this material has no uniform called '%s'", name)
 			);
 			return;
@@ -512,7 +514,7 @@ fn void js_set_side(
 	qjs::Context js = qjs::wrap(ctx);
 
 	uint index = (uint)arg_int(&js, argc, args, 0);
-	int side = arg_int(&js, argc, args, 1);
+	int side   = arg_int(&js, argc, args, 1);
 
 	if (catch self.pass.set_material_side(index, side))
 	{
@@ -540,7 +542,12 @@ fn void js_set_side(
  The prelude has already refused a value outside 0..1 by name.
 *>
 fn void js_set_opacity(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -552,9 +559,7 @@ fn void js_set_opacity(
 		// `js_dispose_material`'s sentence, because it is the same pair of mistakes:
 		// an index this context never handed out, or one of the two built-ins, which
 		// belong to every node that never asked for a material.
-		*out = js.raise(
-			"that material is not in this context, or it is a built-in one that every node shares"
-		);
+		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
 		return;
 	}
 }
@@ -568,7 +573,12 @@ fn void js_set_opacity(
  a disposed handle before this is reached.
 *>
 fn void js_get_opacity(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -593,7 +603,12 @@ fn void js_get_opacity(
  The prelude has already refused a value outside 0..1 by name.
 *>
 fn void js_set_surface(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -607,9 +622,7 @@ fn void js_set_surface(
 		arg_float(&js, argc, args, 3)
 	))
 	{
-		*out = js.raise(
-			"that material is not in this context, or it is a built-in one that every node shares"
-		);
+		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
 	}
 }
 
@@ -621,14 +634,19 @@ fn void js_set_surface(
  `getOpacity`'s rule.
 *>
 fn void js_get_surface(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
 	float[4] surface = self.pass.material_surface((uint)arg_int(&js, argc, args, 0));
-	qjs::Value list = js.array();
+	qjs::Value list  = js.array();
 	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(surface[i]));
 	*out = list;
 }
@@ -646,7 +664,12 @@ fn void js_get_surface(
  would reach every unrelated surface that happened to use the same image.
 *>
 fn void js_set_material_uv(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -665,7 +688,7 @@ fn void js_set_material_uv(
 		{
 			*out = js.raise(
 				"material.repeat cannot be zero — every point of the surface would sample the same texel. "
-				"1 is once across, 4 is four times"
+					"1 is once across, 4 is four times"
 			);
 			return;
 		}
@@ -678,13 +701,18 @@ fn void js_set_material_uv(
  `[repeat_u, repeat_v, offset_u, offset_v]` for a material.
 *>
 fn void js_get_material_uv(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	float[4] uv = self.pass.material_uv((uint)arg_int(&js, argc, args, 0));
+	float[4] uv     = self.pass.material_uv((uint)arg_int(&js, argc, args, 0));
 	qjs::Value four = js.array();
 	for (uint i = 0; i < 4; i++) js.set_index(four, i, qjs::number_value((double)uv[i]));
 	*out = four;
@@ -713,9 +741,9 @@ fn void js_create_texture_material(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int texture = arg_int(&js, argc, args, 0);
+	int texture  = arg_int(&js, argc, args, 0);
 	// Absent means `SIDE_FRONT`, matching `js_create_material`.
-	int side = argc > 1 ? arg_int(&js, argc, args, 1) : SIDE_FRONT;
+	int side     = argc > 1 ? arg_int(&js, argc, args, 1) : SIDE_FRONT;
 	// And absent means `BLENDING_NONE`, for the same reason. The pass has all
 	// three variants of the built-in pipeline built already.
 	int blending = argc > 2 ? arg_int(&js, argc, args, 2) : BLENDING_NONE;
@@ -723,9 +751,7 @@ fn void js_create_texture_material(
 	uint? made = self.pass.create_texture_material(texture, side, blending);
 	if (catch made)
 	{
-		*out = js.raise(
-			"that texture is not in this context — it was disposed, or it came from another renderer"
-		);
+		*out = js.raise("that texture is not in this context — it was disposed, or it came from another renderer");
 		return;
 	}
 
@@ -760,9 +786,7 @@ fn void js_dispose_material(
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
 	if (catch self.pass.dispose_material(gpu, index))
 	{
-		*out = js.raise(
-			"that material is not in this context, or it is a built-in one that every node shares"
-		);
+		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
 		return;
 	}
 }
@@ -786,7 +810,7 @@ fn void js_set_map(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	uint index = (uint)arg_int(&js, argc, args, 0);
+	uint index  = (uint)arg_int(&js, argc, args, 0);
 	// The prelude sends `NO_TEXTURE` for a cleared map, so absent and cleared are
 	// the same thing here and neither is a texture index.
 	int texture = argc > 1 ? arg_int(&js, argc, args, 1) : NO_TEXTURE;
@@ -795,8 +819,8 @@ fn void js_set_map(
 	if (catch err = self.pass.set_material_map(gpu, index, texture))
 	{
 		*out = js.raise(
-			err == MATERIAL_TEXTURE_UNKNOWN
-				? "that texture is not in this context — it was disposed, or it came from another renderer"
+			err
+				== MATERIAL_TEXTURE_UNKNOWN ? "that texture is not in this context — it was disposed, or it came from another renderer"
 				: "that material is not in this context, or it is a built-in one that every node shares"
 		);
 		return;
@@ -886,7 +910,7 @@ fn void js_begin_material_layers(
 			return;
 		}
 
-		String shared = arg_text(&js, argc, args, 1, tmem);
+		String shared      = arg_text(&js, argc, args, 1, tmem);
 		String base_normal = arg_text(&js, argc, args, 2, tmem);
 		String base_height = arg_text(&js, argc, args, 3, tmem);
 		material.begin_script_layers(
@@ -954,9 +978,7 @@ fn void js_add_material_layer(
 			.normal_binding = binding_at(material, &samplers, 1),
 			.emissive_binding = binding_at(material, &samplers, 2),
 			.mask_binding = binding_at(material, &samplers, 3),
-			.params_offset = samplers.len() > 4 && samplers[4].len > 0
-				? material.uniform_offset(samplers[4])
-				: -1,
+			.params_offset = samplers.len() > 4 && samplers[4].len > 0 ? material.uniform_offset(samplers[4]) : -1,
 			.mr_binding = binding_at(material, &samplers, 5),
 			.height_binding = binding_at(material, &samplers, 6),
 			.blend_mode = (uint)arg_int(&js, argc, args, 3),

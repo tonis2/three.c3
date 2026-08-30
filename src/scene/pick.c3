@@ -54,7 +54,11 @@ struct Hit
 fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 {
 	Hit best = { .hit = false, .distance = float::max, .node = NO_NODE };
-	if (assets == null) { best.distance = 0; return best; }
+	if (assets == null)
+	{
+		best.distance = 0;
+		return best;
+	}
 
 	// The walk is over cells, not over nodes. Testing every node's broad phase
 	// first cost 42 µs in a 500-node scene for a ray that could only ever have
@@ -62,7 +66,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 	// apiece measured 2.1 ms. The index is rebuilt by the first query after
 	// anything moved and by nothing else, so the first cast in a frame costs
 	// what a cast used to and the ninety-ninth costs a cell walk.
-	//
+	// 
 	// The broad phase itself is unchanged: the same world box from the same
 	// `world_mesh_bounds`, tested with the same `intersect_ray`. What changed is
 	// which boxes are reached.
@@ -70,7 +74,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 	QueryIndex* index = &self.query;
 	index.stamp_now++;
 
-	index.@walk_ray(ray, float::max; uint i, float cell_near)
+	index.@walk_ray(ray, float::max ; uint i, float cell_near)
 	{
 		// Nearest cell first, so a cell beginning beyond the best hit so far
 		// cannot improve on it. That is what makes the walk sublinear rather
@@ -81,7 +85,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 		if (cell_near < best.distance && index.stamp[(sz)i] != index.stamp_now)
 		{
 			index.stamp[(sz)i] = index.stamp_now;
-			QueryEntry entry = index.entries[(sz)i];
+			QueryEntry entry         = index.entries[(sz)i];
 			collision::HitInfo broad = entry.box.intersect_ray(ray);
 			if (broad.collided && broad.depth <= best.distance && self.query_node(entry) != null)
 			{
@@ -116,14 +120,14 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 *>
 fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint height)
 {
-	float aspect = (float)width / (float)height;
+	float aspect                     = (float)width / (float)height;
 	Matrix4f inverse_view_projection = invert(camera.view_projection(aspect));
 
 	// To normalised device coordinates. Y is flipped because `gpu/target.c3`
 	// binds a negative-height viewport (`.y = height, .height = -height`), which
 	// puts NDC +Y at the *top* row of the image; a pixel row counted from the
 	// top therefore runs from +1 down to -1, opposite to the column.
-	//
+	// 
 	// Getting this backwards is invisible to every test that asks the picker to
 	// agree with itself — a round trip, a pick at the centre, a symmetric
 	// fixture — because the centre row is the one row a flip leaves alone. It
@@ -140,7 +144,7 @@ fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint 
 
 fn Vec3 unproject(Matrix4f inverse_view_projection, float x, float y, float z) @local
 {
-	float[<4>] clip = { x, y, z, 1.0f };
+	float[<4>] clip  = { x, y, z, 1.0f };
 	float[<4>] world = inverse_view_projection * clip;
 	if (math::abs(world[3]) < 1e-12f) return { world[0], world[1], world[2] };
 	return { world[0] / world[3], world[1] / world[3], world[2] / world[3] };

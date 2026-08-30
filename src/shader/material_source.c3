@@ -19,12 +19,12 @@
 
  So the body is bracketed by `#line` directives:
 
-	#line 1 "material"
-	float3 shade(Surface s)
-	{
-	    return s.albedo * notAFunction(s.uv);
-	}
-	#line 141 "three.material"
+ #line 1 "material"
+ float3 shade(Surface s)
+ {
+ return s.albedo * notAFunction(s.uv);
+ }
+ #line 141 "three.material"
 
  and Slang then reports `material:3:24`, echoing the agent's own text under the
  caret. The restore directive is not decoration either: on an arity or overload
@@ -59,7 +59,7 @@ faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY,
 *>
 struct MaterialTexture
 {
-	String name;  // borrowed from the caller
+	String name; // borrowed from the caller
 }
 
 <*
@@ -78,9 +78,9 @@ struct MaterialTexture
 *>
 struct MaterialUniform
 {
-	String name;      // borrowed from the caller
-	uint components;  // 1..4 floats
-	uint rows;        // 1 for a plain uniform, N for a column of an N-row table
+	String name; // borrowed from the caller
+	uint components; // 1..4 floats
+	uint rows; // 1 for a plain uniform, N for a column of an N-row table
 }
 
 <*
@@ -117,7 +117,7 @@ const uint MATERIAL_UNIFORM_BUDGET = 104;
  the field list. In `MATERIAL_RESERVED` for the usual reason.
 *>
 const String MATERIAL_TABLE_FIELD = "material_table";
-const String MATERIAL_TABLE_TYPE = "MaterialTable";
+const String MATERIAL_TABLE_TYPE  = "MaterialTable";
 
 <*
  How large a spilled uniform table may be.
@@ -257,50 +257,115 @@ const String MATERIAL_PREAMBLE_NAME = "three.material";
  anything past it fails as an ordinary Slang diagnostic at `material:<line>`,
  which is where the agent can act on it.
 *>
-const String[*] MATERIAL_RESERVED @local = {
-	// What the template declares.
-	"push", "s", "shade", "Surface", "VertexOutput", "PushData", "FrameBlock",
-	"Instance", "vertexMain", "fragmentMain", "base_color_map", "lambert",
-	"srgb_to_linear",
-	// The lighting the template hands a body: the struct in the frame block, the
+const String[*] MATERIAL_RESERVED @local = { // What the template declares.
+	"push",
+	"s",
+	"shade",
+	"Surface",
+	"VertexOutput",
+	"PushData",
+	"FrameBlock",
+	"Instance",
+	"vertexMain",
+	"fragmentMain",
+	"base_color_map",
+	"lambert",
+	"srgb_to_linear", // The lighting the template hands a body: the struct in the frame block, the
 	// two intrinsics beside `lambert`, and the function all three of them share.
-	"Light", "specular", "standard", "specular_light",
-	// The spilled uniform table's pointer and its struct, generated only for a
+	"Light",
+	"specular",
+	"standard",
+	"specular_light", // The spilled uniform table's pointer and its struct, generated only for a
 	// material whose uniforms do not fit the push block — but reserved for every
 	// material, because whether a name collides must not depend on how many other
 	// uniforms happened to be declared beside it.
-	"material_table", "MaterialTable",
-	// The shadow lookup: the reserved sampler at binding 1, the function that
+	"material_table",
+	"MaterialTable", // The shadow lookup: the reserved sampler at binding 1, the function that
 	// reads it, and the one global in the template. `g_shadow` is the one worth
 	// naming out loud — a uniform of that name would shadow the value `lambert`
 	// folds into the direct light, and the body would compile and come out lit.
-	"shadow_map", "shadow_factor", "g_shadow",
-	// The sky the same way: the reserved sampler at binding 2, the term that
+	"shadow_map",
+	"shadow_factor",
+	"g_shadow", // The sky the same way: the reserved sampler at binding 2, the term that
 	// reads it and the mapping that term projects a direction through. A body
 	// naming any of the three would compile against its own and the reflection
 	// would resolve the binding to a texture the pass never wrote.
-	"environment_map", "environment_light", "environment_uv",
-	// The vertex half of the same contract. `v` and `displace` are the body's own
+	"environment_map",
+	"environment_light",
+	"environment_uv", // The vertex half of the same contract. `v` and `displace` are the body's own
 	// parameter and function, exactly as `s` and `shade` are the fragment body's;
 	// `Vertex` is the struct both of them name.
-	"v", "displace", "Vertex",
-	"FLAG_HAS_NORMALS", "FLAG_HAS_UVS", "FLAG_HAS_COLORS", "MATERIAL_ROWS",
-	// The three push fields the mesh contract pins, and the record the third of
+	"v",
+	"displace",
+	"Vertex",
+	"FLAG_HAS_NORMALS",
+	"FLAG_HAS_UVS",
+	"FLAG_HAS_COLORS",
+	"MATERIAL_ROWS", // The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
 	// no longer share a scope with a uniform — they stay refused because the
 	// template still declares them.
-	"frame", "instances", "draw", "Draw",
-	"positions", "normals", "uvs", "colors", "base_color", "flags", "uv_transform",
-	// Types.
-	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
-	"int", "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4",
-	"bool", "bool2", "bool3", "bool4", "half", "double", "void",
-	"Sampler2D", "Texture2D", "SamplerState",
-	// Keywords.
-	"return", "if", "else", "for", "while", "do", "switch", "case", "default",
-	"break", "continue", "struct", "const", "static", "in", "out", "inout",
-	"discard", "true", "false", "typedef", "namespace", "uniform", "cbuffer",
+	"frame",
+	"instances",
+	"draw",
+	"Draw",
+	"positions",
+	"normals",
+	"uvs",
+	"colors",
+	"base_color",
+	"flags",
+	"uv_transform", // Types.
+	"float",
+	"float2",
+	"float3",
+	"float4",
+	"float2x2",
+	"float3x3",
+	"float4x4",
+	"int",
+	"int2",
+	"int3",
+	"int4",
+	"uint",
+	"uint2",
+	"uint3",
+	"uint4",
+	"bool",
+	"bool2",
+	"bool3",
+	"bool4",
+	"half",
+	"double",
+	"void",
+	"Sampler2D",
+	"Texture2D",
+	"SamplerState", // Keywords.
+	"return",
+	"if",
+	"else",
+	"for",
+	"while",
+	"do",
+	"switch",
+	"case",
+	"default",
+	"break",
+	"continue",
+	"struct",
+	"const",
+	"static",
+	"in",
+	"out",
+	"inout",
+	"discard",
+	"true",
+	"false",
+	"typedef",
+	"namespace",
+	"uniform",
+	"cbuffer",
 	"groupshared",
 };
 
@@ -323,13 +388,19 @@ const String[*] MATERIAL_RESERVED @local = {
  most likely uniform anybody writes, failed with `three.post:134` under a caret
  pointing at a `#define`.
 *>
-const String[*] MATERIAL_CONTRACT_FIELDS @local = {
-	// Surface. `shadow` is here rather than in `MATERIAL_RESERVED` because it
-	// fails the way this list's header describes: a uniform of that name rewrites
-	// the `s.shadow` in the body that declared it into `s.(push.shadow)`.
-	"albedo", "normal", "uv", "position", "color", "vertex_color", "variant", "shadow",
-	// Vertex adds these two; the rest it shares with Surface.
-	"local", "index",
+const String[*] MATERIAL_CONTRACT_FIELDS @local = { // Surface. `shadow` is here rather than in `MATERIAL_RESERVED` because it
+// fails the way this list's header describes: a uniform of that name rewrites
+// the `s.shadow` in the body that declared it into `s.(push.shadow)`.
+	"albedo",
+	"normal",
+	"uv",
+	"position",
+	"color",
+	"vertex_color",
+	"variant",
+	"shadow", // Vertex adds these two; the rest it shares with Surface.
+	"local",
+	"index",
 };
 
 const usz MATERIAL_DIAGNOSTIC_MAX @local = 512;
@@ -402,10 +473,10 @@ fn uint material_rows(MaterialUniform[] uniforms)
  by, and the budget last because "these seventeen floats do not fit" is only
  useful once each of them is known to be a real uniform.
 
- @return? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, or is not 1 to 4 floats wide.`
- @return? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
- @return? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
+ @return ? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
+ @return ? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, or is not 1 to 4 floats wide.`
+ @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
+ @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
 *>
 fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
 {
@@ -421,32 +492,38 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 		{
 			if (!is_identifier(uniform.name))
 			{
-				material_note(string::tformat(
-					"material: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
-					uniform.name
-				));
+				material_note(
+					string::tformat(
+						"material: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
+						uniform.name
+					)
+				);
 				return MATERIAL_NAME_INVALID~;
 			}
 
 			foreach (reserved : MATERIAL_RESERVED)
 			{
 				if (uniform.name != reserved) continue;
-				material_note(string::tformat(
-					"material: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
-					uniform.name
-				));
+				material_note(
+					string::tformat(
+						"material: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
+						uniform.name
+					)
+				);
 				return MATERIAL_NAME_INVALID~;
 			}
 
 			foreach (field : MATERIAL_CONTRACT_FIELDS)
 			{
 				if (uniform.name != field) continue;
-				material_note(string::tformat(
-					"material: uniform name '%s' is a field of Surface and Vertex, so it would rewrite s.%s and v.%s in your own body — rename the uniform",
-					uniform.name,
-					uniform.name,
-					uniform.name
-				));
+				material_note(
+					string::tformat(
+						"material: uniform name '%s' is a field of Surface and Vertex, so it would rewrite s.%s and v.%s in your own body — rename the uniform",
+						uniform.name,
+						uniform.name,
+						uniform.name
+					)
+				);
 				return MATERIAL_NAME_INVALID~;
 			}
 
@@ -454,20 +531,19 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			{
 				if (j >= i) break;
 				if (earlier.name != uniform.name) continue;
-				material_note(string::tformat(
-					"material: uniform '%s' is declared twice",
-					uniform.name
-				));
+				material_note(string::tformat("material: uniform '%s' is declared twice", uniform.name));
 				return MATERIAL_NAME_INVALID~;
 			}
 
 			if (uniform.components < 1 || uniform.components > 4)
 			{
-				material_note(string::tformat(
-					"material: uniform '%s' is %d floats wide; a uniform is 1 to 4",
-					uniform.name,
-					uniform.components
-				));
+				material_note(
+					string::tformat(
+						"material: uniform '%s' is %d floats wide; a uniform is 1 to 4",
+						uniform.name,
+						uniform.components
+					)
+				);
 				return MATERIAL_NAME_INVALID~;
 			}
 
@@ -479,13 +555,15 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			{
 				uint other_rows = uniform_rows_of(other);
 				if (other_rows == 1 || rows == 1 || other_rows == rows) continue;
-				material_note(string::tformat(
-					"material: '%s' has %d rows and '%s' has %d; every array in one material is a column of the same table and they must agree",
-					uniform.name,
-					rows,
-					other.name,
-					other_rows
-				));
+				material_note(
+					string::tformat(
+						"material: '%s' has %d rows and '%s' has %d; every array in one material is a column of the same table and they must agree",
+						uniform.name,
+						rows,
+						other.name,
+						other_rows
+					)
+				);
 				return MATERIAL_NAME_INVALID~;
 			}
 		}
@@ -495,7 +573,11 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 		// and `texture_problem` can only report it once both lists are known to be
 		// individually sound.
 		String texture_note = texture_problem(
-			MATERIAL_BODY_NAME, textures, uniforms, MATERIAL_RESERVED[..], MATERIAL_TEXTURE_LIMIT
+			MATERIAL_BODY_NAME,
+			textures,
+			uniforms,
+			MATERIAL_RESERVED[..],
+			MATERIAL_TEXTURE_LIMIT
 		);
 		if (texture_note.len > 0)
 		{
@@ -519,33 +601,39 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			// it does not have.
 			if (table == 0)
 			{
-				material_note(string::tformat(
-					"material: the uniforms want %d bytes of push block and %d are free; the mesh contract takes the other %d of the 128 every device offers",
-					material_uniform_bytes(uniforms),
-					MATERIAL_UNIFORM_BUDGET,
-					PUSH_BUDGET - MATERIAL_UNIFORM_BUDGET
-				));
+				material_note(
+					string::tformat(
+						"material: the uniforms want %d bytes of push block and %d are free; the mesh contract takes the other %d of the 128 every device offers",
+						material_uniform_bytes(uniforms),
+						MATERIAL_UNIFORM_BUDGET,
+						PUSH_BUDGET - MATERIAL_UNIFORM_BUDGET
+					)
+				);
 				return MATERIAL_TOO_MANY_UNIFORMS~;
 			}
 
 			uint pushed = material_pushed_bytes(uniforms);
 			if (pushed > MATERIAL_UNIFORM_BUDGET)
 			{
-				material_note(string::tformat(
-					"material: the uniforms that are not arrays want %d bytes of push block and %d are free (the table's pointer takes 8 of them); a plain uniform cannot move to the table buffer, so declare fewer of them or make them rows of one",
-					pushed,
-					MATERIAL_UNIFORM_BUDGET
-				));
+				material_note(
+					string::tformat(
+						"material: the uniforms that are not arrays want %d bytes of push block and %d are free (the table's pointer takes 8 of them); a plain uniform cannot move to the table buffer, so declare fewer of them or make them rows of one",
+						pushed,
+						MATERIAL_UNIFORM_BUDGET
+					)
+				);
 				return MATERIAL_TOO_MANY_UNIFORMS~;
 			}
 
 			if (table > MATERIAL_TABLE_BUDGET)
 			{
-				material_note(string::tformat(
-					"material: the uniform table wants %d bytes and %d is the most one may have; it is written per draw per frame, so a table that size is a frame time rather than a limit",
-					table,
-					MATERIAL_TABLE_BUDGET
-				));
+				material_note(
+					string::tformat(
+						"material: the uniform table wants %d bytes and %d is the most one may have; it is written per draw per frame, so a table that size is a frame time rather than a limit",
+						table,
+						MATERIAL_TABLE_BUDGET
+					)
+				);
 				return MATERIAL_TOO_MANY_UNIFORMS~;
 			}
 		}
@@ -567,20 +655,19 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
  @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
  @param bake : `Assemble the unlit, uv-space variant instead — see //@bake in material.slang. The exporter's, and nothing else's.`
  @return `The whole module, allocated from allocator and owned by the caller.`
- @return? MATERIAL_BODY_EMPTY : `The body is empty. material_diagnostic() has the sentence.`
- @return? MATERIAL_NAME_INVALID : `A uniform or texture name, or a uniform width, is one this cannot generate. material_diagnostic() names it.`
- @return? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms do not fit in what the mesh contract leaves of the push block.`
- @return? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT. material_diagnostic() has the count.`
- @return? SHADER_NOT_FOUND : `shaders/material.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
+ @return ? MATERIAL_BODY_EMPTY : `The body is empty. material_diagnostic() has the sentence.`
+ @return ? MATERIAL_NAME_INVALID : `A uniform or texture name, or a uniform width, is one this cannot generate. material_diagnostic() names it.`
+ @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms do not fit in what the mesh contract leaves of the push block.`
+ @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT. material_diagnostic() has the count.`
+ @return ? SHADER_NOT_FOUND : `shaders/material.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
 fn String? material_source(
 	String fragment,
 	MaterialUniform[] uniforms,
-	alloc::Allocator allocator = mem,
-	// After the allocator, which reads wrong and is deliberate: every caller that
+	alloc::Allocator allocator = mem, // After the allocator, which reads wrong and is deliberate: every caller that
 	// predates textures passes the allocator positionally, and putting this where
 	// it belongs would silently turn one of those into a texture list.
-	MaterialTexture[] textures = {},
+	MaterialTexture[] textures = { },
 	String vertex = "",
 	bool bake = false
 )

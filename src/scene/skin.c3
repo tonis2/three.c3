@@ -7,11 +7,11 @@
  characters. This does the opposite:
 
  - A clip is sampled at a fixed rate once, when the first skinned mesh of the
-   file uploads, into a device-local buffer that never changes again.
+ file uploads, into a device-local buffer that never changes again.
  - An instance names a frame with one `uint` — `Instance.pose`, an offset in
-   matrices. A hundred zombies mid-stride at a hundred different phases disagree
-   about that number and nothing else, so they stay one bucket and one
-   `vkCmdDrawIndexed`, and the crowd costs a hundred integers a frame.
+ matrices. A hundred zombies mid-stride at a hundred different phases disagree
+ about that number and nothing else, so they stay one bucket and one
+ `vkCmdDrawIndexed`, and the crowd costs a hundred integers a frame.
 
  The trade is memory against per-frame work, and the memory is small: sixty
  joints at thirty frames a second is 115 KB per second of clip, so a character
@@ -229,14 +229,16 @@ fn uint plan_segments(Asset* asset) @local
 		foreach (c, &clip : asset.clips)
 		{
 			uint frames = frame_count_of(clip.duration);
-			asset.baked.push({
-				.skin = (uint)s,
-				.clip = (uint)c,
-				.frame_offset = offset,
-				.frame_count = frames,
-				.joint_count = joint_count,
-				.fps = BAKE_FPS,
-			});
+			asset.baked.push(
+				{
+					.skin = (uint)s,
+					.clip = (uint)c,
+					.frame_offset = offset,
+					.frame_count = frames,
+					.joint_count = joint_count,
+					.fps = BAKE_FPS,
+				}
+			);
 			offset += frames * joint_count;
 		}
 	}
@@ -274,11 +276,11 @@ fn uint frame_count_of(float duration) @local
 *>
 fn void Asset.bake_poses(&self, Matrix4f[] poses)
 {
-	Asset* asset = self;
-	sz nodes = asset.nodes.len();
+	Asset* asset        = self;
+	sz nodes            = asset.nodes.len();
 	PosedNode[] scratch = mem::new_array(PosedNode, nodes);
-	Matrix4f[] locals = mem::new_array(Matrix4f, nodes);
-	Matrix4f[] world = mem::new_array(Matrix4f, nodes);
+	Matrix4f[] locals   = mem::new_array(Matrix4f, nodes);
+	Matrix4f[] world    = mem::new_array(Matrix4f, nodes);
 	defer
 	{
 		free(scratch);
@@ -296,7 +298,7 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 
 	foreach (&segment : asset.baked)
 	{
-		AssetSkin* skin = &asset.skins[segment.skin];
+		AssetSkin* skin     = &asset.skins[segment.skin];
 		AnimationClip* clip = &asset.clips[segment.clip];
 
 		for (uint frame = 0; frame < segment.frame_count; frame++)
@@ -365,10 +367,7 @@ fn void pose_at(
 
 	foreach (i, &node : scratch)
 	{
-		locals[i] = matrix::IDENTITY4{float}
-			.translate(node.position)
-			.mul(node.rotation.to_matrix())
-			.scale(node.scale);
+		locals[i] = matrix::IDENTITY4{float}.translate(node.position).mul(node.rotation.to_matrix()).scale(node.scale);
 	}
 
 	foreach (root : asset.roots)
@@ -410,9 +409,7 @@ fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[]
 		// A joint naming a node the file does not have poses nothing rather than
 		// reading past the hierarchy — the vertices riding it stay where the bind
 		// pose left them, which is visible and local instead of catastrophic.
-		out[j] = node < world.len
-			? world[node].mul(skin.inverse_bind[j])
-			: matrix::IDENTITY4{float};
+		out[j] = node < world.len ? world[node].mul(skin.inverse_bind[j]) : matrix::IDENTITY4{float};
 	}
 }
 
@@ -431,7 +428,7 @@ fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[]
 fn void measure_skinned_bounds(Asset* asset, Matrix4f[] poses) @local
 {
 	collision::Aabb3 bind = asset.bounds;
-	bool first = true;
+	bool first            = true;
 
 	foreach (pose : poses)
 	{
@@ -498,15 +495,15 @@ fn uint BakedPose.frame_at(&self, int frame)
  and this is the third:
 
  - Keeping the array `ensure_poses` already built would double the pose memory of
-   every rigged file in the project, whether or not anything ever asks a question
-   about a bone.
+ every rigged file in the project, whether or not anything ever asks a question
+ about a bone.
  - Sampling the clip again along the bone's ancestor chain would answer a slightly
-   different question: the curves at the player's exact time, where what is drawn
-   is the nearest baked frame. A sword half a bake frame ahead of the hand holding
-   it is the kind of wrong that is only visible in motion.
+ different question: the curves at the player's exact time, where what is drawn
+ is the nearest baked frame. A sword half a bake frame ahead of the hand holding
+ it is the kind of wrong that is only visible in motion.
  - Re-running the bake answers exactly the question the GPU is answering, because
-   it is the same deterministic function over the same inputs. `Asset.bake_poses`
-   is public and says so.
+ it is the same deterministic function over the same inputs. `Asset.bake_poses`
+ is public and says so.
 
  So a file nothing is socketed to spends nothing, and one that is spends a second
  copy of its pose table — per asset, not per instance, and once.
@@ -607,8 +604,8 @@ fn bool Scene.attach_socket(&self, NodeId node, NodeId root, String bone)
 	if (player != null && player.live_skin) return false;
 
 	NodeId character = NO_NODE;
-	uint skin = 0;
-	uint joint = 0;
+	uint skin        = 0;
+	uint joint       = 0;
 	if (!self.find_bone(root, bone, &character, &skin, &joint)) return false;
 
 	Node* posed = self.node(character);
@@ -694,8 +691,8 @@ fn void Scene.update_sockets(&self)
 	// Backwards, so removing an entry does not skip the one after it.
 	for (sz i = self.sockets.len(); i > 0; i--)
 	{
-		Socket* socket = &self.sockets[i - 1];
-		Node* node = self.node(socket.node);
+		Socket* socket  = &self.sockets[i - 1];
+		Node* node      = self.node(socket.node);
 		Node* character = self.node(socket.character);
 		if (node == null || character == null)
 		{
@@ -703,9 +700,7 @@ fn void Scene.update_sockets(&self)
 			continue;
 		}
 
-		if (socket.written
-			&& socket.pose == character.pose
-			&& socket.pose_from == character.pose_from
+		if (socket.written && socket.pose == character.pose && socket.pose_from == character.pose_from
 			&& socket.blend == character.blend)
 		{
 			continue;

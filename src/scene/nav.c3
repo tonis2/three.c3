@@ -172,7 +172,7 @@ fn void Scene.drop_nav(&self)
 	foreach (&slot : self.nav_fields)
 	{
 		if (slot.values.len > 0) mem::free(slot.values);
-		*slot = {};
+		*slot = { };
 	}
 	self.nav_fields.clear();
 	self.nav.free();
@@ -181,7 +181,7 @@ fn void Scene.drop_nav(&self)
 fn void NavMesh.free(&self)
 {
 	self.grid.free();
-	*self = {};
+	*self = { };
 }
 
 fn bool NavMesh.usable(&self) => self.built && self.grid.usable();
@@ -213,10 +213,10 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	region.min -= (Vec3) { cell, cell, cell };
 	region.max += (Vec3) { cell, settings.agent_height + cell, cell };
 
-	Vec3 span = region.size();
-	int nx = (int)math::ceil(span.x / cell) + 2 * NAV_PAD + 1;
-	int ny = (int)math::ceil(span.y / cell) + 2 * NAV_PAD + 1;
-	int nz = (int)math::ceil(span.z / cell) + 2 * NAV_PAD + 1;
+	Vec3 span  = region.size();
+	int nx     = (int)math::ceil(span.x / cell) + 2 * NAV_PAD + 1;
+	int ny     = (int)math::ceil(span.y / cell) + 2 * NAV_PAD + 1;
+	int nz     = (int)math::ceil(span.z / cell) + 2 * NAV_PAD + 1;
 	long total = (long)nx * (long)ny * (long)nz;
 	if (total <= 0 || total > NAV_MAX_VOXELS) return false;
 
@@ -244,12 +244,12 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 		triangles.tinit(256);
 		List{NodeId} owners;
 		owners.tinit(256);
-		self.gather_triangles(assets, region, {}, &triangles, &owners);
+		self.gather_triangles(assets, region, { }, &triangles, &owners);
 
 		foreach (tri : triangles)
 		{
-			Vec3 normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
-			float area = normal.length();
+			Vec3 normal    = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+			float area     = normal.length();
 			// A degenerate triangle has no normal and no area; it is still solid,
 			// so it is rasterized and simply never counts as floor.
 			bool standable = area > 1e-9f && math::abs(normal.y / area) >= cos_limit;
@@ -305,7 +305,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	// horizontally — the solid cells that are not floor. Horizontally only:
 	// growing vertically would swallow the standing room above every floor, which
 	// is the space being looked for.
-	//
+	// 
 	// Walls rather than the whole solid set. Dilating every solid cell is correct
 	// only while the floor is level; the moment it is not, the uphill column's
 	// *floor* cell sits at the walkable layer of the column beside it — that is
@@ -316,13 +316,13 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	// trail where `0.30` — the same bake with `grow` rounding to zero — reached
 	// all 49. A flat corridor is whole either way, which is why it survives every
 	// test until a level has a hill in it.
-	//
+	// 
 	// A wall keeps its clearance, because a wall is not floor. A ramp keeps its
 	// continuity, because ground you stand *on* is not something to keep clear
 	// *of*. The seam where a floor triangle and a wall triangle share a cell is
 	// left out of the dilation, and the wall's own cells above it are not, so the
 	// clearance is still there one layer up where the agent's chest is.
-	int grow = (int)math::ceil(math::max(settings.agent_radius, 0.0f) / cell - 0.5f);
+	int grow       = (int)math::ceil(math::max(settings.agent_radius, 0.0f) / cell - 0.5f);
 	char[] blocked = solid;
 	char[] dilated;
 	if (grow > 0)
@@ -380,7 +380,11 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 				bool clear = true;
 				for (int up = 1; up <= head && clear; up++)
 				{
-					if (y + up >= ny - NAV_PAD) { clear = false; break; }
+					if (y + up >= ny - NAV_PAD)
+					{
+						clear = false;
+						break;
+					}
 					if (blocked[(sz)(((z * ny) + (y + up)) * nx + x)] != 0) clear = false;
 				}
 				if (!clear) continue;
@@ -407,7 +411,9 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.grid = {
 		.origin = origin,
 		.cell = cell,
-		.nx = nx, .ny = ny, .nz = nz,
+		.nx = nx,
+		.ny = ny,
+		.nz = nz,
 		.index = index,
 		.cells = cells.to_array(mem),
 	};
@@ -447,7 +453,7 @@ fn void NavMesh.measure_components(&self)
 	self.largest_component = 0;
 	if (!self.usable()) return;
 
-	sz count = self.grid.cells.len;
+	sz count    = self.grid.cells.len;
 	int[] label = mem::new_array(int, count);
 	defer mem::free(label);
 	foreach (&slot : label) *slot = -1;
@@ -561,12 +567,12 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 	int entry = self.grid.nearest_cell(point, NAV_PAD);
 	if (entry < 0) return { 0, 0, 0 };
 
-	int voxel = self.grid.cells[entry];
+	int voxel  = self.grid.cells[entry];
 	float here = field[entry];
 	if (here >= collision::VOXEL_UNREACHED) return { 0, 0, 0 };
 
-	int plane = self.grid.nx * self.grid.ny;
-	float best = here;
+	int plane      =  self.grid.nx * self.grid.ny;
+	float best     =  here;
 	int best_voxel = -1;
 
 	for (int dz = -1; dz <= 1; dz++)
@@ -576,7 +582,7 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 			for (int dx = -1; dx <= 1; dx++)
 			{
 				if (dx == 0 && dy == 0 && dz == 0) continue;
-				int step = dz * plane + dy * self.grid.nx + dx;
+				int step      = dz * plane + dy * self.grid.nx + dx;
 				int neighbour = self.grid.index[voxel + step];
 				if (neighbour < 0) continue;
 				float there = field[neighbour];
@@ -634,7 +640,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 	uint count = 0;
 	out[count++] = self.foot_of(voxel);
 
-	int plane = self.grid.nx * self.grid.ny;
+	int plane  = self.grid.nx * self.grid.ny;
 	// One step per cell of the longest possible descent, with slack. A chamfer
 	// field is monotonically decreasing along this walk, so the bound is a
 	// backstop against a field that was never solved rather than a real limit.
@@ -659,7 +665,11 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 					int neighbour = self.grid.index[candidate];
 					if (neighbour < 0) continue;
 					float there = field[neighbour];
-					if (there < best) { best = there; next = candidate; }
+					if (there < best)
+					{
+						best = there;
+						next = candidate;
+					}
 				}
 			}
 		}
@@ -687,7 +697,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
 {
 	collision::Ray down = { .origin = { point.x, point.y + cell, point.z }, .direction = { 0, -1, 0 } };
-	Hit hit = self.raycast(assets, down);
+	Hit hit             = self.raycast(assets, down);
 	if (!hit.hit || hit.distance > cell * 3.0f) return point;
 	return hit.point;
 }
@@ -710,9 +720,7 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
  @param out : `Where the shortened path goes. May be the same slice the raw walk is in.`
  @return `How many points were written, always at least one.`
 *>
-fn uint Scene.shorten_path(
-	&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, IgnoreSet skip
-)
+fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, IgnoreSet skip)
 {
 	if (count == 0 || out.len == 0) return 0;
 	if (count == 1 || assets == null)
@@ -722,12 +730,12 @@ fn uint Scene.shorten_path(
 	}
 
 	float radius = math::max(nav.settings.agent_radius, 0.05f);
-	float half = math::max((nav.settings.agent_height - 2.0f * radius) * 0.5f, 0.0f);
+	float half   = math::max((nav.settings.agent_height - 2.0f * radius) * 0.5f, 0.0f);
 	// The capsule's centre above the foot point the path carries.
-	float lift = radius + half;
+	float lift   = radius + half;
 	// A hair off the floor, so a sweep along a surface the agent is standing on is
 	// not a sweep starting in contact with it.
-	float skin = nav.grid.cell * 0.05f;
+	float skin   = nav.grid.cell * 0.05f;
 
 	uint written = 0;
 	out[written++] = self.on_floor(assets, path[0], nav.grid.cell);

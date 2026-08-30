@@ -90,7 +90,7 @@ struct Texture
 *>
 fn uint mip_levels(uint width, uint height)
 {
-	uint side = width > height ? width : height;
+	uint side   = width > height ? width : height;
 	uint levels = 1;
 	while (side > 1)
 	{
@@ -116,8 +116,7 @@ fn uint mip_levels(uint width, uint height)
 *>
 fn bool Gpu.can_generate_mips(&self, vk::Format format)
 {
-	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_BLIT_SRC_BIT
-		| FORMAT_FEATURE_BLIT_DST_BIT
+	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_BLIT_SRC_BIT | FORMAT_FEATURE_BLIT_DST_BIT
 		| FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
 	vk::FormatProperties props;
@@ -177,11 +176,16 @@ fn uint Gpu.levels_for(&self, uint width, uint height, ColorSpace space, bool mi
  @require rgba.len == (sz)width * height * 4
 *>
 fn Texture? Gpu.create_texture(
-	&self, char[] rgba, uint width, uint height, ColorSpace space = ColorSpace.SRGB, bool mips = true
+	&self,
+	char[] rgba,
+	uint width,
+	uint height,
+	ColorSpace space = ColorSpace.SRGB,
+	bool mips = true
 )
 {
 	vk::Format format = space.format();
-	uint levels = self.levels_for(width, height, space, mips);
+	uint levels       = self.levels_for(width, height, space, mips);
 
 	Texture texture = {
 		.width = width,
@@ -196,13 +200,9 @@ fn Texture? Gpu.create_texture(
 		.setMipLevels(levels)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		// TRANSFER_SRC as well as DST, so `read_pixels` can copy the image back
-		// and each mip level can be the blit source for the one below it. It costs
-		// a usage bit and nothing else, and without it the readback is not merely
-		// slow but invalid: the layer answers
-		// `VUID-VkImageMemoryBarrier2-oldLayout-01212`, because an image may not
-		// be moved to a layout its usage flags do not admit.
+		.setTiling(
+			IMAGE_TILING_OPTIMAL
+		)/* TRANSFER_SRC as well as DST, so `read_pixels` can copy the image back *//* and each mip level can be the blit source for the one below it. It costs *//* a usage bit and nothing else, and without it the readback is not merely *//* slow but invalid: the layer answers *//* `VUID-VkImageMemoryBarrier2-oldLayout-01212`, because an image may not *//* be moved to a layout its usage flags do not admit. */
 		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(self.handle)!;
@@ -218,14 +218,15 @@ fn Texture? Gpu.create_texture(
 	)!;
 	defer stage.free();
 
-	self.handle.@single_time_command(queue: self.graphics; vk::CommandBuffer cmd)
+	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)
 	{
 		// The whole chain, not just level 0. Every level is a separate subresource
 		// with a layout of its own, and one left in `UNDEFINED` is not a level
 		// that reads as black — it is a blit destination in a layout the blit does
 		// not admit (`VUID-vkCmdBlitImage-dstImageLayout-00226`), with undefined
 		// contents after.
-		vk::ImageMemoryBarrier2 to_transfer = { ...IMAGE_BARRIER,
+		vk::ImageMemoryBarrier2 to_transfer = {
+			...IMAGE_BARRIER,
 			.image = texture.image,
 			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
 			.srcAccessMask = (vk::AccessFlags2)0,
@@ -258,11 +259,12 @@ fn Texture? Gpu.create_texture(
 		// a real dependency. Blitting every level from level 0 instead would need
 		// no barriers and would be worse — a single wide box filter per level
 		// rather than a chain, which is exactly the aliasing the chain removes.
-		int mip_width = (int)width;
+		int mip_width  = (int)width;
 		int mip_height = (int)height;
 		for (uint level = 1; level < levels; level++)
 		{
-			vk::ImageMemoryBarrier2 to_source = { ...IMAGE_BARRIER,
+			vk::ImageMemoryBarrier2 to_source = {
+				...IMAGE_BARRIER,
 				.image = texture.image,
 				.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 				.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
@@ -277,7 +279,7 @@ fn Texture? Gpu.create_texture(
 			// Floored at 1 rather than halved, because the short side reaches 1
 			// while the long one is still shrinking. A zero extent is not a small
 			// blit, it is an invalid one.
-			int next_width = mip_width > 1 ? mip_width / 2 : 1;
+			int next_width  = mip_width > 1 ? mip_width / 2 : 1;
 			int next_height = mip_height > 1 ? mip_height / 2 : 1;
 
 			vk::ImageBlit downsample = {
@@ -316,9 +318,10 @@ fn Texture? Gpu.create_texture(
 		// was only ever written to. Both are handed to one `cmdPipelineBarrier2` —
 		// a dependency covers a *set* of subresources, and splitting these into
 		// two calls would order the second against the first for no reason.
-		//
+		// 
 		// A one-level image takes the second entry alone.
-		vk::ImageMemoryBarrier2 read_levels = { ...IMAGE_BARRIER,
+		vk::ImageMemoryBarrier2 read_levels = {
+			...IMAGE_BARRIER,
 			.image = texture.image,
 			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 			.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
@@ -337,7 +340,7 @@ fn Texture? Gpu.create_texture(
 		// `last_level` first so a one-level image is the head of this array rather
 		// than a special case built somewhere else.
 		vk::ImageMemoryBarrier2[2] to_shader = { last_level, read_levels };
-		usz used = levels > 1 ? 2 : 1;
+		usz used                             = levels > 1 ? 2 : 1;
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(to_shader[:used]));
 	}!;
 
@@ -432,7 +435,7 @@ fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 	)!;
 	defer readback.free();
 
-	gpu.handle.@single_time_command(queue: gpu.graphics; vk::CommandBuffer cmd)
+	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
 	{
 		vk::ImageMemoryBarrier2 to_src = vk::transferBarrier(
 			self.image,

@@ -1,16 +1,16 @@
 <*
  The physics verbs.
 
-	mesh.body = { shape: 'box', mass: 1, friction: 0.5, restitution: 0.2 }
-	three.physics.add(mesh)
-	three.physics.remove(mesh)
-	three.physics.gravity = [0, -9.8, 0]
-	three.physics.velocity(mesh)                     // and setVelocity
-	three.physics.applyImpulse(mesh, [0, 5, 0])
-	three.physics.joint(door, frame, { type: 'hinge', axis: [0, 1, 0] })
-	three.physics.soft(jelly, { mass: 2 })
-	three.onTrigger(e => ...)
-	three.onContact(e => ...)
+ mesh.body = { shape: 'box', mass: 1, friction: 0.5, restitution: 0.2 }
+ three.physics.add(mesh)
+ three.physics.remove(mesh)
+ three.physics.gravity = [0, -9.8, 0]
+ three.physics.velocity(mesh)                     // and setVelocity
+ three.physics.applyImpulse(mesh, [0, 5, 0])
+ three.physics.joint(door, frame, { type: 'hinge', axis: [0, 1, 0] })
+ three.physics.soft(jelly, { mass: 2 })
+ three.onTrigger(e => ...)
+ three.onContact(e => ...)
 
  Velocity and impulse are what make a character possible: without them no
  combination of the verbs above both walks and collides — a dynamic body can be
@@ -67,7 +67,12 @@ fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
  handed body 7 of a scene it did not build.
 *>
 fn void js_physics_add(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -78,7 +83,7 @@ fn void js_physics_add(
 
 	@pool()
 	{
-		String kind_name = arg_text(&js, argc, args, 2, tmem);
+		String kind_name  = arg_text(&js, argc, args, 2, tmem);
 		String shape_name = arg_text(&js, argc, args, 3, tmem);
 
 		BodyKind kind;
@@ -89,10 +94,12 @@ fn void js_physics_add(
 			case "kinematic": kind = BodyKind.KINEMATIC;
 			case "trigger": kind = BodyKind.TRIGGER;
 			default:
-				*out = js.raise(string::tformat(
-					"'%s' is not a body kind — it is one of dynamic, static, kinematic or trigger",
-					kind_name
-				));
+				*out = js.raise(
+					string::tformat(
+						"'%s' is not a body kind — it is one of dynamic, static, kinematic or trigger",
+						kind_name
+					)
+				);
 				return;
 		}
 
@@ -105,22 +112,31 @@ fn void js_physics_add(
 			case "hull": shape = ColliderShape.HULL;
 			case "heightfield": shape = ColliderShape.HEIGHTFIELD;
 			default:
-				*out = js.raise(string::tformat(
-					"'%s' is not a collider shape — it is one of box, sphere, capsule, hull or heightfield",
-					shape_name
-				));
+				*out = js.raise(
+					string::tformat(
+						"'%s' is not a collider shape — it is one of box, sphere, capsule, hull or heightfield",
+						shape_name
+					)
+				);
 				return;
 		}
 
-		float mass = arg_float(&js, argc, args, 4);
-		float friction = arg_float(&js, argc, args, 5);
+		float mass        = arg_float(&js, argc, args, 4);
+		float friction    = arg_float(&js, argc, args, 5);
 		float restitution = arg_float(&js, argc, args, 6);
 
 		// The scene the object is in, not the one being rendered: bodies for the
 		// next level are built while it is still off screen, which is most of what
 		// owning a world per scene is for.
 		if (catch err = ref.scene.physics.add(
-			ref.scene, &self.pass.assets, ref.id, kind, shape, mass, friction, restitution
+			ref.scene,
+			&self.pass.assets,
+			ref.id,
+			kind,
+			shape,
+			mass,
+			friction,
+			restitution
 		))
 		{
 			*out = js.raise(physics_add_message(err, shape_name));
@@ -145,7 +161,7 @@ fn String physics_add_message(fault err, String shape_name) @local
 		case MESH_HAS_NO_HULL:
 			return string::tformat(
 				"a '%s' collider needs the mesh's own points and this mesh has none on the host — "
-				"it may not have been drawn yet, and 'box' works from bounds alone",
+					"it may not have been drawn yet, and 'box' works from bounds alone",
 				shape_name
 			);
 		case NODE_IS_NOT_TOP_LEVEL:
@@ -163,7 +179,12 @@ fn String physics_add_message(fault err, String shape_name) @local
  `physicsRemove(index, generation)` — true when there was one.
 *>
 fn void js_physics_remove(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -176,7 +197,12 @@ fn void js_physics_remove(
 }
 
 fn void js_physics_gravity_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -185,15 +211,22 @@ fn void js_physics_gravity_set(
 	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
 	if (scene == null) return;
 
-	scene.physics.set_gravity({
-		arg_float(&js, argc, args, 1),
-		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3),
-	});
+	scene.physics.set_gravity(
+		{
+			arg_float(&js, argc, args, 1),
+			arg_float(&js, argc, args, 2),
+			arg_float(&js, argc, args, 3),
+		}
+	);
 }
 
 fn void js_physics_gravity_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -228,7 +261,12 @@ fn void js_physics_gravity_get(
  converts backwards for exactly this reason.
 *>
 fn void js_physics_transform(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -244,7 +282,7 @@ fn void js_physics_transform(
 		return;
 	}
 
-	Vec3 euler = euler_from_quat(node.rotation);
+	Vec3 euler     = euler_from_quat(node.rotation);
 	qjs::Value six = js.array();
 	js.set_index(six, 0, qjs::number_value((double)node.position.x));
 	js.set_index(six, 1, qjs::number_value((double)node.position.y));
@@ -257,7 +295,7 @@ fn void js_physics_transform(
 
 // ---------------------------------------------------------------------------
 // Velocity and impulse
-//
+// 
 // Five verbs over three solver calls. What they share is the guard: each one
 // resolves the node, refuses a body the solver does not integrate, and wakes the
 // island before touching anything. Skipping the wake is the failure worth naming
@@ -272,7 +310,12 @@ fn void js_physics_transform(
  mistakes and the fix for each is a different line of script.
 *>
 fn collision::Rigidbody* pushable(
-	JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, qjs::Value* out, String verb
+	JsRuntime* self,
+	qjs::Context* js,
+	int argc,
+	qjs::Value* args,
+	qjs::Value* out,
+	String verb
 ) @local
 {
 	NodeRef ref = arg_handle(self, js, argc, args, 0, out);
@@ -287,30 +330,38 @@ fn collision::Rigidbody* pushable(
 	}
 	if (body.kind == BodyKind.STATIC)
 	{
-		*out = js.raise(string::tformat(
-			"%s cannot move a static body: its inverse mass is zero, so an impulse is arithmetically nothing. Give it a mass, or move its transform directly",
-			verb
-		));
+		*out = js.raise(
+			string::tformat(
+				"%s cannot move a static body: its inverse mass is zero, so an impulse is arithmetically nothing. Give it a mass, or move its transform directly",
+				verb
+			)
+		);
 		return null;
 	}
 	if (body.kind == BodyKind.KINEMATIC)
 	{
-		*out = js.raise(string::tformat(
-			"%s cannot move a kinematic body: the solver drives it from the transform your script writes, so a velocity set here is discarded a fraction of a step later. Move object.position instead",
-			verb
-		));
+		*out = js.raise(
+			string::tformat(
+				"%s cannot move a kinematic body: the solver drives it from the transform your script writes, so a velocity set here is discarded a fraction of a step later. Move object.position instead",
+				verb
+			)
+		);
 		return null;
 	}
 	if (body.kind == BodyKind.TRIGGER)
 	{
-		*out = js.raise(string::tformat("%s cannot move a trigger: a trigger detects overlaps and is never integrated", verb));
+		*out = js.raise(
+			string::tformat("%s cannot move a trigger: a trigger detects overlaps and is never integrated", verb)
+		);
 		return null;
 	}
 
 	collision::Rigidbody* rigid = ref.scene.physics.rigidbody_for(id);
 	if (rigid == null)
 	{
-		*out = js.raise(string::tformat("%s found the body's record but not the solver's, which should not happen", verb));
+		*out = js.raise(
+			string::tformat("%s found the body's record but not the solver's, which should not happen", verb)
+		);
 		return null;
 	}
 	ref.scene.physics.wake(rigid);
@@ -333,7 +384,12 @@ fn collision::Rigidbody* pushable(
  actually carrying the thing.
 *>
 fn void js_physics_velocity_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -374,7 +430,12 @@ fn void js_physics_velocity_get(
  frame rather than once.
 *>
 fn void js_physics_linear_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -384,7 +445,9 @@ fn void js_physics_linear_set(
 	if (rigid == null) return;
 
 	rigid.linear_velocity = {
-		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
 	};
 }
 
@@ -393,7 +456,12 @@ fn void js_physics_linear_set(
  world axis, the vector's length being the rate.
 *>
 fn void js_physics_angular_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -403,7 +471,9 @@ fn void js_physics_angular_set(
 	if (rigid == null) return;
 
 	rigid.angular_velocity = {
-		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
 	};
 }
 
@@ -422,7 +492,12 @@ fn void js_physics_angular_set(
  for anything not sitting at the origin.
 *>
 fn void js_physics_impulse(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -431,12 +506,8 @@ fn void js_physics_impulse(
 	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.applyImpulse");
 	if (rigid == null) return;
 
-	Vec3 impulse = {
-		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
-	};
-	Vec3 point = {
-		arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7)
-	};
+	Vec3 impulse = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point = { arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) };
 
 	if (point.length_sq() == 0.0f)
 	{
@@ -454,7 +525,12 @@ fn void js_physics_impulse(
  second means solving for an offset and a force that produce a wanted spin.
 *>
 fn void js_physics_torque_impulse(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -463,13 +539,18 @@ fn void js_physics_torque_impulse(
 	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.applyTorqueImpulse");
 	if (rigid == null) return;
 
-	rigid.apply_angular_impulse({
-		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
-	});
+	rigid.apply_angular_impulse(
+		{ arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) }
+	);
 }
 
 fn void js_physics_count(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -483,7 +564,7 @@ fn void js_physics_count(
 
 // ---------------------------------------------------------------------------
 // Joints
-//
+// 
 // The host takes a **limit list** and nothing else: a joint is some of the joint
 // frame's axes held to some range, which is glTF's `KHR_physics_rigid_bodies`
 // description of one and is exactly the two lists `collision::GenericJoint3D`
@@ -506,7 +587,12 @@ const sz JOINT_LIMIT_FLOATS = 6;
  written down in `prelude/physics.js` where it is filled in.
 *>
 fn void js_physics_joint(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -520,12 +606,12 @@ fn void js_physics_joint(
 	{
 		*out = js.raise(
 			"three.physics.joint needs both objects in the same scene — a world belongs to a scene, "
-			"and a joint is a constraint inside one world"
+				"and a joint is a constraint inside one world"
 		);
 		return;
 	}
 
-	char[] packed = {};
+	char[] packed = { };
 	if (argc > 14) packed = js.bytes(args[14]);
 	if (packed.len == 0 || packed.len % (JOINT_LIMIT_FLOATS * float::size) != 0)
 	{
@@ -535,12 +621,12 @@ fn void js_physics_joint(
 
 	@pool()
 	{
-		float[] rows = ((float*)packed.ptr)[:packed.len / float::size];
-		sz count = rows.len / JOINT_LIMIT_FLOATS;
+		float[] rows        = ((float*)packed.ptr)[:packed.len / float::size];
+		sz count            = rows.len / JOINT_LIMIT_FLOATS;
 		JointLimit[] limits = alloc::new_array(tmem, JointLimit, count);
 		for (sz i = 0; i < count; i++)
 		{
-			float[] row = rows[i * JOINT_LIMIT_FLOATS ..][:JOINT_LIMIT_FLOATS];
+			float[] row = rows[i * JOINT_LIMIT_FLOATS..][:JOINT_LIMIT_FLOATS];
 			limits[i] = {
 				.angular = row[0] != 0,
 				.axes = (char)row[1],
@@ -553,12 +639,8 @@ fn void js_physics_joint(
 
 		JointSpec spec = {
 			.has_pivot = arg_truth(&js, argc, args, 4),
-			.pivot = {
-				arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7)
-			},
-			.axis = {
-				arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10)
-			},
+			.pivot = { arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) },
+			.axis = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) },
 			.collide = arg_truth(&js, argc, args, 11),
 			.stiffness = arg_float(&js, argc, args, 12),
 			.damping = arg_float(&js, argc, args, 13),
@@ -611,7 +693,12 @@ fn String joint_message(fault err) @local
  so there is no handle to find its world from.
 *>
 fn void js_physics_joint_remove(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -627,10 +714,16 @@ fn void js_physics_joint_remove(
 // Soft bodies
 
 <*
- `physicsSoftAdd(index, generation, mass, softness, damping, volume, volumeSoftness, bending, bendingSoftness, friction, restitution)`.
+ `physicsSoftAdd(index, generation, mass, softness, damping, volume, volumeSoftness, bending, bendingSoftness, friction,
+ restitution)`.
 *>
 fn void js_physics_soft_add(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -687,7 +780,12 @@ fn String soft_message(fault err) @local
  `physicsSoftRemove(index, generation)` — true when there was one.
 *>
 fn void js_physics_soft_remove(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -704,7 +802,12 @@ fn void js_physics_soft_remove(
  no soft body.
 *>
 fn void js_physics_soft_count(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -728,7 +831,12 @@ fn void js_physics_soft_count(
  Answers how many particles were written, and 0 when the buffer is the wrong size.
 *>
 fn void js_physics_soft_points(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -744,7 +852,7 @@ fn void js_physics_soft_points(
 		return;
 	}
 
-	char[] into = {};
+	char[] into = { };
 	if (argc > 2) into = js.bytes(args[2]);
 	if (into.len != points.len * Vec3::size)
 	{
@@ -761,7 +869,12 @@ fn void js_physics_soft_points(
  at a world point, or where it already is.
 *>
 fn void js_physics_soft_pin(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -770,7 +883,7 @@ fn void js_physics_soft_pin(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	sz particle = (sz)arg_int(&js, argc, args, 2);
+	sz particle   = (sz)arg_int(&js, argc, args, 2);
 	Vec3[] points = ref.scene.physics.soft_points(ref.id);
 	if (particle < 0 || particle >= points.len)
 	{
@@ -781,9 +894,7 @@ fn void js_physics_soft_pin(
 	Vec3 at = points[particle];
 	if (arg_truth(&js, argc, args, 3))
 	{
-		at = {
-			arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6)
-		};
+		at = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
 	}
 
 	*out = qjs::bool_value(ref.scene.physics.pin_soft(ref.id, particle, at));
@@ -793,7 +904,12 @@ fn void js_physics_soft_pin(
  `physicsSoftUnpin(index, generation, particle, mass)` — let one particle go.
 *>
 fn void js_physics_soft_unpin(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -802,9 +918,9 @@ fn void js_physics_soft_unpin(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	*out = qjs::bool_value(ref.scene.physics.unpin_soft(
-		ref.id, (sz)arg_int(&js, argc, args, 2), arg_float(&js, argc, args, 3)
-	));
+	*out = qjs::bool_value(
+		ref.scene.physics.unpin_soft(ref.id, (sz)arg_int(&js, argc, args, 2), arg_float(&js, argc, args, 3))
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -819,7 +935,12 @@ fn void js_physics_soft_unpin(
  whereas four registrations is four things to unbind and four to forget.
 *>
 fn void js_on_trigger(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -844,7 +965,12 @@ fn void js_on_trigger(
 }
 
 fn void js_on_contact(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -903,13 +1029,16 @@ fn void JsRuntime.report_diverged_bodies(&self)
 	if (count == 0) return;
 	self.pass.scene.physics.diverged.clear();
 
-	self.report_frame_failure(string::tformat(
-		"%d object%s left the simulation and had its body removed. A body that starts inside "
-		"static geometry is the usual cause: the solver answers a deep overlap with a correction "
-		"deep enough to throw it out of the world. Check that nothing is spawned intersecting "
-		"the floor or a wall.",
-		count, count == 1 ? "" : "s"
-	));
+	self.report_frame_failure(
+		string::tformat(
+			"%d object%s left the simulation and had its body removed. A body that starts inside "
+				"static geometry is the usual cause: the solver answers a deep overlap with a correction "
+				"deep enough to throw it out of the world. Check that nothing is spawned intersecting "
+				"the floor or a wall.",
+			count,
+			count == 1 ? "" : "s"
+		)
+	);
 }
 
 <*
@@ -1006,10 +1135,10 @@ fn bool JsRuntime.call_physics_handler(&self, qjs::Value handler, qjs::Value eve
 		qjs::Value? answer = self.js.call(handler, qjs::undefined_value(), handler_args[..]);
 		if (catch err = answer)
 		{
-			self.report_frame_failure(self.timed_out
-				? self.frame_timeout_message()
-				: string::tformat(
-					"the %s handler threw and was stopped: %s", what, self.js.exception(tmem)));
+			self.report_frame_failure(
+				self.timed_out ? self.frame_timeout_message()
+					: string::tformat("the %s handler threw and was stopped: %s", what, self.js.exception(tmem))
+			);
 			kept = false;
 		}
 		else
@@ -1018,9 +1147,13 @@ fn bool JsRuntime.call_physics_handler(&self, qjs::Value handler, qjs::Value eve
 			self.js.release(answer);
 			if (promised)
 			{
-				self.report_frame_failure(string::tformat(
-					"the %s handler returned a promise. It has to finish inside the frame, "
-					"so it must be synchronous — do the awaiting in a run_script instead", what));
+				self.report_frame_failure(
+					string::tformat(
+						"the %s handler returned a promise. It has to finish inside the frame, "
+							"so it must be synchronous — do the awaiting in a run_script instead",
+						what
+					)
+				);
 				kept = false;
 			}
 		}

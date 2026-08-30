@@ -61,11 +61,17 @@ struct InventoryEntry
 fn void InventoryEntry.free(&self)
 {
 	if (self.path.len > 0) self.path.free(mem);
-	foreach (&entry : self.meshes) { if (entry.name.len > 0) entry.name.free(mem); }
+	foreach (&entry : self.meshes)
+	{
+		if (entry.name.len > 0) entry.name.free(mem);
+	}
 	self.meshes.free();
-	foreach (name : self.animations) { if (name.len > 0) name.free(mem); }
+	foreach (name : self.animations)
+	{
+		if (name.len > 0) name.free(mem);
+	}
 	self.animations.free();
-	*self = {};
+	*self = { };
 }
 
 alias Inventory = List{InventoryEntry};
@@ -88,7 +94,7 @@ fn void Inventory.free_entries(&self)
 
  @param root : `The assets directory.`
  @return `Owned by the caller; free it with Inventory.free_entries.`
- @return? ASSETS_ROOT_IS_NOT_A_DIRECTORY : `Nothing there, or not a directory.`
+ @return ? ASSETS_ROOT_IS_NOT_A_DIRECTORY : `Nothing there, or not a directory.`
 *>
 fn Inventory? take_inventory(String root)
 {
@@ -104,7 +110,7 @@ fn Inventory? take_inventory(String root)
 
 		// `ls` answers in the filesystem's order, which is nobody's contract.
 		String[] names = alloc::new_array(tmem, String, (sz)listed.len());
-		usz count = 0;
+		usz count      = 0;
 		foreach (entry : listed)
 		{
 			String name = (String)entry;
@@ -171,7 +177,7 @@ fn void sort_paths(String[] names) @local
 	for (usz i = 1; i < names.len; i++)
 	{
 		String held = names[i];
-		usz j = i;
+		usz j       = i;
 		while (j > 0 && before(held, names[j - 1]))
 		{
 			names[j] = names[j - 1];
@@ -191,7 +197,7 @@ fn InventoryEntry? describe_gltf(String root, String relative) @local
 {
 	@pool()
 	{
-		String full = string::tformat("%s/%s", root, relative);
+		String full             = string::tformat("%s/%s", root, relative);
 		gltf::GltfStream stream = gltf::open(full, tmem)!;
 		defer stream.close();
 
@@ -254,8 +260,8 @@ fn void widen(InventoryEntry* entry, gltf::Gltf* doc, gltf::Primitive primitive)
 	if (catch positions) return;
 
 	gltf::Accessor accessor = doc.accessors[positions];
-	Vec3 low = { accessor.min[0], accessor.min[1], accessor.min[2] };
-	Vec3 high = { accessor.max[0], accessor.max[1], accessor.max[2] };
+	Vec3 low                = { accessor.min[0], accessor.min[1], accessor.min[2] };
+	Vec3 high               = { accessor.max[0], accessor.max[1], accessor.max[2] };
 
 	if (!entry.has_bounds)
 	{

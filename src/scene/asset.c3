@@ -5,22 +5,22 @@
  Three decisions here are cheap now and expensive later:
 
  - One uploaded mesh per glTF primitive, never a soup. An instance is an
-   immutable asset reference plus a transform, so `Scene` has to be able to name
-   a mesh and place N copies of it — the exact opposite of welding a scene into a
-   single triangle soup, which is what a rigging tool wants.
+ immutable asset reference plus a transform, so `Scene` has to be able to name
+ a mesh and place N copies of it — the exact opposite of welding a scene into a
+ single triangle soup, which is what a rigging tool wants.
 
  - Textures deduplicated by content hash across every asset already loaded, not
-   merely within one file. Two kit pieces exported from the same source share
-   their images, and a scene built out of a kit uploads each image once. That is
-   why the texture list and the 1x1 white stand-in live on `Assets` rather than
-   on `Asset`.
+ merely within one file. Two kit pieces exported from the same source share
+ their images, and a scene built out of a kit uploads each image once. That is
+ why the texture list and the 1x1 white stand-in live on `Assets` rather than
+ on `Asset`.
 
  - A `TriBVH` per unique mesh, built at upload. It is not read until
-   `scene/pick.c3` needs it, but it is per *mesh* rather than per instance — a
-   thousand copies of a wall cost one tree — and building it here is what makes
-   that true without a second pass over the file. The cost is honest: the
-   positions and a triangle index array stay resident on the CPU for the life of
-   the asset, because the tree points at them.
+ `scene/pick.c3` needs it, but it is per *mesh* rather than per instance — a
+ thousand copies of a wall cost one tree — and building it here is what makes
+ that true without a second pass over the file. The cost is honest: the
+ positions and a triangle index array stay resident on the CPU for the life of
+ the asset, because the tree points at them.
 
  ## There are no descriptor pools
 
@@ -57,11 +57,7 @@ import image::jpeg;
 import collision;
 
 faultdef
-	ASSET_HAS_NO_MESHES,
-	UNSUPPORTED_IMAGE,
-	TEXTURE_UNREADABLE,
-	TEXTURE_FORMAT_UNKNOWN,
-	TEXTURE_BIT_DEPTH;
+	ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE, TEXTURE_UNREADABLE, TEXTURE_FORMAT_UNKNOWN, TEXTURE_BIT_DEPTH;
 
 <*
  A handle to a loaded asset: which slot, and which occupant of it.
@@ -90,8 +86,10 @@ struct AssetId
 const AssetId NO_ASSET = { uint::max, 0 };
 
 fn bool AssetId.is_set(self) => self.index != uint::max;
-fn bool AssetId.equals(self, AssetId other) @operator(==) => self.index == other.index
-	&& self.generation == other.generation;
+fn bool AssetId.equals(
+	self,
+	AssetId other
+) @operator(==) => self.index == other.index && self.generation == other.generation;
 
 <*
  One layer of `CUSTOM_materials_layers`, resolved to texture slots.
@@ -189,15 +187,15 @@ struct GpuLayers
 
  ## The four maps, and what shades them
 
-	 normal     `mapped_normal` in a ShaderMaterial, or a LayeredMaterial's
-	            `normal` — the same path a hand-written one takes.
-	 emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
-	 occlusion  nothing built in. A `shade` body multiplies by it in one line.
-	 metallic-  nothing built in, and that is a decision rather than a gap: the
-	 roughness  specular term reads one roughness and one metalness per material
-	            — `material.roughness`, `material.metalness` — and this map is
-	            per texel. Loaded anyway, because a `shade` body is free to do
-	            something with it and "we parsed it and threw it away" is worse.
+ normal     `mapped_normal` in a ShaderMaterial, or a LayeredMaterial's
+ `normal` — the same path a hand-written one takes.
+ emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
+ occlusion  nothing built in. A `shade` body multiplies by it in one line.
+ metallic-  nothing built in, and that is a decision rather than a gap: the
+ roughness  specular term reads one roughness and one metalness per material
+ — `material.roughness`, `material.metalness` — and this map is
+ per texel. Loaded anyway, because a `shade` body is free to do
+ something with it and "we parsed it and threw it away" is worse.
 
  ## The colourspaces are the load-bearing part
 
@@ -296,7 +294,7 @@ struct GpuMesh
 	// `CUSTOM_materials_layers`, if this primitive's material carried it. Empty and
 	// `present == false` otherwise, which is every mesh in every file that was not
 	// authored with the extension.
-	//
+	// 
 	// Unlike `texture`, the zero fill is correct here, because the field that
 	// decides whether anything is read is a bool rather than an index: a
 	// construction site that forgets this gets `present == false` and a mesh with
@@ -313,7 +311,7 @@ struct GpuMesh
 	collision::TriBVHNode* bvh;
 
 	// ---- Lazily uploaded ------------------------------------------------
-	//
+	// 
 	// `Assets.load` describes a file rather than uploading it, so a mesh slot
 	// exists from the moment the JSON is parsed and everything above this line
 	// except `name`, `bounds` and `vertex_count` is empty until something draws
@@ -398,7 +396,7 @@ struct AssetNode
 
 	// Which of `Asset.skins` poses this node's mesh, or -1 for the ordinary node
 	// that is placed by its own transform.
-	//
+	// 
 	// On the node and not on the mesh, because that is where glTF puts it: the
 	// vertex attributes name joints by position in *this* skin's array, so the same
 	// primitive under two nodes with two skins is two different poses of one piece
@@ -452,7 +450,7 @@ struct Asset
 	List{AssetSkin} skins;
 
 	// ---- The baked poses -----------------------------------------------------
-	//
+	// 
 	// Every clip of every skin, sampled at a fixed rate and folded through the
 	// inverse bind pose. Device-local and immutable, which is the whole reason a
 	// crowd is affordable: a hundred characters at a hundred phases read a hundred
@@ -521,7 +519,7 @@ struct Asset
 	// `Scene.create_slot` and `Scene.kill` — the two places a node can start or
 	// stop naming an asset — so there is one implementation of it rather than one
 	// per caller.
-	//
+	// 
 	// Zero means unloadable, and it means it completely. In Three.js you need an
 	// explicit `.dispose()` because anything can hold a hidden reference to a
 	// buffer; here nothing can, because there is no accessor from an asset to its
@@ -705,7 +703,7 @@ struct Assets
 	// The device, for the one path that cannot be handed one: `Assets.retain` is
 	// called from `Scene.create_slot`, which has no `Gpu*` and should not grow one
 	// — a scene is not a renderer — and retaining a mesh is what uploads it.
-	//
+	// 
 	// Only the lazy-upload path reads this. Every other method still takes the
 	// device as a parameter, which keeps "who owns the device" a question with one
 	// answer. Null in a scene-math runtime, where there is nothing to upload to.
@@ -904,7 +902,7 @@ fn usz Assets.texture_bytes(&self)
 	foreach (&shared : self.textures)
 	{
 		if (!shared.alive) continue;
-		uint width = shared.texture.width;
+		uint width  = shared.texture.width;
 		uint height = shared.texture.height;
 		for (uint level = 0; level < shared.texture.levels; level++)
 		{
@@ -1088,15 +1086,15 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	// Before the zeroing below, for `free_nodes`' reason: after it the slot no
 	// longer says it had one.
 	if (asset.has_terrain) asset.terrain.heights.free();
-	asset.terrain = {};
+	asset.terrain = { };
 	asset.has_terrain = false;
 	// Zeroed rather than left dangling: `claim_slot` overwrites the whole struct
 	// and `Assets.free` walks every slot, so a freed `List` must not look
 	// initialised to either of them.
-	asset.meshes = {};
+	asset.meshes = { };
 	if (asset.path.len > 0) asset.path.free(mem);
 	asset.path = "";
-	asset.bounds = {};
+	asset.bounds = { };
 	asset.refs = 0;
 	asset.alive = false;
 	// The climb is what makes every outstanding `AssetId` to this slot stale.
@@ -1136,19 +1134,20 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 	{
 		foreach (i, &mesh : loaded.meshes)
 		{
-			out.push({
-				.name = mesh.name,
-				.parent = -1,
-				.mesh = (int)i,
-				.gltf_node = -1,
-				.position = { 0, 0, 0 },
-				.rotation = NO_ROTATION,
-				.scale = { 1, 1, 1 },
-				.color = NO_TINT,
-				// No nodes means no skins to name one: a file that declares meshes
-				// and no scene cannot have said which skin poses them.
-				.skin = -1,
-			});
+			out.push(
+				{
+					.name = mesh.name,
+					.parent = -1,
+					.mesh = (int)i,
+					.gltf_node = -1,
+					.position = { 0, 0, 0 },
+					.rotation = NO_ROTATION,
+					.scale = { 1, 1, 1 },
+					.color = NO_TINT, // No nodes means no skins to name one: a file that declares meshes
+					// and no scene cannot have said which skin poses them.
+					.skin = -1,
+				}
+			);
 		}
 		return;
 	}
@@ -1159,7 +1158,7 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 	bool[] prunable;
 	@pool()
 	{
-		prunable = skeleton ? (bool[]){} : prunable_joints(loaded);
+		prunable = skeleton ? (bool[]) { } : prunable_joints(loaded);
 		foreach (root : loaded.roots)
 		{
 			self.flatten_node(asset, root, -1, out, prunable);
@@ -1176,12 +1175,12 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
  place:
 
  - *Named in a joint list*, because an ordinary node is the thing the scene graph
-   is for; only a bone is redundant, and only because the pose it would carry is
-   already baked into the buffer the shader reads.
+ is for; only a bone is redundant, and only because the pose it would carry is
+ already baked into the buffer the shader reads.
  - *Draws no mesh*, because a glTF may hang geometry off a bone directly.
  - *Every descendant too*, because a prop parented into a hand — `skinned.glb` has
-   one, for this rule — needs the chain above it to exist or it is orphaned at the
-   character's root and follows nothing.
+ one, for this rule — needs the chain above it to exist or it is orphaned at the
+ character's root and follows nothing.
 
  The payoff is the whole point of the baked design: a sixty-bone character
  instantiates as **two nodes** rather than sixty-two, so a hundred of them is two
@@ -1193,9 +1192,9 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 *>
 fn bool[] prunable_joints(Asset* loaded) @local
 {
-	if (loaded.skins.len() == 0) return {};
+	if (loaded.skins.len() == 0) return { };
 
-	sz count = loaded.nodes.len();
+	sz count     = loaded.nodes.len();
 	bool[] joint = alloc::new_array(tmem, bool, count);
 	foreach (&skin : loaded.skins)
 	{
@@ -1241,7 +1240,7 @@ fn bool mark_prunable(Asset* loaded, uint index, bool[] joint, bool[] prunable) 
  `record_nodes` derives roots from "nothing claims it" and a cycle claims all of
  its own members, so a cyclic subtree has no root and is never reached.
 *>
-fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{PlacedNode}* out, bool[] prunable = {})
+fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{PlacedNode}* out, bool[] prunable = { })
 {
 	Asset* loaded = self.slot(asset);
 	if (loaded == null || index >= loaded.nodes.len()) return;
@@ -1253,9 +1252,9 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	// not the node's own. The copies are children of it, so the node's own TRS
 	// still applies to all of them and each copy's is relative to that — which is
 	// what the extension says instance transforms are.
-	bool instanced = source.instances.len() > 0 && source.mesh_count > 0;
+	bool instanced    = source.instances.len() > 0 && source.mesh_count > 0;
 	bool draws_itself = source.mesh_count == 1 && !instanced;
-	int here = (int)out.len();
+	int here          = (int)out.len();
 
 	// **A skinned mesh does not inherit its own node's transform, and glTF says
 	// so**: the joint matrices are already in the skin's space, so the node the
@@ -1264,22 +1263,24 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	// identity transform — is worth more than saying it in the draw loop, because
 	// it makes `Node.world` the matrix the palette is actually relative to and
 	// leaves `Instance.model` with no special case in it at all.
-	//
+	// 
 	// It also gives the character one node you can move: dragging it moves the
 	// whole posed mesh, which is the reading anybody would expect.
 	bool skinned = source.skin >= 0 && source.mesh_count > 0;
 
-	out.push({
-		.name = source.name,
-		.parent = skinned ? -1 : parent,
-		.mesh = draws_itself ? (int)source.first_mesh : -1,
-		.gltf_node = (int)index,
-		.position = skinned ? (Vec3){ 0, 0, 0 } : source.position,
-		.rotation = skinned ? NO_ROTATION : source.rotation,
-		.scale = skinned ? (Vec3){ 1, 1, 1 } : source.scale,
-		.color = NO_TINT,
-		.skin = source.skin,
-	});
+	out.push(
+		{
+			.name = source.name,
+			.parent = skinned ? -1 : parent,
+			.mesh = draws_itself ? (int)source.first_mesh : -1,
+			.gltf_node = (int)index,
+			.position = skinned ? (Vec3) { 0, 0, 0 } : source.position,
+			.rotation = skinned ? NO_ROTATION : source.rotation,
+			.scale = skinned ? (Vec3) { 1, 1, 1 } : source.scale,
+			.color = NO_TINT,
+			.skin = source.skin,
+		}
+	);
 
 	if (instanced)
 	{
@@ -1291,20 +1292,22 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 		{
 			for (uint i = 0; i < source.mesh_count; i++)
 			{
-				out.push({
-					.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
-					.parent = here,
-					.mesh = (int)(source.first_mesh + i),
-					.gltf_node = -1,
-					.position = copy.position,
-					.rotation = copy.rotation,
-					.scale = copy.scale,
-					.color = copy.color,
-					// A copy placed by transform is the one thing a skin cannot be:
-					// the extension positions each copy and a skin ignores the
-					// position. A file doing both is malformed and gets the copies.
-					.skin = -1,
-				});
+				out.push(
+					{
+						.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
+						.parent = here,
+						.mesh = (int)(source.first_mesh + i),
+						.gltf_node = -1,
+						.position = copy.position,
+						.rotation = copy.rotation,
+						.scale = copy.scale,
+						.color = copy
+							.color, // A copy placed by transform is the one thing a skin cannot be:
+							// the extension positions each copy and a skin ignores the
+							// position. A file doing both is malformed and gets the copies.
+						.skin = -1,
+					}
+				);
 			}
 		}
 	}
@@ -1312,20 +1315,21 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	{
 		for (uint i = 0; i < source.mesh_count; i++)
 		{
-			out.push({
-				.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
-				.parent = here,
-				.mesh = (int)(source.first_mesh + i),
-				.gltf_node = -1,
-				.position = { 0, 0, 0 },
-				.rotation = NO_ROTATION,
-				.scale = { 1, 1, 1 },
-				.color = NO_TINT,
-				// The primitives of a skinned mesh are each skinned. Their parent
-				// is the entry above, which is already sitting at the root with an
-				// identity transform, so they inherit the right space.
-				.skin = source.skin,
-			});
+			out.push(
+				{
+					.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
+					.parent = here,
+					.mesh = (int)(source.first_mesh + i),
+					.gltf_node = -1,
+					.position = { 0, 0, 0 },
+					.rotation = NO_ROTATION,
+					.scale = { 1, 1, 1 },
+					.color = NO_TINT, // The primitives of a skinned mesh are each skinned. Their parent
+					// is the entry above, which is already sitting at the root with an
+					// identity transform, so they inherit the right space.
+					.skin = source.skin,
+				}
+			);
 		}
 	}
 
@@ -1416,7 +1420,11 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 		// kit — which is the whole reason the count moved down a level.
 		foreach (&mesh : asset.meshes)
 		{
-			if (mesh.uploaded && mesh.refs == 0) { sweepable = true; break; }
+			if (mesh.uploaded && mesh.refs == 0)
+			{
+				sweepable = true;
+				break;
+			}
 		}
 		if (sweepable) break;
 	}
@@ -1430,7 +1438,7 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 	// `gpu/retire.c3` instead, so the sweep costs an allocation and a list push
 	// per object and the frames in flight finish undisturbed.
 
-	usz bytes_before = self.texture_bytes();
+	usz bytes_before     = self.texture_bytes();
 	uint textures_before = self.texture_count();
 
 	foreach (i, &asset : self.assets)
@@ -1487,7 +1495,7 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 
  @param path : `A .glb or a .gltf; gltf.c3l reads both.`
  @return `The asset's handle, for Scene.add_mesh.`
- @return? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
+ @return ? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
 *>
 fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 {
@@ -1651,7 +1659,7 @@ fn void Assets.ensure_uploaded(&self, AssetId asset, uint mesh)
 	// back to; reaching here for one would mean its `uploaded` flag was lost.
 	if (!owner.has_stream) return;
 
-	int gltf_mesh = owner.meshes[mesh].gltf_mesh;
+	int gltf_mesh      = owner.meshes[mesh].gltf_mesh;
 	int gltf_primitive = owner.meshes[mesh].gltf_primitive;
 	if (gltf_mesh < 0 || gltf_mesh >= owner.stream.gltf.meshes.len()) return;
 
@@ -1660,10 +1668,8 @@ fn void Assets.ensure_uploaded(&self, AssetId asset, uint mesh)
 
 	if (catch self.ensure_white(self.gpu)) return;
 
-	GpuMesh? built = self.upload_primitive(
-		self.gpu, &self.slot(asset).stream, &self.slot(asset).images,
-		source, source.primitives[gltf_primitive]
-	);
+	GpuMesh? built = self.upload_primitive(self.gpu, &self.slot(asset)
+		.stream, &self.slot(asset).images, source, source.primitives[gltf_primitive]);
 	if (catch err = built)
 	{
 		if (!self.warned_upload_failed)
@@ -1678,7 +1684,7 @@ fn void Assets.ensure_uploaded(&self, AssetId asset, uint mesh)
 	// the device. Here rather than at load for G3/S3's reason, and here rather
 	// than at `play` because a skinned mesh needs its rest pose to draw at all —
 	// `Node.pose` points into this before anything has been played.
-	//
+	// 
 	// Swallowed like the upload above: a bake that fails leaves every skinned node
 	// pointing at offset zero of a buffer that is not there, which the draw loop
 	// reads as "no skin" and renders as the bind pose.
@@ -1834,9 +1840,9 @@ fn void read_instances(AssetNode* node, gltf::GltfStream* stream, gltf::Node* so
 
 	sz count = -1;
 	if (try translation) count = shortest(count, stream, translation);
-	if (try rotation)    count = shortest(count, stream, rotation);
-	if (try scale)       count = shortest(count, stream, scale);
-	if (try tint)        count = shortest(count, stream, tint);
+	if (try rotation) count = shortest(count, stream, rotation);
+	if (try scale) count = shortest(count, stream, scale);
+	if (try tint) count = shortest(count, stream, tint);
 	if (count <= 0) return;
 
 	node.instances.init(mem, count);
@@ -1894,8 +1900,8 @@ fn void free_nodes(Asset* asset) @local
 	}
 	asset.nodes.free();
 	asset.roots.free();
-	asset.nodes = {};
-	asset.roots = {};
+	asset.nodes = { };
+	asset.roots = { };
 
 	foreach (&skin : asset.skins)
 	{
@@ -1904,14 +1910,14 @@ fn void free_nodes(Asset* asset) @local
 		skin.bind.free();
 	}
 	asset.skins.free();
-	asset.skins = {};
+	asset.skins = { };
 
 	if (asset.poses.buffer != null) asset.poses.free();
-	asset.poses = {};
+	asset.poses = { };
 	asset.baked.free();
-	asset.baked = {};
+	asset.baked = { };
 	if (asset.pose_mirror.len > 0) mem::free(asset.pose_mirror);
-	asset.pose_mirror = {};
+	asset.pose_mirror = { };
 	asset.pose_matrices = 0;
 }
 
@@ -1941,9 +1947,7 @@ fn void record_clips(Asset* asset) @local
 		};
 		// An unnamed clip is legal and useless to a script, so it gets the index
 		// it would otherwise be addressed by anyway.
-		clip.name = source.name.len > 0
-			? source.name.copy(mem)
-			: string::format(mem, "animation_%d", i);
+		clip.name = source.name.len > 0 ? source.name.copy(mem) : string::format(mem, "animation_%d", i);
 		asset.clips.push(clip);
 	}
 }
@@ -2000,7 +2004,7 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 		if (sampler.input >= owner.stream.gltf.accessors.len()) continue;
 		if (sampler.output >= owner.stream.gltf.accessors.len()) continue;
 
-		gltf::Accessor times = owner.stream.gltf.accessors[sampler.input];
+		gltf::Accessor times  = owner.stream.gltf.accessors[sampler.input];
 		gltf::Accessor values = owner.stream.gltf.accessors[sampler.output];
 		if (times.count == 0 || values.count == 0) continue;
 
@@ -2034,8 +2038,10 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 			.path = path,
 			.interp = sampler.interpolation,
 			.stride = stride,
-			.times = mem::new_array(float, times.count),
-			// A scalar channel's accessor already holds one float per slot, so the
+			.times = mem::new_array(
+				float,
+				times.count
+			), // A scalar channel's accessor already holds one float per slot, so the
 			// flat array is the accessor's own length; a vector channel's holds one
 			// element per key and is unpacked into `stride` floats each.
 			.values = mem::new_array(float, scalar ? (sz)values.count : (sz)values.count * stride),
@@ -2085,7 +2091,7 @@ fn void free_stream(Asset* asset) @local
 {
 	foreach (&clip : asset.clips) clip.free();
 	asset.clips.free();
-	asset.clips = {};
+	asset.clips = { };
 
 	if (asset.has_stream)
 	{
@@ -2093,7 +2099,7 @@ fn void free_stream(Asset* asset) @local
 		asset.has_stream = false;
 	}
 	asset.images.free();
-	asset.images = {};
+	asset.images = { };
 }
 
 <*
@@ -2120,15 +2126,23 @@ fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale
 	Vec3 axis_y = { m.m[4], m.m[5], m.m[6] };
 	Vec3 axis_z = { m.m[8], m.m[9], m.m[10] };
 
-	float sx = axis_x.length();
-	float sy = axis_y.length();
+	float sx  = axis_x.length();
+	float sy  = axis_y.length();
 	float sz_ = axis_z.length();
 
-	Matrix3f linear = { .m = {
-		m.m[0], m.m[1], m.m[2],
-		m.m[4], m.m[5], m.m[6],
-		m.m[8], m.m[9], m.m[10],
-	} };
+	Matrix3f linear = {
+		.m = {
+			m.m[0],
+			m.m[1],
+			m.m[2],
+			m.m[4],
+			m.m[5],
+			m.m[6],
+			m.m[8],
+			m.m[9],
+			m.m[10],
+		}
+	};
 	if (linear.determinant() < 0) sx = -sx;
 
 	*scale = { sx, sy, sz_ };
@@ -2208,12 +2222,7 @@ fn Quaternionf quat_from_basis(Vec3 x, Vec3 y, Vec3 z)
  walks `primitive.attributes` and morph accessors are not in it, so without this
  the read would be against a buffer nobody opened.
 *>
-fn void? read_morph_targets(
-	Gpu* gpu,
-	gltf::GltfStream* stream,
-	gltf::Primitive primitive,
-	GpuMesh* out
-) @local
+fn void? read_morph_targets(Gpu* gpu, gltf::GltfStream* stream, gltf::Primitive primitive, GpuMesh* out) @local
 {
 	if (primitive.targets.len() == 0 || out.vertex_count == 0) return;
 
@@ -2225,7 +2234,7 @@ fn void? read_morph_targets(
 		if (position >= stream.gltf.accessors.len()) break;
 
 		gltf::Accessor accessor = stream.gltf.accessors[position];
-		gltf::BufferView view = stream.gltf.bufferViews[accessor.view];
+		gltf::BufferView view   = stream.gltf.bufferViews[accessor.view];
 		if (catch stream.load_buffer(view.buffer)) break;
 
 		sz? normal = target.get("NORMAL");
@@ -2238,17 +2247,17 @@ fn void? read_morph_targets(
 	}
 	if (count == 0) return;
 
-	usz total = (usz)count * (usz)out.vertex_count;
+	usz total           = (usz)count * (usz)out.vertex_count;
 	MorphDelta[] deltas = mem::new_array(MorphDelta, (sz)total);
 	defer free(deltas);
 
 	for (uint t = 0; t < count; t++)
 	{
 		gltf::AttributeMap target = primitive.targets[t];
-		gltf::Accessor position = stream.gltf.accessors[target.get("POSITION")!!];
+		gltf::Accessor position   = stream.gltf.accessors[target.get("POSITION")!!];
 
 		sz? normal_index = target.get("NORMAL");
-		bool has_normal = false;
+		bool has_normal  = false;
 		gltf::Accessor normal;
 		if (try normal_index && normal_index < stream.gltf.accessors.len())
 		{
@@ -2285,12 +2294,7 @@ fn void? read_morph_targets(
  outside this, and the cost of that is a character clipped at the edge of the
  screen rather than anything worse.
 *>
-fn void grow_bounds_by_morph(
-	gltf::GltfStream* stream,
-	gltf::Primitive primitive,
-	uint count,
-	GpuMesh* out
-) @local
+fn void grow_bounds_by_morph(gltf::GltfStream* stream, gltf::Primitive primitive, uint count, GpuMesh* out) @local
 {
 	Vec3 reach = { 0, 0, 0 };
 
@@ -2301,7 +2305,7 @@ fn void grow_bounds_by_morph(
 
 		for (uint axis = 0; axis < 3; axis++)
 		{
-			float low = math::abs((float)position.min[axis]);
+			float low  = math::abs((float)position.min[axis]);
 			float high = math::abs((float)position.max[axis]);
 			float most = low > high ? low : high;
 			if (most > reach[axis]) reach[axis] = most;
@@ -2370,11 +2374,20 @@ fn GpuMesh? Assets.upload_primitive(
 		indices.free();
 	}
 
-	stream.@each_position(primitive; Vec3 position, sz i) { positions.push(position); };
+	stream.@each_position(primitive ; Vec3 position, sz i)
+	{
+		positions.push(position);
+	};
 	if (positions.len() == 0) return out;
 
-	stream.@each_normal(primitive; Vec3 normal, sz i) { normals.push(normal); };
-	stream.@each_texcoord(primitive, 0; Vec2 uv, sz i) { uvs.push(uv); };
+	stream.@each_normal(primitive ; Vec3 normal, sz i)
+	{
+		normals.push(normal);
+	};
+	stream.@each_texcoord(primitive, 0 ; Vec2 uv, sz i)
+	{
+		uvs.push(uv);
+	};
 	read_colors(stream, primitive, &colors);
 
 	// Widened from whatever the file stored — `@each_joint` already folds the
@@ -2382,7 +2395,7 @@ fn GpuMesh? Assets.upload_primitive(
 	// scalar layout and 16-bit storage is a device feature this project does not
 	// require. Only JOINTS_0/WEIGHTS_0: a second set is 8 influences a vertex, and
 	// nothing here blends more than four.
-	stream.@each_joint(primitive, 0; ushort[<4>] j, sz i)
+	stream.@each_joint(primitive, 0 ; ushort[<4>] j, sz i)
 	{
 		joints.push({ (uint)j[0], (uint)j[1], (uint)j[2], (uint)j[3] });
 	};
@@ -2624,7 +2637,7 @@ fn void read_colors(gltf::GltfStream* stream, gltf::Primitive primitive, List{Ve
 	if (catch attr) return;
 
 	gltf::Accessor accessor = stream.gltf.accessors[attr];
-	bool three = accessor.type == gltf::AccessorType.VEC3;
+	bool three              = accessor.type == gltf::AccessorType.VEC3;
 
 	for (sz i = 0; i < accessor.count; i++)
 	{
@@ -2673,9 +2686,9 @@ fn void read_colors(gltf::GltfStream* stream, gltf::Primitive primitive, List{Ve
  answer different questions:
 
  - **The memo** (`ImageMemo`), keyed on this file's own image index. A material
-   named by four primitives asks four times; the file's bytes are decoded once.
+ named by four primitives asks four times; the file's bytes are decoded once.
  - **The content hash**, keyed on the decoded pixels. Two *different* images,
-   here or in a file loaded an hour ago, that hold the same picture.
+ here or in a file loaded an hour ago, that hold the same picture.
 
  The order matters and only one way round is free: the memo costs a walk of a
  list one entry long per image in the file, and skips everything. The hash costs
@@ -2792,7 +2805,11 @@ fn void? Assets.load_material_layers(
 	// dark end — which reads as the relief being wrong rather than as the image
 	// being misread. `load_material_texture`'s header measures it.
 	out.height_texture = self.load_material_texture(
-		gpu, stream, images, material.layers_ext.heightTexture, ColorSpace.LINEAR
+		gpu,
+		stream,
+		images,
+		material.layers_ext.heightTexture,
+		ColorSpace.LINEAR
 	)!;
 
 	foreach (source : material.layers_ext.layers)
@@ -2831,18 +2848,37 @@ fn void? Assets.load_material_layers(
 		if (source.enabled)
 		{
 			layer.texture = self.load_material_texture(gpu, stream, images, source.baseColorTexture)!;
-			layer.normal_texture =
-				self.load_material_texture(gpu, stream, images, source.normalTexture, ColorSpace.LINEAR)!;
+			layer.normal_texture = self.load_material_texture(
+				gpu,
+				stream,
+				images,
+				source.normalTexture,
+				ColorSpace.LINEAR
+			)!;
 			layer.emissive_texture = self.load_material_texture(gpu, stream, images, source.emissiveTexture)!;
 			layer.metallic_roughness_texture = self.load_material_texture(
-				gpu, stream, images, source.metallicRoughnessTexture, ColorSpace.LINEAR
+				gpu,
+				stream,
+				images,
+				source.metallicRoughnessTexture,
+				ColorSpace.LINEAR
 			)!;
-			layer.height_texture =
-				self.load_material_texture(gpu, stream, images, source.heightTexture, ColorSpace.LINEAR)!;
+			layer.height_texture = self.load_material_texture(
+				gpu,
+				stream,
+				images,
+				source.heightTexture,
+				ColorSpace.LINEAR
+			)!;
 			if (source.mask.source == gltf::LayerMaskSource.TEXTURE)
 			{
-				layer.mask_texture =
-					self.load_material_texture(gpu, stream, images, source.mask.texture, ColorSpace.LINEAR)!;
+				layer.mask_texture = self.load_material_texture(
+					gpu,
+					stream,
+					images,
+					source.mask.texture,
+					ColorSpace.LINEAR
+				)!;
 			}
 		}
 
@@ -2952,7 +2988,7 @@ fn void GpuMesh.release_material(&self, Assets* assets, Gpu* gpu)
 	assets.release_texture(gpu, self.material.occlusion_texture);
 	assets.release_texture(gpu, self.material.emissive_texture);
 	assets.release_texture(gpu, self.material.metallic_roughness_texture);
-	self.material = {};
+	self.material = { };
 }
 
 <*
@@ -2999,12 +3035,21 @@ fn void? Assets.load_material_record(
 	// is a weight and a metallic-roughness pair is two more; only the emissive map
 	// is a colour somebody looked at. `load_material_texture`'s header measures
 	// what getting this wrong does.
-	out.normal_texture =
-		self.load_material_texture(gpu, stream, images, material.normalTexture, ColorSpace.LINEAR)!;
-	out.occlusion_texture =
-		self.load_material_texture(gpu, stream, images, material.occlusionTexture, ColorSpace.LINEAR)!;
-	out.metallic_roughness_texture =
-		self.load_material_texture(gpu, stream, images, material.metallicRoughnessTexture, ColorSpace.LINEAR)!;
+	out.normal_texture = self.load_material_texture(gpu, stream, images, material.normalTexture, ColorSpace.LINEAR)!;
+	out.occlusion_texture = self.load_material_texture(
+		gpu,
+		stream,
+		images,
+		material.occlusionTexture,
+		ColorSpace.LINEAR
+	)!;
+	out.metallic_roughness_texture = self.load_material_texture(
+		gpu,
+		stream,
+		images,
+		material.metallicRoughnessTexture,
+		ColorSpace.LINEAR
+	)!;
 	out.emissive_texture = self.load_material_texture(gpu, stream, images, material.emissiveTexture)!;
 }
 
@@ -3050,7 +3095,11 @@ fn void GpuMesh.release_layers(&self, Assets* assets, Gpu* gpu)
  @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
 *>
 fn int? Assets.decode_material_texture(
-	&self, Gpu* gpu, gltf::GltfStream* stream, int image_index, ColorSpace space = ColorSpace.SRGB,
+	&self,
+	Gpu* gpu,
+	gltf::GltfStream* stream,
+	int image_index,
+	ColorSpace space = ColorSpace.SRGB,
 	bool mips = true
 )
 {
@@ -3064,7 +3113,7 @@ fn int? Assets.decode_material_texture(
 	// that can see the geometry can tell what it is looking at.
 	gltf::ImageType mime = stream.gltf.images[image_index].mimeType;
 	self.decodes++;
-	image::Image? maybe  = decode_image(mime, encoded);
+	image::Image? maybe = decode_image(mime, encoded);
 	if (catch maybe)
 	{
 		if (!self.warned_unsupported_image)
@@ -3088,7 +3137,8 @@ fn int? Assets.decode_material_texture(
 		if (!self.warned_unsupported_image)
 		{
 			io::printfn(
-				"three: 16-bit %s textures are not decoded; those materials render untextured", image_type_name(mime)
+				"three: 16-bit %s textures are not decoded; those materials render untextured",
+				image_type_name(mime)
 			);
 			self.warned_unsupported_image = true;
 		}
@@ -3134,7 +3184,12 @@ fn int? Assets.decode_material_texture(
  @return `An index into Assets.textures, or -1 when there is no such image or it would not decode.`
 *>
 fn int? Assets.load_asset_image(
-	&self, Gpu* gpu, AssetId id, int image_index, ColorSpace space = ColorSpace.SRGB, bool mips = true
+	&self,
+	Gpu* gpu,
+	AssetId id,
+	int image_index,
+	ColorSpace space = ColorSpace.SRGB,
+	bool mips = true
 )
 {
 	Asset* owner = self.slot(id);
@@ -3206,13 +3261,17 @@ fn uint Assets.asset_image_count(&self, AssetId id)
  @return `An index into Assets.textures.`
 *>
 fn int? Assets.claim_texture(
-	&self, Gpu* gpu, image::Image decoded, ColorSpace space = ColorSpace.SRGB, bool mips = true
+	&self,
+	Gpu* gpu,
+	image::Image decoded,
+	ColorSpace space = ColorSpace.SRGB,
+	bool mips = true
 )
 {
 	char[] rgba = decoded.to_rgba();
 	defer free(rgba);
 
-	ulong hash = content_hash(rgba);
+	ulong hash  = content_hash(rgba);
 	// Asked once, before the loop, and compared as a number: a chain the caller
 	// declined and one it asked for are different images too, and the difference
 	// is invisible in every other field.
@@ -3220,8 +3279,7 @@ fn int? Assets.claim_texture(
 	foreach (i, &existing : self.textures)
 	{
 		if (!existing.alive) continue;
-		if (existing.texture.hash == hash
-			&& existing.texture.width == decoded.width
+		if (existing.texture.hash == hash && existing.texture.width == decoded.width
 			&& existing.texture.height == decoded.height
 			&& existing.texture.space == space
 			&& existing.texture.levels == levels)
@@ -3268,7 +3326,7 @@ const char[8] PNG_SIGNATURE = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
  own mime type per image, which is a stronger claim than a file name and is
  already what `decode_image` switches on.
 
- @return? TEXTURE_FORMAT_UNKNOWN : `Neither a PNG nor a JPEG. Named rather than attempted.`
+ @return ? TEXTURE_FORMAT_UNKNOWN : `Neither a PNG nor a JPEG. Named rather than attempted.`
 *>
 fn image::Image? decode_by_signature(char[] encoded)
 {
@@ -3312,13 +3370,11 @@ fn image::Image? decode_by_signature(char[] encoded)
  @param space : `SRGB for a colour map, LINEAR for a normal, roughness, height or lookup map.`
  @param mips : `False for pixels meant to be indexed exactly. A full chain otherwise.`
  @return `An index into Assets.textures, at one reference.`
- @return? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
- @return? TEXTURE_FORMAT_UNKNOWN : `Not a PNG, a JPEG or a KTX2, by its first bytes.`
- @return? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
+ @return ? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
+ @return ? TEXTURE_FORMAT_UNKNOWN : `Not a PNG, a JPEG or a KTX2, by its first bytes.`
+ @return ? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
 *>
-fn int? Assets.load_texture_file(
-	&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true
-)
+fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true)
 {
 	if (!file::is_file(path)) return TEXTURE_UNREADABLE~;
 
@@ -3455,8 +3511,7 @@ fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
 		.name = "triangle".copy(mem),
 		.vertex_count = 3,
 		.index_count = 3,
-		.has_normals = true,
-		// sRGB, converted here: `base_color` is a linear factor, because glTF's
+		.has_normals = true, // sRGB, converted here: `base_color` is a linear factor, because glTF's
 		// `baseColorFactor` is one. Written as the orange it looks like.
 		.base_color = srgb_to_linear_rgb({ 0.85, 0.55, 0.25, 1.0 }),
 		.texture = -1,
@@ -3506,7 +3561,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	// `gpu/retire.c3` has the argument and `unload_unused` is the caller it was
 	// built for. `retire_memory` answers a stream the mesh never had, so the
 	// seven guards this used to carry are one, inside it.
-	//
+	// 
 	// A null `gpu` is a scene-math runtime, where every one of these is already
 	// null: there is no device, so there was never an upload.
 	if (gpu != null)
@@ -3520,14 +3575,14 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 		gpu.retire_memory(self.weights);
 		gpu.retire_memory(self.morph);
 	}
-	self.positions = {};
-	self.indices = {};
-	self.normals = {};
-	self.uvs = {};
-	self.colors = {};
-	self.joints = {};
-	self.weights = {};
-	self.morph = {};
+	self.positions = { };
+	self.indices = { };
+	self.normals = { };
+	self.uvs = { };
+	self.colors = { };
+	self.joints = { };
+	self.weights = { };
+	self.morph = { };
 	self.morph_targets = 0;
 
 	// `free_indexed` rather than `free`: the root owns the sorted-index array
@@ -3540,8 +3595,8 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	}
 	if (self.hull_positions.len > 0) mem::free(self.hull_positions);
 	if (self.hull_triangles.len > 0) mem::free(self.hull_triangles);
-	self.hull_positions = {};
-	self.hull_triangles = {};
+	self.hull_positions = { };
+	self.hull_triangles = { };
 }
 
 <*

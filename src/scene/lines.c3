@@ -12,11 +12,11 @@
  fall out:
 
  - A thousand box helpers are one draw call — they share the unit-cube asset and
-   differ by transform.
+ differ by transform.
  - Colour is free per copy, since `mesh.color` rides in the instance record. That
-   is what makes `AxesHelper` three meshes over *one* segment asset.
+ is what makes `AxesHelper` three meshes over *one* segment asset.
  - `scene.remove(helper)` works and `unloadUnused` gives the memory back, because
-   there is nothing special about these assets.
+ there is nothing special about these assets.
 
  ## Unit shapes, scaled
 
@@ -92,7 +92,7 @@ fn String LineShape.key(&self, Allocator allocator)
  `primitive_kind`'s twin: `prelude.js` names a shape and the host is the place
  that knows whether the name is one it builds.
 
- @return? NO_SUCH_LINE_SHAPE : `Not one of box, segment or grid.`
+ @return ? NO_SUCH_LINE_SHAPE : `Not one of box, segment or grid.`
 *>
 fn LineKind? line_kind(String name)
 {
@@ -167,11 +167,13 @@ fn void build_line_box(GeometryBuilder* out) @local
 	// are every pair differing in exactly one bit.
 	for (uint corner = 0; corner < 8; corner++)
 	{
-		out.line_vertex({
-			(corner & 1) != 0 ? 0.5f : -0.5f,
-			(corner & 2) != 0 ? 0.5f : -0.5f,
-			(corner & 4) != 0 ? 0.5f : -0.5f,
-		});
+		out.line_vertex(
+			{
+				(corner & 1) != 0 ? 0.5f : -0.5f,
+				(corner & 2) != 0 ? 0.5f : -0.5f,
+				(corner & 4) != 0 ? 0.5f : -0.5f,
+			}
+		);
 	}
 
 	for (uint corner = 0; corner < 8; corner++)
@@ -275,8 +277,8 @@ fn AssetId? Assets.lines(&self, Gpu* gpu, LineShape shape)
  triangle would double the index buffer. `n log n` with one allocation, against a
  hash map's per-edge one.
 
- @return? NO_SUCH_LINE_MESH : `The handle names no mesh — a stale asset, or an index past the end of the file.`
- @return? LINE_MESH_NOT_RESIDENT : `That mesh's triangles are not on this side. Add something that draws it to the scene first.`
+ @return ? NO_SUCH_LINE_MESH : `The handle names no mesh — a stale asset, or an index past the end of the file.`
+ @return ? LINE_MESH_NOT_RESIDENT : `That mesh's triangles are not on this side. Add something that draws it to the scene first.`
 *>
 fn AssetId? Assets.wireframe(&self, Gpu* gpu, AssetId asset, uint mesh)
 {
@@ -306,7 +308,7 @@ fn AssetId? Assets.wireframe(&self, Gpu* gpu, AssetId asset, uint mesh)
 			for (uint i = 0; i < 3; i++)
 			{
 				uint from = corner[i];
-				uint to = corner[(i + 1) % 3];
+				uint to   = corner[(i + 1) % 3];
 				// Ordered before packing, so the same edge seen from either
 				// triangle packs to the same number and the dedup is exact.
 				edges.push(from < to ? ((ulong)from << 32) | to : ((ulong)to << 32) | from);
@@ -320,7 +322,7 @@ fn AssetId? Assets.wireframe(&self, Gpu* gpu, AssetId asset, uint mesh)
 		sort::mergesort(edges.array_view());
 
 		ulong previous = 0;
-		bool started = false;
+		bool started   = false;
 		foreach (edge : edges)
 		{
 			if (started && edge == previous) continue;

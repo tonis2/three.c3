@@ -55,13 +55,13 @@ struct PointerState
 struct Controls
 {
 	// Whether the hand on the window reaches the camera at all.
-	//
+	// 
 	// A script that drives its own camera has to be able to say so. A follow
 	// camera or a first-person look writes yaw, pitch and target every frame,
 	// and the turntable writes them again from whatever the mouse did — two
 	// things fighting over one matrix at sixty hertz, which reads as a camera
 	// that shudders rather than as a control scheme that is wrong.
-	//
+	// 
 	// It takes the mouse away and nothing else: `three.camera.orbit()` still
 	// moves the camera, because a script writing the camera on purpose was never
 	// what this protects anything from.
@@ -98,15 +98,13 @@ struct Controls
 	float damping_ms;
 }
 
-const Controls DEFAULT_CONTROLS = {
-	// On, and on is the only sane default: a window nobody can move the camera
-	// in is a bad way for a script to leave one, so the bad state has to be the
-	// one somebody asked for rather than the one they got by not asking.
+const Controls DEFAULT_CONTROLS = { // On, and on is the only sane default: a window nobody can move the camera
+// in is a bad way for a script to leave one, so the bad state has to be the
+// one somebody asked for rather than the one they got by not asking.
 	.enabled = true,
 	.orbit_degrees_per_point = 0.4,
 	.zoom_per_scroll_point = 0.01,
-	.min_distance = 0.01,
-	// Short. A hard flick is around 0.6 degrees per millisecond, and this buys
+	.min_distance = 0.01, // Short. A hard flick is around 0.6 degrees per millisecond, and this buys
 	// it another thirty-odd degrees over a third of a second — enough to read as
 	// weight rather than as a camera that will not settle. Most drags end slowly
 	// anyway, which is why the velocity is measured from the *last* frame of the
@@ -182,14 +180,14 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 	bool held = pointer.orbit || pointer.pan;
 
 	// A held button is only believed once it has been seen released.
-	//
+	// 
 	// Mouse state arrives as a latch — a flag set by a down event and cleared by
 	// the matching up — and the up does not always come. AppKit runs an event
 	// loop of its own while a window is dragged by its title bar and swallows the
 	// release, so the flag stays set for the rest of the session. Every later
 	// mouse *movement* is then read as a drag with no button held, and the scene
 	// turns on its own whenever the cursor crosses the window.
-	//
+	// 
 	// No headless test can find this: the fault is in what the window reports
 	// rather than in what is done with it. Waiting for one button-free frame
 	// costs nothing when the mouse is behaving — the loop renders hundreds
@@ -230,7 +228,7 @@ fn bool Controls.apply(&self, Camera* camera, PointerState pointer, float viewpo
 		// control scheme that feels wrong and cannot be argued with, so the
 		// direction is asserted in `controls_test.c3`.
 		float turn = -dx * self.orbit_degrees_per_point;
-		float tilt = dy * self.orbit_degrees_per_point;
+		float tilt =  dy * self.orbit_degrees_per_point;
 
 		if (turn != 0.0f || tilt != 0.0f)
 		{
@@ -353,6 +351,7 @@ fn bool Controls.coast(&self, Camera* camera, float dt_ms)
 
 fn bool Controls.spinning(&self)
 {
-	return math::abs(self.yaw_velocity) >= MIN_SPIN_DEGREES_PER_MS
-		|| math::abs(self.pitch_velocity) >= MIN_SPIN_DEGREES_PER_MS;
+	return math::abs(
+		self.yaw_velocity
+	) >= MIN_SPIN_DEGREES_PER_MS || math::abs(self.pitch_velocity) >= MIN_SPIN_DEGREES_PER_MS;
 }

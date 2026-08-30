@@ -1,13 +1,16 @@
 <*
  The post chain: three images, two rules, and the one interface in this project.
 
-	`c3c test --trust=full --test-noleak --test-filter three_tests::post`
+ `c3c test --trust=full --test-noleak --test-filter three_tests::post`
 
  ## What a frame is
 
-	inactive   scene ─────────────────────────────────────────► target.color ─► blit
-	one pass   scene ─► A ─► P0 ─────────────────────► tonemap ─► target.color ─► blit
-	three      scene ─► A ─► P0 ─► P1 ─► P0 ─► tonemap ─► target.color ─► blit
+ inactive scene
+ ─────────────────────────────────────────►
+ target.color ─► blit
+ one pass scene ─► A ─► P0 ─────────────────────► tonemap ─►
+ target.color ─► blit
+ three      scene ─► A ─► P0 ─► P1 ─► P0 ─► tonemap ─► target.color ─► blit
 
  Three images regardless of how long the chain is. A is what the scene renders
  into (`PostPass.scene`), and P0/P1 are the ping-pong pair every pass after the
@@ -17,9 +20,9 @@
 
  The two rules are the whole scheduler:
 
-	pass i     reads P[(i-1)&1] as `prev` — or A, when i is 0 — and A as `scene`
-	           writes P[i&1]
-	tonemap    reads P[(N-1)&1], writes target.color
+ pass i     reads P[(i-1)&1] as `prev` — or A, when i is 0 — and A as `scene`
+ writes P[i&1]
+ tonemap    reads P[(N-1)&1], writes target.color
 
  ## Why a chain and not a graph
 
@@ -111,7 +114,13 @@ fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent
 
 	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(format)
 		.setSubresourceRange(
-			{ .aspectMask = IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+			{
+				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			}
 		)
 		.setImage(self.image)
 		.build(gpu.handle)!;
@@ -126,7 +135,7 @@ fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent
 fn void ChainImage.free(&self, Gpu* gpu)
 {
 	gpu.retire_memory(self.memory, self.view);
-	*self = {};
+	*self = { };
 }
 
 fn bool ChainImage.exists(&self) => self.image != null;
@@ -136,17 +145,17 @@ fn bool ChainImage.exists(&self) => self.image != null;
 
  Each field is something a pass genuinely cannot get anywhere else:
 
-	prev, scene      the two reserved bindings. Two rather than one because the
-	                 chain has two edges; see the header.
-	dst, dst_view    the destination. The *image* as well as the view because the
-	                 pass opens it with a barrier and a barrier names an image.
-	extent           the viewport, the scissor and `info.xy`.
-	sampler          the chain's own — CLAMP_TO_EDGE, so a blur stepping off the
-	                 edge smears the border rather than wrapping the far side of
-	                 the picture in.
-	assets           what a pass's *own* samplers resolve through. Null is legal
-	                 and means the reflected bindings above the reserved two get
-	                 nothing, which is only safe on a pass that declared none.
+ prev, scene      the two reserved bindings. Two rather than one because the
+ chain has two edges; see the header.
+ dst, dst_view    the destination. The *image* as well as the view because the
+ pass opens it with a barrier and a barrier names an image.
+ extent           the viewport, the scissor and `info.xy`.
+ sampler          the chain's own — CLAMP_TO_EDGE, so a blur stepping off the
+ edge smears the border rather than wrapping the far side of
+ the picture in.
+ assets           what a pass's *own* samplers resolve through. Null is legal
+ and means the reflected bindings above the reserved two get
+ nothing, which is only safe on a pass that declared none.
 
  What is absent is the argument for the interface being scoped to this one kind
  of pass: no `Gpu`, no `Target`, no frame slot, no scene, no instance buffer. A
@@ -347,7 +356,7 @@ fn void PostPass.destroy_images(&self, Gpu* gpu)
 	self.scene.free(gpu);
 	self.pong[0].free(gpu);
 	self.pong[1].free(gpu);
-	self.extent = {};
+	self.extent = { };
 }
 
 // ============================================================================
@@ -391,7 +400,7 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 
 	@pool()
 	{
-		String source = post_source(TONEMAP_BODY, {}, tmem)!;
+		String source    = post_source(TONEMAP_BODY, { }, tmem)!;
 		ShaderModule mod = compile_slang_cached(source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
@@ -420,13 +429,13 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
  One per edge, not one per pass:
 
  - A → SHADER_READ_ONLY_OPTIMAL, once, before anything reads it. It is `scene` at
-   binding 1 for every pass and `prev` at binding 0 for the first, so one
-   transition covers every use of it in the frame.
+ binding 1 for every pass and `prev` at binding 0 for the first, so one
+ transition covers every use of it in the frame.
  - P[i] → SHADER_READ_ONLY_OPTIMAL after pass i, because pass i+1 samples it.
  - the destination's `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` is the *pass's own*,
-   not issued here. That is the protocol on `FullscreenPass`, and it lets an
-   implementation that renders into its destination more than once — a pyramid —
-   open it as many times as it needs to.
+ not issued here. That is the protocol on `FullscreenPass`, and it lets an
+ implementation that renders into its destination more than once — a pyramid —
+ open it as many times as it needs to.
 
  `color_attachment_barrier` discards from `UNDEFINED`, which is already correct
  for reusing P0 on pass 2 after pass 1 sampled it: the pass covers every pixel.
@@ -457,10 +466,13 @@ fn void? PostPass.record_chain(
 	// `set` call site would put the same number in two places for that.
 	self.now = now;
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({
-		shader_read_barrier(self.scene.image),
-		depth_read_barrier(target.depth),
-	}));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
+			{
+				shader_read_barrier(self.scene.image),
+				depth_read_barrier(target.depth),
+			}
+		));
 
 	foreach (i, boxed : self.stages)
 	{
@@ -468,33 +480,36 @@ fn void? PostPass.record_chain(
 		// or a source is named: a stage something taps writes into an image of its
 		// own, and the whole difference between the two kinds lives in that one
 		// function.
-		ChainImage* dst = self.output_of(i);
+		ChainImage* dst    = self.output_of(i);
 		// The first pass's `prev` is A, which makes a chain of one identical to the
 		// single pass this replaced: both bindings point at the same image, so
 		// `p.color == p.scene` and a shader written before the chain existed reads
 		// exactly what it always read.
 		vk::ImageView prev = i == 0 ? self.scene.view : self.output_of(i - 1).view;
-		int tapped = self.stages[i].tap;
-		vk::ImageView tap = tapped >= 0 ? self.output_of((sz)tapped).view : self.scene.view;
+		int tapped         = self.stages[i].tap;
+		vk::ImageView tap  = tapped >= 0 ? self.output_of((sz)tapped).view : self.scene.view;
 
 		// Taken fresh from the boxed stage rather than cached — see
 		// `FullscreenPass` on interface values being pointers.
 		FullscreenPass pass = boxed;
-		pass.record(cmd, {
-			.prev = prev,
-			.scene = self.scene.view,
-			.dst = dst.image,
-			.dst_view = dst.view,
-			.extent = self.extent,
-			.sampler = self.sampler,
-			.depth = target.depth_view,
-			.depth_sampler = self.depth_sampler,
-			.near_plane = near_plane,
-			.far_plane = far_plane,
-			.tap = tap,
-			.assets = assets,
-			.time = now,
-		})!;
+		pass.record(
+			cmd,
+			{
+				.prev = prev,
+				.scene = self.scene.view,
+				.dst = dst.image,
+				.dst_view = dst.view,
+				.extent = self.extent,
+				.sampler = self.sampler,
+				.depth = target.depth_view,
+				.depth_sampler = self.depth_sampler,
+				.near_plane = near_plane,
+				.far_plane = far_plane,
+				.tap = tap,
+				.assets = assets,
+				.time = now,
+			}
+		)!;
 
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(dst.image) }));
 	}
@@ -502,21 +517,20 @@ fn void? PostPass.record_chain(
 	// The one pass that writes `target.color`, and the one pipeline in the chain
 	// built with its format.
 	FullscreenPass tone = &self.tonemap;
-	tone.record(cmd, {
-		.prev = self.output_of(count - 1).view,
-		.scene = self.scene.view,
-		.dst = target.color,
-		.dst_view = target.color_view,
-		.extent = self.extent,
-		.sampler = self.sampler,
-		.depth = target.depth_view,
-		.depth_sampler = self.depth_sampler,
-		.near_plane = near_plane,
-		.far_plane = far_plane,
-		// The tonemap is the engine's and reads no third source. Image A, for the
-		// reason `PassIo.tap` gives.
-		.tap = self.scene.view,
-		.assets = assets,
-		.time = now,
-	})!;
+	tone.record(
+		cmd,
+		{
+			.prev = self.output_of(count - 1)
+		.view, .scene = self.scene
+			.view, .dst = target
+				.color, .dst_view = target
+					.color_view, .extent = self
+						.extent, .sampler = self
+							.sampler, .depth = target
+								.depth_view, .depth_sampler = self
+									.depth_sampler, .near_plane = near_plane, .far_plane = far_plane, // The tonemap is the engine's and reads no third source. Image A, for the
+									// reason `PassIo.tap` gives.
+									.tap = self
+										.scene
+										.view, .assets = assets, .time = now, })!;
 }

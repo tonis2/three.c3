@@ -106,14 +106,7 @@ fn void js_add_pass(
  @param append : `false replaces the chain (setPost), true appends to it (addPass).`
  @param [out] out : `The stage index on success, so a handle knows which pass it is. Untouched by setPost, whose answer is always 0.`
 *>
-fn void JsRuntime.post_verb(
-	&self,
-	qjs::Context js,
-	int argc,
-	qjs::Value* args,
-	bool append,
-	qjs::Value* out
-)
+fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, bool append, qjs::Value* out)
 {
 	if (self.renderer == null)
 	{
@@ -124,8 +117,8 @@ fn void JsRuntime.post_verb(
 	@pool()
 	{
 		String fragment = arg_text(&js, argc, args, 0, tmem);
-		String names = arg_text(&js, argc, args, 1, tmem);
-		String widths = arg_text(&js, argc, args, 2, tmem);
+		String names    = arg_text(&js, argc, args, 1, tmem);
+		String widths   = arg_text(&js, argc, args, 2, tmem);
 
 		List{String} name_list;
 		List{String} width_list;
@@ -148,10 +141,7 @@ fn void JsRuntime.post_verb(
 			if (components < 1 || components > 4)
 			{
 				*out = js.raise(
-					string::tformat(
-						"uniform '%s' must be a number or an array of two, three or four numbers",
-						name
-					)
+					string::tformat("uniform '%s' must be a number or an array of two, three or four numbers", name)
 				);
 				return;
 			}
@@ -165,7 +155,7 @@ fn void JsRuntime.post_verb(
 		// The samplers, as two more joined lists — names the body declares, and the
 		// texture each starts bound to, with `-1` for a sampler that starts white.
 		String texture_names = arg_text(&js, argc, args, 3, tmem);
-		String texture_ids = arg_text(&js, argc, args, 4, tmem);
+		String texture_ids   = arg_text(&js, argc, args, 4, tmem);
 
 		// The third source, as an index into the chain or -1. `postSpec` has already
 		// turned a handle into this number and refused everything that is not one;
@@ -216,18 +206,20 @@ fn void JsRuntime.post_verb(
 		}
 		else
 		{
-			err = @catch(self.renderer.post.set(
-				&self.renderer.gpu,
-				&self.renderer.target,
-				fragment,
-				uniforms.array_view(),
-				textures.array_view(),
-				// Where the outgoing chain's images go back to. The table belongs to
-				// the mesh pass and the chain belongs to the renderer, so this is
-				// the layer that has both.
-				&self.pass.assets,
-				diagnostic: &diagnostic
-			));
+			err = @catch(
+				self.renderer.post.set(
+					&self.renderer.gpu,
+					&self.renderer.target,
+					fragment,
+					uniforms.array_view(),
+					textures
+						.array_view(), // Where the outgoing chain's images go back to. The table belongs to
+						// the mesh pass and the chain belongs to the renderer, so this is
+						// the layer that has both.
+					&self.pass.assets,
+					diagnostic: &diagnostic
+				)
+			);
 		}
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
@@ -252,7 +244,11 @@ fn void JsRuntime.post_verb(
 		{
 			int texture = texture_id_list[i].to_int() ?? NO_TEXTURE;
 			if (catch bind_err = self.renderer.post.set_texture(
-				&self.renderer.gpu, &self.pass.assets, name, texture, stage
+				&self.renderer.gpu,
+				&self.pass.assets,
+				name,
+				texture,
+				stage
 			))
 			{
 				*out = js.raise(post_texture_failure(bind_err, name));
@@ -278,7 +274,7 @@ fn String post_texture_failure(fault err, String name) @local
 		case MATERIAL_SAMPLER_UNKNOWN:
 			return string::tformat(
 				"this post shader has no sampler called '%s' — either the name is not the one the body uses, "
-				"or the body never samples it and Slang dropped it from the module",
+					"or the body never samples it and Slang dropped it from the module",
 				name
 			);
 		case MATERIAL_TEXTURE_UNKNOWN:
@@ -319,15 +315,19 @@ fn void js_set_post_texture(
 	{
 		String name = arg_text(&js, argc, args, 0, tmem);
 		int texture = arg_int(&js, argc, args, 1);
-		int stage = arg_int(&js, argc, args, 2);
+		int stage   = arg_int(&js, argc, args, 2);
 
 		if (catch err = self.renderer.post.set_texture(
-			&self.renderer.gpu, &self.pass.assets, name, texture, stage < 0 ? 0 : (uint)stage
+			&self.renderer.gpu,
+			&self.pass.assets,
+			name,
+			texture,
+			stage < 0 ? 0 : (uint)stage
 		))
 		{
 			*out = js.raise(
-				err == MATERIAL_UNKNOWN
-					? "there is no post shader running — three.setPost({ fragment, textures }) first"
+				err
+					== MATERIAL_UNKNOWN ? "there is no post shader running — three.setPost({ fragment, textures }) first"
 					: post_texture_failure(err, name)
 			);
 			return;
@@ -447,10 +447,10 @@ fn void js_set_post_uniform(
 		if (catch err = self.renderer.post.set_uniform(name, values[:count], stage < 0 ? 0 : (uint)stage))
 		{
 			*out = js.raise(
-				err == MATERIAL_UNIFORM_WIDTH
-					? string::tformat(
-						"uniform '%s' was declared with a different number of components", name
-					)
+				err == MATERIAL_UNIFORM_WIDTH ? string::tformat(
+					"uniform '%s' was declared with a different number of components",
+					name
+				)
 					: string::tformat("the post pass has no uniform called '%s'", name)
 			);
 			return;

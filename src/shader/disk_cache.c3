@@ -51,36 +51,36 @@
  Little-endian throughout, every variable-length field prefixed with its `u32`
  length. `blob` below means "`u32` length, then that many bytes".
 
-	bytes  field
-	-----  ------------------------------------------------------------------
-	    4  magic — 'T3SC' as the four bytes T, 3, S, C
-	    4  SHADER_CACHE_FORMAT_VERSION
-	 blob  compiler — slang::build_tag()                  (identity, checked)
-	 blob  arguments — SLANG_ARGUMENTS joined with '\0'   (identity, checked)
-	    4  entry count
-	          per entry:
-	 blob        name
-	    4        stage (slang::STAGE_*)
-	 blob  source                                         (identity, checked)
-	 blob  spirv                                          (magic + %4 rechecked)
-	 blob  diagnostic
-	    4  layout.push_size
-	    4  layout.stages
-	    4  layout.set_count
-	    4  binding count
-	          per binding:
-	 blob        name
-	    4        set
-	    4        binding
-	    4        count
-	    4        type   (vk::DescriptorType)
-	    4        stages (vk::ShaderStageFlags)
-	    4  push field count
-	          per field:
-	 blob        name
-	    4        offset
-	    4        size
-	    4        indirect (0 or 1 — a field of the table buffer)
+ bytes  field
+ -----  ------------------------------------------------------------------
+ 4  magic — 'T3SC' as the four bytes T, 3, S, C
+ 4  SHADER_CACHE_FORMAT_VERSION
+ blob  compiler — slang::build_tag()                  (identity, checked)
+ blob  arguments — SLANG_ARGUMENTS joined with '\0'   (identity, checked)
+ 4  entry count
+ per entry:
+ blob        name
+ 4        stage (slang::STAGE_*)
+ blob  source                                         (identity, checked)
+ blob  spirv                                          (magic + %4 rechecked)
+ blob  diagnostic
+ 4  layout.push_size
+ 4  layout.stages
+ 4  layout.set_count
+ 4  binding count
+ per binding:
+ blob        name
+ 4        set
+ 4        binding
+ 4        count
+ 4        type   (vk::DescriptorType)
+ 4        stages (vk::ShaderStageFlags)
+ 4  push field count
+ per field:
+ blob        name
+ 4        offset
+ 4        size
+ 4        indirect (0 or 1 — a field of the table buffer)
 
  Trailing bytes past the last field are ignored rather than refused. A torn write
  is short, not long, and everything the module is made of has been read and
@@ -189,7 +189,7 @@ fn ShaderCacheStats shader_cache_stats() => cache_counters;
 
 fn void shader_cache_reset_stats()
 {
-	cache_counters = {};
+	cache_counters = { };
 }
 
 // ============================================================================
@@ -373,8 +373,7 @@ fn uint CacheReader.u32(&self)
 		self.bad = true;
 		return 0;
 	}
-	uint value = (uint)self.bytes[self.at]
-		| ((uint)self.bytes[self.at + 1] << 8)
+	uint value = (uint)self.bytes[self.at] | ((uint)self.bytes[self.at + 1] << 8)
 		| ((uint)self.bytes[self.at + 2] << 16)
 		| ((uint)self.bytes[self.at + 3] << 24);
 	self.at += 4;
@@ -453,7 +452,7 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 
 		// Identity, not the hash. See the header.
 		String stored_compiler = reader.blob();
-		String stored_args = reader.blob();
+		String stored_args     = reader.blob();
 		if (reader.bad) return cache_reject();
 		if (stored_compiler != compiler) return cache_reject();
 		if (stored_args != args) return cache_reject();
@@ -472,8 +471,8 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 		}
 
 		String stored_source = reader.blob();
-		String spirv = reader.blob();
-		String diagnostic = reader.blob();
+		String spirv         = reader.blob();
+		String diagnostic    = reader.blob();
 		if (reader.bad) return cache_reject();
 
 		// The second half of the identity check, and the expensive-looking one: a
@@ -485,14 +484,11 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 		// `uint*` because this pointer is at whatever offset the source length left
 		// it at.
 		if (spirv.len < 4 || spirv.len % 4 != 0) return cache_reject();
-		uint spirv_magic = (uint)spirv[0]
-			| ((uint)spirv[1] << 8)
-			| ((uint)spirv[2] << 16)
-			| ((uint)spirv[3] << 24);
+		uint spirv_magic = (uint)spirv[0] | ((uint)spirv[1] << 8) | ((uint)spirv[2] << 16) | ((uint)spirv[3] << 24);
 		if (spirv_magic != SPIRV_MAGIC) return cache_reject();
 
 		uint push_size = reader.u32();
-		uint stages = reader.u32();
+		uint stages    = reader.u32();
 		uint set_count = reader.u32();
 
 		uint binding_count = reader.u32();
@@ -587,8 +583,8 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
  @param name : `What the source is called in diagnostics. Not a path, never opened, and not part of the key — two names over identical source are one module.`
  @param entries : `The entry points to compile. Part of the key.`
  @param [out] compiled : `Set true when Slang actually ran, false when the module came off disk. PipelineCache.compiles counts this, so a compile keeps meaning Slang ran.`
- @return? SLANG_UNAVAILABLE : `The session would not start. Only reachable on a miss.`
- @return? SHADER_NOT_SPIRV : `Slang reported success and returned something that is not a module. Only reachable on a miss — a stored module that fails the same check is a miss, not a fault.`
+ @return ? SLANG_UNAVAILABLE : `The session would not start. Only reachable on a miss.`
+ @return ? SHADER_NOT_SPIRV : `Slang reported success and returned something that is not a module. Only reachable on a miss — a stored module that fails the same check is a miss, not a fault.`
 *>
 fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] entries, bool* compiled = null)
 {
@@ -603,8 +599,8 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 	@pool()
 	{
 		String compiler = slang::build_tag();
-		String args = cache_argument_blob();
-		String path = cache_path(cache_key(compiler, args, source, entries));
+		String args     = cache_argument_blob();
+		String path     = cache_path(cache_key(compiler, args, source, entries));
 
 		ShaderModule loaded;
 		if (cache_load(path, compiler, args, source, &loaded))

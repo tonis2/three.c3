@@ -20,9 +20,9 @@
  two things an agent will assume it has:
 
  - `await` at the top level. `three.load` is synchronous, so nothing here needs
-   it — but `const kit = await three.load(...)` is the line an agent that has
-   memorised Three.js will write, and a SyntaxError on it would be the API being
-   surprising on the first line of the first script.
+ it — but `const kit = await three.load(...)` is the line an agent that has
+ memorised Three.js will write, and a SyntaxError on it would be the API being
+ surprising on the first line of the first script.
  - `return` at the top level, which is where the returned value comes from.
 
  The open brace carries no newline, so a stack trace's line numbers are the
@@ -93,13 +93,13 @@ const long JS_BUDGET_MS = 5_000;
 const long JS_MCP_BUDGET_MS = 30_000;
 
 // The most a script may raise its own budget to, through `three.budget`.
-//
+// 
 // The ceiling is the point, not the default. A script that simulates rather than
 // builds — thirty thousand steps of a character against a hundred colliders —
 // needs minutes, and forcing that into five-second pieces means cutting it into
 // pieces that fit the budget rather than pieces that mean something. But a budget
 // a script can raise without limit is no budget.
-//
+// 
 // Ten minutes is longer than any legitimate scene build by two orders of
 // magnitude and shorter than a person's patience with a stuck process.
 const long JS_BUDGET_CEILING_MS = 600_000;
@@ -120,28 +120,28 @@ const uint JS_MAX_JOBS = 100_000;
  runtime, which for the files that *define* the API is worth more than editing
  them without a rebuild.
 *>
-const char[*] PRELUDE = $embed("prelude/prelude.js");
-const char[*] PRELUDE_MATH = $embed("prelude/math.js");
+const char[*] PRELUDE          = $embed("prelude/prelude.js");
+const char[*] PRELUDE_MATH     = $embed("prelude/math.js");
 const char[*] PRELUDE_OBJECT3D = $embed("prelude/object3d.js");
-const char[*] PRELUDE_TEXTURE = $embed("prelude/texture.js");
+const char[*] PRELUDE_TEXTURE  = $embed("prelude/texture.js");
 const char[*] PRELUDE_MATERIAL = $embed("prelude/material.js");
-const char[*] PRELUDE_SHADER = $embed("prelude/shader.js");
-const char[*] PRELUDE_LAYERS = $embed("prelude/layers.js");
-const char[*] PRELUDE_POST = $embed("prelude/post.js");
-const char[*] PRELUDE_MESH = $embed("prelude/mesh.js");
-const char[*] PRELUDE_SCENE = $embed("prelude/scene.js");
-const char[*] PRELUDE_ASSET = $embed("prelude/asset.js");
+const char[*] PRELUDE_SHADER   = $embed("prelude/shader.js");
+const char[*] PRELUDE_LAYERS   = $embed("prelude/layers.js");
+const char[*] PRELUDE_POST     = $embed("prelude/post.js");
+const char[*] PRELUDE_MESH     = $embed("prelude/mesh.js");
+const char[*] PRELUDE_SCENE    = $embed("prelude/scene.js");
+const char[*] PRELUDE_ASSET    = $embed("prelude/asset.js");
 const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
-const char[*] PRELUDE_FIELD = $embed("prelude/field.js");
-const char[*] PRELUDE_HELPERS = $embed("prelude/helpers.js");
-const char[*] PRELUDE_QUERY = $embed("prelude/query.js");
-const char[*] PRELUDE_NAV = $embed("prelude/nav.js");
-const char[*] PRELUDE_PHYSICS = $embed("prelude/physics.js");
-const char[*] PRELUDE_SYSTEMS = $embed("prelude/systems.js");
-const char[*] PRELUDE_ENTITY = $embed("prelude/entity.js");
+const char[*] PRELUDE_FIELD    = $embed("prelude/field.js");
+const char[*] PRELUDE_HELPERS  = $embed("prelude/helpers.js");
+const char[*] PRELUDE_QUERY    = $embed("prelude/query.js");
+const char[*] PRELUDE_NAV      = $embed("prelude/nav.js");
+const char[*] PRELUDE_PHYSICS  = $embed("prelude/physics.js");
+const char[*] PRELUDE_SYSTEMS  = $embed("prelude/systems.js");
+const char[*] PRELUDE_ENTITY   = $embed("prelude/entity.js");
 const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
-const char[*] PRELUDE_API = $embed("prelude/api.js");
-const char[*] PRELUDE_DOCS = $embed("prelude/docs.js");
+const char[*] PRELUDE_API      = $embed("prelude/api.js");
+const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
 
 <*
  The prelude's modules, by their `three:` specifiers.
@@ -249,7 +249,7 @@ fn void RunResult.free(&self)
 	if (self.error.ptr != null) self.error.free(mem);
 	if (self.warnings.ptr != null) self.warnings.free(mem);
 	if (self.frame_error.ptr != null) self.frame_error.free(mem);
-	*self = {};
+	*self = { };
 }
 
 <*
@@ -284,7 +284,7 @@ struct JsRuntime
 	// from JavaScript through `three.budget`, because 5,000 ms is generous for
 	// building a scene and short for simulating thirty thousand steps of one.
 	// `JS_BUDGET_CEILING_MS` keeps it from becoming a hang.
-	//
+	// 
 	// Separate from `budget_ns` on purpose: `frame_loop.c3` overwrites that one
 	// per frame, so a raised script budget must not silently become a raised
 	// per-frame allowance and let one callback wedge a game.
@@ -294,7 +294,7 @@ struct JsRuntime
 
 	// The process's own monotonic clock, stamped once in `open` and never again —
 	// `three.clock.wall`.
-	//
+	// 
 	// A second clock, deliberately, and not the game clock. `GameClock` is scaled
 	// by `timeScale` and stops dead when paused, which is right for everything
 	// that MOVES and useless for measuring how long something TOOK: a profiler
@@ -370,12 +370,12 @@ struct JsRuntime
 	bool click_active;
 
 	// The turntable's hand on the window — `scene/controls.c3`.
-	//
+	// 
 	// It lives here because `enabled` has to survive having no window. A script
 	// says `three.controls.enabled = false` under `--mcp --headless` as readily as
 	// with a window open, and a flag stored in the window's loop would have
 	// nowhere to be written to and would read back as whatever it was.
-	//
+	// 
 	// So the runtime owns the whole struct and `main.c3`'s loop drives *this* one
 	// rather than a local of its own. The drag anchor coming along for the ride is
 	// the price of there being exactly one; two would be two answers to
@@ -458,8 +458,8 @@ struct PendingUpload
 
  @param pass : `The scene, assets and camera the bindings drive. Must outlive the runtime.`
  @param renderer : `Null for a context with no device: three.load and three.render then throw, and everything else works.`
- @return? JS_ENGINE_FAILED : `QuickJS could not be created — out of memory, and nothing else.`
- @return? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
+ @return ? JS_ENGINE_FAILED : `QuickJS could not be created — out of memory, and nothing else.`
+ @return ? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
 *>
 fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 {
@@ -470,7 +470,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	// Started here as well as in `MeshPass.init`, because a `MeshPass` built by
 	// hand — every check in `test/` that needs no device — never runs that, and
 	// the zero value of a `GameClock` is a clock stopped at nought hertz.
-	//
+	// 
 	// Null is a real configuration: `open(null)` is a context with no scene at
 	// all, which is what the module-loader checks want. It has no clock either,
 	// and the clock verbs say so.
@@ -548,7 +548,7 @@ fn void JsRuntime.close(&self)
 	self.input_text.free();
 	self.texture_handles.free();
 	self.modules.free();
-	*self = {};
+	*self = { };
 }
 
 <*
@@ -664,18 +664,18 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 	// run that skips it leaves in the sink for the next one.
 	if (drain_frame) self.collect_advice();
 
-	SceneStats stats = self.pass != null ? self.scene_stats() : (SceneStats){};
+	SceneStats stats = self.pass != null ? self.scene_stats() : (SceneStats) { };
 
 	// Always copied, cleared only when this run is the agent's. Copying is free of
 	// consequence and the clear is not: a stopped callback has to be explained to
 	// exactly one caller, or an old failure looks like a new one on every tool
 	// call afterwards.
-	//
+	// 
 	// The copy is unconditional for a second reason. `RunResult.free` frees
 	// whatever pointer it finds, and a `""` literal has a perfectly good pointer
 	// into static memory — the one shape of empty string that must never reach it.
-	String frame_error = self.frame_error.copy_str(mem);
-	long frame_ticks = self.frame_ticks;
+	String frame_error  = self.frame_error.copy_str(mem);
+	long frame_ticks    = self.frame_ticks;
 	long frame_overruns = self.frame_overruns;
 	if (drain_frame)
 	{
@@ -689,12 +689,13 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.log = self.log.copy_str(mem),
 		.value = self.value.copy_str(mem),
 		.debug = self.debug_json(mem),
-		.error = self.error.copy_str(mem),
-		// Copied unconditionally like the three above, and for `frame_error`'s
+		.error = self.error.copy_str(
+			mem
+		), // Copied unconditionally like the three above, and for `frame_error`'s
 		// second reason: `RunResult.free` frees whatever pointer it finds.
 		.warnings = self.advice.copy_str(mem),
 		.stats = stats,
-		.timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ },
+		.timing = self.renderer != null ? self.renderer.timing() : (FrameTiming) { },
 		.frame_running = self.frame_active,
 		.frame_ticks = frame_ticks,
 		.frame_overruns = frame_overruns,
@@ -732,14 +733,13 @@ fn bool JsRuntime.step_upload(&self)
 	bool alive = self.pass != null && self.pass.assets.slot(job.asset) != null;
 	if (alive) self.pass.assets.ensure_uploaded(job.asset, job.mesh);
 
-	qjs::Value settle = alive ? job.resolve : job.reject;
-	qjs::Value argument = alive
-		? qjs::undefined_value()
+	qjs::Value settle   = alive ? job.resolve : job.reject;
+	qjs::Value argument = alive ? qjs::undefined_value()
 		: self.js.string("that asset was unloaded before its mesh finished uploading");
 	defer if (!alive) self.js.release(argument);
 
 	qjs::Value[1] arguments = { argument };
-	qjs::Value? called = self.js.call(settle, qjs::undefined_value(), arguments[..]);
+	qjs::Value? called      = self.js.call(settle, qjs::undefined_value(), arguments[..]);
 	if (catch called) return true;
 	self.js.release(called);
 	return true;
@@ -786,13 +786,13 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 		return;
 	}
 
-	qjs::Value on_ok = self.js.function(&js_settled, "resolve", 1, self);
+	qjs::Value on_ok  = self.js.function(&js_settled, "resolve", 1, self);
 	qjs::Value on_err = self.js.function(&js_rejected, "reject", 1, self);
 	defer self.js.release(on_ok);
 	defer self.js.release(on_err);
 
 	qjs::Value[2] handlers = { on_ok, on_err };
-	qjs::Value? attached = self.js.call(then, promise, handlers[..]);
+	qjs::Value? attached   = self.js.call(then, promise, handlers[..]);
 	if (catch err = attached)
 	{
 		String message = self.js.exception(mem);
@@ -810,8 +810,7 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 		if (self.js.jobs_waiting())
 		{
 			self.js.step_job();
-		}
-		// Nothing runnable and the script has not finished: it can only be waiting
+		} // Nothing runnable and the script has not finished: it can only be waiting
 		// on a queued upload, so hand it one. **Only while it is still waiting** —
 		// a script that started an upload and returned without awaiting it leaves
 		// the queue for the frames to drain, which is the entire point of there
@@ -840,9 +839,7 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 		// An await on something that never resolves. Worth its own sentence: "no
 		// error and no value" is otherwise indistinguishable from a script that
 		// returned nothing.
-		self.error.append_string(
-			"the script never finished — it is awaiting something that will not resolve"
-		);
+		self.error.append_string("the script never finished — it is awaiting something that will not resolve");
 		self.rejected = true;
 		self.settled = true;
 	}
@@ -866,7 +863,7 @@ fn String JsRuntime.timeout_message(&self)
 {
 	return string::tformat(
 		"the script ran for longer than %d ms and was stopped. `three.budget = 60000;` at the top of "
-		"the script raises it (ten minutes is the ceiling), and takes effect on the run that sets it",
+			"the script raises it (ten minutes is the ceiling), and takes effect on the run that sets it",
 		self.budget_ns / 1_000_000
 	);
 }
@@ -1142,9 +1139,7 @@ fn void js_console(
 *>
 fn String display(qjs::Context* js, qjs::Value value, Allocator allocator) @local
 {
-	if (value.tag() == qjs::TAG_OBJECT
-		&& qjs::qjs_is_error(js.ctx, &value) == 0
-		&& !js.is_function(value))
+	if (value.tag() == qjs::TAG_OBJECT && qjs::qjs_is_error(js.ctx, &value) == 0 && !js.is_function(value))
 	{
 		String json = js.json(value, allocator);
 		if (json.len > 0) return json;

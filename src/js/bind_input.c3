@@ -143,7 +143,12 @@ fn void JsRuntime.take_input(&self, InputState input)
  person still at the keyboard.
 *>
 fn void js_input_hold(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -164,7 +169,12 @@ fn void js_input_hold(
  happened.
 *>
 fn void js_input_release_all(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -184,9 +194,7 @@ fn void JsRuntime.dispatch_keys(&self)
 	while (at < self.key_handler_count)
 	{
 		KeyHandler handler = self.key_handlers[at];
-		bool fired = handler.on_press
-			? self.input.went_down(handler.row)
-			: self.input.went_up(handler.row);
+		bool fired         = handler.on_press ? self.input.went_down(handler.row) : self.input.went_up(handler.row);
 
 		if (!fired)
 		{
@@ -233,11 +241,14 @@ fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 		qjs::Value? answer = self.js.call(handler.body, qjs::undefined_value(), args[..]);
 		if (catch err = answer)
 		{
-			self.report_frame_failure(self.timed_out
-				? self.frame_timeout_message()
-				: string::tformat(
-					"the '%s' key handler threw and was stopped: %s",
-					handler.row.name, self.js.exception(tmem)));
+			self.report_frame_failure(
+				self.timed_out ? self.frame_timeout_message()
+					: string::tformat(
+						"the '%s' key handler threw and was stopped: %s",
+						handler.row.name,
+						self.js.exception(tmem)
+					)
+			);
 			kept = false;
 		}
 		else
@@ -246,10 +257,13 @@ fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 			self.js.release(answer);
 			if (promised)
 			{
-				self.report_frame_failure(string::tformat(
-					"the '%s' key handler returned a promise. It has to finish inside the frame, "
-					"so it must be synchronous — do the awaiting in a run_script instead",
-					handler.row.name));
+				self.report_frame_failure(
+					string::tformat(
+						"the '%s' key handler returned a promise. It has to finish inside the frame, "
+							"so it must be synchronous — do the awaiting in a run_script instead",
+						handler.row.name
+					)
+				);
 				kept = false;
 			}
 		}
@@ -273,7 +287,7 @@ fn void JsRuntime.drop_key_handler(&self, usz at)
 		self.key_handlers[i - 1] = self.key_handlers[i];
 	}
 	self.key_handler_count--;
-	self.key_handlers[self.key_handler_count] = {};
+	self.key_handlers[self.key_handler_count] = { };
 }
 
 <*
@@ -320,10 +334,10 @@ fn void JsRuntime.dispatch_click(&self)
 		qjs::Value? answer = self.js.call(self.click_fn, qjs::undefined_value(), args[..]);
 		if (catch err = answer)
 		{
-			self.report_frame_failure(self.timed_out
-				? self.frame_timeout_message()
-				: string::tformat(
-					"the click handler threw and was stopped: %s", self.js.exception(tmem)));
+			self.report_frame_failure(
+				self.timed_out ? self.frame_timeout_message()
+					: string::tformat("the click handler threw and was stopped: %s", self.js.exception(tmem))
+			);
 			kept = false;
 		}
 		else
@@ -334,7 +348,8 @@ fn void JsRuntime.dispatch_click(&self)
 			{
 				self.report_frame_failure(
 					"the click handler returned a promise. It has to finish inside the frame, "
-					"so it must be synchronous — do the awaiting in a run_script instead");
+						"so it must be synchronous — do the awaiting in a run_script instead"
+				);
 				kept = false;
 			}
 		}
@@ -375,49 +390,69 @@ fn KeyName? named_key(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* a
 		row = find_key(name);
 		if (catch err = row)
 		{
-			*out = js.raise(string::tformat(
-				"there is no key called '%s' — three.input.keys() lists every name there is",
-				name));
+			*out = js.raise(
+				string::tformat("there is no key called '%s' — three.input.keys() lists every name there is", name)
+			);
 		}
 	};
 	return row;
 }
 
 fn void js_input_down(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row = named_key(self, &js, argc, args, 0, out);
+	KeyName? row    = named_key(self, &js, argc, args, 0, out);
 	if (catch err = row) return;
 	*out = qjs::bool_value(self.input.is_down(row));
 }
 
 fn void js_input_pressed(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row = named_key(self, &js, argc, args, 0, out);
+	KeyName? row    = named_key(self, &js, argc, args, 0, out);
 	if (catch err = row) return;
 	*out = qjs::bool_value(self.input.went_down(row));
 }
 
 fn void js_input_released(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row = named_key(self, &js, argc, args, 0, out);
+	KeyName? row    = named_key(self, &js, argc, args, 0, out);
 	if (catch err = row) return;
 	*out = qjs::bool_value(self.input.went_up(row));
 }
 
 fn void js_input_text(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -433,13 +468,18 @@ fn void js_input_text(
  list `find_key` searches cannot drift.
 *>
 fn void js_key_names(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	qjs::Context js = qjs::wrap(ctx);
 
 	qjs::Value names = js.array();
-	uint at = 0;
+	uint at          = 0;
 	foreach (KeyName row : KEY_NAMES)
 	{
 		js.set_index(names, at++, js.string(row.name));
@@ -455,7 +495,12 @@ fn void js_key_names(
  exists, and that the table has room.
 *>
 fn void js_on_key(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -490,10 +535,13 @@ fn void js_on_key(
 	{
 		@pool()
 		{
-			*out = js.raise(string::tformat(
-				"there is room for %d key handlers and they are all taken — "
-				"unbind one with three.onKeyDown(key, null)",
-				MAX_KEY_HANDLERS));
+			*out = js.raise(
+				string::tformat(
+					"there is room for %d key handlers and they are all taken — "
+						"unbind one with three.onKeyDown(key, null)",
+					MAX_KEY_HANDLERS
+				)
+			);
 		};
 		return;
 	}
@@ -515,7 +563,12 @@ fn void js_on_key(
  mouse is moving.
 *>
 fn void js_pointer(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -552,7 +605,12 @@ fn void js_pointer(
  and there is only one field here to pack.
 *>
 fn void js_controls_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -575,7 +633,12 @@ fn void js_controls_get(
  was left, waiting for a fresh press.
 *>
 fn void js_controls_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -592,7 +655,12 @@ fn void js_controls_set(
  shape rather than `onKey`'s.
 *>
 fn void js_on_click(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -625,7 +693,12 @@ fn void js_on_click(
  back to a drag-look when it comes back false.
 *>
 fn void js_pointer_lock_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -643,13 +716,22 @@ fn void js_pointer_lock_get(
  worse.
 *>
 fn void js_pointer_lock_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.window == null) { *out = qjs::bool_value(false); return; }
+	if (self.window == null)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
 
 	self.window.setPointerLock(arg_truth(&js, argc, args, 0));
 	*out = qjs::bool_value(self.window.pointerLocked());
@@ -701,13 +783,18 @@ const int WINDOW_MAX_SIDE = 16384;
  picture there either.
 *>
 fn void js_window_size(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	uint width = 0;
+	uint width  = 0;
 	uint height = 0;
 	float scale = 0;
 	if (self.window != null && self.renderer != null && self.renderer.windowed)
@@ -749,24 +836,37 @@ fn void js_window_size(
  on a machine that has one should still start on a machine that does not.
 *>
 fn void js_window_resize(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	int width = arg_int(&js, argc, args, 0);
+	int width  = arg_int(&js, argc, args, 0);
 	int height = arg_int(&js, argc, args, 1);
 	if (width < 1 || height < 1 || width > WINDOW_MAX_SIDE || height > WINDOW_MAX_SIDE)
 	{
-		*out = js.raise(string::tformat(
-			"three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
-			WINDOW_MAX_SIDE, width, height
-		));
+		*out = js.raise(
+			string::tformat(
+				"three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
+				WINDOW_MAX_SIDE,
+				width,
+				height
+			)
+		);
 		return;
 	}
 
-	if (self.window == null) { *out = qjs::bool_value(false); return; }
+	if (self.window == null)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
 
 	float scale = self.window.get_scale();
 	if (scale <= 0.0f) scale = 1.0f;
@@ -797,8 +897,11 @@ fn void say_window_stretch(Renderer* renderer, uint width, uint height) @local
 
 	@advise(
 		"three: the window was asked for %dx%d and the picture in it is %dx%d stretched to fit. The "
-		"render target is fixed at what --width/--height asked for and resizing the window does not "
-		"move it — three.renderSize() stays what a screenshot and scene.pick count in.",
-		width, height, image_wide, image_high
+			"render target is fixed at what --width/--height asked for and resizing the window does not "
+			"move it — three.renderSize() stays what a screenshot and scene.pick count in.",
+		width,
+		height,
+		image_wide,
+		image_high
 	);
 }

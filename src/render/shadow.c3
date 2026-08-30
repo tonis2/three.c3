@@ -1,13 +1,13 @@
 <*
  The directional shadow map: one depth image, one fit, one comparison.
 
-	`c3c test --trust=full --test-noleak --test-filter three_tests::shadow`
+ `c3c test --trust=full --test-noleak --test-filter three_tests::shadow`
 
  ## What a frame does
 
-	prepare        fit the light's box around the scene, write it into FrameBlock
-	record_shadow  UNDEFINED -> DEPTH_ATTACHMENT, draw every caster, -> SAMPLED
-	the scene      binding 1 is the map; `shadow_factor` reads it back
+ prepare        fit the light's box around the scene, write it into FrameBlock
+ record_shadow  UNDEFINED -> DEPTH_ATTACHMENT, draw every caster, -> SAMPLED
+ the scene      binding 1 is the map; `shadow_factor` reads it back
 
  ...where "draw every caster" is one of three shapes — see `SHADOW_PLAN_FULL`.
 
@@ -220,25 +220,25 @@ fn float ShadowMap.reach(&self, float orbit_distance)
  list holds — see `MeshPass.plan_shadow`, the only thing that assigns this.
 
  - `FULL` clears the map, draws every caster into it, and samples it. Any frame
-   with nothing marked static is this, and so is a frame whose second image could
-   not be allocated.
+ with nothing marked static is this, and so is a frame whose second image could
+ not be allocated.
  - `STATIC` is the win. Every caster is static, so the map is a picture of a
-   world that is not moving: it is drawn once into an image of its own and then
-   sampled directly, frame after frame, with no pass recorded at all — no clear,
-   no draws, no barriers, not even a copy.
+ world that is not moving: it is drawn once into an image of its own and then
+ sampled directly, frame after frame, with no pass recorded at all — no clear,
+ no draws, no barriers, not even a copy.
  - `COMBINED` is a village with somebody walking through it. The static image is
-   copied into the live one and the movers are drawn over the top, so the
-   buildings are rasterised when they change and never because a character took a
-   step.
+ copied into the live one and the movers are drawn over the top, so the
+ buildings are rasterised when they change and never because a character took a
+ step.
 *>
-const uint SHADOW_PLAN_FULL = 0;
-const uint SHADOW_PLAN_STATIC = 1;
+const uint SHADOW_PLAN_FULL     = 0;
+const uint SHADOW_PLAN_STATIC   = 1;
 const uint SHADOW_PLAN_COMBINED = 2;
 
 // Which copies of each bucket a shadow pass draws — see `Bucket.static_first`
 // for the layout these index into, and `MeshPass.record_casters` for the loop.
-const uint CASTERS_ALL = 0;
-const uint CASTERS_STATIC = 1;
+const uint CASTERS_ALL     = 0;
+const uint CASTERS_STATIC  = 1;
 const uint CASTERS_DYNAMIC = 2;
 
 <*
@@ -345,10 +345,10 @@ struct ShadowMap
 	 the lookup will assume they mean:
 
 	 - the fit, because a shadow map is only depths *in a particular projection*
-	   and re-projecting is not something a stored image can do. See
-	   `SHADOW_FIT_SLACK`.
+	 and re-projecting is not something a stored image can do. See
+	 `SHADOW_FIT_SLACK`.
 	 - `Scene.static_revision`, which moves when a static caster is added, removed,
-	   hidden, re-parented, re-materialled or moved.
+	 hidden, re-parented, re-materialled or moved.
 
 	 The size is a third and is not compared, because it cannot drift: `ensure`
 	 destroys both images when it changes and `invalidate_static` goes with it.
@@ -429,7 +429,7 @@ struct ShadowMap
 	*>
 	bool live;
 	// How many buckets the last shadow pass drew. Reported through `stats()`.
-	//
+	// 
 	// It counts the draws this frame *recorded*, so a village whose static map is
 	// still good reports zero and one with somebody walking through it reports the
 	// movers. That is the number a script wants: `shadowDraws` is what the frame
@@ -509,9 +509,10 @@ fn void ShadowMap.invalidate_static(&self)
 *>
 fn bool ShadowMap.static_current(&self, uint revision)
 {
-	return self.static_valid
-		&& self.static_revision == revision
-		&& same_matrix(self.static_fit, self.light_view_projection);
+	return self.static_valid && self.static_revision == revision && same_matrix(
+		self.static_fit,
+		self.light_view_projection
+	);
 }
 
 <*
@@ -578,12 +579,9 @@ fn void? ShadowMap.ensure(&self, Gpu* gpu)
 		.setMipLevels(1)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		// TRANSFER_DST because the cached half is copied in before the movers are
-		// drawn over it. Asked for unconditionally rather than only when something
-		// is static: the flag is set per node at any moment and the image can only
-		// be created between frames, so the alternative is a resize-and-stall the
-		// first time a script writes `mesh.static = true`.
+		.setTiling(
+			IMAGE_TILING_OPTIMAL
+		)/* TRANSFER_DST because the cached half is copied in before the movers are *//* drawn over it. Asked for unconditionally rather than only when something *//* is static: the flag is set per node at any moment and the image can only *//* be created between frames, so the alternative is a resize-and-stall the *//* first time a script writes `mesh.static = true`. */
 		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
@@ -609,7 +607,7 @@ fn void? ShadowMap.ensure(&self, Gpu* gpu)
 	// `shadow_factor` are where the softening comes from: they average the
 	// *comparisons*, which is what PCF means. It is also the only filter a depth
 	// format is guaranteed to support as a sampled image.
-	//
+	// 
 	// CLAMP_TO_EDGE with the uv bounds check in the shader on top of it. Either
 	// alone is nearly right and both together are exact: the clamp keeps the sample
 	// legal and the bounds check keeps the *answer* from being the edge texel's
@@ -652,18 +650,13 @@ fn void? ShadowMap.ensure_static(&self, Gpu* gpu)
 		.setMipLevels(1)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		// SAMPLED as well as TRANSFER_SRC: a frame in which *everything* is static
-		// reads this image directly and never copies it, which is the case the whole
-		// section exists for. See `sample_static`.
-		.setUsage(
-			IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT
-		)
+		.setTiling(
+			IMAGE_TILING_OPTIMAL
+		)/* SAMPLED as well as TRANSFER_SRC: a frame in which *everything* is static *//* reads this image directly and never copies it, which is the case the whole *//* section exists for. See `sample_static`. */
+		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
-	self.static_memory = vk::create_image_buffer(
-		self.static_image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-	)!;
+	self.static_memory = vk::create_image_buffer(self.static_image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
 
 	self.static_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
 		.setSubresourceRange(
@@ -717,10 +710,10 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 
  ## The fit, in four steps
 
-	direction    surface-to-light, normalized here because a script's is not
-	eye          the scene's centre, backed off along it by the bounding radius
-	light space  the scene's box re-bounded through that view
-	projection   exactly that box, so no depth range is spent on nothing
+ direction    surface-to-light, normalized here because a script's is not
+ eye          the scene's centre, backed off along it by the bounding radius
+ light space  the scene's box re-bounded through that view
+ projection   exactly that box, so no depth range is spent on nothing
 
  The eye is at twice the bounding radius, the smallest distance at which the
  whole scene is in front of the light for *every* direction a script can set: the
@@ -745,16 +738,16 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  not simply "re-bound the focus box":
 
  - The extent may not change when the camera turns. An axis-aligned box in light
-   space grows and shrinks as the camera orbits, which changes the world size of
-   a texel every frame and makes every shadow edge boil. So the extent is a
-   *square* the size of the focus box's diagonal — the one number a rotation
-   cannot move.
+ space grows and shrinks as the camera orbits, which changes the world size of
+ a texel every frame and makes every shadow edge boil. So the extent is a
+ *square* the size of the focus box's diagonal — the one number a rotation
+ cannot move.
  - The origin may only move in whole texels. With a stable texel size, the
-   remaining shimmer is the grid sliding under static geometry, and flooring the
-   light-space origin to a multiple of the texel size removes it.
+ remaining shimmer is the grid sliding under static geometry, and flooring the
+ light-space origin to a multiple of the texel size removes it.
  - It may never be worse than fitting the whole scene. A camera that can see
-   everything has a focus box that *is* the scene, and its diagonal is 1.7 times
-   the box — so the square is capped at the scene's own light-space extent.
+ everything has a focus box that *is* the scene, and its diagonal is 1.7 times
+ the box — so the square is capped at the scene's own light-space extent.
 
  The depth range still comes from `bounds`, not from `focus`: a caster standing
  between the light and the visible region is outside the focus box and its shadow
@@ -783,9 +776,8 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  @param focus : `The part of it worth spending texels on — Camera.view_bounds intersected with bounds. Omitted, empty or degenerate falls back to bounds, which is what the tests that check the fit itself pass.`
  @param stable : `Whether to hold a fit that is still good rather than recentring on the focus. What a scene with static casters wants; see above for what it costs.`
 *>
-fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = {}, bool stable = false)
+fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = { }, bool stable = false)
 {
-
 	Vec3 direction = { light[0], light[1], light[2] };
 	float length   = direction.length();
 	if (length > 1e-6f)
@@ -821,7 +813,7 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 	// The diagonal, so that orbiting the camera cannot change it — and capped at
 	// the scene's own light-space extent, so a camera which frames everything is
 	// fitted exactly as it was before this existed.
-	float extent = (focus.max - focus.min).length();
+	float extent  = (focus.max - focus.min).length();
 	float ceiling = math::max(box.max.x - box.min.x, box.max.y - box.min.y);
 	// The slack is applied before the cap, so a scene the camera can see all of is
 	// fitted to the scene either way and pays nothing for hysteresis it cannot use.
@@ -847,16 +839,11 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 	// which is the exact condition for the map still being right rather than a
 	// heuristic for it. The half-size test is what lets density come back after a
 	// zoom.
-	bool keep = stable
-		&& self.has_fit
-		&& self.fit_near == near
-		&& self.fit_far == far
-		&& same_matrix(self.fit_view, view)
-		&& lit.min.x >= self.fit_low_x
-		&& lit.min.y >= self.fit_low_y
-		&& lit.max.x <= self.fit_low_x + self.fit_extent
-		&& lit.max.y <= self.fit_low_y + self.fit_extent
-		&& extent * 2.0f >= self.fit_extent;
+	bool keep = stable && self.has_fit && self.fit_near == near && self.fit_far == far && same_matrix(
+		self.fit_view,
+		view
+	) && lit.min.x >= self.fit_low_x && lit.min.y >= self.fit_low_y && lit.max.x <= self.fit_low_x
+		+ self.fit_extent && lit.max.y <= self.fit_low_y + self.fit_extent && extent * 2.0f >= self.fit_extent;
 
 	float low_x;
 	float low_y;
@@ -889,8 +876,8 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 
 	float per_texel = extent / (float)texels;
 
-	self.light_view_projection =
-		matrix::ortho{float}(low_x, low_x + extent, low_y, low_y + extent, near, far).mul(view);
+	self.light_view_projection = matrix::ortho{float}(low_x, low_x + extent, low_y, low_y + extent, near, far)
+		.mul(view);
 
 	self.texel = 1.0f / (float)texels;
 
@@ -963,9 +950,9 @@ struct ShadowFit
 *>
 fn ShadowFit ShadowMap.report(&self)
 {
-	if (!self.has_fit) return {};
+	if (!self.has_fit) return { };
 
-	uint texels = self.created > 0 ? self.created : self.size;
+	uint texels     = self.created > 0 ? self.created : self.size;
 	float per_texel = texels > 0 ? self.fit_extent / (float)texels : 0.0f;
 
 	// The centre of the fitted box in light space: the middle of the square, and
@@ -978,7 +965,7 @@ fn ShadowFit ShadowMap.report(&self)
 	};
 
 	float[<16>] v = self.fit_view.m;
-	Vec3 d = { middle.x - v[12], middle.y - v[13], middle.z - v[14] };
+	Vec3 d        = { middle.x - v[12], middle.y - v[13], middle.z - v[14] };
 	Vec3 centre = {
 		v[0] * d.x + v[1] * d.y + v[2] * d.z,
 		v[4] * d.x + v[5] * d.y + v[6] * d.z,
@@ -986,12 +973,12 @@ fn ShadowFit ShadowMap.report(&self)
 	};
 
 	return {
-		.live   = self.live,
+		.live = self.live,
 		.centre = centre,
 		.extent = self.fit_extent,
-		.near   = self.fit_near,
-		.far    = self.fit_far,
-		.texel  = per_texel,
+		.near = self.fit_near,
+		.far = self.fit_far,
+		.texel = per_texel,
 	};
 }
 
@@ -1088,11 +1075,17 @@ fn void ShadowMap.begin_over_copy(&self, vk::CommandBuffer cmd)
  @param clear : `Whether to clear on load. False loads what is already there, which is only legal because the caller put it there in this same command buffer.`
 *>
 fn void ShadowMap.begin_depth(
-	&self, vk::CommandBuffer cmd, vk::Image image, vk::ImageView view, vk::ImageLayout from, bool clear
+	&self,
+	vk::CommandBuffer cmd,
+	vk::Image image,
+	vk::ImageView view,
+	vk::ImageLayout from,
+	bool clear
 )
 {
 	bool loading = from == IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	vk::ImageMemoryBarrier2 to_attachment = { ...IMAGE_BARRIER,
+	vk::ImageMemoryBarrier2 to_attachment = {
+		...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = loading ? PIPELINE_STAGE_2_COPY_BIT : PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		.srcAccessMask = loading ? ACCESS_2_TRANSFER_WRITE_BIT : (vk::AccessFlags2)0,
@@ -1146,7 +1139,8 @@ fn void ShadowMap.end_depth(&self, vk::CommandBuffer cmd, vk::Image image)
 {
 	vk::cmdEndRendering(cmd);
 
-	vk::ImageMemoryBarrier2 to_sampled = { ...IMAGE_BARRIER,
+	vk::ImageMemoryBarrier2 to_sampled = {
+		...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -1178,7 +1172,8 @@ fn void ShadowMap.end_depth(&self, vk::CommandBuffer cmd, vk::Image image)
 *>
 fn void ShadowMap.copy_static(&self, vk::CommandBuffer cmd)
 {
-	vk::ImageMemoryBarrier2 source = { ...IMAGE_BARRIER,
+	vk::ImageMemoryBarrier2 source = {
+		...IMAGE_BARRIER,
 		.image = self.static_image,
 		.srcStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
 		.srcAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
@@ -1188,7 +1183,8 @@ fn void ShadowMap.copy_static(&self, vk::CommandBuffer cmd)
 		.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		.subresourceRange = DEPTH_LEVEL,
 	};
-	vk::ImageMemoryBarrier2 destination = { ...IMAGE_BARRIER,
+	vk::ImageMemoryBarrier2 destination = {
+		...IMAGE_BARRIER,
 		.image = self.image,
 		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		.srcAccessMask = (vk::AccessFlags2)0,
@@ -1213,12 +1209,16 @@ fn void ShadowMap.copy_static(&self, vk::CommandBuffer cmd)
 	};
 	vk::cmdCopyImage(
 		cmd,
-		self.static_image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		self.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1, &region
+		self.static_image,
+		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		self.image,
+		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1,
+		&region
 	);
 
-	vk::ImageMemoryBarrier2 restore = { ...IMAGE_BARRIER,
+	vk::ImageMemoryBarrier2 restore = {
+		...IMAGE_BARRIER,
 		.image = self.static_image,
 		.srcStageMask = PIPELINE_STAGE_2_COPY_BIT,
 		.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
@@ -1244,7 +1244,7 @@ fn void ShadowMap.destroy_image(&self, Gpu* gpu)
 	// sampling the map. `memory.free` is what destroys the image, so `image` is not
 	// handed over and is only cleared here.
 	gpu.retire_memory(self.memory, self.view, self.sampler);
-	self.memory = {};
+	self.memory = { };
 	self.image = (vk::Image)null;
 	self.view = (vk::ImageView)null;
 	self.sampler = (vk::Sampler)null;
@@ -1261,7 +1261,7 @@ fn void ShadowMap.destroy_image(&self, Gpu* gpu)
 fn void ShadowMap.destroy_static_image(&self, Gpu* gpu)
 {
 	gpu.retire_memory(self.static_memory, self.static_view, (vk::Sampler)null);
-	self.static_memory = {};
+	self.static_memory = { };
 	self.static_image = (vk::Image)null;
 	self.static_view = (vk::ImageView)null;
 	self.static_created = 0;

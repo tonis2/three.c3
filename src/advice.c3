@@ -58,7 +58,7 @@ import std::io;
 // are deduplicated, so this is far above the count any real run reaches — the
 // bound is here so that a diagnostic that repeats cannot grow without one.
 const usz ADVICE_BYTES = 4096;
-const usz ADVICE_MAX = 16;
+const usz ADVICE_MAX   = 16;
 
 char[ADVICE_BYTES] advice_storage @local;
 usz advice_used @local;
@@ -167,7 +167,7 @@ fn String advice_line(usz index)
 {
 	// The previous message's end, plus the newline that follows it.
 	usz from = index == 0 ? 0 : advice_ends[index - 1] + 1;
-	usz to = advice_ends[index];
+	usz to   = advice_ends[index];
 	return (String)advice_storage[from:to - from];
 }
 

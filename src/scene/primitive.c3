@@ -82,7 +82,7 @@ fn String PrimitiveKind.label(self)
 <*
  A name for a shape, as the JS binding spells it.
 
- @return? NO_SUCH_PRIMITIVE : `The caller made the name up — js_primitive answers with the list of real ones.`
+ @return ? NO_SUCH_PRIMITIVE : `The caller made the name up — js_primitive answers with the list of real ones.`
 *>
 fn PrimitiveKind? primitive_kind(String name)
 {
@@ -154,13 +154,19 @@ struct Primitive
  A box, `width` x `height` x `depth`, centred on the origin.
 *>
 fn Primitive box_shape(
-	float width, float height, float depth,
-	uint width_segments = 1, uint height_segments = 1, uint depth_segments = 1
+	float width,
+	float height,
+	float depth,
+	uint width_segments = 1,
+	uint height_segments = 1,
+	uint depth_segments = 1
 )
 {
 	return {
 		.kind = PrimitiveKind.BOX,
-		.a = width, .b = height, .c = depth,
+		.a = width,
+		.b = height,
+		.c = depth,
 		.u = primitive_segments(width_segments, 1),
 		.v = primitive_segments(height_segments, 1),
 		.w = primitive_segments(depth_segments, 1),
@@ -189,7 +195,8 @@ fn Primitive plane_shape(float width, float height, uint width_segments = 1, uin
 {
 	return {
 		.kind = PrimitiveKind.PLANE,
-		.a = width, .b = height,
+		.a = width,
+		.b = height,
 		.u = primitive_segments(width_segments, 1),
 		.v = primitive_segments(height_segments, 1),
 		.w = 1,
@@ -204,13 +211,19 @@ fn Primitive plane_shape(float width, float height, uint width_segments = 1, uin
  is dropped rather than emitted as slivers.
 *>
 fn Primitive cylinder_shape(
-	float radius_top, float radius_bottom, float height,
-	uint radial_segments = 32, uint height_segments = 1, bool capped = true
+	float radius_top,
+	float radius_bottom,
+	float height,
+	uint radial_segments = 32,
+	uint height_segments = 1,
+	bool capped = true
 )
 {
 	return {
 		.kind = PrimitiveKind.CYLINDER,
-		.a = radius_top, .b = radius_bottom, .c = height,
+		.a = radius_top,
+		.b = radius_bottom,
+		.c = height,
 		.u = primitive_segments(radial_segments, 3),
 		.v = primitive_segments(height_segments, 1),
 		.w = 1,
@@ -229,7 +242,8 @@ fn Primitive torus_shape(float radius, float tube, uint tubular_segments = 48, u
 {
 	return {
 		.kind = PrimitiveKind.TORUS,
-		.a = radius, .b = tube,
+		.a = radius,
+		.b = tube,
 		.u = primitive_segments(tubular_segments, 3),
 		.v = primitive_segments(radial_segments, 3),
 		.w = 1,
@@ -263,15 +277,22 @@ fn String Primitive.key(&self, Allocator allocator)
 	switch (self.kind)
 	{
 		case PrimitiveKind.BOX:
-			return string::format(allocator, "<box %fx%fx%f %dx%dx%d>",
-				self.a, self.b, self.c, self.u, self.v, self.w);
+			return string::format(allocator, "<box %fx%fx%f %dx%dx%d>", self.a, self.b, self.c, self.u, self.v, self.w);
 		case PrimitiveKind.SPHERE:
 			return string::format(allocator, "<sphere r%f %dx%d>", self.a, self.u, self.v);
 		case PrimitiveKind.PLANE:
 			return string::format(allocator, "<plane %fx%f %dx%d>", self.a, self.b, self.u, self.v);
 		case PrimitiveKind.CYLINDER:
-			return string::format(allocator, "<cylinder %f/%f h%f %dx%d %s>",
-				self.a, self.b, self.c, self.u, self.v, self.capped ? "capped" : "open");
+			return string::format(
+				allocator,
+				"<cylinder %f/%f h%f %dx%d %s>",
+				self.a,
+				self.b,
+				self.c,
+				self.u,
+				self.v,
+				self.capped ? "capped" : "open"
+			);
 		case PrimitiveKind.TORUS:
 			return string::format(allocator, "<torus r%f t%f %dx%d>", self.a, self.b, self.u, self.v);
 		default:
@@ -279,8 +300,18 @@ fn String Primitive.key(&self, Allocator allocator)
 			// gets a key that is wrongly *named* rather than one that collides with
 			// another shape's, so the failure is a confusing path and not a mesh
 			// that draws as something else.
-			return string::format(allocator, "<%s %f/%f/%f %dx%dx%d %d>",
-				self.kind.label(), self.a, self.b, self.c, self.u, self.v, self.w, self.capped ? 1 : 0);
+			return string::format(
+				allocator,
+				"<%s %f/%f/%f %dx%dx%d %d>",
+				self.kind.label(),
+				self.a,
+				self.b,
+				self.c,
+				self.u,
+				self.v,
+				self.w,
+				self.capped ? 1 : 0
+			);
 	}
 }
 
@@ -304,7 +335,7 @@ struct GeometryBuilder
 	// the file it came from — a generated shape has no colour attribute and a hull
 	// never had one. Left empty by `vertex`, so a builder assembled shape by shape
 	// has none.
-	//
+	// 
 	// Here rather than on the upload path because the reader is the exporter: a
 	// layer whose mask reads a vertex colour needs the attribute written beside
 	// it, or the mask it names is one the file does not carry.
@@ -382,9 +413,14 @@ fn void Primitive.build(&self, GeometryBuilder* out)
 *>
 fn void build_face(
 	GeometryBuilder* out,
-	Vec3 u_axis, Vec3 v_axis, Vec3 normal,
-	float u_length, float v_length, float offset,
-	uint u_segments, uint v_segments
+	Vec3 u_axis,
+	Vec3 v_axis,
+	Vec3 normal,
+	float u_length,
+	float v_length,
+	float offset,
+	uint u_segments,
+	uint v_segments
 ) @local
 {
 	uint first = (uint)out.positions.len();
@@ -394,10 +430,8 @@ fn void build_face(
 		float fv = (float)iv / (float)v_segments;
 		for (uint iu = 0; iu <= u_segments; iu++)
 		{
-			float fu = (float)iu / (float)u_segments;
-			Vec3 position = u_axis * ((fu - 0.5f) * u_length)
-				+ v_axis * ((0.5f - fv) * v_length)
-				+ normal * offset;
+			float fu      = (float)iu / (float)u_segments;
+			Vec3 position = u_axis * ((fu - 0.5f) * u_length) + v_axis * ((0.5f - fv) * v_length) + normal * offset;
 			// v counts down the face and the texture coordinate counts up, which is
 			// Three.js's layout: uv (0, 0) is the bottom-left corner.
 			out.vertex(position, normal, { fu, 1.0f - fv });
@@ -428,9 +462,9 @@ fn void build_face(
 *>
 fn void build_box(GeometryBuilder* out, Primitive shape) @local
 {
-	float half_width = shape.a * 0.5f;
+	float half_width  = shape.a * 0.5f;
 	float half_height = shape.b * 0.5f;
-	float half_depth = shape.c * 0.5f;
+	float half_depth  = shape.c * 0.5f;
 
 	build_face(out, { 0, 0, -1 }, { 0, 1, 0 }, { 1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v);
 	build_face(out, { 0, 0, 1 }, { 0, 1, 0 }, { -1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v);
@@ -456,18 +490,18 @@ fn void build_plane(GeometryBuilder* out, Primitive shape) @local
 *>
 fn void build_sphere(GeometryBuilder* out, Primitive shape) @local
 {
-	float radius = shape.a;
-	uint width_segments = shape.u;
+	float radius         = shape.a;
+	uint width_segments  = shape.u;
 	uint height_segments = shape.v;
-	uint first = (uint)out.positions.len();
+	uint first           = (uint)out.positions.len();
 
 	for (uint iy = 0; iy <= height_segments; iy++)
 	{
-		float v = (float)iy / (float)height_segments;
+		float v     = (float)iy / (float)height_segments;
 		float theta = v * (float)math::PI;
 		for (uint ix = 0; ix <= width_segments; ix++)
 		{
-			float u = (float)ix / (float)width_segments;
+			float u   = (float)ix / (float)width_segments;
 			float phi = u * (float)math::TAU;
 			Vec3 position = {
 				-radius * math::cos(phi) * math::sin(theta),
@@ -506,27 +540,27 @@ fn void build_sphere(GeometryBuilder* out, Primitive shape) @local
 *>
 fn void build_cylinder(GeometryBuilder* out, Primitive shape) @local
 {
-	float radius_top = shape.a;
+	float radius_top    = shape.a;
 	float radius_bottom = shape.b;
-	float height = shape.c;
-	uint radial = shape.u;
-	uint rows = shape.v;
+	float height        = shape.c;
+	uint radial         = shape.u;
+	uint rows           = shape.v;
 
-	float half = height * 0.5f;
+	float half  = height * 0.5f;
 	float slope = (radius_bottom - radius_top) / height;
-	uint first = (uint)out.positions.len();
+	uint first  = (uint)out.positions.len();
 
 	for (uint iy = 0; iy <= rows; iy++)
 	{
-		float v = (float)iy / (float)rows;
+		float v      = (float)iy / (float)rows;
 		float radius = v * (radius_bottom - radius_top) + radius_top;
 		for (uint ix = 0; ix <= radial; ix++)
 		{
-			float u = (float)ix / (float)radial;
-			float theta = u * (float)math::TAU;
+			float u         = (float)ix / (float)radial;
+			float theta     = u * (float)math::TAU;
 			float sin_theta = math::sin(theta);
 			float cos_theta = math::cos(theta);
-			Vec3 normal = ((Vec3){ sin_theta, slope, cos_theta }).normalize();
+			Vec3 normal     = ((Vec3) { sin_theta, slope, cos_theta }).normalize();
 			out.vertex({ radius * sin_theta, half - v * height, radius * cos_theta }, normal, { u, 1.0f - v });
 		}
 	}
@@ -564,15 +598,15 @@ fn void build_cylinder(GeometryBuilder* out, Primitive shape) @local
 *>
 fn void build_cap(GeometryBuilder* out, float radius, float y, bool top, uint radial) @local
 {
-	float sign = top ? 1.0f : -1.0f;
+	float sign  = top ? 1.0f : -1.0f;
 	Vec3 normal = { 0, sign, 0 };
 
 	uint centre = out.vertex({ 0, y, 0 }, normal, { 0.5f, 0.5f });
-	uint first = (uint)out.positions.len();
+	uint first  = (uint)out.positions.len();
 
 	for (uint ix = 0; ix <= radial; ix++)
 	{
-		float theta = (float)ix / (float)radial * (float)math::TAU;
+		float theta     = (float)ix / (float)radial * (float)math::TAU;
 		float sin_theta = math::sin(theta);
 		float cos_theta = math::cos(theta);
 		// The uv is the disc seen from outside, so the bottom cap's mirrors the
@@ -608,24 +642,28 @@ fn void build_cap(GeometryBuilder* out, float radius, float y, bool top, uint ra
 fn void build_torus(GeometryBuilder* out, Primitive shape) @local
 {
 	float radius = shape.a;
-	float tube = shape.b;
+	float tube   = shape.b;
 	uint tubular = shape.u;
-	uint radial = shape.v;
-	uint first = (uint)out.positions.len();
+	uint radial  = shape.v;
+	uint first   = (uint)out.positions.len();
 
 	for (uint j = 0; j <= radial; j++)
 	{
 		float v = (float)j / (float)radial * (float)math::TAU;
 		for (uint i = 0; i <= tubular; i++)
 		{
-			float u = (float)i / (float)tubular * (float)math::TAU;
-			float ring = radius + tube * math::cos(v);
+			float u       = (float)i / (float)tubular * (float)math::TAU;
+			float ring    = radius + tube * math::cos(v);
 			Vec3 position = { ring * math::cos(u), ring * math::sin(u), tube * math::sin(v) };
-			Vec3 centre = { radius * math::cos(u), radius * math::sin(u), 0 };
-			out.vertex(position, (position - centre).normalize(), {
-				(float)i / (float)tubular,
-				(float)j / (float)radial,
-			});
+			Vec3 centre   = { radius * math::cos(u), radius * math::sin(u), 0 };
+			out.vertex(
+				position,
+				(position - centre).normalize(),
+				{
+					(float)i / (float)tubular,
+					(float)j / (float)radial,
+				}
+			);
 		}
 	}
 
@@ -657,7 +695,7 @@ fn void build_torus(GeometryBuilder* out, Primitive shape) @local
  one table and one dedup rule.
 
  @return `The asset's handle, for Scene.add_mesh.`
- @return? PRIMITIVE_HAS_NO_TRIANGLES : `The numbers describe nothing — a zero radius, a zero-height cone with no caps. The prelude refuses these first; this is what a forged __three.primitive call gets.`
+ @return ? PRIMITIVE_HAS_NO_TRIANGLES : `The numbers describe nothing — a zero radius, a zero-height cone with no caps. The prelude refuses these first; this is what a forged __three.primitive call gets.`
 *>
 fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
 {
@@ -694,7 +732,7 @@ fn AssetId? Assets.primitive(&self, Gpu* gpu, Primitive shape)
  and `Assets.convex` asks before it runs a hull, which keeps a repeated
  construction cheap rather than merely deduplicated after the fact.
 
- @return? NOTHING_BUILT_UNDER_THAT_KEY : `No generator has filed an asset under this key yet.`
+ @return ? NOTHING_BUILT_UNDER_THAT_KEY : `No generator has filed an asset under this key yet.`
 *>
 fn AssetId? Assets.built(&self, String key)
 {
@@ -732,7 +770,14 @@ fn AssetId? Assets.built(&self, String key)
  @param lines : `True when the indices are pairs for PRIMITIVE_TOPOLOGY_LINE_LIST rather than triangles. Skips the picking tree, which would read them three at a time.`
  @return `The new asset's handle, for Scene.add_mesh.`
 *>
-fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, GeometryBuilder* geometry, bool lines = false)
+fn AssetId? Assets.upload_built(
+	&self,
+	Gpu* gpu,
+	String key,
+	String label,
+	GeometryBuilder* geometry,
+	bool lines = false
+)
 {
 	// The generated streams sample the white stand-in, exactly as an untextured
 	// glTF primitive does: the binding is pushed for every draw whether or not the
@@ -801,7 +846,7 @@ fn AssetId? Assets.upload_built(&self, Gpu* gpu, String key, String label, Geome
 *>
 fn collision::Aabb3 bounds_of(Vec3[] positions)
 {
-	if (positions.len == 0) return {};
+	if (positions.len == 0) return { };
 
 	collision::Aabb3 box = { .min = positions[0], .max = positions[0] };
 	foreach (position : positions) box.expand_by_point(position);

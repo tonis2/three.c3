@@ -10,17 +10,17 @@
  ## Where the three pieces live
 
  - **The displacements are on the asset**, uploaded once with the rest of the
-   geometry — `GpuMesh.morph`. They are immutable data a hundred copies of a head
-   share, exactly like the baked pose table.
+ geometry — `GpuMesh.morph`. They are immutable data a hundred copies of a head
+ share, exactly like the baked pose table.
  - **The weights are per copy**, because two characters built from one head mesh
-   have to be able to wear different expressions. They sit in `Scene.morphs`, a
-   side table rather than a field on `Node`: almost no node has any, and a `List`
-   per node would be a pointer, a length and a capacity per crate in the level.
+ have to be able to wear different expressions. They sit in `Scene.morphs`, a
+ side table rather than a field on `Node`: almost no node has any, and a `List`
+ per node would be a pointer, a length and a capacity per crate in the level.
  - **The frame's weights are one buffer**, written by
-   `MeshPass.write_morph_weights` and pointed at by `FrameBlock.morph_weights`.
-   An instance names its slice with one `uint`, the way it names its pose with
-   one, and for the same reason: a morphing copy and a still one stay in one
-   `vkCmdDrawIndexed`.
+ `MeshPass.write_morph_weights` and pointed at by `FrameBlock.morph_weights`.
+ An instance names its slice with one `uint`, the way it names its pose with
+ one, and for the same reason: a morphing copy and a still one stay in one
+ `vkCmdDrawIndexed`.
 
  ## What this deliberately does not do
 
@@ -81,7 +81,7 @@ fn float[] Scene.morph_weights(&self, NodeId id)
 	{
 		if (entry.node == id) return entry.weights.array_view();
 	}
-	return {};
+	return { };
 }
 
 <*
@@ -106,7 +106,11 @@ fn bool Scene.set_morph_weights(&self, NodeId id, float[] values)
 	MorphWeights* entry = null;
 	foreach (&candidate : self.morphs)
 	{
-		if (candidate.node == id) { entry = candidate; break; }
+		if (candidate.node == id)
+		{
+			entry = candidate;
+			break;
+		}
 	}
 
 	if (entry == null)
@@ -127,7 +131,11 @@ fn bool Scene.set_morph_weights(&self, NodeId id, float[] values)
 	bool driven = false;
 	foreach (weight : entry.weights)
 	{
-		if (weight != 0) { driven = true; break; }
+		if (weight != 0)
+		{
+			driven = true;
+			break;
+		}
 	}
 	if (!driven) self.clear_morph_weights(id);
 	return true;

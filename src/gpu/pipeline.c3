@@ -11,9 +11,9 @@
 
  Mirrors `shaders/mesh.slang` exactly:
 
-	frame        0     8      -> FrameBlock, one per frame in flight
-	instances    8     8      -> Instance[], already offset to this bucket
-	draw        16     8      -> DrawRecord*, this bucket's own = 24 bytes
+ frame        0     8      -> FrameBlock, one per frame in flight
+ instances    8     8      -> Instance[], already offset to this bucket
+ draw        16     8      -> DrawRecord*, this bucket's own = 24 bytes
 
  That table is `MESH_PUSH_FIELDS` below, and it is checked against the shader on
  every pipeline build. As a comment it would be exactly as good as a `slangc`
@@ -172,7 +172,7 @@ struct FrameBlock
 	float[4] lighting;
 	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
 	// frame with no live character.
-	//
+	// 
 	// Here rather than in the draw record, and that is the field's whole argument:
 	// the record is per bucket, and a single palette pointer there would split a
 	// live character away from the baked copies it shares a mesh and a material
@@ -219,15 +219,15 @@ struct FrameBlock
 	<*
 	 The sky, as the surfaces that reflect it need it.
 
-	   x  intensity, and **zero means there is no environment** — the one number
-	      the shading branches on, so a scene with no sky and a scene whose sky
-	      is turned all the way down are the same frame.
-	   y  rotation about world Y in radians, the same angle `shaders/sky.slang`
-	      turns the background by. One number in one place, or a metal would
-	      reflect a sky pointing somewhere else than the one on screen.
-	   z  the highest mip level of the environment image, which is what turns
-	      `roughness` into a blur.
-	   w  unused.
+	 x  intensity, and **zero means there is no environment** — the one number
+	 the shading branches on, so a scene with no sky and a scene whose sky
+	 is turned all the way down are the same frame.
+	 y  rotation about world Y in radians, the same angle `shaders/sky.slang`
+	 turns the background by. One number in one place, or a metal would
+	 reflect a sky pointing somewhere else than the one on screen.
+	 z  the highest mip level of the environment image, which is what turns
+	 `roughness` into a blur.
+	 w  unused.
 
 	 Beside `camera` rather than folded into its spare `w`, for the reason the
 	 debug view is a whole `float4`: the block is aligned to sixteen bytes
@@ -303,22 +303,22 @@ struct MorphDelta
  Scalar layout, so it packs the way the C3 struct does — 8-byte pointers, then
  two float4s at 4-byte alignment, then the flags:
 
-	positions       0     8
-	normals         8     8
-	uvs            16     8
-	colors         24     8
-	joints         32     8
-	weights        40     8
-	palette        48     8
-	posed          56     8
-	morph          64     8
-	base_color     72    16
-	flags          88     4
-	skin_stride    92     4
-	morph_targets  96     4
-	uv_transform  100    16
-	surface       116    16    = 132, and four bytes of tail padding to the
-	                           struct's own eight-byte alignment
+ positions       0     8
+ normals         8     8
+ uvs            16     8
+ colors         24     8
+ joints         32     8
+ weights        40     8
+ palette        48     8
+ posed          56     8
+ morph          64     8
+ base_color     72    16
+ flags          88     4
+ skin_stride    92     4
+ morph_targets  96     4
+ uv_transform  100    16
+ surface       116    16    = 132, and four bytes of tail padding to the
+ struct's own eight-byte alignment
 
  The stride between records is this struct's size, decided on the C3 side alone:
  the shader is handed a pointer to one record and never indexes past it, so
@@ -369,7 +369,7 @@ struct DrawRecord
 	// x roughness, y metalness, z reflectance, w unused — `material.roughness`,
 	// `.metalness` and `.reflectance`, which is everything the specular term reads
 	// off a material.
-	//
+	// 
 	// Here rather than in a material's uniforms for `uv_transform`'s reason: only a
 	// ShaderMaterial has uniforms, and the surface most likely to want a highlight
 	// is a `MeshLambertMaterial` on a floor.
@@ -415,20 +415,20 @@ struct SkinPush
 $assert SkinPush::size <= PUSH_BUDGET : "the skinning push block outgrew the 128 bytes every device must offer";
 
 const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
-	{ "positions",       0, 8 },
-	{ "normals",         8, 8 },
-	{ "joints",         16, 8 },
-	{ "weights",        24, 8 },
-	{ "instances",      32, 8 },
-	{ "baked",          40, 8 },
-	{ "live",           48, 8 },
-	{ "output",         56, 8 },
-	{ "morph",          64, 8 },
-	{ "morph_weights",  72, 8 },
-	{ "vertex_count",   80, 4 },
+	{ "positions", 0, 8 },
+	{ "normals", 8, 8 },
+	{ "joints", 16, 8 },
+	{ "weights", 24, 8 },
+	{ "instances", 32, 8 },
+	{ "baked", 40, 8 },
+	{ "live", 48, 8 },
+	{ "output", 56, 8 },
+	{ "morph", 64, 8 },
+	{ "morph_weights", 72, 8 },
+	{ "vertex_count", 80, 4 },
 	{ "instance_count", 84, 4 },
-	{ "flags",          88, 4 },
-	{ "morph_targets",  92, 4 },
+	{ "flags", 88, 4 },
+	{ "morph_targets", 92, 4 },
 };
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
@@ -440,8 +440,14 @@ $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 byt
 // struct this file declares.
 $assert @layout_matches(MeshPush, MESH_PUSH_FIELDS) : "MeshPush no longer lays out the way MESH_PUSH_FIELDS says";
 $assert @layout_matches(SkinPush, SKIN_PUSH_FIELDS) : "SkinPush no longer lays out the way SKIN_PUSH_FIELDS says";
-$assert @layout_matches(DrawRecord, DRAW_RECORD_FIELDS) : "DrawRecord no longer lays out the way DRAW_RECORD_FIELDS says";
-$assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer lays out the way FRAME_BLOCK_FIELDS says";
+$assert @layout_matches(
+	DrawRecord,
+	DRAW_RECORD_FIELDS
+) : "DrawRecord no longer lays out the way DRAW_RECORD_FIELDS says";
+$assert @layout_matches(
+	FrameBlock,
+	FRAME_BLOCK_FIELDS
+) : "FrameBlock no longer lays out the way FRAME_BLOCK_FIELDS says";
 // Not a bound but an equality, because these numbers are a wire format shared
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
@@ -494,9 +500,9 @@ macro bool @layout_matches($Type, $fields)
 }
 
 const PushFieldLayout[*] MESH_PUSH_FIELDS = {
-	{ "frame",      0,  8 },
-	{ "instances",  8,  8 },
-	{ "draw",      16,  8 },
+	{ "frame", 0, 8 },
+	{ "instances", 8, 8 },
+	{ "draw", 16, 8 },
 };
 
 <*
@@ -514,27 +520,27 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  does: the declaration is cut out of `shaders/mesh.slang` and compiled *as* a
  push block, which is a layout Slang will report.
 
-	view_projection          0    64
-	lighting                64    16
-	live_poses              80     8
-	light_view_projection   88    64
-	shadow                 152    16
-	debug                  168    16
-	camera                 184    16
-	environment            200    16
-	lights                 216   128    = 344, and no tail padding
+ view_projection          0    64
+ lighting                64    16
+ live_poses              80     8
+ light_view_projection   88    64
+ shadow                 152    16
+ debug                  168    16
+ camera                 184    16
+ environment            200    16
+ lights                 216   128    = 344, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
-	{ "view_projection",         0,  64 },
-	{ "lighting",               64,  16 },
-	{ "live_poses",             80,   8 },
-	{ "light_view_projection",  88,  64 },
-	{ "shadow",                152,  16 },
-	{ "debug",                 168,  16 },
-	{ "camera",                184,  16 },
-	{ "environment",           200,  16 },
-	{ "lights",                216, 128 },
-	{ "morph_weights",         344,   8 },
+	{ "view_projection", 0, 64 },
+	{ "lighting", 64, 16 },
+	{ "live_poses", 80, 8 },
+	{ "light_view_projection", 88, 64 },
+	{ "shadow", 152, 16 },
+	{ "debug", 168, 16 },
+	{ "camera", 184, 16 },
+	{ "environment", 200, 16 },
+	{ "lights", 216, 128 },
+	{ "morph_weights", 344, 8 },
 };
 
 <*
@@ -554,21 +560,21 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
  is.
 *>
 const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
-	{ "positions",      0,  8 },
-	{ "normals",        8,  8 },
-	{ "uvs",           16,  8 },
-	{ "colors",        24,  8 },
-	{ "joints",        32,  8 },
-	{ "weights",       40,  8 },
-	{ "palette",       48,  8 },
-	{ "posed",         56,  8 },
-	{ "morph",         64,  8 },
-	{ "base_color",    72, 16 },
-	{ "flags",         88,  4 },
-	{ "skin_stride",   92,  4 },
-	{ "morph_targets", 96,  4 },
+	{ "positions", 0, 8 },
+	{ "normals", 8, 8 },
+	{ "uvs", 16, 8 },
+	{ "colors", 24, 8 },
+	{ "joints", 32, 8 },
+	{ "weights", 40, 8 },
+	{ "palette", 48, 8 },
+	{ "posed", 56, 8 },
+	{ "morph", 64, 8 },
+	{ "base_color", 72, 16 },
+	{ "flags", 88, 4 },
+	{ "skin_stride", 92, 4 },
+	{ "morph_targets", 96, 4 },
 	{ "uv_transform", 100, 16 },
-	{ "surface",      116, 16 },
+	{ "surface", 116, 16 },
 };
 
 <*
@@ -640,7 +646,7 @@ enum BlendMode : char
  pixel, because Metal takes the primitive type at draw time. It is still
  undefined behaviour, and the validation layer names it on every draw:
 
-	VUID-vkCmdDrawIndexed-dynamicPrimitiveTopologyUnrestricted-07500
+ VUID-vkCmdDrawIndexed-dynamicPrimitiveTopologyUnrestricted-07500
 
  A validation error on every frame is how a real one gets missed, so the line
  pass gets a pipeline and topology stays here.
@@ -774,22 +780,24 @@ const PipelineState BAKE_STATE = {
 
 fn ulong PipelineState.hash(self)
 {
-	return ((ulong)self.topology * 0xbf58476d1ce4e5b9)
-		^ (self.depth_test ? 0x94d049bb133111ebUL : 0)
-		^ (self.depth_write ? 0x2545f4914f6cdd1dUL : 0)
-		// Multiplied rather than xor'd with a constant per value, so the three modes
-		// are three different numbers and `NONE` still contributes nothing — every
-		// state written before blending existed hashes exactly as it did.
-		^ ((ulong)self.blend.ordinal * 0x9e3779b97f4a7c15);
+	return ((ulong)self.topology * 0xbf58476d1ce4e5b9) ^ (self.depth_test ? 0x94d049bb133111ebUL
+		: 0) ^ (self.depth_write ? 0x2545f4914f6cdd1dUL
+			: 0) // Multiplied rather than xor'd with a constant per value, so the three modes
+			// are three different numbers and `NONE` still contributes nothing — every
+			// state written before blending existed hashes exactly as it did.
+			^ ((ulong)self
+				.blend
+				.ordinal
+				* 0x9e3779b97f4a7c15);
 }
 
 fn bool PipelineState.equals(self, PipelineState other)
 {
-	return self.topology == other.topology
-		&& self.depth_test == other.depth_test
-		&& self.depth_write == other.depth_write
-		// The line that makes a blended variant its own cache entry: one Slang
-		// compile, about a millisecond for the extra `VkPipeline`.
+	return self.topology == other.topology && self.depth_test == other.depth_test
+		&& self.depth_write
+			== other
+				.depth_write // The line that makes a blended variant its own cache entry: one Slang
+				// compile, about a millisecond for the extra `VkPipeline`.
 		&& self.blend == other.blend;
 }
 
@@ -818,7 +826,7 @@ struct MeshPipeline
  for the budget check to be forgotten.
 
  @param fields : `The push contract to hold the shader to — MESH_PUSH_FIELDS or POST_PUSH_FIELDS.`
- @return? PUSH_BLOCK_MISMATCH : `The shader's push block does not lay out the way the contract does. The offending field is printed, because "they disagree" is not something anyone can act on.`
+ @return ? PUSH_BLOCK_MISMATCH : `The shader's push block does not lay out the way the contract does. The offending field is printed, because "they disagree" is not something anyone can act on.`
 *>
 fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 {
@@ -830,11 +838,7 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 	// in `MeshPipeline.init`.
 	if (layout.push_size > PUSH_BUDGET)
 	{
-		@advise(
-			"shader: the push block is %d bytes and the budget is %d",
-			layout.push_size,
-			PUSH_BUDGET
-		);
+		@advise("shader: the push block is %d bytes and the budget is %d", layout.push_size, PUSH_BUDGET);
 		return PUSH_BLOCK_MISMATCH~;
 	}
 
@@ -870,7 +874,7 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
  under a different name — which is what happens without
  `-fvk-use-entrypoint-name`, where both entry points come out called `main`.
 
- @return? SHADER_MISSING_ENTRY_POINT : `The compiled module does not contain an entry point the pipeline names.`
+ @return ? SHADER_MISSING_ENTRY_POINT : `The compiled module does not contain an entry point the pipeline names.`
 *>
 fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTRIES[..])
 {
@@ -902,10 +906,10 @@ fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTR
 
  @param fields : `MESH_PUSH_FIELDS or POST_PUSH_FIELDS — see check_push_block.`
  @param entries : `Which entry points the module must contain. Defaults to the two a shading pipeline has; the shadow pass passes SHADOW_ENTRIES, which is a vertex stage alone.`
- @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout.`
- @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs.`
- @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this creates one.`
- @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something no Vulkan descriptor type covers.`
+ @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout.`
+ @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs.`
+ @return ? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this creates one.`
+ @return ? SHADER_BINDING_UNSUPPORTED : `The shader declares something no Vulkan descriptor type covers.`
 *>
 fn void? MeshPipeline.build_layouts(
 	&self,
@@ -944,19 +948,21 @@ fn void? MeshPipeline.build_layouts(
 				@advise("shader: cannot bind '%s' — no Vulkan descriptor type for it", binding.name);
 				return SHADER_BINDING_UNSUPPORTED~;
 			}
-			bindings.push({
-				.binding = binding.binding,
-				.descriptorType = binding.type,
-				.descriptorCount = binding.count,
-				.stageFlags = binding.stages,
-			});
+			bindings.push(
+				{
+					.binding = binding.binding,
+					.descriptorType = binding.type,
+					.descriptorCount = binding.count,
+					.stageFlags = binding.stages,
+				}
+			);
 		}
 
 		// `PUSH_DESCRIPTOR_BIT` makes this a layout that is never allocated from.
 		// Sets for it are specified inline by `cmdPushDescriptorSetKHR` at draw
 		// time, which is why `Assets` has no pool, no set list and — the part that
 		// mattered — no reason to know a pipeline exists.
-		//
+		// 
 		// A module with no bindings still gets a layout, and `setBindings` is what
 		// has to be skipped rather than the layout: the builder takes the address of
 		// the slice's first element, so an empty slice faults inside the binding
@@ -971,8 +977,7 @@ fn void? MeshPipeline.build_layouts(
 
 	vk::PushConstantRange push_range = {
 		.stageFlags = mod.layout.stages,
-		.offset = 0,
-		// The shader's own size rather than `MeshPush::size`: reflection reports the
+		.offset = 0, // The shader's own size rather than `MeshPush::size`: reflection reports the
 		// bytes that are used, not what the C3 struct occupies with its tail
 		// padding, and a range longer than the block is a validation error on some
 		// drivers. `check_push_block` has already proved they agree field for field.
@@ -1070,8 +1075,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.setTopology(desc.topology)
 		.setPrimitiveRestartEnable(vk::FALSE);
 
-	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState()
-		.setCullMode(desc.cull)
+	vk::PipelineRasterizationStateCreateInfo rasterization = vk::defaultRasterizationState().setCullMode(desc.cull)
 		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
 		.setPolygonMode(POLYGON_MODE_FILL);
 
@@ -1113,7 +1117,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 	// A copy, not a move. A module now produces one pipeline per render state —
 	// the line pass and the solid pass are one `mesh.slang`, and a material's two
 	// sides are one source — so the module has to survive with its layout intact.
-	//
+	// 
 	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
 	// the argument against borrowing instead.
 	self.shader = mod.layout.copy();
@@ -1129,13 +1133,17 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
  themselves at record time.
 
  @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
- @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
- @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
- @return? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
- @return? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
+ @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
+ @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
+ @return ? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
+ @return ? SHADER_BINDING_UNSUPPORTED : `The shader declares something this pass cannot bind — an acceleration structure, say. Named rather than guessed at.`
 *>
 fn MeshPipeline? MeshPipeline.init(
-	&self, Gpu* gpu, Target* target, ShaderModule* mod, PipelineState state,
+	&self,
+	Gpu* gpu,
+	Target* target,
+	ShaderModule* mod,
+	PipelineState state,
 	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..]
 )
 {
@@ -1145,9 +1153,12 @@ fn MeshPipeline? MeshPipeline.init(
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[2] stages = {
-		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
-		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT).setMod(module_handle).setName("fragmentMain"),
-	};
+		vk::pipelineShaderStageCreateInfo()
+		.setStage(SHADER_STAGE_VERTEX_BIT)
+		.setMod(module_handle)
+		.setName("vertexMain"), vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT)
+			.setMod(module_handle)
+			.setName("fragmentMain"), };
 
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
 		.setColorAttachmentFormats((vk::Format[]) { target.color_format })
@@ -1158,7 +1169,7 @@ fn MeshPipeline? MeshPipeline.init(
 	// KosmicKrisp build this targets — Metal keeps blending inside the compiled
 	// pipeline state — so unlike the cull mode, which `dynamic_cull` turns into a
 	// command per bucket, this is a pipeline per mode. See `BlendMode`.
-	//
+	// 
 	// `vk::defaultColorBlendAttachment` is *already* standard alpha —
 	// SRC_ALPHA / ONE_MINUS_SRC_ALPHA over ONE / ONE_MINUS_SRC_ALPHA — so the
 	// `ALPHA` case is the helper unchanged and the opaque case is the one that has
@@ -1185,20 +1196,25 @@ fn MeshPipeline? MeshPipeline.init(
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
 
-	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
-		.stages = stages[..],
-		.rendering = &rendering,
-		.color_blend = &color_blend,
-		.topology = state.topology,
-		// Ignored, because `dynamic_cull` is set just below and `MeshPass.record`
-		// supplies the material's own per bucket. Written as the old default rather
-		// than left as the struct's `CULL_MODE_NONE`, because a reader who missed
-		// the dynamic state would take that zero for a choice.
-		.cull = CULL_MODE_BACK_BIT,
-		.dynamic_cull = true,
-		.depth_test = state.depth_test,
-		.depth_write = state.depth_write,
-	});
+	return self.build_graphics(
+		gpu,
+		mod,
+		{
+			...GRAPHICS_PIPELINE,
+			.stages = stages[..],
+			.rendering = &rendering,
+			.color_blend = &color_blend,
+			.topology = state
+				.topology, // Ignored, because `dynamic_cull` is set just below and `MeshPass.record`
+				// supplies the material's own per bucket. Written as the old default rather
+				// than left as the struct's `CULL_MODE_NONE`, because a reader who missed
+				// the dynamic state would take that zero for a choice.
+			.cull = CULL_MODE_BACK_BIT,
+			.dynamic_cull = true,
+			.depth_test = state.depth_test,
+			.depth_write = state.depth_write,
+		}
+	);
 }
 
 <*
@@ -1209,20 +1225,20 @@ fn MeshPipeline? MeshPipeline.init(
  would be a bug if it did not:
 
  - No depth attachment, no depth test and no depth write. Dynamic rendering
-   matches the pipeline's declared depth format against the one the attachment
-   actually carries, so declaring a depth format and then beginning a pass
-   without one is a validation error rather than a wasted attachment.
+ matches the pipeline's declared depth format against the one the attachment
+ actually carries, so declaring a depth format and then beginning a pass
+ without one is a validation error rather than a wasted attachment.
  - No blending. A post pass writes every pixel of the frame from the image it
-   just sampled; blending it over the previous contents would compose it with an
-   attachment that is about to be cleared anyway.
+ just sampled; blending it over the previous contents would compose it with an
+ attachment that is about to be cleared anyway.
  - `CULL_MODE_NONE`, statically. The fullscreen triangle is clockwise on screen,
-   the opposite of everything else this project draws, and
-   `DYNAMIC_STATE_CULL_MODE` is deliberately *not* declared: the post draw
-   follows `MeshPass.record`, which sets the cull mode per bucket, so an
-   inherited dynamic value would decide whether the frame appears. Getting this
-   wrong is an empty frame with no validation message.
+ the opposite of everything else this project draws, and
+ `DYNAMIC_STATE_CULL_MODE` is deliberately *not* declared: the post draw
+ follows `MeshPass.record`, which sets the cull mode per bucket, so an
+ inherited dynamic value would decide whether the frame appears. Getting this
+ wrong is an empty frame with no validation message.
  - `POST_PUSH_FIELDS`, not the mesh contract. There is no geometry to point at,
-   so a shader required to declare `positions` could not be written.
+ so a shader required to declare `positions` could not be written.
 
  ## The colour format is a parameter
 
@@ -1237,7 +1253,7 @@ fn MeshPipeline? MeshPipeline.init(
 
  @param mod : `A module from post_source + compile_slang_cached. Its layout is copied, not moved.`
  @param color_format : `What this pass writes — POST_CHAIN_FORMAT for a chain pass, target.color_format for the tonemap. Dynamic rendering checks it against the attachment, so a wrong one is a validation error rather than a wrong colour.`
- @return? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
+ @return ? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
 *>
 fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::Format color_format)
 {
@@ -1247,9 +1263,12 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[2] stages = {
-		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
-		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT).setMod(module_handle).setName("fragmentMain"),
-	};
+		vk::pipelineShaderStageCreateInfo()
+		.setStage(SHADER_STAGE_VERTEX_BIT)
+		.setMod(module_handle)
+		.setName("vertexMain"), vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT)
+			.setMod(module_handle)
+			.setName("fragmentMain"), };
 
 	// Colour only. `setDepthAttachmentFormat` is absent rather than set to
 	// FORMAT_UNDEFINED for readability; the zero the struct starts with is
@@ -1266,11 +1285,16 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 	// No depth of any kind, and `CULL_MODE_NONE` statically — both are the header's
 	// argument, and `dynamic_cull` staying false keeps an inherited cull mode from
 	// deciding whether the frame appears.
-	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
-		.stages = stages[..],
-		.rendering = &rendering,
-		.color_blend = &color_blend,
-	});
+	return self.build_graphics(
+		gpu,
+		mod,
+		{
+			...GRAPHICS_PIPELINE,
+			.stages = stages[..],
+			.rendering = &rendering,
+			.color_blend = &color_blend,
+		}
+	);
 }
 
 <*
@@ -1281,31 +1305,31 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  which would be a validation error or a wrong picture if it did not:
 
  - One shader stage. A depth-only pipeline is allowed to have no fragment shader.
-   `SHADOW_ENTRIES` is what `build_layouts` is held to instead of `MESH_ENTRIES`,
-   so a module with a `fragmentMain` is not required and one without it is not
-   refused.
+ `SHADOW_ENTRIES` is what `build_layouts` is held to instead of `MESH_ENTRIES`,
+ so a module with a `fragmentMain` is not required and one without it is not
+ refused.
  - No colour attachment, and a depth format that is not the target's. The shadow
-   map is its own image at its own extent, and dynamic rendering checks the
-   declared formats against the attachments the pass actually begins with.
+ map is its own image at its own extent, and dynamic rendering checks the
+ declared formats against the attachments the pass actually begins with.
  - `CULL_MODE_NONE`, statically. Two reasons pointing the same way: a closed mesh
-   is unaffected — its back faces are further from the light and lose the depth
-   test — while an open one, a plane or a leaf card, casts nothing at all with
-   either face culled from *some* light direction. And
-   `DYNAMIC_STATE_CULL_MODE` is absent for `init_post`'s reason.
+ is unaffected — its back faces are further from the light and lose the depth
+ test — while an open one, a plane or a leaf card, casts nothing at all with
+ either face culled from *some* light direction. And
+ `DYNAMIC_STATE_CULL_MODE` is absent for `init_post`'s reason.
  - Depth tested and written, which is the whole output. `SOLID_STATE`'s two
-   trues, spelled out here rather than taken from it, because `PipelineState`
-   also carries a topology and a blend mode and neither means anything to a pass
-   with no colour attachment.
+ trues, spelled out here rather than taken from it, because `PipelineState`
+ also carries a topology and a blend mode and neither means anything to a pass
+ with no colour attachment.
  - `MESH_PUSH_FIELDS`, the same contract the shading pipelines are held to. That
-   is not a coincidence to be tidied away: the shadow pass reads the same
-   instance array and the same draw record the main pass reads, out of the same
-   buffers, which is what makes a skinned character's shadow the shadow of the
-   pose it is actually in.
+ is not a coincidence to be tidied away: the shadow pass reads the same
+ instance array and the same draw record the main pass reads, out of the same
+ buffers, which is what makes a skinned character's shadow the shadow of the
+ pose it is actually in.
 
  @param mod : `A module from compile_slang containing vertexMain. Its layout is copied, not moved.`
  @param depth_format : `The shadow map's format — see ShadowMap.ensure, which picks one the device will both render to and sample.`
- @return? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
- @return? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
+ @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
+ @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format)
 {
@@ -1315,8 +1339,10 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[1] stages = {
-		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
-	};
+		vk::pipelineShaderStageCreateInfo()
+		.setStage(SHADER_STAGE_VERTEX_BIT)
+		.setMod(module_handle)
+		.setName("vertexMain"), };
 
 	// Depth alone. `setColorAttachmentFormats` is not called rather than being
 	// called with an empty slice, for the reason `init_post` leaves the depth
@@ -1331,13 +1357,18 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 
 	// Depth tested and written is the whole output; `CULL_MODE_NONE` statically for
 	// the two reasons in the header.
-	return self.build_graphics(gpu, mod, { ...GRAPHICS_PIPELINE,
-		.stages = stages[..],
-		.rendering = &rendering,
-		.color_blend = &color_blend,
-		.depth_test = true,
-		.depth_write = true,
-	});
+	return self.build_graphics(
+		gpu,
+		mod,
+		{
+			...GRAPHICS_PIPELINE,
+			.stages = stages[..],
+			.rendering = &rendering,
+			.color_blend = &color_blend,
+			.depth_test = true,
+			.depth_write = true,
+		}
+	);
 }
 
 fn void MeshPipeline.free(&self, Gpu* gpu)
@@ -1382,10 +1413,10 @@ struct SkinPipeline
  one of them.
 
  @param mod : `A module from compile_slang containing computeMain.`
- @return? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, and so does everything else here.`
- @return? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push bytes than the block needs.`
- @return? SHADER_MISSING_ENTRY_POINT : `The module has no computeMain.`
- @return? PUSH_BLOCK_MISMATCH : `The shader's push block is not the one SKIN_PUSH_FIELDS describes.`
+ @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, and so does everything else here.`
+ @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push bytes than the block needs.`
+ @return ? SHADER_MISSING_ENTRY_POINT : `The module has no computeMain.`
+ @return ? PUSH_BLOCK_MISMATCH : `The shader's push block is not the one SKIN_PUSH_FIELDS describes.`
 *>
 fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 {
@@ -1402,20 +1433,14 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 	};
 
 	// No set layouts at all: everything this shader reads it reaches by address.
-	self.layout = vk::pipelineLayoutCreateInfo()
-		.setPushConstantRanges({ push_range })
-		.build(gpu.handle)!;
+	self.layout = vk::pipelineLayoutCreateInfo().setPushConstantRanges({ push_range }).build(gpu.handle)!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
 	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(
-			vk::pipelineShaderStageCreateInfo()
-				.setStage(SHADER_STAGE_COMPUTE_BIT)
-				.setMod(module_handle)
-				.setName("computeMain")
-		)
+		.setStage(vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_COMPUTE_BIT).setMod(module_handle)
+			.setName("computeMain"))
 		.setLayout(self.layout);
 
 	vk::Pipeline handle;
@@ -1425,7 +1450,7 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 	// Moved, exactly as `MeshPipeline.init` moves it: the pipeline outlives the
 	// module it was built from.
 	self.shader = mod.layout;
-	mod.layout = {};
+	mod.layout = { };
 	self.ready = true;
 
 	return *self;
@@ -1528,7 +1553,7 @@ struct PipelineCache
 	// How many modules came off `shader/disk_cache.c3` instead — a miss here and a
 	// hit there, which is the case the disk cache exists for and the one the
 	// in-memory counters above cannot see.
-	//
+	// 
 	// `compiles` keeps meaning "Slang ran", which is why this is a counter of its
 	// own. Every existing test that asserts on `compiles` is asserting about
 	// *Slang*, and a disk hit that incremented it would turn all of them into tests
@@ -1599,7 +1624,7 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 	// the one level the in-memory cache above cannot reach. Everything below this
 	// line is unchanged by which side answered, the diagnostic included: a stored
 	// module carries the warning it was compiled with.
-	bool ran = false;
+	bool ran         = false;
 	ShaderModule mod = compile_slang_cached(source, name, MESH_ENTRIES[..], &ran)!;
 	if (ran)
 	{
@@ -1767,8 +1792,8 @@ fn void PipelineCache.trim(&self, Gpu* gpu)
 	while (true)
 	{
 		uint unused = 0;
-		sz oldest = 0;
-		bool found = false;
+		sz oldest   = 0;
+		bool found  = false;
 		foreach (i, entry : self.entries)
 		{
 			if (entry.refs > 0) continue;
@@ -1848,5 +1873,5 @@ fn void PipelineCache.free(&self, Gpu* gpu)
 		mem::free(compiled);
 	}
 	self.modules.free();
-	*self = {};
+	*self = { };
 }

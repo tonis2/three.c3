@@ -12,9 +12,9 @@
  A `Sampler2D` and a `Texture2D` are indistinguishable at two of the three
  levels Slang exposes:
 
-	type kind           RESOURCE for both
-	parameter category  DESCRIPTOR_TABLE_SLOT for both
-	binding range type  COMBINED_TEXTURE_SAMPLER vs TEXTURE
+ type kind           RESOURCE for both
+ parameter category  DESCRIPTOR_TABLE_SLOT for both
+ binding range type  COMBINED_TEXTURE_SAMPLER vs TEXTURE
 
  Only the third says which. Deriving a set layout from the first two produces a
  `SAMPLED_IMAGE` where the shader wants a `COMBINED_IMAGE_SAMPLER` — a
@@ -131,7 +131,7 @@ fn void ShaderLayout.free(&self)
 	foreach (field : self.push_fields) if (field.name.ptr != null) field.name.free(mem);
 	self.bindings.free();
 	self.push_fields.free();
-	*self = {};
+	*self = { };
 }
 
 <*
@@ -256,14 +256,16 @@ fn ShaderLayout reflect_layout(slang::Reflection reflection, ShaderEntry[] entri
 		uint highest = 0;
 		foreach (descriptor : descriptors)
 		{
-			out.bindings.push({
-				.name = descriptor.name.copy(mem),
-				.set = descriptor.set,
-				.binding = descriptor.binding,
-				.count = descriptor.count,
-				.type = descriptor_type_of(descriptor.type),
-				.stages = out.stages,
-			});
+			out.bindings.push(
+				{
+					.name = descriptor.name.copy(mem),
+					.set = descriptor.set,
+					.binding = descriptor.binding,
+					.count = descriptor.count,
+					.type = descriptor_type_of(descriptor.type),
+					.stages = out.stages,
+				}
+			);
 			if (descriptor.set + 1 > highest) highest = descriptor.set + 1;
 		}
 		out.set_count = highest;
@@ -276,12 +278,14 @@ fn ShaderLayout reflect_layout(slang::Reflection reflection, ShaderEntry[] entri
 		out.push_size = reflection.push_block(&fields, MATERIAL_TABLE_FIELD);
 		foreach (field : fields)
 		{
-			out.push_fields.push({
-				.name = field.name.copy(mem),
-				.offset = field.offset,
-				.size = field.size,
-				.indirect = field.indirect,
-			});
+			out.push_fields.push(
+				{
+					.name = field.name.copy(mem),
+					.offset = field.offset,
+					.size = field.size,
+					.indirect = field.indirect,
+				}
+			);
 		}
 	};
 

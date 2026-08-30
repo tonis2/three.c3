@@ -11,18 +11,18 @@
 
  ## Six marks, five spans
 
-	 begin ──prepare──▶ ──shadow──▶ ──scene──▶ ──post──▶ ──present──▶ end
+ begin ──prepare──▶ ──shadow──▶ ──scene──▶ ──post──▶ ──present──▶ end
 
  - prepare — the scene update, the frame's buffer writes and the compute
-   skinning dispatch. Everything before the first rendering begins.
+ skinning dispatch. Everything before the first rendering begins.
  - shadow — the depth-only pass. 0 with shadows off.
  - scene — the pass that draws the picture, into the target or into the post
-   chain's first image.
+ chain's first image.
  - post — the chain, and 0 when no post shader is active.
  - present — getting the finished image out: the blit on a windowed frame, the
-   readback copy on a `capture()`, the closing layout transition on all three.
-   Not a phase of `record_scene` but the remainder of the outer span, which is
-   what makes the five add up to `total`.
+ readback copy on a `capture()`, the closing layout transition on all three.
+ Not a phase of `record_scene` but the remainder of the outer span, which is
+ what makes the five add up to `total`.
 
  The outer pair is the first and last command in the frame's buffer, so it
  covers the blit and the readback — deliberately, since "what did this frame
@@ -40,12 +40,12 @@
  ## Which frame a reading describes
 
  - `Renderer.frame()` (windowed) reports the last *completed* frame, which with
-   two frames in flight is a frame or two behind the one on screen, and 0 before
-   the first has completed. A windowed frame does not wait for its own
-   submission, so its own time does not exist yet when it returns.
+ two frames in flight is a frame or two behind the one on screen, and 0 before
+ the first has completed. A windowed frame does not wait for its own
+ submission, so its own time does not exist yet when it returns.
  - `capture()` and `render_offscreen()` report the frame they just drew — both
-   wait on their own fence before returning, so "render, then read the stats"
-   sees the render it asked for.
+ wait on their own fence before returning, so "render, then read the stats"
+ sees the render it asked for.
 
  ## Two implementation notes
 
@@ -171,8 +171,11 @@ fn void FrameTimer.free(&self, Gpu* gpu)
  before it was resolved — and an enormous positive number from the unsigned
  wraparound is the worst way to report that.
 *>
-fn double FrameTimer.span(&self, ulong from, ulong to)
-	=> to > from ? (double)(to - from) * (double)self.period / 1_000_000.0 : 0.0;
+fn double FrameTimer.span(
+	&self,
+	ulong from,
+	ulong to
+) => to > from ? (double)(to - from) * (double)self.period / 1_000_000.0 : 0.0;
 
 <*
  Reads back a slot's run, if it has one, and turns it into `timing`.
@@ -210,12 +213,12 @@ fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 	if (stamps[FrameMark.END.ordinal] <= stamps[FrameMark.BEGIN.ordinal]) return;
 
 	self.timing = {
-		.total   = self.span(stamps[FrameMark.BEGIN.ordinal],   stamps[FrameMark.END.ordinal]),
-		.prepare = self.span(stamps[FrameMark.BEGIN.ordinal],   stamps[FrameMark.PREPARE.ordinal]),
-		.shadow  = self.span(stamps[FrameMark.PREPARE.ordinal], stamps[FrameMark.SHADOW.ordinal]),
-		.scene   = self.span(stamps[FrameMark.SHADOW.ordinal],  stamps[FrameMark.SCENE.ordinal]),
-		.post    = self.span(stamps[FrameMark.SCENE.ordinal],   stamps[FrameMark.POST.ordinal]),
-		.present = self.span(stamps[FrameMark.POST.ordinal],    stamps[FrameMark.END.ordinal]),
+		.total = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.END.ordinal]),
+		.prepare = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.PREPARE.ordinal]),
+		.shadow = self.span(stamps[FrameMark.PREPARE.ordinal], stamps[FrameMark.SHADOW.ordinal]),
+		.scene = self.span(stamps[FrameMark.SHADOW.ordinal], stamps[FrameMark.SCENE.ordinal]),
+		.post = self.span(stamps[FrameMark.SCENE.ordinal], stamps[FrameMark.POST.ordinal]),
+		.present = self.span(stamps[FrameMark.POST.ordinal], stamps[FrameMark.END.ordinal]),
 	};
 }
 

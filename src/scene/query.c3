@@ -102,7 +102,7 @@ const uint QUERY_MAX_CELLS = 64;
 // Per axis, and a total. Both are there so that a scene with one node a
 // kilometre from the rest cannot ask for a billion cells: the cell size is grown
 // until the grid fits instead.
-const int QUERY_MAX_DIM = 128;
+const int QUERY_MAX_DIM   = 128;
 const int QUERY_MAX_TOTAL = 1 << 18;
 
 <*
@@ -416,7 +416,7 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 
 	// Pass one: the entries, and the world box around all of them.
 	collision::Aabb3 world = collision::NEW_AABB3;
-	Vec3 extent_total = { 0, 0, 0 };
+	Vec3 extent_total      = { 0, 0, 0 };
 	foreach (slot, &node : self.nodes)
 	{
 		if (!node.alive) continue;
@@ -463,8 +463,8 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	// because a cell smaller than the things in it puts every object in many cells
 	// for no selectivity; and the span divided by the per-axis cap, which stops one
 	// far-flung node from asking for a grid nobody can hold.
-	Vec3 span = world.size();
-	Vec3 mean = extent_total * (1.0f / (float)count);
+	Vec3 span  = world.size();
+	Vec3 mean  = extent_total * (1.0f / (float)count);
 	float cell = math::max(math::max(mean.x, math::max(mean.y, mean.z)), 1e-4f);
 
 	float longest = math::max(span.x, math::max(span.y, span.z));
@@ -502,8 +502,8 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	// counted nowhere, which keeps it out of `items` in pass four.
 	foreach (i, entry : index.entries)
 	{
-		int[<3>] lo = index.clamp_cell(index.cell_of(entry.box.min));
-		int[<3>] hi = index.clamp_cell(index.cell_of(entry.box.max));
+		int[<3>] lo  = index.clamp_cell(index.cell_of(entry.box.min));
+		int[<3>] hi  = index.clamp_cell(index.cell_of(entry.box.max));
 		long covered = (long)(hi.x - lo.x + 1) * (long)(hi.y - lo.y + 1) * (long)(hi.z - lo.z + 1);
 		if (covered > (long)QUERY_MAX_CELLS)
 		{
@@ -535,8 +535,8 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 
 	foreach (i, entry : index.entries)
 	{
-		int[<3>] lo = index.clamp_cell(index.cell_of(entry.box.min));
-		int[<3>] hi = index.clamp_cell(index.cell_of(entry.box.max));
+		int[<3>] lo  = index.clamp_cell(index.cell_of(entry.box.min));
+		int[<3>] hi  = index.clamp_cell(index.cell_of(entry.box.max));
 		long covered = (long)(hi.x - lo.x + 1) * (long)(hi.y - lo.y + 1) * (long)(hi.z - lo.z + 1);
 		if (covered > (long)QUERY_MAX_CELLS) continue;
 		for (int z = lo.z; z <= hi.z; z++)
@@ -652,7 +652,7 @@ fn uint Scene.query_box(&self, Assets* assets, collision::Aabb3 box, NodeId[] ou
 	if (out.len == 0) return 0;
 
 	uint found = 0;
-	self.@each_in_box(assets, box; NodeId node, collision::Aabb3 world)
+	self.@each_in_box(assets, box ; NodeId node, collision::Aabb3 world)
 	{
 		// The slice is filled and then ignored rather than the walk being cut
 		// short: a macro body cannot break its caller's loop, and a cell walk that
@@ -677,17 +677,17 @@ fn uint Scene.overlap_sphere(&self, Assets* assets, Vec3 centre, float radius, N
 {
 	if (out.len == 0) return 0;
 
-	float r = math::max(radius, 0.0f);
-	Vec3 reach = { r, r, r };
+	float r              = math::max(radius, 0.0f);
+	Vec3 reach           = { r, r, r };
 	collision::Aabb3 box = { centre - reach, centre + reach };
-	float r_sq = r * r;
+	float r_sq           = r * r;
 
 	// One pass, with the exact test where the box is already in hand. Written as a
 	// filter over `query_box`'s answer first, which needed the world box back for
 	// each hit and so had to find it again — a linear scan of the entry list per
 	// candidate, which is quadratic in a scene where the query is wide.
 	uint found = 0;
-	self.@each_in_box(assets, box; NodeId node, collision::Aabb3 world)
+	self.@each_in_box(assets, box ; NodeId node, collision::Aabb3 world)
 	{
 		if (found < out.len)
 		{
@@ -721,13 +721,13 @@ fn bool Scene.ray_hits_node(&self, Assets* assets, NodeId id, collision::Ray ray
 
 	Matrix4f inverse_world = invert(node.world);
 
-	Vec3 local_origin = transform_point(inverse_world, ray.origin);
+	Vec3 local_origin    = transform_point(inverse_world, ray.origin);
 	Vec3 local_direction = transform_direction(inverse_world, ray.direction);
 
 	float length = local_direction.length();
 	if (length < 1e-12f) return false;
 
-	collision::Ray local_ray = { .origin = local_origin, .direction = local_direction / length };
+	collision::Ray local_ray  = { .origin = local_origin, .direction = local_direction / length };
 	collision::HitInfo narrow = mesh.bvh.ray_intersects(local_ray);
 	if (!narrow.collided) return false;
 
@@ -741,8 +741,8 @@ fn bool Scene.ray_hits_node(&self, Assets* assets, NodeId id, collision::Ray ray
 		.mesh = node.mesh,
 		.distance = distance,
 		.point = ray.origin + ray.direction * distance,
-		.normal = transform_direction(node.normal, narrow.normal).normalize(),
-	};
+		.normal = transform_direction(node.normal, narrow.normal)
+		.normalize(), };
 	return true;
 }
 
@@ -787,27 +787,40 @@ macro void QueryIndex.@walk_ray(&self, collision::Ray ray, float max_distance; @
 		for (int axis = 0; axis < 3; axis++)
 		{
 			float direction = ray.direction[axis];
-			float origin = ray.origin[axis];
-			float lo = grid_min[axis];
-			float hi = grid_max[axis];
+			float origin    = ray.origin[axis];
+			float lo        = grid_min[axis];
+			float hi        = grid_max[axis];
 			if (math::abs(direction) < 1e-12f)
 			{
-				if (origin < lo || origin > hi) { misses = true; break; }
+				if (origin < lo || origin > hi)
+				{
+					misses = true;
+					break;
+				}
 				continue;
 			}
 			float t0 = (lo - origin) / direction;
 			float t1 = (hi - origin) / direction;
-			if (t0 > t1) { float swap = t0; t0 = t1; t1 = swap; }
+			if (t0 > t1)
+			{
+				float swap = t0;
+				t0 = t1;
+				t1 = swap;
+			}
 			enter = math::max(enter, t0);
 			leave = math::min(leave, t1);
-			if (enter > leave) { misses = true; break; }
+			if (enter > leave)
+			{
+				misses = true;
+				break;
+			}
 		}
 
 		if (!misses)
 		{
 			// A hair inside, so the entry point does not land exactly on a cell
 			// wall and floor into the cell before the grid.
-			Vec3 at = ray.origin + ray.direction * (enter + 1e-4f);
+			Vec3 at       = ray.origin + ray.direction * (enter + 1e-4f);
 			int[<3>] cell = self.clamp_cell(self.cell_of(at));
 
 			int[<3>] step;
@@ -881,17 +894,17 @@ fn uint Scene.raycast_all(&self, Assets* assets, collision::Ray ray, float max_d
 	if (out.len == 0 || assets == null) return 0;
 
 	QueryIndex* index = &self.query;
-	float limit = max_distance > 0.0f ? max_distance : float::max;
+	float limit       = max_distance > 0.0f ? max_distance : float::max;
 
 	uint found = 0;
 	index.stamp_now++;
 
-	index.@walk_ray(ray, limit; uint i, float cell_near)
+	index.@walk_ray(ray, limit ; uint i, float cell_near)
 	{
 		if (found < out.len && index.stamp[(sz)i] != index.stamp_now)
 		{
 			index.stamp[(sz)i] = index.stamp_now;
-			QueryEntry entry = index.entries[(sz)i];
+			QueryEntry entry         = index.entries[(sz)i];
 			collision::HitInfo broad = entry.box.intersect_ray(ray);
 			if (broad.collided && broad.depth <= limit && self.query_node(entry) != null)
 			{
@@ -992,7 +1005,7 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 
 	// Does the segment cross the triangle? The plane test first, because it is two
 	// dot products and rejects almost every triangle a sweep looks at.
-	Vec3 face = (v1 - v0).cross(v2 - v0);
+	Vec3 face     = (v1 - v0).cross(v2 - v0);
 	float area_sq = face.length_sq();
 	if (area_sq > 1e-16f)
 	{
@@ -1000,9 +1013,9 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 		float db = face.dot(b - v0);
 		if ((da < 0.0f) != (db < 0.0f))
 		{
-			float t = da / (da - db);
+			float t       = da / (da - db);
 			Vec3 crossing = a + (b - a) * t;
-			Vec3 inside = collision::closest_point_on_triangle(crossing, v0, v1, v2);
+			Vec3 inside   = collision::closest_point_on_triangle(crossing, v0, v1, v2);
 			// The plane crossing is inside the triangle exactly when the triangle's
 			// own closest point to it is itself. The tolerance is squared and
 			// generous: a crossing a micron outside an edge is caught by the edge
@@ -1020,7 +1033,7 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 	foreach (end : ends)
 	{
 		Vec3 on_tri = collision::closest_point_on_triangle(end, v0, v1, v2);
-		float d = (end - on_tri).length();
+		float d     = (end - on_tri).length();
 		if (d < best.distance) best = { .distance = d, .on_segment = end, .on_triangle = on_tri };
 	}
 
@@ -1073,7 +1086,7 @@ struct IgnoreSet
 *>
 fn IgnoreSet ignore_one(NodeId id)
 {
-	if (!id.is_set()) return {};
+	if (!id.is_set()) return { };
 	IgnoreSet set;
 	set.nodes[0] = id;
 	set.count = 1;
@@ -1140,13 +1153,17 @@ fn bool Scene.ignored(&self, NodeId id, IgnoreSet set)
  @param skip : `Nodes to leave out, subtrees included — the character's own body. An empty set for none.`
 *>
 fn void Scene.gather_triangles(
-	&self, Assets* assets, collision::Aabb3 box, IgnoreSet skip,
-	List{collision::TriangleVerts}* out, List{NodeId}* owners
+	&self,
+	Assets* assets,
+	collision::Aabb3 box,
+	IgnoreSet skip,
+	List{collision::TriangleVerts}* out,
+	List{NodeId}* owners
 )
 {
 	if (assets == null) return;
 
-	self.@each_in_box(assets, box; NodeId id, collision::Aabb3 world)
+	self.@each_in_box(assets, box ; NodeId id, collision::Aabb3 world)
 	{
 		if (!self.ignored(id, skip))
 		{
@@ -1169,11 +1186,14 @@ fn void Scene.gather_triangles(
 					for (sz i = before; i < out.len(); i++)
 					{
 						collision::TriangleVerts tri = out.get(i);
-						out.set(i, {
-							transform_point(node.world, tri[0]),
-							transform_point(node.world, tri[1]),
-							transform_point(node.world, tri[2]),
-						});
+						out.set(
+							i,
+							{
+								transform_point(node.world, tri[0]),
+								transform_point(node.world, tri[1]),
+								transform_point(node.world, tri[2]),
+							}
+						);
 						owners.push(id);
 					}
 				}
@@ -1216,25 +1236,31 @@ fn void Scene.gather_triangles(
  @param skip : `Nodes to ignore, subtrees included — the moving body's own. An empty set for none.`
 *>
 fn SweepHit Scene.sweep_capsule(
-	&self, Assets* assets, Vec3 from, Vec3 to,
-	float radius, float half_height, float skin = 0.0f, IgnoreSet skip = {}
+	&self,
+	Assets* assets,
+	Vec3 from,
+	Vec3 to,
+	float radius,
+	float half_height,
+	float skin = 0.0f,
+	IgnoreSet skip = { }
 )
 {
 	SweepHit miss = { .hit = false, .fraction = 1.0f, .distance = 0.0f };
 	if (assets == null) return miss;
 
-	float r = math::max(radius, 0.0f);
-	float half = math::max(half_height, 0.0f);
+	float r         = math::max(radius, 0.0f);
+	float half      = math::max(half_height, 0.0f);
 	float clearance = r + math::max(skin, 0.0f);
 
-	Vec3 travel = to - from;
+	Vec3 travel  = to - from;
 	float length = travel.length();
 
 	// The box around the whole motion, both hemispheres and the clearance. Wide by
 	// design: it is gathered once and reused for every step of the loop, so a box
 	// that is too tight is a triangle that appears halfway through the sweep and is
 	// never seen.
-	Vec3 reach = { clearance, clearance + half, clearance };
+	Vec3 reach           = { clearance, clearance + half, clearance };
 	collision::Aabb3 box = { math::min(from, to) - reach, math::max(from, to) + reach };
 
 	@pool()
@@ -1247,25 +1273,25 @@ fn SweepHit Scene.sweep_capsule(
 
 		if (triangles.len() == 0) return miss;
 
-		bool still = length <= 1e-9f;
+		bool still     = length <= 1e-9f;
 		Vec3 direction = still ? (Vec3) { 0, 0, 0 } : travel / length;
-		float at = 0.0f;
-		float touch = clearance + SWEEP_TOUCH * math::max(1.0f, length);
+		float at       = 0.0f;
+		float touch    = clearance + SWEEP_TOUCH * math::max(1.0f, length);
 
 		for (int step = 0; step < SWEEP_MAX_STEPS; step++)
 		{
 			Vec3 centre = from + direction * at;
-			Vec3 head = centre + (Vec3) { 0, half, 0 };
-			Vec3 tail = centre - (Vec3) { 0, half, 0 };
+			Vec3 head   = centre + (Vec3) { 0, half, 0 };
+			Vec3 tail   = centre - (Vec3) { 0, half, 0 };
 
 			// The smallest distance the capsule may travel before *some* triangle
 			// could be within reach. Conservative, per triangle, and the minimum of
 			// them is the safe step.
-			float soonest = float::max;
-			bool blocked = false;
+			float soonest  = float::max;
+			bool blocked   = false;
 			SegmentTriangle best;
 			Vec3 best_axis = { 0, 1, 0 };
-			sz best_index = 0;
+			sz best_index  = 0;
 
 			foreach (i, tri : triangles)
 			{
@@ -1330,9 +1356,9 @@ fn SweepHit Scene.sweep_capsule(
 					.node = owners[best_index],
 					.fraction = still ? 0.0f : math::clamp(at / length, 0.0f, 1.0f),
 					.distance = at,
-					.point = best.on_triangle,
-					// Out of the surface, towards the capsule — the direction a slide
-					// projects against and a ground test compares with up.
+					.point = best
+						.on_triangle, // Out of the surface, towards the capsule — the direction a slide
+						// projects against and a ground test compares with up.
 					.normal = -best_axis,
 				};
 			}
@@ -1357,7 +1383,7 @@ fn SweepHit Scene.sweep_capsule(
  given. A capsule of zero half-height is a sphere; there is no second
  implementation.
 *>
-fn SweepHit Scene.sweep_sphere(&self, Assets* assets, Vec3 from, Vec3 to, float radius, IgnoreSet skip = {})
+fn SweepHit Scene.sweep_sphere(&self, Assets* assets, Vec3 from, Vec3 to, float radius, IgnoreSet skip = { })
 {
 	return self.sweep_capsule(assets, from, to, radius, 0.0f, 0.0f, skip);
 }

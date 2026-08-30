@@ -154,14 +154,12 @@ fn int AgentGrid.key_of(&self, float[] positions, int agent)
  frame of an infinite push throws an agent across the level. A linear taper from
  touching to fully overlapping is bounded by construction.
 *>
-fn Vec3 separation_of(
-	AgentGrid* grid, float[] positions, int count, int agent, float radius
-) @local
+fn Vec3 separation_of(AgentGrid* grid, float[] positions, int count, int agent, float radius) @local
 {
-	Vec3 here = { positions[agent * 3], positions[agent * 3 + 1], positions[agent * 3 + 2] };
-	Vec3 push = { 0, 0, 0 };
+	Vec3 here   = { positions[agent * 3], positions[agent * 3 + 1], positions[agent * 3 + 2] };
+	Vec3 push   = { 0, 0, 0 };
 	int counted = 0;
-	float r_sq = radius * radius;
+	float r_sq  = radius * radius;
 
 	if (!grid.usable)
 	{
@@ -171,7 +169,7 @@ fn Vec3 separation_of(
 		for (int other = 0; other < count && counted < STEER_MAX_NEIGHBOURS; other++)
 		{
 			if (other == agent) continue;
-			Vec3 away = here - (Vec3) { positions[other * 3], positions[other * 3 + 1], positions[other * 3 + 2] };
+			Vec3 away  = here - (Vec3) { positions[other * 3], positions[other * 3 + 1], positions[other * 3 + 2] };
 			float d_sq = away.length_sq();
 			if (d_sq >= r_sq) continue;
 			push += taper(away, d_sq, radius);
@@ -205,7 +203,11 @@ fn Vec3 separation_of(
 				{
 					int other = grid.items[at];
 					if (other == agent) continue;
-					Vec3 away = here - (Vec3) { positions[other * 3], positions[other * 3 + 1], positions[other * 3 + 2] };
+					Vec3 away  = here - (Vec3) {
+						positions[other * 3],
+						positions[other * 3 + 1],
+						positions[other * 3 + 2]
+					};
 					float d_sq = away.length_sq();
 					if (d_sq >= r_sq) continue;
 					push += taper(away, d_sq, radius);
@@ -241,14 +243,12 @@ fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
  @param nav : `The baked mesh the field belongs to, or null for goal-seeking only.`
  @param field : `A solved flow field over that mesh, or empty.`
 *>
-fn void steer_agents(
-	float[] positions, float[] out, NavMesh* nav, float[] field, SteerOptions options
-)
+fn void steer_agents(float[] positions, float[] out, NavMesh* nav, float[] field, SteerOptions options)
 {
 	int count = (int)math::min(positions.len / 3, out.len / 3);
 	if (count <= 0) return;
 
-	float speed = options.max_speed > 0.0f ? options.max_speed : 1.0f;
+	float speed    = options.max_speed > 0.0f ? options.max_speed : 1.0f;
 	bool use_field = nav != null && nav.usable() && field.len == nav.grid.cells.len;
 
 	AgentGrid grid;
@@ -261,7 +261,7 @@ fn void steer_agents(
 	{
 		Vec3 here = { positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2] };
 
-		Vec3 want = { 0, 0, 0 };
+		Vec3 want       = { 0, 0, 0 };
 		float remaining = float::max;
 
 		if (use_field)

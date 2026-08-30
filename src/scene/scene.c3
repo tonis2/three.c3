@@ -14,9 +14,9 @@
 
  ## Three passes, and why they are separate
 
-	update_world_matrices   parent-relative TRS -> world matrix, dirty-driven
-	build_draw_list         traverse, cull, sort by bucket key, write instances
-	MeshPass.record         upload, bind, draw
+ update_world_matrices   parent-relative TRS -> world matrix, dirty-driven
+ build_draw_list         traverse, cull, sort by bucket key, write instances
+ MeshPass.record         upload, bind, draw
 
  The first is the only one that touches the hierarchy, and the only one that can
  be skipped — a scene where nothing moved does not walk at all, which matters
@@ -76,7 +76,7 @@ struct Instance
 	uint variant;
 	// Where this copy's joint matrices start, in matrices, with `POSE_LIVE` in the
 	// top bit saying which buffer they are in.
-	//
+	// 
 	// The field a crowd is affordable because of. A hundred characters mid-stride
 	// at a hundred different phases disagree about this one uint and about nothing
 	// else, so they key a hundred different frames out of one baked table and stay
@@ -87,7 +87,7 @@ struct Instance
 	// showing — 1 when the fade starts and 0 when it is over. 0 and 0 on every
 	// copy that is not mid-fade, which is every copy in almost every frame, and
 	// which is why zero is the value that means "not fading".
-	//
+	// 
 	// The pair is what makes a crossfade cost a baked character nothing it was
 	// not already paying: two offsets and a weight still disagree per instance
 	// and nothing else does, so a crowd mid-fade is still one draw call. What it
@@ -98,7 +98,7 @@ struct Instance
 	// Which slice of this frame's morph weights this copy reads, **plus one** — so
 	// zero is "this copy does not morph", which is the quiet default and what
 	// every copy of every mesh in every file without targets carries.
-	//
+	// 
 	// Per instance for `pose`'s reason: two faces built from one head mesh have to
 	// be able to wear different expressions and still be one draw call.
 	uint morph;
@@ -158,10 +158,10 @@ struct Bucket
 	 `visible` needs a prefix and the static set needs a run, and two independent
 	 halves cannot both be prefixes — so the sort lays a bucket out in four cells:
 
-		[ visible dynamic | visible static | hidden static | hidden dynamic ]
-		 <----------- visible ----------->
-		                   <--- static_count --->
-		                   ^ static_first
+	 [ visible dynamic | visible static | hidden static | hidden dynamic ]
+	 <----------- visible ----------->
+	 <--- static_count --->
+	 ^ static_first
 
 	 Visible is still exactly the prefix `record` has always drawn. The static run
 	 is contiguous and `record_shadow` draws it alone when rebuilding the cached
@@ -278,7 +278,7 @@ struct SceneStats
 	// and zero again after any `update` made with `Scene.cull` false: nothing was
 	// dropped, and reporting the frame before it would be a stale number wearing a
 	// live one's name.
-	//
+	// 
 	// It means the camera in a shadowed frame too. A frame that built one unculled
 	// list for both passes reported 0 here whenever the pass was on — honest, and
 	// saying nothing.
@@ -368,7 +368,7 @@ struct SceneStats
 // folded in because `bucket_key` already spends all 64 bits on two full-range
 // uints and narrowing either half to make room would be a silent wrap rather
 // than an error. Two compares instead of one is the cheaper price.
-//
+// 
 // `order` leads the sort and is the material index for everything that is not
 // blended or a line, so consecutive buckets share a pipeline wherever they can —
 // which is what keeps the per-bucket `cmdBindPipeline` from thrashing once a
@@ -472,7 +472,7 @@ struct Scene
 	// The same pair again for the *light's* box. Counted only in a frame that has a
 	// shadow pass, because in every other frame there is no second frustum and zero
 	// is the honest answer.
-	//
+	// 
 	// A drawable is in the shadow list unless *both* frustums rejected it, so this
 	// counts the copies that are in neither pass — not the difference between the
 	// two lists. `culled` above is still "what the camera dropped", and the two
@@ -854,10 +854,10 @@ fn void Scene.free(&self)
 	foreach (&player : self.players) player.free();
 	self.players.free();
 	self.sockets.free();
-	self.sockets = {};
+	self.sockets = { };
 	foreach (&entry : self.morphs) entry.weights.free();
 	self.morphs.free();
-	self.morphs = {};
+	self.morphs = { };
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
@@ -925,7 +925,14 @@ fn NodeId Scene.add_mesh(&self, AssetId asset, uint mesh, NodeId parent = NO_NOD
 
  @return `The group everything was placed under, or NO_NODE if the handle names no asset.`
 *>
-fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, String name = "", bool skeleton = false, bool compute_skin = false)
+fn NodeId Scene.instantiate(
+	&self,
+	AssetId asset,
+	NodeId parent = NO_NODE,
+	String name = "",
+	bool skeleton = false,
+	bool compute_skin = false
+)
 {
 	if (self.assets == null) return NO_NODE;
 	Asset* loaded = self.assets.slot(asset);
@@ -947,8 +954,7 @@ fn NodeId Scene.instantiate(&self, AssetId asset, NodeId parent = NO_NODE, Strin
 	foreach (&entry : placed)
 	{
 		NodeId into = entry.parent < 0 ? group : created[entry.parent];
-		NodeId id = entry.mesh < 0
-			? self.add_group(into, entry.name)
+		NodeId id   = entry.mesh < 0 ? self.add_group(into, entry.name)
 			: self.add_mesh(asset, (uint)entry.mesh, into, entry.name);
 
 		Node* node = self.node(id);
@@ -1064,7 +1070,14 @@ fn void Scene.collect_skinned(&self, NodeId id, List{SkinnedTarget}* out)
  Nothing happens for an asset with no clips, so a scene of ten thousand crates
  holds no players at all.
 *>
-fn void Scene.start_player(&self, AssetId asset, NodeId root, PlacedNode[] placed, NodeId[] created, bool live_skin = false)
+fn void Scene.start_player(
+	&self,
+	AssetId asset,
+	NodeId root,
+	PlacedNode[] placed,
+	NodeId[] created,
+	bool live_skin = false
+)
 {
 	List{uint} sources;
 	List{NodeId} nodes;
@@ -1131,7 +1144,7 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 	}
 
 	// The skinned meshes, found once here rather than searched for per frame.
-	//
+	// 
 	// A walk of the subtree rather than of `nodes`, because `nodes` is the channel
 	// map and only covers entries that came from a glTF node. A mesh with several
 	// primitives becomes one child per primitive with no glTF node of its own —
@@ -1160,7 +1173,15 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
  @param fade : `Seconds to crossfade out of whatever is playing. Zero is the snap, and asking for one when the clip named is already the clip playing is a no-op — which is what makes calling this every frame from a state machine safe.`
  @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
 *>
-fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f, float time = 0, float fade = 0)
+fn bool Scene.play(
+	&self,
+	NodeId root,
+	String clip,
+	bool loop = true,
+	float speed = 1.0f,
+	float time = 0,
+	float fade = 0
+)
 {
 	if (self.assets == null) return false;
 	AnimationPlayer* player = self.player(root);
@@ -1172,7 +1193,11 @@ fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float spee
 	int found = -1;
 	foreach (i, &candidate : loaded.clips)
 	{
-		if (candidate.name == clip) { found = (int)i; break; }
+		if (candidate.name == clip)
+		{
+			found = (int)i;
+			break;
+		}
 	}
 	if (found < 0) return false;
 
@@ -1412,7 +1437,7 @@ fn void Scene.remove(&self, NodeId id)
 		return;
 	}
 
-	NodeId parent = node.parent;
+	NodeId parent     = node.parent;
 	Node* parent_node = self.node(parent);
 	if (parent_node != null)
 	{
@@ -1703,7 +1728,14 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 	// Bumped whichever way it went: a node joining the static set has to be drawn
 	// into the map, and one leaving it has to be taken out.
 	node.static_caster = wanted;
-	if (wanted) { self.static_nodes++; } else { self.static_nodes--; }
+	if (wanted)
+	{
+		self.static_nodes++;
+	}
+	else
+	{
+		self.static_nodes--;
+	}
 	self.static_revision++;
 	return wanted;
 }
@@ -1787,7 +1819,7 @@ macro Scene.@traverse(&self, NodeId id; @body(NodeId child_id, Node* node))
 	while (stack.len() > 0)
 	{
 		NodeId current = stack.pop()!!;
-		Node* node = self.node(current);
+		Node* node     = self.node(current);
 		if (node == null) continue;
 		@body(current, node);
 		foreach (child : node.children) stack.push(child);
@@ -1858,8 +1890,8 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	// pointer taken before a call that takes `&self` is exactly the habit that
 	// stops being safe the day something does.
 	Matrix4f world = node.world;
-	bool visible = node.world_visible;
-	sz count = node.children.len();
+	bool visible   = node.world_visible;
+	sz count       = node.children.len();
 	for (sz i = 0; i < count; i++)
 	{
 		NodeId child = self.nodes[id.index].children[i];
@@ -1915,7 +1947,7 @@ fn Frustum frustum_of(Matrix4f m)
 
 fn Plane plane_of(float[<4>] v) @local
 {
-	Vec3 normal = { v[0], v[1], v[2] };
+	Vec3 normal  = { v[0], v[1], v[2] };
 	float length = normal.length();
 	// A degenerate plane accepts everything rather than rejecting everything: a
 	// cull that hides the scene is far worse than a cull that does nothing.
@@ -2038,8 +2070,8 @@ fn void Scene.update(
 	&self,
 	Assets* assets,
 	Matrix4f view_projection,
-	bool[] transparent = {},
-	float[] margins = {},
+	bool[] transparent = { },
+	float[] margins = { },
 	Matrix4f* light_view_projection = null
 )
 {
@@ -2049,7 +2081,7 @@ fn void Scene.update(
 	// off is asking for its own draws not to be dropped; it is not asking the
 	// shadow pass to rasterise the far side of the level, and a light box smaller
 	// than the scene would then be the only thing keeping the map affordable.
-	//
+	// 
 	// Neither turns the *sort* off: `frustum.planes[4]` is the near plane and a
 	// transparent draw is ordered by it whether or not anything was culled.
 	Frustum light;
@@ -2130,11 +2162,10 @@ fn void Scene.build_draw_list(
 	&self,
 	Assets* assets,
 	Frustum* frustum,
-	bool[] transparent = {},
-	Plane* near = null,
-	// Indexed by material, exactly as `transparent` is, and empty when nobody has
+	bool[] transparent = { },
+	Plane* near = null, // Indexed by material, exactly as `transparent` is, and empty when nobody has
 	// asked for one.
-	float[] margins = {},
+	float[] margins = { },
 	Frustum* light = null,
 	bool counts_only = false
 )
@@ -2166,7 +2197,7 @@ fn void Scene.build_draw_list(
 
 		// Free in a scene with no soft body in it, which is nearly every scene —
 		// `Physics.soft_for` returns on an empty list before it looks at anything.
-		NodeId id = { (uint)slot, node.generation };
+		NodeId id      = { (uint)slot, node.generation };
 		SoftMesh* soft = self.physics.soft_for(id);
 
 		// The world box has two readers and neither wants it unconditionally: the
@@ -2174,15 +2205,15 @@ fn void Scene.build_draw_list(
 		// centre for the depth sort whether culling is on or not. Computed once for
 		// both, and not at all in the case that has to stay free — an opaque draw in
 		// an unculled frame.
-		//
+		// 
 		// Conservative on purpose, unlike the measuring paths. A box that is too big
 		// keeps a draw that could have been skipped; a box that is too small drops
 		// geometry the camera can see. `world_mesh_bounds` would be tighter and
 		// would cost a pass over every vertex of every node every frame to save a
 		// handful of draws. The same slack is harmless in the sort: it moves a
 		// centre, and sorting centres is already an approximation.
-		float depth = 0;
-		bool sorted = is_transparent && near != null;
+		float depth  = 0;
+		bool sorted  = is_transparent && near != null;
 		// True until something rejects it, which is what makes an unculled frame
 		// cost nothing: with no frustum and no light there is no box to compute and
 		// no test to run.
@@ -2214,13 +2245,13 @@ fn void Scene.build_draw_list(
 			// before it, because the displacement in a body is world-space too:
 			// `v.position + something` is metres of scene, whatever the node is
 			// scaled by.
-			//
+			// 
 			// Zero for every material that has no vertex body, so the common case
 			// adds one compare and no arithmetic.
 			if (node.material < margins.len && margins[node.material] > 0)
 			{
 				float m = margins[node.material];
-				box = { .min = box.min - {m, m, m}, .max = box.max + {m, m, m} };
+				box = { .min = box.min - { m, m, m }, .max = box.max + { m, m, m } };
 			}
 			visible = frustum == null || frustum.contains(box);
 			if (!visible) self.culled++;
@@ -2246,17 +2277,19 @@ fn void Scene.build_draw_list(
 			if (sorted) depth = near.normal.dot(box.center()) + near.distance;
 		}
 
-		self.draws.push({
-			.material = node.material,
-			.key = bucket_key(node.asset.index, node.mesh),
-			.slot = (uint)slot,
-			.order = draw_order(node.material, is_transparent),
-			.depth = depth,
-			.visible = visible,
-			.preskinned = node.preskinned && node.skin >= 0,
-			.is_static = node.static_caster,
-			.soft = soft != null,
-		});
+		self.draws.push(
+			{
+				.material = node.material,
+				.key = bucket_key(node.asset.index, node.mesh),
+				.slot = (uint)slot,
+				.order = draw_order(node.material, is_transparent),
+				.depth = depth,
+				.visible = visible,
+				.preskinned = node.preskinned && node.skin >= 0,
+				.is_static = node.static_caster,
+				.soft = soft != null,
+			}
+		);
 	}
 
 	if (self.draws.len() == 0) return;
@@ -2271,10 +2304,10 @@ fn void Scene.build_draw_list(
 	// three.js's too, whose per-object sort splits the same way; the alternative is
 	// sorting buckets after the fact, which cannot order two panes that landed in
 	// the same bucket.
-	//
+	// 
 	// `order` and `depth` were computed at push time because this comparator is a
 	// captureless function pointer — see `Draw`.
-	//
+	// 
 	// Merge, not quick, and the reason is this data. `std::sort::quicksort` pivots
 	// on `list[l]` with no median-of-three and no three-way partition, so a run of
 	// elements the comparator calls equal peels exactly one element per pass: a run
@@ -2284,11 +2317,12 @@ fn void Scene.build_draw_list(
 	// whenever a script places one asset at a time. Measured on 4178 draws in 9
 	// buckets: 8.7M comparisons and 20.4 ms against mergesort's 24.9k and 0.196 ms,
 	// for the same answer element for element.
-	//
+	// 
 	// Being stable is the second reason: draws the comparator cannot separate keep
 	// their slot order, so a bucket's instances land in the same sequence every
 	// frame instead of in whatever order a partition happened to leave.
-	mergesort(self.draws.array_view(), fn int(Draw a, Draw b) {
+	mergesort(self.draws.array_view(), fn int (Draw a, Draw b)
+	{
 		if (a.order < b.order) return -1;
 		if (a.order > b.order) return 1;
 		// Farthest first, and only within the transparent band: everything else is
@@ -2322,17 +2356,17 @@ fn void Scene.build_draw_list(
 	// Deliberately not equal to the first draw, so the first iteration always opens
 	// a bucket. `open_material` is part of that sentinel: two materials over one
 	// mesh are adjacent in the sort and share a key.
-	ulong open = self.draws[0].key + 1;
-	uint open_material = self.draws[0].material;
+	ulong open           = self.draws[0].key + 1;
+	uint open_material   = self.draws[0].material;
 	bool open_preskinned = self.draws[0].preskinned;
 	// Whether the bucket standing open belongs to a soft body. One of the two
 	// halves of "a soft copy never shares": this one closes the bucket a soft
 	// draw opened, and the `draw.soft` test below is what opens it.
-	bool open_soft = false;
+	bool open_soft       = false;
 	// Where the next copy goes, counted rather than read off `self.instances`,
 	// because in a counting build there is no instance array to read it off. The two
 	// are the same number in every build that writes one.
-	uint placed = 0;
+	uint placed          = 0;
 	foreach (draw : self.draws)
 	{
 		Node* node = &self.nodes[draw.slot];
@@ -2341,8 +2375,8 @@ fn void Scene.build_draw_list(
 		// key there is and still cannot share, because each one's vertices are its
 		// own buffer. So a soft draw always opens a bucket, and always closes it
 		// behind itself.
-		if (draw.key != open || draw.material != open_material || draw.preskinned != open_preskinned
-			|| draw.soft || open_soft)
+		if (draw.key != open || draw.material != open_material || draw.preskinned != open_preskinned || draw.soft
+			|| open_soft)
 		{
 			open = draw.key;
 			open_material = draw.material;
@@ -2351,39 +2385,43 @@ fn void Scene.build_draw_list(
 			// Read off the node rather than unpacked from the key, which only carries
 			// the slot index. Every node in a bucket names the same live asset, so
 			// any of them supplies the generation.
-			self.buckets.push({
-				.asset = node.asset,
-				.mesh = node.mesh,
-				.material = draw.material,
-				.first = placed,
-				.count = 0,
-				.visible = 0,
-				.static_first = 0,
-				.static_count = 0,
-				.preskinned = draw.preskinned,
-				.node = draw.soft ? (NodeId) { draw.slot, node.generation } : NO_NODE,
-			});
+			self.buckets.push(
+				{
+					.asset = node.asset,
+					.mesh = node.mesh,
+					.material = draw.material,
+					.first = placed,
+					.count = 0,
+					.visible = 0,
+					.static_first = 0,
+					.static_count = 0,
+					.preskinned = draw.preskinned,
+					.node = draw.soft ? (NodeId) { draw.slot, node.generation } : NO_NODE,
+				}
+			);
 		}
 
 		if (!counts_only)
 		{
-			self.instances.push({
-				.model = node.world,
-				.normal = node.normal,
-				.color = node.color,
-				.variant = node.variant,
-				// The whole of what a hundred characters at a hundred phases disagree
-				// about. Zero on everything that is not skinned, which the shader
-				// reads as nothing because the bucket's flags say there is no skin.
-				.pose = node.pose,
-				// Zero on everything that is not mid-crossfade. `AnimationPlayer`
-				// is the only writer of either.
-				.pose_from = node.pose_from,
-				.blend = node.blend,
-				// Written by `MeshPass.write_morph_weights` just before this walk,
-				// and zero on everything it did not touch.
-				.morph = node.morph,
-			});
+			self.instances.push(
+				{
+					.model = node.world,
+					.normal = node.normal,
+					.color = node.color,
+					.variant = node
+						.variant, // The whole of what a hundred characters at a hundred phases disagree
+						// about. Zero on everything that is not skinned, which the shader
+						// reads as nothing because the bucket's flags say there is no skin.
+					.pose = node
+						.pose, // Zero on everything that is not mid-crossfade. `AnimationPlayer`
+						// is the only writer of either.
+					.pose_from = node.pose_from,
+					.blend = node
+						.blend, // Written by `MeshPass.write_morph_weights` just before this walk,
+						// and zero on everything it did not touch.
+					.morph = node.morph,
+				}
+			);
 		}
 		placed++;
 
@@ -2418,7 +2456,9 @@ fn ulong bucket_key(uint asset, uint mesh) @inline => ((ulong)asset << 32) | (ul
 // instance array, so this is where the number comes from — and it is the same
 // number a writing build would have left in `instances.len()`, because every draw
 // increments exactly one bucket's count.
-fn uint count_instances(Bucket[] buckets)
+fn uint count_instances(
+	Bucket[] buckets
+)
 {
 	uint total = 0;
 	foreach (bucket : buckets) total += bucket.count;
@@ -2426,7 +2466,6 @@ fn uint count_instances(Bucket[] buckets)
 }
 
 fn uint count_unique_meshes(Bucket[] buckets)
-
 {
 	uint unique = 0;
 	foreach (i, bucket : buckets)
@@ -2480,15 +2519,16 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 	// agent runs. The buckets still need the sort that produces them, so this is
 	// not free; what it saves is the write and the growth of a list a query has no
 	// reader for.
-	//
+	// 
 	// The list is left empty rather than stale, which is the honest state: the next
 	// `update` rebuilds both halves, and it would have done that anyway.
-	self.build_draw_list(assets, null, {}, null, {}, null, true);
+	self.build_draw_list(assets, null, { }, null, { }, null, true);
 
 	SceneStats stats = {
 		.draw_calls = (uint)self.buckets.len(),
-		.unique_meshes = count_unique_meshes(self.buckets.array_view()),
-		// Summed over the buckets rather than read off `self.instances`, which the
+		.unique_meshes = count_unique_meshes(
+			self.buckets.array_view()
+		), // Summed over the buckets rather than read off `self.instances`, which the
 		// counting build above deliberately left empty. Same number: every draw that
 		// survived lands in exactly one bucket.
 		.instances = count_instances(self.buckets.array_view()),
