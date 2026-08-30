@@ -28,3 +28,6 @@
 [submodule "lib/cui.c3l"]
 	path = lib/cui.c3l
 	url = https://github.com/tonis2/cui.git
+[submodule "lib/font.c3l"]
+	path = lib/font.c3l
+	url = https://github.com/tonis2/font.c3.git
