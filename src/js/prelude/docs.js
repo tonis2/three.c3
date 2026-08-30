@@ -1550,6 +1550,13 @@ export const DOCS = {
 			+ 'value with no JSON form — a cycle, a function, undefined — arrives as the text '
 			+ 'String(value) would have shown rather than punching a hole in the array. '
 			+ 'Example: three.debug.write({ crates: Crate.count, wumpa: Wumpa.count }).',
+		'three.debug.overlay(text)':
+			'One line over the top-left of the frame, and one entry in the run\'s debug array as '
+			+ '{ overlay: "..." } — so a person and an agent read the same line, and a screenshot '
+			+ 'carries it, because the text is drawn into the offscreen target the same as the scene is. '
+			+ 'It lasts one frame: set it again each frame to keep it up, which makes a HUD '
+			+ 'three.frame(() => three.debug.overlay(`hp ${p.hp}`)) and lets a one-shot note clear '
+			+ 'itself. Text only, no layout and no widgets, so nothing here can swallow a click.',
 		'three.stats()':
 			'The numbers below, for the whole scene, with culling off. The six ...Ms are the exception: '
 			+ 'they are not facts about the scene but measurements of the last frame drawn, so they move '

@@ -34,57 +34,41 @@ built to take one.
 
 ## 2. Build integration
 
-Three things stand between `dependencies: [..., "cui"]` and a build.
+**Nothing did, in the end.** The version of cui in `lib/` names `vk`, `c3w`,
+`image` and `font` as dependencies rather than vendoring them, so the collision
+this section was written to head off does not exist: three already had `c3w` and
+`image`, `font.c3l` was the one genuinely new library, and adding `"cui"` and
+`"font"` to `project.json` was the whole of the build integration. The empty
+`lib/cui.c3l/lib/{image,font,window}.c3l` directories are unfetched submodules
+that nothing in the manifest names. No manifest rewrite, no dropped files.
 
-**The vendored submodules are empty.** `lib/cui.c3l/lib/{image,font,window}.c3l`
-are empty directories in this checkout, and cui's `manifest.json` lists
-`lib/image.c3l/src/**`, `lib/font.c3l/src/**` and `lib/window.c3l/main.c3` as
-sources. As it stands the dependency compiles nothing.
+`src/vulkan/renderer.c3` — the standalone host, and the only file in cui that
+imports `c3w` — still compiles as part of the dependency and is simply never
+called. Dropping it from the manifest would save a little build time and is
+worth doing upstream as a separate embedding target rather than as a local edit
+here.
 
-**Two of those three would collide anyway.** three already depends on `image` and
-`c3w`. Compiling cui's copies alongside them is a duplicate-module error, not a
-merge.
+### What did stand in the way: a temp-allocator bug in cui
 
-**`font` is genuinely new.** `src/render/text.c3` imports it and nothing in three
-has it.
+Worth recording, because it is invisible until an embedder has a `@pool()` and
+then it is a wild pointer rather than an error. **A zeroed C3 `List` or `DString`
+takes the *temp* allocator on its first write** — `list_ensure_capacity` maps a
+null allocator to `tmem`. cui built every long-lived list that way: `Element`'s
+`children` and `local_drawings`, the six lists on `Ui`, the `Canvas`'s three, the
+font list, and the `CanvasPass`'s two texture lists.
 
-### The fix
+That is harmless in cui's own reference renderer, whose temp arena is never
+reset, and fatal here: three opens a `@pool()` in eighty places, including the
+one around the script callback that sets the overlay. The tree was built inside
+the pool, the pool gave the memory back, and the first layout walked a freed
+`children` array.
 
-Rewrite `lib/cui.c3l/manifest.json` down to the embedding subset:
-
-```json
-{
-  "provides": "cui",
-  "sources": [
-    "src/core/**",
-    "src/render/**",
-    "src/widgets/**",
-    "src/vulkan/canvas_pass.c3",
-    "src/vulkan/render_state.c3"
-  ]
-}
-```
-
-That drops exactly two files, and both for the same reason — they belong to the
-host half we are replacing:
-
-- `src/vulkan/renderer.c3` — the standalone host. The only file in cui that
-  imports `c3w`.
-- `src/vulkan/vendored.c3` — loader and driver discovery. `create_instance` in
-  `main.c3` already does this, and doing it twice is how a build ends up with two
-  loaders.
-
-`render_state.c3` stays and still needs `image`, which three has. Then add
-`font.c3l` beside the other libraries and extend `project.json`:
-
-```json
-"dependencies": ["vk", "c3w", "gltf", "image", "collision",
-                 "quickjs", "mcp", "slang", "ktx", "cui", "font"]
-```
-
-Upstream, the same split would be better expressed as a `cui` that ships the
-embedding subset by default and a separate target for the reference host. Worth
-raising there rather than carrying the local manifest edit forever.
+Fixed in `lib/cui.c3l` by naming the heap at each of those init sites —
+`init(mem, 0)` sets the allocator and allocates nothing, so the empty case still
+costs nothing. The widgets were already correct (`TextField`, `FileBrowser` and
+`ConfirmDialog` all call `init(mem)` in `mount`), which is what makes this an
+oversight rather than a design. **It belongs upstream**: any engine embedding cui
+hits it the moment it uses a scratch arena.
 
 ### Device features
 
@@ -100,10 +84,11 @@ if (!self.limits.push_descriptor)       return NO_PUSH_DESCRIPTOR~;
 
 `shaderDrawParameters` is a `VkPhysicalDeviceVulkan11Features` member, and `v11`
 is queried and handed back to `deviceCreateInfo` unchanged — so it is *enabled*
-wherever it is supported, with nothing to add. What is missing is the guard: it
-belongs in `GpuLimits` next to the other three, so a device that cannot do it
-fails at `Gpu.init` with a name rather than in a shader. `Gpu.report` gains a
-line for the same reason.
+wherever it is supported, with nothing to add. What was missing was the guard,
+and it is there now: `GpuLimits.shader_draw_parameters` beside the other three,
+`NO_SHADER_DRAW_PARAMETERS` as the fourth hard require, and a line in
+`Gpu.report`. A device that cannot do it fails at `Gpu.init` with a name rather
+than in a shader.
 
 The allocator already carries `MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`, which
 `CanvasPass` needs for its three buffers.
@@ -302,10 +287,12 @@ Ordered so each one is worth having on its own.
 
 ### Stage 1 — pixels
 
-- [ ] Manifest fix, `font.c3l` added, `shaderDrawParameters` guard in `GpuLimits`.
-- [ ] `Target.begin_overlay`.
-- [ ] A hard-coded cui tree in `main.c3` — one `Label` — with no JS anywhere near
-      it. Proves the frame slot, the input path and the build in one go.
+- [x] `font.c3l` added, `shaderDrawParameters` guard in `GpuLimits`. **No
+      manifest fix was needed** — see §2.
+- [x] `Target.begin_overlay`.
+- [x] A cui tree owned by `render/ui.c3` — an `Anchored` over one `Label` — and
+      `three.debug.overlay` pointed at it. Proves the frame slot, the glyph
+      atlas and the screenshot path in one go.
 
 This alone closes `plan.md` §5's *"Draw the one-line overlay"*:
 `three.debug.overlay(string)` already exists and reaches `console.log` and the
@@ -315,9 +302,10 @@ lines.
 
 ### Stage 2 — an owner
 
-- [ ] `src/render/ui.c3`, holding the `Ui*`, the `CanvasPass`, the font, the
+- [x] `src/render/ui.c3`, holding the `Ui*`, the `CanvasPass`, the font, the
       input adapter and the consume predicate. Hangs off `Renderer` beside
-      `post`; `record_scene` gains three lines.
+      `post`; `record_scene` gains the `upload` line and the three-line overlay
+      block.
 
 Two rules for that file:
 
@@ -359,13 +347,17 @@ and the `AreaHost` family. §8.3 has the reason for each.
 
 ### Stage 5 — tests
 
-- [ ] A `three_tests` case that draws a UI frame and asserts it passes validation
-      — that is the check that catches a wrong `LOAD_OP`, a missing barrier, or a
-      second `close`.
-- [ ] A case asserting drawn UI pixels appear in `capture()`. Because the
-      interface lives in the offscreen target, `--screenshot` and the MCP
-      screenshot tool get it for free, and *for free* is exactly the kind of claim
-      that needs a test under it.
+- [x] `three_tests::ui`, seven cases. Two of them are the silence checks — one
+      over a bare frame and one over a post chain, because with a chain running it
+      is the tonemap that leaves `target.color` in `COLOR_ATTACHMENT_OPTIMAL` and
+      `begin_overlay` barriers from that layout on both paths.
+- [x] The pixel checks, and they are paired on purpose: *the line appeared* and
+      *the frame under it survived* fail in opposite directions, and a test for
+      either one alone passes on the other's bug — an overlay that clears first
+      shows more text on a black frame.
+- [ ] A case with the pointer over a widget, once there is a widget to be over.
+      Stage 4's predicate has nothing to assert against a `Label`, which sets
+      `ignores_pointer`.
 
 ---
 

@@ -161,6 +161,10 @@ struct Renderer
 	// image the scene goes into while it does. Inert until something calls `set`
 	// — see `render/post.c3`.
 	PostPass post;
+	// The interface drawn over the finished frame — `render/ui.c3`. Inert until
+	// something asks for it, the same way `post` is inert until a script sets a
+	// shader.
+	UiLayer ui;
 	bool windowed;
 	// What every render begins with. Reachable from a script as
 	// `scene.background`.
@@ -221,6 +225,11 @@ fn void Renderer.free(&self)
 	// into `pass.assets`, and `MeshPass.free` frees every texture slot outright,
 	// so giving them back afterwards would be reading a table that no longer
 	// exists.
+	// Before `gpu.free()`, because the canvas pass borrows the allocator. Its
+	// textures are its own rather than slots in `pass.assets`, so there is no
+	// ordering dance here — only the idle above, which the pass needs for the
+	// same reason `post` does.
+	self.ui.free();
 	self.post.release_textures(&self.gpu, &self.pass.assets);
 	self.post.free(&self.gpu);
 	self.pass.free(&self.gpu);
@@ -276,6 +285,12 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	// caller *after* the submit, so every mark recorded here belongs to the run
 	// `timer.begin` opened.
 	uint slot = self.frames.slot;
+
+	// Outside every rendering, and before the one below opens: this flushes the
+	// interface, bakes glyphs and may grow a buffer or rebuild a pipeline. It
+	// records nothing into `cmd` — see `UiLayer.upload` for the contract it
+	// keeps with the fence wait each caller opens with.
+	self.ui.upload(&self.target)!;
 
 	// Before the render pass, because a dispatch cannot be inside one. This is
 	// the scene update, the frame's buffers, and the compute skinning for any
@@ -335,6 +350,17 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd)
 	}
 
 	self.timer.mark(cmd, slot, FrameMark.POST);
+
+	// The interface, over the finished frame. A rendering of its own because it
+	// must not clear what it is drawn over and has no depth to test — see
+	// `Target.begin_overlay`. It writes `target.color` like the stages above it
+	// and, like them, does not close it.
+	if (self.ui.active())
+	{
+		self.target.begin_overlay(cmd);
+		self.ui.record(cmd, &self.target)!;
+		vk::cmdEndRendering(cmd);
+	}
 
 	self.target.close(cmd);
 }

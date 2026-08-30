@@ -353,6 +353,11 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	self.timed_out = false;
 	self.in_frame = true;
 
+	// Before the callbacks, not after: the overlay is one line for one frame, and
+	// what survives this is what the frame that just ran asked for. See
+	// `UiLayer.expire_overlay`.
+	if (self.renderer != null) self.renderer.ui.expire_overlay();
+
 	// Input first, then the animation. A handler that moves something and a
 	// callback that draws the consequence in the same frame is the order a person
 	// expects; the other way round shows every keypress one frame late.

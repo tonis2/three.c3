@@ -1128,13 +1128,17 @@ const debug = {
 		}
 	},
 
-	// One line, this frame, gone the next. Lives, coins, `r.hit.name` — the
-	// window has no text yet, so this also prints and lands in the run's
-	// `debug` array as `{ overlay: "..." }` for an agent to read beside the PNG.
+	// One line, this frame, gone the next. Lives, coins, `r.hit.name` — drawn
+	// over the top-left of the frame, and landing in the run's `debug` array as
+	// `{ overlay: "..." }` so an agent reads the same line beside the PNG.
+	//
+	// "Gone the next" is the host's doing: a line has to be set again each frame
+	// to stay up, so a HUD is `three.frame(() => three.debug.overlay(...))` and
+	// a one-shot note disappears by itself.
 	overlay(text) {
 		const line = String(text);
-		console.log(line);
 		this.write({ overlay: line });
+		H.debugOverlay(line);
 	},
 };
 

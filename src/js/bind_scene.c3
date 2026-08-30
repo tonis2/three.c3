@@ -135,6 +135,7 @@ fn void JsRuntime.install_bindings(&self)
 	// The frame
 	self.bind(host, "stats", &js_stats, 1);
 	self.bind(host, "debugWrite", &js_debug_write, 1);
+	self.bind(host, "debugOverlay", &js_debug_overlay, 1);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	// Hot reload (reload.c3)
 	self.bind(host, "reload", &js_reload, 0);
@@ -3018,4 +3019,36 @@ fn void js_camera_attached(
 		return;
 	}
 	*out = handle_value(&js, self.pass.follow.node);
+}
+<*
+ The other half of `three.debug.overlay`: the line, in pixels.
+
+ `debugWrite` puts it in the run's `debug` array for an agent to read; this puts
+ it on the frame for a person. The interface layer is brought up by the first
+ non-empty line and never before — a script that does not call this pays nothing
+ for it, which is what keeps the headless tests unchanged.
+
+ Silent with no renderer: `three.debug.overlay` still logs and still writes, and
+ a scene with no GPU device is not a thing to raise about. The one failure worth
+ telling a script about is the layer refusing to come up.
+*>
+fn void js_debug_overlay(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null) return;
+
+	String line = arg_text(&js, argc, args, 0, tmem);
+	if (catch self.renderer.ui.set_overlay(&self.renderer.gpu, &self.renderer.target, line))
+	{
+		*out = js.raise("the overlay could not be drawn — the interface layer failed to start");
+	}
 }
