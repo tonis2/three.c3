@@ -61,8 +61,10 @@ struct NodeId
 const NodeId NO_NODE = { uint::max, 0 };
 
 fn bool NodeId.is_set(self) => self.index != uint::max;
-fn bool NodeId.equals(self, NodeId other) @operator(==) => self.index == other.index
-	&& self.generation == other.generation;
+fn bool NodeId.equals(
+	self,
+	NodeId other
+) @operator(==) => self.index == other.index && self.generation == other.generation;
 
 struct Node
 {
@@ -70,7 +72,7 @@ struct Node
 
 	// The local transform. Applied scale-first, then rotation, then translation
 	// — `local_matrix` is where that order is written down.
-	//
+	// 
 	// `rotation` is a quaternion and is always normalized; `quat_from_euler` is
 	// the door Euler angles come in through. See the header for why it is not
 	// stored as a triple.
@@ -95,7 +97,7 @@ struct Node
 
 	// What this node draws. `mesh` indexes that asset's `meshes`; a group
 	// carries NO_ASSET and is traversed but never drawn.
-	//
+	// 
 	// A handle rather than an index, because assets can be unloaded and their
 	// slots reused. A node never outlives the asset it names — it holds a
 	// reference for as long as it is alive, and the sweep only takes assets at
@@ -108,7 +110,7 @@ struct Node
 	// the built-in shader every node starts on, and it is a shared index rather
 	// than a per-node copy because a thousand instances stop being one draw call
 	// the moment two nodes with the same mesh disagree here.
-	//
+	// 
 	// Deliberately *not* inherited, unlike `visible`: Three.js resolves a
 	// child's material entirely on the child. The mechanism to inherit exists
 	// and is nearly free — `world_visible` is recomputed on every walk anyway —
@@ -119,7 +121,7 @@ struct Node
 	// and read by `SV_InstanceID`. They are what a node may disagree with its
 	// neighbours about without costing a draw call; everything else that changes
 	// how a mesh looks is bucket state. See `Instance`.
-	//
+	// 
 	// Not inherited, for `material`'s reason.
 	float[4] color;
 	uint variant;
@@ -132,7 +134,7 @@ struct Node
 	// Where this node's joint matrices start, in matrices, with `POSE_LIVE` in
 	// the top bit for a character posed from its bone nodes rather than from a
 	// baked clip. Copied straight into `Instance.pose`.
-	//
+	// 
 	// Seeded to the skin's rest offset, so a character that has never played
 	// anything draws its bind pose — there is no "nothing is playing" case in
 	// the shader or the draw loop, because rest is a baked frame like any other.
@@ -240,10 +242,7 @@ struct Node
 *>
 fn Matrix4f Node.local_matrix(&self)
 {
-	return matrix::IDENTITY4{float}
-		.translate(self.position)
-		.mul(self.rotation.to_matrix())
-		.scale(self.scale);
+	return matrix::IDENTITY4{float}.translate(self.position).mul(self.rotation.to_matrix()).scale(self.scale);
 }
 
 <*
@@ -305,7 +304,7 @@ fn Vec3 euler_from_quat(Quaternionf rotation)
 	// own `to_matrix` and Three.js's agree element for element, which is what
 	// makes the case analysis below transplantable.
 	float m13 = m.m[8];
-	float y = math::asin(m13 < -1.0f ? -1.0f : (m13 > 1.0f ? 1.0f : m13));
+	float y   = math::asin(m13 < -1.0f ? -1.0f : (m13 > 1.0f ? 1.0f : m13));
 
 	if (math::abs(m13) < 0.9999999f)
 	{
@@ -347,26 +346,48 @@ fn Vec3 Node.world_position(&self) => { self.world.m[12], self.world.m[13], self
 *>
 fn Matrix4f normal_matrix(Matrix4f world)
 {
-	Matrix3f linear = { .m = {
-		world.m[0], world.m[1], world.m[2],
-		world.m[4], world.m[5], world.m[6],
-		world.m[8], world.m[9], world.m[10],
-	} };
+	Matrix3f linear = {
+		.m = {
+			world.m[0],
+			world.m[1],
+			world.m[2],
+			world.m[4],
+			world.m[5],
+			world.m[6],
+			world.m[8],
+			world.m[9],
+			world.m[10],
+		}
+	};
 
 	float det = linear.determinant();
 	if (math::abs(det) < 1e-8f) return matrix::IDENTITY4{float};
 
-	Matrix3f adjugate = linear.adjoint();
+	Matrix3f adjugate          = linear.adjoint();
 	Matrix3f inverse_transpose = adjugate.transpose();
 	inverse_transpose = inverse_transpose * (1.0f / det);
 
 	float[<9>] n = inverse_transpose.m;
-	return { .m = {
-		n[0], n[1], n[2], 0,
-		n[3], n[4], n[5], 0,
-		n[6], n[7], n[8], 0,
-		0, 0, 0, 1,
-	} };
+	return {
+		.m = {
+			n[0],
+			n[1],
+			n[2],
+			0,
+			n[3],
+			n[4],
+			n[5],
+			0,
+			n[6],
+			n[7],
+			n[8],
+			0,
+			0,
+			0,
+			0,
+			1,
+		}
+	};
 }
 
 <*

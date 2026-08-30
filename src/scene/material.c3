@@ -42,8 +42,7 @@ import vk;
 
 faultdef
 	MATERIAL_UNKNOWN,
-	MATERIAL_TEXTURE_UNKNOWN,
-	// A name that is not one of this material's samplers. Separate from
+	MATERIAL_TEXTURE_UNKNOWN, // A name that is not one of this material's samplers. Separate from
 	// `MATERIAL_TEXTURE_UNKNOWN`, which is about the *image*: one says the picture
 	// is not there and the other says the shader has nowhere to put it, and the
 	// two are fixed in different files.
@@ -69,8 +68,8 @@ const uint DEFAULT_MATERIAL = 0;
  rather than only the names means a script that hardcoded `side: 2` from memory
  of Three.js gets what it meant.
 *>
-const int SIDE_FRONT = 0;
-const int SIDE_BACK = 1;
+const int SIDE_FRONT  = 0;
+const int SIDE_BACK   = 1;
 const int SIDE_DOUBLE = 2;
 
 <*
@@ -112,8 +111,8 @@ fn vk::CullModeFlags cull_for_side(int side)
  material did before this existed, whatever its opacity says. Three.js behaves
  the same way — `opacity` without `transparent` does nothing.
 *>
-const int BLENDING_NONE = 0;
-const int BLENDING_NORMAL = 1;
+const int BLENDING_NONE     = 0;
+const int BLENDING_NORMAL   = 1;
 const int BLENDING_ADDITIVE = 2;
 
 <*
@@ -185,10 +184,10 @@ const uint LINE_MATERIAL = 1;
 *>
 const uint MATERIAL_PUSH_START = 24;
 
-$assert MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].offset + MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].size == MATERIAL_PUSH_START :
-	"the mesh push block moved; material uniforms no longer start where the template puts them";
-$assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET == PUSH_BUDGET :
-	"the material uniform budget and the push budget disagree";
+$assert MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].offset + MESH_PUSH_FIELDS[MESH_PUSH_FIELDS.len - 1].size
+	== MATERIAL_PUSH_START : "the mesh push block moved; material uniforms no longer start where the template puts them";
+$assert MATERIAL_PUSH_START + MATERIAL_UNIFORM_BUDGET
+	== PUSH_BUDGET : "the material uniform budget and the push budget disagree";
 
 // One `float4` — the width of an `animated` layer's tint-and-opacity uniform,
 // which `Material.layer_params` reads out of the push block.
@@ -224,16 +223,16 @@ const uint NO_TABLE_POINTER = uint::max;
  depends entirely on whether zero is a *legal value* of the field:
 
  - `texture` — zero is an ordinary texture index, so no encoding saves it.
-   `NO_TEXTURE` is -1 and every construction site names the field, which makes
-   forgetting possible on purpose: the mistake shows up as a wrong picture rather
-   than being silently absorbed.
+ `NO_TEXTURE` is -1 and every construction site names the field, which makes
+ forgetting possible on purpose: the mistake shows up as a wrong picture rather
+ than being silently absorbed.
  - `uv_transform` — zero is a legal number but a meaningless *transform*, so the
-   all-zero value is read as "unset" and the boundary refuses a script that tries
-   to write one. Nobody has to remember anything.
+ all-zero value is read as "unset" and the boundary refuses a script that tries
+ to write one. Nobody has to remember anything.
  - `one_minus_opacity` — zero is both legal and meaningful (fully transparent),
-   and the *common* case is the one that must be free. So the field stores the
-   complement: zero fill spells opacity 1, and an opacity of exactly 0 is still
-   representable rather than being stolen by a sentinel.
+ and the *common* case is the one that must be free. So the field stores the
+ complement: zero fill spells opacity 1, and an opacity of exactly 0 is still
+ representable rather than being stolen by a sentinel.
 
  The pattern: encode when zero is meaningful and the default is not zero; require
  naming when no encoding is honest.
@@ -270,14 +269,14 @@ struct Material
 	MaterialUniform[] declared_uniforms;
 	MaterialTexture[] declared_textures;
 	// How far this material's vertex body can move a vertex, in world units.
-	//
+	// 
 	// A cull margin and nothing else. `build_draw_list` tests a mesh's own bounds
 	// against the frustum, and those bounds describe the geometry as it was
 	// uploaded — a body that pushes a vertex two metres out is drawing something
 	// the box does not contain, so the draw is dropped while the displaced part is
 	// still on screen. That reads as geometry vanishing at the edge of the view
 	// and coming back when the camera turns.
-	//
+	// 
 	// Zero for every material without a vertex body, which is exactly right for
 	// them. Deliberately not derived: nothing can read a bound out of an arbitrary
 	// shader body, and a conservative guess would either cost draw calls
@@ -287,7 +286,7 @@ struct Material
 	// "whatever the mesh brought". Holds one reference to that slot for as long as
 	// it names it; `MeshPass.set_material_map` is the only thing that moves it, so
 	// the retain and the release cannot get out of step.
-	//
+	// 
 	// This must be set explicitly at every site that builds a `Material`. C3
 	// zero-fills what a designated initializer leaves out, and zero is a perfectly
 	// ordinary texture index — so a forgotten `.texture` does not render
@@ -300,7 +299,7 @@ struct Material
 	TextureSlots textures;
 	// `material.repeat` and `material.offset` — xy is how many times the texture
 	// repeats across the surface, zw is where it starts.
-	//
+	// 
 	// All zeros means unset, and is read as the identity. Zero would otherwise be
 	// a repeat of zero, which collapses a whole surface onto one texel — a black
 	// or single-colour shape, on a material nobody gave a transform to. Rather
@@ -310,12 +309,12 @@ struct Material
 	float[4] uv_transform;
 	// Which blend mode the material's pipeline was built with — `material.blend`
 	// and `material.transparent`, decided once, at construction.
-	//
+	// 
 	// A copy of what `PipelineState.blend` already says, kept here because the two
 	// readers cannot get at that: `Scene`'s draw ordering needs to know which
 	// buckets are transparent without reaching into a `MeshPipeline`, and the
 	// exporter needs it to write `alphaMode`.
-	//
+	// 
 	// There is no setter, unlike `cull`. Blending is baked into the pipeline on
 	// this device, so changing it would mean re-acquiring — a device, a target and
 	// the assembled source read back out of the cache — to save a script one line.
@@ -323,33 +322,33 @@ struct Material
 	BlendMode blend;
 	// `material.opacity`, stored as 1 - opacity so the zero fill is the common
 	// case.
-	//
+	// 
 	// A plain `opacity` field would make every forgotten initializer produce an
 	// invisible material — geometry that does not render, on a material nobody
 	// said anything about. A sentinel would have cost the one value a fade-out has
 	// to reach.
-	//
+	// 
 	// Never read directly outside `Material.opacity`.
 	float one_minus_opacity;
 	// `material.roughness`, stored as `1 - roughness` for the same reason opacity
 	// is stored as its complement: C3 zero-fills what an initializer leaves out,
 	// and a *zero* roughness is a mirror — every material nobody said anything
 	// about would come out as one.
-	//
+	// 
 	// Never read directly outside `Material.surface`.
 	float one_minus_roughness;
 	// `material.metalness` and `material.reflectance`, both 0 by default, so the
 	// zero fill is already the right answer and neither needs inverting.
-	//
+	// 
 	// ## Why reflectance is 0 rather than the 4% that real dielectrics reflect
-	//
+	// 
 	// Because the standing constraint at the bottom of `plan.md` says a default is
 	// invented when the answer stops depending on the scene, and this one has not:
 	// every scene in this project was authored against a Lambert renderer, and
 	// turning a 4% highlight on for all of them would relight all of them. So the
 	// physical value is one line away — `material.reflectance = 0.5` — and off
 	// until asked for, exactly as shadows are.
-	//
+	// 
 	// The importer *does* apply the file's `metallicFactor` and `roughnessFactor`,
 	// and the difference is that those are numbers a file states while this is one
 	// nothing states — glTF has no reflectance, so applying the file's would mean
@@ -362,12 +361,12 @@ struct Material
 	// The uniform table, when it did not fit the block. Empty for every material
 	// whose uniforms fit — almost all of them — and then nothing below this line
 	// costs anything.
-	//
+	// 
 	// A CPU shadow rather than the device buffer itself. `set_uniform` writes
 	// here, and `MeshPass.prepare` copies it into that frame slot's table buffer
 	// once per frame, which is what makes writing a uniform safe while frames are
 	// in flight: the GPU may still be reading last frame's copy.
-	//
+	// 
 	// Laid out as the shader lays the table out, so the copy is one memcpy with no
 	// per-uniform loop, and every offset in it came from reflection.
 	char[] table;
@@ -384,13 +383,13 @@ struct Material
 	// was collected, which stays in the list so every index ever handed out keeps
 	// meaning what it meant — and is handed to the next `create_material` rather
 	// than growing the list forever.
-	//
+	// 
 	// Never set at a construction site: `MeshPass.claim_slot` is the only thing
 	// that makes a material live, so C3's zero-fill cannot produce a material that
 	// is dead the moment it is built.
 	bool alive;
 	// Whether the script's handle has been given back — `material.dispose()`.
-	//
+	// 
 	// Not the same as dead. A material is collected when this is true *and* no
 	// node still names it, the rule `texture.dispose()` already follows: giving
 	// back a handle is a statement about the handle, and a mesh that is still
@@ -490,7 +489,7 @@ struct ScriptLayers
 	// for the whole stack.
 	uint mask_binding;
 	// The *base* material's normal map, as a binding, or zero.
-	//
+	// 
 	// Not a layer's — it is the one under all of them, and it is here rather than
 	// on `Material` beside `texture` because a `LayeredMaterial` is the only thing
 	// in this renderer that has one: the core materials have no normal map
@@ -642,8 +641,10 @@ fn void TextureSlots.set(&self, uint binding, int texture)
  `render/bind.c3` — shared with the post pass, which asks the identical question
  of a pipeline that is not a material's. Zero means no.
 *>
-fn uint Material.binding_of_texture(&self, String name)
-	=> sampler_binding_of(self.pipeline, name, MATERIAL_BINDING_FIRST);
+fn uint Material.binding_of_texture(
+	&self,
+	String name
+) => sampler_binding_of(self.pipeline, name, MATERIAL_BINDING_FIRST);
 
 <*
  Points a uniform at new values.
@@ -670,8 +671,8 @@ fn uint Material.binding_of_texture(&self, String name)
  @param values : `One to four floats. Must match the width the shader declared.`
  @param row : `Which row of the column, 0 for a plain uniform.`
  @param rows : `How many rows the caller believes the column has. 1 for a plain uniform.`
- @return? MATERIAL_UNIFORM_UNKNOWN : `No uniform of that name in this material.`
- @return? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components, a different number of rows, or the row is past the end.`
+ @return ? MATERIAL_UNIFORM_UNKNOWN : `No uniform of that name in this material.`
+ @return ? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components, a different number of rows, or the row is past the end.`
 *>
 fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, uint rows = 1)
 {
@@ -750,7 +751,7 @@ fn void Material.bind_table(&self)
 	}
 
 	if (self.table.len > 0) mem::free(self.table);
-	self.table = {};
+	self.table = { };
 	if (size == 0) return;
 	// Zero-filled, exactly as `block` is: a uniform nobody set reads zero, and
 	// that is the same promise on both sides of the spill.
@@ -850,7 +851,7 @@ fn int Material.uniform_offset(&self, String name)
 *>
 fn MaterialUniform[] copy_uniform_declarations(MaterialUniform[] from)
 {
-	if (from.len == 0) return {};
+	if (from.len == 0) return { };
 	MaterialUniform[] made = mem::new_array(MaterialUniform, from.len);
 	foreach (i, uniform : from)
 	{
@@ -861,7 +862,7 @@ fn MaterialUniform[] copy_uniform_declarations(MaterialUniform[] from)
 
 fn MaterialTexture[] copy_texture_declarations(MaterialTexture[] from)
 {
-	if (from.len == 0) return {};
+	if (from.len == 0) return { };
 	MaterialTexture[] made = mem::new_array(MaterialTexture, from.len);
 	foreach (i, texture : from) made[i] = { .name = texture.name.copy(mem) };
 	return made;
@@ -873,8 +874,8 @@ fn void Material.free_declarations(&self)
 	foreach (texture : self.declared_textures) if (texture.name.len > 0) texture.name.free(mem);
 	if (self.declared_uniforms.len > 0) mem::free(self.declared_uniforms);
 	if (self.declared_textures.len > 0) mem::free(self.declared_textures);
-	self.declared_uniforms = {};
-	self.declared_textures = {};
+	self.declared_uniforms = { };
+	self.declared_textures = { };
 }
 
 fn void Material.free(&self)
@@ -883,7 +884,7 @@ fn void Material.free(&self)
 	if (self.vertex.len > 0) self.vertex.free(mem);
 	self.free_declarations();
 	if (self.table.len > 0) mem::free(self.table);
-	self.table = {};
+	self.table = { };
 	self.free_script_layers();
 	*self = { };
 	// Not left at the zero fill. Zero is a perfectly ordinary texture index, and a

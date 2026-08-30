@@ -6,9 +6,9 @@
  reach one:
 
  - Clear colours. `vkCmdBeginRendering` writes them straight into an `_SRGB`
-   attachment, which encodes on write, so they have to arrive linear.
+ attachment, which encodes on write, so they have to arrive linear.
  - glTF export. `baseColorFactor` is linear by specification, while a script's
-   `mesh.color` is sRGB.
+ `mesh.color` is sRGB.
  - Test expectations that want to be written in the units the script used.
 
  The curve here is the exact piecewise sRGB transfer function rather than
@@ -54,5 +54,6 @@ fn float linear_to_srgb(float c)
  not a colour, and running it through the curve is the classic way to make a
  half-transparent thing wrong.
 *>
-fn float[4] srgb_to_linear_rgb(float[4] c) =>
-	{ srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3] };
+fn float[4] srgb_to_linear_rgb(
+	float[4] c
+) => { srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3] };

@@ -53,7 +53,12 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
  walls, or a slope limit nothing in it is under.
 *>
 fn void js_nav_bake(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -63,7 +68,7 @@ fn void js_nav_bake(
 	if (scene == null) return;
 
 	NavSettings settings = default_nav_settings();
-	float cell = arg_float(&js, argc, args, 1);
+	float cell           = arg_float(&js, argc, args, 1);
 	if (cell > 0.0f) settings.cell = cell;
 	settings.agent_radius = math::max(arg_float(&js, argc, args, 2), 0.0f);
 	settings.agent_height = math::max(arg_float(&js, argc, args, 3), 0.0f);
@@ -116,19 +121,31 @@ fn qjs::Value nav_stats_value(Scene* scene, qjs::Context* js) @local
 	js.set_property(value, "components", qjs::number_value((double)nav.components));
 	js.set_property(value, "largest", qjs::number_value((double)nav.largest_component));
 	js.set_property(value, "bakeMs", qjs::number_value(nav.bake_ms));
-	js.set_property(value, "bounds", aabb_value(js, (collision::Aabb3) {
-		nav.grid.origin,
-		nav.grid.origin + (Vec3) {
-			(float)(nav.grid.nx - 1) * nav.grid.cell,
-			(float)(nav.grid.ny - 1) * nav.grid.cell,
-			(float)(nav.grid.nz - 1) * nav.grid.cell,
-		},
-	}));
+	js.set_property(
+		value,
+		"bounds",
+		aabb_value(
+			js,
+			(collision::Aabb3) {
+				nav.grid.origin,
+				nav.grid.origin + (Vec3) {
+					(float)(nav.grid.nx - 1) * nav.grid.cell,
+					(float)(nav.grid.ny - 1) * nav.grid.cell,
+					(float)(nav.grid.nz - 1) * nav.grid.cell,
+				},
+			}
+		)
+	);
 	return value;
 }
 
 fn void js_nav_stats(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -141,7 +158,12 @@ fn void js_nav_stats(
 }
 
 fn void js_nav_clear(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -161,7 +183,12 @@ fn void js_nav_clear(
  @return `A handle, or -1 when nothing was solved: no bake, no goals, or no goal on a walkable cell.`
 *>
 fn void js_nav_field(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -186,7 +213,7 @@ fn void js_nav_field(
 	float[] values = mem::new_array(float, scene.nav.field_size());
 	@pool()
 	{
-		sz count = goals.len / 3;
+		sz count      = goals.len / 3;
 		Vec3[] points = mem::temp_array(Vec3, count);
 		for (sz i = 0; i < count; i++) points[i] = { goals[i * 3], goals[i * 3 + 1], goals[i * 3 + 2] };
 
@@ -220,15 +247,20 @@ fn void js_nav_field(
 *>
 fn float[] Scene.nav_field_of(&self, int handle)
 {
-	if (handle < 0 || (sz)handle >= self.nav_fields.len()) return {};
+	if (handle < 0 || (sz)handle >= self.nav_fields.len()) return { };
 	NavFieldSlot slot = self.nav_fields[(sz)handle];
-	if (!slot.live) return {};
-	if (!self.nav.usable() || slot.values.len != self.nav.grid.cells.len) return {};
+	if (!slot.live) return { };
+	if (!self.nav.usable() || slot.values.len != self.nav.grid.cells.len) return { };
 	return slot.values;
 }
 
 fn void js_nav_field_free(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -238,12 +270,20 @@ fn void js_nav_field_free(
 	if (scene == null) return;
 
 	int handle = arg_int(&js, argc, args, 1);
-	if (handle < 0 || (sz)handle >= scene.nav_fields.len()) { *out = qjs::bool_value(false); return; }
+	if (handle < 0 || (sz)handle >= scene.nav_fields.len())
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
 
 	NavFieldSlot* slot = &scene.nav_fields[(sz)handle];
-	if (!slot.live) { *out = qjs::bool_value(false); return; }
+	if (!slot.live)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
 	if (slot.values.len > 0) mem::free(slot.values);
-	*slot = {};
+	*slot = { };
 	*out = qjs::bool_value(true);
 }
 
@@ -257,7 +297,12 @@ fn void js_nav_field_free(
  than this being called in a loop.
 *>
 fn void js_nav_direction(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -267,7 +312,7 @@ fn void js_nav_direction(
 	if (scene == null) return;
 
 	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point    = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
 
 	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 	*out = vec3_value(&js, direction);
@@ -284,7 +329,12 @@ fn void js_nav_direction(
  whether to give up.
 *>
 fn void js_nav_cost(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -294,7 +344,11 @@ fn void js_nav_cost(
 	if (scene == null) return;
 
 	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	if (field.len == 0) { *out = qjs::number_value(-1.0); return; }
+	if (field.len == 0)
+	{
+		*out = qjs::number_value(-1.0);
+		return;
+	}
 
 	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
 	float cost = scene.nav.cost_at(field, point);
@@ -333,7 +387,12 @@ fn void js_nav_cost(
  @return `How many agents were sampled.`
 *>
 fn void js_nav_sample(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -342,19 +401,23 @@ fn void js_nav_sample(
 	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
 	if (scene == null) return;
 
-	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	float[] positions = float_view(&js, argc, args, 2);
-	float[] costs = float_view(&js, argc, args, 5);
+	float[] field      = scene.nav_field_of(arg_int(&js, argc, args, 1));
+	float[] positions  = float_view(&js, argc, args, 2);
+	float[] costs      = float_view(&js, argc, args, 5);
 	float[] directions = float_view(&js, argc, args, 8);
 
 	sz count = positions.len / 3;
 	if (costs.len > 0 && costs.len < count) count = costs.len;
 	if (directions.len > 0 && directions.len / 3 < count) count = directions.len / 3;
-	if (count == 0) { *out = qjs::int_value(0); return; }
+	if (count == 0)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	for (sz i = 0; i < count; i++)
 	{
-		sz at = i * 3;
+		sz at      = i * 3;
 		Vec3 point = { positions[at], positions[at + 1], positions[at + 2] };
 
 		if (costs.len > 0)
@@ -392,7 +455,12 @@ fn void js_nav_sample(
  how many were written, including the start, and zero when there is no route.
 *>
 fn void js_nav_path(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -408,29 +476,40 @@ fn void js_nav_path(
 	}
 
 	Vec3 from = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
-	Vec3 to = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	Vec3 to   = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
 
 	float[] slots = float_view(&js, argc, args, 7);
-	if (slots.len < 3) { *out = qjs::int_value(0); return; }
+	if (slots.len < 3)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	@pool()
 	{
 		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!scene.nav.solve(&goals, field)) { *out = qjs::int_value(0); return; }
+		if (!scene.nav.solve(&goals, field))
+		{
+			*out = qjs::int_value(0);
+			return;
+		}
 
 		// The raw walk is one point per cell, so it can be as long as the reachable
 		// set. Bounded by the caller's slice times a factor, because shortening is
 		// what turns hundreds of cells into a handful of corners and a caller
 		// asking for eight waypoints still needs the cells between them walked.
 		sz raw_limit = math::min((sz)scene.nav.field_size(), (sz)(slots.len / 3) * 64 + 64);
-		Vec3[] raw = mem::temp_array(Vec3, raw_limit);
-		uint count = scene.nav.walk(field, from, raw);
-		if (count == 0) { *out = qjs::int_value(0); return; }
+		Vec3[] raw   = mem::temp_array(Vec3, raw_limit);
+		uint count   = scene.nav.walk(field, from, raw);
+		if (count == 0)
+		{
+			*out = qjs::int_value(0);
+			return;
+		}
 
 		Vec3[] tight = mem::temp_array(Vec3, (sz)(slots.len / 3));
-		uint kept = scene.shorten_path(
-			&self.pass.assets, &scene.nav, raw[:(sz)count], count, tight, {});
+		uint kept = scene.shorten_path(&self.pass.assets, &scene.nav, raw[:(sz)count], count, tight, { });
 
 		for (uint i = 0; i < kept; i++)
 		{
@@ -455,7 +534,12 @@ fn void js_nav_path(
  zero turns it off, which is what a caller steering one agent means.
 *>
 fn void js_steer(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -464,11 +548,15 @@ fn void js_steer(
 	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
 	if (scene == null) return;
 
-	float[] positions = float_view(&js, argc, args, 1);
+	float[] positions  = float_view(&js, argc, args, 1);
 	float[] velocities = float_view(&js, argc, args, 4);
-	if (positions.len < 3 || velocities.len < 3) { *out = qjs::int_value(0); return; }
+	if (positions.len < 3 || velocities.len < 3)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
-	int handle = arg_int(&js, argc, args, 7);
+	int handle    = arg_int(&js, argc, args, 7);
 	float[] field = scene.nav_field_of(handle);
 
 	SteerOptions options;

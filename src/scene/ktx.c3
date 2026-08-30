@@ -12,9 +12,9 @@
  A KTX2 file is a container, and what is inside it is either
 
  - **a Basis texture** — ETC1S or UASTC, `vkFormat` 0, which is what
-   `KHR_texture_basisu` means and what every glTF compressor writes; or
+ `KHR_texture_basisu` means and what every glTF compressor writes; or
  - **a plain one** — an ordinary Vulkan format, uncompressed or BCn, optionally
-   Zstd/ZLIB supercompressed, which is what an engine-ready pipeline writes.
+ Zstd/ZLIB supercompressed, which is what an engine-ready pipeline writes.
 
  They are told apart by the descriptor block rather than by the extension, since
  both arrive through the same mime type, and `ktx::basis::info` reads exactly
@@ -82,7 +82,7 @@ fn bool is_ktx2(char[] encoded)
  from one switch and its callers stay as they were.
 
  @param encoded : `The whole file. Not modified, and not retained.`
- @return? UNSUPPORTED_IMAGE : `Not a KTX2, or a format inside it this cannot narrow to RGBA8.`
+ @return ? UNSUPPORTED_IMAGE : `Not a KTX2, or a format inside it this cannot narrow to RGBA8.`
 *>
 fn image::Image? decode_ktx2(char[] encoded, Allocator allocator = mem)
 {
@@ -138,8 +138,8 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
 	char[]? face = tex.image(0, 0, 0);
 	if (catch face) return UNSUPPORTED_IMAGE~;
 
-	uint width = tex.level_width(0);
-	uint height = tex.level_height(0);
+	uint width   = tex.level_width(0);
+	uint height  = tex.level_height(0);
 	char[]? rgba = codec::decode_image(allocator, tex.vk_format, face, width, height);
 	if (catch rgba) return UNSUPPORTED_IMAGE~;
 

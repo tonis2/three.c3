@@ -117,10 +117,10 @@ const int MOVE_DEFAULT_SLIDES = 4;
  that the single form spends three fifths of its time building an object. Eight
  rather than the seven it needs, so the stride is a shift rather than a multiply.
 
-	0..2  remaining   what was left of the motion when the slides ran out
-	3..5  normal      the last contact's outward normal
-	6     slope       degrees from level of whatever is being stood on
-	7     flags       MOVE_GROUNDED | MOVE_STEPPED | MOVE_TOUCHED, added
+ 0..2  remaining   what was left of the motion when the slides ran out
+ 3..5  normal      the last contact's outward normal
+ 6     slope       degrees from level of whatever is being stood on
+ 7     flags       MOVE_GROUNDED | MOVE_STEPPED | MOVE_TOUCHED, added
 
  The flags are floats because everything else in the block is, and a bit field
  that small is exact in a float32 — the alternative is a second buffer of a
@@ -129,8 +129,8 @@ const int MOVE_DEFAULT_SLIDES = 4;
 const sz MOVE_RESULT_STRIDE = 8;
 
 const float MOVE_GROUNDED = 1.0f;
-const float MOVE_STEPPED = 2.0f;
-const float MOVE_TOUCHED = 4.0f;
+const float MOVE_STEPPED  = 2.0f;
+const float MOVE_TOUCHED  = 4.0f;
 
 <*
  Sensible numbers for a person, so a caller who supplied none gets a character
@@ -212,11 +212,11 @@ fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOption
 	if (assets == null) return centre;
 
 	float clearance = options.radius + options.skin;
-	Vec3 at = centre;
+	Vec3 at         = centre;
 
 	for (int pass = 0; pass < 3; pass++)
 	{
-		Vec3 reach = { clearance, clearance + options.half_height, clearance };
+		Vec3 reach           = { clearance, clearance + options.half_height, clearance };
 		collision::Aabb3 box = { at - reach, at + reach };
 
 		bool moved = false;
@@ -236,7 +236,7 @@ fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOption
 				SegmentTriangle pair = segment_triangle_closest(tail, head, tri);
 				if (pair.distance >= clearance) continue;
 
-				Vec3 push = pair.on_segment - pair.on_triangle;
+				Vec3 push    = pair.on_segment - pair.on_triangle;
 				float length = push.length();
 				Vec3 normal;
 				if (length > 1e-6f)
@@ -275,7 +275,13 @@ fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOption
  it the next move starts at zero clearance — see `MoveOptions.skin`.
 *>
 fn Vec3 Scene.slide_step(
-	&self, Assets* assets, Vec3 at, Vec3 motion, MoveOptions options, IgnoreSet skip, SweepHit* out
+	&self,
+	Assets* assets,
+	Vec3 at,
+	Vec3 motion,
+	MoveOptions options,
+	IgnoreSet skip,
+	SweepHit* out
 )
 {
 	SweepHit hit = self.sweep_capsule(assets, at, at + motion, options.radius, options.half_height, options.skin, skip);
@@ -314,9 +320,7 @@ fn bool walkable(Vec3 normal, float slope_limit) @local
  @param motion : `How far it wants to go this frame. Gravity is the caller's: this integrates nothing and remembers nothing between calls.`
  @param skip : `The character's own nodes, subtrees included, so it does not collide with its own mesh. An empty set if it draws nothing. A character is usually a Group — see IgnoreSet.`
 *>
-fn MoveResult Scene.move_capsule(
-	&self, Assets* assets, Vec3 centre, Vec3 motion, MoveOptions options, IgnoreSet skip
-)
+fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion, MoveOptions options, IgnoreSet skip)
 {
 	MoveResult result = {
 		.position = centre,
@@ -342,14 +346,22 @@ fn MoveResult Scene.move_capsule(
 	// to the floor it just left, and the difference is exactly this reading, taken
 	// before anything moved.
 	bool was_grounded = false;
+
+
 	{
 		SweepHit probe = self.sweep_capsule(
-			assets, at, at - (Vec3) { 0, skin * 4.0f, 0 },
-			options.radius, options.half_height, skin, skip);
+			assets,
+			at,
+			at - (Vec3) { 0, skin * 4.0f, 0 },
+			options.radius,
+			options.half_height,
+			skin,
+			skip
+		);
 		was_grounded = probe.hit && walkable(probe.normal, options.slope_limit);
 	}
 
-	Vec3 left = motion;
+	Vec3 left   = motion;
 	uint slides = 0;
 
 	for (int i = 0; i < options.max_slides; i++)
@@ -372,7 +384,7 @@ fn MoveResult Scene.move_capsule(
 
 		// What is left of the motion after the part that was used up.
 		Vec3 travelled = hit.distance > 0.0f ? left.normalize() * hit.distance : (Vec3) { 0, 0, 0 };
-		Vec3 rest = left - travelled;
+		Vec3 rest      = left - travelled;
 
 		// The step-up, and only for a wall: a slope under the limit is walked up
 		// by the slide below, and trying to climb it as well would let a character
@@ -409,8 +421,14 @@ fn MoveResult Scene.move_capsule(
 	if (was_grounded && options.snap > 0.0f && motion.y <= 0.0f) probe_depth = math::max(probe_depth, options.snap);
 
 	SweepHit floor = self.sweep_capsule(
-		assets, at, at - (Vec3) { 0, probe_depth, 0 },
-		options.radius, options.half_height, skin, skip);
+		assets,
+		at,
+		at - (Vec3) { 0, probe_depth, 0 },
+		options.radius,
+		options.half_height,
+		skin,
+		skip
+	);
 
 	if (floor.hit && walkable(floor.normal, options.slope_limit))
 	{
@@ -428,7 +446,7 @@ fn MoveResult Scene.move_capsule(
 		Node* floor_node = self.node(floor.node);
 		if (floor_node != null && floor_node.had_world)
 		{
-			Vec3 now = { floor_node.world.m[12], floor_node.world.m[13], floor_node.world.m[14] };
+			Vec3 now   = { floor_node.world.m[12], floor_node.world.m[13], floor_node.world.m[14] };
 			Vec3 delta = now - floor_node.prev_world;
 			// Carry the capsule with the floor. Jumping (upward motion) is left
 			// alone so a lift does not glue you to itself on the way up.
@@ -452,9 +470,7 @@ fn MoveResult Scene.move_capsule(
  @param flat : `The horizontal motion left over, which is what the climb is trying to spend.`
  @return `Whether the climb was taken, with the new centre in out.`
 *>
-fn bool Scene.try_step_up(
-	&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions options, IgnoreSet skip, Vec3* out
-)
+fn bool Scene.try_step_up(&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions options, IgnoreSet skip, Vec3* out)
 {
 	SweepHit ignored;
 
@@ -473,7 +489,7 @@ fn bool Scene.try_step_up(
 	// Down, by the whole lift plus the gap it was raised by. Anything less leaves
 	// the capsule hovering a step above the ledge it just climbed.
 	SweepHit landing;
-	Vec3 drop = { 0, -(options.step_height + options.skin * 2.0f), 0 };
+	Vec3 drop   = { 0, -(options.step_height + options.skin * 2.0f), 0 };
 	Vec3 landed = self.slide_step(assets, across, drop, options, skip, &landing);
 
 	if (!landing.hit) return false;
@@ -534,9 +550,15 @@ fn bool Scene.try_step_up(
  @return `How many agents were stepped, which is the shortest of the buffers given.`
 *>
 fn uint Scene.move_capsules(
-	&self, Assets* assets,
-	float[] positions, float[] motions, float[] results,
-	MoveOptions options, IgnoreSet skip, int[] selves)
+	&self,
+	Assets* assets,
+	float[] positions,
+	float[] motions,
+	float[] results,
+	MoveOptions options,
+	IgnoreSet skip,
+	int[] selves
+)
 {
 	sz count = positions.len / 3;
 	if (motions.len / 3 < count) count = motions.len / 3;
@@ -558,9 +580,9 @@ fn uint Scene.move_capsules(
 			if (self.node(own) != null) mine.nodes[mine.count++] = own;
 		}
 
-		sz at = i * 3;
-		Vec3 centre = { positions[at], positions[at + 1], positions[at + 2] };
-		Vec3 motion = { motions[at], motions[at + 1], motions[at + 2] };
+		sz at             = i * 3;
+		Vec3 centre       = { positions[at], positions[at + 1], positions[at + 2] };
+		Vec3 motion       = { motions[at], motions[at + 1], motions[at + 2] };
 		MoveResult result = self.move_capsule(assets, centre, motion, options, mine);
 
 		positions[at] = result.position.x;
@@ -576,10 +598,8 @@ fn uint Scene.move_capsules(
 		results[to + 4] = result.normal.y;
 		results[to + 5] = result.normal.z;
 		results[to + 6] = result.slope;
-		results[to + 7] =
-			(result.grounded ? MOVE_GROUNDED : 0.0f)
-			+ (result.stepped ? MOVE_STEPPED : 0.0f)
-			+ (result.hit.is_set() ? MOVE_TOUCHED : 0.0f);
+		results[to + 7] = (result.grounded ? MOVE_GROUNDED
+			: 0.0f) + (result.stepped ? MOVE_STEPPED : 0.0f) + (result.hit.is_set() ? MOVE_TOUCHED : 0.0f);
 	}
 	return (uint)count;
 }

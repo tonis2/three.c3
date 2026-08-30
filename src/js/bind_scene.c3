@@ -274,7 +274,7 @@ fn AssetId arg_asset(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* ar
 	{
 		*out = js.raise(
 			"that asset is no longer loaded — three.unloadUnused() or scene.unload() freed it, "
-			"and loading the file again gives a fresh handle"
+				"and loading the file again gives a fresh handle"
 		);
 		return NO_ASSET;
 	}
@@ -356,9 +356,7 @@ fn NodeRef arg_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* a
 			if (each.node(id) != null) return { .scene = each, .id = id };
 		}
 	}
-	*out = js.raise(
-		"that object is no longer in the scene — it was removed, or the scene it was in was disposed"
-	);
+	*out = js.raise("that object is no longer in the scene — it was removed, or the scene it was in was disposed");
 	return { };
 }
 
@@ -373,7 +371,7 @@ fn NodeRef arg_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* a
 *>
 fn Scene* arg_scene(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
 {
-	uint id = (uint)arg_int(js, argc, args, at);
+	uint id      = (uint)arg_int(js, argc, args, at);
 	Scene* found = self.pass == null ? null : self.pass.scene_by_id(id);
 	if (found == null)
 	{
@@ -392,17 +390,25 @@ fn Scene* arg_scene(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* arg
  would not be a lie.
 *>
 fn NodeRef arg_live_handle(
-	JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out, String verb
+	JsRuntime* self,
+	qjs::Context* js,
+	int argc,
+	qjs::Value* args,
+	int at,
+	qjs::Value* out,
+	String verb
 )
 {
 	NodeRef ref = arg_handle(self, js, argc, args, at, out);
 	if (ref.scene == null) return ref;
 	if (ref.scene != self.pass.scene)
 	{
-		*out = js.raise(string::tformat(
-			"%s needs an object in the scene being rendered — call scene.activate() on the one it is in first",
-			verb
-		));
+		*out = js.raise(
+			string::tformat(
+				"%s needs an object in the scene being rendered — call scene.activate() on the one it is in first",
+				verb
+			)
+		);
 		return { };
 	}
 	return ref;
@@ -426,7 +432,12 @@ fn NodeRef arg_live_handle(
  @return `The triple [sceneId, rootIndex, rootGeneration]. The root comes back with the id because a Scene needs both, and asking twice would be two crossings.`
 *>
 fn void js_scene_create(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -455,7 +466,12 @@ fn void js_scene_create(
  @return `false if the id names no live scene.`
 *>
 fn void js_scene_activate(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -482,7 +498,12 @@ fn void js_scene_activate(
  @return `false if the id names nothing, or names the scene being rendered.`
 *>
 fn void js_scene_dispose(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -493,7 +514,12 @@ fn void js_scene_dispose(
 // Whether a scene id still names a scene. What `Scene._check()` in the prelude
 // asks before every call, in place of the epoch comparison it used to make.
 fn void js_scene_alive(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -503,7 +529,12 @@ fn void js_scene_alive(
 
 // The id of the scene being rendered.
 fn void js_scene_active(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -524,7 +555,12 @@ fn void js_scene_active(
  back a usable handle for a scene whose wrapper is gone.
 *>
 fn void js_scene_ids(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -558,14 +594,19 @@ fn void js_scene_ids(
  @return `How many were disposed.`
 *>
 fn void js_dispose_inactive(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 
 	uint disposed = 0;
 	// Backwards: `dispose_scene` removes from the list it is walking.
-	sz at = self.pass.scenes.len();
+	sz at         = self.pass.scenes.len();
 	while (at > 0)
 	{
 		at--;
@@ -652,14 +693,19 @@ fn void JsRuntime.set_clear(&self, Scene* scene, float[4] clear)
  generation for an asset it does not name.
 *>
 fn void js_add(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
 	int index = arg_int(&js, argc, args, 0);
-	int mesh = arg_int(&js, argc, args, 2);
+	int mesh  = arg_int(&js, argc, args, 2);
 
 	// The parent's handle is what names the scene — an object is added to the
 	// graph its parent is in, which is what lets a script build the next level
@@ -693,7 +739,12 @@ fn void js_add(
 }
 
 fn void js_remove(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -714,7 +765,12 @@ fn void js_remove(
 }
 
 fn void js_set_parent(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -747,7 +803,12 @@ fn void js_set_parent(
  crossing instead of three.
 *>
 fn void js_set_transform(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -772,8 +833,10 @@ fn void js_set_transform(
 	node.position = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
 	// Euler in, quaternion stored — the one-way conversion `node.c3`'s header
 	// describes. JavaScript keeps the triple it sent, so nothing converts back.
-	node.rotation = quat_from_euler({ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) });
-	node.scale    = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
+	node.rotation = quat_from_euler(
+		{ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) }
+	);
+	node.scale = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
 	// Not `node.dirty = true`: the flag alone stopped being enough in §19.5, when
 	// the world-matrix walk gained the right to skip itself. See
 	// `Scene.mark_moved`.
@@ -795,7 +858,12 @@ fn void js_set_transform(
  `.rotation` gets exactly what it typed and nothing left over from the file.
 *>
 fn void js_set_quaternion(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -813,12 +881,15 @@ fn void js_set_quaternion(
 		return;
 	}
 
-	ref.scene.set_quaternion(ref.id, {
-		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3),
-		arg_float(&js, argc, args, 4),
-		arg_float(&js, argc, args, 5),
-	});
+	ref.scene.set_quaternion(
+		ref.id,
+		{
+			arg_float(&js, argc, args, 2),
+			arg_float(&js, argc, args, 3),
+			arg_float(&js, argc, args, 4),
+			arg_float(&js, argc, args, 5),
+		}
+	);
 }
 
 <*
@@ -840,7 +911,12 @@ fn void js_set_quaternion(
  Called lazily, on the first `play`. A prop that never animates never sends it.
 *>
 fn void js_bind_animation(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -854,7 +930,7 @@ fn void js_bind_animation(
 
 	if (argc < 5) return;
 	qjs::Value pairs = args[4];
-	uint length = (uint)js.length(pairs);
+	uint length      = (uint)js.length(pairs);
 
 	List{uint} sources;
 	List{NodeId} nodes;
@@ -866,10 +942,12 @@ fn void js_bind_animation(
 	for (uint i = 0; i + 2 < length; i += 3)
 	{
 		sources.push((uint)js.number(js.index(pairs, i)));
-		nodes.push({
-			.index = (uint)js.number(js.index(pairs, i + 1)),
-			.generation = (uint)js.number(js.index(pairs, i + 2)),
-		});
+		nodes.push(
+			{
+				.index = (uint)js.number(js.index(pairs, i + 1)),
+				.generation = (uint)js.number(js.index(pairs, i + 2)),
+			}
+		);
 	}
 
 	// Whether this character is posed from its bone nodes. The script asked for a
@@ -889,7 +967,12 @@ fn void js_bind_animation(
  game rather than a wrong pose.
 *>
 fn void js_play_animation(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -901,16 +984,16 @@ fn void js_play_animation(
 	@pool()
 	{
 		String name = arg_text(&js, argc, args, 2, tmem);
-		bool loop = argc > 3 ? arg_truth(&js, argc, args, 3) : true;
+		bool loop   = argc > 3 ? arg_truth(&js, argc, args, 3) : true;
 		float speed = argc > 4 ? arg_float(&js, argc, args, 4) : 1.0f;
 		// The start phase. What a crowd needs and the only new argument since the
 		// binding was written: a hundred characters on one walk cycle at a hundred
 		// phases are a hundred values of this over one baked clip.
-		float time = argc > 5 ? arg_float(&js, argc, args, 5) : 0;
+		float time  = argc > 5 ? arg_float(&js, argc, args, 5) : 0;
 		// Seconds of crossfade out of whatever was playing. Zero is the snap this
 		// binding did for its whole life before the argument existed, which is why
 		// it is the default and not a sentinel.
-		float fade = argc > 6 ? arg_float(&js, argc, args, 6) : 0;
+		float fade  = argc > 6 ? arg_float(&js, argc, args, 6) : 0;
 		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade));
 	};
 }
@@ -932,7 +1015,12 @@ fn void js_play_animation(
  a mistake a script can see.
 *>
 fn void js_set_morph_weights(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -943,7 +1031,7 @@ fn void js_set_morph_weights(
 	if (argc < 3) return;
 
 	qjs::Value values = args[2];
-	uint length = (uint)js.length(values);
+	uint length       = (uint)js.length(values);
 
 	List{float} weights;
 	weights.init(mem, (sz)length + 1);
@@ -964,7 +1052,12 @@ fn void js_set_morph_weights(
  look at `mesh.weights`, rather than in the `Mesh` constructor.
 *>
 fn void js_mesh_morphs(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -973,7 +1066,7 @@ fn void js_mesh_morphs(
 	AssetId id = arg_asset(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
-	uint index = (uint)arg_int(&js, argc, args, 2);
+	uint index    = (uint)arg_int(&js, argc, args, 2);
 	GpuMesh* mesh = self.pass.assets.mesh(id, index);
 	*out = qjs::int_value(mesh == null ? 0 : (int)mesh.morph_targets);
 }
@@ -988,7 +1081,12 @@ fn void js_mesh_morphs(
  lists what the rig does have.
 *>
 fn void js_bind_socket(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1017,7 +1115,12 @@ fn void js_bind_socket(
  side of it is three lines.
 *>
 fn void js_unbind_socket(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1042,7 +1145,12 @@ fn void js_unbind_socket(
  A skin of -1 clears it, which is what every ordinary mesh is.
 *>
 fn void js_bind_skin(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1062,7 +1170,12 @@ fn void js_bind_skin(
  `stopAnimation(index, generation)` — hold the pose. See `Scene.stop`.
 *>
 fn void js_stop_animation(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1075,7 +1188,12 @@ fn void js_stop_animation(
 }
 
 fn void js_set_visible(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1094,7 +1212,12 @@ fn void js_set_visible(
  can be refused on. `Node.collides` has what it is for.
 *>
 fn void js_set_collides(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1116,7 +1239,12 @@ fn void js_set_collides(
  answer. `Scene.set_static_caster` has the argument.
 *>
 fn void js_set_static(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1129,10 +1257,14 @@ fn void js_set_static(
 }
 
 fn void js_set_name(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
@@ -1158,7 +1290,12 @@ fn void js_set_name(
  one bucket. Everything else that changes how a mesh looks is bucket state.
 *>
 fn void js_set_color(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1167,12 +1304,15 @@ fn void js_set_color(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	ref.scene.set_color(ref.id, {
-		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3),
-		arg_float(&js, argc, args, 4),
-		arg_float(&js, argc, args, 5),
-	});
+	ref.scene.set_color(
+		ref.id,
+		{
+			arg_float(&js, argc, args, 2),
+			arg_float(&js, argc, args, 3),
+			arg_float(&js, argc, args, 4),
+			arg_float(&js, argc, args, 5),
+		}
+	);
 }
 
 <*
@@ -1184,7 +1324,12 @@ fn void js_set_color(
  rows the material actually declared — see `shaders/material.slang`.
 *>
 fn void js_set_variant(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1206,7 +1351,12 @@ fn void js_set_variant(
  the wrong number.
 *>
 fn void js_world_position(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1232,7 +1382,12 @@ fn void js_world_position(
  Null rather than a zero box for an empty subtree — see `Scene.subtree_bounds`.
 *>
 fn void js_object_bounds(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1241,7 +1396,7 @@ fn void js_object_bounds(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	bool found = false;
+	bool found           = false;
 	collision::Aabb3 box = ref.scene.subtree_bounds(&self.pass.assets, ref.id, &found);
 	*out = found ? aabb_value(&js, box) : qjs::null_value();
 }
@@ -1293,7 +1448,12 @@ fn qjs::Value hit_value(JsRuntime* self, qjs::Context* js, Hit hit)
  with, so "the ray goes where the picture goes" holds by construction.
 *>
 fn void js_pick(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1344,18 +1504,19 @@ fn qjs::Value JsRuntime.pick_at(&self, qjs::Context* js, float x, float y)
  mistake `Scene.raycast` already guards against between instance scales.
 *>
 fn void js_raycast(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 origin = {
-		arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2)
-	};
-	Vec3 direction = {
-		arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5)
-	};
+	Vec3 origin = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	Vec3 direction = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
 
 	float length = direction.length();
 	if (length < 1e-12f)
@@ -1404,7 +1565,12 @@ fn void js_raycast(
  fifteen keys are nested.
 *>
 fn void js_stats(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1475,7 +1641,7 @@ fn void js_stats(
 	// the next, which is what marking things static is for. See
 	// `SceneStats.shadow_static_draws`.
 	js.set_property(object, "shadowStaticDraws", qjs::int_value((int)stats.shadow_static_draws));
-	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming){ };
+	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming) { };
 	js.set_property(object, "gpuMs", qjs::number_value(timing.total));
 	js.set_property(object, "prepareMs", qjs::number_value(timing.prepare));
 	js.set_property(object, "shadowMs", qjs::number_value(timing.shadow));
@@ -1504,7 +1670,12 @@ fn void js_stats(
  merely wasteful.
 *>
 fn void js_unload_unused(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1513,7 +1684,7 @@ fn void js_unload_unused(
 	// A null device is a scene-math runtime: nothing was ever uploaded, so there
 	// is nothing to give back and an exception would make a script written for a
 	// game fail under a test harness.
-	Gpu* gpu = self.renderer != null ? &self.renderer.gpu : null;
+	Gpu* gpu            = self.renderer != null ? &self.renderer.gpu : null;
 	UnloadReport report = self.pass.assets.unload_unused(gpu);
 
 	qjs::Value object = js.object();
@@ -1525,7 +1696,12 @@ fn void js_unload_unused(
 }
 
 fn void js_render(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1552,7 +1728,12 @@ fn void js_render(
  is the line this exists for.
 *>
 fn void js_render_size(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1578,7 +1759,12 @@ fn void js_render_size(
  reads back what was set on it instead of what the level on screen is showing.
 *>
 fn void js_background_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1624,7 +1810,12 @@ fn void js_background_get(
  because the decode happens at the attachment and not to the stored value.
 *>
 fn void js_background_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1658,7 +1849,12 @@ fn void js_background_set(
  the host's truth.
 *>
 fn void js_sky_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1667,7 +1863,7 @@ fn void js_sky_get(
 	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
 	if (scene == null) return;
 
-	SkyLook sky = scene.look.sky;
+	SkyLook sky     = scene.look.sky;
 	qjs::Value list = js.array();
 	js.set_index(list, 0, qjs::int_value(sky.background));
 	js.set_index(list, 1, qjs::int_value(sky.environment));
@@ -1693,7 +1889,12 @@ fn void js_sky_get(
  anyway, because it keeps the `Texture` objects.
 *>
 fn void js_sky_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1708,7 +1909,7 @@ fn void js_sky_set(
 	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
 	if (scene == null) return;
 
-	int background = arg_int(&js, argc, args, 1);
+	int background  = arg_int(&js, argc, args, 1);
 	int environment = arg_int(&js, argc, args, 2);
 	if (background != NO_TEXTURE && !self.pass.assets.texture_alive(background))
 	{
@@ -1732,7 +1933,12 @@ fn void js_sky_set(
  `budgetGet()` — how long this script may run, in milliseconds.
 *>
 fn void js_budget_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1768,7 +1974,12 @@ fn void js_budget_get(
  needs longer until it is already running.
 *>
 fn void js_budget_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1777,7 +1988,9 @@ fn void js_budget_set(
 	double asked = (double)arg_float(&js, argc, args, 0);
 	if (asked <= 0)
 	{
-		*out = js.raise("three.budget wants a positive number of milliseconds — there is no way to turn the interrupt off");
+		*out = js.raise(
+			"three.budget wants a positive number of milliseconds — there is no way to turn the interrupt off"
+		);
 		return;
 	}
 
@@ -1827,11 +2040,16 @@ fn GameClock* JsRuntime.clock_or_raise(&self, qjs::Context* js, qjs::Value* out)
  seven scalar verbs.
 *>
 fn void js_clock_time(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 	*out = qjs::number_value(clock.time);
@@ -1867,7 +2085,12 @@ fn void js_clock_time(
  are what either is for, and mixing them is a difference of two origins.
 *>
 fn void js_clock_wall(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1882,11 +2105,16 @@ fn void js_clock_wall(
  to test and no branch to forget.
 *>
 fn void js_clock_delta(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 	*out = qjs::number_value(clock.dt);
@@ -1896,11 +2124,16 @@ fn void js_clock_delta(
  `clockScaleGet()` — the multiplier from wall time to game time.
 *>
 fn void js_clock_scale_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 	*out = qjs::number_value(clock.scale);
@@ -1924,11 +2157,16 @@ fn void js_clock_scale_get(
  the direction the caller asked for rather than in a direction the engine chose.
 *>
 fn void js_clock_scale_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 
@@ -1947,11 +2185,16 @@ fn void js_clock_scale_set(
  `clockRateGet()` — how many fixed steps a second of game time is worth.
 *>
 fn void js_clock_rate_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 	*out = qjs::number_value(clock.fixed_hz);
@@ -1972,21 +2215,30 @@ fn void js_clock_rate_get(
  runs slow.
 *>
 fn void js_clock_rate_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 
 	double asked = arg_number(&js, argc, args, 0);
 	if (!math::is_finite(asked) || asked < CLOCK_FIXED_HZ_MIN || asked > CLOCK_FIXED_HZ_MAX)
 	{
-		*out = js.raise(string::tformat(
-			"three.clock.fixedRate wants %d to %d steps a second — %g is not a rate a fixed loop can run at",
-			(int)CLOCK_FIXED_HZ_MIN, (int)CLOCK_FIXED_HZ_MAX, asked
-		));
+		*out = js.raise(
+			string::tformat(
+				"three.clock.fixedRate wants %d to %d steps a second — %g is not a rate a fixed loop can run at",
+				(int)CLOCK_FIXED_HZ_MIN,
+				(int)CLOCK_FIXED_HZ_MAX,
+				asked
+			)
+		);
 		return;
 	}
 	clock.fixed_hz = asked;
@@ -2007,11 +2259,16 @@ fn void js_clock_rate_set(
  step ever saw.
 *>
 fn void js_clock_advance(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	JsRuntime* self  = (JsRuntime*)opaque;
+	qjs::Context js  = qjs::wrap(ctx);
 	GameClock* clock = self.clock_or_raise(&js, out);
 	if (clock == null) return;
 
@@ -2028,7 +2285,12 @@ fn void js_clock_advance(
  `lightCount()` — how many lights are lit, 1 to `MAX_LIGHTS`.
 *>
 fn void js_light_count(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2044,7 +2306,15 @@ fn void js_light_count(
 
  @param first : `The lowest slot this caller accepts. One for lightRemove, which will not take the sun; zero for everything else.`
 *>
-fn uint arg_light(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, uint first, qjs::Value* out) @local
+fn uint arg_light(
+	JsRuntime* self,
+	qjs::Context* js,
+	int argc,
+	qjs::Value* args,
+	int at,
+	uint first,
+	qjs::Value* out
+) @local
 {
 	int asked = arg_int(js, argc, args, at);
 	if (asked < (int)first || asked >= (int)self.pass.lighting.count)
@@ -2052,7 +2322,9 @@ fn uint arg_light(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args,
 		*out = js.raise(
 			string::tformat(
 				"there is no light %d — this scene has %d, numbered 0 to %d",
-				asked, self.pass.lighting.count, self.pass.lighting.count - 1
+				asked,
+				self.pass.lighting.count,
+				self.pass.lighting.count - 1
 			)
 		);
 		return MAX_LIGHTS;
@@ -2071,7 +2343,12 @@ fn uint arg_light(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args,
  the JS side reads it positionally.
 *>
 fn void js_light_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2080,7 +2357,7 @@ fn void js_light_get(
 	uint index = arg_light(self, &js, argc, args, 0, 0, out);
 	if (index == MAX_LIGHTS) return;
 
-	Light light = self.pass.lighting.lights[index];
+	Light light     = self.pass.lighting.lights[index];
 	qjs::Value list = js.array();
 	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(light.direction[i]));
 	for (uint i = 0; i < 4; i++) js.set_index(list, i + 3, qjs::number_value(light.color[i]));
@@ -2116,7 +2393,12 @@ fn void js_light_get(
  nothing anywhere pointing at the light.
 *>
 fn void js_light_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2142,7 +2424,12 @@ fn void js_light_set(
  nothing anywhere saying which light went missing.
 *>
 fn void js_light_add(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2182,7 +2469,12 @@ fn void js_light_add(
  happened to be next. Turning it off is `three.light.intensity = 0`.
 *>
 fn void js_light_remove(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2191,7 +2483,9 @@ fn void js_light_remove(
 	int asked = arg_int(&js, argc, args, 0);
 	if (asked == 0)
 	{
-		*out = js.raise("three.lights[0] is the light the shadow map is fitted around and cannot be removed — set its intensity to 0 to turn it off");
+		*out = js.raise(
+			"three.lights[0] is the light the shadow map is fitted around and cannot be removed — set its intensity to 0 to turn it off"
+		);
 		return;
 	}
 
@@ -2223,7 +2517,9 @@ fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* 
 
 	if (x * x + y * y + z * z <= 0.0f)
 	{
-		*out = js.raise("a light's direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term");
+		*out = js.raise(
+			"a light's direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term"
+		);
 		return false;
 	}
 
@@ -2244,7 +2540,12 @@ fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* 
  light.
 *>
 fn void js_ambient_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2259,7 +2560,12 @@ fn void js_ambient_get(
  floors. `Lighting.ambient` has the rest of that argument.
 *>
 fn void js_ambient_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2284,14 +2590,19 @@ fn void js_ambient_set(
  image is how it is honoured.
 *>
 fn void js_shadow_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
 	ShadowMap* shadows = &self.pass.shadows;
-	qjs::Value list = js.array();
+	qjs::Value list    = js.array();
 	js.set_index(list, 0, qjs::number_value(shadows.enabled ? 1.0 : 0.0));
 	js.set_index(list, 1, qjs::number_value((double)shadows.size));
 	js.set_index(list, 2, qjs::number_value((double)shadows.bias));
@@ -2313,13 +2624,18 @@ fn void js_shadow_get(
  at the property, and one array is one host crossing.
 *>
 fn void js_shadow_fit(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	ShadowFit fit = self.pass.shadows.report();
+	ShadowFit fit   = self.pass.shadows.report();
 	qjs::Value list = js.array();
 	js.set_index(list, 0, qjs::number_value(fit.live ? 1.0 : 0.0));
 	js.set_index(list, 1, qjs::number_value((double)fit.centre.x));
@@ -2340,7 +2656,12 @@ fn void js_shadow_fit(
  place that has to know `'shadow'` is 1 is the one place a typo can be caught.
 *>
 fn void js_debug_view_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2364,7 +2685,12 @@ fn void js_debug_view_get(
  scene.
 *>
 fn void js_debug_view_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2401,9 +2727,11 @@ fn void say_shadow_size(uint was, uint now) @local
 	usz each = (usz)now * now * 4;
 	@advise(
 		"three: shadow.size = %d is %d MB of depth image, and %d MB once anything in the scene is "
-		"static — image and static_image are the same format at the same extent. "
-		"stats().shadowBytes is what it actually cost.",
-		now, each / (1024 * 1024), (each * 2) / (1024 * 1024)
+			"static — image and static_image are the same format at the same extent. "
+			"stats().shadowBytes is what it actually cost.",
+		now,
+		each / (1024 * 1024),
+		(each * 2) / (1024 * 1024)
 	);
 }
 
@@ -2437,7 +2765,12 @@ fn void say_shadow_size(uint was, uint now) @local
  is stop the pass recording, which is the whole cost — see `MeshPass.prepare`.
 *>
 fn void js_shadow_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2446,7 +2779,7 @@ fn void js_shadow_set(
 	ShadowSettings settings;
 	settings.enabled = arg_float(&js, argc, args, 0) != 0.0f;
 
-	uint wanted = (uint)math::clamp(arg_float(&js, argc, args, 1), (float)SHADOW_MIN_SIZE, (float)SHADOW_MAX_SIZE);
+	uint wanted  = (uint)math::clamp(arg_float(&js, argc, args, 1), (float)SHADOW_MIN_SIZE, (float)SHADOW_MAX_SIZE);
 	uint rounded = SHADOW_MIN_SIZE;
 	while (rounded * 2 <= wanted) rounded *= 2;
 	settings.size = rounded;
@@ -2469,13 +2802,18 @@ fn void js_shadow_set(
 }
 
 fn void js_camera_get(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Camera* camera = &self.pass.camera;
+	Camera* camera  = &self.pass.camera;
 	qjs::Value list = js.array();
 	js.set_index(list, 0, qjs::number_value(camera.target.x));
 	js.set_index(list, 1, qjs::number_value(camera.target.y));
@@ -2508,7 +2846,12 @@ fn void js_camera_get(
  and a hand on the window cannot put the camera in two different sets of states.
 *>
 fn void js_camera_set(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2544,7 +2887,12 @@ fn void js_camera_set(
 }
 
 fn void js_frame_all(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2575,7 +2923,12 @@ fn void js_frame_all(
  the two frames mean and why a cockpit needs the second one.
 *>
 fn void js_camera_attach(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -2626,12 +2979,17 @@ fn void js_camera_attach(
  the picture".
 *>
 fn void js_camera_detach(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
-	bool was = self.pass.follow.active;
-	self.pass.follow = {};
+	bool was        = self.pass.follow.active;
+	self.pass.follow = { };
 	*out = qjs::bool_value(was);
 }
 
@@ -2643,7 +3001,12 @@ fn void js_camera_detach(
  alternative is raising from inside a tick nobody called.
 *>
 fn void js_camera_attached(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;

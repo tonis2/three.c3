@@ -9,8 +9,8 @@
  from `$embed` when there is not. Both halves matter:
 
  - Embedded, so a shipped `three` is one file plus the Slang libraries. The
-   search path is relative to the working directory, so without this every
-   shipped copy would need a `shaders/` beside it and a launcher to cd there.
+ search path is relative to the working directory, so without this every
+ shipped copy would need a `shaders/` beside it and a launcher to cd there.
  - Disk first, so the edit-and-rerun loop in a checkout is untouched.
 
  This is not the `$embed` staleness trap described in `src/js/runtime.c3`. That
@@ -33,7 +33,7 @@ faultdef SHADER_NOT_FOUND;
  Both candidates are relative to the working directory, because `c3c run`, a
  shell at the project root and `c3c test` all start there.
 
- @return? SHADER_NOT_FOUND : `No shader by that name on the search path. Run from the project root.`
+ @return ? SHADER_NOT_FOUND : `No shader by that name on the search path. Run from the project root.`
 *>
 fn String? find_shader(String name, alloc::Allocator allocator = mem)
 {
@@ -76,7 +76,7 @@ struct EmbeddedShader
  on the search path nor embedded is a typo, not a deployment problem.
 
  @param name : `A file name, not a path: "mesh.slang".`
- @return? SHADER_NOT_FOUND : `No such template, on disk or in the binary.`
+ @return ? SHADER_NOT_FOUND : `No such template, on disk or in the binary.`
  @return `The source, owned by the caller.`
 *>
 fn String? shader_source(String name, alloc::Allocator allocator = mem)
@@ -87,12 +87,12 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem)
 	};
 
 	EmbeddedShader[6] embedded = {
-		{ "mesh.slang",     (String)EMBED_MESH[..] },
+		{ "mesh.slang", (String)EMBED_MESH[..] },
 		{ "material.slang", (String)EMBED_MATERIAL[..] },
-		{ "post.slang",     (String)EMBED_POST[..] },
-		{ "shadow.slang",   (String)EMBED_SHADOW[..] },
-		{ "skin.slang",     (String)EMBED_SKIN[..] },
-		{ "sky.slang",      (String)EMBED_SKY[..] },
+		{ "post.slang", (String)EMBED_POST[..] },
+		{ "shadow.slang", (String)EMBED_SHADOW[..] },
+		{ "skin.slang", (String)EMBED_SKIN[..] },
+		{ "sky.slang", (String)EMBED_SKY[..] },
 	};
 	foreach (entry : embedded)
 	{
@@ -108,7 +108,7 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem)
  and a column, which beats anything this function could say. The SPIR-V magic
  number check lives in `shader/compile.c3`, guarding what the compiler returned.
 
- @return? SHADER_NOT_FOUND : `No such file.`
+ @return ? SHADER_NOT_FOUND : `No such file.`
  @return `The source, owned by the caller.`
 *>
 fn String? load_source(String path, alloc::Allocator allocator = mem)

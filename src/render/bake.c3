@@ -94,9 +94,9 @@ faultdef BAKE_NEEDS_A_DEVICE;
  scene this feature was written against — 2909 copies, 309 of them written as
  nodes of their own — the three sizes measured:
 
-	256     14 MB     5 s
-	512     22 MB    10 s
-	1024    44 MB    28 s
+ 256     14 MB     5 s
+ 512     22 MB    10 s
+ 1024    44 MB    28 s
 
  against 9.4 MB and no shading at all. A terrain that wants more says so with a
  number; a scene of three hundred props that wants a smaller file says so the same
@@ -105,8 +105,8 @@ faultdef BAKE_NEEDS_A_DEVICE;
 const uint BAKE_SIZE_DEFAULT = 512;
 // Under this a bake is not a texture, and over it a single PNG of noise is tens
 // of megabytes. Both are refused at the JS boundary by name.
-const uint BAKE_SIZE_MIN = 16;
-const uint BAKE_SIZE_MAX = 4096;
+const uint BAKE_SIZE_MIN     = 16;
+const uint BAKE_SIZE_MAX     = 4096;
 
 <*
  What one material is asked to bake: which mesh, and the placement to bake it at.
@@ -241,7 +241,7 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 	}
 
 	MeshPipeline* built = null;
-	Material* material = self.pass.material(index);
+	Material* material  = self.pass.material(index);
 	if (material != null && material.fragment.len > 0)
 	{
 		@pool()
@@ -257,7 +257,11 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 			if (try source)
 			{
 				MeshPipeline*? made = self.pass.pipelines.acquire(
-					self.gpu, &self.target, source, "three.bake", BAKE_STATE
+					self.gpu,
+					&self.target,
+					source,
+					"three.bake",
+					BAKE_STATE
 				);
 				if (try made) built = made;
 			}
@@ -276,11 +280,9 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
  recoverable: a submission that did not run leaves the readback holding the
  previous bake, which would be written into the file as this material's answer.
 *>
-fn void? MaterialBaker.record(
-	&self, MeshPipeline* pipeline, Material* material, GpuMesh* mesh, ulong table_address
-)
+fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material, GpuMesh* mesh, ulong table_address)
 {
-	self.gpu.handle.@single_time_command(queue: self.gpu.graphics; vk::CommandBuffer cmd)
+	self.gpu.handle.@single_time_command(queue: self.gpu.graphics ; vk::CommandBuffer cmd)
 	{
 		// Transparent, so a texel no triangle covers and a texel a body discarded are
 		// the same value — which is what `alphaMode: MASK` then cuts out.
@@ -300,8 +302,7 @@ fn void? MaterialBaker.record(
 		// The frame's own rule for binding 0: the material's map beats the mesh's
 		// image, because a script that set one and got the other would be overruled
 		// by an asset it did not write.
-		Texture* sampled = material.texture == NO_TEXTURE
-			? self.pass.assets.texture_for(mesh)
+		Texture* sampled = material.texture == NO_TEXTURE ? self.pass.assets.texture_for(mesh)
 			: self.pass.assets.texture_at(material.texture);
 
 		SampledBindings samplers;
@@ -414,18 +415,16 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 		.positions = mesh.positions.address,
 		.normals = mesh.has_normals ? mesh.normals.address : 0,
 		.uvs = mesh.uvs.address,
-		.colors = mesh.has_colors ? mesh.colors.address : 0,
-		// A skinned mesh bakes in its bind pose, which is the pose its vertices are
-		// written to the file in. Posing it would bake a frame of an animation into
-		// a texture that the geometry beside it does not match.
+		.colors = mesh.has_colors ? mesh.colors.address
+			: 0, // A skinned mesh bakes in its bind pose, which is the pose its vertices are
+			// written to the file in. Posing it would bake a frame of an animation into
+			// a texture that the geometry beside it does not match.
 		.joints = 0,
 		.weights = 0,
 		.palette = 0,
 		.posed = 0,
 		.base_color = { mesh.base_color[0], mesh.base_color[1], mesh.base_color[2], 1 },
-		.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
-			| FLAG_HAS_UVS
-			| (mesh.has_colors ? FLAG_HAS_COLORS : 0),
+		.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | FLAG_HAS_UVS | (mesh.has_colors ? FLAG_HAS_COLORS : 0),
 		.skin_stride = 0,
 		.uv_transform = material.uv_transform_or_identity(),
 		.surface = material.surface(),
@@ -479,7 +478,7 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 fn void MaterialBaker.dilate(&self, char[] texels)
 {
 	uint size = self.size;
-	sz count = (sz)size * (sz)size;
+	sz count  = (sz)size * (sz)size;
 	if (self.spread.len < count) return;
 
 	// Zero is written, `uint::max` is "nothing has reached here yet". A written
@@ -525,7 +524,7 @@ fn void MaterialBaker.reach(&self, char[] texels, uint x, uint y, uint fx, uint 
 	uint size = self.size;
 	if (x >= size || y >= size || fx >= size || fy >= size) return;
 
-	sz to = (sz)y * (sz)size + (sz)x;
+	sz to   = (sz)y * (sz)size + (sz)x;
 	sz from = (sz)fy * (sz)size + (sz)fx;
 	if (self.spread[from] == uint::max) return;
 

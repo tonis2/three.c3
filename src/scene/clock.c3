@@ -15,20 +15,20 @@
  delta:
 
  - The first tick contributes nothing. `elapsed_ms` is measured from process
-   start, so the first one carries the whole boot — window creation, device
-   selection, the script's load. A clip played during boot would otherwise begin
-   half a second into itself.
+ start, so the first one carries the whole boot — window creation, device
+ selection, the script's load. A clip played during boot would otherwise begin
+ half a second into itself.
  - A wall delta is clamped to `CLOCK_MAX_STEP_MS`. A longer one means the
-   process stalled, and no clip should teleport through a second of itself for
-   it. The clamp is on the *wall* delta, before the scale, so `timeScale = 4` is
-   four times as much game time and not a fifth of it.
+ process stalled, and no clip should teleport through a second of itself for
+ it. The clamp is on the *wall* delta, before the scale, so `timeScale = 4` is
+ four times as much game time and not a fifth of it.
  - Then the scale. Zero is paused, and paused is exactly `dt == 0` reaching
-   every consumer rather than a flag each has to test — there is no
-   `if (paused)` in the clip player, the solver or the follow camera.
+ every consumer rather than a flag each has to test — there is no
+ `if (paused)` in the clip player, the solver or the follow camera.
  - Then the debt, which is `advance()` and the only thing that moves a paused
-   clock. Added *after* the scale: a caller asking for a step of 1/60 s while
-   the game is stopped means one frame's worth of world, not one frame's worth
-   multiplied by a zero scale.
+ clock. Added *after* the scale: a caller asking for a step of 1/60 s while
+ the game is stopped means one frame's worth of world, not one frame's worth
+ multiplied by a zero scale.
 
  ## Why the fixed accumulator is here rather than in JavaScript
 
@@ -205,7 +205,7 @@ fn void GameClock.advance(&self, double seconds)
 fn int GameClock.take_fixed_steps(&self)
 {
 	double step_ms = self.fixed_step_ms();
-	int steps = 0;
+	int steps      = 0;
 	while (self.fixed_ms >= step_ms && steps < CLOCK_MAX_FIXED_STEPS)
 	{
 		self.fixed_ms -= step_ms;

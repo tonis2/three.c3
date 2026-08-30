@@ -5,12 +5,12 @@
 
  Measured on an Apple M5 against the KosmicKrisp vulkan.c3l bundles:
 
-	scalarBlockLayout    true
-	bufferDeviceAddress  true
-	dynamicRendering     true
-	pushDescriptor       true       <- no descriptor pools anywhere
-	fillModeNonSolid     false      <- wireframes are line-list index buffers
-	maxPushConstantsSize 256        <- budget stays 128, the portable minimum
+ scalarBlockLayout    true
+ bufferDeviceAddress  true
+ dynamicRendering     true
+ pushDescriptor       true       <- no descriptor pools anywhere
+ fillModeNonSolid     false      <- wireframes are line-list index buffers
+ maxPushConstantsSize 256        <- budget stays 128, the portable minimum
 
  So `-force-glsl-scalar-layout` is legal here and the `float4`-never-`float3` tax
  does not apply. It is still queried rather than assumed
@@ -27,9 +27,9 @@
  in two places that cost nothing:
 
  - `create_instance` does not enable `VK_KHR_portability_enumeration`, so the
-   loader never enumerates their physical devices;
+ loader never enumerates their physical devices;
  - `select_device` skips any device advertising `VK_KHR_portability_subset`, and
-   says so through `PORTABILITY_DRIVER_ONLY` when that leaves nothing.
+ says so through `PORTABILITY_DRIVER_ONLY` when that leaves nothing.
 
  On macOS a checkout without the bundled driver needs an installed KosmicKrisp;
  an installed MoltenVK is not a fallback.
@@ -59,11 +59,7 @@ import std::collections::list;
 import vk;
 
 faultdef
-	NO_BUFFER_DEVICE_ADDRESS,
-	NO_DYNAMIC_RENDERING,
-	NO_PUSH_DESCRIPTOR,
-	NO_SUITABLE_GPU,
-	PORTABILITY_DRIVER_ONLY;
+	NO_BUFFER_DEVICE_ADDRESS, NO_DYNAMIC_RENDERING, NO_PUSH_DESCRIPTOR, NO_SUITABLE_GPU, PORTABILITY_DRIVER_ONLY;
 
 <*
  What the selected device actually reports. Nothing optional is assumed: the
@@ -132,8 +128,8 @@ fn uint wanted_api_version()
 // The layer that produces the messages, and the instance extension that carries
 // them. Named once because `create_instance` asks whether the first is installed
 // and `Gpu.init` asks whether the second was enabled.
-const ZString VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
-const ZString DEBUG_UTILS_EXTENSION = "VK_EXT_debug_utils";
+const ZString VALIDATION_LAYER              = "VK_LAYER_KHRONOS_validation";
+const ZString DEBUG_UTILS_EXTENSION         = "VK_EXT_debug_utils";
 // What lets `VkValidationFeaturesEXT` be chained onto the instance. Requested
 // only alongside `sync`, because that struct is the only thing here that uses it.
 const ZString VALIDATION_FEATURES_EXTENSION = "VK_EXT_validation_features";
@@ -142,7 +138,8 @@ const ZString VALIDATION_FEATURES_EXTENSION = "VK_EXT_validation_features";
 // whose members are only visible unqualified inside module vk. Every other use
 // here is inferred from a builder's parameter type; this one is a comparison and
 // has nothing to infer from.
-const uint SEVERITY_ERROR @local = (uint)vk::DebugUtilsMessageSeverityFlagBitsEXT.DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+const uint SEVERITY_ERROR @local = (uint)vk::DebugUtilsMessageSeverityFlagBitsEXT
+	.DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 
 <*
  What the debug messenger heard, kept apart by severity.
@@ -268,7 +265,7 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 		// is missing from the machine and the fix is to install the SDK; in a
 		// release build the machinery is not in the binary and the layer being
 		// installed changes nothing.
-		//
+		// 
 		// The second is unreachable from `main`, which passes `DEBUG_BUILD`. It is
 		// kept for the caller that is not `main` — a test, or anything embedding
 		// this.
@@ -356,28 +353,28 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 	}
 
 	// Synchronization validation — asked for, and it does not answer here.
-	//
+	// 
 	// The ordinary layer checks that every call is *well formed*: the right
 	// handles, the right layouts, arguments in range. It does not check that a
 	// write is ordered against the read that follows it, so a missing
 	// `vkCmdPipelineBarrier2` produces no message at all and a picture that is
 	// correct on whichever driver happened to finish first.
-	//
+	// 
 	// Measured, and the measurement is negative: deleting the barrier at the end
 	// of `MeshPass.skin` left the skinning checks green with this off, with it on,
 	// and with `VK_EXT_validation_features` enabled so the struct below was really
 	// read.
-	//
+	// 
 	// That is history rather than something the suite re-derives. The check that
 	// recorded it asked for the extension at instance creation and the loader here
 	// answers "Extension not supported VK_EXT_validation_features", so it failed
 	// for the machine rather than for the code and has been removed. Nothing in
 	// the suite passes `sync: true` today.
-	//
+	// 
 	// Kept because it is the documented way to ask, it costs nothing when nobody
 	// asks, and a layer that reports nothing today may report something tomorrow.
 	// What must not happen is a *check* claiming to rest on it.
-	//
+	// 
 	// Function scope, like the two driver structs above: `vkCreateInstance` reads
 	// through `pNext` after this returns from the `if`.
 	vk::ValidationFeatureEnableEXT[1] sync_features = { VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT };
@@ -400,8 +397,8 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
  shape, surface check skipped when there is none, and portability
  implementations turned away.
 
- @return? PORTABILITY_DRIVER_ONLY : `Every device on offer was a portability implementation. Distinguished from NO_SUITABLE_GPU because the fix is a different driver, not different code.`
- @return? NO_SUITABLE_GPU : `No device has a graphics queue, the required extensions, and present support for the surface.`
+ @return ? PORTABILITY_DRIVER_ONLY : `Every device on offer was a portability implementation. Distinguished from NO_SUITABLE_GPU because the fix is a different driver, not different code.`
+ @return ? NO_SUITABLE_GPU : `No device has a graphics queue, the required extensions, and present support for the surface.`
 *>
 fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surface, vk::ZStringList extensions)
 {
@@ -417,7 +414,7 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
 	{
 		// A portability implementation advertises VK_KHR_portability_subset, and
 		// on this platform that means MoltenVK, which three.c3 does not support.
-		//
+		// 
 		// Leaving VK_KHR_portability_enumeration off the instance already keeps
 		// these out of the enumeration. This is the second lock: a driver handed
 		// to the loader directly did not go through that filter.
@@ -473,9 +470,9 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
 
  @param surface : `Null for headless. With one, VK_KHR_swapchain is required of the device; without, it is not asked for.`
  @param validate : `Must be the same answer create_instance was given. Vulkan has no way to ask an instance what it enabled, so this is taken on trust and then checked against what is installed.`
- @return? NO_BUFFER_DEVICE_ADDRESS : `Geometry reaches the shader through buffer device addresses; there is no vertex-input fallback to degrade to.`
- @return? NO_DYNAMIC_RENDERING : `There is no VkRenderPass anywhere in this project, by decision.`
- @return? NO_PUSH_DESCRIPTOR : `There are no descriptor pools and no descriptor sets here at all — the draw loop names the image and the sampler inline. Required rather than probed and worked around, for the same reason dynamic rendering is: it is baseline on every driver this targets, and a fallback path would be a second renderer nobody exercises.`
+ @return ? NO_BUFFER_DEVICE_ADDRESS : `Geometry reaches the shader through buffer device addresses; there is no vertex-input fallback to degrade to.`
+ @return ? NO_DYNAMIC_RENDERING : `There is no VkRenderPass anywhere in this project, by decision.`
+ @return ? NO_PUSH_DESCRIPTOR : `There are no descriptor pools and no descriptor sets here at all — the draw loop names the image and the sampler inline. Required rather than probed and worked around, for the same reason dynamic rendering is: it is baseline on every driver this targets, and a fallback path would be a second renderer nobody exercises.`
 *>
 fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool validate = false)
 {
@@ -487,19 +484,17 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	self.deletions.init();
 
 	// Asked twice, because neither question is sufficient on its own.
-	//
+	// 
 	// The layer probe is the same one `create_instance` used, repeated rather than
 	// remembered: there is no way to ask an instance which extensions it was
 	// created with, so `validate` here is a *claim* about what `create_instance`
 	// was told, and installing a messenger on an instance without
 	// VK_EXT_debug_utils is undefined rather than an error.
-	//
+	// 
 	// The entry point is the second lock. It cannot be the only one — the loader
 	// resolves instance-extension commands it knows about whether or not the
 	// caller enabled them — but a null here is conclusive the other way.
-	self.validation = validate
-		&& validation_layer_present()
-		&& vk::extensions.vkCreateDebugUtilsMessengerEXT != null;
+	self.validation = validate && validation_layer_present() && vk::extensions.vkCreateDebugUtilsMessengerEXT != null;
 	if (self.validation) self.install_debug_messenger()!;
 
 	vk::ZStringList extensions;
@@ -563,15 +558,15 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.push_descriptor = push_descriptor.maxPushDescriptors > 0,
 		.fill_mode_non_solid = features.features.fillModeNonSolid == vk::TRUE,
 		.max_push_constants_size = properties.limits.maxPushConstantsSize,
-		.timestamp_period = properties.limits.timestampPeriod,
-		// `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
-		// below unchanged, so it is enabled exactly when it is supported: a claim
-		// about the device *and* about what was asked for, which cannot disagree.
+		.timestamp_period = properties.limits
+			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
+			// below unchanged, so it is enabled exactly when it is supported: a claim
+			// about the device *and* about what was asked for, which cannot disagree.
 		.timestamps = properties.limits.timestampComputeAndGraphics == vk::TRUE && v12.hostQueryReset == vk::TRUE,
-		.api_version = properties.apiVersion,
-		// Read off the same `v14` that goes to `deviceCreateInfo`, so — as with
-		// `hostQueryReset` — this cannot disagree with what was asked for. False on
-		// a 1.3 device because the struct was never chained there.
+		.api_version = properties
+			.apiVersion, // Read off the same `v14` that goes to `deviceCreateInfo`, so — as with
+			// `hostQueryReset` — this cannot disagree with what was asked for. False on
+			// a 1.3 device because the struct was never chained there.
 		.dynamic_rendering_local_read = has_1_4 && v14.dynamicRenderingLocalRead == vk::TRUE,
 		.device_name = properties.deviceName,
 	};
@@ -580,8 +575,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	if (!self.limits.dynamic_rendering) return NO_DYNAMIC_RENDERING~;
 	if (!self.limits.push_descriptor) return NO_PUSH_DESCRIPTOR~;
 
-	vk::DeviceQueueCreateInfo queue_info = vk::deviceQueueCreateInfo()
-		.setQueueFamilyIndex(self.graphics.index)
+	vk::DeviceQueueCreateInfo queue_info = vk::deviceQueueCreateInfo().setQueueFamilyIndex(self.graphics.index)
 		.setQueuePriorities({ 1.0 });
 
 	self.handle = vk::deviceCreateInfo().setQueueCreateInfos({ queue_info })
@@ -639,15 +633,11 @@ fn void? Gpu.install_debug_messenger(&self)
 	self.sink.warnings.init(mem, 1024);
 
 	self.debug = vk::debugUtilsMessengerCreateInfoEXT()
-		.setMessageSeverity(
-			DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
-		)
+		.setMessageSeverity(DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 		.setMessageType(
 			DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
 				| DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT
-		)
-		// See `validation_message` for why this cast is here and why it is not a
-		// bug being papered over.
+		)/* See `validation_message` for why this cast is here and why it is not a *//* bug being papered over. */
 		.setPfnUserCallback((vk::PFN_vkDebugUtilsMessengerCallbackEXT)&validation_message)
 		.setUserData(&self.sink)
 		.build(self.instance)!;
@@ -710,14 +700,14 @@ fn uint validation_message(
 	ValidationSink* sink = (ValidationSink*)user;
 	if (sink == null || data == null) return vk::FALSE;
 
-	bool fatal = (uint)severity >= SEVERITY_ERROR;
+	bool fatal  = (uint)severity >= SEVERITY_ERROR;
 	// Both are documented as possibly-null, and a validating driver is exactly
 	// where a null would arrive.
-	String id = data.pMessageIdName != null ? ((ZString)data.pMessageIdName).str_view() : "";
+	String id   = data.pMessageIdName != null ? ((ZString)data.pMessageIdName).str_view() : "";
 	String text = data.pMessage != null ? ((ZString)data.pMessage).str_view() : "";
 
 	DString* into = fatal ? &sink.errors : &sink.warnings;
-	sz mark = into.len();
+	sz mark       = into.len();
 
 	into.append_string(fatal ? "validation ERROR" : "validation WARNING");
 	// The VUID, or whatever else named this. The Khronos layer repeats it inside

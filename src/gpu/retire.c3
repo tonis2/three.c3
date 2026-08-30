@@ -20,7 +20,7 @@
  So a retired object records the frame ordinal it was given back at and is
  destroyed once that many frames have *started* since:
 
-     retire_at = frame + MAX_FRAMES_IN_FLIGHT
+ retire_at = frame + MAX_FRAMES_IN_FLIGHT
 
  What makes the arithmetic right is the fence wait at the top of every frame
  path. Frame N waits on slot `N % 2`'s fence, and the last thing submitted on
@@ -152,10 +152,12 @@ fn void Gpu.retire_pipeline(&self, MeshPipeline pipeline)
 		return;
 	}
 
-	self.deletions.pipelines.push({
-		.retire_at = self.deletions.frame + (ulong)MAX_FRAMES_IN_FLIGHT,
-		.pipeline = pipeline,
-	});
+	self.deletions.pipelines.push(
+		{
+			.retire_at = self.deletions.frame + (ulong)MAX_FRAMES_IN_FLIGHT,
+			.pipeline = pipeline,
+		}
+	);
 
 	// The fallback for a caller that never renders. See the header.
 	if (self.deletions.pipelines.len() > MAX_PENDING_DELETES) self.drain_deletions();
@@ -193,12 +195,14 @@ fn void Gpu.retire_memory(
 		return;
 	}
 
-	self.deletions.memory.push({
-		.retire_at = self.deletions.frame + (ulong)MAX_FRAMES_IN_FLIGHT,
-		.sampler = sampler,
-		.view = view,
-		.memory = memory,
-	});
+	self.deletions.memory.push(
+		{
+			.retire_at = self.deletions.frame + (ulong)MAX_FRAMES_IN_FLIGHT,
+			.sampler = sampler,
+			.view = view,
+			.memory = memory,
+		}
+	);
 
 	if (self.deletions.memory.len() > MAX_PENDING_MEMORY_DELETES) self.drain_deletions();
 }
@@ -235,18 +239,26 @@ fn void Gpu.begin_frame(&self)
 	self.deletions.frame++;
 
 	ulong now = self.deletions.frame;
-	for (sz i = 0; i < self.deletions.pipelines.len(); )
+	for (sz i = 0; i < self.deletions.pipelines.len();)
 	{
-		if (self.deletions.pipelines[i].retire_at > now) { i++; continue; }
+		if (self.deletions.pipelines[i].retire_at > now)
+		{
+			i++;
+			continue;
+		}
 		// Freed out of a copy, because `remove_at` shifts the entry away under a
 		// pointer into the list.
 		MeshPipeline due = self.deletions.pipelines[i].pipeline;
 		self.deletions.pipelines.remove_at(i);
 		due.free(self);
 	}
-	for (sz i = 0; i < self.deletions.memory.len(); )
+	for (sz i = 0; i < self.deletions.memory.len();)
 	{
-		if (self.deletions.memory[i].retire_at > now) { i++; continue; }
+		if (self.deletions.memory[i].retire_at > now)
+		{
+			i++;
+			continue;
+		}
 		RetiredMemory due = self.deletions.memory[i];
 		self.deletions.memory.remove_at(i);
 		free_retired_memory(self, due);

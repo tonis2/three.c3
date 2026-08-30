@@ -27,9 +27,9 @@
  There is no unwrap of an arbitrary hull that does not visibly seam. Every face
  instead gets its own planar projection along its own normal, in local space:
 
- 	t = normalize(cross(axis, n))     axis is whichever of x/y/z is least like n
- 	b = cross(n, t)
- 	uv = (dot(p, t), dot(p, b))
+ t = normalize(cross(axis, n))     axis is whichever of x/y/z is least like n
+ b = cross(n, t)
+ uv = (dot(p, t), dot(p, b))
 
  One unit of uv is one unit of local space on every face, so a texture is the
  same size everywhere on the hull and the same size on a hull as on a box beside
@@ -66,13 +66,13 @@
  FNV-1a over every coordinate's bits.
 
  - Bit-exact, where `Primitive.key` is exact to six decimals. Two clouds
-   differing in the last bit of one coordinate are different assets. That is the
-   right way round: a size is typed by hand, a cloud comes out of a loop, and the
-   same loop gives the same bits.
+ differing in the last bit of one coordinate are different assets. That is the
+ right way round: a size is typed by hand, a cloud comes out of a loop, and the
+ same loop gives the same bits.
  - Two different clouds with the same hull are two assets. Deduping on the hull
-   would need the hull computed before the lookup, which is the expensive half;
-   keying on the input keeps the case that actually happens — the same array
-   handed over twice — free.
+ would need the hull computed before the lookup, which is the expensive half;
+ keying on the input keeps the case that actually happens — the same array
+ handed over twice — free.
 *>
 module three;
 
@@ -162,12 +162,18 @@ fn String convex_key(Vec3[] points, Allocator allocator)
 *>
 fn void face_basis(Vec3 normal, Vec3* tangent, Vec3* bitangent)
 {
-	float ax = math::abs(normal.x);
-	float ay = math::abs(normal.y);
-	float az = math::abs(normal.z);
+	float ax  = math::abs(normal.x);
+	float ay  = math::abs(normal.y);
+	float az  = math::abs(normal.z);
 	Vec3 axis = { 1, 0, 0 };
-	if (az <= ax && az <= ay) { axis = { 0, 0, 1 }; }
-	else if (ay <= ax) { axis = { 0, 1, 0 }; }
+	if (az <= ax && az <= ay)
+	{
+		axis = { 0, 0, 1 };
+	}
+	else if (ay <= ax)
+	{
+		axis = { 0, 1, 0 };
+	}
 
 	Vec3 t = axis.cross(normal).normalize();
 	*tangent = t;
@@ -203,7 +209,7 @@ fn void build_convex(GeometryBuilder* out, Vec3[] points)
 		Vec3 b = hull.vertices[triangle[1]];
 		Vec3 c = hull.vertices[triangle[2]];
 
-		Vec3 cross = (b - a).cross(c - a);
+		Vec3 cross  = (b - a).cross(c - a);
 		float area2 = cross.length();
 		if (area2 < CONVEX_MIN_FACE_AREA2) continue;
 
@@ -226,7 +232,7 @@ fn void build_convex(GeometryBuilder* out, Vec3[] points)
 		Vec3 bitangent;
 		face_basis(normal, &tangent, &bitangent);
 
-		uint first = (uint)out.positions.len();
+		uint first      = (uint)out.positions.len();
 		Vec3[3] corners = { a, b, c };
 		foreach (corner : corners)
 		{
@@ -248,8 +254,8 @@ fn void build_convex(GeometryBuilder* out, Vec3[] points)
 
  @param points : `The cloud, in the mesh's own local space. Not modified, and not retained.`
  @return `The asset's handle, for Scene.add_mesh.`
- @return? TOO_MANY_CONVEX_POINTS : `More than MAX_CONVEX_POINTS. The prelude refuses these first; this is what a forged __three.convex call gets.`
- @return? CONVEX_HULL_IS_DEGENERATE : `The cloud encloses no volume — fewer than four points, or points that are all equal, collinear or coplanar.`
+ @return ? TOO_MANY_CONVEX_POINTS : `More than MAX_CONVEX_POINTS. The prelude refuses these first; this is what a forged __three.convex call gets.`
+ @return ? CONVEX_HULL_IS_DEGENERATE : `The cloud encloses no volume — fewer than four points, or points that are all equal, collinear or coplanar.`
 *>
 fn AssetId? Assets.convex(&self, Gpu* gpu, Vec3[] points)
 {

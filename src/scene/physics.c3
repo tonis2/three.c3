@@ -1,4 +1,3 @@
-
 module three;
 
 import std::collections::list;
@@ -11,38 +10,26 @@ import std::io;
 
 faultdef
 	// The node draws nothing, so there is no size to take a collider from.
-	NODE_HAS_NO_MESH,
-	// A hull was asked for on a mesh whose positions never reached the host.
-	MESH_HAS_NO_HULL,
-	// The solver works in world space; a nested node's local transform is not.
-	NODE_IS_NOT_TOP_LEVEL,
-	// A heightfield collider was asked for on a node whose mesh is not terrain.
+	NODE_HAS_NO_MESH, // A hull was asked for on a mesh whose positions never reached the host.
+	MESH_HAS_NO_HULL, // The solver works in world space; a nested node's local transform is not.
+	NODE_IS_NOT_TOP_LEVEL, // A heightfield collider was asked for on a node whose mesh is not terrain.
 	// There is no grid to take, and approximating one would be a collider that
 	// looks right and behaves wrongly.
-	NODE_IS_NOT_TERRAIN,
-	// A joint was asked for on a node that has no body to hold.
-	JOINT_NEEDS_A_BODY,
-	// Both ends of a joint are the same object.
-	JOINT_ON_ONE_BODY,
-	// A trigger is never integrated, so a joint could not move it.
-	JOINT_ON_A_TRIGGER,
-	// Neither end of the joint can move, so the constraint has nothing to solve.
-	JOINT_NEEDS_A_MOVER,
-	// A joint with an empty limit list holds nothing.
-	JOINT_HAS_NO_LIMITS,
-	// More than three limits on one side. There are only three axes.
-	JOINT_HAS_TOO_MANY_LIMITS,
-	// A soft body was asked for on a mesh whose points never reached the host.
-	SOFT_HAS_NO_POINTS,
-	// A soft body was asked for on a skinned mesh. Two things would own the same
+	NODE_IS_NOT_TERRAIN, // A joint was asked for on a node that has no body to hold.
+	JOINT_NEEDS_A_BODY, // Both ends of a joint are the same object.
+	JOINT_ON_ONE_BODY, // A trigger is never integrated, so a joint could not move it.
+	JOINT_ON_A_TRIGGER, // Neither end of the joint can move, so the constraint has nothing to solve.
+	JOINT_NEEDS_A_MOVER, // A joint with an empty limit list holds nothing.
+	JOINT_HAS_NO_LIMITS, // More than three limits on one side. There are only three axes.
+	JOINT_HAS_TOO_MANY_LIMITS, // A soft body was asked for on a mesh whose points never reached the host.
+	SOFT_HAS_NO_POINTS, // A soft body was asked for on a skinned mesh. Two things would own the same
 	// vertices — see `Physics.add_soft`.
 	SOFT_IS_SKINNED;
 
 // What a script is told when it writes a transform the solver owns. One string
 // rather than two copies, because it is raised from both transform doors and a
 // sentence that drifts between them is worse than no sentence.
-const String PHYSICS_OWNS_TRANSFORM =
-	"this object's transform belongs to the physics solver — a dynamic body is "
+const String PHYSICS_OWNS_TRANSFORM = "this object's transform belongs to the physics solver — a dynamic body is "
 	"moved by the world, not by a script. Make the body kinematic to drive it "
 	"yourself, or three.physics.remove(object) first.";
 
@@ -50,8 +37,7 @@ const String PHYSICS_OWNS_TRANSFORM =
 // escape is a different call and the reason is a different one: the node sits at
 // the particles' average and the vertices are written relative to it, so moving
 // the node moves the drawing out from under the simulation.
-const String PHYSICS_OWNS_SOFT_TRANSFORM =
-	"this object's transform belongs to the soft body solver — its position is "
+const String PHYSICS_OWNS_SOFT_TRANSFORM = "this object's transform belongs to the soft body solver — its position is "
 	"where the particles average out to, rewritten every step. Push it with "
 	"three.physics.pin(object, i, [x, y, z]), or three.physics.removeSoft(object) "
 	"first.";
@@ -114,12 +100,12 @@ struct PhysicsBody
 	ColliderShape shape;
 
 	// The collider, on the heap and owned here.
-	//
+	// 
 	// The address is the point. `TransformedShape.shape` is an interface value
 	// pointing straight at this allocation, so a `List` of shapes that reallocated
 	// on its next push would leave every body already in the world pointing into
 	// freed memory. One allocation per body, released in `drop`.
-	void* collider; //CollisionShape
+	void* collider; // CollisionShape
 }
 
 <*
@@ -186,7 +172,7 @@ struct Physics
 
 	// Drained off the world after every step *and* after every removal, and
 	// emptied by the dispatch in `js/bind_physics.c3`.
-	//
+	// 
 	// Held here rather than read straight off the world because `run_step` clears
 	// the world's own lists at the top: a body removed between frames would
 	// otherwise have its EXIT events wiped before anything saw them.
@@ -382,9 +368,7 @@ fn String Physics.transform_refusal(&self, NodeId node)
 
  @param bounds : `Filled with the mesh's local bounds, which the caller needs for the body's centre.`
 *>
-fn void*? Physics.build_collider(
-	&self, Assets* assets, Node* node, ColliderShape shape, collision::Aabb3* bounds
-)
+fn void*? Physics.build_collider(&self, Assets* assets, Node* node, ColliderShape shape, collision::Aabb3* bounds)
 {
 	if (!node.asset.is_set()) return NODE_HAS_NO_MESH~;
 
@@ -524,10 +508,10 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
 
 	switch (body.shape)
 	{
-		case BOX:     shape.shape = (collision::Aabb3*)body.collider;
-		case SPHERE:  shape.shape = (collision::Sphere*)body.collider;
+		case BOX: shape.shape = (collision::Aabb3*)body.collider;
+		case SPHERE: shape.shape = (collision::Sphere*)body.collider;
 		case CAPSULE: shape.shape = (collision::Capsule*)body.collider;
-		case HULL:    shape.shape = (collision::Mesh*)body.collider;
+		case HULL: shape.shape = (collision::Mesh*)body.collider;
 		case HEIGHTFIELD: shape.shape = (collision::Heightmap*)body.collider;
 	}
 
@@ -544,8 +528,15 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
  @param mass : `Ignored for anything but a dynamic body — a static one is mass 0 by definition.`
 *>
 fn void? Physics.add(
-	&self, Scene* scene, Assets* assets, NodeId node_id,
-	BodyKind kind, ColliderShape shape, float mass, float friction, float restitution
+	&self,
+	Scene* scene,
+	Assets* assets,
+	NodeId node_id,
+	BodyKind kind,
+	ColliderShape shape,
+	float mass,
+	float friction,
+	float restitution
 )
 {
 	self.open();
@@ -593,11 +584,19 @@ fn void? Physics.add(
 
 	if (kind == BodyKind.TRIGGER)
 	{
-		if (catch err = self.world.add_trigger(rigid)) { body.drop(); return err~; }
+		if (catch err = self.world.add_trigger(rigid))
+		{
+			body.drop();
+			return err~;
+		}
 	}
 	else
 	{
-		if (catch err = self.world.add_body(rigid)) { body.drop(); return err~; }
+		if (catch err = self.world.add_body(rigid))
+		{
+			body.drop();
+			return err~;
+		}
 	}
 
 	self.bodies.push(body);
@@ -639,21 +638,25 @@ fn void Physics.harvest(&self)
 {
 	foreach (event : self.world.trigger_events)
 	{
-		self.trigger_events.push({
-			.trigger = self.node_of(event.trigger_id),
-			.other = self.node_of(event.other_id),
-			.entered = event.type == collision::TriggerEventType.ENTER,
-		});
+		self.trigger_events.push(
+			{
+				.trigger = self.node_of(event.trigger_id),
+				.other = self.node_of(event.other_id),
+				.entered = event.type == collision::TriggerEventType.ENTER,
+			}
+		);
 	}
 	foreach (event : self.world.contact_events)
 	{
-		self.contact_events.push({
-			.a = self.node_of(event.body_a),
-			.b = self.node_of(event.body_b),
-			.started = event.type == collision::ContactEventType.START,
-			.normal = event.normal,
-			.point = event.contact_point,
-		});
+		self.contact_events.push(
+			{
+				.a = self.node_of(event.body_a),
+				.b = self.node_of(event.body_b),
+				.started = event.type == collision::ContactEventType.START,
+				.normal = event.normal,
+				.point = event.contact_point,
+			}
+		);
 	}
 	self.world.trigger_events.clear();
 	self.world.contact_events.clear();
@@ -760,9 +763,7 @@ fn void Physics.drive_kinematic(&self, Scene* scene)
 		if (body.kind != BodyKind.KINEMATIC) continue;
 		Node* node = scene.node(body.node);
 		if (node == null) continue;
-		self.world.set_kinematic_target(
-			body.id, node.position, node.rotation, (float)(PHYSICS_STEP_MS / 1000.0)
-		);
+		self.world.set_kinematic_target(body.id, node.position, node.rotation, (float)(PHYSICS_STEP_MS / 1000.0));
 	}
 }
 
@@ -824,12 +825,18 @@ fn sz Physics.evict_diverged(&self)
 		collision::Rigidbody*? rigid = self.world.find_body(body.id);
 		if (catch rigid) continue;
 
-		Vec3 at = rigid.collider.translation;
-		bool finite = math::is_finite(at.x) && math::is_finite(at.y) && math::is_finite(at.z)
-			&& math::is_finite(rigid.collider.rotation.i)
-			&& math::is_finite(rigid.collider.rotation.j)
-			&& math::is_finite(rigid.collider.rotation.k)
-			&& math::is_finite(rigid.collider.rotation.l);
+		Vec3 at     = rigid.collider.translation;
+		bool finite = math::is_finite(
+			at.x
+		) && math::is_finite(
+			at.y
+		) && math::is_finite(
+			at.z
+		) && math::is_finite(
+			rigid.collider.rotation.i
+		) && math::is_finite(
+			rigid.collider.rotation.j
+		) && math::is_finite(rigid.collider.rotation.k) && math::is_finite(rigid.collider.rotation.l);
 
 		// The bound is generous on purpose: a body that has fallen off the world is
 		// a game's business and not a failure, so only something that has plainly
@@ -849,7 +856,7 @@ fn sz Physics.evict_diverged(&self)
 	// constant-time read where walking the particles is not.
 	for (sz i = self.softs.len(); i > 0; i--)
 	{
-		SoftMesh* record = &self.softs[i - 1];
+		SoftMesh* record           = &self.softs[i - 1];
 		collision::SoftBody*? body = self.world.find_softbody(record.id);
 		if (catch body) continue;
 		if (finite_and_near(body.aabb.min) && finite_and_near(body.aabb.max)) continue;
@@ -891,8 +898,8 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 
 	self.accumulator_ms += elapsed_ms;
 
-	
-	int steps = 0;
+
+	int steps  = 0;
 	// `run_step` requires a rigid body — its broad phase, its islands and its
 	// event lists are all about them — and a scene may hold nothing but soft
 	// bodies. `solve_soft_bodies` is the phase `run_step` would have reached, with
@@ -939,7 +946,7 @@ fn void Physics.write_back_soft(&self, Scene* scene)
 
 // ---------------------------------------------------------------------------
 // Joints
-//
+// 
 // **The limit list is the joint**, and it is glTF's list rather than a shape of
 // this project's own. `KHR_physics_rigid_bodies` describes a constraint as a set
 // of limits, each naming some of the joint frame's axes and the range those axes
@@ -949,7 +956,7 @@ fn void Physics.write_back_soft(&self, Scene* scene)
 // and one left alone. `prelude/physics.js` keeps the four familiar words and
 // expands each into its limits before it calls, which is why nothing below knows
 // what a hinge is.
-//
+// 
 // **No range is a lock.** A limit with `min == max == 0` holds its axes at zero,
 // which is glTF's default for both fields and the library's reading of them
 // (`solver/joint.c3`). It is the opposite of what "no limit" sounds like, and it
@@ -1066,13 +1073,15 @@ fn void basis_about(Vec3 axis, Vec3* side, Vec3* up) @local
 fn bool push_limit(collision::Limits* limits, Vec3 axes, JointLimit limit) @local
 {
 	if (limits.len() >= 3) return false;
-	limits.push({
-		.axes = axes,
-		.min = limit.min,
-		.max = limit.max,
-		.stiffness = limit.stiffness,
-		.damping = limit.damping,
-	});
+	limits.push(
+		{
+			.axes = axes,
+			.min = limit.min,
+			.max = limit.max,
+			.stiffness = limit.stiffness,
+			.damping = limit.damping,
+		}
+	);
 	return true;
 }
 
@@ -1105,8 +1114,8 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 	collision::Rigidbody* rigid_b = self.rigidbody_for(b);
 	if (rigid_a == null || rigid_b == null) return JOINT_NEEDS_A_BODY~;
 
-	Vec3 at_a = rigid_a.collider.translation;
-	Vec3 at_b = rigid_b.collider.translation;
+	Vec3 at_a  = rigid_a.collider.translation;
+	Vec3 at_b  = rigid_b.collider.translation;
 	Vec3 pivot = spec.has_pivot ? spec.pivot : (at_a + at_b) * 0.5f;
 
 	collision::GenericJoint3D joint = {
@@ -1146,8 +1155,7 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 			if (one.stiffness == 0) one.stiffness = spec.stiffness;
 			if (one.damping == 0) one.damping = spec.damping;
 
-			bool room = limit.angular
-				? push_limit(&joint.angular_limits, into_b * frame[i], one)
+			bool room = limit.angular ? push_limit(&joint.angular_limits, into_b * frame[i], one)
 				: push_limit(&joint.linear_limits, frame[i], one);
 			if (!room) return JOINT_HAS_TOO_MANY_LIMITS~;
 		}
@@ -1229,19 +1237,19 @@ fn void Physics.drop_joints_on(&self, NodeId node)
 
 // ---------------------------------------------------------------------------
 // Soft bodies
-//
+// 
 // A soft body is the mesh's own vertices handed to XPBD as particles, so unlike
 // every other body here it has no collider: the thing that collides *is* the
 // drawing. That costs the two rules below, and they are the whole of what makes
 // it different from a rigid body at a call site.
-//
+// 
 // **The node's transform belongs to the solver, and is a translation.** The
 // particles are world-space, so the node is put at their average and the
 // vertices are written relative to it. `object.position` is therefore the jelly's
 // centre and reads back honestly; its rotation and scale are the identity and
 // stay there, because a rotation applied on top of world-space vertices would
 // turn the drawing away from the simulation.
-//
+// 
 // **Its copy of the mesh is its own.** Two nodes sharing one `BoxGeometry` share
 // one vertex buffer and one draw call; a soft body writes vertices, so it cannot.
 // It gets a bucket to itself — `Bucket.node` and `MeshPass.write_soft_vertices`
@@ -1310,8 +1318,8 @@ fn void SoftMesh.drop(&self)
 {
 	if (self.normals.len > 0) mem::free(self.normals);
 	if (self.map.len > 0) mem::free(self.map);
-	self.normals = {};
-	self.map = {};
+	self.normals = { };
+	self.map = { };
 }
 
 <*
@@ -1341,10 +1349,12 @@ macro uint WeldKey.hash(self)
 	return (uint)(h ^ (h >> 32));
 }
 
-fn bool WeldKey.equals(self, WeldKey other) @operator(==) =>
-	self.x == other.x && self.y == other.y && self.z == other.z;
+fn bool WeldKey.equals(
+	self,
+	WeldKey other
+) @operator(==) => self.x == other.x && self.y == other.y && self.z == other.z;
 
-alias WeldMap = HashMap {WeldKey, uint};
+alias WeldMap = HashMap{WeldKey, uint};
 
 fn uint weld_bits(float value) @local => bitcast(value == 0 ? 0.0f : value, uint);
 
@@ -1425,12 +1435,16 @@ fn uint[] weld_vertices(Vec3[] positions, collision::Triangle[] triangles, List{
 				map[i] = found;
 				continue;
 			}
-			uint best = 0;
+			uint best     = 0;
 			float best_sq = float::max;
 			foreach (slot, candidate : *particles)
 			{
 				float d = (candidate - at).length_sq();
-				if (d < best_sq) { best_sq = d; best = (uint)slot; }
+				if (d < best_sq)
+				{
+					best_sq = d;
+					best = (uint)slot;
+				}
 			}
 			map[i] = best;
 		}
@@ -1561,7 +1575,7 @@ fn void? Physics.add_soft(&self, Scene* scene, Assets* assets, NodeId node_id, S
 		// Into world space here rather than in the weld, so the weld compares the
 		// file's own numbers and a scaled or turned node cannot make two copies of
 		// one corner miss each other.
-		//
+		// 
 		// The node's *local* matrix, which is its world matrix: a body-backed node
 		// is a child of the scene root. Reading `node.world` would be the same
 		// answer one frame later and the identity right now, because nothing has
@@ -1706,9 +1720,9 @@ fn bool Physics.unpin_soft(&self, NodeId node, sz particle, float mass)
 fn Vec3[] Physics.soft_points(&self, NodeId node)
 {
 	SoftMesh* record = self.soft_for(node);
-	if (record == null) return {};
+	if (record == null) return { };
 
 	collision::SoftBody*? body = self.world.find_softbody(record.id);
-	if (catch body) return {};
+	if (catch body) return { };
 	return body.positions.array_view();
 }

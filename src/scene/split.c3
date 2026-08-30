@@ -114,7 +114,7 @@ fn void VertexUnion.free(&self)
 {
 	if (self.parent.len > 0) mem::free(self.parent);
 	if (self.size.len > 0) mem::free(self.size);
-	*self = {};
+	*self = { };
 }
 
 <*
@@ -169,9 +169,9 @@ fn void VertexUnion.join(&self, uint a, uint b)
  @param mesh : `Which of its meshes to cut.`
  @param [out] pieces : `One MeshPiece per component, appended. Not cleared first.`
  @return `How many pieces the mesh turned out to be.`
- @return? MESH_CANNOT_BE_SPLIT : `No triangles to walk — an unknown handle, a mesh index out of range, or a line mesh, whose indices are pairs.`
- @return? MESH_HAS_LAYERS : `The mesh carries a CUSTOM_materials_layers stack, which a piece cannot inherit. See the header.`
- @return? TOO_MANY_SPLIT_PIECES : `More components than MAX_SPLIT_PIECES.`
+ @return ? MESH_CANNOT_BE_SPLIT : `No triangles to walk — an unknown handle, a mesh index out of range, or a line mesh, whose indices are pairs.`
+ @return ? MESH_HAS_LAYERS : `The mesh carries a CUSTOM_materials_layers stack, which a piece cannot inherit. See the header.`
+ @return ? TOO_MANY_SPLIT_PIECES : `More components than MAX_SPLIT_PIECES.`
 *>
 fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiece}* pieces)
 {
@@ -188,8 +188,8 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 	// Copied before anything can grow `self.assets` and move the slot under us.
 	String source_path = owner.path;
 	String source_name = source.name;
-	Vec4 base_color = source.base_color;
-	int texture = source.texture;
+	Vec4 base_color    = source.base_color;
+	int texture        = source.texture;
 
 	@pool()
 	{
@@ -198,7 +198,7 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 		defer geometry.free();
 		if (!self.read_geometry(id, mesh, &geometry)) return MESH_CANNOT_BE_SPLIT~;
 
-		usz vertices = (usz)geometry.positions.len();
+		usz vertices  = (usz)geometry.positions.len();
 		usz triangles = (usz)geometry.indices.len() / 3;
 		if (vertices == 0 || triangles == 0) return MESH_CANNOT_BE_SPLIT~;
 
@@ -267,8 +267,8 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 		defer mem::free(moved_in);
 
 		bool has_normals = (usz)geometry.normals.len() == vertices;
-		bool has_uvs = (usz)geometry.uvs.len() == vertices;
-		bool has_colors = (usz)geometry.colors.len() == vertices;
+		bool has_uvs     = (usz)geometry.uvs.len() == vertices;
+		bool has_colors  = (usz)geometry.colors.len() == vertices;
 
 		for (uint p = 0; p < count; p++)
 		{
@@ -304,8 +304,8 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 
 			// The source's path and mesh index, so a second split of the same
 			// mesh is a lookup rather than a second upload.
-			String key = string::tformat("<split %s#%d/%d of %d>", source_path, mesh, p, count);
-			String label = string::tformat("%s piece %d", source_name, p);
+			String key    = string::tformat("<split %s#%d/%d of %d>", source_path, mesh, p, count);
+			String label  = string::tformat("%s piece %d", source_name, p);
 			AssetId built = self.upload_built(gpu, key, label, &piece)!;
 
 			// The colour and the map, after the upload rather than through it: a

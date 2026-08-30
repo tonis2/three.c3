@@ -110,11 +110,9 @@ fn float Heightfield.sample(&self, int i, int j)
  cell and the fraction is the position inside it, and computing them separately
  is how the two end up disagreeing at a cell boundary.
 *>
-fn float Heightfield.grid_x(&self, float x) @inline
-	=> (x + self.width * 0.5f) / self.width * (float)self.segments;
+fn float Heightfield.grid_x(&self, float x) @inline => (x + self.width * 0.5f) / self.width * (float)self.segments;
 
-fn float Heightfield.grid_z(&self, float z) @inline
-	=> (z + self.depth * 0.5f) / self.depth * (float)self.segments;
+fn float Heightfield.grid_z(&self, float z) @inline => (z + self.depth * 0.5f) / self.depth * (float)self.segments;
 
 fn float Heightfield.cell_x(&self) @inline => self.width / (float)self.segments;
 fn float Heightfield.cell_z(&self) @inline => self.depth / (float)self.segments;
@@ -133,8 +131,8 @@ fn float Heightfield.height_at(&self, float x, float z)
 {
 	float gx = self.grid_x(x);
 	float gz = self.grid_z(z);
-	int i = (int)math::floor(gx);
-	int j = (int)math::floor(gz);
+	int i    = (int)math::floor(gx);
+	int j    = (int)math::floor(gz);
 	float fx = gx - (float)i;
 	float fz = gz - (float)j;
 
@@ -143,7 +141,7 @@ fn float Heightfield.height_at(&self, float x, float z)
 	float h01 = self.sample(i, j + 1);
 	float h11 = self.sample(i + 1, j + 1);
 
-	float top = h00 + (h10 - h00) * fx;
+	float top    = h00 + (h10 - h00) * fx;
 	float bottom = h01 + (h11 - h01) * fx;
 	return top + (bottom - top) * fz;
 }
@@ -164,7 +162,7 @@ fn Vec3 Heightfield.grid_normal(&self, int i, int j)
 {
 	float dx = (self.sample(i + 1, j) - self.sample(i - 1, j)) / (2.0f * self.cell_x());
 	float dz = (self.sample(i, j + 1) - self.sample(i, j - 1)) / (2.0f * self.cell_z());
-	Vec3 n = { -dx, 1.0f, -dz };
+	Vec3 n   = { -dx, 1.0f, -dz };
 	return n.normalize();
 }
 
@@ -180,8 +178,8 @@ fn Vec3 Heightfield.normal_at(&self, float x, float z)
 {
 	float gx = self.grid_x(x);
 	float gz = self.grid_z(z);
-	int i = (int)math::floor(gx);
-	int j = (int)math::floor(gz);
+	int i    = (int)math::floor(gx);
+	int j    = (int)math::floor(gz);
 	float fx = gx - (float)i;
 	float fz = gz - (float)j;
 
@@ -190,11 +188,11 @@ fn Vec3 Heightfield.normal_at(&self, float x, float z)
 	Vec3 n01 = self.grid_normal(i, j + 1);
 	Vec3 n11 = self.grid_normal(i + 1, j + 1);
 
-	Vec3 top = n00 + (n10 - n00) * fx;
-	Vec3 bottom = n01 + (n11 - n01) * fx;
+	Vec3 top     = n00 + (n10 - n00) * fx;
+	Vec3 bottom  = n01 + (n11 - n01) * fx;
 	Vec3 blended = top + (bottom - top) * fz;
 	float length = blended.length();
-	return length > 1e-6f ? blended * (1.0f / length) : (Vec3){ 0, 1, 0 };
+	return length > 1e-6f ? blended * (1.0f / length) : (Vec3) { 0, 1, 0 };
 }
 
 <*
@@ -206,7 +204,7 @@ fn Vec3 Heightfield.normal_at(&self, float x, float z)
 *>
 fn collision::Aabb3 Heightfield.bounds(&self)
 {
-	float low = 0;
+	float low  = 0;
 	float high = 0;
 	foreach (i, height : self.heights)
 	{
@@ -233,7 +231,7 @@ fn collision::Aabb3 Heightfield.bounds(&self)
 *>
 fn void Heightfield.build(&self, GeometryBuilder* out)
 {
-	uint side = self.side();
+	uint side    = self.side();
 	float half_w = self.width * 0.5f;
 	float half_d = self.depth * 0.5f;
 
@@ -293,9 +291,9 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 *>
 fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 {
-	uint side = self.side();
-	float half_w = self.width * 0.5f;
-	float half_d = self.depth * 0.5f;
+	uint side     = self.side();
+	float half_w  = self.width * 0.5f;
+	float half_d  = self.depth * 0.5f;
 	float floor_y = self.bounds().min.y;
 
 	// edge 0: -z, normal -z, walked +x. 1: +z, normal +z, walked -x.
@@ -325,9 +323,9 @@ fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 			}
 			float x = -half_w + (float)i / (float)self.segments * self.width;
 			float z = -half_d + (float)j / (float)self.segments * self.depth;
-			float y = self.sample((int)i, (int)j);
-			float u = (float)i / (float)self.segments;
-			float v = (float)j / (float)self.segments;
+			float y =  self.sample((int)i, (int)j);
+			float u =  (float)i / (float)self.segments;
+			float v =  (float)j / (float)self.segments;
 			out.vertex({ x, y, z }, normal, { u, v });
 			out.vertex({ x, floor_y, z }, normal, { u, v });
 		}
@@ -360,8 +358,8 @@ fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
  `Assets.free_slot` frees the list with the asset.
 
  @param field : `Borrowed. The list is copied onto the asset, so the caller keeps ownership of theirs.`
- @return? TERRAIN_SIZE_INVALID : `A non-positive extent, or a segment count outside 1..MAX_TERRAIN_SEGMENTS.`
- @return? TERRAIN_HEIGHTS_WRONG_LENGTH : `The height array is not exactly (segments + 1)^2 long — the one mistake that would otherwise read a plausible surface off the wrong stride.`
+ @return ? TERRAIN_SIZE_INVALID : `A non-positive extent, or a segment count outside 1..MAX_TERRAIN_SEGMENTS.`
+ @return ? TERRAIN_HEIGHTS_WRONG_LENGTH : `The height array is not exactly (segments + 1)^2 long — the one mistake that would otherwise read a plausible surface off the wrong stride.`
 *>
 fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 {
@@ -386,7 +384,12 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 			}
 		}
 		String key = string::tformat(
-			"terrain:%f:%f:%d:%f:%x", field.width, field.depth, field.segments, field.skirt, hash
+			"terrain:%f:%f:%d:%f:%x",
+			field.width,
+			field.depth,
+			field.segments,
+			field.skirt,
+			hash
 		);
 		if (try hit = self.built(key)) return hit;
 

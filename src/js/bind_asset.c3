@@ -32,9 +32,7 @@ import std::collections::list;
  script that reaches for a file in one should be told which of the two it is
  missing.
 *>
-fn void js_load(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -62,10 +60,13 @@ fn void js_load(
 		{
 			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
-				*out = js.raise(string::tformat(
-					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
-					"what is inside its own", path
-				));
+				*out = js.raise(
+					string::tformat(
+						"cannot load '%s': it climbs out of the assets directory, and a game may only read "
+							"what is inside its own",
+						path
+					)
+				);
 				return;
 			}
 			*out = js.raise(string::tformat("cannot load '%s': %s", path, err));
@@ -209,9 +210,7 @@ fn void JsRuntime.release_script_textures(&self)
  of the same file returns a second object holding a reference of its own. So a
  stale index cannot be presented.
 *>
-fn void js_texture(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_texture(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -236,10 +235,13 @@ fn void js_texture(
 		{
 			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
-				*out = js.raise(string::tformat(
-					"cannot load '%s': it climbs out of the assets directory, and a game may only read "
-					"what is inside its own", path
-				));
+				*out = js.raise(
+					string::tformat(
+						"cannot load '%s': it climbs out of the assets directory, and a game may only read "
+							"what is inside its own",
+						path
+					)
+				);
 				return;
 			}
 			*out = js.raise(string::tformat("cannot load '%s': %s", path, err));
@@ -247,7 +249,7 @@ fn void js_texture(
 		}
 
 		ColorSpace space = color_space_of(arg_int(&js, argc, args, 1));
-		bool mips = arg_truth_or(&js, argc, args, 2, true);
+		bool mips        = arg_truth_or(&js, argc, args, 2, true);
 
 		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips);
 		if (catch err = index)
@@ -281,7 +283,12 @@ fn void js_texture(
  complaint.
 *>
 fn void js_data_texture(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -293,24 +300,33 @@ fn void js_data_texture(
 		return;
 	}
 
-	int width = arg_int(&js, argc, args, 1);
+	int width  = arg_int(&js, argc, args, 1);
 	int height = arg_int(&js, argc, args, 2);
 	if (width <= 0 || height <= 0)
 	{
-		*out = js.raise(string::tformat(
-			"new three.DataTexture(data, width, height) wants positive dimensions, got %dx%d", width, height
-		));
+		*out = js.raise(
+			string::tformat(
+				"new three.DataTexture(data, width, height) wants positive dimensions, got %dx%d",
+				width,
+				height
+			)
+		);
 		return;
 	}
 	if (width > MAX_TEXTURE_SIDE || height > MAX_TEXTURE_SIDE)
 	{
-		*out = js.raise(string::tformat(
-			"%dx%d is past the %d-pixel limit three.DataTexture accepts on a side", width, height, MAX_TEXTURE_SIDE
-		));
+		*out = js.raise(
+			string::tformat(
+				"%dx%d is past the %d-pixel limit three.DataTexture accepts on a side",
+				width,
+				height,
+				MAX_TEXTURE_SIDE
+			)
+		);
 		return;
 	}
 
-	char[] pixels = argc > 0 ? js.bytes(args[0]) : (char[]){};
+	char[] pixels = argc > 0 ? js.bytes(args[0]) : (char[]) { };
 	if (pixels.len == 0)
 	{
 		// An empty slice means "not a Uint8Array" *and* "an empty one", and the
@@ -323,17 +339,22 @@ fn void js_data_texture(
 	usz wanted = (usz)width * (usz)height * 4;
 	if (pixels.len != wanted)
 	{
-		*out = js.raise(string::tformat(
-			"%dx%d is %d RGBA bytes and %d were given — four per pixel, in r, g, b, a order",
-			width, height, wanted, pixels.len
-		));
+		*out = js.raise(
+			string::tformat(
+				"%dx%d is %d RGBA bytes and %d were given — four per pixel, in r, g, b, a order",
+				width,
+				height,
+				wanted,
+				pixels.len
+			)
+		);
 		return;
 	}
 
 	// An `Image` over the borrowed bytes rather than a copy. `to_rgba` inside
 	// `claim_texture` makes the one copy this path needs; a second one here would
 	// be 1 MB memcpy'd for nothing on a 512x512.
-	//
+	// 
 	// The null allocator is what makes borrowing safe: `Image.free` frees nothing
 	// without one, so this struct owning bytes it did not allocate can never free
 	// the engine's storage.
@@ -351,7 +372,7 @@ fn void js_data_texture(
 	// script generated are as often a table as a picture — a palette, a ramp, a
 	// noise field indexed exactly — and a blurred level of a table is not a cheaper
 	// approximation of anything.
-	bool mips = arg_truth_or(&js, argc, args, 4, true);
+	bool mips        = arg_truth_or(&js, argc, args, 4, true);
 
 	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips);
 	if (catch err = index)
@@ -396,7 +417,8 @@ fn String texture_failure(fault err, String path) @local
 		case TEXTURE_FORMAT_UNKNOWN:
 			return string::tformat(
 				"'%s' is not a PNG or a JPEG — those are the two three.texture reads, and the check is on the "
-				"file's own first bytes rather than its name", path
+					"file's own first bytes rather than its name",
+				path
 			);
 		case TEXTURE_BIT_DEPTH:
 			return string::tformat("'%s' is a 16-bit PNG; save it as 8-bit and it will load", path);
@@ -419,7 +441,12 @@ fn String texture_failure(fault err, String path) @local
  `release_texture` and a frame in flight may still be sampling it.
 *>
 fn void js_texture_dispose(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -459,7 +486,12 @@ fn void js_texture_dispose(
  @return `The number of bytes written, so a caller can assert on it rather than trusting the length it passed.`
 *>
 fn void js_texture_read(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -479,15 +511,20 @@ fn void js_texture_read(
 	}
 
 	Texture* texture = self.pass.assets.texture_at(index);
-	sz need = (sz)texture.width * (sz)texture.height * 4;
+	sz need          = (sz)texture.width * (sz)texture.height * 4;
 
-	char[] dst = argc > 1 ? js.bytes(args[1]) : (char[]){};
+	char[] dst = argc > 1 ? js.bytes(args[1]) : (char[]) { };
 	if (dst.len < need)
 	{
-		*out = js.raise(string::tformat(
-			"texture.read() wants a Uint8Array of at least %d bytes for a %dx%d image, and was given %d",
-			need, texture.width, texture.height, dst.len
-		));
+		*out = js.raise(
+			string::tformat(
+				"texture.read() wants a Uint8Array of at least %d bytes for a %dx%d image, and was given %d",
+				need,
+				texture.width,
+				texture.height,
+				dst.len
+			)
+		);
 		return;
 	}
 
@@ -513,7 +550,12 @@ fn void js_texture_read(
  The device is required and says so: a shape has to be uploaded to be drawn.
 *>
 fn void js_primitive(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -527,14 +569,16 @@ fn void js_primitive(
 
 	@pool()
 	{
-		String name = arg_text(&js, argc, args, 0, tmem);
+		String name         = arg_text(&js, argc, args, 0, tmem);
 		PrimitiveKind? kind = primitive_kind(name);
 		if (catch kind)
 		{
-			*out = js.raise(string::tformat(
-				"there is no shape called '%s' — three.c3 builds: box, sphere, plane, cylinder, torus",
-				name
-			));
+			*out = js.raise(
+				string::tformat(
+					"there is no shape called '%s' — three.c3 builds: box, sphere, plane, cylinder, torus",
+					name
+				)
+			);
 			return;
 		}
 
@@ -577,9 +621,7 @@ fn void js_primitive(
  quietly built from the first 65536 of a script's points would be a shape nobody
  asked for.
 *>
-fn void js_convex(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_convex(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -602,16 +644,12 @@ fn void js_convex(
 	usz count = (usz)(length / 3);
 	if (count < MIN_CONVEX_POINTS)
 	{
-		*out = js.raise(string::tformat(
-			"a convex hull needs at least %d points, got %d", MIN_CONVEX_POINTS, count
-		));
+		*out = js.raise(string::tformat("a convex hull needs at least %d points, got %d", MIN_CONVEX_POINTS, count));
 		return;
 	}
 	if (count > MAX_CONVEX_POINTS)
 	{
-		*out = js.raise(string::tformat(
-			"a convex hull is capped at %d points, got %d", MAX_CONVEX_POINTS, count
-		));
+		*out = js.raise(string::tformat("a convex hull is capped at %d points, got %d", MAX_CONVEX_POINTS, count));
 		return;
 	}
 
@@ -623,7 +661,7 @@ fn void js_convex(
 			for (usz axis = 0; axis < 3; axis++)
 			{
 				qjs::Value component = js.index(args[0], (uint)(i * 3 + axis));
-				double value = js.number(component);
+				double value         = js.number(component);
 				js.release(component);
 				// The prelude has already refused a non-finite component with a
 				// sentence naming the point it was in. This is the backstop for a
@@ -642,11 +680,13 @@ fn void js_convex(
 			// generated cloud which of the three ways it collapsed.
 			if (err == CONVEX_HULL_IS_DEGENERATE)
 			{
-				*out = js.raise(string::tformat(
-					"those %d points enclose no volume — they are all equal, all on one line or all on one "
-					"plane, and a convex hull needs four that are none of those",
-					count
-				));
+				*out = js.raise(
+					string::tformat(
+						"those %d points enclose no volume — they are all equal, all on one line or all on one "
+							"plane, and a convex hull needs four that are none of those",
+						count
+					)
+				);
 				return;
 			}
 			*out = js.raise(string::tformat("could not build a convex hull from %d points: %s", count, err));
@@ -675,7 +715,7 @@ fn ulong ribbon_fnv(ulong hash, uint bits) @inline
 fn float ribbon_float(qjs::Context* js, qjs::Value array, uint idx)
 {
 	qjs::Value value = js.index(array, idx);
-	double number = js.number(value);
+	double number    = js.number(value);
 	js.release(value);
 	return math::is_finite(number) ? (float)number : 0.0f;
 }
@@ -701,9 +741,7 @@ fn float ribbon_float(qjs::Context* js, qjs::Value array, uint idx)
  bounds and BVH through the same tail a built primitive uses. None of the data is
  retained on the slot: unlike a terrain, a ribbon answers no questions.
 *>
-fn void js_ribbon(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -714,9 +752,9 @@ fn void js_ribbon(
 		return;
 	}
 
-	long npos = argc > 0 ? js.length(args[0]) : -1;
+	long npos  = argc > 0 ? js.length(args[0]) : -1;
 	long nnorm = argc > 1 ? js.length(args[1]) : -1;
-	long nuv = argc > 2 ? js.length(args[2]) : -1;
+	long nuv   = argc > 2 ? js.length(args[2]) : -1;
 	if (npos < 3 || npos % 3 != 0)
 	{
 		*out = js.raise(
@@ -736,7 +774,7 @@ fn void js_ribbon(
 		return;
 	}
 	int columns = (int)math::max(arg_int(&js, argc, args, 3), 0);
-	int rows = (int)math::max(arg_int(&js, argc, args, 4), 0);
+	int rows    = (int)math::max(arg_int(&js, argc, args, 4), 0);
 	if (columns < 2 || rows < 2)
 	{
 		*out = js.raise("a ribbon needs at least 2 columns across and 2 rows along");
@@ -744,10 +782,9 @@ fn void js_ribbon(
 	}
 	if ((usz)columns * (usz)rows != count)
 	{
-		*out = js.raise(string::tformat(
-			"columns x rows (%d x %d) must equal the number of vertices (%d)",
-			columns, rows, count
-		));
+		*out = js.raise(
+			string::tformat("columns x rows (%d x %d) must equal the number of vertices (%d)", columns, rows, count)
+		);
 		return;
 	}
 
@@ -761,7 +798,7 @@ fn void js_ribbon(
 		for (usz i = 0; i < count; i++)
 		{
 			Vec3 position = { 0, 0, 0 };
-			Vec3 normal = { 0, 1, 0 };
+			Vec3 normal   = { 0, 1, 0 };
 			for (usz axis = 0; axis < 3; axis++)
 			{
 				position[axis] = ribbon_float(&js, args[0], (uint)(i * 3 + axis));
@@ -780,10 +817,10 @@ fn void js_ribbon(
 		{
 			for (int c = 0; c + 1 < columns; c++)
 			{
-				uint a = (uint)(r * columns + c);
-				uint b = a + 1;
+				uint a  = (uint)(r * columns + c);
+				uint b  = a + 1;
 				uint cc = a + (uint)columns;
-				uint d = cc + 1;
+				uint d  = cc + 1;
 				geometry.triangle(a, b, cc);
 				geometry.triangle(b, d, cc);
 			}
@@ -824,9 +861,7 @@ fn void js_ribbon(
  leaves it out of their keys, so a box asked for with a stray division count is
  still the one box asset.
 *>
-fn void js_lines(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_lines(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -839,13 +874,13 @@ fn void js_lines(
 
 	@pool()
 	{
-		String name = arg_text(&js, argc, args, 0, tmem);
+		String name    = arg_text(&js, argc, args, 0, tmem);
 		LineKind? kind = line_kind(name);
 		if (catch kind)
 		{
-			*out = js.raise(string::tformat(
-				"there is no line shape called '%s' — three.c3 builds: box, segment, grid", name
-			));
+			*out = js.raise(
+				string::tformat("there is no line shape called '%s' — three.c3 builds: box, segment, grid", name)
+			);
 			return;
 		}
 
@@ -879,7 +914,12 @@ fn void js_lines(
  not work.
 *>
 fn void js_wireframe(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -894,7 +934,7 @@ fn void js_wireframe(
 	AssetId id = arg_asset(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
-	uint mesh = (uint)math::max(arg_int(&js, argc, args, 2), 0);
+	uint mesh      = (uint)math::max(arg_int(&js, argc, args, 2), 0);
 	AssetId? asset = self.pass.assets.wireframe(&self.renderer.gpu, id, mesh);
 	if (catch err = asset)
 	{
@@ -902,16 +942,14 @@ fn void js_wireframe(
 		{
 			*out = js.raise(
 				"a wireframe is built from the mesh's own triangles, and those reach this side when the "
-				"mesh is uploaded — which happens when something drawing it is added to a scene. "
-				"scene.add(mesh) first, then make the helper"
+					"mesh is uploaded — which happens when something drawing it is added to a scene. "
+					"scene.add(mesh) first, then make the helper"
 			);
 			return;
 		}
 		if (err == NO_SUCH_LINE_MESH)
 		{
-			*out = js.raise(string::tformat(
-				"that asset has no mesh %d — asset.meshes lists the ones it has", mesh
-			));
+			*out = js.raise(string::tformat("that asset has no mesh %d — asset.meshes lists the ones it has", mesh));
 			return;
 		}
 		*out = js.raise(string::tformat("could not build a wireframe of mesh %d: %s", mesh, err));
@@ -958,9 +996,7 @@ fn void js_wireframe(
  `bakedImages` and `bakedColors` are what it did — both of them copies that would
  have been counted in `shaded` without it.
 *>
-fn void js_export(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -985,10 +1021,13 @@ fn void js_export(
 		{
 			if (err == qjs::MODULE_ESCAPES_ROOT)
 			{
-				*out = js.raise(string::tformat(
-					"cannot export to '%s': it climbs out of the assets directory, and a game may only "
-					"write inside its own", path
-				));
+				*out = js.raise(
+					string::tformat(
+						"cannot export to '%s': it climbs out of the assets directory, and a game may only "
+							"write inside its own",
+						path
+					)
+				);
 				return;
 			}
 			*out = js.raise(string::tformat("cannot export to '%s': %s", path, err));
@@ -1003,7 +1042,9 @@ fn void js_export(
 		// outside the range by name, so this is a number and nothing else.
 		int bake = arg_int(&js, argc, args, 2);
 		ExportReport? report = self.pass.export_scene(
-			writing, arg_truth(&js, argc, args, 1), bake > 0 ? (uint)bake : 0
+			writing,
+			arg_truth(&js, argc, args, 1),
+			bake > 0 ? (uint)bake : 0
 		);
 		if (catch err = report)
 		{
@@ -1011,7 +1052,7 @@ fn void js_export(
 			{
 				*out = js.raise(
 					"there is nothing in this scene to draw, so there is nothing to export — it is empty, "
-					"or everything in it is a helper or a hidden subtree, neither of which goes into a file"
+						"or everything in it is a helper or a hidden subtree, neither of which goes into a file"
 				);
 				return;
 			}
@@ -1052,7 +1093,12 @@ fn void js_export(
  recovery, which is the half that matters.
 *>
 fn void js_check_asset(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1063,7 +1109,12 @@ fn void js_check_asset(
 }
 
 fn void js_asset_path(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1082,7 +1133,12 @@ fn void js_asset_path(
  the first, which is what `Assets.find_mesh` does.
 *>
 fn void js_mesh_names(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1113,7 +1169,12 @@ fn void js_mesh_names(
  several entries sharing a name, and a `Mesh` node draws exactly one of them.
 *>
 fn void js_mesh_bounds(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1147,7 +1208,12 @@ fn void js_mesh_bounds(
  be.
 *>
 fn void js_upload_mesh(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1162,12 +1228,14 @@ fn void js_upload_mesh(
 		return;
 	}
 
-	self.uploads.push({
-		.asset = id,
-		.mesh = (uint)arg_int(&js, argc, args, 2),
-		.resolve = js.retain(args[3]),
-		.reject = js.retain(args[4]),
-	});
+	self.uploads.push(
+		{
+			.asset = id,
+			.mesh = (uint)arg_int(&js, argc, args, 2),
+			.resolve = js.retain(args[3]),
+			.reject = js.retain(args[4]),
+		}
+	);
 	*out = qjs::undefined_value();
 }
 
@@ -1180,7 +1248,12 @@ fn void js_upload_mesh(
  could equally mean "the picture would not decode".
 *>
 fn void js_asset_images(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1214,7 +1287,12 @@ fn void js_asset_images(
  @return `[index, width, height, levels], or null when the image would not decode.`
 *>
 fn void js_asset_image(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1229,9 +1307,9 @@ fn void js_asset_image(
 	AssetId id = arg_asset(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
-	int image = arg_int(&js, argc, args, 2);
+	int image        = arg_int(&js, argc, args, 2);
 	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
-	bool mips = arg_truth_or(&js, argc, args, 4, true);
+	bool mips        = arg_truth_or(&js, argc, args, 4, true);
 
 	int? index = self.pass.assets.load_asset_image(&self.renderer.gpu, id, image, space, mips);
 	if (catch err = index)
@@ -1256,11 +1334,11 @@ fn void js_asset_image(
  array, `js_mesh_layers`'s shape and for its reason — the QuickJS shim has no
  property enumeration, so a positional row is cheaper on both sides.
 
-	 0  alphaMode ordinal      4  emissiveFactor r     8  metallic
-	 1  alphaCutoff           5  emissiveFactor g     9  roughness
-	 2  doubleSided           6  emissiveFactor b    10  normal texture
-	 3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
-	                                                 12  emissive texture
+ 0  alphaMode ordinal      4  emissiveFactor r     8  metallic
+ 1  alphaCutoff           5  emissiveFactor g     9  roughness
+ 2  doubleSided           6  emissiveFactor b    10  normal texture
+ 3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
+ 12  emissive texture
 
  Reading this uploads the mesh, and every read holds new references, exactly as
  `meshLayers` does: the images exist only once the primitive is on the device,
@@ -1270,7 +1348,12 @@ fn void js_asset_image(
  the default one.
 *>
 fn void js_mesh_material(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1290,7 +1373,7 @@ fn void js_mesh_material(
 	}
 
 	GpuMaterial* material = &mesh.material;
-	qjs::Value row = js.array();
+	qjs::Value row        = js.array();
 	js.set_index(row, 0, qjs::int_value((int)material.alpha_mode));
 	js.set_index(row, 1, qjs::number_value(material.alpha_cutoff));
 	js.set_index(row, 2, qjs::bool_value(material.double_sided));
@@ -1322,7 +1405,12 @@ fn void js_mesh_material(
  by looking at the length.
 *>
 fn void js_split_mesh(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1352,20 +1440,22 @@ fn void js_split_mesh(
 				case MESH_HAS_LAYERS:
 					*out = js.raise(
 						"that mesh carries a layer stack, and a piece cut out of it cannot inherit one — "
-						"read the stack with ref.layers, build a LayeredMaterial from it, and put that on "
-						"the pieces yourself"
+							"read the stack with ref.layers, build a LayeredMaterial from it, and put that on "
+							"the pieces yourself"
 					);
 				case MESH_CANNOT_BE_SPLIT:
 					*out = js.raise(
 						"there are no triangles to cut there — that mesh index does not exist, or it is a "
-						"line mesh, whose indices are pairs"
+							"line mesh, whose indices are pairs"
 					);
 				case TOO_MANY_SPLIT_PIECES:
-					*out = js.raise(string::tformat(
-						"that mesh comes apart into more than %d pieces, which is not a kit — it is "
-						"geometry whose triangles do not touch each other",
-						MAX_SPLIT_PIECES
-					));
+					*out = js.raise(
+						string::tformat(
+							"that mesh comes apart into more than %d pieces, which is not a kit — it is "
+								"geometry whose triangles do not touch each other",
+							MAX_SPLIT_PIECES
+						)
+					);
 				default:
 					*out = js.raise(string::tformat("that mesh could not be split: %s", err));
 			}
@@ -1411,7 +1501,12 @@ fn void js_split_mesh(
  @return `[maskTexture, [layer...], height, bumpStrength, bumpDistance] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture, metallic, roughness, metallicRoughness, height, bumpStrength, bumpDistance], or null.`
 *>
 fn void js_mesh_layers(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1454,8 +1549,7 @@ fn void js_mesh_layers(
 		js.set_index(row, 17, layer_texture_value(self, &js, layer.mask_texture));
 		js.set_index(row, 18, qjs::number_value(layer.metallic));
 		js.set_index(row, 19, qjs::number_value(layer.roughness));
-		js.set_index(row, 20,
-			layer_texture_value(self, &js, layer.metallic_roughness_texture));
+		js.set_index(row, 20, layer_texture_value(self, &js, layer.metallic_roughness_texture));
 		js.set_index(row, 21, layer_texture_value(self, &js, layer.height_texture));
 		js.set_index(row, 22, qjs::number_value(layer.bump_strength));
 		js.set_index(row, 23, qjs::number_value(layer.bump_distance));
@@ -1499,7 +1593,7 @@ fn void js_mesh_layers(
 fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) @local
 {
 	if (index < 0) return qjs::null_value();
-	Assets* assets = &self.pass.assets;
+	Assets* assets    = &self.pass.assets;
 	Texture* uploaded = assets.texture_at(index);
 	if (uploaded == null) return qjs::null_value();
 	assets.retain_texture(index);
@@ -1540,7 +1634,12 @@ fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) 
  @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin].`
 *>
 fn void js_asset_nodes(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1609,7 +1708,12 @@ fn void js_asset_nodes(
  is the only handle `play` takes.
 *>
 fn void js_asset_clips(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1639,7 +1743,12 @@ fn void js_asset_clips(
  which a file with a body mesh and a head mesh usually does — name it once.
 *>
 fn void js_asset_bones(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1648,9 +1757,9 @@ fn void js_asset_bones(
 	AssetId id = arg_asset(self, &js, argc, args, 0, out);
 	if (!id.is_set()) return;
 
-	Asset* asset = self.pass.assets.slot(id);
+	Asset* asset     = self.pass.assets.slot(id);
 	qjs::Value names = js.array();
-	uint at = 0;
+	uint at          = 0;
 
 	// The names already emitted, borrowed from the asset rather than copied — this
 	// list outlives nothing and the asset outlives it.
@@ -1669,7 +1778,11 @@ fn void js_asset_bones(
 			bool already = false;
 			foreach (had : seen)
 			{
-				if (had == name) { already = true; break; }
+				if (had == name)
+				{
+					already = true;
+					break;
+				}
 			}
 			if (already) continue;
 
@@ -1694,7 +1807,12 @@ fn void js_asset_bones(
  exception would make a script written for a game boot fail loudly under one.
 *>
 fn void js_inventory(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1771,9 +1889,7 @@ fn void js_inventory(
  wrong stride, which produces a plausible-looking diagonal ripple and nothing
  that says why.
 *>
-fn void js_terrain(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
-)
+fn void js_terrain(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
@@ -1784,17 +1900,21 @@ fn void js_terrain(
 		return;
 	}
 
-	float width = arg_float(&js, argc, args, 0);
-	float depth = arg_float(&js, argc, args, 1);
+	float width   = arg_float(&js, argc, args, 0);
+	float depth   = arg_float(&js, argc, args, 1);
 	long segments = arg_int(&js, argc, args, 2);
-	float skirt = arg_float(&js, argc, args, 3);
+	float skirt   = arg_float(&js, argc, args, 3);
 
 	if (segments < (long)MIN_TERRAIN_SEGMENTS || segments > (long)MAX_TERRAIN_SEGMENTS)
 	{
-		*out = js.raise(string::tformat(
-			"a terrain has between %d and %d segments a side, got %d",
-			MIN_TERRAIN_SEGMENTS, MAX_TERRAIN_SEGMENTS, segments
-		));
+		*out = js.raise(
+			string::tformat(
+				"a terrain has between %d and %d segments a side, got %d",
+				MIN_TERRAIN_SEGMENTS,
+				MAX_TERRAIN_SEGMENTS,
+				segments
+			)
+		);
 		return;
 	}
 
@@ -1802,10 +1922,14 @@ fn void js_terrain(
 	long length = argc > 4 ? js.length(args[4]) : -1;
 	if (length != wanted)
 	{
-		*out = js.raise(string::tformat(
-			"a %d-segment terrain wants %d heights, got %d — the array is (segments + 1) squared, row-major in z",
-			segments, wanted, length
-		));
+		*out = js.raise(
+			string::tformat(
+				"a %d-segment terrain wants %d heights, got %d — the array is (segments + 1) squared, row-major in z",
+				segments,
+				wanted,
+				length
+			)
+		);
 		return;
 	}
 
@@ -1821,7 +1945,7 @@ fn void js_terrain(
 		for (long i = 0; i < wanted; i++)
 		{
 			qjs::Value sample = js.index(args[4], (uint)i);
-			double value = js.number(sample);
+			double value      = js.number(sample);
 			js.release(sample);
 			// The prelude refuses a non-finite height with a sentence naming its
 			// index. Zero is the backstop for a forged call: a NaN here would spread
@@ -1853,7 +1977,12 @@ fn void js_terrain(
  negative answer expensive.
 *>
 fn void js_terrain_at(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 )
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -1872,8 +2001,8 @@ fn void js_terrain_at(
 		return;
 	}
 
-	float x = arg_float(&js, argc, args, 2);
-	float z = arg_float(&js, argc, args, 3);
+	float x     = arg_float(&js, argc, args, 2);
+	float z     = arg_float(&js, argc, args, 3);
 	Vec3 normal = field.normal_at(x, z);
 	js.set_index(list, 0, qjs::number_value((double)field.height_at(x, z)));
 	js.set_index(list, 1, qjs::number_value((double)normal.x));

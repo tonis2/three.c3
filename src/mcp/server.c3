@@ -67,51 +67,51 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	// `advise_quiet` has the rest.
 	advise_quiet(true);
 
-	server.add_tool({
-		.name = "run_script",
-		.description =
-			"Run a JavaScript scene script and get back everything it logged, everything it "
-			"wrote with three.debug.write, the scene's stats, and a PNG of the frame. The API "
-			"is Three.js-shaped: "
-			"three.load, three.Scene, three.Mesh, three.Group, position/rotation/scale, add/remove. "
-			"Call get_api_docs first if you have not seen it. Use three.debug.write(x) to send a "
-			"value back — from anywhere in the script, including from inside a system or an "
-			"animation callback.",
-		.input_schema =
-			`{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"required":["source"]}`,
-		.handler = &tool_run_script,
-		.user_data = host,
-		.raw_content = true,
-	});
+	server.add_tool(
+		{
+			.name = "run_script",
+			.description = "Run a JavaScript scene script and get back everything it logged, everything it "
+				"wrote with three.debug.write, the scene's stats, and a PNG of the frame. The API "
+				"is Three.js-shaped: "
+				"three.load, three.Scene, three.Mesh, three.Group, position/rotation/scale, add/remove. "
+				"Call get_api_docs first if you have not seen it. Use three.debug.write(x) to send a "
+				"value back — from anywhere in the script, including from inside a system or an "
+				"animation callback.",
+			.input_schema = `{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"required":["source"]}`,
+			.handler = &tool_run_script,
+			.user_data = host,
+			.raw_content = true,
+		}
+	);
 
-	server.add_tool({
-		.name = "screenshot",
-		.description =
-			"Render the current scene and return the frame as a PNG. Optionally also write it "
-			"to a file. Takes no view arguments — move three.camera from a script.",
-		.input_schema =
-			`{"type":"object","properties":{"path":{"type":"string","description":"Where to also write the PNG. Omit to only receive the image."}}}`,
-		.handler = &tool_screenshot,
-		.user_data = host,
-		.raw_content = true,
-	});
+	server.add_tool(
+		{
+			.name = "screenshot",
+			.description = "Render the current scene and return the frame as a PNG. Optionally also write it "
+				"to a file. Takes no view arguments — move three.camera from a script.",
+			.input_schema = `{"type":"object","properties":{"path":{"type":"string","description":"Where to also write the PNG. Omit to only receive the image."}}}`,
+			.handler = &tool_screenshot,
+			.user_data = host,
+			.raw_content = true,
+		}
+	);
 
-	server.add_tool({
-		.name = "get_api_docs",
-		.description =
-			"The three.c3 scripting API as JSON. With no arguments: the INDEX — the summary, "
-			"every place it deliberately differs from Three.js, the stats block and the examples "
-			"in full, and the names of the classes and functions. `search` is the grep over the "
-			"whole surface: every entry whose name or prose mentions a word, with its text. "
-			"`section` opens one of those names. `path` also writes the whole thing to a Markdown "
-			"file, which is how you grep it with your own tools instead of asking again. Read the "
-			"index before writing a script — the differences are short and each one is a script "
-			"that would otherwise fail.",
-		.input_schema =
-			`{"type":"object","properties":{"search":{"type":"string","description":"A word or phrase. Answers with every entry whose name or text contains it, keyed by the path 'section' takes. This is the grep."},"section":{"type":"string","description":"One entry or one whole section: 'differences', 'classes.ShaderMaterial', 'functions.three.load(path)'. A bare name like 'ShaderMaterial' is found too."},"path":{"type":"string","description":"Where to also write the whole surface as Markdown, one heading per entry. Answers with the path and its size rather than the docs, since the point of a file is not having to read it here."},"all":{"type":"boolean","description":"Everything at once, about 113 KB of JSON. The index and a search cover nearly every reason to want it."}}}`,
-		.handler = &tool_get_api_docs,
-		.user_data = host,
-	});
+	server.add_tool(
+		{
+			.name = "get_api_docs",
+			.description = "The three.c3 scripting API as JSON. With no arguments: the INDEX — the summary, "
+				"every place it deliberately differs from Three.js, the stats block and the examples "
+				"in full, and the names of the classes and functions. `search` is the grep over the "
+				"whole surface: every entry whose name or prose mentions a word, with its text. "
+				"`section` opens one of those names. `path` also writes the whole thing to a Markdown "
+				"file, which is how you grep it with your own tools instead of asking again. Read the "
+				"index before writing a script — the differences are short and each one is a script "
+				"that would otherwise fail.",
+			.input_schema = `{"type":"object","properties":{"search":{"type":"string","description":"A word or phrase. Answers with every entry whose name or text contains it, keyed by the path 'section' takes. This is the grep."},"section":{"type":"string","description":"One entry or one whole section: 'differences', 'classes.ShaderMaterial', 'functions.three.load(path)'. A bare name like 'ShaderMaterial' is found too."},"path":{"type":"string","description":"Where to also write the whole surface as Markdown, one heading per entry. Answers with the path and its size rather than the docs, since the point of a file is not having to read it here."},"all":{"type":"boolean","description":"Everything at once, about 113 KB of JSON. The index and a search cover nearly every reason to want it."}}}`,
+			.handler = &tool_get_api_docs,
+			.user_data = host,
+		}
+	);
 
 	return server;
 }
@@ -293,10 +293,10 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 		return TOOL_NO_RUNTIME~;
 	}
 
-	String search = "";
+	String search  = "";
 	String section = "";
-	String path = "";
-	bool all = false;
+	String path    = "";
+	bool all       = false;
 	if (args != null)
 	{
 		if (try given = args.get_string("search")) search = given;
@@ -378,9 +378,11 @@ fn String? write_api_docs(ToolHost* host, String path, DString* detail)
 	report.append_string(`,"bytes":`);
 	report.appendf("%d", markdown.len)!!;
 	report.append_string(`,"note":`);
-	append_json_string(&report,
+	append_json_string(
+		&report,
 		"The whole API surface, one heading per entry, and every heading is a path this tool's "
-		"`section` argument accepts. Grep it rather than asking again.");
+			"`section` argument accepts. Grep it rather than asking again."
+	);
 	report.append_char('}');
 	return report.copy_str(mem);
 }
@@ -470,7 +472,7 @@ fn void append_json_string(DString* out, String text)
 fn void append_json_lines(DString* out, String text)
 {
 	out.append_char('[');
-	usz from = 0;
+	usz from   = 0;
 	bool first = true;
 	for (usz i = 0; i <= text.len; i++)
 	{

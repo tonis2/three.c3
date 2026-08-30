@@ -6,13 +6,13 @@
  surface. The two share `shader/assemble.c3` — the marker walk and the `#line`
  arithmetic — and nothing else:
 
-	                  material                post
-	 template         material.slang          post.slang
-	 body             float3 shade(Surface)   float3 post(Post)
-	 push block       76 bytes of mesh        16 bytes of `info`
-	 budget           52 bytes                112 bytes
-	 tables           yes, `//@rows`          no — there are no instances
-	 bindings         the base colour map     the frame before and image A
+ material                post
+ template         material.slang          post.slang
+ body             float3 shade(Surface)   float3 post(Post)
+ push block       76 bytes of mesh        16 bytes of `info`
+ budget           52 bytes                112 bytes
+ tables           yes, `//@rows`          no — there are no instances
+ bindings         the base colour map     the frame before and image A
 
  `info` is a `float4` at offset 0: the target's extent in `xy`, seconds since the
  shader was set in `z`, and a fourth component reserved rather than removed. A
@@ -66,10 +66,9 @@ const uint POST_UNIFORM_BUDGET = 104;
 *>
 const uint POST_PUSH_START = 24;
 
-$assert POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].offset + POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].size == POST_PUSH_START :
-	"`info` moved; post uniforms no longer start where post.slang puts them";
-$assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET :
-	"the post uniform budget and the push budget disagree";
+$assert POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].offset + POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].size
+	== POST_PUSH_START : "`info` moved; post uniforms no longer start where post.slang puts them";
+$assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET : "the post uniform budget and the push budget disagree";
 
 // The template, looked up the same way `mesh.slang` and `material.slang` are —
 // `shaders/` first, then `build/shaders/`, both relative to the working
@@ -96,29 +95,85 @@ const String POST_PREAMBLE_NAME = "three.post";
  message would not otherwise explain:
 
  - `info` is a *field* of the same struct the uniforms are appended to, so a
-   second one is a duplicate member rather than a substitution problem.
+ second one is a duplicate member rather than a substitution problem.
  - `post` and `p` are the body's own function and parameter. A `#define p
-   (push.p)` is live across exactly the lines the agent wrote, so it rewrites the
-   signature they are declared in.
+ (push.p)` is live across exactly the lines the agent wrote, so it rewrites the
+ signature they are declared in.
  - `prev` and `scene` are the two reserved samplers. A body has both as
-   same-pixel samples already (`p.color`, `p.scene`) and reaches the globals only
-   to sample a *different* pixel — a blur, a bloom combine — so a uniform by
-   either name would make the template's own declaration unparseable.
+ same-pixel samples already (`p.color`, `p.scene`) and reaches the globals only
+ to sample a *different* pixel — a blur, a bloom combine — so a uniform by
+ either name would make the template's own declaration unparseable.
 *>
-const String[*] POST_RESERVED @local = {
-	// What the template declares.
-	"push", "PushData", "info", "planes", "prev", "scene", "depth_buffer",
-	"tap_image", "Post", "p", "VertexOutput", "vertexMain", "fragmentMain",
-	"post", "output", "vid", "d", "near", "far", "span",
-	// Types.
-	"float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
-	"int", "int2", "int3", "int4", "uint", "uint2", "uint3", "uint4",
-	"bool", "bool2", "bool3", "bool4", "half", "double", "void",
-	"Sampler2D", "Texture2D", "SamplerState",
-	// Keywords.
-	"return", "if", "else", "for", "while", "do", "switch", "case", "default",
-	"break", "continue", "struct", "const", "static", "in", "out", "inout",
-	"discard", "true", "false", "typedef", "namespace", "uniform", "cbuffer",
+const String[*] POST_RESERVED @local = { // What the template declares.
+	"push",
+	"PushData",
+	"info",
+	"planes",
+	"prev",
+	"scene",
+	"depth_buffer",
+	"tap_image",
+	"Post",
+	"p",
+	"VertexOutput",
+	"vertexMain",
+	"fragmentMain",
+	"post",
+	"output",
+	"vid",
+	"d",
+	"near",
+	"far",
+	"span", // Types.
+	"float",
+	"float2",
+	"float3",
+	"float4",
+	"float2x2",
+	"float3x3",
+	"float4x4",
+	"int",
+	"int2",
+	"int3",
+	"int4",
+	"uint",
+	"uint2",
+	"uint3",
+	"uint4",
+	"bool",
+	"bool2",
+	"bool3",
+	"bool4",
+	"half",
+	"double",
+	"void",
+	"Sampler2D",
+	"Texture2D",
+	"SamplerState", // Keywords.
+	"return",
+	"if",
+	"else",
+	"for",
+	"while",
+	"do",
+	"switch",
+	"case",
+	"default",
+	"break",
+	"continue",
+	"struct",
+	"const",
+	"static",
+	"in",
+	"out",
+	"inout",
+	"discard",
+	"true",
+	"false",
+	"typedef",
+	"namespace",
+	"uniform",
+	"cbuffer",
 	"groupshared",
 };
 
@@ -176,10 +231,10 @@ fn uint post_uniform_bytes(MaterialUniform[] uniforms)
  and its argument: "these thirty floats do not fit" is only useful once each of
  them is known to be a real uniform.
 
- @return? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
- @return? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
- @return? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
+ @return ? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
+ @return ? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
+ @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
+ @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
 *>
 fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
 {
@@ -195,32 +250,38 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 		{
 			if (!is_identifier(uniform.name))
 			{
-				post_note(string::tformat(
-					"post: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
-					uniform.name
-				));
+				post_note(
+					string::tformat(
+						"post: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
+						uniform.name
+					)
+				);
 				return POST_NAME_INVALID~;
 			}
 
 			foreach (reserved : POST_RESERVED)
 			{
 				if (uniform.name != reserved) continue;
-				post_note(string::tformat(
-					"post: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
-					uniform.name
-				));
+				post_note(
+					string::tformat(
+						"post: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
+						uniform.name
+					)
+				);
 				return POST_NAME_INVALID~;
 			}
 
 			foreach (field : POST_CONTRACT_FIELDS)
 			{
 				if (uniform.name != field) continue;
-				post_note(string::tformat(
-					"post: uniform name '%s' is a field of Post, so it would rewrite p.%s in your own body — rename the uniform%s",
-					uniform.name,
-					uniform.name,
-					uniform.name == "time" ? " (and p.time is already the clock)" : ""
-				));
+				post_note(
+					string::tformat(
+						"post: uniform name '%s' is a field of Post, so it would rewrite p.%s in your own body — rename the uniform%s",
+						uniform.name,
+						uniform.name,
+						uniform.name == "time" ? " (and p.time is already the clock)" : ""
+					)
+				);
 				return POST_NAME_INVALID~;
 			}
 
@@ -234,11 +295,13 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 
 			if (uniform.components < 1 || uniform.components > 4)
 			{
-				post_note(string::tformat(
-					"post: uniform '%s' is %d floats wide; a uniform is 1 to 4",
-					uniform.name,
-					uniform.components
-				));
+				post_note(
+					string::tformat(
+						"post: uniform '%s' is %d floats wide; a uniform is 1 to 4",
+						uniform.name,
+						uniform.components
+					)
+				);
 				return POST_NAME_INVALID~;
 			}
 
@@ -251,11 +314,13 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 			// rows believes it can index them.
 			if (uniform_rows_of(uniform) > 1)
 			{
-				post_note(string::tformat(
-					"post: uniform '%s' asked for %d rows; a post pass draws one triangle over the whole frame, so there are no instances to select a row with",
-					uniform.name,
-					uniform_rows_of(uniform)
-				));
+				post_note(
+					string::tformat(
+						"post: uniform '%s' asked for %d rows; a post pass draws one triangle over the whole frame, so there are no instances to select a row with",
+						uniform.name,
+						uniform_rows_of(uniform)
+					)
+				);
 				return POST_NAME_INVALID~;
 			}
 		}
@@ -264,7 +329,11 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 		// against the uniforms as well as against the template's own names, so
 		// both lists have to be individually sound first.
 		String texture_note = texture_problem(
-			POST_BODY_NAME, textures, uniforms, POST_RESERVED[..], POST_TEXTURE_LIMIT
+			POST_BODY_NAME,
+			textures,
+			uniforms,
+			POST_RESERVED[..],
+			POST_TEXTURE_LIMIT
 		);
 		if (texture_note.len > 0)
 		{
@@ -275,12 +344,14 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 		uint wanted = post_uniform_bytes(uniforms);
 		if (wanted > POST_UNIFORM_BUDGET)
 		{
-			post_note(string::tformat(
-				"post: the uniforms want %d bytes of push block and %d are free; `info` and `planes` take the other %d of the 128 every device offers",
-				wanted,
-				POST_UNIFORM_BUDGET,
-				PUSH_BUDGET - POST_UNIFORM_BUDGET
-			));
+			post_note(
+				string::tformat(
+					"post: the uniforms want %d bytes of push block and %d are free; `info` and `planes` take the other %d of the 128 every device offers",
+					wanted,
+					POST_UNIFORM_BUDGET,
+					PUSH_BUDGET - POST_UNIFORM_BUDGET
+				)
+			);
 			return POST_TOO_MANY_UNIFORMS~;
 		}
 
@@ -299,19 +370,18 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names. rows must be 0 or 1.`
  @param textures : `Samplers the body wants, in declaration order. Bindings 2..N, generated from that order — a post pass reserves two.`
  @return `The whole module, allocated from allocator and owned by the caller.`
- @return? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence.`
- @return? POST_NAME_INVALID : `A uniform or texture name, a width or a row count is one this cannot generate. post_diagnostic() names it.`
- @return? POST_TOO_MANY_UNIFORMS : `The uniforms do not fit in what info leaves of the push block.`
- @return? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT. post_diagnostic() has the count.`
- @return? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
+ @return ? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence.`
+ @return ? POST_NAME_INVALID : `A uniform or texture name, a width or a row count is one this cannot generate. post_diagnostic() names it.`
+ @return ? POST_TOO_MANY_UNIFORMS : `The uniforms do not fit in what info leaves of the push block.`
+ @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT. post_diagnostic() has the count.`
+ @return ? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
 fn String? post_source(
 	String fragment,
 	MaterialUniform[] uniforms,
-	alloc::Allocator allocator = mem,
-	// After the allocator, for `material_source`'s reason: every caller written
+	alloc::Allocator allocator = mem, // After the allocator, for `material_source`'s reason: every caller written
 	// before textures existed passes it positionally.
-	MaterialTexture[] textures = {}
+	MaterialTexture[] textures = { }
 )
 {
 	validate_post(fragment, uniforms, textures)!;
@@ -319,7 +389,15 @@ fn String? post_source(
 	// marker, because a post pass's three vertices are `SV_VertexID` arithmetic
 	// with no geometry behind them and nothing an agent could usefully move.
 	return assemble_shader(
-		POST_TEMPLATE, fragment, uniforms, textures, "",
-		POST_BODY_NAME, POST_BODY_NAME, POST_PREAMBLE_NAME, POST_BINDING_FIRST, allocator
+		POST_TEMPLATE,
+		fragment,
+		uniforms,
+		textures,
+		"",
+		POST_BODY_NAME,
+		POST_BODY_NAME,
+		POST_PREAMBLE_NAME,
+		POST_BINDING_FIRST,
+		allocator
 	);
 }

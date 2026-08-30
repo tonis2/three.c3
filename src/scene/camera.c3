@@ -188,7 +188,7 @@ fn Vec3 Camera.up(&self)
 {
 	if (self.roll == 0.0f) return { 0, 1, 0 };
 
-	Vec3 forward = self.orbit_dir() * -1.0f;
+	Vec3 forward  = self.orbit_dir() * -1.0f;
 	Vec3 sideways = forward.cross((Vec3) { 0, 1, 0 });
 	// Same fallback as `basis`, and for the same reason: a caller may write
 	// `pitch` past the clamp directly, and a NaN up vector is an empty frame.
@@ -212,7 +212,7 @@ fn Vec3 Camera.up(&self)
 *>
 fn void Camera.basis(&self, Vec3* right, Vec3* up)
 {
-	Vec3 forward = self.orbit_dir() * -1.0f;
+	Vec3 forward  = self.orbit_dir() * -1.0f;
 	Vec3 sideways = forward.cross(self.up());
 
 	// The pitch clamp normally keeps this from happening, but the clamp is applied
@@ -258,10 +258,10 @@ fn float Camera.world_per_point(&self, float viewport_height)
 fn Matrix4f Camera.view(&self)
 {
 	Vec3 eye = self.eye();
-	Vec3 at = self.distance > 0.0f
-		? self.target
-		// One unit along the way the camera is already pointing. The length is
-		// arbitrary and cancels: `look_at` normalizes.
+	Vec3 at  = self
+		.distance > 0.0f ? self
+			.target // One unit along the way the camera is already pointing. The length is
+			// arbitrary and cancels: `look_at` normalizes.
 		: eye - self.orbit_dir();
 	return matrix::look_at{float}(eye, at, self.up());
 }
@@ -297,14 +297,14 @@ fn Matrix4f Camera.view_projection(&self, float aspect)
  The two ways to get this wrong, both of which overshoot and compound:
 
  - Fitting the bounding *sphere* through the corners. That is the tightest bound
-   holding whichever way the camera is turned, which is only worth paying for if
-   the camera is going to turn — and this runs on `frameAll`, at a known
-   orientation. Framing a cube by its corner sphere spends a factor of sqrt(3).
+ holding whichever way the camera is turned, which is only worth paying for if
+ the camera is going to turn — and this runs on `frameAll`, at a known
+ orientation. Framing a cube by its corner sphere spends a factor of sqrt(3).
  - Fitting the vertical half-angle alone. It is the one the projection is
-   specified by, but only the *narrower* of the two on a frame wider than it is
-   tall; on 16:9 the horizontal is nearly twice as wide and is left empty, and on
-   a portrait frame the never-fitted horizontal lets the silhouette run off the
-   sides.
+ specified by, but only the *narrower* of the two on a frame wider than it is
+ tall; on 16:9 the horizontal is nearly twice as wide and is left empty, and on
+ a portrait frame the never-fitted horizontal lets the silhouette run off the
+ sides.
 
  The cost of the exact fit is what the sphere was bought for: it is good at the
  orientation it was made at, and orbiting afterwards can carry a long box's ends
@@ -326,7 +326,7 @@ fn void Camera.frame_bounds(&self, Vec3 min, Vec3 max, float aspect = 1.0f)
 {
 	self.target = (min + max) * 0.5f;
 
-	Vec3 half = (max - min) * 0.5f;
+	Vec3 half    = (max - min) * 0.5f;
 	float radius = half.length();
 	// A box with no size at all — one point, or a scene holding nothing — has no
 	// fit to compute. A unit box keeps every expression below away from a divide
@@ -359,8 +359,8 @@ fn void Camera.frame_bounds(&self, Vec3 min, Vec3 max, float aspect = 1.0f)
 			(i & 4) != 0 ? half.z : -half.z,
 		};
 		float toward = corner.dot(to_eye);
-		float v = math::abs(corner.dot(up));
-		float h = math::abs(corner.dot(right));
+		float v      = math::abs(corner.dot(up));
+		float h      = math::abs(corner.dot(right));
 		needed = math::max(needed, toward + v * FRAME_MARGIN / tan_v);
 		needed = math::max(needed, toward + h * FRAME_MARGIN / tan_h);
 	}
@@ -473,7 +473,7 @@ fn void CameraFollow.apply(&self, Camera* camera, Vec3 anchor, float dt_ms)
 fn void CameraFollow.apply_world(&self, Camera* camera, Matrix4f world, float dt_ms)
 {
 	float[<16>] m = world.m;
-	Vec3 anchor = { m[12], m[13], m[14] };
+	Vec3 anchor   = { m[12], m[13], m[14] };
 
 	Vec3 offset = self.offset;
 	if (self.local_offset)
@@ -509,7 +509,7 @@ fn void CameraFollow.settle(&self, Camera* camera, Vec3 want, float dt_ms)
 
 	float step = math::min(dt_ms, FOLLOW_MAX_STEP_MS);
 	// 1 - e^(-t/τ): the fraction of the remaining distance to close this frame.
-	float t = 1.0f - math::exp(-step / self.lag_ms);
+	float t    = 1.0f - math::exp(-step / self.lag_ms);
 	camera.target = camera.target + (want - camera.target) * t;
 }
 
@@ -538,17 +538,17 @@ fn void CameraFollow.settle(&self, Camera* camera, Vec3 want, float dt_ms)
 *>
 fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
 {
-	Vec3 back    = self.orbit_dir();
+	Vec3 back    =  self.orbit_dir();
 	Vec3 forward = -back;
 	// `look_at` builds its basis this way round, and at the 89-degree pitch limit
 	// the cross product is still well conditioned.
-	//
+	// 
 	// Rolled, through `Camera.up`, so the box is around the frustum the frame is
 	// actually drawn with. A roll rotates the frustum about its own axis and the
 	// axis-aligned box around it genuinely changes — for a wide field of view, by
 	// up to a factor of the aspect ratio.
-	Vec3 right = forward.cross(self.up()).normalize();
-	Vec3 up    = right.cross(forward);
+	Vec3 right   =  forward.cross(self.up()).normalize();
+	Vec3 up      =  right.cross(forward);
 
 	float near = self.near_plane;
 	float far  = self.far_plane;
@@ -556,15 +556,15 @@ fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
 	if (far <= near) far = near + 1.0f;
 
 	float tan_half = math::tan(math::deg_to_rad(self.fov) * 0.5f);
-	Vec3 eye = self.eye();
+	Vec3 eye       = self.eye();
 
 	collision::Aabb3 box = collision::NEW_AABB3;
-	float[2] depths = { near, far };
+	float[2] depths      = { near, far };
 	foreach (d : depths)
 	{
-		float h = d * tan_half;
-		float w = h * aspect;
-		Vec3 centre = eye + forward * d;
+		float h        = d * tan_half;
+		float w        = h * aspect;
+		Vec3 centre    = eye + forward * d;
 		float[2] signs = { -1.0f, 1.0f };
 		foreach (sx : signs)
 		{

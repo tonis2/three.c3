@@ -33,9 +33,9 @@
 
  On this machine, with the Slang half already warm either way:
 
-	                          examples/chain.js   examples/village.js
-	warm (blob on disk)       0.21 s              0.61-0.68 s
-	cold (blob deleted)       0.21-0.22 s         0.62-0.64 s
+ examples/chain.js   examples/village.js
+ warm (blob on disk)       0.21 s              0.61-0.68 s
+ cold (blob deleted)       0.21-0.22 s         0.62-0.64 s
 
  Five runs and three runs; the difference is inside the noise. MoltenVK does not
  pay for pipeline creation the way a desktop driver does — it is a Metal pipeline
@@ -51,16 +51,16 @@
 
  Little-endian throughout.
 
-	bytes  field
-	-----  ------------------------------------------------------------------
-	    4  magic — 'T3PC' as the four bytes T, 3, P, C
-	    4  DRIVER_CACHE_FORMAT_VERSION
-	    4  vendorID                                       (identity, checked)
-	    4  deviceID                                       (identity, checked)
-	    4  driverVersion                                  (identity, checked)
-	   16  pipelineCacheUUID                              (identity, checked)
-	    4  payload length
-	    N  payload — whatever vkGetPipelineCacheData returned
+ bytes  field
+ -----  ------------------------------------------------------------------
+ 4  magic — 'T3PC' as the four bytes T, 3, P, C
+ 4  DRIVER_CACHE_FORMAT_VERSION
+ 4  vendorID                                       (identity, checked)
+ 4  deviceID                                       (identity, checked)
+ 4  driverVersion                                  (identity, checked)
+ 16  pipelineCacheUUID                              (identity, checked)
+ 4  payload length
+ N  payload — whatever vkGetPipelineCacheData returned
 
  Trailing bytes past the payload are ignored, and a payload shorter than its
  length is a miss. A torn write is short, not long.
@@ -138,7 +138,7 @@ fn DriverCacheStats driver_cache_stats() => driver_cache_counters;
 
 fn void driver_cache_reset_stats()
 {
-	driver_cache_counters = {};
+	driver_cache_counters = { };
 }
 
 <*
@@ -180,27 +180,27 @@ fn String driver_cache_path(DriverCache* cache) @local
 *>
 fn char[] driver_cache_payload(char[] bytes, DriverCache* cache) @local
 {
-	if (bytes.len < 40) return {};
+	if (bytes.len < 40) return { };
 
-	uint magic = driver_read_u32(bytes, 0);
+	uint magic   = driver_read_u32(bytes, 0);
 	uint version = driver_read_u32(bytes, 4);
-	if (magic != DRIVER_CACHE_MAGIC) return {};
-	if (version != DRIVER_CACHE_FORMAT_VERSION) return {};
+	if (magic != DRIVER_CACHE_MAGIC) return { };
+	if (version != DRIVER_CACHE_FORMAT_VERSION) return { };
 
-	if (driver_read_u32(bytes, 8) != cache.vendor) return {};
-	if (driver_read_u32(bytes, 12) != cache.device) return {};
-	if (driver_read_u32(bytes, 16) != cache.driver_version) return {};
+	if (driver_read_u32(bytes, 8) != cache.vendor) return { };
+	if (driver_read_u32(bytes, 12) != cache.device) return { };
+	if (driver_read_u32(bytes, 16) != cache.driver_version) return { };
 	// The one the spec actually names. Checked byte by byte rather than by
 	// comparing two slices, so a shorter file cannot reach past its end.
 	for (usz i = 0; i < vk::UUID_SIZE; i++)
 	{
-		if (bytes[20 + i] != cache.uuid[i]) return {};
+		if (bytes[20 + i] != cache.uuid[i]) return { };
 	}
 
 	usz length = (usz)driver_read_u32(bytes, 36);
-	if (length == 0) return {};
-	if (40 + length > bytes.len) return {};
-	return bytes[40 : length];
+	if (length == 0) return { };
+	if (40 + length > bytes.len) return { };
+	return bytes[40:length];
 }
 
 fn void driver_put_u32(DString* out, uint value) @local
@@ -213,10 +213,7 @@ fn void driver_put_u32(DString* out, uint value) @local
 
 fn uint driver_read_u32(char[] bytes, usz at) @local
 {
-	return (uint)bytes[at]
-		| ((uint)bytes[at + 1] << 8)
-		| ((uint)bytes[at + 2] << 16)
-		| ((uint)bytes[at + 3] << 24);
+	return (uint)bytes[at] | ((uint)bytes[at + 1] << 8) | ((uint)bytes[at + 2] << 16) | ((uint)bytes[at + 3] << 24);
 }
 
 <*
@@ -244,10 +241,10 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 
 	@pool()
 	{
-		char[] payload = {};
+		char[] payload = { };
 		if (self.persisted)
 		{
-			String where = driver_cache_path(self);
+			String where  = driver_cache_path(self);
 			char[]? bytes = file::load(tmem, where);
 			if (catch bytes)
 			{
@@ -264,8 +261,7 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 			}
 		}
 
-		vk::PipelineCacheCreateInfo info = vk::pipelineCacheCreateInfo()
-			.setInitialDataSize((sz)payload.len)
+		vk::PipelineCacheCreateInfo info = vk::pipelineCacheCreateInfo().setInitialDataSize((sz)payload.len)
 			.setInitialData(payload.len > 0 ? (void*)payload.ptr : null);
 
 		vk::PipelineCache? made = info.build(gpu.handle);
@@ -330,8 +326,7 @@ fn void DriverCache.save(&self, Gpu* gpu)
 
 		if (catch err = path::mkdir(shader_cache_dir(), recursive: true))
 		{
-			@advise("driver cache: cannot create %s (%s); every run builds its own pipelines",
-				shader_cache_dir(), err);
+			@advise("driver cache: cannot create %s (%s); every run builds its own pipelines", shader_cache_dir(), err);
 			return;
 		}
 
@@ -366,5 +361,5 @@ fn void DriverCache.free(&self, Gpu* gpu)
 	{
 		vk::destroyPipelineCache(gpu.handle, self.handle, null);
 	}
-	*self = {};
+	*self = { };
 }

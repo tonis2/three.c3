@@ -4,13 +4,13 @@
  Two halves of one feature, with one image behind them:
 
  - **The background.** Three vertices at the far plane, sampled by the direction
-   through each pixel — `shaders/sky.slang` has how, and why it is
-   equirectangular rather than a cubemap.
+ through each pixel — `shaders/sky.slang` has how, and why it is
+ equirectangular rather than a cubemap.
  - **The environment.** The same image bound at `ENVIRONMENT_BINDING` in every
-   shader that shades a surface, reflected by `environment_light`. This is the
-   half the plan is actually about: a metal reflects and does not scatter, so
-   with nothing around it to reflect, `material.metalness` renders dark and the
-   four punctual lights give it a highlight and nothing else.
+ shader that shades a surface, reflected by `environment_light`. This is the
+ half the plan is actually about: a metal reflects and does not scatter, so
+ with nothing around it to reflect, `material.metalness` renders dark and the
+ four punctual lights give it a highlight and nothing else.
 
  They are two fields rather than one because Three.js has two — `scene.background`
  and `scene.environment` — and because a scene that wants an environment and a
@@ -149,7 +149,7 @@ fn float[4] MeshPass.environment_params(&self)
 	if (sky.environment == NO_TEXTURE || sky.environment_intensity <= 0) return { 0, 0, 0, 0 };
 
 	Texture* image = self.assets.texture_at(sky.environment);
-	float top = image.levels > 1 ? (float)(image.levels - 1) : 0.0f;
+	float top      = image.levels > 1 ? (float)(image.levels - 1) : 0.0f;
 	return { sky.environment_intensity, sky.rotation, top, 0 };
 }
 
@@ -187,9 +187,7 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
 		.inverse_view_projection = invert(self.frame_view_projection),
 		.params = { sky.background_intensity, sky.rotation, 0, 0 },
 	};
-	vk::cmdPushConstants(
-		cmd, self.sky_pipeline.layout, self.sky_pipeline.shader.stages, 0, SkyPush::size, &push
-	);
+	vk::cmdPushConstants(cmd, self.sky_pipeline.layout, self.sky_pipeline.shader.stages, 0, SkyPush::size, &push);
 
 	// No index buffer and no vertex input: `SV_VertexID` is all the vertex stage
 	// reads, which is the same arrangement the post chain draws under.

@@ -3,10 +3,10 @@
 
  ## One instanced draw per bucket, and no other path
 
-	scene.update      world matrices, cull, sort, write Instance records
-	upload            the frame block and the instance array, this slot's copies
-	per bucket        bind the material's pipeline if it changed, push the
-	                  texture, push the block, vkCmdDrawIndexed(N)
+ scene.update      world matrices, cull, sort, write Instance records
+ upload            the frame block and the instance array, this slot's copies
+ per bucket        bind the material's pipeline if it changed, push the
+ texture, push the block, vkCmdDrawIndexed(N)
 
  There is no single-instance shortcut. A lone mesh is a bucket of one, drawn by
  the same call with an instance count of one, reading its transform out of the
@@ -51,13 +51,13 @@ const sz INITIAL_INSTANCES = 64;
 struct Lighting
 {
 	// How many lights are lit, 1 to `MAX_LIGHTS`.
-	//
+	// 
 	// Never zero. Light zero is `three.light` — the one the shadow map is fitted
 	// around — so "no direct light" is that light set to black rather than a count
 	// of none, and every reader is spared the empty case.
 	uint count;
 	// How much of its own colour a surface keeps where no light reaches it, 0 to 1.
-	//
+	// 
 	// Frame-wide rather than per light, because it is not a light: it is the term
 	// standing in for every bounce this renderer does not simulate, and four of
 	// them summed would be four times the same fudge.
@@ -79,10 +79,9 @@ struct Lighting
 *>
 const Lighting DEFAULT_LIGHTING = {
 	.count = 1,
-	.ambient = 0.25,
-	// The three unlit slots are zero, which is the value they hold until something
+	.ambient = 0.25, // The three unlit slots are zero, which is the value they hold until something
 	// fills them and is never read while `count` is one.
-	.lights = { { .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {} },
+	.lights = { { .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
 };
 
 <*
@@ -92,14 +91,14 @@ const Lighting DEFAULT_LIGHTING = {
  Numbers and not an enum because they cross into a shader as a float, and the one
  place that maps a name to one of them is `src/js/prelude/api.js`.
 *>
-const uint DEBUG_VIEW_OFF = 0;
+const uint DEBUG_VIEW_OFF        = 0;
 // `shadow_factor` as greyscale: white lit, black fully shadowed.
-const uint DEBUG_VIEW_SHADOW = 1;
+const uint DEBUG_VIEW_SHADOW     = 1;
 // What the shadow lookup would read, with magenta for "outside the fitted box"
 // and dark purple for "no shadow pass ran".
 const uint DEBUG_VIEW_SHADOW_MAP = 2;
 // The highest view there is, so the binding can range-check without listing them.
-const uint DEBUG_VIEW_MAX = DEBUG_VIEW_SHADOW_MAP;
+const uint DEBUG_VIEW_MAX        = DEBUG_VIEW_SHADOW_MAP;
 
 struct MeshPass
 {
@@ -112,7 +111,7 @@ struct MeshPass
 	MeshPipeline* line_pipeline;
 	// The same shader again, over `ALPHA_STATE` and `ADDITIVE_STATE`. These are
 	// what a `three.MeshLambertMaterial` with `transparent: true` draws with.
-	//
+	// 
 	// Held here rather than acquired when one is asked for, and that is a design
 	// decision rather than an optimisation: `create_texture_material` promises
 	// that putting a picture on a box needs no device, no Slang and no new
@@ -201,7 +200,7 @@ struct MeshPass
 	// see `Material.table` and `write_tables`. Per slot for the instance array's
 	// reason: a script writing a uniform between frames must not reach a buffer the
 	// GPU is still reading.
-	//
+	// 
 	// Zero bytes for a scene with no spilled material, which is every scene until
 	// one declares more uniforms than the push block holds.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] table_buffers;
@@ -210,7 +209,7 @@ struct MeshPass
 	// rather than from a baked clip — `skeleton: true`. Per frame in flight for the
 	// same reason as the two above, and this is the one the rule was written about:
 	// a host-visible palette rewritten while the GPU is still reading it tears.
-	//
+	// 
 	// Empty in every scene with no live character in it.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] pose_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] pose_capacity;
@@ -222,7 +221,7 @@ struct MeshPass
 	sz[MAX_FRAMES_IN_FLIGHT] morph_capacity;
 
 	// ---- Compute skinning, which is opt-in per character ---------------------
-	//
+	// 
 	// Built on the first frame that has a compute-routed character in it, and not
 	// at all in a project that never asks for one — the shader is compiled at that
 	// moment, like every other shader here.
@@ -240,7 +239,7 @@ struct MeshPass
 	List{uint} posed_offsets;
 
 	// ---- Soft bodies, which are opt-in per object ----------------------------
-	//
+	// 
 	// Nothing is allocated in a scene with no soft body in it, and nearly every
 	// scene has none.
 
@@ -261,7 +260,7 @@ struct MeshPass
 	List{uint} soft_offsets;
 
 	// ---- The shadow pass, which is opt-in for the same reason -----------------
-	//
+	// 
 	// No image, no shader and no pipeline until a script sets
 	// `three.light.shadow.enabled`. `render/shadow.c3` is the whole of it; what
 	// lives here is the two lines of the frame that reach it.
@@ -369,14 +368,14 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// cache key and a diagnostic label. A key that changed with where the file
 		// happened to be found would miss the cache for the same bytes.
 		String source = shader_source("mesh.slang", tmem)!;
-		String path = "mesh.slang";
+		String path   = "mesh.slang";
 		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE)!;
 
 		// The line pipeline is the same shader over a different fixed-function state
 		// — `LINE_STATE` has the argument — so this is a second `VkPipeline` and
 		// *not* a second Slang call: `acquire` keys on the source as well as the
 		// state, and the source is byte-identical.
-		//
+		// 
 		// It draws nothing until a script asks for a helper. Built here anyway,
 		// because building it on demand would put a 1 ms pipeline creation inside
 		// whichever frame first added a box helper, and the whole point of a debug
@@ -396,22 +395,27 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// it, and a scene that never assigns one records nothing.
 		String sky = shader_source("sky.slang", tmem)!;
 		self.sky_pipeline = self.pipelines.acquire(
-			gpu, target, sky, "sky.slang", SKY_STATE, contract: SKY_PUSH_FIELDS[..]
+			gpu,
+			target,
+			sky,
+			"sky.slang",
+			SKY_STATE,
+			contract: SKY_PUSH_FIELDS[..]
 		)!;
 	};
 
 	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
 	// a material, so `Node.material` never has to mean "none". Its uniform block is
 	// empty: `mesh.slang` declares no fields past `flags`.
-	//
+	// 
 	// `LINE_MATERIAL` is index 1 and is built beside it for the same reason: a
 	// node's material is a `uint`, so the pass has to be able to hand out an index
 	// that means "draw this as lines" before any script has asked for one.
-	//
+	// 
 	// Both name `NO_TEXTURE` explicitly. Leaving it out would zero-fill the field
 	// to texture 0, so every untextured node in the scene would draw with the first
 	// image any asset happened to upload — see `Material.texture`.
-	//
+	// 
 	// Both take a reference on the pipeline they draw with, on top of the one
 	// `acquire` gave the field above. Every stored `MeshPipeline*` in this file is
 	// a counted borrow without exception — the alternative, "the pass's own two are
@@ -422,15 +426,11 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// threshold every claim is already past: the built-ins warned about themselves.
 	self.material_warn_at = MATERIAL_WARN_AT;
 	self.pipelines.retain(self.pipeline);
-	self.claim_slot({
-		.pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "", .texture = NO_TEXTURE
-	});
+	self.claim_slot({ .pipeline = self.pipeline, .cull = CULL_MODE_BACK_BIT, .fragment = "", .texture = NO_TEXTURE });
 	// No culling for lines: a segment has no facing, and `CULL_MODE_NONE` is what
 	// keeps a wireframe from losing half its edges to a rule about triangles.
 	self.pipelines.retain(self.line_pipeline);
-	self.claim_slot({
-		.pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "", .texture = NO_TEXTURE
-	});
+	self.claim_slot({ .pipeline = self.line_pipeline, .cull = CULL_MODE_NONE, .fragment = "", .texture = NO_TEXTURE });
 	// After the two above rather than before them, which is what makes
 	// `live_materials` mean "materials a script made and could dispose". The two
 	// built-in slots are refused by `editable` and are never collected, so
@@ -457,7 +457,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// `Assets.load` directly — did not, so `three.render()` from a script drew
 	// nothing at all. Nothing caught it because no JS test asserted on pixels, and
 	// a blank PNG comes back fine.
-	//
+	// 
 	// An empty scene is already handled a few lines into `record`, where zero
 	// buckets returns, so this is not a weaker guard than what it replaces.
 	self.ready = true;
@@ -614,8 +614,8 @@ fn void MeshPass.note_scene_created(&self)
 
 	@advise(
 		"three: %d live scenes. new three.Scene() no longer empties the one before "
-		"it — each keeps its nodes, its bodies and its asset references until "
-		"scene.dispose(). stats().scenes is the number to watch.",
+			"it — each keeps its nodes, its bodies and its asset references until "
+			"scene.dispose(). stats().scenes is the number to watch.",
 		self.scenes.len()
 	);
 	self.scene_warn_at *= 2;
@@ -699,8 +699,8 @@ fn void MeshPass.note_material_claimed(&self)
 
 	@advise(
 		"three: %d live materials, and each one holds its pipeline until "
-		"material.dispose() gives it back — %d distinct pipelines so far. "
-		"stats().materials is the number to watch.",
+			"material.dispose() gives it back — %d distinct pipelines so far. "
+			"stats().materials is the number to watch.",
 		self.live_materials,
 		self.pipelines.entries.len()
 	);
@@ -732,7 +732,7 @@ fn Material* MeshPass.material(&self, uint index)
  like it names one thing. Every setter below goes through here, which keeps that
  rule in one place rather than in each of them.
 
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
 *>
 fn Material*? MeshPass.editable(&self, uint index)
 {
@@ -860,25 +860,25 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// loop. Draw ordering needs exactly one bit per material index — does this one
 	// blend — so one bit per index is what crosses: a flat `bool[]` off the temp
 	// arena, built here, read only for the length of the call.
-	//
+	// 
 	// Indexed by material index and exactly as long as the table, so a node naming
 	// a material past the end reads as opaque — the right answer for a bucket the
 	// draw loop is going to skip anyway. `alive` is asked for the same reason
 	// `MeshPass.material` asks it.
-	//
+	// 
 	// The bones settle before the draw list is built, and the order is
 	// load-bearing: `write_live_poses` reads every bone's world matrix and writes
 	// each live character's slice offset back into its node, and `build_draw_list`
 	// then copies that offset into the instance array. Run the other way round and
 	// a live character is drawn with last frame's offset — invisible while nothing
 	// is moving and a frame of lag the moment something is.
-	//
+	// 
 	// `update_world_matrices` runs again inside `scene.update` below and costs
 	// nothing the second time: `Scene.matrices_current` turns the traversal into a
 	// compare.
 
 	self.scene.update_world_matrices();
-	ulong live_address = self.write_live_poses(gpu, slot)!;
+	ulong live_address  = self.write_live_poses(gpu, slot)!;
 	// Before the draw list for `write_live_poses`' reason, and it is the same
 	// reason: this writes each morphing copy's slice offset back into its node, and
 	// `build_draw_list` copies that into the instance a moment later.
@@ -890,7 +890,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// shadow pass builds its list against the light's box as well as the camera's.
 	// Deciding this after `scene.update` would mean a shadow map missing exactly
 	// the casters that matter, and nothing anywhere saying so.
-	//
+	// 
 	// The fit needs the image, because the texel size and the normal offset are
 	// derived from the size it was actually created at; and it needs the world
 	// bounds, which `update_world_matrices` above has just made current.
@@ -901,7 +901,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// frame. Both of these can fail — an image allocation, a Slang compile — and
 		// propagating the fault would stop the renderer drawing anything at all,
 		// every frame, because `prepare` would retry and fail again.
-		//
+		// 
 		// `enabled` is cleared rather than only `live`, so it is one message and not
 		// one per frame, and so a script reading `three.light.shadow.enabled` back
 		// is told the truth.
@@ -923,7 +923,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			// the texels are spent on. Intersected here rather than inside `fit`
 			// because this is the only place that has a camera.
 			collision::Aabb3 bounds = self.scene.bounds(&self.assets);
-			collision::Aabb3 seen = self.camera.view_bounds(aspect, self.shadows.reach(self.camera.distance));
+			collision::Aabb3 seen   = self.camera.view_bounds(aspect, self.shadows.reach(self.camera.distance));
 			collision::Aabb3 focus = {
 				.min = math::max(seen.min, bounds.min),
 				.max = math::min(seen.max, bounds.max),
@@ -946,7 +946,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// Beside it and built in the same pass, because it answers a question of the
 		// same shape — something the *material* knows that the *scene* needs while
 		// it is culling. See `Material.bounds`.
-		float[] margins = alloc::new_array(tmem, float, self.materials.len());
+		float[] margins    = alloc::new_array(tmem, float, self.materials.len());
 		foreach (i, &material : self.materials)
 		{
 			transparent[i] = material.alive && material.blend != BlendMode.NONE;
@@ -956,7 +956,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// rasterise into and the box the cull is against are the same box by
 		// construction rather than by two agreeing derivations.
 		self.scene.update(
-			&self.assets, view_projection, transparent, margins,
+			&self.assets,
+			view_projection,
+			transparent,
+			margins,
 			self.shadows.live ? &self.shadows.light_view_projection : null
 		);
 	};
@@ -1043,7 +1046,7 @@ fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 	if (!self.shadows.live) return;
 
 	uint statics = 0;
-	uint movers = 0;
+	uint movers  = 0;
 	foreach (bucket : self.scene.buckets)
 	{
 		Material* material = self.material(bucket.material);
@@ -1099,7 +1102,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 	self.draw_indices.clear();
 
 	DrawRecord* records = (DrawRecord*)self.draw_buffers[slot].data();
-	uint recorded = 0;
+	uint recorded       = 0;
 
 	foreach (i, bucket : self.scene.buckets)
 	{
@@ -1123,7 +1126,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		// The mesh's own factor, faded by the material's opacity. Multiplied rather
 		// than replaced so a glTF's own alpha and a script's `opacity` compose — the
 		// file said what the surface is, the script says how much of it to show.
-		//
+		// 
 		// Costs nothing on an opaque material: `Material.opacity` is 1 unless
 		// somebody set it, and the opaque pipeline discards the alpha regardless.
 		float[4] base_color = mesh.base_color;
@@ -1141,7 +1144,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		// `skin_stride` is how it finds this copy's own posed vertices inside the
 		// shared output buffer.
 		uint posed_offset = i < self.posed_offsets.len() ? self.posed_offsets[i] : NOT_PRESKINNED;
-		bool preskinned = skinned && posed_offset != NOT_PRESKINNED;
+		bool preskinned   = skinned && posed_offset != NOT_PRESKINNED;
 		if (preskinned) skinned = false;
 
 		// The one thing here that replaces the mesh's own geometry rather than
@@ -1149,10 +1152,10 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		// `write_soft_vertices` produced this frame; everything else — the uvs, the
 		// colours, the index buffer — is still the asset's, because a soft body
 		// moves its vertices and never renumbers them.
-		uint soft_offset = i < self.soft_offsets.len() ? self.soft_offsets[i] : NOT_SOFT;
-		bool soft = soft_offset != NOT_SOFT;
+		uint soft_offset     = i < self.soft_offsets.len() ? self.soft_offsets[i] : NOT_SOFT;
+		bool soft            = soft_offset != NOT_SOFT;
 		ulong soft_positions = self.soft_address + (ulong)soft_offset * Vec3::size;
-		ulong soft_normals = soft_positions + (ulong)mesh.vertex_count * Vec3::size;
+		ulong soft_normals   = soft_positions + (ulong)mesh.vertex_count * Vec3::size;
 
 		// Three ways this bucket can have nothing to displace: the mesh carries no
 		// targets, the compute pass already displaced it, or nothing in the frame
@@ -1169,24 +1172,22 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.colors = mesh.has_colors ? mesh.colors.address : 0,
 			.joints = skinned ? mesh.joints.address : 0,
 			.weights = skinned ? mesh.weights.address : 0,
-			.palette = skinned ? owner.poses.address : 0,
-			// Not on a soft bucket: a soft body's positions are this frame's
-			// deformed ones, and displacing them by a blend shape authored against
-			// the rest mesh would be two deformations fighting over one vertex.
+			.palette = skinned ? owner.poses.address
+				: 0, // Not on a soft bucket: a soft body's positions are this frame's
+				// deformed ones, and displacing them by a blend shape authored against
+				// the rest mesh would be two deformations fighting over one vertex.
 			.morph = morphing ? mesh.morph.address : 0,
-			.posed = preskinned
-				? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size
-				: 0,
+			.posed = preskinned ? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size : 0,
 			.base_color = base_color,
-			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS : 0)
-				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
-				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
-				| (skinned ? FLAG_HAS_SKIN : 0)
-				| (preskinned ? FLAG_PRESKINNED : 0),
-			// The mesh's vertex count, and two readers want it for the same reason:
-			// both the compute pass's output and the morph target table hold one
-			// block per copy or per target, so finding block `n` means multiplying by
-			// this. Zero when neither reader is running, which is most buckets.
+			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS
+				: 0) | (mesh.has_uvs ? FLAG_HAS_UVS
+					: 0) | (mesh.has_colors ? FLAG_HAS_COLORS
+						: 0) | (skinned ? FLAG_HAS_SKIN
+							: 0) | (preskinned ? FLAG_PRESKINNED
+								: 0), // The mesh's vertex count, and two readers want it for the same reason:
+								// both the compute pass's output and the morph target table hold one
+								// block per copy or per target, so finding block `n` means multiplying by
+								// this. Zero when neither reader is running, which is most buckets.
 			.skin_stride = (preskinned || morphing) ? mesh.vertex_count : 0,
 			.morph_targets = morphing ? mesh.morph_targets : 0,
 			.uv_transform = material.uv_transform_or_identity(),
@@ -1209,7 +1210,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
 	// First, and the ordering is load-bearing — `render/sky.c3` has why a sky
 	// drawn last would paint over glass.
-	//
+	// 
 	// **Above the `prepared` guard, not below it.** `prepare` returns early for a
 	// scene with no buckets, and a scene with a background and nothing in it is an
 	// ordinary thing rather than a corner case — a level being framed, a sky an
@@ -1219,9 +1220,9 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 
 	if (!self.prepared) return;
 
-	ulong frame_address = self.frame_address;
+	ulong frame_address    = self.frame_address;
 	ulong instance_address = self.instance_address;
-	ulong draw_address = self.draw_address;
+	ulong draw_address     = self.draw_address;
 
 	// Bound per bucket, because a bucket is `(asset, mesh, material)` and the
 	// material chooses the pipeline. `build_draw_list` sorts material-major
@@ -1240,14 +1241,14 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// `visible`, not `count` — the tail of a bucket is the copies only the light
 		// can see, and drawing them here would put geometry on screen the camera
 		// frustum rejected. `Bucket.visible` has why they are a prefix.
-		//
+		// 
 		// Here rather than at the draw call, so a bucket the camera cannot see at
 		// all costs nothing instead of a pipeline bind, a cull mode, a descriptor
 		// collect and a push. With a shadow pass on, a caster behind the camera is
 		// the ordinary case.
 		if (bucket.visible == 0) continue;
 
-		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
 		Material* material = self.material(bucket.material);
 		if (mesh == null || material == null) continue;
 		MeshPipeline* pipeline = material.pipeline;
@@ -1270,15 +1271,14 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// the image and sampler are specified inline against this pipeline's own
 		// layout, so a material's shader gets its texture through its own layout
 		// rather than through one baked at load time against a different pipeline.
-		//
+		// 
 		// The material's own texture wins over the mesh's. `material.map` is the
 		// explicit statement and the mesh's image is what a file happened to bring,
 		// so a script that sets one and gets the other would be overruled by an
 		// asset it did not write. This costs nothing to decide here: the descriptor
 		// is already written per bucket, and a bucket is `(asset, mesh, material)` —
 		// so two nodes over one mesh with different maps are already two buckets.
-		Texture* sampled = material.texture == NO_TEXTURE
-			? self.assets.texture_for(mesh)
+		Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
 			: self.assets.texture_at(material.texture);
 
 		// Binding 0 by hand and everything above it from the shader's own reflection
@@ -1294,7 +1294,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// reads, and pushing a write for a binding the layout does not declare is a
 		// validation error. Both templates read it today, so the answer is yes
 		// today.
-		//
+		// 
 		// The white 1x1 when there is no shadow pass, which is not a fallback but
 		// the correct value: a depth of 1 is the far plane, nothing is in front of
 		// anything, and `shadow_factor` comes out lit. So shadows on and shadows off
@@ -1304,10 +1304,8 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		{
 			samplers.add(
 				SHADOW_BINDING,
-				self.shadows.live
-					? self.shadows.descriptor()
-					: self.assets.texture_at(NO_TEXTURE).descriptor()
-			);
+				self.shadows.live ? self.shadows.descriptor() : self.assets.texture_at(NO_TEXTURE)
+				.descriptor());
 		}
 		// Binding 2, the third reserved one, on the same terms: the sky when the
 		// scene has one and the white 1x1 when it does not. What stops that white
@@ -1323,29 +1321,29 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
-			.frame = frame_address,
-			// Offset on the CPU rather than passed as a base index: the shader then
+			.frame = frame_address, // Offset on the CPU rather than passed as a base index: the shader then
 			// reads instance zero of its own slice and never has to know whether
 			// SV_InstanceID includes firstInstance.
-			.instances = instance_address + (ulong)bucket.first * Instance::size,
-			// And this bucket's own record, for the same reason — `push.draw[0]` is
-			// always the right one, whatever else is in the buffer.
+			.instances = instance_address
+				+ (ulong)bucket.first
+					* Instance::size, // And this bucket's own record, for the same reason — `push.draw[0]` is
+					// always the right one, whatever else is in the buffer.
 			.draw = draw_address + (ulong)at * DrawRecord::size,
 		};
 		// The reflected size, not `MeshPush::size`. The two agree at 24 today and
 		// have not always: the block used to end in a `uint` that C3 followed with
 		// four bytes of tail padding, so Slang reported 76 where the struct occupied
 		// 80, and pushing 80 into a 76-byte range is a validation error.
-		//
+		// 
 		// Worth knowing how it fails, because it is not how it sounds: the picture
 		// is pixel-identical either way on this driver, so no test here catches it
 		// and only the validation layer does. It is still undefined behaviour, and a
 		// driver that took the spec literally would drop the push and render
 		// nothing.
-		//
+		// 
 		// Both this and the range in `MeshPipeline.init` read the same reflected
 		// field, so they cannot drift without an edit that hardcodes one of them.
-		//
+		// 
 		// The mesh contract first, the material's uniforms on top of it. A
 		// `Material.block` is laid out *as the push block itself* rather than as a
 		// list of values, so this is two memcpys with no per-uniform loop and no
@@ -1387,15 +1385,15 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
  Two refusals, and both are about a pipeline rather than about the surface:
 
  - A blended material casts nothing. A shadow map holds one depth per texel, so a
-   half-transparent surface can only be recorded as fully opaque or not at all —
-   and glass that throws a solid black shadow is a worse answer than glass that
-   throws none. The same reason `ALPHA_STATE` writes no depth in the main pass.
+ half-transparent surface can only be recorded as fully opaque or not at all —
+ and glass that throws a solid black shadow is a worse answer than glass that
+ throws none. The same reason `ALPHA_STATE` writes no depth in the main pass.
  - A line casts nothing. `LINE_STATE` has no depth test and no depth write
-   precisely so a debug helper is never hidden by the scene it was drawn to
-   explain; a helper that cast a shadow onto that scene would be the same mistake
-   from the other side. Asked by pipeline rather than by material index, because
-   `PipelineCache.acquire` hands the same pointer back for the same source and
-   state — so this covers any material drawn as lines.
+ precisely so a debug helper is never hidden by the scene it was drawn to
+ explain; a helper that cast a shadow onto that scene would be the same mistake
+ from the other side. Asked by pipeline rather than by material index, because
+ `PipelineCache.acquire` hands the same pointer back for the same source and
+ state — so this covers any material drawn as lines.
 
  What is deliberately *not* here is a per-node `castShadow`: a third per-copy
  channel splits buckets, which is the trade the whole renderer exists to refuse.
@@ -1488,7 +1486,7 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
 		if (at == NOT_DRAWN) continue;
 
-		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
 		Material* material = self.material(bucket.material);
 		if (mesh == null || material == null) continue;
 		if (!self.casts_shadow(material)) continue;
@@ -1524,7 +1522,13 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
  @return `1 if anything was drawn, 0 for an empty run — which is what makes the caller's sum a draw-call count.`
 *>
 fn uint MeshPass.draw_casters(
-	&self, vk::CommandBuffer cmd, GpuMesh* mesh, Bucket bucket, uint at, uint offset, uint count
+	&self,
+	vk::CommandBuffer cmd,
+	GpuMesh* mesh,
+	Bucket bucket,
+	uint at,
+	uint offset,
+	uint count
 )
 {
 	if (count == 0) return 0;
@@ -1534,7 +1538,7 @@ fn uint MeshPass.draw_casters(
 	// that is not in here at all: `shaders/shadow.slang` reads
 	// `light_view_projection` out of the frame block where `mesh.slang` reads
 	// `view_projection`.
-	//
+	// 
 	// The instance address carries the run's own offset, for `record`'s reason: the
 	// shader reads copy zero of its own slice. It is also what makes a sub-range
 	// legal at all — `SV_InstanceID` is relative to what is pushed here.
@@ -1725,7 +1729,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	}
 
 	Matrix4f* palette = (Matrix4f*)self.pose_buffers[slot].data();
-	uint at = 0;
+	uint at           = 0;
 
 	foreach (&player : self.scene.players)
 	{
@@ -1818,7 +1822,7 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 	}
 
 	float* weights = (float*)self.morph_buffers[slot].data();
-	uint at = 0;
+	uint at        = 0;
 
 	foreach (&entry : self.scene.morphs)
 	{
@@ -1875,7 +1879,7 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 			continue;
 		}
 
-		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		GpuMesh* mesh    = self.assets.mesh(bucket.asset, bucket.mesh);
 		SoftMesh* record = self.scene.physics.soft_for(bucket.node);
 		// The counts disagreeing would mean the node changed mesh under a live soft
 		// body. Drawing the asset's own vertices is the answer that cannot read off
@@ -2011,15 +2015,16 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 			.positions = mesh.positions.address,
 			.normals = mesh.has_normals ? mesh.normals.address : 0,
 			.joints = mesh.joints.address,
-			.weights = mesh.weights.address,
-			// Offset to this bucket's first copy, exactly as the draw path offsets
-			// it, so `iid` starts at zero in the shader either way.
+			.weights = mesh.weights
+				.address, // Offset to this bucket's first copy, exactly as the draw path offsets
+				// it, so `iid` starts at zero in the shader either way.
 			.instances = self.instance_address + (ulong)bucket.first * Instance::size,
 			.baked = owner.poses.address,
 			.live = self.live_address,
-			.output = output_address + (ulong)self.posed_offsets[i] * SkinnedVertex::size,
-			// The morph happens before the blend here exactly as it does in the
-			// vertex shader, or `skinning: 'compute'` would be a different face.
+			.output = output_address
+				+ (ulong)self.posed_offsets[i]
+					* SkinnedVertex::size, // The morph happens before the blend here exactly as it does in the
+					// vertex shader, or `skinning: 'compute'` would be a different face.
 			.morph = (mesh.morph_targets > 0 && self.morph_address != 0) ? mesh.morph.address : 0,
 			.morph_weights = self.morph_address,
 			.vertex_count = mesh.vertex_count,
@@ -2147,7 +2152,7 @@ fn uint? MeshPass.create_material(
 	MaterialUniform[] uniforms,
 	int side = SIDE_FRONT,
 	int blending = BLENDING_NONE,
-	MaterialTexture[] textures = {},
+	MaterialTexture[] textures = { },
 	String vertex = "",
 	float bounds = 0,
 	String* diagnostic = null
@@ -2159,31 +2164,38 @@ fn uint? MeshPass.create_material(
 	{
 		String source = material_source(fragment, uniforms, tmem, textures, vertex)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
-			gpu, target, source, "three.material", state_for_blend(blend), diagnostic
+			gpu,
+			target,
+			source,
+			"three.material",
+			state_for_blend(blend),
+			diagnostic
 		)!;
 
 		// The reference `acquire` handed out is the material's from here — no
 		// retain, because there is no second holder.
-		index = self.claim_slot({
-			.pipeline = pipeline,
-			.cull = cull_for_side(side),
-			.blend = blend,
-			.fragment = fragment.copy(mem),
-			// Copied only when there is one, so a material without a vertex body
-			// carries a zero slice rather than a pointer into static memory that
-			// `Material.free` would hand to the allocator.
-			.vertex = vertex.len > 0 ? vertex.copy(mem) : (String){},
-			// What the source above was generated from, so the exporter can generate
-			// it again as a bake — `Material.declared_uniforms` has the argument.
-			.declared_uniforms = copy_uniform_declarations(uniforms),
-			.declared_textures = copy_texture_declarations(textures),
-			.bounds = bounds,
-			// A `ShaderMaterial` can be given a `map` afterwards like any other
-			// material — `material.slang` declares the same binding 0 that
-			// `mesh.slang` does, so `Surface.uv` samples it either way. It just does
-			// not start with one.
-			.texture = NO_TEXTURE,
-		});
+		index = self.claim_slot(
+			{
+				.pipeline = pipeline,
+				.cull = cull_for_side(side),
+				.blend = blend,
+				.fragment = fragment.copy(
+					mem
+				), // Copied only when there is one, so a material without a vertex body
+				// carries a zero slice rather than a pointer into static memory that
+				// `Material.free` would hand to the allocator.
+				.vertex = vertex.len > 0 ? vertex.copy(mem)
+					: (String) { }, // What the source above was generated from, so the exporter can generate
+					// it again as a bake — `Material.declared_uniforms` has the argument.
+				.declared_uniforms = copy_uniform_declarations(uniforms),
+				.declared_textures = copy_texture_declarations(textures),
+				.bounds = bounds, // A `ShaderMaterial` can be given a `map` afterwards like any other
+				// material — `material.slang` declares the same binding 0 that
+				// `mesh.slang` does, so `Surface.uv` samples it either way. It just does
+				// not start with one.
+				.texture = NO_TEXTURE,
+			}
+		);
 	};
 	return index;
 }
@@ -2207,7 +2219,7 @@ fn uint? MeshPass.create_material(
  reason: a debug line has no facing to cull, and offering the setting would be
  offering one that does nothing.
 
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
 *>
 fn void? MeshPass.set_material_side(&self, uint index, int side)
 {
@@ -2240,7 +2252,7 @@ fn void? MeshPass.set_material_side(&self, uint index, int side)
  name, which is where a script's mistake can be reported against the line that
  made it; this is the floor under that.
 
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
 *>
 fn void? MeshPass.set_material_opacity(&self, uint index, float opacity)
 {
@@ -2300,7 +2312,7 @@ fn float MeshPass.material_opacity(&self, uint index)
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Selects one of the three pipelines built in init; nothing is compiled here whichever it is.`
  @return `The material index, for Node.material.`
- @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
 *>
 fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FRONT, int blending = BLENDING_NONE)
 {
@@ -2310,7 +2322,7 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
 	// the first instant it does. A no-op for `NO_TEXTURE`, which names none.
 	self.assets.retain_texture(texture);
 
-	BlendMode blend = blend_for(blending);
+	BlendMode blend        = blend_for(blending);
 	MeshPipeline* pipeline = self.pipeline;
 	switch (blend)
 	{
@@ -2322,13 +2334,15 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
 	// instead of asking the cache for the built-in shader again — it knows the
 	// answer — so the reference has to be taken by hand.
 	self.pipelines.retain(pipeline);
-	return self.claim_slot({
-		.pipeline = pipeline,
-		.cull = cull_for_side(side),
-		.blend = blend,
-		.fragment = "",
-		.texture = texture,
-	});
+	return self.claim_slot(
+		{
+			.pipeline = pipeline,
+			.cull = cull_for_side(side),
+			.blend = blend,
+			.fragment = "",
+			.texture = texture,
+		}
+	);
 }
 
 <*
@@ -2358,8 +2372,8 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
  transform"; this refuses to write one, so the two cannot be confused.
 
  @param repeat_u : `Times across. Must not be zero.`
- @return? MATERIAL_UNKNOWN : `No such material in this context.`
- @return? MATERIAL_REPEAT_IS_ZERO : `A repeat of zero collapses the surface onto one texel.`
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return ? MATERIAL_REPEAT_IS_ZERO : `A repeat of zero collapses the surface onto one texel.`
 *>
 fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repeat_v, float offset_u, float offset_v)
 {
@@ -2382,7 +2396,7 @@ fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repea
 
  The prelude has already refused a value outside 0..1 by name.
 
- @return? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
 *>
 fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float metalness, float reflectance)
 {
@@ -2432,8 +2446,8 @@ fn float[4] MeshPass.material_uv(&self, uint index)
  missing; there is nowhere on that geometry to put it.
 
  @param gpu : `For the wait below. Null in a scene-math runtime, which has nothing in flight.`
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
- @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture.`
 *>
 fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 {
@@ -2477,9 +2491,9 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 
  @param name : `The sampler as the body spells it.`
  @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back.`
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones.`
- @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
- @return? MATERIAL_SAMPLER_UNKNOWN : `This material's shader has no sampler by that name.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones.`
+ @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return ? MATERIAL_SAMPLER_UNKNOWN : `This material's shader has no sampler by that name.`
 *>
 fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name, int texture)
 {
@@ -2533,7 +2547,7 @@ fn int MeshPass.material_texture(&self, uint index, String name)
  Disposing twice is not an error — the second call has nothing to give back.
 
  @param gpu : `For the collection this may trigger. Null defers it to the next one that has a device.`
- @return? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
 *>
 fn void? MeshPass.dispose_material(&self, Gpu* gpu, uint index)
 {
@@ -2594,7 +2608,7 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	// last one: a frame in flight may still be sampling the image about to be
 	// destroyed. The image goes through the deletion queue now, exactly as the
 	// pipeline below does.
-	//
+	// 
 	// This can land inside a frame, since `record` collects, and that is no longer
 	// a reason to be careful: nothing here waits for anything.
 	self.assets.release_texture(gpu, material.texture);
@@ -2631,7 +2645,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.table_buffers[i].buffer != null) self.table_buffers[i].free();
 		self.table_capacity[i] = 0;
 		if (self.morph_buffers[i].buffer != null) self.morph_buffers[i].free();
-		self.morph_buffers[i] = {};
+		self.morph_buffers[i] = { };
 		self.morph_capacity[i] = 0;
 		if (self.pose_buffers[i].buffer != null) self.pose_buffers[i].free();
 		if (self.posed_buffers[i].buffer != null) self.posed_buffers[i].free();
@@ -2653,7 +2667,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// afterwards would decrement counts in a freed list. The device is idle by the
 	// time a pass is torn down, so no wait is needed here as it is in
 	// `set_material_map`.
-	//
+	// 
 	// Live slots only. A collected one released its image when it was collected,
 	// and `Material.free` leaves `texture` at `NO_TEXTURE` so a second pass here
 	// would be a no-op even if this forgot to ask.

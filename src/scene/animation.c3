@@ -5,11 +5,11 @@
  Two halves, and the split between them is the design:
 
  - A clip is on the asset. Keyframes are immutable data read once per file, so a
-   hundred copies of a walking character share one copy of the walk.
+ hundred copies of a walking character share one copy of the walk.
  - A player is on the instance. Two copies of the same tree must be able to wave
-   at different phases, so the time, the speed and the loop flag live beside the
-   nodes rather than beside the keys. This is the first per-instance state in the
-   scene model that is not a transform.
+ at different phases, so the time, the speed and the loop flag live beside the
+ nodes rather than beside the keys. This is the first per-instance state in the
+ scene model that is not a transform.
 
  `gltf.c3l`'s `Animation.duration`, `loop_time` and `clamp_time` are used; its
  whole-node sampler is not, because it walks every channel looking for the frame
@@ -121,7 +121,7 @@ fn void AnimationClip.free(&self)
 		if (channel.values.len > 0) mem::free(channel.values);
 	}
 	self.channels.free();
-	self.channels = {};
+	self.channels = { };
 	if (self.name.len > 0) self.name.free(mem);
 	self.name = "";
 	self.loaded = false;
@@ -146,12 +146,19 @@ fn usz find_keyframe(float[] times, float time, float* fraction) @local
 	if (time <= times[0]) return 0;
 	if (time >= times[times.len - 1]) return times.len - 1;
 
-	usz low = 0;
+	usz low  = 0;
 	usz high = times.len - 1;
 	while (high - low > 1)
 	{
 		usz mid = (low + high) / 2;
-		if (times[mid] <= time) { low = mid; } else { high = mid; }
+		if (times[mid] <= time)
+		{
+			low = mid;
+		}
+		else
+		{
+			high = mid;
+		}
 	}
 
 	float span = times[high] - times[low];
@@ -167,14 +174,14 @@ fn usz find_keyframe(float[] times, float time, float* fraction) @local
  All three glTF interpolations:
 
  - STEP holds the earlier key. For anything that should pop rather than slide —
-   a light switching, a prop appearing.
+ a light switching, a prop appearing.
  - LINEAR interpolates. For a rotation that means *slerp*, not a component-wise
-   mix: the spec says so, and a component-wise mix of two quaternions 90° apart
-   speeds up in the middle and is not a unit quaternion on the way.
+ mix: the spec says so, and a component-wise mix of two quaternions 90° apart
+ speeds up in the middle and is not a unit quaternion on the way.
  - CUBICSPLINE stores three values per key — in-tangent, value, out-tangent —
-   and interpolates with a Hermite spline. The tangents are scaled by the key
-   spacing, which is the part that is wrong in every implementation that treats
-   the interval as one second.
+ and interpolates with a Hermite spline. The tangents are scaled by the key
+ spacing, which is the part that is wrong in every implementation that treats
+ the interval as one second.
 
  @param out : `At least four floats; only the channel's own stride is written.`
 *>
@@ -182,15 +189,15 @@ fn void AnimationChannel.sample(&self, float time, float[] out)
 {
 	if (self.times.len == 0) return;
 
-	uint stride = self.stride;
-	bool spline = self.interp == gltf::Interpolation.CUBICSPLINE;
+	uint stride       = self.stride;
+	bool spline       = self.interp == gltf::Interpolation.CUBICSPLINE;
 	// CUBICSPLINE stores [in-tangent, value, out-tangent] per key, so the value
 	// of key `k` is at `k * 3 * stride + stride`.
-	uint block = spline ? stride * 3 : stride;
+	uint block        = spline ? stride * 3 : stride;
 	uint value_offset = spline ? stride : 0;
 
 	float fraction;
-	usz key = find_keyframe(self.times, time, &fraction);
+	usz key  = find_keyframe(self.times, time, &fraction);
 	usz next = key + 1 < self.times.len ? key + 1 : key;
 
 	usz a = key * (usz)block + (usz)value_offset;
@@ -205,26 +212,24 @@ fn void AnimationChannel.sample(&self, float time, float[] out)
 	if (spline)
 	{
 		float span = self.times[next] - self.times[key];
-		float t = fraction;
-		float t2 = t * t;
-		float t3 = t2 * t;
+		float t    = fraction;
+		float t2   = t * t;
+		float t3   = t2 * t;
 
-		float h00 = 2 * t3 - 3 * t2 + 1;
-		float h10 = t3 - 2 * t2 + t;
+		float h00 =  2 * t3 - 3 * t2 + 1;
+		float h10 =  t3 - 2 * t2 + t;
 		float h01 = -2 * t3 + 3 * t2;
-		float h11 = t3 - t2;
+		float h11 =  t3 - t2;
 
 		// The out-tangent of the earlier key and the in-tangent of the later one,
 		// both scaled by the interval — glTF stores tangents per unit of the
 		// *parameter*, and the parameter here is seconds.
 		usz out_tangent = key * (usz)block + (usz)stride * 2;
-		usz in_tangent = next * (usz)block;
+		usz in_tangent  = next * (usz)block;
 
 		for (uint i = 0; i < stride; i++)
 		{
-			out[i] = h00 * self.values[a + i]
-				+ h10 * span * self.values[out_tangent + i]
-				+ h01 * self.values[b + i]
+			out[i] = h00 * self.values[a + i] + h10 * span * self.values[out_tangent + i] + h01 * self.values[b + i]
 				+ h11 * span * self.values[in_tangent + i];
 		}
 		if (self.path == AnimatedPath.ROTATION) normalize_into(out);
@@ -233,8 +238,8 @@ fn void AnimationChannel.sample(&self, float time, float[] out)
 
 	if (self.path == AnimatedPath.ROTATION)
 	{
-		Quaternionf from = { self.values[a], self.values[a + 1], self.values[a + 2], self.values[a + 3] };
-		Quaternionf to = { self.values[b], self.values[b + 1], self.values[b + 2], self.values[b + 3] };
+		Quaternionf from  = { self.values[a], self.values[a + 1], self.values[a + 2], self.values[a + 3] };
+		Quaternionf to    = { self.values[b], self.values[b + 1], self.values[b + 2], self.values[b + 3] };
 		Quaternionf mixed = from.slerp(to, fraction);
 		out[0] = mixed.i;
 		out[1] = mixed.j;
@@ -321,7 +326,7 @@ struct AnimationPlayer
 	List{NodeId} targets;
 
 	// The skinned meshes under `root`, usually one and never many. Owned.
-	//
+	// 
 	// What makes a crowd cost nothing: advancing a baked character is stepping
 	// the clock, dividing by the frame rate, and writing one `uint` per entry
 	// here. No palette to compute, nothing to upload, no per-joint work — the
@@ -390,11 +395,11 @@ struct AnimationPlayer
 fn void AnimationPlayer.free(&self)
 {
 	self.targets.free();
-	self.targets = {};
+	self.targets = { };
 	self.skinned.free();
-	self.skinned = {};
+	self.skinned = { };
 	self.weight_scratch.free();
-	self.weight_scratch = {};
+	self.weight_scratch = { };
 }
 
 <*
@@ -520,13 +525,7 @@ fn float AnimationPlayer.blend_weight(&self)
 
  Three passes over the channels rather than one, and only while a fade is running.
 *>
-fn void AnimationPlayer.apply_blend(
-	&self,
-	Scene* scene,
-	Asset* owner,
-	AnimationClip* from,
-	AnimationClip* to
-)
+fn void AnimationPlayer.apply_blend(&self, Scene* scene, Asset* owner, AnimationClip* from, AnimationClip* to)
 {
 	// Every node either clip drives, back to the file's own transform first. A
 	// joint that only one of the two names would otherwise blend out of wherever
@@ -700,7 +699,11 @@ fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, flo
 			case AnimatedPath.TRANSLATION:
 				node.position = mix_vec(node.position, (Vec3) { value[0], value[1], value[2] }, weight);
 			case AnimatedPath.ROTATION:
-				node.rotation = mix_quat(node.rotation, (Quaternionf) { value[0], value[1], value[2], value[3] }, weight);
+				node.rotation = mix_quat(
+					node.rotation,
+					(Quaternionf) { value[0], value[1], value[2], value[3] },
+					weight
+				);
 			case AnimatedPath.SCALE:
 				node.scale = mix_vec(node.scale, (Vec3) { value[0], value[1], value[2] }, weight);
 			default:

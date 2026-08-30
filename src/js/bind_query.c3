@@ -49,30 +49,30 @@ fn void JsRuntime.bind_query_verbs(&self, qjs::Value host)
 *>
 fn char[] typed_view(qjs::Context* js, int argc, qjs::Value* args, int at, sz element_size)
 {
-	if (at + 2 >= argc) return {};
+	if (at + 2 >= argc) return { };
 	char[] bytes = js.bytes(args[at]);
-	if (bytes.len == 0) return {};
+	if (bytes.len == 0) return { };
 
 	long offset = (long)arg_number(js, argc, args, at + 1);
-	long count = (long)arg_number(js, argc, args, at + 2);
-	if (offset < 0 || count <= 0) return {};
+	long count  = (long)arg_number(js, argc, args, at + 2);
+	if (offset < 0 || count <= 0) return { };
 
 	long wanted = count * (long)element_size;
-	if (offset + wanted > (long)bytes.len) return {};
-	return bytes[(sz)offset : (sz)wanted];
+	if (offset + wanted > (long)bytes.len) return { };
+	return bytes[(sz)offset:(sz)wanted];
 }
 
 fn float[] float_view(qjs::Context* js, int argc, qjs::Value* args, int at)
 {
 	char[] bytes = typed_view(js, argc, args, at, 4);
-	if (bytes.len == 0) return {};
+	if (bytes.len == 0) return { };
 	return ((float*)bytes.ptr)[:bytes.len / 4];
 }
 
 fn int[] int_view(qjs::Context* js, int argc, qjs::Value* args, int at)
 {
 	char[] bytes = typed_view(js, argc, args, at, 4);
-	if (bytes.len == 0) return {};
+	if (bytes.len == 0) return { };
 	return ((int*)bytes.ptr)[:bytes.len / 4];
 }
 
@@ -105,7 +105,12 @@ fn uint write_handles(int[] out, NodeId[] found) @local
  @return `How many nodes were written. Equal to capacity means there may be more.`
 *>
 fn void js_query_box(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -118,12 +123,16 @@ fn void js_query_box(
 	box.fix();
 
 	int[] slots = int_view(&js, argc, args, 6);
-	if (slots.len < 2) { *out = qjs::int_value(0); return; }
+	if (slots.len < 2)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	@pool()
 	{
 		NodeId[] found = mem::temp_array(NodeId, (sz)(slots.len / 2));
-		uint count = self.pass.scene.query_box(&self.pass.assets, box, found);
+		uint count     = self.pass.scene.query_box(&self.pass.assets, box, found);
 		*out = qjs::int_value((int)write_handles(slots, found[:(sz)count]));
 	};
 }
@@ -133,22 +142,31 @@ fn void js_query_box(
  `queryBox` and the same counting.
 *>
 fn void js_overlap_sphere(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 centre = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	Vec3 centre  = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
 	float radius = arg_float(&js, argc, args, 3);
 
 	int[] slots = int_view(&js, argc, args, 4);
-	if (slots.len < 2) { *out = qjs::int_value(0); return; }
+	if (slots.len < 2)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	@pool()
 	{
 		NodeId[] found = mem::temp_array(NodeId, (sz)(slots.len / 2));
-		uint count = self.pass.scene.overlap_sphere(&self.pass.assets, centre, radius, found);
+		uint count     = self.pass.scene.overlap_sphere(&self.pass.assets, centre, radius, found);
 		*out = qjs::int_value((int)write_handles(slots, found[:(sz)count]));
 	};
 }
@@ -168,13 +186,18 @@ fn void js_overlap_sphere(
  cheaper than sorting because it can stop.
 *>
 fn void js_raycast_all(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 origin = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	Vec3 origin    = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
 	Vec3 direction = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
 
 	float length = direction.length();
@@ -185,7 +208,7 @@ fn void js_raycast_all(
 	}
 
 	float max_distance = arg_float(&js, argc, args, 6);
-	int limit = arg_int(&js, argc, args, 7);
+	int limit          = arg_int(&js, argc, args, 7);
 	if (limit <= 0) limit = 64;
 	if (limit > 4096) limit = 4096;
 
@@ -233,16 +256,21 @@ fn qjs::Value sweep_value(JsRuntime* self, qjs::Context* js, SweepHit hit) @loca
  `Scene.sweep_capsule` for why there is no orientation argument.
 *>
 fn void js_sweep(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 from = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 to = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 from    = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	Vec3 to      = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
 	float radius = arg_float(&js, argc, args, 6);
-	float half = arg_float(&js, argc, args, 7);
+	float half   = arg_float(&js, argc, args, 7);
 
 	if (!(radius > 0.0f))
 	{
@@ -251,7 +279,14 @@ fn void js_sweep(
 	}
 
 	SweepHit hit = self.pass.scene.sweep_capsule(
-		&self.pass.assets, from, to, radius, half, 0.0f, ignore_set(self, &js, argc, args, 8));
+		&self.pass.assets,
+		from,
+		to,
+		radius,
+		half,
+		0.0f,
+		ignore_set(self, &js, argc, args, 8)
+	);
 	*out = sweep_value(self, &js, hit);
 }
 
@@ -272,7 +307,7 @@ fn void js_sweep(
 fn IgnoreSet ignore_set(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at) @local
 {
 	int[] pairs = int_view(js, argc, args, at);
-	if (pairs.len < 2 || self.pass == null) return {};
+	if (pairs.len < 2 || self.pass == null) return { };
 
 	IgnoreSet set;
 	for (sz i = 0; i + 1 < pairs.len && set.count < MAX_IGNORED; i += 2)
@@ -298,7 +333,12 @@ fn IgnoreSet ignore_set(JsRuntime* self, qjs::Context* js, int argc, qjs::Value*
  `mesh.position.copy(r.position)` is one JavaScript assignment.
 *>
 fn void js_move_and_slide(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
@@ -318,12 +358,19 @@ fn void js_move_and_slide(
 
 	if (!(options.radius > 0.0f))
 	{
-		*out = js.raise("three.moveAndSlide wants a positive radius — a capsule with none is a point and slides off everything");
+		*out = js.raise(
+			"three.moveAndSlide wants a positive radius — a capsule with none is a point and slides off everything"
+		);
 		return;
 	}
 
 	MoveResult result = self.pass.scene.move_capsule(
-		&self.pass.assets, centre, motion, options, ignore_set(self, &js, argc, args, 12));
+		&self.pass.assets,
+		centre,
+		motion,
+		options,
+		ignore_set(self, &js, argc, args, 12)
+	);
 
 	qjs::Value value = js.object();
 	js.set_property(value, "position", vec3_value(&js, result.position));
@@ -333,10 +380,8 @@ fn void js_move_and_slide(
 	js.set_property(value, "stepped", qjs::bool_value(result.stepped));
 	js.set_property(value, "slides", qjs::int_value((int)result.slides));
 	js.set_property(value, "normal", vec3_value(&js, result.normal));
-	js.set_property(value, "ground", result.ground.is_set()
-		? handle_value(&js, result.ground) : qjs::null_value());
-	js.set_property(value, "hit", result.hit.is_set()
-		? handle_value(&js, result.hit) : qjs::null_value());
+	js.set_property(value, "ground", result.ground.is_set() ? handle_value(&js, result.ground) : qjs::null_value());
+	js.set_property(value, "hit", result.hit.is_set() ? handle_value(&js, result.hit) : qjs::null_value());
 	js.set_property(value, "groundVelocity", vec3_value(&js, result.ground_velocity));
 	*out = value;
 }
@@ -360,17 +405,26 @@ fn void js_move_and_slide(
  @return `How many agents were stepped.`
 *>
 fn void js_move_and_slide_all(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
 	float[] positions = float_view(&js, argc, args, 0);
-	float[] motions = float_view(&js, argc, args, 3);
-	float[] results = float_view(&js, argc, args, 6);
-	int[] selves = int_view(&js, argc, args, 9);
-	if (positions.len < 3 || motions.len < 3) { *out = qjs::int_value(0); return; }
+	float[] motions   = float_view(&js, argc, args, 3);
+	float[] results   = float_view(&js, argc, args, 6);
+	int[] selves      = int_view(&js, argc, args, 9);
+	if (positions.len < 3 || motions.len < 3)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	MoveOptions options = default_move_options();
 	options.radius = arg_float(&js, argc, args, 12);
@@ -382,22 +436,30 @@ fn void js_move_and_slide_all(
 
 	if (!(options.radius > 0.0f))
 	{
-		*out = js.raise("three.moveAndSlideAll wants a positive radius — a capsule with none is a point and slides off everything");
+		*out = js.raise(
+			"three.moveAndSlideAll wants a positive radius — a capsule with none is a point and slides off everything"
+		);
 		return;
 	}
 
 	uint stepped = self.pass.scene.move_capsules(
-		&self.pass.assets, positions, motions, results,
-		options, ignore_set(self, &js, argc, args, 18), selves);
+		&self.pass.assets,
+		positions,
+		motions,
+		results,
+		options,
+		ignore_set(self, &js, argc, args, 18),
+		selves
+	);
 	*out = qjs::int_value((int)stepped);
 }
 
 <*
  How a `setTransforms` payload is laid out.
 
-	BATCH_POSITION   3   x y z
-	BATCH_TRS       10   x y z   qx qy qz qw   sx sy sz
-	BATCH_EULER      9   x y z   rx ry rz      sx sy sz
+ BATCH_POSITION   3   x y z
+ BATCH_TRS       10   x y z   qx qy qz qw   sx sy sz
+ BATCH_EULER      9   x y z   rx ry rz      sx sy sz
 
  Two rotation forms, and they are not redundant. `BATCH_TRS` is for a batch
  written by *arithmetic* — a look-at, a slerp, a physics read-back — where what
@@ -409,8 +471,8 @@ fn void js_move_and_slide_all(
  angles into four crossings a frame at about 380 ns apiece.
 *>
 const int BATCH_POSITION = 0;
-const int BATCH_TRS = 1;
-const int BATCH_EULER = 2;
+const int BATCH_TRS      = 1;
+const int BATCH_EULER    = 2;
 
 <*
  `setTransforms(handleBuffer, handleByteOffset, handleInts, dataBuffer,
@@ -434,25 +496,34 @@ const int BATCH_EULER = 2;
  @return `How many nodes were written.`
 *>
 fn void js_set_transforms(
-	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
 ) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
 	int[] handles = int_view(&js, argc, args, 0);
-	float[] data = float_view(&js, argc, args, 3);
-	int mode = arg_int(&js, argc, args, 6);
+	float[] data  = float_view(&js, argc, args, 3);
+	int mode      = arg_int(&js, argc, args, 6);
 
 	sz stride = mode == BATCH_TRS ? 10 : (mode == BATCH_EULER ? 9 : 3);
-	sz count = handles.len / 2;
+	sz count  = handles.len / 2;
 	if (count > data.len / stride) count = data.len / stride;
-	if (count <= 0) { *out = qjs::int_value(0); return; }
+	if (count <= 0)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
 
 	int written = 0;
 	for (sz i = 0; i < count; i++)
 	{
-		NodeId id = { .index = (uint)handles[i * 2], .generation = (uint)handles[i * 2 + 1] };
+		NodeId id  = { .index = (uint)handles[i * 2], .generation = (uint)handles[i * 2 + 1] };
 		Node* node = self.pass.scene.node(id);
 		if (node == null) continue;
 		// The same refusal `setTransform` makes — see `PHYSICS_OWNS_TRANSFORM`.

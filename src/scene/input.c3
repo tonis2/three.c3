@@ -51,7 +51,7 @@ import c3w;
 
 // 124 keys today, and the room is free: four words of stack, copied once a frame.
 const usz KEY_SLOTS = 4;
-const usz KEY_BITS = KEY_SLOTS * 64;
+const usz KEY_BITS  = KEY_SLOTS * 64;
 
 $assert c3w::EventKey::values.len <= KEY_BITS : "c3w has more keys than KeyBits has room for";
 
@@ -93,7 +93,10 @@ fn bool KeyBits.has(&self, c3w::EventKey key)
 fn KeyBits KeyBits.without(&self, KeyBits other)
 {
 	KeyBits out;
-	for (usz i = 0; i < KEY_SLOTS; i++) { out.word[i] = self.word[i] & ~other.word[i]; }
+	for (usz i = 0; i < KEY_SLOTS; i++)
+	{
+		out.word[i] = self.word[i] & ~other.word[i];
+	}
 	return out;
 }
 
@@ -102,7 +105,10 @@ fn KeyBits KeyBits.without(&self, KeyBits other)
 fn KeyBits KeyBits.with(&self, KeyBits other)
 {
 	KeyBits out;
-	for (usz i = 0; i < KEY_SLOTS; i++) { out.word[i] = self.word[i] | other.word[i]; }
+	for (usz i = 0; i < KEY_SLOTS; i++)
+	{
+		out.word[i] = self.word[i] | other.word[i];
+	}
 	return out;
 }
 
@@ -234,7 +240,7 @@ fn void SyntheticKeys.hold(&self, KeyName row, bool down)
 fn void SyntheticKeys.release_all(&self)
 {
 	self.fired_up = self.fired_up.with(self.held);
-	self.held = {};
+	self.held = { };
 	self.active = true;
 }
 
@@ -253,20 +259,19 @@ fn InputState SyntheticKeys.merge(&self, InputState real)
 {
 	if (!self.active) return real;
 
-	KeyBits down = real.down.with(self.held);
+	KeyBits down     = real.down.with(self.held);
 	KeyBits previous = real.down.without(real.pressed).with(self.previous);
 
 	InputState merged = {
 		.down = down,
-		.pressed = down.without(previous).with(real.pressed).with(self.fired_down),
-		.released = previous.without(down).with(real.released).with(self.fired_up),
-		.text = real.text,
-		.mouse = real.mouse,
-	};
+		.pressed = down.without(previous)
+		.with(real.pressed)
+		.with(self.fired_down), .released = previous.without(down).with(real.released)
+			.with(self.fired_up), .text = real.text, .mouse = real.mouse, };
 
 	self.previous = self.held;
-	self.fired_down = {};
-	self.fired_up = {};
+	self.fired_down = { };
+	self.fired_up = { };
 	return merged;
 }
 
@@ -299,15 +304,13 @@ fn InputState SyntheticKeys.merge(&self, InputState real)
  @param cursor : `Where the pointer is, already in image pixels. Default-empty for a host with no window.`
  @param now_ms : `The host's clock, for telling a click from a hold.`
 *>
-fn InputState InputTracker.step(&self, FrameKeys keys, String text = "", Cursor cursor = {}, double now_ms = 0)
+fn InputState InputTracker.step(&self, FrameKeys keys, String text = "", Cursor cursor = { }, double now_ms = 0)
 {
 	InputState state = {
 		.down = keys.down,
-		.pressed = keys.down.without(self.previous).with(keys.fired_down),
-		.released = self.previous.without(keys.down).with(keys.fired_up),
-		.text = text,
-		.mouse = self.mouse.step(cursor, now_ms),
-	};
+		.pressed = keys.down.without(self.previous)
+		.with(keys.fired_down), .released = self.previous.without(keys.down)
+			.with(keys.fired_up), .text = text, .mouse = self.mouse.step(cursor, now_ms), };
 	self.previous = keys.down;
 	return state;
 }
@@ -321,7 +324,7 @@ fn InputState InputTracker.step(&self, FrameKeys keys, String text = "", Cursor 
 
  @param log : `What c3w drained this frame. Empty is a perfectly good answer and means "the latch is all there is".`
 *>
-fn FrameKeys read_events(c3w::EventMap events, c3w::Event[] log = {})
+fn FrameKeys read_events(c3w::EventMap events, c3w::Event[] log = { })
 {
 	FrameKeys keys;
 
@@ -379,18 +382,42 @@ struct KeyName
  line in the docs an agent reads.
 *>
 const KeyName[*] KEY_NAMES = {
-	{ "a", A, EMPTY_KEY }, { "b", B, EMPTY_KEY }, { "c", C, EMPTY_KEY }, { "d", D, EMPTY_KEY },
-	{ "e", E, EMPTY_KEY }, { "f", F, EMPTY_KEY }, { "g", G, EMPTY_KEY }, { "h", H, EMPTY_KEY },
-	{ "i", I, EMPTY_KEY }, { "j", J, EMPTY_KEY }, { "k", K, EMPTY_KEY }, { "l", L, EMPTY_KEY },
-	{ "m", M, EMPTY_KEY }, { "n", N, EMPTY_KEY }, { "o", O, EMPTY_KEY }, { "p", P, EMPTY_KEY },
-	{ "q", Q, EMPTY_KEY }, { "r", R, EMPTY_KEY }, { "s", S, EMPTY_KEY }, { "t", T, EMPTY_KEY },
-	{ "u", U, EMPTY_KEY }, { "v", V, EMPTY_KEY }, { "w", W, EMPTY_KEY }, { "x", X, EMPTY_KEY },
-	{ "y", Y, EMPTY_KEY }, { "z", Z, EMPTY_KEY },
-
-	{ "0", KEY_0, EMPTY_KEY }, { "1", KEY_1, EMPTY_KEY }, { "2", KEY_2, EMPTY_KEY }, { "3", KEY_3, EMPTY_KEY },
-	{ "4", KEY_4, EMPTY_KEY }, { "5", KEY_5, EMPTY_KEY }, { "6", KEY_6, EMPTY_KEY }, { "7", KEY_7, EMPTY_KEY },
-	{ "8", KEY_8, EMPTY_KEY }, { "9", KEY_9, EMPTY_KEY },
-
+	{ "a", A, EMPTY_KEY },
+	{ "b", B, EMPTY_KEY },
+	{ "c", C, EMPTY_KEY },
+	{ "d", D, EMPTY_KEY },
+	{ "e", E, EMPTY_KEY },
+	{ "f", F, EMPTY_KEY },
+	{ "g", G, EMPTY_KEY },
+	{ "h", H, EMPTY_KEY },
+	{ "i", I, EMPTY_KEY },
+	{ "j", J, EMPTY_KEY },
+	{ "k", K, EMPTY_KEY },
+	{ "l", L, EMPTY_KEY },
+	{ "m", M, EMPTY_KEY },
+	{ "n", N, EMPTY_KEY },
+	{ "o", O, EMPTY_KEY },
+	{ "p", P, EMPTY_KEY },
+	{ "q", Q, EMPTY_KEY },
+	{ "r", R, EMPTY_KEY },
+	{ "s", S, EMPTY_KEY },
+	{ "t", T, EMPTY_KEY },
+	{ "u", U, EMPTY_KEY },
+	{ "v", V, EMPTY_KEY },
+	{ "w", W, EMPTY_KEY },
+	{ "x", X, EMPTY_KEY },
+	{ "y", Y, EMPTY_KEY },
+	{ "z", Z, EMPTY_KEY },
+	{ "0", KEY_0, EMPTY_KEY },
+	{ "1", KEY_1, EMPTY_KEY },
+	{ "2", KEY_2, EMPTY_KEY },
+	{ "3", KEY_3, EMPTY_KEY },
+	{ "4", KEY_4, EMPTY_KEY },
+	{ "5", KEY_5, EMPTY_KEY },
+	{ "6", KEY_6, EMPTY_KEY },
+	{ "7", KEY_7, EMPTY_KEY },
+	{ "8", KEY_8, EMPTY_KEY },
+	{ "9", KEY_9, EMPTY_KEY },
 	{ "space", SPACE, EMPTY_KEY },
 	{ "enter", RETURN, EMPTY_KEY },
 	{ "escape", ESCAPE, EMPTY_KEY },
@@ -400,7 +427,6 @@ const KeyName[*] KEY_NAMES = {
 	{ "delete", DELETE, EMPTY_KEY },
 	{ "insert", INSERT, EMPTY_KEY },
 	{ "capslock", CAPS_LOCK, EMPTY_KEY },
-
 	{ "shift", LEFT_SHIFT, RIGHT_SHIFT },
 	{ "shiftleft", LEFT_SHIFT, EMPTY_KEY },
 	{ "shiftright", RIGHT_SHIFT, EMPTY_KEY },
@@ -415,7 +441,6 @@ const KeyName[*] KEY_NAMES = {
 	{ "cmd", LEFT_SUPER, RIGHT_SUPER },
 	{ "metaleft", LEFT_SUPER, EMPTY_KEY },
 	{ "metaright", RIGHT_SUPER, EMPTY_KEY },
-
 	{ "arrowup", UP_ARROW, EMPTY_KEY },
 	{ "arrowdown", DOWN_ARROW, EMPTY_KEY },
 	{ "arrowleft", LEFT_ARROW, EMPTY_KEY },
@@ -424,16 +449,22 @@ const KeyName[*] KEY_NAMES = {
 	{ "down", DOWN_ARROW, EMPTY_KEY },
 	{ "left", LEFT_ARROW, EMPTY_KEY },
 	{ "right", RIGHT_ARROW, EMPTY_KEY },
-
-	{ "f1", F1, EMPTY_KEY }, { "f2", F2, EMPTY_KEY }, { "f3", F3, EMPTY_KEY }, { "f4", F4, EMPTY_KEY },
-	{ "f5", F5, EMPTY_KEY }, { "f6", F6, EMPTY_KEY }, { "f7", F7, EMPTY_KEY }, { "f8", F8, EMPTY_KEY },
-	{ "f9", F9, EMPTY_KEY }, { "f10", F10, EMPTY_KEY }, { "f11", F11, EMPTY_KEY }, { "f12", F12, EMPTY_KEY },
-
+	{ "f1", F1, EMPTY_KEY },
+	{ "f2", F2, EMPTY_KEY },
+	{ "f3", F3, EMPTY_KEY },
+	{ "f4", F4, EMPTY_KEY },
+	{ "f5", F5, EMPTY_KEY },
+	{ "f6", F6, EMPTY_KEY },
+	{ "f7", F7, EMPTY_KEY },
+	{ "f8", F8, EMPTY_KEY },
+	{ "f9", F9, EMPTY_KEY },
+	{ "f10", F10, EMPTY_KEY },
+	{ "f11", F11, EMPTY_KEY },
+	{ "f12", F12, EMPTY_KEY },
 	{ "home", HOME, EMPTY_KEY },
 	{ "end", END, EMPTY_KEY },
 	{ "pageup", PAGE_UP, EMPTY_KEY },
 	{ "pagedown", PAGE_DOWN, EMPTY_KEY },
-
 	{ "-", MINUS, EMPTY_KEY },
 	{ "=", EQUALS, EMPTY_KEY },
 	{ "[", LEFT_BRACKET, EMPTY_KEY },
@@ -455,7 +486,7 @@ const KeyName[*] KEY_NAMES = {
  hundred byte comparisons inside a call that has already crossed the JavaScript
  boundary.
 
- @return? NO_SUCH_KEY : `No row has that name. The caller says so out loud — a key that is silently never down is a control that silently does nothing.`
+ @return ? NO_SUCH_KEY : `No row has that name. The caller says so out loud — a key that is silently never down is a control that silently does nothing.`
 *>
 fn KeyName? find_key(String name)
 {
@@ -498,20 +529,17 @@ fn bool name_matches(String written, String row) @local
 *>
 fn bool InputState.is_down(&self, KeyName row)
 {
-	return self.down.has(row.key)
-		|| (row.also != c3w::EventKey.EMPTY_KEY && self.down.has(row.also));
+	return self.down.has(row.key) || (row.also != c3w::EventKey.EMPTY_KEY && self.down.has(row.also));
 }
 
 fn bool InputState.went_down(&self, KeyName row)
 {
-	return self.pressed.has(row.key)
-		|| (row.also != c3w::EventKey.EMPTY_KEY && self.pressed.has(row.also));
+	return self.pressed.has(row.key) || (row.also != c3w::EventKey.EMPTY_KEY && self.pressed.has(row.also));
 }
 
 fn bool InputState.went_up(&self, KeyName row)
 {
-	return self.released.has(row.key)
-		|| (row.also != c3w::EventKey.EMPTY_KEY && self.released.has(row.also));
+	return self.released.has(row.key) || (row.also != c3w::EventKey.EMPTY_KEY && self.released.has(row.also));
 }
 
 // ============================================================================
@@ -527,7 +555,7 @@ fn bool InputState.went_up(&self, KeyName row)
  moved. Four is about the tremor of a careful trackpad click, and half a second
  is longer than any click and shorter than any deliberate hold.
 *>
-const float CLICK_SLOP = 4.0;
+const float CLICK_SLOP     = 4.0;
 const double CLICK_HOLD_MS = 500.0;
 
 <*
@@ -557,7 +585,7 @@ struct Cursor
 	// The wheel, accumulated over the frame's `getEvent` and positive *away* from
 	// the user. Not a position and not in pixels: it is notches, or fractions of
 	// one from a trackpad.
-	//
+	// 
 	// The browser's `deltaY` has the opposite sign. This is `c3w`'s convention and
 	// the one the camera's zoom is already written against; flipping it here would
 	// leave two conventions in one process.
@@ -631,9 +659,15 @@ struct WindowView
  @param scroll_x : `The horizontal wheel over this frame, positive to the right.`
 *>
 fn Cursor WindowView.cursor(
-	&self, float[<2>] at, bool down,
-	bool right = false, bool middle = false, float scroll = 0, float scroll_x = 0,
-	float[<2>] raw = { 0, 0 }, bool locked = false
+	&self,
+	float[<2>] at,
+	bool down,
+	bool right = false,
+	bool middle = false,
+	float scroll = 0,
+	float scroll_x = 0,
+	float[<2>] raw = { 0, 0 },
+	bool locked = false
 )
 {
 	// Minimised, or before the first frame. The fallback is a cursor that is
@@ -644,7 +678,7 @@ fn Cursor WindowView.cursor(
 	// The scale is what makes the pointer's unit and the extent's unit the same
 	// one; after this line neither of them exists any more, only the fraction.
 	float across = (at[0] * self.scale) / (float)self.width;
-	float up = (at[1] * self.scale) / (float)self.height;
+	float up     = (at[1] * self.scale) / (float)self.height;
 
 	bool inside = across >= 0.0f && across < 1.0f && up >= 0.0f && up < 1.0f;
 
@@ -654,20 +688,20 @@ fn Cursor WindowView.cursor(
 		.right = right,
 		.middle = middle,
 		.scroll = scroll,
-		.scroll_x = scroll_x,
-		// The raw movement through the same fraction the position goes through, so
+		.scroll_x = scroll_x, // The raw movement through the same fraction the position goes through, so
 		// a locked look and a dragged one move the camera by the same amount for
 		// the same hand movement. The y is negated for the same reason the
 		// position's is: the window counts up and the image counts down.
 		.raw_dx = (raw[0] * self.scale / (float)self.width) * (float)self.image_width,
 		.raw_dy = -(raw[1] * self.scale / (float)self.height) * (float)self.image_height,
 		.locked = locked,
-		.x = across * (float)self.image_width,
-		// The one flip, and the only place it happens. `screen_ray` counts rows
-		// from the top because that is how an image is stored and how every window
-		// but Cocoa's reports a cursor; `c3w` normalises all of them to Cocoa's.
-		// Getting it backwards is invisible at the centre of the window and wrong
-		// everywhere else.
+		.x = across
+			* (float)self
+				.image_width, // The one flip, and the only place it happens. `screen_ray` counts rows
+				// from the top because that is how an image is stored and how every window
+				// but Cocoa's reports a cursor; `c3w` normalises all of them to Cocoa's.
+				// Getting it backwards is invisible at the centre of the window and wrong
+				// everywhere else.
 		.y = (1.0f - up) * (float)self.image_height,
 	};
 }
@@ -689,13 +723,13 @@ struct MouseState
 
 	// How far the cursor travelled since the previous frame, in the same image
 	// pixels `x` and `y` are in.
-	//
+	// 
 	// This is what a look is made of, and it is not the same question as where the
 	// cursor is: a script turning a character by the mouse wants the movement, and
 	// differencing `x` across frames in JavaScript would answer it with the frame
 	// *before* the one being drawn, because a script only ever sees the position
 	// at the moment it asked.
-	//
+	// 
 	// It keeps reporting while the cursor is outside the window, because the window
 	// goes on saying where it is and a hand that has left the frame is still
 	// moving. Past the *screen* the cursor stops and a difference of positions
@@ -784,11 +818,9 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 	}
 	else if (!cursor.down && self.was_down)
 	{
-		clicked = self.holding
-			&& cursor.inside
-			&& math::abs(cursor.x - self.press_x) <= CLICK_SLOP
-			&& math::abs(cursor.y - self.press_y) <= CLICK_SLOP
-			&& now_ms - self.press_ms <= CLICK_HOLD_MS;
+		clicked = self.holding && cursor.inside && math::abs(
+			cursor.x - self.press_x
+		) <= CLICK_SLOP && math::abs(cursor.y - self.press_y) <= CLICK_SLOP && now_ms - self.press_ms <= CLICK_HOLD_MS;
 		self.holding = false;
 	}
 
@@ -822,7 +854,7 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 	// frame it is recentred. The platform's own delta is the answer then, and it
 	// is the only reading that keeps counting once the cursor has run out of
 	// screen.
-	//
+	// 
 	// The position keeps being tracked either way, so releasing the lock does not
 	// produce a jump from wherever the cursor was left.
 	if (cursor.locked)

@@ -2,7 +2,7 @@
  The post-processing pass: an agent-written shader over the whole finished frame,
  and the list of them.
 
-	`c3c test --trust=full --test-noleak --test-filter three_tests::post`
+ `c3c test --trust=full --test-noleak --test-filter three_tests::post`
 
  ## Where it sits
 
@@ -10,8 +10,10 @@
  readback still copies `target.color`, and `gpu/target.c3`'s two-layout contract
  still holds — with a post pass active the *scene* is what moves, not the frame:
 
-	 inactive   scene ────────────────────────────────────────► target.color ─► blit
-	 active     scene ──► image A ──► the chain ──► tonemap ──► target.color ─► blit
+ inactive scene
+ ────────────────────────────────────────►
+ target.color ─► blit
+ active     scene ──► image A ──► the chain ──► tonemap ──► target.color ─► blit
 
  `render/chain.c3` is the chain: three images, two rules, and the
  `FullscreenPass` interface a `PostStage` below is the first implementer of. This
@@ -25,12 +27,12 @@
  round trip close by format rather than by arithmetic:
 
  - the scene's shaders write linear floats and the `_SRGB` attachment encodes
-   them, exactly as into `target.color`;
+ them, exactly as into `target.color`;
  - `prev.Sample()` in `post.slang` decodes back to linear, because a sampler
-   reads an `_SRGB` image as linear;
+ reads an `_SRGB` image as linear;
  - the body works in linear, the space every other shader here works in;
  - the pass writes `POST_CHAIN_FORMAT`, which is linear float and stores what it
-   was given, and the tonemap's `_SRGB` write re-encodes at the end.
+ was given, and the tonemap's `_SRGB` write re-encodes at the end.
 
  An identity chain is therefore an identity to within eight bits. Under a
  `_UNORM` A it would not be: the sample would arrive already encoded, the body
@@ -46,12 +48,12 @@
  pipeline wrong the moment a post pass is set. The ways out are both large:
 
  - a second variant of every mesh pipeline, keyed on whether a post pass is
-   active, which puts a format in the pipeline cache key and makes `setPost`
-   rebuild every material's pipeline;
+ active, which puts a format in the pipeline cache key and makes `setPost`
+ rebuild every material's pipeline;
  - render the scene into A always, tonemapping even when no script asked for a
-   post pass — a full-size attachment and a full-screen draw on every frame of
-   every scene, deleting the property that an unposted frame is the code path it
-   always was.
+ post pass — a full-size attachment and a full-screen draw on every frame of
+ every scene, deleting the property that an unposted frame is the code path it
+ always was.
 
  Neither buys anything today, because nothing in this renderer produces a value
  above 1.0. What HDR is actually blocked on is physical light intensities.
@@ -119,7 +121,7 @@ struct PostStage (FullscreenPass)
 	// The samplers the body declared, at bindings 4..N. Bindings 0 to 3 are
 	// `prev`, `scene`, the depth buffer and `tap`, and are not in here — they are
 	// the chain's, the way `base_color_map` is a material's own.
-	//
+	// 
 	// Held across nothing. Replacing a stage releases these before the new
 	// shader's bindings exist, for the same reason it does not carry the uniform
 	// block across: the new module's binding 2 is a different sampler with a
@@ -141,12 +143,12 @@ struct PostStage (FullscreenPass)
 	int tap;
 
 	// This stage's own output image, for a stage somebody taps.
-	//
+	// 
 	// A stage normally writes into the ping-pong pair, where P0 is overwritten by
 	// the stage after next — exactly what a later reader cannot have. So a tapped
 	// stage is given an image nothing else writes, and `PostPass.output_of` is the
 	// one place that decides which of the two a stage got.
-	//
+	// 
 	// Allocated only when something taps it, so a chain nobody taps costs the two
 	// images it always cost.
 	ChainImage keep;
@@ -269,13 +271,13 @@ fn usz PostPass.bytes(&self)
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_texture per name.`
  @param assets : `Where the textures the *previous* chain held go back to. Null skips that release, which is only safe on a chain that never had any.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller. Null keeps the old behaviour of printing to stderr.`
- @return? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence, and it is copied into diagnostic too.`
- @return? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
- @return? POST_TOO_MANY_UNIFORMS : `The uniforms want more than the 112 bytes info leaves.`
- @return? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path.`
- @return? SHADER_COMPILE_FAILED : `Slang refused the assembled module. diagnostic has the text, with post:<line> coordinates on the agent's own lines.`
- @return? SLANG_UNAVAILABLE : `The Slang session would not start. Nothing to do with this body.`
- @return? PUSH_BLOCK_MISMATCH : `The module does not begin with a 16-byte info. Unreachable through post_source, and checked anyway — see MeshPipeline.init_post.`
+ @return ? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence, and it is copied into diagnostic too.`
+ @return ? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
+ @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more than the 112 bytes info leaves.`
+ @return ? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path.`
+ @return ? SHADER_COMPILE_FAILED : `Slang refused the assembled module. diagnostic has the text, with post:<line> coordinates on the agent's own lines.`
+ @return ? SLANG_UNAVAILABLE : `The Slang session would not start. Nothing to do with this body.`
+ @return ? PUSH_BLOCK_MISMATCH : `The module does not begin with a 16-byte info. Unreachable through post_source, and checked anyway — see MeshPipeline.init_post.`
 *>
 fn void? PostPass.set(
 	&self,
@@ -283,7 +285,7 @@ fn void? PostPass.set(
 	Target* target,
 	String fragment,
 	MaterialUniform[] uniforms,
-	MaterialTexture[] textures = {},
+	MaterialTexture[] textures = { },
 	Assets* assets = null,
 	String* diagnostic = null
 )
@@ -336,7 +338,7 @@ fn void? PostPass.set(
 
  @param tap : `Which earlier pass this one also reads, or -1 for none. Must be an index already in the chain.`
  @return `Which position in the chain this pass took. Stable until the chain is set or cleared.`
- @return? POST_TAP_UNKNOWN : `tap is not an index of a pass already in the chain. diagnostic has the sentence.`
+ @return ? POST_TAP_UNKNOWN : `tap is not an index of a pass already in the chain. diagnostic has the sentence.`
 *>
 fn uint? PostPass.add(
 	&self,
@@ -344,7 +346,7 @@ fn uint? PostPass.add(
 	Target* target,
 	String fragment,
 	MaterialUniform[] uniforms,
-	MaterialTexture[] textures = {},
+	MaterialTexture[] textures = { },
 	int tap = -1,
 	String* diagnostic = null
 )
@@ -366,7 +368,14 @@ fn uint? PostPass.add(
 	}
 
 	PostStage* built = self.build_stage(
-		gpu, target, self.stages.len() + 1, fragment, uniforms, textures, tap, diagnostic
+		gpu,
+		target,
+		self.stages.len() + 1,
+		fragment,
+		uniforms,
+		textures,
+		tap,
+		diagnostic
 	)!;
 
 	self.stages.push(built);
@@ -588,8 +597,8 @@ fn bool PostPass.active(&self) => self.stages.len() > 0;
 
  @param values : `One to four floats. Must match the width the shader declared.`
  @param stage : `Which pass in the chain. Zero is the one a plain setPost leaves.`
- @return? MATERIAL_UNIFORM_UNKNOWN : `No uniform of that name, or the chain has no such stage.`
- @return? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components.`
+ @return ? MATERIAL_UNIFORM_UNKNOWN : `No uniform of that name, or the chain has no such stage.`
+ @return ? MATERIAL_UNIFORM_WIDTH : `The shader declared a different number of components.`
 *>
 fn void? PostPass.set_uniform(&self, String name, float[] values, uint stage = 0)
 {
@@ -642,9 +651,9 @@ fn void PostPass.uniform_fields(&self, List{ShaderField}* out, uint stage = 0)
  @param name : `The sampler as the body spells it.`
  @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back.`
  @param stage : `Which pass in the chain. Zero is the one a plain setPost leaves.`
- @return? MATERIAL_UNKNOWN : `The chain has no such stage — there is nothing declaring samplers.`
- @return? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
- @return? MATERIAL_SAMPLER_UNKNOWN : `This post shader has no sampler by that name.`
+ @return ? MATERIAL_UNKNOWN : `The chain has no such stage — there is nothing declaring samplers.`
+ @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return ? MATERIAL_SAMPLER_UNKNOWN : `This post shader has no sampler by that name.`
 *>
 fn void? PostPass.set_texture(&self, Gpu* gpu, Assets* assets, String name, int texture, uint stage = 0)
 {
@@ -708,7 +717,7 @@ fn void PostStage.release_textures(&self, Gpu* gpu, Assets* assets)
 		if (held == NO_TEXTURE) continue;
 		assets.release_texture(gpu, held);
 	}
-	self.textures = {};
+	self.textures = { };
 }
 
 <*
@@ -733,7 +742,7 @@ fn void PostPass.free(&self, Gpu* gpu)
 		self.destroy_images(gpu);
 	}
 	self.stages.free();
-	*self = {};
+	*self = { };
 }
 
 // The interface's optional `free`: a stage owns a pipeline and a string, so it
@@ -743,7 +752,7 @@ fn void PostStage.free(&self, Gpu* gpu) @dynamic
 	self.pipeline.free(gpu);
 	if (self.keep.exists()) self.keep.free(gpu);
 	if (self.fragment.ptr != null) self.fragment.free(mem);
-	*self = {};
+	*self = { };
 }
 
 // ============================================================================
@@ -777,11 +786,9 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// Colour only, and no depth attachment — `MeshPipeline.init_post` declares no
 	// depth format, and dynamic rendering checks the two against each other.
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(io.dst_view)
-		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-		// CLEAR rather than DONT_CARE: the draw covers every pixel, so this is
-		// never read — but a load op that says "whatever was there" is a difference
-		// between drivers waiting for a pass that one day does not cover
-		// everything.
+		.setImageLayout(
+			IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+		)/* CLEAR rather than DONT_CARE: the draw covers every pixel, so this is *//* never read — but a load op that says "whatever was there" is a difference *//* between drivers waiting for a pass that one day does not cover *//* everything. */
 		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
 		.setClearValue({ .color = { .float32 = { 0, 0, 0, 1 } } });
@@ -802,7 +809,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// Pushed, not bound — the same argument `MeshPass.record` makes: there is no
 	// descriptor set anywhere in this project, so the images are specified inline
 	// against this pipeline's own layout.
-	//
+	// 
 	// Every write is checked against the reflected layout first, the two reserved
 	// bindings included. Slang may drop a sampler nothing reads, and a body that
 	// never touches `p.scene` gives it every reason to drop `scene`; a write to a
@@ -816,11 +823,14 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// the two above, which is why it does not go through `sampled_with`.
 	if (pipeline_declares_binding(&self.pipeline, 2))
 	{
-		samplers.add(2, {
-			.sampler = io.depth_sampler,
-			.imageView = io.depth,
-			.imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-		});
+		samplers.add(
+			2,
+			{
+				.sampler = io.depth_sampler,
+				.imageView = io.depth,
+				.imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+			}
+		);
 	}
 	// The third source. `io.tap` is the view of whatever pass this one names, and
 	// the chain has already transitioned it — a tapped stage's output goes to
@@ -836,7 +846,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// `info` is rewritten here and nowhere else. The uniforms above it are
 	// whatever `set_uniform` last wrote, which is what makes them live between
 	// frames with no upload and no per-frame crossing.
-	//
+	// 
 	// Six floats: `info` and then `planes`, which is exactly `POST_PUSH_START`
 	// bytes and exactly what `POST_PUSH_FIELDS` pins. Written as one array because
 	// they are contiguous in the shader's block.

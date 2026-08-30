@@ -6,21 +6,21 @@
  consumers. Three things follow:
 
  - The extent is a parameter, not the window's. A resize rebuilds the swapchain
-   and moves the blit's destination rect; it does not touch the target, the depth
-   buffer, the pipeline or the projection.
+ and moves the blit's destination rect; it does not touch the target, the depth
+ buffer, the pipeline or the projection.
  - `R8G8B8A8_SRGB`, so readback is a straight memcpy and the bytes are already
-   display-ready. The channel order is what makes the memcpy work; the `_SRGB`
-   half is what makes the *values* right, which is a separate claim — see below.
+ display-ready. The channel order is what makes the memcpy work; the `_SRGB`
+ half is what makes the *values* right, which is a separate claim — see below.
  - Headless is the same code path. No surface, no swapchain, and render +
-   readback still work, which is what makes an image test possible under
-   `c3c test` with no window server.
+ readback still work, which is what makes an image test possible under
+ `c3c test` with no window server.
 
  ## The layout contract
 
  The colour image cycles through exactly two layouts, both set here:
 
-	begin_render   UNDEFINED                -> COLOR_ATTACHMENT_OPTIMAL
-	close          COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
+ begin_render   UNDEFINED                -> COLOR_ATTACHMENT_OPTIMAL
+ close          COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
 
  After `close` the image is ready for either consumer with no further
  transition, and the next frame's `UNDEFINED` discards contents it is about to
@@ -56,15 +56,15 @@ import image::png;
  Two consumers had to move with it, and one did not:
 
  - The swapchain blit *does* convert. `vkCmdBlitImage` reads an sRGB source as
-   linear and re-encodes into an sRGB destination, so an `_SRGB` target blitted
-   into a `_UNORM` swapchain would land back in linear and undo the fix at the
-   last step. `gpu/swapchain.c3` prefers an sRGB surface format for this reason.
+ linear and re-encodes into an sRGB destination, so an `_SRGB` target blitted
+ into a `_UNORM` swapchain would land back in linear and undo the fix at the
+ last step. `gpu/swapchain.c3` prefers an sRGB surface format for this reason.
  - The readback does *not* convert. `vkCmdCopyImageToBuffer` is a copy, not a
-   blit — it moves the stored bytes untouched, so a screenshot contains
-   sRGB-encoded bytes, which is what a PNG is defined to hold.
+ blit — it moves the stored bytes untouched, so a screenshot contains
+ sRGB-encoded bytes, which is what a PNG is defined to hold.
  - `scene.pick()` never touched this image: it is a CPU raycast against the hull
-   tree in `scene/pick.c3`. Worth stating because a colour-buffer picker is the
-   usual design and would have been broken by this change.
+ tree in `scene/pick.c3`. Worth stating because a colour-buffer picker is the
+ usual design and would have been broken by this change.
 *>
 const vk::Format TARGET_COLOR_FORMAT = FORMAT_R8G8B8A8_SRGB;
 
@@ -115,7 +115,13 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 
 	self.color_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.color_format)
 		.setSubresourceRange(
-			{ .aspectMask = IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+			{
+				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			}
 		)
 		.setImage(self.color)
 		.build(gpu.handle)!;
@@ -125,10 +131,9 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 		.setMipLevels(1)
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
-		// this image to every pass so a body can read `p.depth`. Costs nothing on
-		// a device where the format supports both, which is every conformant one.
+		.setTiling(
+			IMAGE_TILING_OPTIMAL
+		)/* SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds *//* this image to every pass so a body can read `p.depth`. Costs nothing on *//* a device where the format supports both, which is every conformant one. */
 		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
@@ -136,7 +141,13 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 
 	self.depth_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.depth_format)
 		.setSubresourceRange(
-			{ .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+			{
+				.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			}
 		)
 		.setImage(self.depth)
 		.build(gpu.handle)!;
@@ -206,7 +217,8 @@ fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 	// nothing more, which is what this hazard needs: last frame *read* this image
 	// (blit, or readback copy) and this frame writes it. Write-after-read wants
 	// ordering, not a cache flush.
-	return { ...IMAGE_BARRIER,
+	return {
+		...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		.srcAccessMask = (vk::AccessFlags2)0,
@@ -219,7 +231,8 @@ fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 
 fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 {
-	return { ...IMAGE_BARRIER,
+	return {
+		...IMAGE_BARRIER,
 		.image = self.color,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -241,7 +254,8 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 *>
 fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 {
-	return { ...IMAGE_BARRIER,
+	return {
+		...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -269,7 +283,8 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 *>
 fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 {
-	return { ...IMAGE_BARRIER,
+	return {
+		...IMAGE_BARRIER,
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -287,8 +302,11 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 
  @param clear : `sRGB - the same units a script writes scene.background in - and decoded here. The attachment carries the sRGB transfer function, so Vulkan encodes whatever it is handed; an already-linear value would come out as a far too bright frame with nothing in the API saying which space it wanted. Alpha passes through untouched.`
 *>
-fn void Target.begin_render(&self, vk::CommandBuffer cmd, float[4] clear = { 0, 0, 0, 1 })
-	=> self.begin_render_to(cmd, self.color, self.color_view, clear);
+fn void Target.begin_render(
+	&self,
+	vk::CommandBuffer cmd,
+	float[4] clear = { 0, 0, 0, 1 }
+) => self.begin_render_to(cmd, self.color, self.color_view, clear);
 
 <*
  The same, into a colour image that is not necessarily the target's.
@@ -316,7 +334,7 @@ fn void Target.begin_render_to(
 	// The one colour in the renderer that never meets a shader, so the one that
 	// cannot be decoded where the others are. `gpu/color.c3` says why the curve
 	// is the piecewise one.
-	float[4] clear_linear = srgb_to_linear_rgb(clear);
+	float[4] clear_linear               = srgb_to_linear_rgb(clear);
 	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image), vk::depthBarrier(self.depth) };
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
 
@@ -359,14 +377,16 @@ fn void set_full_viewport(vk::CommandBuffer cmd, vk::Extent2D extent, bool flip_
 		cmd,
 		0,
 		1,
-		(vk::Viewport[]) { {
-			.x = 0,
-			.y = flip_y ? height : 0,
-			.width = width,
-			.height = flip_y ? -height : height,
-			.minDepth = 0.0,
-			.maxDepth = 1.0,
-		} }
+		(vk::Viewport[]) {
+			{
+				.x = 0,
+				.y = flip_y ? height : 0,
+				.width = width,
+				.height = flip_y ? -height : height,
+				.minDepth = 0.0,
+				.maxDepth = 1.0,
+			}
+		}
 	);
 	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = extent } });
 }
@@ -431,7 +451,12 @@ fn void Target.record_readback(&self, vk::CommandBuffer cmd, vk::Memory* dst)
 		.bufferOffset = 0,
 		.bufferRowLength = 0,
 		.bufferImageHeight = 0,
-		.imageSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.imageSubresource = {
+			.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+			.mipLevel = 0,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		},
 		.imageOffset = { 0, 0, 0 },
 		.imageExtent = { self.extent.width, self.extent.height, 1 },
 	};

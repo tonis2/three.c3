@@ -6,10 +6,10 @@
  Two things it therefore does not have:
 
  - No image views. Nothing renders into a swapchain image, so there is no
-   attachment to describe.
+ attachment to describe.
  - No say in format, extent, sample count or projection. Those belong to the
-   target. A resize rebuilds this and moves the blit's destination rect;
-   nothing upstream of the blit notices.
+ target. A resize rebuilds this and moves the blit's destination rect;
+ nothing upstream of the blit notices.
 
  `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` are handled here rather than
  propagated, because a half-done resize turns into an intermittent failure
@@ -104,8 +104,8 @@ fn vk::Extent2D Viewer.client_extent(&self)
 
 <*
  @param width : `Requested size in physical pixels; the surface's own answer wins where it has one.`
- @return? SURFACE_CANNOT_BLIT : `The surface will not grant TRANSFER_DST, or its format cannot be a blit destination. There is no fallback: blitting the target is the swapchain's whole job.`
- @return? NO_PRESENTABLE_SURFACE : `The surface offers no formats at all.`
+ @return ? SURFACE_CANNOT_BLIT : `The surface will not grant TRANSFER_DST, or its format cannot be a blit destination. There is no fallback: blitting the target is the swapchain's whole job.`
+ @return ? NO_PRESENTABLE_SURFACE : `The surface offers no formats at all.`
 *>
 fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint height)
 {
@@ -119,8 +119,8 @@ fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint
 	// walked.
 	self.images.init(mem, 8);
 
-	vk::SurfaceCapabilitiesKHR caps  = surface.deviceSurfaceCapabilities(gpu.pdevice)!;
-	vk::SurfaceFormatList formats    = surface.getFormats(gpu.pdevice)!;
+	vk::SurfaceCapabilitiesKHR caps = surface.deviceSurfaceCapabilities(gpu.pdevice)!;
+	vk::SurfaceFormatList formats   = surface.getFormats(gpu.pdevice)!;
 	defer formats.free();
 	if (formats.len() == 0) return NO_PRESENTABLE_SURFACE~;
 
@@ -130,7 +130,7 @@ fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint
 	// UNORM swapchain would therefore store linear values and present them as
 	// sRGB, losing the gamma correction one step after the code that looks
 	// responsible for it.
-	//
+	// 
 	// So: the matching sRGB pair first, any sRGB format second, and only then
 	// whatever the surface listed first. Readback is unaffected either way — it
 	// copies the target, never a swapchain image.
@@ -163,7 +163,9 @@ fn Viewer? Viewer.init(&self, Gpu* gpu, vk::SurfaceKHR surface, uint width, uint
 	// is worth advising about rather than a fault the caller cannot act on.
 	if (!found)
 	{
-		@advise("three: no sRGB surface format offered; the window will present linear values and look dark. Screenshots are unaffected.");
+		@advise(
+			"three: no sRGB surface format offered; the window will present linear values and look dark. Screenshots are unaffected."
+		);
 	}
 
 	if ((uint)(caps.supportedUsageFlags & IMAGE_USAGE_TRANSFER_DST_BIT) == 0) return SURFACE_CANNOT_BLIT~;
@@ -196,13 +198,13 @@ fn void? Viewer.build(&self, Gpu* gpu, vk::Extent2D requested, vk::SurfaceCapabi
 		.setImageFormat(self.format.format)
 		.setImageColorSpace(self.format.colorSpace)
 		.setImageExtent(extent)
-		.setImageArrayLayers(1)
-		// The only usage this ever needs: it is a blit destination and nothing
-		// is rendered into it.
+		.setImageArrayLayers(
+			1
+		)/* The only usage this ever needs: it is a blit destination and nothing *//* is rendered into it. */
 		.setImageUsage(IMAGE_USAGE_TRANSFER_DST_BIT)
-		.setImageSharingMode(SHARING_MODE_EXCLUSIVE)
-		// Re-queried every rebuild rather than remembered: a display rotation
-		// changes it, and a stale transform is a picture on its side.
+		.setImageSharingMode(
+			SHARING_MODE_EXCLUSIVE
+		)/* Re-queried every rebuild rather than remembered: a display rotation *//* changes it, and a stale transform is a picture on its side. */
 		.setPreTransform(caps.currentTransform)
 		.setCompositeAlpha(COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
 		.setPresentMode(PRESENT_MODE_FIFO_KHR)
@@ -285,11 +287,11 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 {
 	vk::Image dst = self.images[index];
 
-	vk::cmdPipelineBarrier2(
-		cmd,
-		&&vk::dependencyInfo().setImageMemoryBarriers(
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
 			{
-				(vk::ImageMemoryBarrier2) { ...IMAGE_BARRIER,
+				(vk::ImageMemoryBarrier2) {
+					...IMAGE_BARRIER,
 					.image = dst,
 					.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 					.srcAccessMask = (vk::AccessFlags2)0,
@@ -299,8 +301,7 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 					.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				},
 			}
-		)
-	);
+		));
 
 	vk::ImageSubresourceLayers layers = {
 		.aspectMask = IMAGE_ASPECT_COLOR_BIT,
@@ -325,11 +326,11 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 		FILTER_LINEAR
 	);
 
-	vk::cmdPipelineBarrier2(
-		cmd,
-		&&vk::dependencyInfo().setImageMemoryBarriers(
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
 			{
-				(vk::ImageMemoryBarrier2) { ...IMAGE_BARRIER,
+				(vk::ImageMemoryBarrier2) {
+					...IMAGE_BARRIER,
 					.image = dst,
 					.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 					.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
@@ -339,6 +340,5 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 					.newLayout = IMAGE_LAYOUT_PRESENT_SRC_KHR,
 				},
 			}
-		)
-	);
+		));
 }
