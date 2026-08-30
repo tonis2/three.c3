@@ -5,12 +5,14 @@
   "description": "The static website for three.c3. Build-time only — nothing here ships in the engine.",
   "type": "module",
   "scripts": {
-    "build": "node site/build.mjs",
-    "api": "node site/gen-api.mjs",
+    "build": "node site/build.mjs && node site/gen-api.mjs && node tools/docs.mjs",
+    "docs": "node tools/docs.mjs --check",
     "serve": "node site/serve.mjs"
   },
   "devDependencies": {
-    "highlight.js": "^11.11.1",
-    "marked": "^16.4.0"
+    "esbuild": "^0.28.2",
+    "lit": "^3.3.3",
+    "marked": "^16.4.0",
+    "prismjs": "^1.30.0"
   }
 }

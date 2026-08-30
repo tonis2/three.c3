@@ -119,6 +119,13 @@ const uint JS_MAX_JOBS = 100_000;
  files beside it. Embedding it means the API surface cannot be missing at
  runtime, which for the files that *define* the API is worth more than editing
  them without a rebuild.
+
+ `docs.data.js` is the one compiled from something else — `docs/`, by
+ `site/tools/docs.mjs`. No build step regenerates it, deliberately: it is
+ committed, and `node site/tools/docs.mjs --check` fails if it is not what the
+ folder compiles to. That keeps it in the first category rather than the
+ second — a file in the tree, as stale as anything else that is committed
+ wrong, and never something a build quietly rewrote underneath you.
 *>
 const char[*] PRELUDE          = $embed("prelude/prelude.js");
 const char[*] PRELUDE_MATH     = $embed("prelude/math.js");
@@ -142,7 +149,9 @@ const char[*] PRELUDE_ENTITY   = $embed("prelude/entity.js");
 const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
 const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
+const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
 const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
+const char[*] PRELUDE_DOCS_DATA = $embed("prelude/docs.data.js");
 
 <*
  The prelude's modules, by their `three:` specifiers.
@@ -156,7 +165,7 @@ const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[22] parts;
+	static qjs::EmbeddedModule[24] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -178,7 +187,9 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:entity.js", (char[])PRELUDE_ENTITY[..] },
 		{ "three:cooldown.js", (char[])PRELUDE_COOLDOWN[..] },
 		{ "three:ui.js", (char[])PRELUDE_UI[..] },
+		{ "three:widget.js", (char[])PRELUDE_WIDGET[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
+		{ "three:docs.data.js", (char[])PRELUDE_DOCS_DATA[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
 	return parts[..];
@@ -446,6 +457,13 @@ struct JsRuntime
 	// is made from inside the context a reload destroys; the loop reads it
 	// between `pump` and the tick, where nothing of JavaScript's is on the stack.
 	bool reload_wanted;
+
+	// A `three.quit()` a script has asked for and the loop has not acted on yet —
+	// `js_quit` in `main.c3`. Deferred for the same reason a reload is: the call is
+	// made from inside the context that shutting down tears apart. The loop reads
+	// it beside `reload_wanted` and leaves; a run with no loop — a `--frames` batch
+	// past its last frame, a test — never reads it, and nothing is raised about it.
+	bool quit_wanted;
 
 	bool ready;
 }
@@ -923,6 +941,12 @@ fn SceneStats JsRuntime.scene_stats(&self, Scene* scene = null)
 
 <*
  Folds what the validation layer said during the run into the run's answer.
+
+ There is nothing to fold without `--debug`, which is what loads the layer, and
+ the early return on `gpu.validation` is where that lands. So a server started
+ without it answers every run with no validation half at all — not "the driver
+ was happy", but "nobody was watching" — and an agent chasing a frame that draws
+ wrong wants the server restarted with the flag before it believes a clean answer.
 
  An ERROR fails the run, because a run reporting `ok: true` beside a frame the
  driver refused to draw is the loop lying to the agent, and the agent has no

@@ -232,6 +232,11 @@ function normalise(node, path) {
 	put(out, 'ah', enumOf(CROSS, node.h ?? node.horizontal, `${where} h`));
 	put(out, 'av', enumOf(CROSS, node.v ?? node.vertical, `${where} v`));
 	if (node.solid) out.solid = true;
+	// A `stack` that sizes to its last child instead of filling — see `UiWrap`
+	// in `render/ui.c3`. It is what a card with a background is made of, and it
+	// is the difference between saying how tall the card is and letting what is
+	// in it decide.
+	if (node.wrap) out.wrap = true;
 
 	// `size` is per axis and zero means "take what you are offered", which is
 	// cui's own convention and the reason a panel with no size fills its parent.
@@ -347,6 +352,39 @@ function normaliseRows(rows, where) {
 }
 
 // -----------------------------------------------------------------------
+// The raw verbs
+
+// The three below without the guard, for `widget.js` — which IS the class layer
+// and therefore the one caller allowed to write while widgets are mounted.
+export function setTree(tree) { H.uiSet(normalise(tree, 'root')); }
+export function patchTree(key, props) { ui.patch(key, props); }
+export function clearTree() { H.uiClear(); }
+
+// What `widget.js` fills in on load. Behind an object rather than an import so
+// the dependency runs one way: the class layer knows about this file, and this
+// file never has to know about it.
+export const composed = {
+	count: () => 0,
+	flush: () => {},
+	clear: () => 0,
+};
+
+// One interface, two doors, and the last one through would win every frame. A
+// script that has mounted a widget describes everything in a `render()`; one
+// that has not calls `set` and `draw`. Refused rather than allowed to fight,
+// for the reason a patch to a key nothing carries is refused: the alternative
+// is a panel that flickers between two descriptions and nothing that says so.
+function alone(verb) {
+	const n = composed.count();
+	if (n === 0) return;
+	throw new Error(
+		`three.ui.${verb}() cannot run while ${n} widget${n === 1 ? ' is' : 's are'} mounted — `
+		+ 'the class layer owns the interface and would overwrite this on the next frame. '
+		+ `Put it in a widget's render(), or take the widgets down with three.Widget.unmountAll().`
+	);
+}
+
+// -----------------------------------------------------------------------
 // The namespace
 
 export const ui = {
@@ -366,6 +404,7 @@ export const ui = {
 	// scroll offset, the open popup, the keyboard focus — survives this call for
 	// any node that carried a `key` and is still the same type.
 	set(tree) {
+		alone('set');
 		if (tree === null || tree === undefined) { H.uiClear(); return; }
 		H.uiSet(normalise(tree, 'root'));
 	},
@@ -388,13 +427,25 @@ export const ui = {
 	// Coordinates are the same top-left image pixels `three.input.pointer`
 	// arrives in, so a reticle at the cursor needs no conversion.
 	draw(ops) {
+		alone('draw');
 		if (ops === null || ops === undefined) { H.uiClear(); return; }
 		if (!Array.isArray(ops)) throw new TypeError('three.ui.draw(ops) wants an array of ops');
 		H.uiSet(normalise({ type: 'draw', ops }, 'root'));
 	},
 
-	// Takes the interface down. The debug overlay is not part of it and stays.
-	clear() { H.uiClear(); },
+	// Takes the interface down, widgets included — this is the verb that says
+	// "none of it", so it unmounts rather than refusing. The debug overlay is
+	// not part of the interface and stays.
+	clear() {
+		composed.clear();
+		H.uiClear();
+	},
+
+	// Re-render every widget whose state has changed, now, instead of when the
+	// frame reaches `ui.widgets`. A script only needs it to look at an interface
+	// without drawing a frame first — a test, or a screenshot taken straight
+	// after a mutation.
+	flush() { composed.flush(); },
 
 	// One keyed node, one or more of its values. This is the verb a HUD uses:
 	//

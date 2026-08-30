@@ -118,6 +118,37 @@ of objects, something in your scene is creating a new asset per object. Almost
 always that is a geometry built inside a loop with different numbers each
 time.
 
+## `console.log` and `three.debug.write`
+
+Both of these exist, both are captured by the engine rather than going straight
+to your terminal, and they answer different questions. Reaching for the wrong
+one is the usual reason a value you were sure you printed never appears.
+
+
+```js
+console.log('placed', scene.children.length, 'objects');
+three.debug.write(scene.stats());
+three.debug.write({ tallest: 4.9 }, { seed: 7 });
+```
+
+```
+placed 170 objects
+debug: [{"drawCalls":2,"instances":170,...},{"tallest":4.9},{"seed":7}]
+```
+So: **`console.log` for what happened, `three.debug.write` for what a number
+is.** 
+
+**So per-frame debugging is `console.log`, not `three.debug.write`.** Both
+buffers are bounded, so a callback that talks sixty times a second cannot fill
+memory; what overflows is dropped and counted rather than kept.
+
+> **The third option, and often the best one.** `three.debug.overlay(text)`
+> draws one line into the top-left of the frame itself. It lasts exactly one
+> frame, so setting it every frame keeps it up and a one-off note clears itself
+> — and because it is drawn into the image rather than printed beside it, a
+> screenshot carries it. ``three.frame(() => three.debug.overlay(`hp ${hp}`))``
+> is a HUD in one line.
+
 ## Edit it, then press shift+R
 
 The window is live. Change the file, press **shift+R** with the window focused,

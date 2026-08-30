@@ -19,8 +19,7 @@ from `three.inventory()` straight to `three.load`.
 ./three --assets ./assets --script 03-loading-a-gltf-kit.js
 ```
 
-Once the code is your own rather than a tutorial's, move it into the folder as
-`main.js`, and the flag is the whole command:
+Or create `main.js` in assets directory and add the code there
 
 ```bash
 ./three --assets ./assets

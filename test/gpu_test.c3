@@ -135,24 +135,22 @@ fn void device_comes_up_headless() @test
  about the machine the suite runs on, not about the product —
  `asking_for_validation_never_costs_the_device` is what says the product copes.
 
- **A release build is the third case and is not a failure.** Without `-D DEBUG`
- the layer is compiled out on purpose, so every check below is inert by design
- rather than by accident. Failing here would make the default `c3c test` red on
- a working tree, which is the fastest way to teach everyone to ignore this one
- line. It says so and returns instead — and `a_release_build_loads_no_validation_layer`
- is the check that has something to assert in that configuration.
+ **There is no second case any more.** This used to excuse itself in a build
+ without `-D DEBUG`, where the layer was compiled out and every check below was
+ inert by design rather than by accident. `--debug` replaced that flag and the
+ machinery is in every build now, so the suite asks for the layer directly —
+ `@with_validating_gpu` passes `validate: true` and never consults the command
+ line — and the only reason left for these checks to be inert is a machine with
+ no Vulkan SDK on it. Which is the thing this exists to say out loud.
 *>
 fn void without_the_validation_layer_none_of_these_are_tests() @test
 {
-	if (three::DEBUG_BUILD)
-	{
-		test::@check(
-			three::validation_layer_present(),
-			"VK_LAYER_KHRONOS_validation is not installed, so every validation check in this "
-				"suite passed without running. Install the Vulkan SDK, or read this one failure as "
-				"'the validation half of M5 is untested on this machine'."
-		);
-	}
+	test::@check(
+		three::validation_layer_present(),
+		"VK_LAYER_KHRONOS_validation is not installed, so every validation check in this "
+			"suite passed without running. Install the Vulkan SDK, or read this one failure as "
+			"'the validation half of M5 is untested on this machine'."
+	);
 }
 
 <*

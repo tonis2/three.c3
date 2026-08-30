@@ -320,6 +320,42 @@ fn void three_reload_asks_for_one_rather_than_performing_it() @test
 }
 
 <*
+ `three.quit()` asks and does not act, for the same reason.
+
+ Here rather than beside the other verbs because it is the same mechanism as the
+ one above and the pair is only legible together: a request the loop reads
+ between two frames, because acting on the call would free the engine the call is
+ running in. What that buys is the frame already built getting drawn and the
+ lines below the call getting to run — a menu that fades out and then quits is
+ written in that order.
+
+ What no test here can observe is the quit happening, because what performs it is
+ `live`'s loop leaving, and a test that owned that loop would own a window.
+ `three --headless --script` with a `three.quit()` in it is the check for that
+ half: without one the process never exits.
+
+ The `--debug` gate is not on this and must not be. Escape is the engine reaching
+ past the game and is gated; this is the game closing itself, and a menu that only
+ worked in a diagnostic run would be a menu shipped untested.
+*>
+fn void three_quit_asks_to_close_rather_than_closing() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		test::@check(!run.quit_wanted, "something wanted to quit before anything asked");
+
+		test::@check(@answer(run, "three.quit(); return 'still here';") == `"still here"`,
+			"the call did not return");
+		test::@check(run.quit_wanted, "three.quit() did not ask to close");
+
+		// A reload is not a quit. The two flags sit next to each other on the
+		// runtime and are read one line apart, which is exactly where a typo would
+		// put a game's menu into a reload loop.
+		test::@check(!run.reload_wanted, "asking to quit asked for a reload as well");
+	};
+}
+
+<*
  Shift+R, and neither half on its own.
 
  An edge on the R and a level on the shift: the third case is the one that would
@@ -425,8 +461,8 @@ fn void a_reload_gives_back_the_textures_the_script_held() @test
 
  The tally and the table have to agree, and this is the case that would break
  them: a release counted at the dispose and counted again at the teardown frees an
- image that is already gone. Under `-D DEBUG` a second destroy of the same
- `VkImage` is a validation error, so this is checked twice over — once by the
+ image that is already gone. With the Khronos layer loaded a second destroy of the
+ same `VkImage` is a validation error, so this is checked twice over — once by the
  count and once by the layer.
 *>
 fn void a_texture_the_script_disposed_is_not_released_again() @test

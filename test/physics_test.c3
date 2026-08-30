@@ -181,7 +181,7 @@ fn void bodies_built_before_a_swap_wait_for_it() @test
  `PhysicsBody` owns one allocation that nothing else points at, and the scene is
  the only thing that knows the world exists — so a `Scene.free` that forgot
  `physics.close()` would leak one per body with nothing to notice. The assertion
- is the leak checker the `-D DEBUG` suite runs, not a number here.
+ is the leak checker a run without `--test-noleak` does, not a number here.
 
  Proved by injection: drop `self.physics.close()` from `Scene.free` and the run
  reports the colliders and the world's own lists as leaked.

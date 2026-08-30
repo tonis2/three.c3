@@ -92,6 +92,7 @@ than a conversation.
 | `--camera <yaw,pitch,distance>` | Override the camera, over whatever the script set. |
 | `--mcp [port]` | Serve the agent tools on 127.0.0.1. Default port 8808. |
 | `--mcp-stdio [port]` | Be the stdio end of a `three` that is already serving. |
+| `--debug` | Diagnose this run: Vulkan validation layers (if the Khronos layer is installed), the driver/cache log lines, the device table at startup, and the window's own chords — escape to quit, shift+R to reload. |
 | `-h`, `--help` | Usage. |
 
 How they interact:
@@ -113,6 +114,11 @@ exits.** In any non-interactive context always bound the run:
 ```bash
 three --headless --script s.js --frames 1 --screenshot out.png
 ```
+
+The third way out is the script's own: `three.quit()` ends the run from inside,
+between one frame and the next. It is what a game's menu calls, and it is
+ignored under `--frames` — a bounded run is already bounded — so it replaces
+neither of the flags above for a run you need to come back.
 
 ## Recipes
 
@@ -183,6 +189,13 @@ It is what the host noticed: live scenes climbing, live materials climbing, a
 shadow map that just cost 134 MB, a shader that would not compile. Absent on
 nearly every run, which is what makes it worth reading on the runs it appears
 in. Read it as separate from `log`, which is what your own script printed.
+
+**Validation output only reaches the answer if the server was started with
+`--debug`.** That is what loads the Khronos layer; without it a run that made
+the driver unhappy answers exactly like one that did not. So a clean answer from
+a plain `three --mcp` means "nobody was watching", not "the driver was happy" —
+if a frame draws wrong for no reason you can see, restart the server as
+`three --mcp --debug` and run it again.
 
 The script budget through `run_script` is **30 s**, not the 5 s a windowed run
 gets. `three.budget = 60000;` at the top of the script raises it, up to ten
@@ -329,7 +342,7 @@ and `points` are how a script reaches it, and it costs a draw call of its own.
 `float3 post(Post p)` over the finished frame; `three.addPass` chains them.
 
 **Hot reload** — `three.reload()` boots the game again from its own source,
-and shift+R does the same from the window. It is a **new JavaScript context**:
+and shift+R does the same from the window under `--debug`. It is a **new JavaScript context**:
 the animation loop, every handler, every live object and every module the
 script imported are gone, and `main.js` runs from the top. What survives is the
 machine rather than the world — loaded assets, compiled pipelines, the camera —
@@ -338,6 +351,12 @@ a boot which kind it is. Put **numbers** in `persist`, not handles: a `Mesh` is
 an index into a pool that is about to be freed. The call returns before the
 reload happens (the host does it between frames), so over MCP the shape is
 `run_script` with `three.reload()`, then `screenshot`.
+
+**Quitting** — `three.quit()` closes the window and ends the process, which is
+what a menu's Quit calls. It returns first and the host closes between frames,
+so the last frame the game built is the one shown. Escape does the same from
+the window but only under `--debug`: a key the player never bound is the engine
+reaching past the game, so it is not something to ship a menu on top of.
 
 **Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
 `three.renderSize()`. Nothing is freed until you say so — a scene included:

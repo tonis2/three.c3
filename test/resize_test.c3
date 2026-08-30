@@ -13,9 +13,9 @@
 
  The reason it is off rather than merely tagged: it opens a real window and its
  frames are vsynced, so it costs a few seconds of somebody watching a window
- flicker — three times over, since a working session runs the suite plain, under
- `-D DEBUG`, and leak-tracked. That is a poor trade for a check on library
- behaviour that has not regressed.
+ flicker — twice over, since a working session runs the suite under
+ `--test-noleak` and then leak-tracked. That is a poor trade for a check on
+ library behaviour that has not regressed.
 
  To run it by hand, put `@test` back and use the filter above.
 
@@ -34,11 +34,12 @@
  The frames are vsynced, so the walk costs a few real seconds. That is the
  price of presentation actually happening, which is the thing under test.
 
- In a `-D DEBUG` build with the layer installed the walk runs validated and the
- sink's errors are asserted empty — the old probe's "run it validated; the pass
- condition is that nothing is printed", made checkable. Without the
- layer the extent checks still run and the validation half says it was skipped,
- the way `gpu_test.c3` does.
+ With the Khronos layer installed the walk runs validated and the sink's errors
+ are asserted empty — the old probe's "run it validated; the pass condition is
+ that nothing is printed", made checkable. The suite asks for the layer itself
+ rather than inheriting the answer from a build flag, so this needs nothing of
+ the command line. Without the layer the extent checks still run and the
+ validation half says it was skipped, the way `gpu_test.c3` does.
 *>
 module three_tests::resize;
 

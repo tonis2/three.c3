@@ -1,7 +1,8 @@
 <*
  Hot reload — §8, and the two answers §9 wanted before it could land.
 
- shift+R in the window, or `three.reload()` from a script or a tool call.
+ shift+R in a `--debug` window, or `three.reload()` from a script or a tool call
+ in any run at all.
 
  ## What a reload collects, and what it deliberately does not
 
@@ -78,10 +79,12 @@ fn void? reload(
  An edge on the R and a level on either shift, which is the pair every accelerator
  is: holding the combination reloads once, not sixty times a second.
 
- It is a reserved key, the way escape is, and that is the cost of the feature: a
- game that binds shift+R to something of its own does not get it while a window is
- open. Escape has always taken the same liberty and nobody has minded, and the two
- are named together in the line the loop prints at startup.
+ It is a reserved key while `--debug` is on, the way escape is, and only then —
+ which is what makes reserving it affordable. A shipped game binds shift+R to
+ whatever it likes and keeps it; a developer diagnosing that game loses the
+ binding for as long as the flag is up, and knows why. The loop is what applies
+ the gate; this only answers what the keys are doing. The two are named together
+ in the line it prints at startup, and that line prints only when they work.
 
  The reading is the window's own, before `JsRuntime.tick` folds `three.input.press`
  into it — so a script cannot reload the process by pressing its own keys, which

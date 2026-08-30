@@ -1,22 +1,32 @@
 // The API reference, generated rather than written.
 //
-// `src/js/prelude/docs.js` is the one source of truth for the scripting API:
-// `three.getApiDocs()` answers out of it and the `get_api_docs` MCP tool
-// answers out of it, so a page built from the same object cannot disagree
-// with either. The module is import-free by design — its only live call is
-// `globalThis.__three.keyNames()` — which is what lets this script import it
-// with no C3 build, no GPU and no binary anywhere in the picture.
+// `docs/` is the one source of truth for the scripting API, and this reads it:
+// `tools/docs.mjs` — the same compiler `c3c build` runs to produce the module
+// the engine embeds — turns the folder into `{ data, sections }`, and the two
+// walks below turn that into the page. No C3 build, no GPU and no binary
+// anywhere in the picture.
+//
+// It used to go the long way round: compile the folder, write
+// `src/js/prelude/docs.data.js`, then import `docs.js` under a stub for its one
+// host call and read `DOCS` off it. That bought nothing — the site never used
+// the engine's reading side, only the object underneath it — and cost a build
+// of the website that wrote into the engine's source tree.
+//
+// `keys` is the one section not in `docs/`: the key table is the engine's, so
+// the names an agent reads are the names the host matches. `docs.js` fills it
+// from the host binding; here it is parsed out of the table itself.
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+import { compile } from '../tools/docs.mjs';
+
 const here = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = join(here, '..');
 
-// `keyNames` is a host binding over the KEY_NAMES table, so it is the one
-// value that does not travel with the module. Parse the names out of the
-// table itself rather than keeping a second copy of them here.
+// Parse the names out of the KEY_NAMES table rather than keeping a second copy
+// of them here.
 export async function keyNames() {
 	const source = await readFile(join(repoRoot, 'src/scene/input.c3'), 'utf8');
 	const table = source.match(/const KeyName\[\*\] KEY_NAMES = \{([\s\S]*?)\n\};/);
@@ -33,27 +43,24 @@ export async function keyNames() {
 }
 
 // `DOCS` and the two walks the site needs over it.
+//
+// The assembly is `docs.js`'s, in the two lines it is: `version` and `summary`
+// first, then one property per section in README order, with `keys` coming from
+// the engine instead of the folder.
 export async function generate() {
-	const keys = await keyNames();
+	const [{ data, sections }, keys] = await Promise.all([compile(), keyNames()]);
 
-	// The stub stands in for the host binding, and for nothing else — if
-	// `docs.js` ever grows a second `H.` call, this throws by name rather
-	// than emitting a page with a hole in it.
-	globalThis.__three = new Proxy({ keyNames: () => keys }, {
-		get(target, prop) {
-			if (prop in target) return target[prop];
-			throw new Error(`gen-api: docs.js called __three.${String(prop)}, which this stub does not have`);
-		},
-	});
-
-	const docs = await import(join(repoRoot, 'src/js/prelude/docs.js'));
-	const DOCS = docs.DOCS;
+	const DOCS = { version: data.version, summary: data.summary };
+	for (const { key } of sections) {
+		if (key !== 'keys' && !(key in data)) throw new Error(`gen-api: README lists "${key}" and the compiler produced nothing for it`);
+		DOCS[key] = key === 'keys' ? keys : data[key];
+	}
 
 	return {
 		version: DOCS.version,
 		summary: DOCS.summary,
 		docs: DOCS,
-		sections: sectionList(DOCS),
+		sections: sectionList(DOCS, sections),
 		entries: entryList(DOCS),
 	};
 }
@@ -78,12 +85,21 @@ function entryList(DOCS) {
 	return out;
 }
 
-function sectionList(DOCS) {
-	return Object.entries(DOCS).map(([key, value]) => ({
-		key,
-		count: isSection(value) ? Object.keys(value).length : 1,
-		leaf: !isSection(value),
-	}));
+// In README order, each with its blurb; `summary` and `version` — the two
+// leaves that are not sections — last.
+function sectionList(DOCS, sections) {
+	const keys = sections.map(s => s.key);
+	for (const key of Object.keys(DOCS)) if (!keys.includes(key)) keys.push(key);
+	return keys.map(key => {
+		const value = DOCS[key];
+		const listed = sections.find(s => s.key === key);
+		return {
+			key,
+			count: isSection(value) ? Object.keys(value).length : 1,
+			leaf: !isSection(value),
+			blurb: listed ? listed.blurb : '',
+		};
+	});
 }
 
 function isSection(value) {
@@ -99,7 +115,7 @@ function entryText(value) {
 	return Object.entries(value).map(([key, field]) => `${key} ${entryText(field)}`).join('\n');
 }
 
-// `node site/gen-api.mjs` — the CI check. A docs.js edit that breaks the site
+// `node site/gen-api.mjs` — the CI check. A docs edit that breaks the site
 // should fail on the commit that made it, not on the next deploy.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	const api = await generate();

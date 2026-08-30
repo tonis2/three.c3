@@ -1,232 +1,242 @@
-// The whole build: markdown to HTML, the page templates, the asset copy.
+// The build.
 //
-// Plain HTML, CSS and JavaScript out the other end. No framework and no CDN —
-// `marked` and `highlight.js` run here and nothing they produce is shipped as
-// a library, so every page loads with no dependency and opens from a file://
-// URL as readily as from Pages.
+// There is no page generation here any more: the site is one `index.html` and
+// one bundle, and everything the reader sees is rendered by Lit in the browser.
+// What is left is the four things a browser cannot do for itself — generate the
+// reference out of the engine's docs, turn the tutorial Markdown into something
+// fetchable, roll the app up with esbuild, and copy the files.
 
-import { readFile, writeFile, mkdir, rm, cp, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, rm, cp } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { marked } from 'marked';
-import hljs from 'highlight.js';
+import { build as bundle } from 'esbuild';
 
 import { generate } from './gen-api.mjs';
-import * as home from './pages/index.mjs';
-import * as download from './pages/download.mjs';
-import * as api from './pages/api.mjs';
-import * as tutorials from './pages/tutorials.mjs';
-import * as screenshots from './pages/screenshots.mjs';
-import * as notfound from './pages/notfound.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, '..');
 const out = join(here, 'dist');
+const assets = join(out, 'assets');
 
-export const SITE = {
-	name: 'three.c3',
-	// A project Pages site is served from a subdirectory. Nothing in the
-	// build uses this as a prefix — every href is relative — but the meta
-	// tags need one absolute origin and this is it.
-	origin: 'https://tonis2.github.io/three.c3/',
-	repo: 'https://github.com/tonis2/three.c3',
-	owner: 'tonis2',
-	project: 'three.c3',
-};
-
-const NAV = [
-	{ href: 'index.html', label: 'Home' },
-	{ href: 'download.html', label: 'Download' },
-	{ href: 'api.html', label: 'API' },
-	{ href: 'tutorials/index.html', label: 'Tutorials' },
-	{ href: 'screenshots.html', label: 'Screenshots' },
-];
-
-// ---------------------------------------------------------------- helpers --
-
-export function escapeHtml(text) {
-	return String(text)
-		.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// `classes.Mesh` -> the `Mesh` half of `#/api/classes/Mesh`. Anything outside
+// the safe set becomes a dash, because a function entry is keyed by its whole
+// call — `load(path)` — and that has to survive being an id and a fragment.
+function slug(name) {
+	return String(name).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+$/g, '');
 }
 
-// A fenced block, highlighted here so the browser ships no highlighter.
-export function codeBlock(source, language = 'javascript') {
-	const known = hljs.getLanguage(language) ? language : 'plaintext';
-	const html = hljs.highlight(String(source), { language: known }).value;
-	return `<div class="code"><button class="copy" type="button" aria-label="Copy">Copy</button>`
-		+ `<pre><code class="hljs language-${known}">${html}</code></pre></div>`;
-}
-
-// Inline markdown-ish prose: the docs strings use `code` spans and nothing
-// else, so this is the whole of the markup they need.
-export function prose(text) {
-	return escapeHtml(text).replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
-}
-
-marked.use({
-	renderer: {
-		code({ text, lang }) { return codeBlock(text, lang || 'plaintext'); },
-	},
-});
-
-export function markdown(source) {
-	return marked.parse(source);
-}
-
-// -------------------------------------------------------------- the shell --
-
-// `depth` is how many directories down the page sits, which is what every
-// href is written relative to. A page at the root gets '', a tutorial gets
-// '../'. Absolute paths are the standard way a project Pages site breaks —
-// they work locally and 404 on the deploy — so the build refuses them below.
-function layout(page, depth = 0) {
-	const base = '../'.repeat(depth);
-	const nav = NAV.map(item => {
-		const current = item.href === page.path || (page.nav && page.nav === item.label);
-		return `<a href="${base}${item.href}"${current ? ' aria-current="page"' : ''}>${item.label}</a>`;
-	}).join('');
-
-	const scripts = (page.scripts || [])
-		.map(src => `<script src="${base}assets/${src}" defer></script>`).join('');
-
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<script>document.documentElement.className = 'js';</script>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(page.title)}</title>
-<meta name="description" content="${escapeHtml(page.description)}">
-<meta property="og:title" content="${escapeHtml(page.title)}">
-<meta property="og:description" content="${escapeHtml(page.description)}">
-<meta property="og:type" content="website">
-<meta property="og:url" content="${SITE.origin}${page.path}">
-<meta property="og:image" content="${SITE.origin}screenshots/village.jpg">
-<meta name="twitter:card" content="summary_large_image">
-<link rel="icon" href="${base}assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="${base}assets/style.css">
-</head>
-<body>
-<a class="skip" href="#main">Skip to content</a>
-<header class="topbar">
-  <a class="brand" href="${base}index.html"><span class="mark"></span>three.c3</a>
-  <nav>${nav}</nav>
-  <a class="source" href="${SITE.repo}">GitHub</a>
-</header>
-<main id="main"${page.wide ? ' class="wide"' : ''}>
-${page.body}
-</main>
-<footer>
-  <p>${SITE.name} — a Three.js-shaped scene API over Vulkan.
-     <a href="${SITE.repo}">Source</a> ·
-     <a href="${SITE.repo}/releases">Releases</a> ·
-     <a href="${SITE.repo}/blob/main/LICENSE">MIT</a></p>
-</footer>
-<script src="${base}assets/copy.js" defer></script>
-${scripts}
-</body>
-</html>
-`;
-}
-
-// ---------------------------------------------------------------- writing --
-
-const written = [];
-
-async function emit(path, html) {
-	const target = join(out, path);
-	await mkdir(dirname(target), { recursive: true });
-	await writeFile(target, html);
-	written.push({ path, bytes: Buffer.byteLength(html) });
-}
-
-async function page(module, ctx) {
-	const pages = await module.render(ctx);
-	for (const p of Array.isArray(pages) ? pages : [pages]) {
-		await emit(p.path, layout(p, p.path.split('/').length - 1));
+// A duplicate slug is a deep link that silently lands on the wrong entry. It
+// only shows after the deploy, so it fails here instead.
+function checkSlugs(entries) {
+	const taken = new Map();
+	for (const entry of entries) {
+		const id = `${entry.section}/${slug(entry.name)}`;
+		if (taken.has(id)) throw new Error(`api: "${entry.path}" and "${taken.get(id)}" both route to #/api/${id}`);
+		taken.set(id, entry.path);
 	}
 }
 
-// Two build-time checks rather than review ones, because both fail only after
-// the deploy. `href="/assets/style.css"` resolves locally and 404s under
-// /three.c3/; a relative link to a page that was renamed resolves nowhere at
-// all, and neither shows up in a build that otherwise succeeded.
-function checkLinks(html, path, present) {
-	const bad = [...html.matchAll(/(href|src)="(\/[^/][^"]*)"/g)].map(m => m[2]);
-	if (bad.length > 0) {
-		throw new Error(`${path}: absolute paths break the /three.c3/ base — ${bad.join(', ')}`);
-	}
+// ------------------------------------------------------------- tutorials --
 
-	const from = dirname(path);
-	const broken = [];
-	for (const [, , href] of html.matchAll(/(href|src)="([^"]+)"/g)) {
-		if (/^(https?:|mailto:|data:|#)/.test(href)) continue;
-		const target = join(from, href.split('#')[0].split('?')[0]);
-		if (target !== '' && !present.has(target)) broken.push(href);
+// `title`, `order`, `summary` — three scalar keys, and no reason to carry a
+// YAML parser for them.
+function frontmatter(raw) {
+	const found = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+	if (!found) return { meta: {}, content: raw };
+	const meta = {};
+	for (const line of found[1].split(/\r?\n/)) {
+		const pair = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+		if (pair) meta[pair[1]] = pair[2].trim().replace(/^["'](.*)["']$/, '$1');
 	}
-	if (broken.length > 0) throw new Error(`${path}: links to nothing — ${broken.join(', ')}`);
+	return { meta, content: raw.slice(found[0].length) };
 }
 
-// ------------------------------------------------------------------ build --
+// The fenced JavaScript, concatenated in the order it appears. A block marked
+// ```js ignore is prose about code — a counter-example, a line to compare
+// against — and is left out of the file that has to run.
+function scriptFrom(source) {
+	const blocks = [];
+	for (const block of source.matchAll(/^```(js|javascript)([^\n]*)\n([\s\S]*?)^```/gm)) {
+		if (/\bignore\b/.test(block[2])) continue;
+		blocks.push(block[3].trimEnd());
+	}
+	return blocks.length === 0 ? null : blocks.join('\n\n') + '\n';
+}
+
+async function tutorials() {
+	const dir = join(here, 'tutorials');
+	const files = existsSync(dir)
+		? (await readdir(dir)).filter(file => file.endsWith('.md')).sort()
+		: [];
+
+	const entries = [];
+	for (const file of files) {
+		const { meta, content } = frontmatter(await readFile(join(dir, file), 'utf8'));
+		const slugged = file.replace(/\.md$/, '');
+		entries.push({
+			slug: slugged, content,
+			title: meta.title || slugged,
+			summary: meta.summary || '',
+			order: Number(meta.order ?? 999),
+			script: scriptFrom(content),
+		});
+	}
+	entries.sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
+
+	// The tutorials link to each other as files, so that the Markdown reads on
+	// GitHub too. `lib/markup.js` turns those into routes — and a link to a file
+	// that was renamed resolves nowhere in either place, which is worth a red
+	// build rather than a dead link on the deploy.
+	const known = new Set(entries.map(entry => entry.slug));
+	for (const entry of entries) {
+		for (const [, href] of entry.content.matchAll(/\]\((\d\d-[a-z0-9-]+)\.html\)/g)) {
+			if (!known.has(href)) throw new Error(`${entry.slug}.md links to ${href}.html, which is not a tutorial`);
+		}
+	}
+	return entries;
+}
+
+// ----------------------------------------------------------------- build --
 
 async function build() {
 	const started = process.hrtime.bigint();
 	await rm(out, { recursive: true, force: true });
-	await mkdir(out, { recursive: true });
+	await mkdir(assets, { recursive: true });
 
-	const apiData = await generate();
-	const ctx = { root, site: here, out, SITE, apiData, escapeHtml, codeBlock, prose, markdown };
+	const api = await generate();
+	checkSlugs(api.entries);
+	const steps = await tutorials();
 
-	await page(home, ctx);
-	await page(download, ctx);
-	await page(api, ctx);
-	await page(tutorials, ctx);
-	await page(screenshots, ctx);
-	await page(notfound, ctx);
+	// The two values the home page needs, compiled into the bundle rather than
+	// fetched: a couple of kilobytes, against a request the first route a
+	// visitor lands on would otherwise have to wait for.
+	const shots = await screenshots();
+	await mkdir(join(here, '.generated'), { recursive: true });
+	await writeFile(join(here, '.generated/data.js'),
+		'// Written by build.mjs. Not checked in.\n'
+		+ `export const META = ${JSON.stringify({
+			version: api.version,
+			summary: api.summary,
+			example: api.docs.example,
+			entryCount: api.entries.length,
+			sectionCount: api.sections.length,
+		}, null, '\t')};\n\n`
+		+ `export const SHOTS = ${JSON.stringify(shots, null, '\t')};\n`);
 
-	// The reference's data, fetched by api.js rather than inlined: 113 KB of
-	// JSON in the markup would be paid for by every page load, and this one
-	// is cacheable on its own.
-	await mkdir(join(out, 'assets'), { recursive: true });
-	await writeFile(join(out, 'assets/api.json'), JSON.stringify({
-		version: apiData.version,
-		sections: apiData.sections,
-		entries: apiData.entries.map(e => ({ path: e.path, section: e.section, name: e.name, value: e.value })),
+	// `text` is left out: it is the prose of an entry concatenated, and the
+	// prose is already in `value`. The reference builds its search index from
+	// that on the way in rather than being sent the same words twice.
+	await writeFile(join(assets, 'api.json'), JSON.stringify({
+		version: api.version,
+		sections: api.sections,
+		entries: api.entries.map(e => ({ path: e.path, section: e.section, name: e.name, value: e.value })),
 	}));
 
-	await cp(join(here, 'assets'), join(out, 'assets'), { recursive: true });
+	await writeFile(join(assets, 'tutorials.json'), JSON.stringify(
+		steps.map(({ slug: id, title, summary, content, script }) =>
+			({ slug: id, title, summary, content, script: Boolean(script) }))));
 
+	// The runnable file beside each tutorial is a real file, because `--script`
+	// takes a path and a blob the page assembled is not something to keep.
+	await mkdir(join(assets, 'scripts'), { recursive: true });
+	for (const step of steps) {
+		if (step.script) await writeFile(join(assets, 'scripts', `${step.slug}.js`), step.script);
+	}
+
+	const bundled = await app();
+
+	await cp(join(here, 'assets'), assets, { recursive: true });
+	await cp(join(here, 'index.html'), join(out, 'index.html'));
 	if (existsSync(join(here, 'screenshots'))) {
 		await cp(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 	}
 
+	await writeFile(join(out, '404.html'), notFound());
 	// Pages serves what it is given and adds nothing; this stops Jekyll from
 	// eating anything if the source is ever pointed at a branch instead.
 	await writeFile(join(out, '.nojekyll'), '');
 
-	const files = await walk(out);
-	const present = new Set(files.map(file => relative(out, file)));
-	for (const file of files) {
-		if (!file.endsWith('.html')) continue;
-		checkLinks(await readFile(file, 'utf8'), relative(out, file), present);
-	}
+	await checkShell();
 
 	const ms = Number(process.hrtime.bigint() - started) / 1e6;
-	const bytes = written.reduce((sum, w) => sum + w.bytes, 0);
-	console.log(`built ${written.length} pages, ${(bytes / 1024).toFixed(0)} KB, in ${ms.toFixed(0)} ms`);
-	for (const w of written) console.log(`  ${w.path.padEnd(34)} ${(w.bytes / 1024).toFixed(1)} KB`);
+	console.log(`built in ${ms.toFixed(0)} ms`);
+	console.log(`  bundle.js        ${(bundled / 1024).toFixed(1)} KB`);
+	console.log(`  api.json         ${(Buffer.byteLength(await readFile(join(assets, 'api.json'))) / 1024).toFixed(1)} KB  ${api.entries.length} entries`);
+	console.log(`  tutorials.json   ${(Buffer.byteLength(await readFile(join(assets, 'tutorials.json'))) / 1024).toFixed(1)} KB  ${steps.length} tutorials`);
 }
 
-async function walk(dir) {
-	const found = [];
-	for (const entry of await readdir(dir, { withFileTypes: true })) {
-		const full = join(dir, entry.name);
-		if (entry.isDirectory()) found.push(...await walk(full));
-		else found.push(full);
+// Lit, the router, the views and the two live widgets, in one ES module. A
+// module rather than an IIFE because that is what a browser loads without a
+// build step of its own, and bundled rather than import-mapped because Lit's
+// own imports are bare specifiers no browser resolves.
+async function app() {
+	const result = await bundle({
+		entryPoints: [join(here, 'app/main.js')],
+		outfile: join(assets, 'bundle.js'),
+		bundle: true,
+		format: 'esm',
+		minify: true,
+		target: 'es2022',
+		legalComments: 'none',
+		metafile: true,
+	});
+	return Object.values(result.metafile.outputs)[0].bytes;
+}
+
+// A shot missing from disk is dropped rather than rendered as a broken image.
+async function screenshots() {
+	const dir = join(here, 'screenshots');
+	const manifest = join(dir, 'captions.json');
+	if (!existsSync(manifest)) return [];
+	return JSON.parse(await readFile(manifest, 'utf8'))
+		.filter(shot => existsSync(join(dir, shot.file)));
+}
+
+// Every URL the old site got wrong, it got wrong the same way: an absolute path
+// resolves locally and 404s under /three.c3/. There is one document now, so the
+// check is one document long — and it also makes sure the files it names were
+// actually written.
+async function checkShell() {
+	const html = await readFile(join(out, 'index.html'), 'utf8');
+
+	const absolute = [...html.matchAll(/(?:href|src)="(\/[^/][^"]*)"/g)].map(m => m[1]);
+	if (absolute.length > 0) {
+		throw new Error(`index.html: absolute paths break the /three.c3/ base — ${absolute.join(', ')}`);
 	}
-	return found;
+
+	for (const [, href] of html.matchAll(/(?:href|src)="([^":#]+)"/g)) {
+		if (/^(https?:|mailto:|data:)/.test(href)) continue;
+		if (!existsSync(join(out, href))) throw new Error(`index.html: references ${href}, which was not built`);
+	}
+}
+
+// Pages has no rewrite rules, so `/three.c3/api.html` — a URL from when this
+// site was nine documents — is a 404 it serves this file for. The path it was
+// asked for is still in the address bar, so the route is recoverable: work out
+// where the site root is by stripping the tail, and send the reader there.
+function notFound() {
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Redirecting — three.c3</title>
+<script>
+(function () {
+	var path = location.pathname;
+	var tutorial = path.match(/^(.*\\/)tutorials\\/(\\d\\d-[a-z0-9-]+)\\.html$/);
+	var api = path.match(/^(.*\\/)api\\.html$/);
+	var list = path.match(/^(.*\\/)tutorials\\/(index\\.html)?$/);
+
+	var base = (tutorial || api || list || [, path.replace(/[^/]*$/, '')])[1];
+	var route = tutorial ? '#/tutorials/' + tutorial[2] : api ? '#/api' : list ? '#/tutorials' : '#/404';
+
+	location.replace(base + 'index.html' + route);
+}());
+</script>
+</head>
+<body><p>Redirecting to <a href="index.html">three.c3</a>.</p></body>
+</html>
+`;
 }
 
 await build();

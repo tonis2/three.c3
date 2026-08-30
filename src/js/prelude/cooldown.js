@@ -1,6 +1,7 @@
 // three.c3 — three.cooldown(duration, options): a scalar gameplay timer.
-// See `docs.js`'s `Cooldown`/`three.cooldown` entries for the full API; this
-// header is only the one decision that needed evidence to make.
+// See `docs/classes/Cooldown.md` and `three.cooldown` in `docs/functions/systems.md`
+// for the full API; this header is only the one decision that needed evidence
+// to make.
 //
 // Replaces the `if (x > 0) x -= dt` pattern `examples/wumpa_run.js` wrote by
 // hand for `ctl.spin`, `ctl.spinCool`, `ctl.hurt` and `ctl.coyote`. `P_STUN`
