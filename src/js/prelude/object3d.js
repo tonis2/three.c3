@@ -164,13 +164,20 @@ export class Object3D {
 	// script to wonder whether the clip name was wrong.
 	//
 	// **Deliberately not an AnimationMixer.** Three.js's mixer/clip/action
-	// trio earns its complexity on crossfading; there is no crossfading here
-	// yet, and a partial mixer answering to the same name would be worse
-	// than a smaller thing with a different one. See G3/S7.
+	// trio earns its complexity on holding several weighted actions at once.
+	// There is a crossfade here — `play(name, { fade })` — and it is two
+	// clips and one weight, which is what a locomotion state machine asks
+	// for. The third simultaneous clip is where a mixer would have to be a
+	// mixer, and it is not here. See G3/S7.
 
 	get animations() { return this._clips ? this._clips.slice() : []; }
 
-	play(name, { loop = true, speed = 1, time = 0 } = {}) {
+	// `fade` crossfades out of whatever is playing, in seconds. **Asking to
+	// fade into the clip that is already playing does nothing**, which is
+	// what makes `play(state.clip, { fade: 0.2 })` safe to call from a state
+	// machine that runs every frame. Restarting a clip outright is `play`
+	// without a fade.
+	play(name, { loop = true, speed = 1, time = 0, fade = 0 } = {}) {
 		if (!this._clips) {
 			throw new Error(
 				'play() works on an object from asset.instantiate(), which is what carries a file\'s '
@@ -187,13 +194,61 @@ export class Object3D {
 		// The host learns the node map on the first play and not before: a
 		// prop that never animates never sends it.
 		this._bindAnimation();
-		H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time);
+		H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time, +fade);
 		return this;
 	}
 
 	stop() {
 		if (this._i >= 0 && this._clips) H.stopAnimation(this._i, this._g);
 		return this;
+	}
+
+	// -------------------------------------------------------------------
+	// Sockets
+	//
+	// "Put the sword in the character's hand." The bone is named by the
+	// file — `asset.bones` is the list — and what comes back is an ordinary
+	// object to `add` things to.
+	//
+	// **The two kinds of character answer this differently and on purpose.**
+	// With `skeleton: true` the bones already are objects in the tree, so
+	// this hands back the bone itself: moving it moves the skin, and what is
+	// parented to it rides along through the ordinary graph. A baked
+	// character has no bone objects at all — dropping them is what makes a
+	// hundred of them a hundred nodes — so this makes one and the host keeps
+	// it on the bone, reading the transform out of the pose table the
+	// character is already being drawn from. Either way the answer is
+	// something you can `add` to.
+	//
+	// Called twice for one bone on a baked character, it builds two holders.
+	// That is deliberate: they are ordinary objects with their own children,
+	// and deduping them would make removing one remove the other's contents.
+	socket(name) {
+		if (this._i < 0) {
+			throw new Error(`socket("${name}") needs ${this._name || 'the object'} to be in a scene — add it first`);
+		}
+		if (this._liveSkin) {
+			const bone = this.getObjectByName(String(name));
+			if (!bone) throw new Error(`no bone named "${name}" — ${this._boneList()}`);
+			return bone;
+		}
+		const holder = new Object3D();
+		holder.name = String(name);
+		this.add(holder);
+		if (!H.bindSocket(holder._i, holder._g, this._i, this._g, String(name))) {
+			this.remove(holder);
+			throw new Error(`no bone named "${name}" — ${this._boneList()}`);
+		}
+		return holder;
+	}
+
+	// What the rig does have, for the sentence above. `_bones` is set by
+	// `asset.instantiate()`; anything else is not a character and says so.
+	_boneList() {
+		if (!this._bones) {
+			return 'socket() works on a character from asset.instantiate(). This object has no skeleton.';
+		}
+		return this._bones.length ? `this one has: ${this._bones.join(', ')}` : 'this one has no bones';
 	}
 
 	// Flat triples — glTF node index, host node index, host node generation
@@ -242,6 +297,10 @@ export class Object3D {
 			H.setColor(i, g, ...this._color);
 		}
 		if (this._variant) H.setVariant(i, g, this._variant);
+		// Replayed like colour and variant, and only when something is actually
+		// worn: an all-zero vector is the neutral mesh, which is what the host
+		// already has, so sending it would be a crossing to say nothing.
+		if (this._weights && this._weights.toArray().some(w => w !== 0)) this._weights._push();
 		// A skinned mesh learns its skeleton here and nowhere else: this is the
 		// first moment there is a host node to tell, and the host's own
 		// `instantiate` — which sets it as it builds — is not the path a script

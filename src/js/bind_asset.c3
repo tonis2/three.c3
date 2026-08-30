@@ -1627,6 +1627,61 @@ fn void js_asset_clips(
 }
 
 <*
+ `assetBones(asset, generation)` — every joint name of every skin in a file.
+
+ What a socket is named by, and unguessable without it: a rig calls its hand
+ `mixamorig:RightHand` or `hand.R` or `Bone.014` depending on who exported it, and
+ a baked instantiation drops the bone nodes, so JavaScript has no other way to
+ find out. Read straight off the asset's node names, so this costs no upload and
+ no buffer.
+
+ In skin order and then joint order, deduplicated: two skins sharing a joint —
+ which a file with a body mesh and a head mesh usually does — name it once.
+*>
+fn void js_asset_bones(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	Asset* asset = self.pass.assets.slot(id);
+	qjs::Value names = js.array();
+	uint at = 0;
+
+	// The names already emitted, borrowed from the asset rather than copied — this
+	// list outlives nothing and the asset outlives it.
+	List{String} seen;
+	seen.init(mem, 16);
+	defer seen.free();
+
+	foreach (&skin : asset.skins)
+	{
+		foreach (source : skin.joints)
+		{
+			if (source >= asset.nodes.len()) continue;
+			String name = asset.nodes[source].name;
+			if (name.len == 0) continue;
+
+			bool already = false;
+			foreach (had : seen)
+			{
+				if (had == name) { already = true; break; }
+			}
+			if (already) continue;
+
+			seen.push(name);
+			js.set_index(names, at, js.string(name));
+			at++;
+		}
+	}
+	*out = names;
+}
+
+<*
  `three.inventory()` — every glTF in the assets directory, described without
  being loaded.
 

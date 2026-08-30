@@ -43,11 +43,30 @@ struct Instance
     float4 color;
     uint variant;
     uint pose;
+    // The frame a crossfade is coming out of, and how much of it is still showing.
+    // Mixed here for the same reason and with the same lie `mesh.slang` names: a
+    // character posed by this pass has to fade the way one posed by the vertex
+    // shader does, or switching `skinning: 'compute'` on changes how it looks.
+    uint pose_from;
+    float blend;
+    // Which slice of `morph_weights` this copy reads, plus one, or zero for a copy
+    // that does not morph. **Last, like the C3 struct** — the field order here is
+    // a wire format, not a preference.
+    uint morph;
 };
 
 // Byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare. One thread
 // writes both halves and one vertex-shader invocation reads them.
 struct SkinnedVertex
+{
+    float3 position;
+    float3 normal;
+};
+
+// One vertex's displacement for one morph target. Byte for byte what
+// `mesh.slang` and `gpu/pipeline.c3` declare — displacements and not positions,
+// because that is what composes.
+struct MorphDelta
 {
     float3 position;
     float3 normal;
@@ -73,9 +92,18 @@ struct SkinPush
     float4x4* live;
     // This bucket's slice of the frame's output buffer.
     SkinnedVertex* output;
+    // The mesh's morph targets and the frame's weights, both null when nothing
+    // morphs. **The displacement has to happen here and not in the vertex shader**
+    // for a pre-skinned bucket: this pass writes the posed vertices the draw then
+    // reads, so a morph applied afterwards would be applied to a vertex the joints
+    // had already moved — and turning `skinning: 'compute'` on would change the
+    // character's face.
+    MorphDelta* morph;
+    float* morph_weights;
     uint vertex_count;
     uint instance_count;
     uint flags;
+    uint morph_targets;
 };
 [vk_push_constant] const SkinPush push;
 
@@ -87,6 +115,17 @@ static const uint POSE_MASK = 0x7fffffffu;
 // so the only thing this number decides is how many threads the tail wastes.
 // Sixty-four is the largest that is a subgroup multiple on every device this runs
 // on.
+// The four influences of one vertex against one palette, summed into the matrix
+// that poses it. `mesh.slang` carries the same function for the same reason: a
+// crossfade spends it twice, once per frame it sits between.
+float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+    return weights.x * palette[base + joints.x]
+         + weights.y * palette[base + joints.y]
+         + weights.z * palette[base + joints.z]
+         + weights.w * palette[base + joints.w];
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void computeMain(uint3 thread : SV_DispatchThreadID)
@@ -109,19 +148,37 @@ void computeMain(uint3 thread : SV_DispatchThreadID)
     if ((instance.pose & POSE_LIVE) != 0) palette = push.live;
     uint base = instance.pose & POSE_MASK;
 
-    uint4 joints = push.joints[vid];
-    float4 weights = push.weights[vid];
-
-    float4x4 pose = weights.x * palette[base + joints.x]
-                  + weights.y * palette[base + joints.y]
-                  + weights.z * palette[base + joints.z]
-                  + weights.w * palette[base + joints.w];
-
+    float3 position = push.positions[vid];
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
 
+    // Before the blend, exactly as `mesh.slang` does it and for the reason its
+    // `apply_morph` gives: a blend shape is authored against the rest mesh.
+    if (push.morph_targets != 0 && instance.morph != 0)
+    {
+        uint morph_base = instance.morph - 1;
+        for (uint t = 0; t < push.morph_targets; t++)
+        {
+            float amount = push.morph_weights[morph_base + t];
+            if (amount == 0.0) continue;
+            MorphDelta delta = push.morph[t * push.vertex_count + vid];
+            position += amount * delta.position;
+            normal += amount * delta.normal;
+        }
+    }
+
+    uint4 joints = push.joints[vid];
+    float4 weights = push.weights[vid];
+
+    float4x4 pose = blend_joints(palette, base, joints, weights);
+    if (instance.blend > 0.0)
+    {
+        float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
+        pose = pose + (from - pose) * instance.blend;
+    }
+
     SkinnedVertex skinned;
-    skinned.position = mul(pose, float4(push.positions[vid], 1.0)).xyz;
+    skinned.position = mul(pose, float4(position, 1.0)).xyz;
     skinned.normal = mul((float3x3)pose, normal);
 
     push.output[index] = skinned;

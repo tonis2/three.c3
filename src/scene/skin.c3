@@ -342,6 +342,11 @@ fn void pose_at(
 		foreach (&channel : clip.channels)
 		{
 			if (channel.node >= scratch.len) continue;
+			// A baked pose is a table of joint matrices and a morph weight is not
+			// one, so this is the one channel the bake has nothing to do with — and
+			// skipping it *before* the sample matters, because a WEIGHTS channel is
+			// as wide as the mesh has targets and `value` is four floats.
+			if (channel.path == AnimatedPath.WEIGHTS) continue;
 			channel.sample(time, value[..]);
 
 			switch (channel.path)
@@ -352,6 +357,8 @@ fn void pose_at(
 					scratch[channel.node].rotation = { value[0], value[1], value[2], value[3] };
 				case AnimatedPath.SCALE:
 					scratch[channel.node].scale = { value[0], value[1], value[2] };
+				default:
+					break;
 			}
 		}
 	}
@@ -480,4 +487,263 @@ fn uint BakedPose.frame_at(&self, int frame)
 	if (frame < 0) frame = 0;
 	if (frame >= (int)self.frame_count) frame = (int)self.frame_count - 1;
 	return self.frame_offset + (uint)frame * self.joint_count;
+}
+
+<*
+ A CPU copy of the baked table, built the first time something asks where a bone
+ is and never otherwise.
+
+ **The table is device-local and the device is not readable**, so a socket — "put
+ the sword in that hand" — has nowhere to read `pose * bind` from. Three ways out,
+ and this is the third:
+
+ - Keeping the array `ensure_poses` already built would double the pose memory of
+   every rigged file in the project, whether or not anything ever asks a question
+   about a bone.
+ - Sampling the clip again along the bone's ancestor chain would answer a slightly
+   different question: the curves at the player's exact time, where what is drawn
+   is the nearest baked frame. A sword half a bake frame ahead of the hand holding
+   it is the kind of wrong that is only visible in motion.
+ - Re-running the bake answers exactly the question the GPU is answering, because
+   it is the same deterministic function over the same inputs. `Asset.bake_poses`
+   is public and says so.
+
+ So a file nothing is socketed to spends nothing, and one that is spends a second
+ copy of its pose table — per asset, not per instance, and once.
+*>
+fn void Assets.ensure_pose_mirror(&self, AssetId id)
+{
+	Asset* asset = self.slot(id);
+	if (asset == null || asset.pose_mirror.len > 0) return;
+	if (asset.pose_matrices == 0 || asset.nodes.len() == 0) return;
+
+	asset.pose_mirror = mem::new_array(Matrix4f, (usz)asset.pose_matrices);
+	asset.bake_poses(asset.pose_mirror);
+}
+
+<*
+ Where one joint of one skin sits, for one frame of the baked table.
+
+ `pose * bind`, which is the inverse of what `write_joints` did: the table holds
+ `world * inverse_bind`, so multiplying the bind matrix back in leaves the bone's
+ own world matrix in the asset's space — the space a socket node's parent is
+ already in. **This is what `AssetSkin.bind` is kept for, and the only thing that
+ reads it.**
+
+ The identity when the mirror is not built or the offset is off the end, which
+ puts a socket at the character's origin: visible and local, rather than a read
+ past an array.
+*>
+fn Matrix4f Asset.bone_matrix(&self, uint skin, uint joint, uint offset)
+{
+	if (skin >= self.skins.len()) return matrix::IDENTITY4{float};
+	AssetSkin* rig = &self.skins[skin];
+	if (joint >= rig.bind.len()) return matrix::IDENTITY4{float};
+
+	usz at = (usz)offset + (usz)joint;
+	if (at >= self.pose_mirror.len) return matrix::IDENTITY4{float};
+	return self.pose_mirror[at].mul(rig.bind[joint]);
+}
+
+// ============================================================================
+// Sockets
+// ============================================================================
+
+<*
+ One node kept on one bone of a baked character.
+
+ **Sockets are for the baked path and refuse the live one**, which is not a
+ shortfall: a `skeleton: true` character has its bones as scene nodes already, so
+ attaching a sword to its hand is `hand.add(sword)` through the ordinary graph and
+ a second mechanism beside it would be two answers to one question. A baked
+ character has no bone nodes at all — that absence is what makes a hundred of them
+ a hundred nodes — so its bone transforms have to be recovered from the pose table
+ and written somewhere, and this is the somewhere.
+*>
+struct Socket
+{
+	// The node being kept on the bone. Its parent is the character's group, so
+	// what is written into it is the bone's transform in the asset's own space and
+	// the ordinary world-matrix walk does the rest.
+	NodeId node;
+
+	// The skinned mesh whose `pose` says which frame to read — the drawing node
+	// and not the group, because the pose offset is per drawn copy.
+	NodeId character;
+	uint skin;
+	uint joint;
+
+	// What the character's pose was the last time this was written. **A character
+	// standing still writes nothing and marks nothing moved**, which is what keeps
+	// one socket from forcing the world-matrix walk on every frame of a still
+	// scene. The three fields together are the whole of what the bone transform
+	// depends on, so comparing them is exact rather than a heuristic.
+	uint pose;
+	uint pose_from;
+	float blend;
+	bool written;
+}
+
+<*
+ Puts `node` on the bone called `bone`, somewhere under the character at `root`.
+
+ The node keeps its own identity — it is an ordinary scene node and can hold a
+ subtree — and what it loses is its transform, which is overwritten every frame
+ the pose changes. Attaching a second node to the same bone is fine and attaching
+ one node twice replaces the first attachment.
+
+ Refused on a live character, and the refusal is the useful answer: with
+ `skeleton: true` the bone is already a node in the scene, so `getObjectByName`
+ finds it and `add` puts something on it, which is one mechanism rather than two.
+
+ @param root : `The group an instantiation returned. The bone is looked for in every skinned mesh under it, so a file with two skinned meshes finds whichever one names it.`
+ @return `False when the subtree has no skinned mesh with a joint of that name, or when the character is posed live. A question rather than an error: the bone names are the file's own.`
+*>
+fn bool Scene.attach_socket(&self, NodeId node, NodeId root, String bone)
+{
+	if (self.assets == null || self.node(node) == null) return false;
+
+	AnimationPlayer* player = self.player(root);
+	if (player != null && player.live_skin) return false;
+
+	NodeId character = NO_NODE;
+	uint skin = 0;
+	uint joint = 0;
+	if (!self.find_bone(root, bone, &character, &skin, &joint)) return false;
+
+	Node* posed = self.node(character);
+	if (posed == null) return false;
+	self.assets.ensure_pose_mirror(posed.asset);
+
+	self.detach_socket(node);
+	self.sockets.push({ .node = node, .character = character, .skin = skin, .joint = joint });
+	self.update_sockets();
+	return true;
+}
+
+<*
+ Takes a node off whatever bone it was on, leaving it where the bone last put it.
+
+ @return `Whether it was on one.`
+*>
+fn bool Scene.detach_socket(&self, NodeId node)
+{
+	foreach (i, &socket : self.sockets)
+	{
+		if (socket.node != node) continue;
+		self.sockets.remove_at(i);
+		return true;
+	}
+	return false;
+}
+
+<*
+ The skinned mesh under `id` that has a joint called `bone`, and which joint.
+
+ Recursive over an instantiated character, which is `flatten_node`'s depth
+ argument again. The name is the *asset node's*, because that is what a rig calls
+ its bones and what a file's author typed.
+*>
+fn bool Scene.find_bone(&self, NodeId id, String bone, NodeId* character, uint* skin, uint* joint)
+{
+	Node* node = self.node(id);
+	if (node == null) return false;
+
+	if (node.skin >= 0)
+	{
+		Asset* owner = self.assets.slot(node.asset);
+		if (owner != null && node.skin < owner.skins.len())
+		{
+			AssetSkin* rig = &owner.skins[node.skin];
+			foreach (j, source : rig.joints)
+			{
+				if (source >= owner.nodes.len()) continue;
+				if (owner.nodes[source].name != bone) continue;
+
+				*character = id;
+				*skin = (uint)node.skin;
+				*joint = (uint)j;
+				return true;
+			}
+		}
+	}
+
+	foreach (child : node.children)
+	{
+		if (self.find_bone(child, bone, character, skin, joint)) return true;
+	}
+	return false;
+}
+
+<*
+ Every socket put back on its bone, for the pose its character is in now.
+
+ Runs once a frame from `step_animations`, and again from `play` so that a
+ character posed without the clock being stepped drags what is attached to it
+ along. Costs nothing in a scene with no sockets and nothing in a frame where
+ nothing moved — see `Socket.pose`.
+
+ A socket whose node or character has been killed is dropped here rather than by
+ the kill: a node's death is one of several, and sweeping the short list at the
+ one place that walks it anyway is cheaper than a hook on the frequent path.
+*>
+fn void Scene.update_sockets(&self)
+{
+	if (self.sockets.len() == 0 || self.assets == null) return;
+
+	// Backwards, so removing an entry does not skip the one after it.
+	for (sz i = self.sockets.len(); i > 0; i--)
+	{
+		Socket* socket = &self.sockets[i - 1];
+		Node* node = self.node(socket.node);
+		Node* character = self.node(socket.character);
+		if (node == null || character == null)
+		{
+			self.sockets.remove_at(i - 1);
+			continue;
+		}
+
+		if (socket.written
+			&& socket.pose == character.pose
+			&& socket.pose_from == character.pose_from
+			&& socket.blend == character.blend)
+		{
+			continue;
+		}
+
+		Asset* owner = self.assets.slot(character.asset);
+		if (owner == null) continue;
+
+		Matrix4f world = owner.bone_matrix(socket.skin, socket.joint, character.pose);
+		if (character.blend > 0)
+		{
+			// The same mix the shader makes, and the same lie with it: what a
+			// socket has to be is where the crossfading hand *is*, not where either
+			// clip on its own would have put it.
+			Matrix4f from = owner.bone_matrix(socket.skin, socket.joint, character.pose_from);
+			world = mix_matrix(world, from, character.blend);
+		}
+
+		decompose(world, &node.position, &node.rotation, &node.scale);
+		self.mark_moved(socket.node);
+
+		socket.pose = character.pose;
+		socket.pose_from = character.pose_from;
+		socket.blend = character.blend;
+		socket.written = true;
+	}
+}
+
+<*
+ Two matrices mixed componentwise, `weight` of the second.
+
+ The socket's half of `shaders/mesh.slang`'s crossfade, and wrong in exactly the
+ way that one is wrong — deliberately, because a socket that took the honest path
+ would drift away from the hand the shader drew.
+*>
+fn Matrix4f mix_matrix(Matrix4f to, Matrix4f from, float weight) @local
+{
+	Matrix4f mixed;
+	for (usz i = 0; i < 16; i++) mixed.m[i] = to.m[i] + (from.m[i] - to.m[i]) * weight;
+	return mixed;
 }

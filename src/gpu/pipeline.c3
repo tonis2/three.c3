@@ -244,6 +244,21 @@ struct FrameBlock
 	 `light_view_projection` at 88 by that offset rather than by name.
 	*>
 	Light[MAX_LIGHTS] lights;
+	<*
+	 This frame's morph weights — `MeshPass.write_morph_weights`. Zero in a frame
+	 where nothing morphs, which is almost every frame of almost every project.
+
+	 Here rather than in the draw record for `live_poses`' reason exactly: the
+	 record is per bucket, and a weight pointer there would split a morphing copy
+	 of a mesh away from the copies of it that are not morphing. One buffer per
+	 frame keeps them in one draw.
+
+	 **After `lights` rather than beside `live_poses`**, which is the rule the
+	 comment above states: every field keeps the offset it had, so
+	 `shaders/shadow.slang` goes on reading `light_view_projection` at 88 by that
+	 offset and nothing had to be recompiled to agree.
+	*>
+	ulong morph_weights; // float*
 }
 
 <*
@@ -253,6 +268,25 @@ struct FrameBlock
  and one thread reads them — see `shaders/mesh.slang`'s copy of this.
 *>
 struct SkinnedVertex
+{
+	Vec3 position;
+	Vec3 normal;
+}
+
+<*
+ One vertex's displacement for one morph target, as `shaders/mesh.slang` declares
+ it.
+
+ **Displacements and not positions**, which is what glTF stores and the only form
+ that composes: a face with a smile target and a blink target has to be able to do
+ both at once, and adding two absolute positions is not a face.
+
+ Interleaved for `SkinnedVertex`'s reason and the same 24 bytes: one lane reads
+ both halves. A target with no NORMAL accessor gets zeroes here rather than a
+ second flag — the sum is a displacement either way, and adding zero is cheaper
+ than branching per target per vertex.
+*>
+struct MorphDelta
 {
 	Vec3 position;
 	Vec3 normal;
@@ -269,19 +303,22 @@ struct SkinnedVertex
  Scalar layout, so it packs the way the C3 struct does — 8-byte pointers, then
  two float4s at 4-byte alignment, then the flags:
 
-	positions      0     8
-	normals        8     8
-	uvs           16     8
-	colors        24     8
-	joints        32     8
-	weights       40     8
-	palette       48     8
-	posed         56     8
-	base_color    64    16
-	flags         80     4
-	skin_stride   84     4
-	uv_transform  88    16
-	surface      104    16    = 120, and no tail padding
+	positions       0     8
+	normals         8     8
+	uvs            16     8
+	colors         24     8
+	joints         32     8
+	weights        40     8
+	palette        48     8
+	posed          56     8
+	morph          64     8
+	base_color     72    16
+	flags          88     4
+	skin_stride    92     4
+	morph_targets  96     4
+	uv_transform  100    16
+	surface       116    16    = 132, and four bytes of tail padding to the
+	                           struct's own eight-byte alignment
 
  The stride between records is this struct's size, decided on the C3 side alone:
  the shader is handed a pointer to one record and never indexes past it, so
@@ -307,11 +344,22 @@ struct DrawRecord
 	// Where the compute pass wrote this bucket's posed vertices, or zero.
 	// `SkinnedVertex*`, one copy of the mesh per instance.
 	ulong posed;
+	// This mesh's morph target displacements, or zero — `morph_targets` blocks of
+	// `vertex_count` each. Per bucket because the geometry is: which targets exist
+	// is a property of the mesh, and how much of each is applied is a property of
+	// the copy and lives on the instance.
+	ulong morph;
 	float[4] base_color; // rgb albedo factor, a material alpha
 	uint flags;
-	// The mesh's vertex count, read only under `FLAG_PRESKINNED` — the stride
-	// between one instance's posed copy and the next. Zero otherwise.
+	// The mesh's vertex count, and the stride two readers need: between one
+	// instance's posed copy and the next under `FLAG_PRESKINNED`, and between one
+	// morph target's block of displacements and the next under `morph_targets`.
+	// Zero when neither is running.
 	uint skin_stride;
+	// How many blocks `morph` holds, and so how many weights this bucket's
+	// instances index. Zero on every mesh without targets, which is the shader's
+	// whole test for whether to run the loop at all.
+	uint morph_targets;
 	// xy repeat, zw offset — `material.repeat` and `material.offset`, applied to
 	// the uv before the sample. Added when it turned out that a surface mapping its
 	// texture exactly once makes texel density a function of how big the mesh is:
@@ -353,9 +401,15 @@ struct SkinPush
 	ulong baked; // Matrix4f*, the asset's table
 	ulong live; // Matrix4f*, this frame's live palette
 	ulong output; // SkinnedVertex*, this bucket's slice
+	// The same pair the draw path carries, for the same reason: a character routed
+	// through the compute pass has to morph exactly as one left in the vertex
+	// shader does, or turning `skinning: 'compute'` on changes how it looks.
+	ulong morph; // MorphDelta*, or zero
+	ulong morph_weights; // float*, this frame's, or zero
 	uint vertex_count;
 	uint instance_count;
 	uint flags;
+	uint morph_targets;
 }
 
 $assert SkinPush::size <= PUSH_BUDGET : "the skinning push block outgrew the 128 bytes every device must offer";
@@ -369,9 +423,12 @@ const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
 	{ "baked",          40, 8 },
 	{ "live",           48, 8 },
 	{ "output",         56, 8 },
-	{ "vertex_count",   64, 4 },
-	{ "instance_count", 68, 4 },
-	{ "flags",          72, 4 },
+	{ "morph",          64, 8 },
+	{ "morph_weights",  72, 8 },
+	{ "vertex_count",   80, 4 },
+	{ "instance_count", 84, 4 },
+	{ "flags",          88, 4 },
+	{ "morph_targets",  92, 4 },
 };
 
 $assert MeshPush::size <= PUSH_BUDGET : "the mesh push block outgrew the 128 bytes every device must offer";
@@ -389,11 +446,12 @@ $assert @layout_matches(FrameBlock, FRAME_BLOCK_FIELDS) : "FrameBlock no longer 
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert DrawRecord::size == 120 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 344 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert DrawRecord::size == 136 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert FrameBlock::size == 352 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
-$assert Instance::size == 152 : "Instance no longer matches shaders/mesh.slang";
+$assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
+$assert MorphDelta::size == 24 : "MorphDelta no longer matches shaders/mesh.slang";
 
 <*
  One field of the push block as this side lays it out.
@@ -476,6 +534,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "camera",                184,  16 },
 	{ "environment",           200,  16 },
 	{ "lights",                216, 128 },
+	{ "morph_weights",         344,   8 },
 };
 
 <*
@@ -495,19 +554,21 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
  is.
 *>
 const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
-	{ "positions",     0,  8 },
-	{ "normals",       8,  8 },
-	{ "uvs",          16,  8 },
-	{ "colors",       24,  8 },
-	{ "joints",       32,  8 },
-	{ "weights",      40,  8 },
-	{ "palette",      48,  8 },
-	{ "posed",        56,  8 },
-	{ "base_color",   64, 16 },
-	{ "flags",        80,  4 },
-	{ "skin_stride",  84,  4 },
-	{ "uv_transform", 88, 16 },
-	{ "surface",     104, 16 },
+	{ "positions",      0,  8 },
+	{ "normals",        8,  8 },
+	{ "uvs",           16,  8 },
+	{ "colors",        24,  8 },
+	{ "joints",        32,  8 },
+	{ "weights",       40,  8 },
+	{ "palette",       48,  8 },
+	{ "posed",         56,  8 },
+	{ "morph",         64,  8 },
+	{ "base_color",    72, 16 },
+	{ "flags",         88,  4 },
+	{ "skin_stride",   92,  4 },
+	{ "morph_targets", 96,  4 },
+	{ "uv_transform", 100, 16 },
+	{ "surface",      116, 16 },
 };
 
 <*

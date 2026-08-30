@@ -462,19 +462,31 @@ fn void the_draw_record_matches_the_shader() @test
 	test::@check(@ok(vertex_end), "and it is closed");
 	if (catch vertex_end) return;
 
+	// And `Draw.morph` points at one of these, for the same reason and cut the
+	// same way.
+	sz? delta_start = source.index_of("struct MorphDelta");
+	test::@check(@ok(delta_start), "mesh.slang declares a `struct MorphDelta`");
+	if (catch delta_start) return;
+	sz? delta_end = source[delta_start..].index_of("};");
+	test::@check(@ok(delta_end), "and it is closed");
+	if (catch delta_end) return;
+
 	// A push block and two entry points that touch every field, so nothing can be
 	// dropped from the layout for being unread.
 	String probe = string::tformat(
+		"%s};\n"
 		"%s};\n"
 		"%s};\n"
 		"[vk_push_constant] const Draw push;\n"
 		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
 		"{ return push.base_color + float4(push.positions[0] + push.normals[0], push.uvs[0].x)\n"
 		"    + float4(push.weights[0].xyz + push.posed[0].position + push.posed[0].normal, 0.0)\n"
+		"    + float4(push.morph[0].position + push.morph[0].normal, float(push.morph_targets))\n"
 		"    + push.palette[0][0] + float(push.joints[0].x) + float(push.skin_stride); }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
 		"{ return push.uv_transform * push.surface * push.colors[0] * float(push.flags); }\n",
 		source[vertex_start : vertex_end],
+		source[delta_start : delta_end],
 		source[start : end]
 	);
 
@@ -510,7 +522,7 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	test::@check(three::DrawRecord::size == 120, "and the record is 120 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 136, "and the record is 136 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
@@ -586,7 +598,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 344, "and the block is 344 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 352, "and the block is 352 bytes, got %d", three::FrameBlock::size);
 }
 
 <*

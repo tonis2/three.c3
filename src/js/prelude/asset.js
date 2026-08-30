@@ -308,6 +308,12 @@ export class Asset {
 		// this costs nothing and "does this character have a walk cycle" is
 		// a question worth asking before deciding to place it.
 		this.animations = H.assetClips(index, generation);
+		// The rig's joint names, for `character.socket(name)`. Out of the
+		// JSON like the two above, and empty for the vast majority of files
+		// that carry no skin. Worth having on the Asset rather than only on
+		// an instantiation, because a baked character drops its bone nodes
+		// and this is then the only place the names exist.
+		this.bones = H.assetBones(index, generation);
 		// How many pictures the file holds, for `imageAt`. Out of the JSON as
 		// well, so a file whose meshes have never been drawn still answers.
 		this.images = H.assetImages(index, generation);
@@ -496,6 +502,10 @@ export class Asset {
 		// Carried on the root because `_bindAnimation` is what tells the host, and
 		// that runs on the root.
 		root._liveSkin = !!skeleton;
+		// For `socket()`, which needs them to say what a rig does have when it
+		// is asked for a bone it has not. A baked instantiation drops the bone
+		// nodes, so the tree itself cannot answer.
+		root._bones = this.bones;
 
 		const built = [];
 		for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] of rows) {
@@ -630,7 +640,7 @@ export class Asset {
 		return built;
 	}
 
-	toJSON() { return { path: this.path, meshes: this.meshes, animations: this.animations }; }
+	toJSON() { return { path: this.path, meshes: this.meshes, animations: this.animations, bones: this.bones }; }
 }
 
 // -----------------------------------------------------------------------

@@ -18,9 +18,11 @@
  play, is faster per frame and is what makes `CUBICSPLINE` implementable rather
  than approximated.
 
- No blending, no crossfade, no additive layers. Three.js's `AnimationMixer` earns
- its complexity on crossfading, and a partial mixer answering to the same name
- would be worse than a deliberately smaller thing with a different one.
+ There is a crossfade and there are no additive layers. The fade is two clips and
+ one weight — `play(name, { fade })` and nothing else to hold — where Three.js's
+ `AnimationMixer` is a graph of actions with their own weights, timescales and
+ loop counts. Two clips is what a locomotion state machine actually asks for, and
+ the third one is the point at which a mixer would have to be a mixer.
 *>
 module three;
 
@@ -35,18 +37,26 @@ import gltf;
 // ============================================================================
 
 <*
- Which of a node's three transform channels a curve drives.
+ What a curve drives: one of a node's three transform channels, or the morph
+ weights of the mesh it draws.
 
- glTF also has `WEIGHTS` (morph targets) and `POINTER` (the extension that can
- animate anything). Neither is here: there is no morph target support to drive,
- and a channel three.c3 cannot apply is dropped at read time rather than carried
- as a case every switch has to answer.
+ **`WEIGHTS` is the odd one and every switch over this has to know why.** The
+ other three write one fixed-width value into a `Node`; this one writes as many
+ floats as the mesh has morph targets, which is a number the channel carries
+ rather than a constant — so a caller sampling into four floats would overflow on
+ a face with twenty expressions. The bake skips it outright: a baked pose table
+ holds joint matrices, and a weight is not one.
+
+ glTF's `POINTER` — the extension that can animate anything — is still not here. A
+ channel three.c3 cannot apply is dropped at read time rather than carried as a
+ case every switch has to answer.
 *>
 enum AnimatedPath
 {
 	TRANSLATION,
 	ROTATION,
 	SCALE,
+	WEIGHTS,
 }
 
 <*
@@ -328,6 +338,30 @@ struct AnimationPlayer
 	bool playing;
 
 	<*
+	 The clip a crossfade is coming out of, and its own clock. -1 when nothing is
+	 fading, which is every frame but the fraction of a second after a `play` that
+	 asked for one.
+
+	 **Its own clock, not a frozen frame.** A walk faded into a wave goes on
+	 walking underneath for the length of the fade; holding the walk still would
+	 make the legs stop a beat before the arms move, which reads as a hitch rather
+	 than as a transition.
+
+	 One clip deep. A second `play` during a fade drops whatever was fading out and
+	 fades from the clip that was fading *in* — three-way blending is where a mixer
+	 starts, and the header says why this is not one.
+	*>
+	int from_clip;
+	float from_time;
+	float from_speed;
+	bool from_loop;
+
+	// Seconds into the fade, and how long it lasts. `fade / fade_duration` is how
+	// much of `clip` has arrived, and reaching 1 is what clears `from_clip`.
+	float fade;
+	float fade_duration;
+
+	<*
 	 Whether this character's joint matrices are computed every frame from its
 	 bone nodes, rather than keyed out of the baked table.
 
@@ -341,6 +375,16 @@ struct AnimationPlayer
 	 difference between a hero and a crowd, and why the default is the crowd.
 	*>
 	bool live_skin;
+
+	<*
+	 Room for one WEIGHTS sample, which is as wide as the mesh has morph targets.
+
+	 Kept on the player and grown once rather than taken from a scratch arena per
+	 frame: the width is a property of the character and does not change, so the
+	 first frame that morphs pays for the last. Empty on every player that never
+	 touches a weight channel, which is almost all of them.
+	*>
+	List{float} weight_scratch;
 }
 
 fn void AnimationPlayer.free(&self)
@@ -349,6 +393,8 @@ fn void AnimationPlayer.free(&self)
 	self.targets = {};
 	self.skinned.free();
 	self.skinned = {};
+	self.weight_scratch.free();
+	self.weight_scratch = {};
 }
 
 <*
@@ -366,37 +412,187 @@ fn void AnimationPlayer.free(&self)
 *>
 fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 {
-	if (!self.playing || self.clip < 0) return;
+	if (self.clip < 0) return;
+	// A fade outlives the clip it is fading *into* stopping: a one-shot shorter
+	// than the fade would otherwise freeze half-blended, since a stopped player
+	// steps nothing.
+	if (!self.playing && self.from_clip < 0) return;
 
 	Asset* owner = assets.slot(self.asset);
 	if (owner == null || self.clip >= owner.clips.len())
 	{
 		self.playing = false;
+		self.from_clip = -1;
 		return;
 	}
 
 	AnimationClip* clip = &owner.clips[self.clip];
-	self.time += dt * self.speed;
+	if (self.playing) self.time = step_time(clip, self.time, self.speed, self.loop, dt, &self.playing);
 
-	if (self.loop)
+	AnimationClip* from = null;
+	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
 	{
-		self.time = (float)clip_loop_time(clip, self.time);
+		from = &owner.clips[self.from_clip];
+		// Whether the outgoing clip has run out is not interesting — it is on its
+		// way out either way — so the flag it would set is a local nothing reads.
+		bool running = true;
+		self.from_time = step_time(from, self.from_time, self.from_speed, self.from_loop, dt, &running);
+
+		self.fade += dt;
+		if (self.fade >= self.fade_duration)
+		{
+			self.from_clip = -1;
+			from = null;
+		}
 	}
-	else if (self.time >= clip.start + clip.duration)
+	else
 	{
-		self.time = clip.start + clip.duration;
-		self.playing = false;
+		self.from_clip = -1;
 	}
-	else if (self.time < clip.start)
+
+	if (from != null)
+	{
+		self.apply_blend(scene, owner, from, clip);
+	}
+	else
+	{
+		self.write_clip(scene, clip, self.time, 1.0f);
+	}
+	self.key_pose(scene, owner, clip);
+}
+
+<*
+ One clock stepped by `dt`, wrapped or clamped on the clip's own numbers.
+
+ Shared by the playing clip and the one a crossfade is leaving behind, which is
+ the whole reason it is a function: the outgoing clip has to run under exactly the
+ rules it was playing under a moment ago, and two copies of this arithmetic would
+ be two chances to disagree about the endpoint.
+
+ @param playing : `Cleared when a non-looping clip runs off either end, and left alone otherwise.`
+*>
+fn float step_time(AnimationClip* clip, float time, float speed, bool loop, float dt, bool* playing) @local
+{
+	time += dt * speed;
+
+	if (loop) return (float)clip_loop_time(clip, time);
+
+	if (time >= clip.start + clip.duration)
+	{
+		*playing = false;
+		return clip.start + clip.duration;
+	}
+	if (time < clip.start)
 	{
 		// A negative speed running off the front, which is a legitimate way to
 		// play something backwards.
-		self.time = clip.start;
-		self.playing = false;
+		*playing = false;
+		return clip.start;
 	}
+	return time;
+}
 
-	self.apply(scene, clip);
-	self.key_pose(scene, owner, clip);
+<*
+ How much of the incoming clip has arrived: 0 at the moment the fade starts, 1
+ when it is over, and 1 whenever nothing is fading.
+
+ Read by both halves — the live path mixes the nodes by it and the baked path
+ hands it to the shader — so a character does not fade at two different rates
+ depending on which one is posing it.
+*>
+fn float AnimationPlayer.blend_weight(&self)
+{
+	if (self.from_clip < 0 || self.fade_duration <= 0) return 1.0f;
+	float weight = self.fade / self.fade_duration;
+	if (weight <= 0) return 0;
+	if (weight >= 1) return 1.0f;
+	return weight;
+}
+
+<*
+ Both clips written into the nodes, mixed by the fade's weight.
+
+ **This is the honest half of the crossfade.** It blends the transforms rather
+ than the matrices they compose into — a lerp on translation and scale, a slerp on
+ rotation — so a joint mid-fade is a rotation of the right length and the limb
+ keeps its bones. `shaders/mesh.slang` explains what the baked path does instead
+ and why it is allowed to be worse.
+
+ Three passes over the channels rather than one, and only while a fade is running.
+*>
+fn void AnimationPlayer.apply_blend(
+	&self,
+	Scene* scene,
+	Asset* owner,
+	AnimationClip* from,
+	AnimationClip* to
+)
+{
+	// Every node either clip drives, back to the file's own transform first. A
+	// joint that only one of the two names would otherwise blend out of wherever
+	// last frame left it — a drift with no cause a script can see, and one that
+	// depends on which clip was playing before.
+	self.reset_targets(scene, owner, from);
+	self.reset_targets(scene, owner, to);
+
+	self.write_clip(scene, from, self.from_time, 1.0f);
+	self.write_clip(scene, to, self.time, self.blend_weight());
+}
+
+<*
+ Every node a clip targets, back to the transform the file gave it.
+
+ The asset's own nodes are the bind pose, and `Asset.nodes` is indexed by glTF
+ node index — the same index a channel targets and the same one `targets` is
+ keyed by, which is what makes this three lookups and no search.
+*>
+fn void AnimationPlayer.reset_targets(&self, Scene* scene, Asset* owner, AnimationClip* clip)
+{
+	foreach (&channel : clip.channels)
+	{
+		if (channel.node >= self.targets.len() || channel.node >= owner.nodes.len()) continue;
+		NodeId id = self.targets[channel.node];
+		if (!id.is_set()) continue;
+
+		Node* node = scene.node(id);
+		if (node == null) continue;
+
+		if (channel.path == AnimatedPath.WEIGHTS)
+		{
+			// A morph weight's rest value is zero — the neutral mesh — and clearing
+			// takes the copy off the morph path entirely rather than leaving it
+			// paying for a loop over zeroes.
+			scene.clear_morph_weights(id);
+			continue;
+		}
+
+		AssetNode* source = &owner.nodes[channel.node];
+		node.position = source.position;
+		node.rotation = source.rotation;
+		node.scale = source.scale;
+	}
+}
+
+<*
+ One transform mixed toward another. `weight >= 1` is the plain assignment the
+ unblended path wants, and it is an early return rather than a lerp by 1 so that
+ the ordinary case costs nothing and lands on exactly the sampled value.
+*>
+fn Vec3 mix_vec(Vec3 from, Vec3 to, float weight) @local
+{
+	if (weight >= 1.0f) return to;
+	return from + (to - from) * weight;
+}
+
+<*
+ The same for a rotation, and a slerp rather than a lerp for `sample`'s reason: a
+ component-wise mix of two quaternions is not a unit quaternion and speeds up in
+ the middle of the arc.
+*>
+fn Quaternionf mix_quat(Quaternionf from, Quaternionf to, float weight) @local
+{
+	if (weight >= 1.0f) return to;
+	return from.slerp(to, weight);
 }
 
 <*
@@ -421,6 +617,17 @@ fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationCli
 	// two writers for one field, and which one won would depend on call order.
 	if (self.live_skin) return;
 
+	// The clip a fade is leaving, if there is one and the bake holds it. A clip the
+	// bake does not have cancels the fade for this character rather than blending
+	// against a stranger's matrices, which is the same refusal `write_joints` makes
+	// one level down.
+	AnimationClip* previous = null;
+	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
+	{
+		previous = &owner.clips[self.from_clip];
+	}
+	float weight = self.blend_weight();
+
 	foreach (&target : self.skinned)
 	{
 		BakedPose* segment = owner.segment(target.skin, (uint)self.clip);
@@ -434,17 +641,38 @@ fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationCli
 		// of it.
 		int frame = (int)((self.time - clip.start) * segment.fps + 0.5f);
 		node.pose = segment.frame_at(frame);
+
+		node.pose_from = 0;
+		node.blend = 0;
+		if (previous == null) continue;
+
+		BakedPose* was = owner.segment(target.skin, (uint)self.from_clip);
+		if (was == null) continue;
+
+		int from_frame = (int)((self.from_time - previous.start) * was.fps + 0.5f);
+		node.pose_from = was.frame_at(from_frame);
+		// How much of the *outgoing* frame is still showing, which is the shader's
+		// sense of the field and the opposite of `blend_weight`'s. Inverted here
+		// rather than there so that zero — a copy that never faded, a recycled slot
+		// — means "not fading" everywhere it is read.
+		node.blend = 1.0f - weight;
 	}
 }
 
 <*
- Writes the clip's value at the player's current time into every node it targets.
+ Writes a clip's value at `time` into every node it targets, mixed in by `weight`.
+
+ `weight` of 1 is the plain write, and is what everything but the second half of a
+ crossfade asks for. Below 1 the sampled value is mixed into whatever the node
+ already holds, which is what makes the fade two calls to this and no third
+ buffer: the outgoing clip is written straight and the incoming one is mixed over
+ it.
 
  Split from `advance` so `play()` can pose an instance at frame zero without
  stepping it — a prop placed paused should look like its first frame, not like
  whatever its rest pose happened to be.
 *>
-fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
+fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, float time, float weight)
 {
 	float[4] value;
 
@@ -457,21 +685,102 @@ fn void AnimationPlayer.apply(&self, Scene* scene, AnimationClip* clip)
 		Node* node = scene.node(id);
 		if (node == null) continue;
 
-		channel.sample(self.time, value[..]);
+		// Wider than four floats and written somewhere else entirely, so it takes
+		// the door of its own rather than a fourth case below.
+		if (channel.path == AnimatedPath.WEIGHTS)
+		{
+			self.write_weights(scene, channel, id, time, weight);
+			continue;
+		}
+
+		channel.sample(time, value[..]);
 
 		switch (channel.path)
 		{
 			case AnimatedPath.TRANSLATION:
-				node.position = { value[0], value[1], value[2] };
+				node.position = mix_vec(node.position, (Vec3) { value[0], value[1], value[2] }, weight);
 			case AnimatedPath.ROTATION:
-				node.rotation = { value[0], value[1], value[2], value[3] };
+				node.rotation = mix_quat(node.rotation, (Quaternionf) { value[0], value[1], value[2], value[3] }, weight);
 			case AnimatedPath.SCALE:
-				node.scale = { value[0], value[1], value[2] };
+				node.scale = mix_vec(node.scale, (Vec3) { value[0], value[1], value[2] }, weight);
+			default:
+				break;
 		}
 		// Not `node.dirty = true`: the flag alone is not enough now that the
 		// world-matrix walk may skip itself. See `Scene.mark_moved`.
 		scene.mark_moved(id);
 	}
+}
+
+<*
+ The nodes and the skin put where the player's clocks already say, without
+ stepping anything.
+
+ What `play` needs, and the only caller: a prop placed and played in the same
+ breath should look like its first frame rather than like its rest pose for one
+ frame — and when the play asked for a crossfade, like the first frame of the
+ fade rather than like a snap onto the new clip.
+*>
+fn void AnimationPlayer.repose(&self, Scene* scene, Asset* owner)
+{
+	if (self.clip < 0 || self.clip >= owner.clips.len()) return;
+	AnimationClip* clip = &owner.clips[self.clip];
+
+	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
+	{
+		self.apply_blend(scene, owner, &owner.clips[self.from_clip], clip);
+	}
+	else
+	{
+		self.write_clip(scene, clip, self.time, 1.0f);
+	}
+	self.key_pose(scene, owner, clip);
+}
+
+<*
+ One WEIGHTS channel's sample, mixed into the node's morph weights.
+
+ The channel's width is the mesh's morph target count and the node's is too, but
+ they are read from different places — the sampler's accessor and the primitive's
+ target list — so the shorter of the two is what gets written. A file whose two
+ disagree is malformed, and writing the overlap leaves the rest at zero rather
+ than reading past either.
+
+ Mixed by `weight` exactly as a transform channel is, so a crossfade between two
+ clips that both drive an expression lands between them instead of snapping.
+
+ **A glTF node with several primitives only morphs its first.** Each primitive
+ became its own scene node and only one of them carries the glTF index a channel
+ names, so this reaches that one. A face is one primitive in every file that
+ exists; a face split across two materials is where this would show.
+*>
+fn void AnimationPlayer.write_weights(
+	&self,
+	Scene* scene,
+	AnimationChannel* channel,
+	NodeId id,
+	float time,
+	float weight
+)
+{
+	uint targets = scene.morph_target_count(id);
+	if (targets == 0 || channel.stride == 0) return;
+
+	while (self.weight_scratch.len() < channel.stride) self.weight_scratch.push(0);
+	channel.sample(time, self.weight_scratch.array_view());
+
+	uint count = channel.stride < targets ? channel.stride : targets;
+	if (weight < 1.0f)
+	{
+		// Read before the write below, which may free the entry this views into.
+		float[] current = scene.morph_weights(id);
+		for (uint i = 0; i < count && i < current.len; i++)
+		{
+			self.weight_scratch[i] = current[i] + (self.weight_scratch[i] - current[i]) * weight;
+		}
+	}
+
+	scene.set_morph_weights(id, self.weight_scratch.array_view()[0:count]);
 }
 
 <*

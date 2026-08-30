@@ -140,6 +140,28 @@ struct Node
 	uint pose;
 
 	<*
+	 The frame a crossfade is coming *out of*, and how much of it is still showing
+	 — 1 when the fade starts, counting down to 0 as the new pose arrives.
+
+	 Zero and zero except during a fade, and only on a baked character: a live one
+	 blends on its bone nodes, where the arithmetic is on transforms rather than on
+	 matrices and there is nothing for the shader to do. Copied straight into
+	 `Instance.pose_from` and `Instance.blend`.
+	*>
+	uint pose_from;
+	float blend;
+
+	<*
+	 Which slice of this frame's morph weights this node's copy reads, plus one.
+
+	 Written every frame by `MeshPass.write_morph_weights` from
+	 `Scene.morphs` — the weights themselves are not here, because almost no node
+	 has any and a `List` per node would be a pointer, a length and a capacity per
+	 crate. Zero means "does not morph", and it is what a recycled slot carries.
+	*>
+	uint morph;
+
+	<*
 	 Whether the compute pass poses this node's vertices instead of the vertex
 	 shader — `instantiate({ skinning: 'compute' })`.
 

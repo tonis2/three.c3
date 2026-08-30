@@ -72,9 +72,14 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "splitMesh", &js_split_mesh, 3);
 	self.bind(host, "assetNodes", &js_asset_nodes, 3);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
+	self.bind(host, "assetBones", &js_asset_bones, 2);
 	self.bind(host, "bindAnimation", &js_bind_animation, 6);
 	self.bind(host, "bindSkin", &js_bind_skin, 4);
-	self.bind(host, "playAnimation", &js_play_animation, 6);
+	self.bind(host, "bindSocket", &js_bind_socket, 5);
+	self.bind(host, "unbindSocket", &js_unbind_socket, 2);
+	self.bind(host, "setMorphWeights", &js_set_morph_weights, 3);
+	self.bind(host, "meshMorphs", &js_mesh_morphs, 3);
+	self.bind(host, "playAnimation", &js_play_animation, 7);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "exportScene", &js_export, 3);
@@ -875,8 +880,8 @@ fn void js_bind_animation(
 }
 
 <*
- `playAnimation(index, generation, name, loop, speed, time)` — start a clip on an
- instantiated subtree.
+ `playAnimation(index, generation, name, loop, speed, time, fade)` — start a clip
+ on an instantiated subtree.
 
  Answers with a boolean rather than throwing on an unknown clip: `mesh.animations`
  is the list, so naming something that is not on it is a mistake a script can see
@@ -902,8 +907,126 @@ fn void js_play_animation(
 		// binding was written: a hundred characters on one walk cycle at a hundred
 		// phases are a hundred values of this over one baked clip.
 		float time = argc > 5 ? arg_float(&js, argc, args, 5) : 0;
-		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time));
+		// Seconds of crossfade out of whatever was playing. Zero is the snap this
+		// binding did for its whole life before the argument existed, which is why
+		// it is the default and not a sentinel.
+		float fade = argc > 6 ? arg_float(&js, argc, args, 6) : 0;
+		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade));
 	};
+}
+
+<*
+ `setMorphWeights(index, generation, weights)` — how much of each blend shape this
+ copy wears.
+
+ The whole vector every time rather than one element, which is the same choice
+ `setTransform` makes: a face has a handful of targets, and a crossing per element
+ per frame would cost more than the numbers do.
+
+ An all-zero vector takes the copy off the morph path entirely — see
+ `Scene.set_morph_weights` — so a face that has finished its expression stops
+ costing a loop rather than looping over zeroes.
+
+ Answers with a boolean rather than throwing on a mesh with no targets, for
+ `playAnimation`'s reason: `mesh.morphs` is the count, so asking a box to smile is
+ a mistake a script can see.
+*>
+fn void js_set_morph_weights(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+	if (argc < 3) return;
+
+	qjs::Value values = args[2];
+	uint length = (uint)js.length(values);
+
+	List{float} weights;
+	weights.init(mem, (sz)length + 1);
+	defer weights.free();
+	for (uint i = 0; i < length; i++)
+	{
+		weights.push((float)js.number(js.index(values, i)));
+	}
+
+	*out = qjs::bool_value(ref.scene.set_morph_weights(ref.id, weights.array_view()));
+}
+
+<*
+ `meshMorphs(asset, generation, mesh)` — how many morph targets a geometry has.
+
+ Read off the uploaded mesh, so it answers zero for a file whose meshes have not
+ reached the device yet — which is why the prelude asks it lazily, on the first
+ look at `mesh.weights`, rather than in the `Mesh` constructor.
+*>
+fn void js_mesh_morphs(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	uint index = (uint)arg_int(&js, argc, args, 2);
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	*out = qjs::int_value(mesh == null ? 0 : (int)mesh.morph_targets);
+}
+
+<*
+ `bindSocket(index, generation, rootIndex, rootGeneration, bone)` — keep a node on
+ a bone of a baked character.
+
+ Answers with a boolean rather than throwing, for `playAnimation`'s reason: the
+ bone names belong to the file, so naming one the rig does not have is a mistake a
+ script can see and correct. The prelude turns the false into a sentence that
+ lists what the rig does have.
+*>
+fn void js_bind_socket(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef holder = arg_handle(self, &js, argc, args, 0, out);
+	if (holder.scene == null) return;
+
+	NodeId root = {
+		.index = (uint)arg_int(&js, argc, args, 2),
+		.generation = (uint)arg_int(&js, argc, args, 3),
+	};
+
+	@pool()
+	{
+		String bone = arg_text(&js, argc, args, 4, tmem);
+		*out = qjs::bool_value(holder.scene.attach_socket(holder.id, root, bone));
+	};
+}
+
+<*
+ `unbindSocket(index, generation)` — take a node off whatever bone it was on.
+
+ It stays where the bone last left it. Nothing in the prelude calls this yet; it
+ is here because attaching without a way to detach is a one-way door, and the host
+ side of it is three lines.
+*>
+fn void js_unbind_socket(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::bool_value(ref.scene.detach_socket(ref.id));
 }
 
 <*
