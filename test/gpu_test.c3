@@ -427,6 +427,66 @@ fn void target_at_two_extents() @test
 }
 
 <*
+ The composite is built once per size and rebuilt when the size changes.
+
+ It is the one image in the renderer whose extent is the WINDOW's rather than
+ the target's, so it is the one that gets rebuilt while frames are in flight —
+ every time somebody drags a window edge. What that has to get right is here:
+ asking for the size it already is must not reallocate (it is asked on every
+ presented frame), and asking for a different one must replace the image, the
+ memory and the view together rather than keeping a view onto the old size.
+
+ What is NOT here is the recording — `receive`, `begin_overlay`, `close` and
+ the blit that presents the result. Those need a surface, and the headless
+ suite has none, for `resize_test.c3`'s reason. They are checked by running a
+ windowed build with the validation layer installed.
+*>
+fn void composite_at_two_extents() @test
+{
+	@with_gpu(; three::Gpu* gpu)
+	{
+		three::Composite composite;
+
+		// Nothing is allocated until something asks, so a run that never brings
+		// an interface up never pays for this.
+		test::@check(composite.color == null, "a fresh composite already held an image");
+		test::@check(composite.bytes() == 0, "a fresh composite already counted bytes");
+
+		composite.ensure(gpu, { .width = 320, .height = 240 })!!;
+		vk::Image first    = composite.color;
+		vk::ImageView view = composite.color_view;
+		test::@check(first != null, "ensure did not build an image");
+		test::@check(composite.bytes() > 0, "the image is bound to no memory");
+
+		// The same size again: this is asked on every presented frame.
+		composite.ensure(gpu, { .width = 320, .height = 240 })!!;
+		test::@check(composite.color == first, "asking for the size it already is rebuilt it");
+		test::@check(composite.color_view == view, "the view was rebuilt for the same size");
+
+		// Asserted on the bytes rather than on the handles: the old image is
+		// destroyed before the new one is created, and a driver is free to hand
+		// the same handle value straight back — which it does here. The memory
+		// is the thing that has to have moved.
+		usz small_bytes = composite.bytes();
+		composite.ensure(gpu, { .width = 640, .height = 400 })!!;
+		test::@check(composite.extent.width == 640, "the composite kept the old extent");
+		test::@check(
+			composite.bytes() > small_bytes,
+			"the resize kept memory sized for the old extent: %d bytes against %d",
+			composite.bytes(),
+			small_bytes
+		);
+
+		composite.free(gpu);
+		test::@check(composite.color == null, "free left the image behind");
+		// Twice, because `Renderer.free` runs after a path that may already have
+		// freed it, and a second `vkDestroyImage` on a live handle is not a
+		// thing the validation layer forgives.
+		composite.free(gpu);
+	};
+}
+
+<*
  Render one frame headless and read the pixels back.
 
  The assertion is on the pixels, not on a return code: the clear colour is

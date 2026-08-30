@@ -1805,13 +1805,23 @@ fn void? UiLayer.upload(&self, Target* target)
 }
 
 <*
- The draw, inside a rendering `Target.begin_overlay` opened.
+ The draw, inside a rendering `Target.begin_overlay` or `Composite.begin_overlay`
+ opened.
 
  One instanced draw call, whatever the interface contains. A frame with nothing
  to draw records nothing.
+
+ `extent` is the ATTACHMENT'S size and need not be the target's. `upload` fixed
+ the coordinates the interface was laid out in — the target's pixels, which are
+ the pixels a `Cursor` arrives in — and cui's `ui_view` maps those onto whatever
+ viewport this sets, so a bigger attachment rasterises the same interface at a
+ higher density rather than drawing a bigger one. That is the whole of the
+ window-density fix: see `Composite`.
+
+ @param extent : `The size of the attachment being drawn into.`
 *>
-fn void? UiLayer.record(&self, vk::CommandBuffer cmd, Target* target)
+fn void? UiLayer.record(&self, vk::CommandBuffer cmd, vk::Extent2D extent)
 {
 	if (self.ui == null) return;
-	self.pass.record(cmd, target.extent)!;
+	self.pass.record(cmd, extent)!;
 }

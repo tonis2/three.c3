@@ -1,7 +1,12 @@
 <*
- The window's swapchain. It blits `gpu/target.c3` and presents; that is all it
+ The window's swapchain. It blits the finished frame and presents; that is all it
  does. The type is called `Viewer` to keep it that way — the window is a viewer,
  not a render target.
+
+ What it blits is `gpu/target.c3`, or — while an interface is up — the
+ `Composite` at the end of this file, which is the target already scaled to the
+ window with the interface drawn on top at the window's own pixels. Either way
+ the destination is written by exactly one command, and it is a blit.
 
  Two things it therefore does not have:
 
@@ -285,6 +290,29 @@ fn void Viewer.free(&self, Gpu* gpu)
 *>
 fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint index)
 {
+	self.record_blit_from(cmd, target.color, target.extent, index);
+}
+
+<*
+ The same blit, from whichever image holds the finished frame.
+
+ Two of them do. Without an interface it is the target, straight out of
+ `record_scene`. With one it is the `Composite`, which is the target already
+ scaled up to the window with the interface drawn on top at the window's own
+ pixels — see there. Both arrive in `TRANSFER_SRC_OPTIMAL` and neither is a
+ swapchain image, so this stays the one and only thing written into one.
+
+ @param src : `The finished frame. Must be in TRANSFER_SRC_OPTIMAL.`
+ @param src_extent : `Its size — the source rect of the blit.`
+*>
+fn void Viewer.record_blit_from(
+	&self,
+	vk::CommandBuffer cmd,
+	vk::Image src,
+	vk::Extent2D src_extent,
+	uint index
+)
+{
 	vk::Image dst = self.images[index];
 
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
@@ -311,13 +339,13 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 	};
 	vk::ImageBlit region = {
 		.srcSubresource = layers,
-		.srcOffsets = { { 0, 0, 0 }, { (int)target.extent.width, (int)target.extent.height, 1 } },
+		.srcOffsets = { { 0, 0, 0 }, { (int)src_extent.width, (int)src_extent.height, 1 } },
 		.dstSubresource = layers,
 		.dstOffsets = { { 0, 0, 0 }, { (int)self.extent.width, (int)self.extent.height, 1 } },
 	};
 	vk::cmdBlitImage(
 		cmd,
-		target.color,
+		src,
 		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		dst,
 		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -338,6 +366,226 @@ fn void Viewer.record_blit(&self, vk::CommandBuffer cmd, Target* target, uint in
 					.dstAccessMask = (vk::AccessFlags2)0,
 					.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					.newLayout = IMAGE_LAYOUT_PRESENT_SRC_KHR,
+				},
+			}
+		));
+}
+// ============================================================================
+// The composite — the frame at the window's own pixels
+// ============================================================================
+
+<*
+ The finished frame, scaled to the window, with the interface drawn on top of it
+ at the window's own resolution.
+
+ ## Why it exists
+
+ The target's extent is a boot argument and the window's is whatever the display
+ gives it: on a retina screen a 1280x720 target is presented across 2560x1440
+ device pixels, and the blit stretches every pixel of it by two. That is right
+ for the scene — it is what rendering at a fixed size means — and wrong for the
+ interface, whose glyphs are signed distance fields and would be pin-sharp at any
+ size if anything ever asked them for one. Drawn into the target they are
+ rasterised at 1280x720 and then upscaled, which is the one thing SDF text exists
+ to avoid.
+
+ So with an interface up, the present path grows a middle: the scene is blitted
+ up to the window's size FIRST, cui draws into that, and the result is what is
+ presented. The scene is scaled exactly as before and the interface never is.
+
+ ## Why not into the swapchain image directly
+
+ It is one blit cheaper and it does not work. `cui::vulkan::CanvasPass` compiles
+ its pipeline against one colour format, and the format three renders at
+ (`R8G8B8A8_SRGB`) is not the format a surface offers (`B8G8R8A8_SRGB` on every
+ platform this has met). Recording into a swapchain image would mean a second
+ pipeline, a second pass, or a target that changes format with the window — and
+ the `Viewer` would stop being a thing that only ever blits, which is the
+ invariant its own header keeps. A composite in the target's format costs one
+ image and one more blit, and leaves both of those alone.
+
+ ## What it does NOT change
+
+ `capture()`, `render_offscreen()` and every headless path never touch this: they
+ have no window, so the interface goes into the target exactly as it always did
+ and a screenshot still has the HUD in it. `Renderer.record_scene` is told which
+ of the two is happening and draws the interface once, in one place or the other.
+*>
+struct Composite
+{
+	vk::Extent2D extent;
+	vk::Image color;
+	vk::ImageView color_view;
+	vk::Memory color_memory;
+}
+
+<*
+ Builds (or rebuilds) the image at `extent`, and does nothing when it is already
+ that size — which is every frame but the first and the ones after a resize.
+
+ The device is idled before an old image is freed. This is a stall, and it is the
+ correct one: the image being replaced may still be read by the blit of a frame
+ that has not finished presenting, and the alternative is per-image lifetime
+ tracking for something that changes when a person drags a window edge.
+
+ @require extent.width > 0 && extent.height > 0
+*>
+fn void? Composite.ensure(&self, Gpu* gpu, vk::Extent2D extent)
+{
+	if (self.color != null && self.extent.width == extent.width && self.extent.height == extent.height) return;
+
+	if (self.color != null)
+	{
+		gpu.handle.waitIdle();
+		self.free(gpu);
+	}
+
+	self.extent = extent;
+
+	// TRANSFER_DST to receive the scene, COLOR_ATTACHMENT for cui to draw into
+	// it, TRANSFER_SRC to be presented. The whole of its life in three flags.
+	self.color = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(TARGET_COLOR_FORMAT)
+		.setExtent({ .width = extent.width, .height = extent.height, .depth = 1 })
+		.setMipLevels(1)
+		.setArrayLayers(1)
+		.setSamples(SAMPLE_COUNT_1_BIT)
+		.setTiling(IMAGE_TILING_OPTIMAL)
+		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)
+		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
+		.build(gpu.handle)!;
+	self.color_memory = vk::create_image_buffer(self.color, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+
+	self.color_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(TARGET_COLOR_FORMAT)
+		.setSubresourceRange(COLOR_LEVEL)
+		.setImage(self.color)
+		.build(gpu.handle)!;
+}
+
+<*
+ `vk::Memory.free` destroys the image it was bound to, so the view is the only
+ extra — the same rule `Target.free` follows.
+*>
+fn void Composite.free(&self, Gpu* gpu)
+{
+	if (self.color_view != null)
+	{
+		self.color_view.free(gpu.handle);
+		self.color_view = (vk::ImageView)null;
+	}
+	if (self.color != null)
+	{
+		self.color_memory.free();
+		self.color = (vk::Image)null;
+		self.color_memory = {};
+	}
+	self.extent = {};
+}
+
+fn usz Composite.bytes(&self) => (usz)self.color_memory.size;
+
+<*
+ Takes the finished scene, scaled to this image's size.
+
+ The source is in `TRANSFER_SRC_OPTIMAL` (`Target.close`) and this image comes
+ from `UNDEFINED` because every pixel of it is about to be written. Leaves it in
+ `COLOR_ATTACHMENT_OPTIMAL`, ready for `begin_overlay` — one barrier does the
+ whole transition rather than TRANSFER_DST and then a second one.
+*>
+fn void Composite.receive(&self, vk::CommandBuffer cmd, Target* target)
+{
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
+			{
+				(vk::ImageMemoryBarrier2) {
+					...IMAGE_BARRIER,
+					.image = self.color,
+					.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+					.srcAccessMask = (vk::AccessFlags2)0,
+					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+					.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+					.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+					.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				},
+			}
+		));
+
+	vk::ImageSubresourceLayers layers = {
+		.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+		.mipLevel = 0,
+		.baseArrayLayer = 0,
+		.layerCount = 1,
+	};
+	vk::ImageBlit region = {
+		.srcSubresource = layers,
+		.srcOffsets = { { 0, 0, 0 }, { (int)target.extent.width, (int)target.extent.height, 1 } },
+		.dstSubresource = layers,
+		.dstOffsets = { { 0, 0, 0 }, { (int)self.extent.width, (int)self.extent.height, 1 } },
+	};
+	vk::cmdBlitImage(
+		cmd,
+		target.color,
+		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		self.color,
+		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1,
+		&region,
+		FILTER_LINEAR
+	);
+
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
+			{
+				(vk::ImageMemoryBarrier2) {
+					...IMAGE_BARRIER,
+					.image = self.color,
+					.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+					.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+					.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+					.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+					.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				},
+			}
+		));
+}
+
+<*
+ Opens the rendering cui records into: load what is there, no clear, no depth,
+ no Y flip — `Target.begin_overlay` says why for all three, and this is the same
+ rendering over a different image.
+*>
+fn void Composite.begin_overlay(&self, vk::CommandBuffer cmd)
+{
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(self.color_view)
+		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
+
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+		.setColorAttachments({ color_attachment });
+
+	vk::cmdBeginRendering(cmd, &rendering);
+	set_full_viewport(cmd, self.extent, false);
+}
+
+<*
+ Hands it to the blit that presents it. `Target.close` in every respect but the
+ image.
+*>
+fn void Composite.close(&self, vk::CommandBuffer cmd)
+{
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+		.setImageMemoryBarriers(
+			{
+				(vk::ImageMemoryBarrier2) {
+					...IMAGE_BARRIER,
+					.image = self.color,
+					.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+					.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+					.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
+					.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				},
 			}
 		));

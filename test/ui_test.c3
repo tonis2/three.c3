@@ -1251,3 +1251,71 @@ fn void a_closed_context_leaves_no_interface_behind_it() @test
 	defer after.free();
 	test::@check(after.ok, "the new context did not run: %s", after.error);
 }
+
+<*
+ A tree replaced over and over stays a tree.
+
+ The third rebuild is the interesting one: it is the first that draws elements
+ off cui's free list, and a recycled element arrives with its child list zeroed.
+ A zeroed List takes the TEMP allocator on its first push, so its children lived
+ in memory the `@pool()` around `three.ui.set` handed back — a dangling child
+ list that the next build walk read. Six rounds because two of them would pass
+ either way.
+*>
+fn void a_tree_rebuilt_over_and_over_keeps_its_children() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		for (int i = 0; i < 6; i++)
+		{
+			three::RunResult result = run.run(`
+				three.ui.set({
+					type: 'anchored', h: 'center', v: 'center',
+					child: { type: 'column', gap: 4, children: [
+						{ type: 'label', text: 'one' },
+						{ type: 'label', text: 'two' },
+					]},
+				});
+			`);
+			bool ok = result.ok;
+			result.free();
+			test::@check(ok, "rebuild %d did not run", i);
+
+			// The flush is where it showed: the build walk reads the child list
+			// the pool has already taken back.
+			image::Image shot = renderer.capture()!!;
+			shot.free();
+
+			test::@check(
+				renderer.ui.nodes.len() == 4,
+				"rebuild %d left %d nodes",
+				i,
+				renderer.ui.nodes.len()
+			);
+		}
+	};
+}
+
+<*
+ A scroll with nothing in it yet is not a crash.
+
+ cui's Scroll asserts that it has exactly one child, and "the list has not
+ loaded" is an ordinary thing for a script to describe. So `ui.js` gives an
+ empty one an empty stack to scroll — the alternative is a contract violation
+ taking the process down under `-D DEBUG` for a tree that is merely early.
+*>
+fn void a_scroll_with_nothing_in_it_is_not_a_panic() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`three.ui.set({ type: 'scroll', size: [80, 40] });`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		// Two: the scroll, and the empty stack `ui.js` gave it to scroll.
+		test::@check(renderer.ui.nodes.len() == 2, "the scroll came over as %d nodes", renderer.ui.nodes.len());
+	};
+}
