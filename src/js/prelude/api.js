@@ -35,6 +35,7 @@ import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
 import { cooldown, Cooldown } from './cooldown.js';
 import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
+import { ui } from './ui.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
@@ -1160,6 +1161,12 @@ export const three = {
 	clock,
 	frame,
 	debug,
+
+	// The interface — `three:ui.js`. `set` a tree, `patch` a value, `draw` a
+	// list of primitives in frame pixels. Drawn over the finished frame and
+	// into the same image a screenshot reads, so an agent sees what a person
+	// sees.
+	ui,
 
 	// How long this script may run before the interrupt stops it, in
 	// milliseconds. 5,000 by default, and raisable to ten minutes.

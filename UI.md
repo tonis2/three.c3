@@ -245,10 +245,20 @@ that is decoration must do the same.
 
 ### One loop, not two
 
-This block — poll, drive the UI, drive the camera, decide the cursor — currently
-exists **twice**: once in `run()`'s window loop and once in `live()`'s. Adding a
-fourth participant to both copies is how they start to disagree. Factor it into
-one function before the UI goes in, not after.
+This block — poll, drive the UI, drive the camera, decide the cursor — existed
+**twice**: once in `run()`'s window loop and once in `live()`'s. It is now
+`drive_window` in `main.c3`, called by both, answering with a `WindowFrame`.
+
+One rule was not in the sketch and is needed: **a camera drag wins over a hover.**
+The loop reads `wants_pointer && !controls.dragging`, because a drag that began
+on the scene must not stop when the pointer passes over a panel on its way across
+the window. cui's own `captured` is the mirror of that rule for a widget's drag,
+and the two together are why neither gesture can be stolen mid-flight.
+
+The pointer a script sees is *emptied* rather than moved when the interface has
+it — `inside` false as well as the buttons — because `inside` is what stops
+`MouseTracker` resolving a click, and clearing the buttons is what stops a press
+over a panel from ever starting one.
 
 ### The cursor
 
@@ -319,31 +329,33 @@ Two rules for that file:
 
 ### Stage 3 — the JS binding
 
-See §8 for the shape. In order, and the order is deliberate:
+See §8 for the shape. In order, and the order was deliberate:
 
-- [ ] **`three.ui.draw(ops)` first** — the seven `Painter` primitives as a
-      screen-space op list, plus `three.ui.measure`. It is the smallest possible
-      binding: no layout, no keys, no callbacks, no lifetimes, one switch over an
-      op name. It is also the most a game gets per line of binding code —
-      crosshair, health bar, damage flash, minimap, and `three.debug.overlay` is
-      a one-op call against it.
-- [ ] `three.ui.set(tree)` over the pure-data nodes — `column`, `row`, `stack`,
-      `padding`, `grid`, `clip`, `anchored`, `rect`, `label`, and `draw` as a
-      node. Still no callbacks and no state.
-- [ ] Callbacks through `Ui.provide`, adding `button`, `checkbox`, `slider`,
-      `select`, `tree` — and `onClick`/`onHover` on `draw`.
-- [ ] `key` → cui id, reuse-on-match, and `three.ui.patch(key, props)`. This is
-      what makes `textfield` and `scroll` usable, so it lands with them.
+- [x] **`three.ui.draw(ops)`** — the seven `Painter` primitives as a screen-space
+      op list, plus `three.ui.measure`. The smallest possible binding, and the
+      most a game gets per line of it: crosshair, health bar, damage flash,
+      minimap.
+- [x] `three.ui.set(tree)` over the pure-data nodes — `column`, `row`, `stack`,
+      `padding`, `grid`, `clip`, `anchored`, `scroll`, `rect`, `label`, and
+      `draw` as a node.
+- [x] Callbacks, adding `button`, `checkbox`, `slider`, `select`, `tree`,
+      `textfield` — and `onClick`/`onHover` on `draw`.
+- [x] `key`, reuse-on-match, and `three.ui.patch(key, props)`.
 
-Left out on purpose, and say so in the docs: `MenuBar`, `Dialog`, `FileBrowser`
-and the `AreaHost` family. §8.3 has the reason for each.
+Left out on purpose, and the docs say so: `MenuBar`, `Dialog`, `FileBrowser` and
+the `AreaHost` family. §8.3 has the reason for each.
+
+Three things came out differently from the sketch above, and §8.4 and §8.6 are
+rewritten to say what was built instead. Nothing else changed.
 
 ### Stage 4 — the consume flag, properly
 
-- [ ] The single-loop refactor, then `ui_has_pointer` / `ui_has_keys` wired into
-      `drive_camera` and `MouseTracker`.
+- [x] The single-loop refactor — `drive_window` in `main.c3` — then
+      `wants_pointer` / `wants_keys` wired into `drive_camera`, `ask_hover`, the
+      cursor shape and `MouseTracker`.
 - [ ] `plan.md` §5's *"A scene has no way to say which keys it binds"* becomes
-      answerable once the UI can display the list.
+      answerable now that the UI can display the list. Still open: it is a scene
+      API question, not an interface one.
 
 ### Stage 5 — tests
 
@@ -355,9 +367,21 @@ and the `AreaHost` family. §8.3 has the reason for each.
       *the frame under it survived* fail in opposite directions, and a test for
       either one alone passes on the other's bug — an overlay that clears first
       shows more text on a black frame.
-- [ ] A case with the pointer over a widget, once there is a widget to be over.
-      Stage 4's predicate has nothing to assert against a `Label`, which sets
-      `ignores_pointer`.
+- [x] The pointer cases, now that there are widgets to be over: a click reaching
+      the second of two buttons rather than the first, a hovered widget taking
+      the pointer and a bare frame not, a caption over the viewport staying
+      transparent while `solid` blocks, a drag surviving the pointer leaving the
+      widget, and a focused field taking the keyboard.
+- [x] The binding, end to end: a tree written in JavaScript arriving as elements,
+      a bad type refused by name, an async handler refused, `patch` by key,
+      `measure`, and the reentrancy guard — a handler that calls `three.ui.set`
+      is held and applied by `flush_ui`, checked in three parts because "it
+      worked" and "it was deferred" are different claims.
+- [x] The two leaks that would only show after an hour: a thousand patches of one
+      label keeping one string, and a replaced draw list replacing rather than
+      appending.
+
+31 cases in all.
 
 ---
 
@@ -572,19 +596,39 @@ A snapshot that rebuilds the tree wholesale resets the text under someone's
 fingers and scrolls a list back to the top. That is not a rough edge, it is the
 API being unusable for anything but a HUD.
 
-**cui already has the answer, and it is a string.** `Element.with_id(String)`
-names a node, and `find_id` / `get_widget_id` / `request_paint_id` /
-`@modify_id` are the whole family built on it — cui's documented analogue of a
-Flutter `GlobalKey`. So:
+**The rule a script holds in its head is the one that was built:** *give anything
+you type into, scroll, or open a key.*
 
-- A snapshot node may carry `key`. The binding stamps it as the cui id.
-- On `set`, a node whose `key` matches a live element of the same type is
-  **reused, not rebuilt** — its own state survives, and only the fields the
-  snapshot names are written.
+- A snapshot node may carry `key`.
+- On `set`, a node whose `key` matches a live node **of the same kind** keeps
+  everything a rebuild would have destroyed, and only the fields the snapshot
+  named are written.
 - A node with no key is rebuilt freely. Stateless nodes never need one.
+- `patch(key, props)` addresses the same names.
 
-That makes the rule a script can hold in its head: *give anything you type into,
-scroll, or open a key.*
+### What it actually does, and why not `with_id`
+
+The sketch above was going to reuse the *element*. What `render/ui.c3` does
+instead is rebuild the element and **carry the state across by key**: the
+`TextField`'s text, the `Slider`'s value, the `Checkbox`'s tick, the `Scroll`'s
+offset, the `Select`'s selection and whether its popup is open — and the keyboard
+focus, which is the one that would have been missed. `UiNodeSpec`'s five `has_`
+flags are what make "the snapshot did not mention this" different from "the
+snapshot said zero", which is the whole of the contract above.
+
+Element reuse would have meant surgery on a live tree: pulling a reused element
+out of its old parent before the old root is released, moving its children into a
+holding list so the recursion can claim from them by key, and releasing the
+leftovers — with a dangling `Element*` as the failure mode if any of it is wrong.
+Carrying the state is a switch over six widget types, and the observable
+behaviour is the same. The kind must match, or a `slider` renamed into a
+`checkbox` under one key would put a number in a tick box; there is a test for
+exactly that.
+
+Focus is the part worth calling out, because a rebuild loses it silently:
+`Ui.release` hands `focused` to the parent, which is a container that reads no
+keys — so without the carry-over, typing would stop dead the first time a HUD
+called `set`.
 
 ### 8.5 Two verbs, because a HUD updates every frame
 
@@ -607,16 +651,40 @@ the semantics of anything already written.
 ### 8.6 Callbacks
 
 `Ui.provide` is cui's answer to exactly this, and it says so: *"a Button has to
-call back into the app, and cui has no app type to name."* Provide a `JsRuntime*`
-once at startup. A widget callback receives the `Ui`, calls `inherit`, and
-dispatches to a JS function table by key. Nothing is threaded through struct
-literals, and nothing in cui learns what three is.
+call back into the app, and cui has no app type to name."* `ensure` provides the
+`UiLayer*`; a widget callback receives the `Ui`, calls `inherit`, and gets back
+here. Nothing is threaded through struct literals, and nothing in cui learns what
+three is.
+
+**But `inherit` does not say which button.** cui's callback aliases are
+`fn void(Ui*)`, `fn void(Ui*, bool)`, `fn void(Ui*, float)` and so on — the `Ui`
+and the value, and no element. Three ways out were on the table:
+
+- **Trampolines.** A generated table of N distinct functions per signature, one
+  per node index. Eight families times a hundred and twenty-eight slots of
+  generated code, to recover one integer.
+- **Wrapper widgets** that set a module-global around the inner widget's own
+  dispatch. Works for five of the six, and fails for `Select`, whose options are
+  built by its `build` hook — the wrapper's `on_mouse` is not on the stack when
+  an option fires.
+- **Ask the interactivity state**, which is what `ui_signal` does.
+
+The third is the smallest and the only one with no special case. `process_input`
+has just finished setting `captured`, `hovered` and `focused`, and every callback
+fires from inside one of the three dispatches those describe: `captured` for
+anything mid-gesture, `hovered` for a press (dispatched before the capture is
+recorded), `focused` for a key. So the shim walks up from each in turn, looking
+for the nearest element that is a node **of the kind that asked** — and the kind
+is what makes a button inside a tree row find the button. `Select` needs nothing
+extra: its option element chains up through the popup to the `Select` itself.
 
 Callbacks run from inside `process_input`, which runs **before** the tree is
-mutated and before `flush`. A JS handler that calls `three.ui.set` therefore
-mutates the tree cui is mid-dispatch on. Queue snapshot changes and apply them
-after `process_input` returns — cui's own warning is that handlers may unmount
-from their own subtree but must not restructure unrelated parts of the tree.
+mutated and before `flush`. A JS handler that calls `three.ui.set` would mutate
+the tree cui is mid-dispatch on — cui's own warning is that handlers may unmount
+from their own subtree but must not restructure unrelated parts of it. So a `set`
+arriving during a dispatch is **retained and held**, and `JsRuntime.flush_ui`
+applies it the moment `UiLayer.feed` returns, which `drive_window` calls one line
+later. A `patch` needs none of that: it writes a field and asks for paint.
 
 ### 8.7 Strings are borrowed
 
@@ -624,10 +692,21 @@ from their own subtree but must not restructure unrelated parts of the tree.
 `Tree.rows` and `Menu`'s items are all *borrowed — must outlive the element*. A
 JS string is transient and a `patch` replaces one every frame.
 
-So the binding owns a string table per key, frees the previous value only after
-the element stops referencing it, and never hands a widget a pointer into
-QuickJS memory. This is the one memory rule that fails quietly: a freed label
-reads as garbage glyphs or as nothing, never as a crash.
+So `UiNode` owns the strings and copies at the boundary — `keep` for the ones a
+widget's own fields borrow, `keep_listed` for the ones an array borrows, and they
+are two lists because a `patch` that replaces a `select`'s options must free
+exactly those and not the label the widget is still holding. Nothing below
+`bind_ui.c3` ever hands a widget a pointer into QuickJS memory. This is the one
+memory rule that fails quietly: a freed label reads as garbage glyphs or as
+nothing, never as a crash.
+
+Two shapes of leak fall out of that and both have a test. A `patch` that copied
+would keep a string per call, which is a readout at sixty hertz and an hour of
+play — so `retext` writes into one buffer per node and the old bytes are dead the
+instant the widget is re-pointed at the new ones. And a replaced list has to
+*replace*: `reset_list` frees what only that list was holding, the pushes refill
+it, and `relist` re-points the widget once the list has stopped growing, which is
+also why the array views are assigned at `commit_tree` and not at `push_node`.
 
 ---
 
@@ -641,22 +720,38 @@ one thing that has to work when nothing else does. A script loading *additional*
 faces by path is a separate, later question, and that one does belong in the
 sandbox.
 
-**Gamma.** The target is `R8G8B8A8_SRGB` and the hardware encodes on write.
-cui's reference host draws into a swapchain that is normally sRGB too, so the two
-should agree — but `WHITE` and `BLACK` land correctly under any convention, so
-they prove nothing. Check a mid-grey against a cui example before trusting it.
+**Gamma — answered.** The target is `R8G8B8A8_SRGB` and the hardware encodes on
+write, so a colour handed to `three.ui` is **linear**, exactly like
+`mesh.material.color` and for the same reason. That is the answer that makes the
+interface agree with the scene it is drawn over: both write linear and both are
+encoded by the same attachment. It is *not* CSS's convention — `0x808080` is a
+brighter grey here than in a browser — and the docs say so under
+`no-colour-management`, which is where a script already had to look. cui's own
+palette is authored the same way, so the built-in widgets land as intended.
 
 **Resolution.** The target is fixed at `--width`/`--height`, so `ui.resize` is a
 startup call and the interface stretches with the picture. Acceptable now; it is
 the same knob as §4's sharpness question and should be answered once, for both.
 
-**Textures.** `CanvasPass.load_image` / `load_pixels` hand out `cui::Texture`
-handles that are 1-based indices into *its own* sampler array — a separate table
-from `pass.assets`. A script that wants a scene texture in the UI cannot pass an
-`Assets` handle across. Either the binding copies, or the two tables get unified
-later; do not let a JS API imply the second before it is true. `RectStyle.texture`
-is otherwise pure data, so an image in the interface is one field away as soon as
-the handle question is answered.
+**Textures — still open, and deliberately not implied.** `CanvasPass.load_image` /
+`load_pixels` hand out `cui::Texture` handles that are 1-based indices into *its
+own* sampler array — a separate table from `pass.assets`. A script that wants a
+scene texture in the UI cannot pass an `Assets` handle across. So there is no
+`texture` field on a `rect` or on a draw op, and no JS spelling that suggests one
+is coming: `UiOp` and `UiNodeSpec` carry no texture at all. Either the binding
+copies or the two tables get unified, and `RectStyle.texture` is one field away
+once that is decided.
+
+**Styling stops at a theme.** cui's `CheckboxStyle`, `SliderStyle`,
+`TextFieldStyle`, `TreeStyle` and `MenuStyle` are twenty or thirty fields
+between them, and every one of them is data a snapshot could carry. What crossed
+instead is six colours and two text fields — `color`, `accent`, `hoverColor`,
+`pressColor`, `textColor`, `borderColor`, `font`, `textSize` — layered over each
+widget's own default rather than replacing it, because those structs are
+all-or-nothing and a zeroed one takes the default whole. That is enough to
+restyle an interface and not enough to reproduce every design. Widening it is one
+more field on `UiNodeSpec` per knob, which is why it was worth stopping
+somewhere rather than deciding the whole surface up front.
 
 **Does a script get its own fonts?** `Label.font` is a `FontId` from
 `Ui.load_font`, so the snapshot can name a face per node — but only from faces

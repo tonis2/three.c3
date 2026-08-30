@@ -1,0 +1,32 @@
+[
+  {
+    "file": "village.jpg",
+    "caption": "A street, a crowd and nine textures that are arithmetic — no models, no image files.",
+    "alt": "A cobbled village street lined with timbered houses and pine trees, villagers walking down it.",
+    "source": "examples/village.js"
+  },
+  {
+    "file": "wumpa_run.jpg",
+    "caption": "A Crash-shaped run down a jungle hollow: a nav bake, crates, pickups and a chasing camera.",
+    "alt": "A fox-like character on a dirt path between grassy banks, crates and orange fruit ahead.",
+    "source": "examples/wumpa_run.js"
+  },
+  {
+    "file": "tank_yard.jpg",
+    "caption": "A Battle City in four API pieces — one brick material, one draw call for every wall.",
+    "alt": "A top-down walled arena of red brick and grey steel blocks in a symmetric maze.",
+    "source": "examples/tank_yard.js"
+  },
+  {
+    "file": "vfx.jpg",
+    "caption": "What a material's own samplers are for: a shield dome, an ember burst and ribbons, all shader.",
+    "alt": "A glowing blue hemispherical shield over dark cubes on a grid, with orange ribbons and sparks.",
+    "source": "examples/vfx.js"
+  },
+  {
+    "file": "alley.jpg",
+    "caption": "material.repeat and the physics verbs — one 40x40 floor mesh showing four hundred tiles.",
+    "alt": "A tiled floor between brick walls with a stack of crates being knocked over by a blue ball.",
+    "source": "examples/alley.js"
+  }
+]

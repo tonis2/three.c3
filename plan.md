@@ -72,21 +72,27 @@ Crossfading, morph targets and sockets are built. What they left open:
       the `Ui` and the `CanvasPass`, `Target.begin_overlay` opens the rendering,
       and `three_tests::ui` holds the two claims — the line appears, the frame
       under it survives. `UI.md` is the design doc.
-- [ ] **`three.ui.draw(ops)`.** The seven `Painter` primitives — rect, circle,
+- [x] **`three.ui.draw(ops)`.** The seven `Painter` primitives — rect, circle,
       ellipse, line, arc, text, shadow — as a screen-space op list, plus
       `three.ui.measure`. Crosshair, health arc, damage flash, minimap. `UI.md`
       §8.1.
-- [ ] **`three.ui.set(tree)`.** `column`, `row`, `stack`, `padding`, `grid`,
-      `clip`, `anchored`, `rect`, `label`, and `draw` as a node. Then callbacks,
-      then `key` → cui id and `three.ui.patch`. `UI.md` §8.2.
-- [ ] **The consume flag is the hard part.** A click on a button must not also
-      shoot the gun, and `three.controls.enabled` does not answer it.
-      `ui.hovered || ui.captured` and `ui.focused` are the answer; the poll-and-
-      drive block in `main.c3` exists twice and wants factoring into one function
-      first. `UI.md` §5.
+- [x] **`three.ui.set(tree)`.** Seventeen node types, callbacks, `key` and
+      `three.ui.patch(key, props)`. `UI.md` §8.2.
+- [x] **The consume flag.** `drive_window` in `main.c3` is the one poll-and-drive
+      block both loops call, and `wants_pointer` / `wants_keys` gate the camera,
+      the hover raycast, the cursor shape and the `MouseState` a script sees.
+      `UI.md` §5.
 - [ ] **A scene has no way to say which keys it binds.** Seven keys bound to a
       character had to be delivered in a chat message. Smallest possible version
-      of this section, and already missed.
+      of this section, and already missed — the interface can display the list
+      now, so what is left is a scene API for declaring it.
+- [ ] **A texture in the interface.** `RectStyle.texture` is one field away, and
+      the handle question is what blocks it: `CanvasPass` samplers are a
+      different table from `pass.assets`, so a scene texture cannot be named
+      across. `UI.md` §9.
+- [ ] **Styling stops at a theme.** Six colours and two text fields cross per
+      node, layered over each widget's own default. Enough to restyle, not enough
+      to reproduce a design. One field per knob to widen. `UI.md` §9.
 
 ## 6. Audio, saving, and the rest
 
