@@ -53,6 +53,7 @@ export const DOCS = {
 		'steering': 'three.steer(positions, velocities, options) fills a Float32Array with a desired velocity per agent — seek, arrive and separation, for the whole crowd, in ONE crossing. positions is three floats per agent and is read; velocities is three floats per agent and is written. Options are { field, goal, maxSpeed, arrive, separation, separationWeight }; a field wins over a goal, because a field already knows the way round a wall. What comes back is a DESIRED velocity, not a position: integrating it and deciding whether an agent may actually go there are yours, which is what lets the same call feed three.moveAndSlide for agents that collide and a plain add for agents that do not.',
 		'batched-transforms': 'three.batch(objects) moves many nodes in one crossing, through a Float32Array. It is NOT a faster way to move a dozen things and should not be reached for as one — five hundred ordinary mesh.position.set calls measure 0.245 ms a frame, three per cent of the budget, and the trigger for this is about two thousand nodes a frame. It is for the case where the write is already a loop over numbers: a crowd steered by three.steer, a particle field, a chunked terrain. batch.positions is a Float32Array seeded from where the objects are now; batch.flush() writes them and answers with how many landed. With { trs: true } the stride is ten floats — position, an xyzw QUATERNION, then scale.',
 		'window-is-not-the-picture': 'three.window.resize(width, height) makes the WINDOW bigger and does not make the picture bigger. Everything renders into an offscreen target fixed at what --width/--height asked for when the process started, and the swapchain stretches the whole of that onto the whole window — so a wider window is the same pixels spread wider, and three.renderSize(), the PNG a screenshot comes back as and the coordinates scene.pick(x, y) counts in are all unchanged. Nothing in the JS API moves the render size; it is a boot argument. three.window.width and .height are device pixels read off the drawable rather than off the window, so they are current through a live resize drag, and .scale is device pixels per logical point. Resizing is a REQUEST: X11\'s window manager may adjust it and Wayland answers with a configure some frames later, so the new size arrives on a later frame. Under --headless there is no window, the sizes read zero and resize() returns false rather than throwing — the same shape three.input.pointerLock uses, so a game that sizes its window still starts where there is none. And on WAYLAND the size never reads back at all: that surface answers \'whatever the swapchain asks for\' instead of a size, so the drawable stays what the process booted at whatever the window does.',
+		'the-interface': 'There is a UI, and it is DRAWN INTO THE FRAME rather than over the window: three.ui.set(tree) describes a panel, three.ui.patch(key, props) changes one value in it, and three.ui.draw(ops) is the screen-space layer a crosshair and a health bar live in. It goes into the same offscreen target the scene does, after the post chain, so --screenshot and the MCP screenshot tool carry it and an agent reads the interface a person sees. It is RETAINED: a node that did not change costs nothing to redraw, so the guidance is set when the shape changed and patch when a number did, not rebuild every frame. It ARBITRATES the pointer: a click on a button does not also orbit the camera or reach three.onClick, and typing in a text field is not also WASD — while a caption, a panel background and a drawing are transparent to the pointer, so nothing you put over the viewport becomes a dead zone unless it says solid: true. Give anything you type into, scroll or open a key, because set rebuilds the tree and a key is what carries the text, the scroll position, the open popup and the keyboard focus across the rebuild. Colours are linear like everything else here — see no-colour-management — so 0x808080 is the same grey a material would be.',
 		'pointer-lock': 'three.input.pointerLock = true takes the mouse pointer out of the user\'s hands, and what it buys is a look that does not STOP. Without it three.input.pointer.dx is a difference of cursor positions, and a cursor stops at the edge of the screen while a hand does not — so a mouse look turns until the pointer reaches the edge and then quietly refuses to turn further. Reading the property back tells you whether the platform gave it, not what you asked for: a headless run has no window and always reads false, and so does a backend with no implementation. Nothing throws, so a game can fall back to a drag-look rather than refuse to start. three.input.pointer.locked is the same fact reported beside the deltas it is about.',
 		'scalar-math': 'The MathUtils block is on three itself: clamp, clamp01 (GLSL\'s saturate), lerp, inverseLerp, mapLinear, smoothstep, smootherstep, band, pingpong, euclideanModulo, degToRad, radToDeg, moveTowards, plus wrapAngle / angleDelta / moveTowardsAngle for the seam at +/-pi and mixColor / tintColor for colours. Three.js\'s names and Three.js\'s ARGUMENT ORDER, which matters for exactly one of them: smoothstep here is (x, min, max) and GLSL\'s is (edge0, edge1, x), so the shader body and the script a few lines above it take the same three numbers in different orders and swapping them is silent. Randomness is three.randFloat / randInt / randFloatSpread and they do NOT use Math.random — they draw from a seeded stream three.seed(n) resets, because one Math.random() in the gameplay layer throws away the determinism the fixed step and state_hash exist for. Noise is three.hash / noise2 / fbm2, sampled at a point, with a period option that makes a texture tile. None of this crosses to the host: a host call that allocates to answer arithmetic measures 185 ns against the 70 ns of the JavaScript it replaced, and it is slower on every call forever.',
 		'damping-and-curves': 'three.damp(current, target, lambda, dt) and three.smoothDamp(current, target, state, smoothTime, dt) are the two verbs between "where it is" and "where it should be", and both are frame-rate independent — which is the whole reason they are named rather than written inline. `x += (target - x) * 0.1` closes a tenth of the gap per FRAME, so it is twice as fast at 120 Hz as at 60 and a chase tuned on one machine is a different chase on another. damp is a decay, right for a camera easing onto a target; smoothDamp is a critically damped spring with momentum, right for a turret slew or a sliding panel, and its state object must OUTLIVE the frame or it is re-launched from rest every tick. three.dampAngle takes the short way round a circle, which is what a heading needs. dt is in SECONDS, and so is three.clock.dt — pass it straight through, or the dt a three.systems system is handed, which is the same number. new three.CatmullRomCurve3(points) is the three-dimensional curve a loop samples — getPointAt(u) walks its LENGTH and getPoint(t) walks its own parameter, and the difference is what makes hand-written rail code look wrong.',
@@ -1557,6 +1558,50 @@ export const DOCS = {
 			+ 'It lasts one frame: set it again each frame to keep it up, which makes a HUD '
 			+ 'three.frame(() => three.debug.overlay(`hp ${p.hp}`)) and lets a one-shot note clear '
 			+ 'itself. Text only, no layout and no widgets, so nothing here can swallow a click.',
+		'three.ui.set(tree)':
+			'The interface, as one description. A tree of plain objects, each with a type: the layout '
+			+ 'kinds are column, row, stack, padding, grid, clip, anchored and scroll; the painted ones '
+			+ 'are rect, label and draw; the interactive ones are button, checkbox, slider, select, tree '
+			+ 'and textfield. Children go in children: [...] or child: {...}, and a falsy child is '
+			+ 'skipped, so cond && {...} is how a row is conditional. Colours take a hex number, an '
+			+ '[r, g, b] or an [r, g, b, a]; radius and insets take one number, two, or four in cui\'s '
+			+ 'order — insets {left, top, right, bottom} and radius {TL, TR, BR, BL}. size is per axis '
+			+ 'and 0 means take what you are offered. Handlers are onClick, onChange, onCommit, '
+			+ 'onSubmit, onSelect and onToggle, and they must be synchronous, because a handler runs '
+			+ 'inside the frame and the frame does not wait. It is DRAWN OVER the finished frame into '
+			+ 'the same image a screenshot reads, so an agent sees the interface a person sees. '
+			+ 'three.ui.set(null) takes it down. Call this when the SHAPE changed and three.ui.patch '
+			+ 'when a value did: the tree is retained and a node that did not change costs nothing to '
+			+ 'redraw, so rebuilding it every frame is the one thing worth not doing.',
+		'three.ui.patch(key, props)':
+			'One keyed node, one or more of its values — the verb a HUD uses. '
+			+ 'three.frame(() => three.ui.patch(\'fps\', { text: `${fps | 0} fps` })). A node carries a '
+			+ 'key in the snapshot that named it, and the key lives until the next three.ui.set; '
+			+ 'patching one that names nothing throws rather than doing nothing, because a HUD that '
+			+ 'silently froze is the failure that costs an afternoon. The fields are the ones that are '
+			+ 'values rather than structure: text, value, checked, selected, offset, disabled, color, '
+			+ 'min, max, size, plus ops, options and rows, which replace a list wholesale. Anything '
+			+ 'that would change the shape of the tree is a set.',
+		'three.ui.draw(ops)':
+			'The screen-space layer: a list of drawings positioned in frame pixels. A crosshair, a '
+			+ 'health bar, a damage flash and a minimap are all this, and none of them is a widget. '
+			+ 'Seven ops, which are the WHOLE drawing surface the built-in widgets paint with: rect '
+			+ '{at, size, color, radius, borderColor, borderWidth}, circle {center, radius, color}, '
+			+ 'ellipse {center, radii}, line {from, to, thickness, color}, arc {center, radius, start, '
+			+ 'sweep, thickness, color} in radians with 0 at +x turning clockwise, text {at, text, size, '
+			+ 'color} and shadow {at, size, blur, color, radius}. Coordinates are the same top-left '
+			+ 'image pixels three.input.pointer arrives in, so a reticle at the cursor needs no '
+			+ 'conversion. It IS a three.ui.set — one draw node filling the frame — so it replaces the '
+			+ 'interface; to put drawings BESIDE widgets, use { type: \'draw\', size, ops } inside the '
+			+ 'tree, where the coordinates are then the node\'s own and onClick makes it clickable.',
+		'three.ui.measure(text, options)':
+			'What a string will take, as [width, height] in pixels. options is { font, size }. Drawing '
+			+ 'text by hand is arithmetic without it — centring a readout inside an arc is a measured '
+			+ 'width — and this is the same measurement the renderer makes when it lays the glyphs '
+			+ 'down, so positioning by it lands where they go.',
+		'three.ui.clear()':
+			'Takes the interface down. three.debug.overlay is not part of it and stays: the debug line '
+			+ 'and a script\'s interface are two floors of one root, with the line always on top.',
 		'three.stats()':
 			'The numbers below, for the whole scene, with culling off. The six ...Ms are the exception: '
 			+ 'they are not facts about the scene but measurements of the last frame drawn, so they move '

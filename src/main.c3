@@ -459,6 +459,7 @@ fn void? run(Options opts)
 	}
 
 	Controls controls = DEFAULT_CONTROLS;
+	InputTracker keyboard;
 	c3w::CursorShape shown;
 	Hover hover;
 	Clock since_start = clock::now();
@@ -467,44 +468,24 @@ fn void? run(Options opts)
 	// see `serve`, which has more to wait for and says why there.
 	bool quiet        = false;
 
-	while (!window.should_close())
+	while (true)
 	{
-		c3w::EventMap events = window.getEvent(wait: quiet);
-		if (events.is_pressed(ESCAPE)) break;
-		want_surface(&renderer, &window);
-
-		long now_ns = (long)since_start.to_now();
-		float dt_ms = (float)(now_ns - last_ns) / 1_000_000.0f;
-		last_ns = now_ns;
-
-		float[<2>] at = window.getMousePos();
-		float scroll  = window.get_scroll();
-		Cursor cursor = window_view(&renderer, &window)
-			.cursor(
-				at,
-				events.is_pressed(LEFT_MOUSE),
-				right: events.is_pressed(RIGHT_MOUSE),
-				middle: events.is_pressed(MIDDLE_MOUSE),
-				scroll: scroll,
-				scroll_x: window.get_scroll_x()
-			);
-		bool moved = drive_camera(
-			renderer: &renderer,
-			window: &window,
-			controls: &controls,
-			events: events,
-			at: at,
-			dt_ms: dt_ms,
-			scroll: scroll
-		);
-		show_cursor(
+		WindowFrame poll = drive_window(
+			&renderer,
 			&window,
+			&controls,
+			&keyboard,
 			&shown,
-			cursor_shape(cursor.inside, controls.dragging, ask_hover(&renderer, &hover, cursor, controls.dragging))
+			&hover,
+			since_start,
+			&last_ns,
+			quiet
 		);
+		if (poll.closed) break;
 
+		bool ui_idle   = renderer.ui.idle();
 		bool presented = renderer.frame()!;
-		quiet = presented && !moved;
+		quiet = presented && !poll.camera_moved && ui_idle;
 	}
 }
 
@@ -635,6 +616,185 @@ fn bool drive_camera(
 	// scroll toward the model must not pull the far plane in front of the sky.
 	renderer.pass.derive_camera_planes();
 	return true;
+}
+
+<*
+ One iteration of window, as everything downstream of it needs it.
+
+ `closed` is the only field that means "stop"; the rest are what the loop hands
+ on to the frame and to the runtime.
+*>
+struct WindowFrame
+{
+	bool closed;
+	long now_ns;
+	float dt_ms;
+	// True when the camera moved — a drag, a scroll, or a coast still running.
+	bool camera_moved;
+	// Where the pointer is, before the interface's claim on it was applied. The
+	// picker and the loop want the truth; a script wants the gated version, which
+	// is what `input.mouse` carries.
+	Cursor cursor;
+	InputState input;
+}
+
+<*
+ Poll, drive the interface, drive the camera, decide the cursor, latch the
+ keyboard. One frame of window, in one place.
+
+ ## Why this is a function
+
+ It used to be a block, twice: once in `run`'s loop and once in `live`'s. Adding
+ a fourth participant to both copies is how they start to disagree, and the
+ interface is exactly that fourth participant — a click that presses a button
+ must not also orbit the camera, and that rule has to hold in both loops or it
+ does not hold at all.
+
+ ## Who gets the pointer
+
+ The interface sees every frame first, because only it can say whether the
+ pointer is over a widget. Then:
+
+ - **A camera drag wins over a hover.** `controls.dragging` is checked as well as
+   `wants_pointer`, because a drag that began on the scene must not stop when the
+   pointer passes over a panel on its way across the window. cui's own `captured`
+   is the mirror of that rule for a widget's drag.
+ - **A hovered widget takes the pointer**, so the camera does not orbit under a
+   panel and a script's `three.input.mouse` reports `inside: false` — a click on a
+   button does not also fire the gun.
+ - **A focused widget takes the keyboard**, so typing in a text field is not also
+   WASD.
+
+ The typed text goes to the interface unconditionally: cui only reads it when
+ something is focused, and gating it on last frame's answer would swallow the
+ first character of every field.
+
+ @param quiet : `Whether this fetch may sleep in the kernel. The caller decides; every term is in its own comment there.`
+ @param [inout] last_ns : `The previous iteration's timestamp, for the delta.`
+*>
+fn WindowFrame drive_window(
+	Renderer* renderer,
+	c3w::Window* window,
+	Controls* controls,
+	InputTracker* keyboard,
+	c3w::CursorShape* shown,
+	Hover* hover,
+	Clock since_start,
+	long* last_ns,
+	bool quiet
+)
+{
+	if (window.should_close()) return { .closed = true };
+
+	c3w::EventMap events = window.getEvent(wait: quiet);
+	if (events.is_pressed(ESCAPE)) return { .closed = true };
+	want_surface(renderer, window);
+
+	long now_ns = (long)since_start.to_now();
+	float dt_ms = (float)(now_ns - *last_ns) / 1_000_000.0f;
+	*last_ns = now_ns;
+
+	// Read once and handed to everything: the camera wants a delta in points and
+	// the click wants a position in image pixels, and two readings of the same
+	// instant are two chances for them to disagree.
+	float[<2>] at = window.getMousePos();
+	float scroll  = window.get_scroll();
+	Cursor cursor = window_view(renderer, window)
+		.cursor(
+			at,
+			events.is_pressed(LEFT_MOUSE),
+			right: events.is_pressed(RIGHT_MOUSE),
+			middle: events.is_pressed(MIDDLE_MOUSE),
+			scroll: scroll,
+			scroll_x: window
+				.get_scroll_x(), // The platform's own movement, and whether it is the reading that
+				// counts this frame — `three.input.pointerLock`. Asked of the window
+				// rather than of the runtime, because the runtime records what a
+				// script *wanted* and only the window knows whether the platform
+				// gave it.
+			raw: window.getMouseDelta(),
+			locked: window.pointerLocked()
+		);
+
+	// The queue as well as the latch: a key pressed and released between two
+	// frames is in one and not the other.
+	FrameKeys keys = read_events(events, window.events());
+	String typed   = window.get_text();
+
+	// First, and this is the whole of the arbitration: nothing else can answer
+	// "is the pointer over a widget" until cui has hit-tested this frame.
+	renderer.ui.feed(cursor, keys.down, typed, dt_ms);
+
+	bool ui_pointer = renderer.ui.wants_pointer && !controls.dragging;
+	bool ui_keys    = renderer.ui.wants_keys;
+
+	// Before `pump` in the caller, so a drag and a script that arrive in the same
+	// iteration resolve in the order they happened rather than the script's
+	// camera being overwritten by a stale anchor.
+	bool moved;
+	if (!ui_pointer)
+	{
+		moved = drive_camera(
+			renderer: renderer,
+			window: window,
+			controls: controls,
+			events: events,
+			at: at,
+			dt_ms: dt_ms,
+			scroll: scroll
+		);
+	}
+
+	if (ui_pointer)
+	{
+		// No raycast while the interface has the pointer — the answer would be
+		// about something nobody can see, and it costs a BVH walk to get it.
+		hover.forget();
+		show_cursor(window, shown, renderer.ui.cursor_shape());
+	}
+	else
+	{
+		show_cursor(
+			window,
+			shown,
+			cursor_shape(cursor.inside, controls.dragging, ask_hover(renderer, hover, cursor, controls.dragging))
+		);
+	}
+
+	// What a script is told. The pointer is emptied rather than moved: `inside`
+	// false is what stops `MouseTracker` resolving a click, and the buttons going
+	// with it is what stops a press over a panel from ever starting one.
+	Cursor to_script = cursor;
+	if (ui_pointer)
+	{
+		to_script.inside = false;
+		to_script.down = false;
+		to_script.right = false;
+		to_script.middle = false;
+		to_script.scroll = 0;
+		to_script.scroll_x = 0;
+	}
+
+	return {
+		.now_ns = now_ns,
+		.dt_ms = dt_ms,
+		.camera_moved = moved,
+		.cursor = cursor,
+		// Sampled here rather than at the tick, because this is where the events
+		// are: `getEvent` clears the typed text on its next call, and the edges are
+		// a difference against what the *previous* call saw.
+		// 
+		// The clock is this iteration's own, and not the tick's. A click is timed
+		// from when the button was *sampled*, and what happens between here and the
+		// tick is a whole `pump` — which on the iteration that runs a slow tool call
+		// is seconds, and would turn every click that straddled it into a hold.
+		.input = keyboard.step(
+			ui_keys ? (FrameKeys){ } : keys,
+			ui_keys ? "" : typed,
+			to_script,
+			(double)now_ns / 1_000_000.0
+		),
+	};
 }
 
 <*
@@ -788,76 +948,29 @@ fn void? live(
 	{
 		if (window != null)
 		{
-			if (window.should_close()) break;
-			c3w::EventMap events = window.getEvent(wait: quiet);
-			if (events.is_pressed(ESCAPE)) break;
-			want_surface(renderer, window);
-
-			long now_ns = (long)since_start.to_now();
-			float dt_ms = (float)(now_ns - last_frame_ns) / 1_000_000.0f;
-			last_frame_ns = now_ns;
-
-			// Read once and handed to both: the camera wants a delta in points and
-			// the click wants a position in image pixels, and two readings of the
-			// same instant are two chances for them to disagree.
-			float[<2>] at = window.getMousePos();
-			float scroll  = window.get_scroll();
-			Cursor cursor = window_view(renderer, window)
-				.cursor(
-					at,
-					events.is_pressed(LEFT_MOUSE),
-					right: events.is_pressed(RIGHT_MOUSE),
-					middle: events.is_pressed(MIDDLE_MOUSE),
-					scroll: scroll,
-					scroll_x: window
-						.get_scroll_x(), // The platform's own movement, and whether it is the reading that
-						// counts this frame — `three.input.pointerLock`. Asked of the window
-						// rather than of the runtime, because the runtime records what a
-						// script *wanted* and only the window knows whether the platform
-						// gave it.
-					raw: window.getMouseDelta(),
-					locked: window.pointerLocked()
-				);
-
-			// Before `pump`, so a drag and a script that arrives in the same
-			// iteration resolve in the order they happened rather than the script's
-			// camera being overwritten by a stale anchor.
-			camera_moved = drive_camera(
-				renderer: renderer,
-				window: window,
-				controls: &runtime.controls,
-				events: events,
-				at: at,
-				dt_ms: dt_ms,
-				scroll: scroll
-			);
-			show_cursor(
+			// One call, and `run`'s loop makes the same one. Everything about a
+			// frame of window — the events, the pointer, the interface, the camera,
+			// the cursor shape and the keyboard a script sees — happens in there, so
+			// a fifth participant is added once instead of twice.
+			WindowFrame poll = drive_window(
+				renderer,
 				window,
+				&runtime.controls,
+				&keyboard,
 				&shown,
-				cursor_shape(
-					cursor.inside,
-					runtime.controls.dragging,
-					ask_hover(renderer, &hover, cursor, runtime.controls.dragging)
-				)
+				&hover,
+				since_start,
+				&last_frame_ns,
+				quiet
 			);
+			if (poll.closed) break;
+			camera_moved = poll.camera_moved;
+			input = poll.input;
 
-			// Sampled here rather than at the tick, because this is where the events
-			// are: `getEvent` clears the typed text on its next call, and the edges
-			// are a difference against what the *previous* call saw.
-			// 
-			// The clock is this iteration's own, and not the tick's below. A click
-			// is timed from when the button was *sampled*, and what happens between
-			// here and the tick is a whole `pump` — which on the iteration that runs
-			// a slow tool call is seconds, and would turn every click that straddled
-			// it into a hold.
-			input = keyboard
-				.step(// The queue as well as the latch: a key pressed and released between
-				// two frames is in one and not the other.
-				read_events(events, window.events()),
-				window.get_text(),
-				cursor,
-				(double)now_ns / 1_000_000.0,
-			);
+			// A widget handler that asked for a new tree was held while cui was
+			// walking the old one. This is the first moment it is not — see
+			// `JsRuntime.flush_ui`.
+			runtime.flush_ui();
 		}
 
 		// Nothing to pump when there is no listener; a game alone still ticks.
@@ -891,6 +1004,7 @@ fn void? live(
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between requests,
 			// which reads as a hung application.
+			bool ui_idle   = renderer.ui.idle();
 			bool presented = renderer.frame()!;
 
 			// When the next fetch is allowed to sleep in the kernel. Every term is
@@ -909,7 +1023,12 @@ fn void? live(
 			//   followed by a third of a second of frames nobody asked for.
 			// - `handled` — a tool call may have changed the scene, and the answer
 			//   went out before the frame that shows it.
-			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0;
+			// - `ui_idle` — cui sets `frame_requested` on every invalidation, so a
+			//   panel that a click has just changed still owes a frame. Read
+			//   unconditionally rather than inside the `&&` chain, because reading
+			//   is what clears it and a short-circuit would leave it standing.
+			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0
+				&& ui_idle;
 		}
 		else
 		{

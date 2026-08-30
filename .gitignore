@@ -58,3 +58,7 @@ dkms.conf
 
 # Build output
 build/
+
+# The website
+node_modules/
+site/dist/

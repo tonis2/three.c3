@@ -141,6 +141,7 @@ const char[*] PRELUDE_SYSTEMS  = $embed("prelude/systems.js");
 const char[*] PRELUDE_ENTITY   = $embed("prelude/entity.js");
 const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
+const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
 const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
 
 <*
@@ -155,7 +156,7 @@ const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[21] parts;
+	static qjs::EmbeddedModule[22] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -176,6 +177,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:systems.js", (char[])PRELUDE_SYSTEMS[..] },
 		{ "three:entity.js", (char[])PRELUDE_ENTITY[..] },
 		{ "three:cooldown.js", (char[])PRELUDE_COOLDOWN[..] },
+		{ "three:ui.js", (char[])PRELUDE_UI[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
@@ -339,6 +341,21 @@ struct JsRuntime
 	// filled by every `tick` and read by the overrun report and `three.frame.ms`.
 	FrameSpend frame_spend;
 
+	<*
+	 The widget callbacks `three.ui.set` attached, one entry per node of the live
+	 snapshot — `js/bind_ui.c3`. Retained like `frame_fn`, and released before the
+	 context closes for the same reason.
+
+	 `ui_pending` is a snapshot a widget handler asked for while it was being
+	 dispatched: cui is mid-walk of the tree at that moment, so the rebuild waits
+	 for `flush_ui` at the top of the next thing the loop does.
+	*>
+	List{UiHandlers} ui_handlers;
+	qjs::Value ui_pending;
+	bool ui_pending_held;
+	bool ui_pending_active;
+	bool ui_dispatching;
+
 	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at worst
 	// and is replaced whole by every tick; `input_text` backs its `text`, which
 	// would otherwise point into a window buffer that clears itself.
@@ -491,6 +508,10 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.uploads.init(mem, 8);
 	// One entry per resident image, grown on demand — `hold_texture`.
 	self.texture_handles.init(mem, 8);
+	// One entry per node of the interface, and empty for every run that never
+	// draws one — `js/bind_ui.c3`.
+	self.ui_handlers.init(mem, 0);
+	self.ui_pending = qjs::undefined_value();
 	self.frame_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
@@ -530,6 +551,11 @@ fn void JsRuntime.close(&self)
 	self.clear_click_handler();
 	self.clear_physics_handlers();
 	self.clear_uploads();
+	// The interface's callbacks, and then the interface itself: the layer belongs
+	// to the Renderer and outlives this context, so a reload must not leave it
+	// holding a listener into the one that just went.
+	self.clear_ui_handlers();
+	self.release_ui();
 	// The same idea as the five above, for the one resource whose reference is
 	// held by a *handle* rather than by a callback: the images this context's
 	// `Texture` objects own, which will never be disposed now that the context
@@ -547,6 +573,7 @@ fn void JsRuntime.close(&self)
 	self.frame_error.free();
 	self.input_text.free();
 	self.texture_handles.free();
+	self.ui_handlers.free();
 	self.modules.free();
 	*self = { };
 }

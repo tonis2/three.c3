@@ -1,0 +1,16 @@
+{
+  "name": "three-c3-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The static website for three.c3. Build-time only — nothing here ships in the engine.",
+  "type": "module",
+  "scripts": {
+    "build": "node site/build.mjs",
+    "api": "node site/gen-api.mjs",
+    "serve": "node site/serve.mjs"
+  },
+  "devDependencies": {
+    "highlight.js": "^11.11.1",
+    "marked": "^16.4.0"
+  }
+}
