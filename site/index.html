@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>three.c3 — a Three.js-shaped scene API over Vulkan</title>
+<meta name="description" content="A Three.js-shaped scene API over direct Vulkan.">
+<meta property="og:title" content="three.c3">
+<meta property="og:description" content="A Three.js-shaped scene API over direct Vulkan. One binary, instanced by default, scripted in JavaScript.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tonis2.github.io/three.c3/">
+<meta property="og:image" content="https://tonis2.github.io/three.c3/screenshots/village.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/bundle.js" type="module"></script>
+</head>
+<body>
+<!--
+  The only page. Everything below is replaced by <three-app> the moment the
+  bundle runs; it is written out here so the first paint is the header rather
+  than an empty screen, and so a reader with JavaScript off is told why the
+  page is blank instead of being left to guess.
+-->
+<three-app>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="#/"><span class="mark"></span>three.c3</a>
+    <nav>
+      <a href="#/" aria-current="page">Home</a>
+      <a href="#/api">API</a>
+      <a href="#/tutorials">Tutorials</a>
+    </nav>
+    <a class="source" href="https://github.com/tonis2/three.c3">GitHub</a>
+  </header>
+  <main id="main" class="wide"></main>
+</three-app>
+
+<noscript>
+  <section class="page-head narrow">
+    <h1>This site needs JavaScript</h1>
+    <p class="lede">It is one page that renders itself. Everything it shows is in
+       the repository as plain files, so nothing here is behind the script:
+       <a href="https://github.com/tonis2/three.c3/tree/main/site/tutorials">the
+       tutorials</a> are Markdown, and the API reference is
+       <a href="assets/api.json">api.json</a> and
+       <code>three.getApiDocs()</code> in the engine itself.</p>
+  </section>
+</noscript>
+</body>
+</html>

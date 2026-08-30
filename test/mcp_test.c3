@@ -530,17 +530,19 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
  The validation flags are gone, and a line that still names one is refused.
 
  `--validate` and `--no-validate` used to be here, and `--mcp` used to imply the
- first of them in a debug build. All three went when the layers became a property
- of the build — `src/debug.c3` carries the argument and the 2x it costs. So did
- `--shader <path>`, which could only ever name one of the five templates
- `find_shader` looks up; `src/shader/load.c3` has that one.
+ first of them. Both went when the layers became a property of the build, and the
+ build flag has since become `--debug` — so the layers are back on the command
+ line under one name rather than two, and `--mcp` still does not imply it: an
+ agent's server pays the 2x only when somebody asked for it. `--shader <path>`
+ went the same way for a different reason, being able to name only one of the five
+ templates `find_shader` looks up; `src/shader/load.c3` has that one.
 
  What is pinned here is not that they are absent, which nothing can observe, but
  that their absence is **loud**. A `.mcp.json`, a shell alias or a run script
  written before the change still carries the flag, and the two ways of meeting it
  are not close: refused, it stops with usage printed and the line gets fixed;
- ignored, a debug build validates when the line asked it not to, at the 2x, with
- nothing on screen to point at.
+ ignored, a run validates when the line asked it not to, at the 2x, with nothing
+ on screen to point at.
 
  The control line first, because a test that only checks for refusals passes just
  as well against a `parse_args` that refuses everything.
@@ -572,6 +574,31 @@ fn void the_flags_that_went_are_refused_rather_than_ignored() @test
 	String[*] pointed = { "three", "--shader", "shaders/mesh.slang" };
 	three::Options? refused_shader = three::parse_args(pointed[..]);
 	test::@check(@catch(refused_shader), "--shader was accepted rather than refused");
+}
+
+<*
+ `--debug` is off unless the line says it, and takes no value.
+
+ The default is the whole of what makes it safe to ship the machinery in every
+ binary: a game started by a player is a run nobody asked to diagnose, so the
+ layers are not loaded, the log lines do not print, and escape and shift+R are
+ the game's own keys. Pinned here rather than assumed, because the failure is
+ silent in the direction that matters — a default of true costs the 2x on every
+ machine a game ever runs on and nothing on screen says so.
+
+ It takes no value, which is what the third case is: a bare `--debug` followed by
+ another flag must not swallow it, the way `--script` deliberately does.
+*>
+fn void debug_is_off_unless_the_line_asks_for_it() @test
+{
+	String[*] plain = { "three", "--headless", "--frames", "1" };
+	three::Options quiet = three::parse_args(plain[..])!!;
+	test::@check(!quiet.debug, "a line that never said --debug asked to diagnose");
+
+	String[*] asked = { "three", "--debug", "--headless" };
+	three::Options loud = three::parse_args(asked[..])!!;
+	test::@check(loud.debug, "--debug was not understood");
+	test::@check(loud.headless, "--debug swallowed the flag beside it");
 }
 
 <*

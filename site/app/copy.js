@@ -1,4 +1,5 @@
-// A copy button on every code block. One listener, delegated.
+// A copy button on every code block. One listener, delegated — so a block that
+// a route rendered a moment ago needs no wiring up.
 
 document.addEventListener('click', async event => {
 	const button = event.target.closest('.copy');

@@ -264,9 +264,10 @@ fn sz free_block_bytes(three::Gpu* gpu)
  It survived because the suite had no way to see it. A leaked image is reported
  by `vkDestroyDevice`, which happens after the last check in a run; the sink is
  armed around a script and this is not one; and the picture is identical either
- way. What finally showed it was a `-D DEBUG` build validating without being
- asked — see `src/debug.c3` — which put "1 leaked object" under the built-in
- triangle, the white 1x1 stand-in being the only image it makes.
+ way. What finally showed it was a `--debug` run validating without being asked —
+ see `validation_layer_present` in `src/gpu/device.c3` — which put "1 leaked
+ object" under the built-in triangle, the white 1x1 stand-in being the only image
+ it makes.
 
  So the assertion is the byte count rather than the handle: `vk::Memory.free`
  destroys the image and returns the block in the same three lines, so the block
@@ -961,7 +962,8 @@ fn void the_scene_warning_waits_for_twice_the_count() @test
 			"the next word waits for twice the count: %d then %d", threshold, pass.scene_warn_at);
 
 		// And they all go back. `MeshPass.free` frees every scene, not just the
-		// active one — the leak checker in the `-D DEBUG` run is the assertion.
+		// active one — the leak checker in a run without `--test-noleak` is the
+		// assertion.
 		test::@check(pass.scenes.len() == (sz)threshold,
 			"the scenes are all still there to be freed: %d", pass.scenes.len());
 	};

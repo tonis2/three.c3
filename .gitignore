@@ -63,3 +63,6 @@ build/
 # The website
 node_modules/
 site/dist/
+
+# Written by site/build.mjs.
+site/.generated/

@@ -218,8 +218,8 @@ fn void Gpu.retire_memory(
  does the opposite. Asking only about `.buffer` meant every image reaching this
  queue was retired, dequeued, then silently skipped — `vkDestroyImage` never
  called and the page block never returned. It leaks at `vkDestroyDevice`, after
- the suite has disarmed its validation sink, so nothing caught it until a
- `-D DEBUG` build started validating unconditionally.
+ the suite has disarmed its validation sink, so nothing caught it until a run
+ under `--debug` started validating unconditionally.
 *>
 fn void free_retired_memory(Gpu* gpu, RetiredMemory due) @local
 {

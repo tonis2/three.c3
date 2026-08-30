@@ -496,6 +496,7 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 		.anchor_h = (uint)math::max(prop_number(js, value, "ah"), 0.0),
 		.anchor_v = (uint)math::max(prop_number(js, value, "av"), 0.0),
 		.solid = prop_truth(js, value, "solid"),
+		.wrap = prop_truth(js, value, "wrap"),
 
 		.color = prop_vec4(js, value, "color"),
 		.border_color = prop_vec4(js, value, "borderColor"),

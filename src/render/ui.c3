@@ -262,6 +262,63 @@ fn void UiPainting.on_hover(&self, cui::Element* elem, bool entered) @dynamic
 	ui_fire(elem, { .kind = UiEventKind.HOVER, .flag = entered });
 }
 
+<*
+ A stack that hugs what is in it: `{ type: 'stack', wrap: true }`.
+
+ cui's `Stack` fills, which is right for a scrim and for the root and wrong for a
+ panel. A card with a background is a `Rectangle` behind a `Padding`, and a Stack
+ that fills makes that card the size of the window — so what a script is left
+ with is arithmetic: measure the line height, add up the rows, add the insets and
+ write the total into the stack by hand. That total stops being true the moment a
+ row is added, which is the kind of wrong that looks like a layout bug.
+
+ So the LAST child is the content and everything before it is decoration. The
+ content is measured against the space on offer, the decoration is then laid out
+ TIGHT to what came back, and the element is the content's size. It is
+ `DialogFrame`'s shape — cui builds its own panels this way — with the title bar
+ left out.
+*>
+struct UiWrap (cui::Widget)
+{
+	// A fixed axis still wins; zero hugs the content child on that axis.
+	Vec2 size;
+}
+
+<*
+ Measures the content child and fits everything else to it.
+
+ @param elem : `The element this widget is attached to.`
+ @param constraints : `The size range offered by the parent.`
+ @return `The content's size, with any fixed axis substituted in.`
+*>
+fn Vec2 UiWrap.layout(&self, cui::Element* elem, cui::Constraints constraints) @dynamic
+{
+	sz count = elem.children.len();
+	if (count == 0) return constraints.constrain(self.size);
+
+	// A fixed axis is what the content is OFFERED and not merely what this
+	// element reports: measuring against the whole window and then shrinking
+	// afterwards is how a slider in a 220-wide card comes out window-wide.
+	// `Column` caps its children the same way and for the same reason.
+	Vec2 room = {
+		self.size.x > 0 ? math::min(self.size.x, constraints.max.x) : constraints.max.x,
+		self.size.y > 0 ? math::min(self.size.y, constraints.max.y) : constraints.max.y,
+	};
+
+	Vec2 content = elem.layout_child(count - 1, cui::loose(room));
+	Vec2 own     = constraints.constrain(
+		{
+			self.size.x > 0 ? self.size.x : content.x,
+			self.size.y > 0 ? self.size.y : content.y,
+		}
+	);
+
+	// Tight rather than loose: a background `Rectangle` fills what it is offered,
+	// and what it must be offered is the panel rather than the window.
+	for (sz i = 0; i < count - 1; i++) elem.layout_child(i, cui::tight(own));
+	return own;
+}
+
 // ============================================================================
 // The node IR
 // ============================================================================
@@ -367,6 +424,8 @@ struct UiNodeSpec
 	// Blocks the pointer even though the kind is decoration — a modal scrim, or
 	// a panel that must not let a drag through to the scene behind it.
 	bool solid;
+	// A `stack` that sizes to its last child instead of filling — see `UiWrap`.
+	bool wrap;
 
 	// Paint. The common theme rather than every field of every style struct:
 	// a colour whose alpha is zero was not named, and the widget's own default
@@ -1098,7 +1157,14 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				(cui::widgets::Row){ .gap = spec.gap, .size = spec.size, .main_align = main, .cross_align = cross }
 			);
 		case STACK:
-			element = self.ui.@node((cui::widgets::Stack){ .size = spec.size });
+			if (spec.wrap)
+			{
+				element = self.ui.@node((UiWrap){ .size = spec.size });
+			}
+			else
+			{
+				element = self.ui.@node((cui::widgets::Stack){ .size = spec.size });
+			}
 		case PADDING:
 			element = self.ui.@node(
 				(cui::widgets::Padding){
@@ -1337,8 +1403,8 @@ fn void UiLayer.push_row(&self, uint node, String label, String trailing, usz de
  The text is copied here for the same reason every other string is: a `Painter`
  call happens at paint time, long after the QuickJS string that named it is
  gone. Sizes are clamped rather than refused — `Painter.rect` has a contract
- against a negative one, and a `-D DEBUG` build would turn a script's typo into
- a panic in the renderer.
+ against a negative one, and any build but `--safe=no` would turn a script's typo
+ into a panic in the renderer.
 
  @param node : `The index push_node answered with.`
 *>

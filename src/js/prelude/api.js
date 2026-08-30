@@ -36,9 +36,16 @@ import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.j
 import { cooldown, Cooldown } from './cooldown.js';
 import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { ui } from './ui.js';
+import { Widget, nodes as uiNodes, unmountAll as unmountAllWidgets } from './widget.js';
 import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
+
+// The node classes onto the namespace that already owns the verbs, so
+// `three.ui.set` and `three.ui.Panel` are one place rather than two. Capitalised
+// beside lowercase verbs, which is the JavaScript convention for exactly this
+// distinction and leaves both lists free to grow.
+Object.assign(ui, uiNodes);
 
 // `three.physics` and `three.nav`, which are whichever Scene is being rendered's.
 //
@@ -1166,6 +1173,10 @@ export const three = {
 	// list of primitives in frame pixels. Drawn over the finished frame and
 	// into the same image a screenshot reads, so an agent sees what a person
 	// sees.
+	//
+	// The node classes are on it too — `three.ui.Panel`, `three.ui.Label`, one
+	// per kind — because they are what a `three.Widget` composes and a script
+	// destructures them in one line: `const { Panel, Label, Button } = three.ui`.
 	ui,
 
 	// How long this script may run before the interrupt stops it, in
@@ -1511,6 +1522,16 @@ export const three = {
 	// needed a Proxy for.
 	Entity,
 
+	// A WIDGET IS A CLASS, the way an entity is, and this is the base to extend.
+	// `render()` describes the interface as it is now, assigning a field marks
+	// the widget for a re-render, and what reaches the host is the DIFFERENCE —
+	// one `three.ui.patch` per changed value, and a `set` only when the shape
+	// itself changed. So a HUD is written the way an immediate-mode one is and
+	// costs what a retained one does, and the two things `set`/`patch` make a
+	// script carry — a unique key per value and the rule that every tree must
+	// still contain the keys the loop patches — stop existing.
+	Widget,
+
 	// Which instance owns this object — a drawn node, one of its meshes, or a
 	// trigger volume — or null. Walks up the parent chain, because a raycast
 	// answers with the leaf it hit, and an assembled character is a Group of
@@ -1752,6 +1773,7 @@ export const three = {
 	// system registry, and drops the post chain. Does not free the scene being
 	// rendered — `new three.Scene()` then `disposeInactive()` is still that half.
 	reset() {
+		unmountAllWidgets();
 		disposeAllEntities();
 		systems.clear();
 		this.setPost(null);
@@ -1774,7 +1796,8 @@ export const three = {
 
 	// Boot this game again from its own source — §8.
 	//
-	// The same thing shift+R does in the window, and the reason it is a verb
+	// The same thing shift+R does in a `--debug` window — and unlike the
+	// chord this works in every run, which is the reason it is a verb
 	// too is `--mcp`: an agent edits a .js, calls this, and the next
 	// screenshot is of the edited file. It returns immediately and the
 	// reload has not happened yet — the host performs it between this
@@ -1789,6 +1812,29 @@ export const three = {
 	// A run with no host loop to perform it (a `--frames` batch, a test)
 	// takes the request and never acts on it.
 	reload() { H.reload(); },
+
+	// Close the window and end the process — the in-game menu's Quit.
+	//
+	// It returns, and the process is still up: the host closes between
+	// this frame and the next, because closing inside the click handler
+	// that asked would free the engine the handler is running in. So the
+	// frame already built is the last one shown, and a fade-out that ends
+	// on this call gets to finish.
+	//
+	//   menu.on('quit', () => three.quit());
+	//
+	// There is nothing after it worth writing, but nothing stops the rest
+	// of the handler running either — treat it as a request, not a
+	// `return`.
+	//
+	// Escape does the same thing in the window, but only under `--debug`.
+	// This one is how a shipped game closes and works in every run: the
+	// engine reaching past the game to the player is the part that is
+	// gated, not the game closing itself.
+	//
+	// A run with no host loop to perform it (a `--frames` batch, a test)
+	// takes the request and never acts on it, the same as `reload()`.
+	quit() { H.quit(); },
 
 	// The one object that survives a reload, and the whole of what does.
 	//
@@ -1968,9 +2014,10 @@ export const three = {
 	// argument this is the index — everything short in full, and the names of
 	// the classes and functions; `{ search }` is the grep over the whole
 	// surface, `{ section }` the drill-down, `{ all: true }` the old answer.
-	// The shapes live in `docs.js` beside the strings they walk, and the MCP
-	// tool calls this rather than reimplementing it, so an agent asking over
-	// JSON-RPC and a script asking here read the same docs the same way.
+	// The prose is Markdown under `docs/`, compiled into the data `docs.js`
+	// walks, and the MCP tool calls this rather than reimplementing it, so an
+	// agent asking over JSON-RPC and a script asking here read the same docs
+	// the same way.
 	getApiDocs(options) { return docsQuery(options); },
 	searchDocs(term) { return docsSearch(term); },
 };

@@ -14,6 +14,7 @@
  --frames <n>          run n frames, then stop. Implies --headless
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
+ --debug               validation layers, @debug_log, and the window's own chords
 
  There is no file argument. A model is loaded from JavaScript — `three.load`
  hands the script an object it can place, parent and dispose — and a model the
@@ -26,11 +27,23 @@
  `three.camera`, so the two compose with no arbitration — see
  `scene/controls.c3`.
 
- Validation is not on this list, and that is the whole of its interface: a
- validation error only reaches `run_script`'s answer if the layer that produces
- it is loaded, so the build answers the question rather than the CLI. `-D DEBUG`
- runs the layers, always; a release build has none in it to run, and `--validate`
- is refused as an unknown option. See `src/debug.c3`.
+ `--debug` is the one flag that is about the process rather than the picture,
+ and every build has it: the shipped binary and the one on this desk are the same
+ binary, and which of the two is diagnosing is a decision taken at the terminal.
+ It asks the loader for the Khronos validation layer, compiles nothing in or out
+ for `@debug_log`, and unlocks the two chords the window otherwise answers on its
+ own — escape to quit, shift+R to reload.
+
+ Nothing behind it costs anything when it is off. A layer that was not requested
+ is never inserted into the loader's dispatch chain, so there is no per-call
+ branch to pay; the chords are one bool read a frame; and `@debug_log` leaves its
+ arguments unevaluated either way, because it is a macro and the `if` is around
+ the substituted expressions.
+
+ What belongs behind it is what the engine does *behind the game's back*. A key
+ the player never bound that quits the process is that; `three.quit()` and
+ `three.reload()` are the game asking, and are answered in every build. See
+ `validation_layer_present` in `src/gpu/device.c3` for the layer half.
 
  The server's handlers run on *this* thread — `Listener` moves bytes on its own
  and `pump` runs the work on the caller's — so a script, the scene it builds and
@@ -48,6 +61,7 @@ import c3w;
 import vk;
 import image;
 import mcp;
+import qjs;
 
 const String VERSION = "0.1.0";
 
@@ -84,6 +98,9 @@ struct Options
 	// Be the stdio end of somebody else's server rather than a server: no window,
 	// no device, no scene. See `serve_relay`.
 	bool relay_stdio;
+	// `--debug`. Copied into `three::debugging` before anything reads it — the flag
+	// is the CLI's, the global is what the rest of the engine asks.
+	bool debug;
 	bool help;
 }
 
@@ -105,6 +122,8 @@ fn Options? parse_args(String[] args)
 				opts.help = true;
 			case "--headless":
 				opts.headless = true;
+			case "--debug":
+				opts.debug = true;
 			case "--assets":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.assets = args[++i];
@@ -217,46 +236,57 @@ fn void usage()
 	io::printn("  --frames <n>          run n frames and stop — implies --headless");
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
+	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  -h, --help            this");
 	io::printn("");
 	io::printn("  There is no file argument: a model is loaded from a script, with");
 	io::printn("  three.load(\"model.glb\"), which is what hands it back as an object.");
 	io::printn("");
-	// Which binary this is, rather than a flag for changing it. The layers moved to
-	// `-D DEBUG` and the shader search path to `shaders/`, so the two things the
-	// line used to be able to say are now properties of the build and of the
-	// working directory — and `--help` is where somebody goes to find that out.
-	if (DEBUG_BUILD)
-	{
-		io::printn("  Built with -D DEBUG: Vulkan validation layers on, @debug_log compiled in.");
-	}
-	else
-	{
-		io::printn("  Built without -D DEBUG: no validation layers in this binary.");
-	}
+	// Said here rather than in the flag list because it is four things, and because
+	// this is where somebody goes when a run is misbehaving. Every build has it —
+	// the shipped binary is this binary — so the line is the same wherever it prints.
+	io::printn("  --debug turns on, in any build:");
+	io::printn("    Vulkan validation layers, if the Khronos layer is installed");
+	io::printn("    @debug_log — driver, driver cache and shader cache lines");
+	io::printn("    the device and limits table, at startup");
+	io::printn("    escape to quit and shift+R to reload, in the window");
+	io::printn("");
 	io::printn("  Shaders are read from shaders/ — run from the project root.");
 }
 
 
 <*
- Whether this binary was built with `-D DEBUG`.
+ Whether this run was started with `--debug`.
 
- A plain constant rather than a `$if` at every reading, so it can be branched on
- in ordinary code and asserted on in tests.
+ Written once, by `main`, before anything reads it, and never again — a process
+ is diagnosing or it is not, and a switch that could be thrown mid-run would mean
+ an instance created without the validation layer being asked to report through
+ one. Everything downstream reads it rather than taking a parameter, for the same
+ reason it used to be a constant: it is a property of the run, not of the call.
+
+ There is no build that lacks the machinery. The binary somebody ships and the
+ binary on the developer's desk are the same binary, so a bug that only appears
+ on a player's machine can be looked at on a player's machine.
 *>
-const bool DEBUG_BUILD = $feat(DEBUG);
+bool debugging;
 
 <*
- A log line that exists only in a debug build.
+ A log line that exists only under `--debug`.
 
- The arguments are not evaluated without one, which makes this usable where
+ The arguments are not evaluated without it, which makes this usable where
  composing the message costs more than printing it: `@debug_log("%s", describe())`
- does not call `describe` in a release build.
+ does not call `describe` in an ordinary run.
 
- That property is why the signature uses untyped varargs. A typed parameter list
- — `macro @debug_log(String format, args...)` — still evaluates everything at the
- call site even with the same `$if`'d body; only `$vaarg` inside the `$if`
- disappears with it.
+ That property survives the flag having become a runtime one, and the reason is
+ that this is a macro: the argument expressions are substituted *inside* the `if`,
+ so the branch is what guards them. A typed parameter list —
+ `macro @debug_log(String format, args...)` — would evaluate everything at the
+ call site before the branch was reached, which is why the signature is untyped
+ varargs and has to stay that way.
+
+ What it costs when off is therefore one read of a global bool, on ten call sites
+ that all run at startup. What it costs in the binary is the lines themselves,
+ which is the price of the shipped build being able to explain itself.
 
  This is for the developer at the terminal, not the agent: what a `run_script`
  should see belongs in `log`, which comes back through `RunResult`, and advice
@@ -265,9 +295,7 @@ const bool DEBUG_BUILD = $feat(DEBUG);
 *>
 macro @debug_log(format, ...)
 {
-	$if DEBUG_BUILD:
-		io::printfn(format, ...$vaarg);
-	$endif
+	if (debugging) io::printfn(format, ...$vaarg);
 }
 
 fn int main(String[] args)
@@ -279,6 +307,10 @@ fn int main(String[] args)
 		return 1;
 	}
 	Options opts = parsed;
+
+	// Before the relay, before the window and before the device: `create_instance`
+	// reads it, and an instance is the one thing that cannot be told afterwards.
+	debugging = opts.debug;
 
 	if (opts.help)
 	{
@@ -357,7 +389,7 @@ fn void? run(Options opts)
 	}
 	defer if (windowed) window.free();
 
-	vk::Instance instance = create_instance(DEBUG_BUILD, headless: opts.headless)!;
+	vk::Instance instance = create_instance(debugging, headless: opts.headless)!;
 	defer instance.free();
 
 	vk::SurfaceKHR surface;
@@ -371,15 +403,15 @@ fn void? run(Options opts)
 	defer if (windowed) surface.free(instance);
 
 	Renderer renderer;
-	renderer.init(instance, surface, opts.width, opts.height, DEBUG_BUILD)!;
+	renderer.init(instance, surface, opts.width, opts.height, debugging)!;
 	defer renderer.free();
 
-	// The device table on every debug run, where it used to take a flag. A build
-	// that carries the validation layers is a build somebody is diagnosing with,
+	// The device table on every debug run, where it used to take a flag of its own.
+	// A run that asked for the validation layers is a run somebody is diagnosing,
 	// and the first question a diagnosis asks is which device and which limits —
 	// `Gpu.report` prints whether validation actually loaded, which is the one
-	// thing `DEBUG_BUILD` cannot promise on its own.
-	if (DEBUG_BUILD) renderer.gpu.report();
+	// thing `--debug` cannot promise on its own.
+	if (debugging) renderer.gpu.report();
 
 	// The shader is compiled here, from shaders/mesh.slang on disk. Editing it and
 	// re-running changes the picture — no rebuild of this binary, and no build step
@@ -687,7 +719,12 @@ fn WindowFrame drive_window(
 	if (window.should_close()) return { .closed = true };
 
 	c3w::EventMap events = window.getEvent(wait: quiet);
-	if (events.is_pressed(ESCAPE)) return { .closed = true };
+	// Only while diagnosing. Escape is the key a game binds to its pause menu, and
+	// a key that closes the process out from under that menu is the engine reaching
+	// past the game to the player. `three.quit()` is how a game closes itself, and
+	// the title bar is how a person does; this is the developer's third way and it
+	// exists because a `--headless`-less window with a broken script has no other.
+	if (debugging && events.is_pressed(ESCAPE)) return { .closed = true };
 	want_surface(renderer, window);
 
 	long now_ns = (long)since_start.to_now();
@@ -911,7 +948,10 @@ fn void? live(
 	else
 	{
 		io::printn("     drag to orbit, right-drag to pan, scroll to zoom");
-		io::printn("     shift+R reloads the script, escape quits");
+		// Printed only when they work. A line offering two keys that do nothing is
+		// worse than no line, and this is the only place a person finds out that
+		// `--debug` is what turns them on.
+		if (debugging) io::printn("     shift+R reloads the script, escape quits");
 	}
 
 	// No `Controls` of its own: the runtime holds the one this loop drives, so that
@@ -976,16 +1016,27 @@ fn void? live(
 		// Nothing to pump when there is no listener; a game alone still ticks.
 		usz handled = serving ? listener.pump(&server) : 0;
 
+		// Read in the same place as the reload and for the same reason: the request
+		// came from JavaScript, and acting on it while the call that made it is
+		// still on the stack would free the engine underneath it. So the game's menu
+		// closes the window on the next iteration rather than inside the click, and
+		// the last frame it built is the last frame shown.
+		if (runtime.quit_wanted) break;
+
 		// After `pump` and before the tick, which is the one point in an iteration
 		// with nothing of JavaScript's on the stack — a reload frees the engine the
 		// call asking for it was made from. So a `three.reload()` in a tool call is
 		// honoured on the iteration that answered it, one from a frame callback on
 		// the next, and shift+R before the world it is replacing gets a last frame.
-		// 
+		//
+		// The chord is the half that `--debug` gates, and the verb is not: a game
+		// that calls `three.reload()` asked for it, while a player who happened to
+		// hold shift and press R did not.
+		//
 		// `runtime` is a different object on the far side of this. Nothing below
 		// holds a pointer into it — `controls` is read as `runtime.controls` every
 		// frame for exactly this kind of reason.
-		if (runtime.reload_wanted || (window != null && wants_reload(input)))
+		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
 			reload(&runtime, &renderer.pass, renderer, window, assets, script)!;
@@ -1409,4 +1460,37 @@ fn void wake_window(void* ctx)
 	c3w::Window* window = (c3w::Window*)ctx;
 	if (window == null) return;
 	window.wake();
+}
+
+<*
+ `three.quit()` — the game closing itself.
+
+ Here rather than beside the other scene verbs because it is not one: it is a
+ statement about the process, and this file is what owns the process. `live`
+ reads the flag between `pump` and the tick and leaves the loop; every `defer`
+ from `run` down unwinds in order, so the device is torn down and the leak
+ checker still has something to say. There is no exit code and no argument — a
+ game that closed on purpose succeeded.
+
+ It is not behind `--debug`, and that is the point of the split: escape is the
+ engine reaching past the game, and this is the game itself. Most games close
+ from a menu, and a menu that only worked in a debug build would be a menu
+ shipped untested.
+
+ Deferred rather than immediate for the same reason `three.reload()` is: this
+ runs inside the JavaScript context, with the click handler that called it still
+ on the stack, and closing from here would free the engine the call is in. The
+ frame the game had already built is drawn first, so a fade-out that ends on
+ `three.quit()` shows its last frame.
+
+ A run with no loop reading the flag — a `--frames` batch, a test — takes the
+ request and never acts on it, exactly as `three.reload()` does there. The same
+ script has to work in both, and a verb that threw under `--frames` would make a
+ game unrunnable in the mode that checks it.
+*>
+fn void js_quit(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	self.quit_wanted = true;
+	*out = qjs::undefined_value();
 }

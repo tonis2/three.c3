@@ -27,6 +27,7 @@ import three;
 import cui;
 import cui::widgets;
 import vk;
+import c3w;
 import image;
 import std::core::test;
 import std::math;
@@ -71,6 +72,15 @@ fn uint lit_pixels(image::Image* img)
 		}
 	}
 	return lit;
+}
+
+// Whether that pixel is the saturated red nothing else in a frame is — how a
+// test asks which of two overlapping things was drawn on top.
+fn bool red_at(image::Image* img, uint x, uint y)
+{
+	sz bpp = img.bytes_per_pixel();
+	sz at  = ((sz)y * (sz)img.width + (sz)x) * bpp;
+	return img.pixels[at] > 150 && img.pixels[at + 1] < 90;
 }
 
 // ============================================================================
@@ -840,8 +850,9 @@ fn void a_focused_field_takes_the_keyboard() @test
  A pixel check on each one would be a check on the SDF rather than on the
  binding, and cui has those. What is worth asserting here is that every op
  reaches a `Painter` call with arguments it accepts — a negative size is a
- contract violation in `Painter.rect`, and a `-D DEBUG` build turns a script's
- typo into a panic inside the renderer if the binding does not clamp first.
+ contract violation in `Painter.rect`, and any build but `--safe=no` turns a
+ script's typo into a panic inside the renderer if the binding does not clamp
+ first.
 *>
 fn void every_drawing_op_reaches_the_painter() @test
 {
@@ -1302,7 +1313,8 @@ fn void a_tree_rebuilt_over_and_over_keeps_its_children() @test
  cui's Scroll asserts that it has exactly one child, and "the list has not
  loaded" is an ordinary thing for a script to describe. So `ui.js` gives an
  empty one an empty stack to scroll — the alternative is a contract violation
- taking the process down under `-D DEBUG` for a tree that is merely early.
+ taking the process down, in every build but `--safe=no`, for a tree that is
+ merely early.
 *>
 fn void a_scroll_with_nothing_in_it_is_not_a_panic() @test
 {
@@ -1317,5 +1329,377 @@ fn void a_scroll_with_nothing_in_it_is_not_a_panic() @test
 
 		// Two: the scroll, and the empty stack `ui.js` gave it to scroll.
 		test::@check(renderer.ui.nodes.len() == 2, "the scroll came over as %d nodes", renderer.ui.nodes.len());
+	};
+}
+
+// ============================================================================
+// The class layer
+// ============================================================================
+
+<*
+ A widget class becomes the interface, and the panel it describes hugs it.
+
+ Three claims in one build, because they are one build. The tree arrives — a
+ `Panel` is a wrapping stack, a background and a padded column, so the count is
+ what says it expanded rather than crossing as a type nothing knows. The key a
+ node carries is the WIDGET'S id and the name, which is what stops two widgets
+ that both called something `card` from addressing each other's. And the card is
+ shorter than the frame, which is the whole of `UiWrap`: a `Stack` fills, and a
+ panel that filled would be the size of the window with two rows in the corner
+ of it.
+*>
+fn void a_widget_class_becomes_the_interface() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const { Panel, Label, Button } = three.ui;
+			class Hud extends three.Widget {
+				constructor() { super(); this.score = 0; }
+				render() {
+					return new Panel({ key: 'card', at: 'top-left', margin: 12, width: 150 },
+						new Label('score ' + this.score),
+						new Button('reset', () => { this.score = 0; }),
+					);
+				}
+			}
+			Hud.mount();
+			return three.Widget.count;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::eq(result.value, `1`);
+
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		// The root stack, the anchored, the card's own stack, its background,
+		// its padding, its column, and the two rows.
+		test::@check(renderer.ui.nodes.len() == 8, "the widget came over as %d nodes", renderer.ui.nodes.len());
+
+		uint at = renderer.ui.node_for("0#card")!!;
+		float height = renderer.ui.nodes[at].element.size.y;
+		test::@check(height > 0 && height < (float)H, "the card is %f tall in a %d frame", height, H);
+	};
+}
+
+<*
+ A value changed is a patch; the shape changed is a rebuild.
+
+ The reason the class layer exists: `render()` is written as though it ran every
+ frame, and what reaches the host is the difference. So the check is element
+ identity across a score going up — nothing may be rebuilt — and then the same
+ check inverted across a row being added, because that one has to be.
+*>
+fn void a_widget_patches_what_changed_and_rebuilds_what_moved() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { Panel, Label } = three.ui;
+			class Hud extends three.Widget {
+				constructor() { super(); this.score = 0; this.rows = ['a']; }
+				render() {
+					return new Panel({ at: 'top-left', margin: 8, width: 150 },
+						new Label('score ' + this.score),
+						...this.rows.map(r => new Label(r)),
+					);
+				}
+			}
+			globalThis.hud = Hud.mount();
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		sz count = renderer.ui.nodes.len();
+		void*[8] was;
+		for (sz i = 0; i < count && i < 8; i++) was[i] = (void*)renderer.ui.nodes[i].element;
+
+		three::RunResult valued = run.run(`hud.score = 41; three.ui.flush();`);
+		defer valued.free();
+		test::@check(valued.ok, "the value change ran: %s", valued.error);
+
+		test::@check(renderer.ui.nodes.len() == count, "a changed number changed the node count");
+		bool rebuilt;
+		for (sz i = 0; i < count && i < 8; i++)
+		{
+			if ((void*)renderer.ui.nodes[i].element != was[i]) rebuilt = true;
+		}
+		test::@check(!rebuilt, "a changed number rebuilt the tree instead of patching it");
+
+		three::RunResult grown = run.run(`hud.rows.push('b'); hud.update(); three.ui.flush();`);
+		defer grown.free();
+		test::@check(grown.ok, "the structural change ran: %s", grown.error);
+
+		test::@check(
+			renderer.ui.nodes.len() == count + 1,
+			"a new row left %d nodes where %d were expected",
+			renderer.ui.nodes.len(),
+			count + 1
+		);
+	};
+}
+
+<*
+ Two widgets are two floors of one interface, and unmounting one leaves the other.
+
+ What a HUD and a pause screen are: mounting the second does not restate the
+ first, and taking it away does not take the first's labels with it — which is
+ the failure the class layer was written to remove. `examples/range.js` pauses by
+ rebuilding the whole tree by hand, and the bug that cost was a pause screen that
+ forgot to carry the HUD's keys.
+*>
+fn void widgets_stack_and_come_apart_one_at_a_time() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { Panel, Label } = three.ui;
+			class Hud extends three.Widget {
+				render() { return new Panel({ key: 'hud', at: 'top-left', margin: 8 }, new Label('hud')); }
+			}
+			class Pause extends three.Widget {
+				static layer = 1;
+				render() { return new Panel({ key: 'pause', at: 'center' }, new Label('paused')); }
+			}
+			Hud.mount();
+			globalThis.pause = Pause.mount();
+			return three.Widget.count;
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+		test::eq(built.value, `2`);
+		test::@check(@ok(renderer.ui.node_for("0#hud")), "the hud's key did not cross");
+		test::@check(@ok(renderer.ui.node_for("1#pause")), "the pause screen's key did not cross");
+
+		three::RunResult gone = run.run(`pause.unmount(); return three.Widget.count;`);
+		defer gone.free();
+		test::@check(gone.ok, "the unmount ran: %s", gone.error);
+		test::eq(gone.value, `1`);
+
+		test::@check(@ok(renderer.ui.node_for("0#hud")), "unmounting the pause screen took the hud with it");
+		test::@check(!@ok(renderer.ui.node_for("1#pause")), "the pause screen is still in the tree");
+	};
+}
+
+<*
+ `three.ui.set` while a widget is mounted is refused by name.
+
+ One interface and two doors onto it: the class layer rewrites the whole tree
+ whenever anything changes, so a `set` beside it would be overwritten on the next
+ frame and nothing would say so. The same reason a patch to a key nothing carries
+ throws rather than doing nothing.
+*>
+fn void the_two_doors_onto_the_interface_are_exclusive() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			class Bare extends three.Widget {
+				render() { return new three.ui.Label('here'); }
+			}
+			Bare.mount();
+			three.ui.set({ type: 'label', text: 'and here' });
+		`);
+		defer result.free();
+
+		test::@check(!result.ok, "a set beside a mounted widget was accepted");
+		test::@check(
+			result.error.contains("unmountAll"),
+			"the message did not say how to have it both ways: %s",
+			result.error
+		);
+
+		three::RunResult after = run.run(`
+			three.Widget.unmountAll();
+			three.ui.set({ type: 'label', text: 'and here' });
+			return three.Widget.count;
+		`);
+		defer after.free();
+		test::@check(after.ok, "the set was still refused after unmountAll: %s", after.error);
+		test::eq(after.value, `0`);
+	};
+}
+
+<*
+ A click reaches a widget's method, and what it changed is a patch.
+
+ The whole loop in one test: cui dispatches into the stable function the class
+ layer registered, that finds the handler this render put there, `this` is the
+ widget, the field it wrote marks it dirty, and the re-render writes one label
+ without rebuilding the button that was just pressed. A dispatcher that was a
+ fresh closure per render would make every click a rebuild, which is the failure
+ this indirection exists to prevent and the reason the element identity is
+ checked rather than only the text.
+*>
+fn void a_click_reaches_a_widget_and_lands_as_a_patch() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { Column, Label, Button } = three.ui;
+			class Counter extends three.Widget {
+				constructor() { super(); this.n = 0; }
+				bump() { this.n += 1; }
+				render() {
+					return new Column({ gap: 0 },
+						new Button('go', () => this.bump(), { size: [60, 24] }),
+						new Label(String(this.n), { key: 'n' }),
+					);
+				}
+			}
+			Counter.mount();
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		sz count = renderer.ui.nodes.len();
+		void*[8] was;
+		for (sz i = 0; i < count && i < 8; i++) was[i] = (void*)renderer.ui.nodes[i].element;
+
+		point(renderer, 30, 12, true);
+		point(renderer, 30, 12, false);
+
+		three::RunResult after = run.run(`three.ui.flush();`);
+		defer after.free();
+		test::@check(after.ok, "the flush ran: %s", after.error);
+
+		uint at = renderer.ui.node_for("0#n")!!;
+		String text = renderer.ui.nodes[at].element.widget_as(cui::widgets::Label).text;
+		test::@check(text == "1", "the click did not reach the widget: the label reads '%s'", text);
+
+		bool rebuilt;
+		for (sz i = 0; i < count && i < 8; i++)
+		{
+			if ((void*)renderer.ui.nodes[i].element != was[i]) rebuilt = true;
+		}
+		test::@check(!rebuilt, "the click rebuilt the tree instead of patching one label");
+	};
+}
+
+<*
+ Typing into a widget's field reaches the widget and is not written back at it.
+
+ The one place a re-render could be actively harmful. `render()` names the text
+ the field is to show, so the obvious implementation diffs what was typed against
+ what the last render said and patches the difference back — and writing a text
+ field's text moves the caret to the end of it, so a name edited in the middle
+ would jump under somebody's fingers. The value the event carried is folded into
+ the last render before the handler runs, so the diff finds nothing; the check is
+ that the widget saw the text AND that nothing was rebuilt to show it.
+*>
+fn void typing_into_a_widget_is_not_echoed_back_at_it() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { TextField } = three.ui;
+			class Form extends three.Widget {
+				constructor() { super(); this.name = ''; }
+				render() {
+					return new TextField({ key: 'name', size: [120, 0], text: this.name, onChange: t => { this.name = t; } });
+				}
+			}
+			globalThis.form = Form.mount();
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		uint at = renderer.ui.node_for("0#name")!!;
+		void* was = (void*)renderer.ui.nodes[at].element;
+
+		point(renderer, 40, 10, true);
+		point(renderer, 40, 10, false);
+		renderer.ui.feed({ .inside = true, .x = 40, .y = 10 }, {}, "ada", 16.0);
+
+		// The caret put back where somebody editing a name would have left it:
+		// two in, not at the end. This is what a patch would destroy, and
+		// nothing else here can see the difference.
+		KeyBits back;
+		back.set(c3w::EventKey.LEFT_ARROW);
+		renderer.ui.feed({ .inside = true, .x = 40, .y = 10 }, back, "", 16.0);
+		renderer.ui.feed({ .inside = true, .x = 40, .y = 10 }, {}, "", 16.0);
+
+		three::RunResult typed = run.run(`three.ui.flush(); return form.name;`);
+		defer typed.free();
+		test::@check(typed.ok, "the flush ran: %s", typed.error);
+		test::eq(typed.value, `"ada"`);
+
+		usz caret = renderer.ui.nodes[at].element.widget_as(cui::widgets::TextField).caret;
+		test::@check(caret == 2, "the re-render moved the caret to %d", caret);
+
+		String text = renderer.ui.nodes[at].element.widget_as(cui::widgets::TextField).value();
+		test::@check(text == "ada", "the field lost what was typed: '%s'", text);
+		test::@check(
+			(void*)renderer.ui.nodes[at].element == was,
+			"typing rebuilt the field instead of leaving it alone"
+		);
+	};
+}
+
+<*
+ An open dropdown covers what is under it, and takes the click.
+
+ cui builds a popup as a child of the widget that owns it — there is no overlay
+ layer in the core — so without `Element.raised` the list lands in the Select's
+ slot in the paint order and every field BELOW it in the same form draws over it.
+ The symptom is a dropdown that appears behind the text box under it and answers
+ no clicks where they overlap, which is what a person reports as a z-index.
+
+ Both halves are checked because they are two walks: `Ui.emit` decides what is
+ drawn on top and `Ui.hit_test_element` decides what is clicked, and a fix to one
+ of them alone is a list that looks right and cannot be used.
+*>
+fn void an_open_dropdown_paints_and_hits_over_what_is_under_it() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { Column, Select, Rect } = three.ui;
+			class Form extends three.Widget {
+				constructor() { super(); this.picked = -1; }
+				render() {
+					return new Column({ gap: 0 },
+						new Select(['one', 'two', 'three'], 0, i => { this.picked = i; }),
+						new Rect({ color: [1, 0, 0], size: [120, 60] }),
+					);
+				}
+			}
+			globalThis.form = Form.mount();
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		image::Image closed = renderer.capture()!!;
+		defer closed.free();
+		test::@check(red_at(&closed, 20, 40), "the rect under the dropdown is not where the test thinks");
+
+		// The press is what opens it; the release is the other half of the click.
+		point(renderer, 10, 13, true);
+		point(renderer, 10, 13, false);
+
+		image::Image open = renderer.capture()!!;
+		defer open.free();
+		test::@check(!red_at(&open, 20, 40), "the open list drew under the rect below it");
+
+		// The same point, now that the list is over it.
+		point(renderer, 20, 40, true);
+		point(renderer, 20, 40, false);
+
+		three::RunResult picked = run.run(`three.ui.flush(); return form.picked;`);
+		defer picked.free();
+		test::@check(picked.ok, "the flush ran: %s", picked.error);
+		test::@check(
+			picked.value != "-1",
+			"the click reached the rect under the list instead of the list: picked %s",
+			picked.value
+		);
 	};
 }

@@ -111,10 +111,99 @@ footer p { max-width: 60rem; margin: 0 auto; }
 
 /* -------------------------------------------------------------- home -- */
 
-.hero { padding: 2rem 0 1rem; }
+.hero {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+	gap: clamp(1.5rem, 4vw, 3.5rem);
+	align-items: center;
+	padding: 2.5rem 0 1rem;
+}
+@media (max-width: 62rem) { .hero { grid-template-columns: 1fr; padding-top: 1rem; } }
 .hero h1 { letter-spacing: -0.03em; }
+.hero-copy .lede { max-width: 34rem; }
 .lede { font-size: 1.15rem; color: var(--text-soft); max-width: 42rem; margin: 0 0 1.6rem; }
 .version { color: var(--text-faint); font-size: 0.875rem; margin-top: 1.2rem; }
+.narrow { max-width: 60rem; }
+
+/* Every route and every live control is a custom element, so the document is
+   five wrappers deeper than the layout wants to be. `display: contents` takes
+   each of them out of the box tree: what is laid out is the markup itself. */
+three-app, three-api, three-tutorials, three-download, three-gallery { display: contents; }
+
+/* The download button and the platform switch beside it, as one control: the
+   button is the whole of the common case and the switch is the correction. */
+.picker {
+	display: inline-flex;
+	align-items: stretch;
+	max-width: 100%;
+	margin: 1.7rem 0 0.75rem;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--bg-soft);
+	overflow: hidden;
+}
+.picker .button.primary {
+	border: none; border-radius: 0;
+	padding: 0.8rem 1.3rem;
+	font-size: 1rem;
+	white-space: nowrap;
+}
+.picker .os { display: flex; }
+.picker .os button {
+	border: none;
+	border-left: 1px solid var(--line);
+	background: transparent;
+	color: var(--text-soft);
+	font: inherit; font-size: 0.85rem; font-weight: 550;
+	padding: 0 0.85rem;
+	cursor: pointer;
+}
+.picker .os button:hover { background: var(--bg); color: var(--text); }
+.picker .os button[aria-pressed="true"] {
+	background: var(--bg);
+	color: var(--text);
+	box-shadow: inset 0 -2px 0 var(--accent);
+}
+.picker-meta {
+	display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.9rem;
+	margin: 0;
+	color: var(--text-faint); font-size: 0.875rem;
+}
+.picker-meta strong { color: var(--text-soft); font-weight: 600; }
+.picker-meta .asset { font-family: var(--mono); font-size: 0.78rem; }
+
+/* A code sample with a title bar, because it is a FILE and the point of the
+   hero is that one of these is the whole program. */
+.window {
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--bg-code);
+	overflow: hidden;
+	box-shadow: 0 18px 40px -26px rgba(0, 0, 0, 0.5);
+}
+.titlebar {
+	display: flex; align-items: center; gap: 0.8rem;
+	padding: 0.55rem 0.85rem;
+	background: var(--bg-soft);
+	border-bottom: 1px solid var(--line);
+}
+.titlebar .dots { display: flex; gap: 0.38rem; }
+.titlebar .dots i { display: block; width: 10px; height: 10px; border-radius: 999px; }
+.titlebar .dots i:nth-child(1) { background: #ff5f57; }
+.titlebar .dots i:nth-child(2) { background: #febc2e; }
+.titlebar .dots i:nth-child(3) { background: #28c840; }
+.titlebar .filename { color: var(--text-faint); font-family: var(--mono); font-size: 0.78rem; }
+.window .code { margin: 0; }
+.window .code pre { border: none; border-radius: 0; font-size: 0.8rem; }
+.hero-code .aside { margin: 0.9rem 0 0; }
+
+/* Six cells over 84rem is five and a widow; three and three reads as a set. */
+.features .grid { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); }
+.gallery { margin-top: 3.5rem; }
+.gallery-note {
+	max-width: 46rem; margin: 1.3rem auto 0;
+	color: var(--text-soft); font-size: 0.95rem; text-align: center;
+}
 
 .cta { display: flex; gap: 0.7rem; flex-wrap: wrap; margin: 1.6rem 0 0; }
 .button {
@@ -172,48 +261,32 @@ footer p { max-width: 60rem; margin: 0 auto; }
 .code:hover .copy, .copy:focus { opacity: 1; }
 .copy[data-done] { color: var(--accent); border-color: var(--accent); }
 
-/* highlight.js, both themes, from the same tokens */
-.hljs-comment, .hljs-quote { color: var(--text-faint); font-style: italic; }
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #a626a4; }
-.hljs-string, .hljs-regexp, .hljs-attr { color: #0a7d3f; }
-.hljs-number, .hljs-variable, .hljs-template-variable { color: #b76a00; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #0b6bcb; }
-.hljs-params { color: var(--text); }
-.hljs-property, .hljs-attribute { color: var(--text); }
+/* The syntax colours: Prism's token classes, both themes, four hues and a
+   grey. This is the whole theme — no stylesheet ships with the highlighter and
+   none is wanted, because these are the page's own colours. A token with no
+   rule here inherits the code block's text colour, which is the right answer
+   for punctuation and for a grammar nobody has thought about. */
+.token.comment, .token.prolog, .token.doctype, .token.cdata { color: var(--text-faint); font-style: italic; }
+.token.keyword, .token.boolean, .token.constant, .token.builtin, .token.atrule,
+.token.selector, .token.important, .token.tag { color: #a626a4; }
+.token.string, .token.char, .token.attr-value, .token.regex, .token.inserted { color: #0a7d3f; }
+.token.number, .token.variable, .token.symbol, .token.deleted, .token.entity, .token.url { color: #b76a00; }
+.token.function, .token.class-name { color: #0b6bcb; }
+.token.operator, .token.punctuation { color: var(--text-soft); }
+.token.property, .token.attr-name, .token.parameter { color: var(--text); }
 @media (prefers-color-scheme: dark) {
-	.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #d2a8ff; }
-	.hljs-string, .hljs-regexp, .hljs-attr { color: #7ee787; }
-	.hljs-number, .hljs-variable, .hljs-template-variable { color: #ffa657; }
-	.hljs-title, .hljs-title.function_, .hljs-section { color: #79c0ff; }
+	.token.keyword, .token.boolean, .token.constant, .token.builtin, .token.atrule,
+	.token.selector, .token.important, .token.tag { color: #d2a8ff; }
+	.token.string, .token.char, .token.attr-value, .token.regex, .token.inserted { color: #7ee787; }
+	.token.number, .token.variable, .token.symbol, .token.deleted, .token.entity, .token.url { color: #ffa657; }
+	.token.function, .token.class-name { color: #79c0ff; }
 }
 
 /* ---------------------------------------------------------- download -- */
 
 .page-head { margin-bottom: 2rem; }
-.status { color: var(--text-faint); font-size: 0.9rem; }
+.status { color: var(--text-faint); font-size: 0.875rem; margin: 0.4rem 0 0; }
 .status[data-error] { color: #c2410c; }
-
-.platforms { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
-.card {
-	border: 1px solid var(--line);
-	border-radius: var(--radius);
-	padding: 1.25rem 1.35rem;
-	background: var(--bg-soft);
-}
-.platform h2 { margin: 0 0 0.15rem; font-size: 1.2rem; display: flex; align-items: center; gap: 0.5rem; }
-.platform .detail { color: var(--text-faint); font-size: 0.875rem; margin: 0 0 1rem; }
-.platform .get { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin: 0 0 0.6rem; }
-.platform .asset { color: var(--text-faint); font-size: 0.8rem; font-family: var(--mono); }
-.platform.mine { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); order: -1; }
-.badge {
-	font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
-	color: var(--accent); background: var(--accent-soft);
-	border-radius: 999px; padding: 0.15rem 0.5rem;
-}
-.platform details { border-top: 1px solid var(--line); padding-top: 0.7rem; }
-.platform summary { cursor: pointer; color: var(--text-soft); font-size: 0.9rem; }
-.platform details p { font-size: 0.9rem; color: var(--text-soft); }
-.platform details .code pre { font-size: 0.8rem; }
 
 /* ---------------------------------------------------------- the API -- */
 
@@ -284,10 +357,6 @@ a.section-link { color: var(--text-soft); }
 ul.chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0; margin: 0.5rem 0; }
 ul.chips li code { white-space: nowrap; }
 
-/* Everything is in the page; with JavaScript the panes take turns. */
-.js .pane { display: none; }
-.js .pane.active { display: block; }
-.js .entry[hidden] { display: none; }
 .empty { color: var(--text-faint); }
 
 /* -------------------------------------------------------- tutorials -- */
@@ -388,12 +457,3 @@ ul.chips li code { white-space: nowrap; }
 
 .notfound h1 { font-size: 4rem; font-family: var(--mono); color: var(--text-faint); }
 
-.shot { margin: 2.5rem 0 0; }
-.shot img {
-	width: 100%; height: auto; display: block;
-	border: 1px solid var(--line); border-radius: var(--radius);
-}
-.shot figcaption {
-	display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
-	color: var(--text-faint); font-size: 0.85rem; padding: 0.6rem 0.2rem 0;
-}

@@ -180,8 +180,8 @@ struct Gpu
 	vk::MemoryAllocator allocator;
 	GpuLimits limits;
 	// Whether validation is *running*, not whether it was asked for. A machine
-	// with no Khronos layer installed sets this false even in a `-D DEBUG` build,
-	// and `js/runtime.c3` reads it to decide whether there is a sink worth arming.
+	// with no Khronos layer installed sets this false even under `--debug`, and
+	// `js/runtime.c3` reads it to decide whether there is a sink worth arming.
 	bool validation;
 	ValidationSink sink;
 	// GPU objects given back but not yet destroyable — see `gpu/retire.c3`. Lives
@@ -208,24 +208,20 @@ struct Gpu
  enumeration at startup, and a `false` cached from before `vk::init()` bound the
  loader would be a lie with no expiry.
 
- This is also the one lock `-D DEBUG` turns. Without a debug build the answer is
- false whatever is installed, and that is deliberately the only place the build
- flag is read on this path: `create_instance` gates the layer and the extension
- on it, `Gpu.init` gates the messenger on it, and both go on asking the same
- question. Three separate `$if`s would be three places that could each forget.
+ It answers about the *machine*, and nothing else. Whether this run wants the
+ layer is `--debug`, which its two callers already hold: `create_instance` gates
+ the layer and the extension on `validate && validation_layer_present()`, and
+ `Gpu.init` gates the messenger on the same conjunction. So a run that did not
+ ask never reaches here at all — the short circuit is what makes the enumeration
+ cost nothing in an ordinary run — and the two questions stay separate, which is
+ what lets a test ask for validation on a build the CLI did not.
 *>
 fn bool validation_layer_present()
 {
-	$if !DEBUG_BUILD:
-		// Installed or not, there is nothing here to report to: the messenger, the
-		// sink and the callback are all compiled out below.
-		return false;
-	$else
-		vk::StringList? installed = vk::getValidationLayers();
-		if (catch err = installed) return false;
-		defer installed.release();
-		return installed.contains(VALIDATION_LAYER.str_view());
-	$endif
+	vk::StringList? installed = vk::getValidationLayers();
+	if (catch err = installed) return false;
+	defer installed.release();
+	return installed.contains(VALIDATION_LAYER.str_view());
 }
 
 <*
@@ -255,7 +251,7 @@ fn void push_surface_extensions(vk::ZStringList* out)
  which is deterministic and so makes screenshots reproducible across machines. A
  checkout without one falls back to loader discovery, and says so.
 
- @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed. main.c3 passes DEBUG_BUILD — there is no flag for it — and the suite passes false except where a test is checking the layer's own output.`
+ @param validate : `Ask for the Khronos validation layer and VK_EXT_debug_utils. Honoured only if the layer is installed. main.c3 passes three::debugging, which is --debug, and the suite passes false except where a test is checking the layer's own output.`
  @param headless : `Skip the surface extensions entirely — nothing will present.`
 *>
 fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync = false)
@@ -268,19 +264,11 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 	bool validating = validate && validation_layer_present();
 	if (validate && !validating)
 	{
-		// Two different failures wearing the same face: in a debug build the layer
-		// is missing from the machine and the fix is to install the SDK; in a
-		// release build the machinery is not in the binary and the layer being
-		// installed changes nothing.
-		// 
-		// The second is unreachable from `main`, which passes `DEBUG_BUILD`. It is
-		// kept for the caller that is not `main` — a test, or anything embedding
-		// this.
-		$if DEBUG_BUILD:
-			io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
-		$else
-			io::printn("three: built without -D DEBUG — validation layers are not compiled in");
-		$endif
+		// One failure with one cause now that the binary always carries the
+		// machinery: the layer is not on this machine, and the fix is to install the
+		// Vulkan SDK. Said rather than swallowed because `--debug` on a run that
+		// then validates nothing is the kind of silence that gets read as "no errors".
+		io::printfn("three: %s is not installed — running without validation", VALIDATION_LAYER);
 	}
 
 	vk::ZStringList extensions;
