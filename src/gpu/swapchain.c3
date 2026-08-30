@@ -380,14 +380,15 @@ fn void Viewer.record_blit_from(
 
  ## Why it exists
 
- The target's extent is a boot argument and the window's is whatever the display
- gives it: on a retina screen a 1280x720 target is presented across 2560x1440
- device pixels, and the blit stretches every pixel of it by two. That is right
- for the scene — it is what rendering at a fixed size means — and wrong for the
- interface, whose glyphs are signed distance fields and would be pin-sharp at any
- size if anything ever asked them for one. Drawn into the target they are
- rasterised at 1280x720 and then upscaled, which is the one thing SDF text exists
- to avoid.
+ The target follows the window by default, so the two usually agree and this is a
+ 1:1 blit — one image and one copy, and nothing to see. It exists for when they
+ do not, which is a render size a script has PINNED with `three.setRenderSize`:
+ a 1280x720 target presented across 2560x1440 device pixels, every pixel of it
+ stretched by two. That is right for the scene — it is what a render scale means
+ — and wrong for the interface, whose glyphs are signed distance fields and
+ would be pin-sharp at any size if anything ever asked them for one. Drawn into
+ the target they are rasterised at 1280x720 and then upscaled, which is the one
+ thing SDF text exists to avoid.
 
  So with an interface up, the present path grows a middle: the scene is blitted
  up to the window's size FIRST, cui draws into that, and the result is what is

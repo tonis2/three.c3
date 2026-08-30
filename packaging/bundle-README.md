@@ -102,6 +102,40 @@ Redistributable for x64, from Microsoft, or:
 
     winget install Microsoft.VCRedist.2015+.x64
 
+## Where it writes
+
+Nothing lands in the folder you run from.
+
+    compiled shaders   ~/Library/Caches/three.c3          (macOS)
+                       %LOCALAPPDATA%\three.c3            (Windows)
+                       $XDG_CACHE_HOME or ~/.cache/three.c3
+    a game's saves     ~/Library/Application Support/three.c3/<game>
+                       %AppData%\three.c3\<game>
+                       $XDG_CONFIG_HOME or ~/.config/three.c3/<game>
+
+The first is a cache and is safe to delete: the next run compiles the shaders
+again, which costs about three seconds once. `--cache-dir <dir>` moves it and
+`--cache-dir ""` turns it off. The second is not a cache — deleting it deletes
+somebody's progress — which is why the two are kept apart.
+
+A game says `three.save.path` if you want the exact folder from inside it.
+
+**Shipping a warm cache.** A `shader-cache/` directory beside the executable is
+read and never written. The `.slangmod` files in it are keyed on the shader
+source and the compiler, not on the machine, so the ones a release was built
+with are the ones any machine would compile for itself: copy them in and first
+start drops from about 3.5 seconds to 1.6.
+
+## Attaching an agent
+
+`--mcp` works in every build, including this one. `three --mcp` serves the agent
+tools on 127.0.0.1:8808 and composes with everything else — `three --assets
+./game --mcp` plays the game and answers tool calls against the same scene, in
+the same loop. `SKILL.md` beside this file is what to hand the agent.
+
+Nothing outside your machine can reach it: the port is bound on the loopback
+address only.
+
 ## Moving the binary
 
 **macOS** — the driver is found relative to the executable, so move the whole

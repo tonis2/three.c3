@@ -181,24 +181,76 @@ trips, and lines are not written yet.
 
 { width, height } of the offscreen image — what pick() counts in and what the returned PNG is.
 three.window is how big the window showing it is, and the two are free to differ.
+three.setRenderSize(width, height) moves this one.
+
+## three.setRenderSize(width, height)
+
+PIN THE RENDER SIZE, instead of letting it follow the window. By default the offscreen target tracks
+the window's drawable — drag an edge, call three.window.resize, go fullscreen, and the picture moves
+with it — so this is the escape hatch, and the reason for it is performance: a target below the
+window is upscaled to fill it, which is the render-scale slider a settings screen has. Once set the
+window no longer moves it; three.setRenderSize(null) gives the follow back. After it,
+three.renderSize(), the PNG a screenshot returns and the coordinates scene.pick(x, y) counts in are
+all the new size, and a post chain's images are rebuilt at it. Returns TRUE when it has already
+happened and FALSE when it is queued: called from inside the animation loop it takes effect between
+that frame and the next, because the images it frees are the ones that frame is drawing into — the
+same deferral three.reload() and three.quit() use. Called from a booting script or an MCP tool call
+it is immediate, so the very next screenshot is the new size. Either way read the size back on a
+later frame rather than on the next line. A size the device will not allocate throws and the old
+target is still there and still being drawn; a run with no host loop (a --frames batch) never
+performs a queued one. Sizes are 1 to 16384 a side.
+
+## three.configure(options)
+
+WHAT A GAME DECLARES ABOUT ITSELF, at the top of main.js: { title, fullscreen, saveDir }. Every key
+is optional and anything left out is left alone. There are no command-line flags for these — a
+player never sees a command line, and a settings screen has to change the same things at runtime —
+so title and fullscreen are live properties on three.window as well, and this is the one call that
+sets them before the first frame. saveDir is BOOT-ONLY and has no property beside it, because moving
+it mid-run would strand everything already written; it is a FOLDER NAME and not a path, and a
+separator in it is refused. Returns { title, fullscreen, saveDir } as they stand after the call, so
+a boot log can print one line and be accurate. Under --headless the window half is remembered and
+does nothing, the shape three.window.resize already uses.
+
+## three.save
+
+READ AND WRITE THE GAME'S OWN SAVE FOLDER — the one place a script may write outside its assets
+directory. write(name, value) and read(name) are JSON; writeText/readText move a string;
+writeBytes/readBytes move a Uint8Array. list() is every save in the folder and remove(name) deletes
+one, answering false for a slot that was not there. path is where the folder actually is, or null
+when nothing has named one. THE FOLDER is <application data>/three.c3/<name>, named by
+three.configure({ saveDir }) or taken from the assets directory's own name — ~/Library/Application
+Support on macOS, %AppData% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. Deliberately not
+the cache directory the compiled shaders go in: a disk cleaner may empty that one. A SAVE IS A NAME,
+NOT A PATH — letters, digits, dash, underscore and dot, at most 64, not starting with a dot — so
+there are no subdirectories and no way to leave the folder; 'a/b' and '../escape' throw rather than
+resolving. Reading something never written answers null rather than throwing, because that is every
+game's first run, and list() is [] before a folder has even been named so a load menu needs no
+guard. A --script or --mcp run has no assets directory to be named after: saving there throws until
+three.configure names a folder.
 
 ## three.window
 
-The window, as four things: width, height, scale and resize(width, height). width and height are
+The window: width, height, scale, resize(width, height), title and fullscreen. width and height are
 DEVICE PIXELS, read off the drawable so they stay current through a live resize drag, and scale is
 device pixels per logical point — 1.0 on an ordinary display, 2.0 on a retina one. resize takes the
 same device pixels those report, so asking for a size and reading it back agrees, and it answers
-with whether there was a window to ask. Everything is zero and resize is false under --headless. THE
-WINDOW IS NOT THE PICTURE: the scene renders into an offscreen target fixed at what --width/--height
-asked for at boot, and the window shows the whole of that stretched to fit. So a bigger window is
-the same pixels spread wider — softer on screen, with three.renderSize(), the PNG a screenshot
-returns and the coordinates scene.pick(x, y) counts in all unmoved. Resizing past the render size
-says so in the run's warnings. RESIZE IS A REQUEST, not a setting. X11's window manager may adjust
-it and a Wayland compositor answers with a configure some frames later, so the new size turns up on
-a later frame rather than on the next line — read three.window.width back from inside the animation
-callback, not immediately after the call. ON WAYLAND THE SIZE NEVER READS BACK: the surface answers
-'whatever the swapchain asks for' rather than a size, so the drawable stays what the process booted
-at and the compositor scales it into whatever the window became. X11, macOS and Windows track it.
+with whether there was a window to ask. title is writable at any time — three.configure names it at
+boot and this is what a level change or a pause menu uses — and reads back what was last set even
+under --headless. fullscreen is a request in both directions: macOS animates into its own space over
+about half a second, a Wayland compositor answers with a configure some frames later, and an X11
+window manager may refuse outright, so read it back on a later frame. Sizes are zero, fullscreen is
+false and resize returns false under --headless. THE PICTURE FOLLOWS THE WINDOW: the offscreen
+target moves to the window's new drawable, so resizing or going fullscreen renders more pixels
+rather than stretching the ones there were, and three.renderSize(), the PNG a screenshot returns and
+the coordinates scene.pick(x, y) counts in all move with it. three.setRenderSize pins it when a game
+wants a render scale of its own, and resizing past a pinned size says so in the run's warnings.
+RESIZE IS A REQUEST, not a setting. X11's window manager may adjust it and a Wayland
+compositor answers with a configure some frames later, so the new size turns up on a later frame
+rather than on the next line — read three.window.width back from inside the animation callback, not
+immediately after the call. ON WAYLAND THE SIZE NEVER READS BACK: the surface answers 'whatever the
+swapchain asks for' rather than a size, so the drawable stays what the process booted at and the
+compositor scales it into whatever the window became. X11, macOS and Windows track it.
 
 ## three.getApiDocs(options)
 

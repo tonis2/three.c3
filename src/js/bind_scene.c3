@@ -125,6 +125,9 @@ fn void JsRuntime.install_bindings(&self)
 	// The keyboard (js/bind_input.c3)
 	self.bind_input_verbs(host);
 
+	// Saving (js/bind_save.c3)
+	self.bind_save_verbs(host);
+
 	// Physics (js/bind_physics.c3)
 	self.bind_physics_verbs(host);
 
@@ -145,6 +148,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "quit", &js_quit, 0);
 	self.bind(host, "render", &js_render, 0);
 	self.bind(host, "renderSize", &js_render_size, 0);
+	self.bind(host, "renderResize", &js_render_resize, 2);
+	self.bind(host, "renderFollowWindow", &js_render_follow_window, 0);
 	self.bind(host, "backgroundGet", &js_background_get, 1);
 	self.bind(host, "backgroundSet", &js_background_set, 4);
 	self.bind(host, "skyGet", &js_sky_get, 1);
@@ -1754,6 +1759,161 @@ fn void js_render_size(
 	js.set_index(pair, 0, qjs::int_value((int)self.renderer.target.extent.width));
 	js.set_index(pair, 1, qjs::int_value((int)self.renderer.target.extent.height));
 	*out = pair;
+}
+
+// The offscreen target's side limit, the same number `three.window.resize`
+// takes for a window. Neither is a promise the device will allocate it — a
+// 16384-square target is a gigabyte of colour before the depth buffer — and a
+// size the driver refuses comes back as the fault it raised.
+const int RENDER_MAX_SIDE = 16384;
+
+<*
+ `renderResize(width, height)` — move the offscreen target, which is the actual
+ resolution.
+
+ The other half of `three.window.resize`, and the one that changes how much is
+ drawn rather than how large it is shown. Everything renders into a target fixed
+ at `--width`/`--height` when the process started and the swapchain stretches it
+ over the window; this moves that target. So a settings screen offering
+ "resolution" wants this, and one offering "window size" wants the other.
+
+ What follows it: `three.renderSize()`, the PNG a screenshot comes back as and
+ the pixels `scene.pick(x, y)` counts in all become the new size, and a post
+ chain's images are rebuilt at it.
+
+ ## When it happens
+
+ Immediately, unless the call came from inside a frame — the animation callback,
+ a fixed step, a widget handler — in which case it happens between that frame and
+ the next. The images a resize frees are the ones the frame around the call is
+ drawing into, which is the same reason `three.reload()` is deferred.
+
+ The return value says which of the two it was: `true` for done, `false` for
+ queued. A script that wants to read the size back does it on a later frame
+ either way, because a queued resize has not happened yet and
+ `three.renderSize()` answers honestly about the present.
+
+ A run with no host loop — a `--frames` batch past its last frame, a test — never
+ performs a queued one, exactly as it never performs a queued reload.
+
+ A device that will not allocate a target that size throws, and the old one is
+ still there and still being drawn.
+*>
+fn void js_render_resize(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int width  = arg_int(&js, argc, args, 0);
+	int height = arg_int(&js, argc, args, 1);
+	if (width < 1 || height < 1 || width > RENDER_MAX_SIDE || height > RENDER_MAX_SIDE)
+	{
+		*out = js.raise(
+			string::tformat(
+				"three.setRenderSize(width, height) wants two sizes between 1 and %d pixels; got %dx%d",
+				RENDER_MAX_SIDE,
+				width,
+				height
+			)
+		);
+		return;
+	}
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is no render target without a GPU device, so there is nothing to resize");
+		return;
+	}
+
+	// Pinned before the resize rather than after, and before the deferral too: a
+	// queued resize that only pinned when it landed would spend the frames in
+	// between still following the window, and a drag inside that window would
+	// arrive after the pin and be honoured.
+	self.renderer.render_size_pinned = true;
+
+	if (self.in_frame)
+	{
+		self.render_width_wanted = (uint)width;
+		self.render_height_wanted = (uint)height;
+		*out = qjs::bool_value(false);
+		return;
+	}
+
+	if (catch err = self.renderer.resize_target((uint)width, (uint)height))
+	{
+		*out = js.raise(
+			string::tformat("three.setRenderSize could not make a %dx%d target: %s", width, height, err)
+		);
+		return;
+	}
+	*out = qjs::bool_value(true);
+}
+
+<*
+ `renderFollowWindow()` — go back to the render size tracking the window.
+
+ What `three.setRenderSize(null)` calls, and the way out of the pin an explicit
+ size puts on. The target moves on the next swapchain rebuild rather than here:
+ that is where every other window size change is answered, and a second path
+ that resized on the spot would be a second place for the two to disagree.
+
+ Answers with whether there was a renderer to tell — false under a runtime with
+ no device, which is the shape every other verb here uses.
+*>
+fn void js_render_follow_window(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+
+	if (self.renderer == null)
+	{
+		*out = qjs::bool_value(false);
+		return;
+	}
+	self.renderer.render_size_pinned = false;
+	self.render_width_wanted = 0;
+	self.render_height_wanted = 0;
+	*out = qjs::bool_value(true);
+}
+
+<*
+ Performs a resize a frame asked for, between frames.
+
+ Called by the host loop beside the reload and the quit it sits with. Failure is
+ reported and dropped rather than raised: there is no script on the stack to
+ raise into — the call that asked for this returned a frame ago — and a run that
+ stopped because a menu asked for a resolution the device refused would be worse
+ than one that goes on drawing at the size it had.
+
+ @return `True if a resize was pending, whether or not it worked.`
+*>
+fn bool JsRuntime.take_render_resize(&self)
+{
+	if (self.render_width_wanted == 0 || self.renderer == null) return false;
+
+	uint width  = self.render_width_wanted;
+	uint height = self.render_height_wanted;
+	self.render_width_wanted = 0;
+	self.render_height_wanted = 0;
+
+	if (catch err = self.renderer.resize_target(width, height))
+	{
+		@advise("three.setRenderSize(%d, %d) was refused by the device (%s); the size is unchanged", width, height, err);
+	}
+	return true;
 }
 
 <*

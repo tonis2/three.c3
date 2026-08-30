@@ -452,6 +452,29 @@ struct JsRuntime
 	*>
 	List{uint} texture_handles;
 
+	<*
+	 A `three.setRenderSize()` made from inside a frame, and not performed yet —
+	 `js/bind_scene.c3`. Zero width means nothing is pending.
+
+	 Deferred for the reason a reload is: the call can come from the animation
+	 callback, and the images a resize frees are the ones the frame around that
+	 callback is drawing into. Outside a frame it is done on the spot, because
+	 there is nothing to wait for and an agent asking over `--mcp` wants the very
+	 next screenshot to be the new size.
+	*>
+	uint render_width_wanted;
+	uint render_height_wanted;
+
+	<*
+	 Where `three.save` writes — `js/bind_save.c3`.
+
+	 Empty until something names it: `three.configure({ saveDir })`, or the first
+	 save verb falling back to the assets directory's own name. Held as the
+	 resolved absolute path rather than the slug, because the platform root is
+	 not going to move under a running process and every verb wants the path.
+	*>
+	DString save_dir;
+
 	// A `three.reload()` a script has asked for and the loop has not performed
 	// yet — `reload.c3`. Deferred rather than done on the call, because the call
 	// is made from inside the context a reload destroys; the loop reads it
@@ -521,6 +544,9 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.frame_debug.init(mem, 256);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
+	// Written by the first `three.configure` or the first save verb, and never
+	// long. Initialised like the rest so it does not take the temp arena.
+	self.save_dir.init(mem, 64);
 	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
 	// that never asks for one, which is most of them.
 	self.uploads.init(mem, 8);
@@ -590,6 +616,7 @@ fn void JsRuntime.close(&self)
 	self.frame_debug.free();
 	self.frame_error.free();
 	self.input_text.free();
+	self.save_dir.free();
 	self.texture_handles.free();
 	self.ui_handlers.free();
 	self.modules.free();

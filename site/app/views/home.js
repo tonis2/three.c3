@@ -92,7 +92,7 @@ ${gallerySection(SHOTS)}
 
   <p>
 	Use debug parameter while developing, to get hot-reload, quit by ESC and debugging info while the game runs.
-	Hot-reload works work SHIFT+R
+	Hot-reload works with SHIFT+R
   </p>
 
   <div class="code">

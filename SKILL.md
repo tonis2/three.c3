@@ -29,6 +29,16 @@ file beside the binary because `vk/driver.c3` `dlopen`s it by name. Move the
 folder, not the executable. On Linux and Windows the loader is the system's and
 the executable travels alone.
 
+**Where a run writes.** Nothing goes in the working directory. Compiled shaders
+and the driver's pipeline blob go to `build/shader-cache` when a `build/` is
+already there — a checkout, so the suite and the edit loop are unchanged — and
+otherwise to the platform's cache directory (`~/Library/Caches/three.c3`,
+`%LOCALAPPDATA%`, `$XDG_CACHE_HOME`). A game's saves go somewhere else again,
+under the application-data root, because a cache is a thing a disk cleaner may
+empty. A bundle can ship `shader-cache/` beside the executable and it is read
+and never written: `.slangmod` files are keyed on source and compiler tag, so
+they are portable, and shipping them warm turns a 3.5s first start into 1.6s.
+
 **A checkout still overrides.** `shader_source` reads the search path first —
 `shaders/<name>` then `build/shaders/<name>` — and falls back to the embedded
 copy. So editing `shaders/mesh.slang` and re-running shows the change with no
@@ -88,11 +98,12 @@ than a conversation.
 | `--screenshot <path>` | Write a PNG. Implies `--headless`. |
 | `--frames <n>` | Run exactly n frames and exit. Implies `--headless`. |
 | `--every <n>` | With `--frames`, shoot every n frames. |
-| `--width <n>` / `--height <n>` | Offscreen size. Default 1280×720. |
+| `--width <n>` / `--height <n>` | The window's size in logical points, or the offscreen size when there is no window. Default 1280×720. The render target follows the window's drawable, so on a 2× display a 1280-point window renders 2560 pixels wide. |
 | `--camera <yaw,pitch,distance>` | Override the camera, over whatever the script set. |
 | `--mcp [port]` | Serve the agent tools on 127.0.0.1. Default port 8808. |
 | `--mcp-stdio [port]` | Be the stdio end of a `three` that is already serving. |
 | `--debug` | Diagnose this run: Vulkan validation layers (if the Khronos layer is installed), the driver/cache log lines, the device table at startup, and the window's own chords — escape to quit, shift+R to reload. |
+| `--cache-dir <dir>` | Where compiled shaders are kept. A checkout uses `build/shader-cache`, a shipped binary the platform's cache directory; `THREE_CACHE_DIR` does the same job. An empty string turns the cache off, which is what timing a cold compile wants. |
 | `-h`, `--help` | Usage. |
 
 How they interact:
@@ -176,6 +187,12 @@ script succeeded**:
    `warnings` when the renderer had something to say, and `debug` when the
    script called `three.debug.write`
 2. a PNG of the frame
+
+**The PNG is the render size**, and with a window open that is the window's own
+drawable — so a server started without `--headless` on a 2× display answers with
+four times the pixels `--width`/`--height` asked for. `--headless` keeps it at
+exactly what those flags say, and `three.setRenderSize(w, h)` pins it in a
+windowed run. `three.renderSize()` says which you have.
 
 `stats` is `drawCalls, uniqueMeshes, instances, nodes, assets, triangles,
 vertices, textures, textureBytes, geometryBytes, targetBytes, postBytes,
@@ -357,6 +374,29 @@ what a menu's Quit calls. It returns first and the host closes between frames,
 so the last frame the game built is the one shown. Escape does the same from
 the window but only under `--debug`: a key the player never bound is the engine
 reaching past the game, so it is not something to ship a menu on top of.
+
+**What a game declares** — `three.configure({ title, fullscreen, saveDir })` at
+the top of `main.js`. No command-line flags for these: a player never sees one,
+and a settings screen has to change the same things at runtime, so `title` and
+`fullscreen` are also live on `three.window`. `saveDir` is boot-only and is a
+folder NAME, not a path.
+
+**Saving** — `three.save.write/read` (JSON), `writeText/readText`,
+`writeBytes/readBytes`, `list()`, `remove(name)`, `path`. One flat folder under
+the platform's application-data root — `three.save.path` says where — and the
+only place a script may write outside its assets directory. A name with a `/` or
+a `..` in it throws rather than resolving. Reading a save that is not there is
+`null`, not a throw, and `list()` is `[]` before a folder has even been named.
+A `--script` or `--mcp` run has no assets directory to be named after and has to
+be told with `three.configure`.
+
+**Resolution** — the picture follows the window: a drag, `three.window.resize`,
+fullscreen or a move to a denser display all move the offscreen target with it,
+so what is on screen is its own pixels. `three.setRenderSize(width, height)`
+**pins** it, which is the render-scale slider — a target below the window is
+upscaled to fill it — and `three.setRenderSize(null)` gives the follow back.
+From inside the animation loop a pin is queued for between frames and returns
+`false`; from a script or a tool call it is immediate and returns `true`.
 
 **Memory and measurement** — `three.stats()`, `three.unloadUnused()`,
 `three.renderSize()`. Nothing is freed until you say so — a scene included:

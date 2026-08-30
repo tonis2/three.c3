@@ -709,13 +709,21 @@ const controls = {
 // canvas, so there was nothing to match. What is here is the smallest set
 // that answers "how big is this thing" and "make it bigger".
 //
-// **It is the window and not the picture.** Everything renders into an
-// offscreen target fixed at what `--width`/`--height` asked for, and the
-// swapchain stretches the whole of that onto the whole window. So a bigger
-// window is the same pixels spread wider: softer on screen, and
-// `three.renderSize()` — what a screenshot comes back as and what
-// `scene.pick(x, y)` counts in — does not move. Resizing past the render
-// size says so in the run's `warnings`.
+// **The picture follows the window.** Everything renders into an offscreen
+// target and the swapchain puts that on the window; when the window moves —
+// a drag, `resize`, fullscreen, a different display — the target moves with
+// it, so what is on screen is its own pixels rather than stretched ones.
+// `--width`/`--height` are the size the window OPENS at.
+//
+// So `three.renderSize()` — what a screenshot comes back as and what
+// `scene.pick(x, y)` counts in — tracks the window too, and on a retina
+// display it is the DEVICE pixel count, which is twice the logical one.
+//
+// **`three.setRenderSize(width, height)` pins it**, and that is the render
+// scale a settings screen offers: a target below the window is upscaled to
+// fill it, which is fewer pixels to shade. While it is pinned the window no
+// longer moves the picture, and resizing past it says so in the run's
+// `warnings`. `three.setRenderSize(null)` gives the follow back.
 //
 // **`width` and `height` are device pixels**, read off the surface rather
 // than the window, so they are current through a live resize drag and
@@ -739,12 +747,104 @@ const controls = {
 // **On Wayland the size never reads back.** That surface answers "whatever
 // the swapchain asks for" rather than a size, so the drawable stays what
 // the process booted at and the compositor scales it into whatever the
-// window became. X11, macOS and Windows track it.
+// window became — which also means the picture cannot follow a resize
+// there, because nothing ever reports one. X11, macOS and Windows track it.
 const windowSurface = {
 	get width() { return H.windowSize()[0]; },
 	get height() { return H.windowSize()[1]; },
 	get scale() { return H.windowSize()[2]; },
+	// Resize the window. THE PICTURE FOLLOWS: the offscreen target moves to
+	// the window's new drawable on the next frame, so this changes how many
+	// pixels are rendered as well as how big they are shown — unless
+	// three.setRenderSize has pinned the render size.
+	//
+	// A REQUEST, not a setting. X11's window manager may adjust it and
+	// Wayland answers with a configure some frames later, so read
+	// three.window.width back on a later frame. False under --headless.
 	resize(width, height) { return H.windowResize(width, height); },
+
+	// What the title bar says. Writable at any time, which is the point:
+	// a boot-time name belongs in three.configure, and this is what a
+	// pause menu or a level change uses.
+	//
+	//   three.window.title = `Wumpa Run — ${level.name}`;
+	//
+	// Reads back what was last set even under --headless, where there is
+	// no title bar to put it on.
+	get title() { return H.windowTitleGet(); },
+	set title(text) { H.windowTitleSet(text); },
+
+	// Whether the window fills a display, and how to ask it to.
+	//
+	//   three.window.fullscreen = !three.window.fullscreen;
+	//
+	// ASKING IS NOT GETTING. macOS animates into its own fullscreen space
+	// over about half a second, a Wayland compositor answers with a
+	// configure some frames later, and an X11 window manager is entitled
+	// to refuse outright — so read it back on a later frame rather than on
+	// the next line. False under --headless, and setting it there does
+	// nothing.
+	//
+	// The render size follows it, the same way it follows a resize, so
+	// fullscreen is sharp rather than stretched — unless three.setRenderSize
+	// has pinned it.
+	get fullscreen() { return H.windowFullscreenGet(); },
+	set fullscreen(on) { H.windowFullscreenSet(!!on); },
+};
+
+// -----------------------------------------------------------------------
+// Saving
+//
+// One directory, named by three.configure({ saveDir }) or taken from the
+// assets folder's own name, under the platform's application-data root:
+// ~/Library/Application Support/three.c3/<name> on macOS, %AppData% on
+// Windows, $XDG_CONFIG_HOME or ~/.config elsewhere. three.save.path is
+// where it actually landed.
+//
+// A save is a NAME, not a path: letters, digits, dash, underscore and dot,
+// at most 64 of them. There are no subdirectories and no way to leave the
+// folder — a name with a '/' in it is refused rather than resolved.
+//
+// Reading something that was never written answers null rather than
+// throwing, because that is every game's first run.
+
+const save = {
+	// Where saves go, or null when nothing has named a folder yet.
+	get path() { return H.saveDirGet(); },
+
+	// JSON in, JSON out. The common pair.
+	//
+	//   three.save.write('slot1', { level: 3, hp: 80 });
+	//   const s = three.save.read('slot1') ?? { level: 1, hp: 100 };
+	write(name, value) { return H.saveWriteText(name, JSON.stringify(value)); },
+	read(name) {
+		const text = H.saveReadText(name);
+		return text === null ? null : JSON.parse(text);
+	},
+
+	// The same file as a string, for a game with its own format.
+	writeText(name, text) { return H.saveWriteText(name, String(text)); },
+	readText(name) { return H.saveReadText(name); },
+
+	// And as bytes. readBytes answers with a Uint8Array the caller owns —
+	// it is filled by the host rather than handed out as a view, which is
+	// why the size is asked for first.
+	writeBytes(name, bytes) { return H.saveWriteBytes(name, bytes); },
+	readBytes(name) {
+		const size = H.saveSize(name);
+		if (size < 0) return null;
+		const out = new Uint8Array(size);
+		if (size === 0) return out;
+		const moved = H.saveReadInto(name, out);
+		return moved === size ? out : out.subarray(0, moved);
+	},
+
+	// What is in the folder, and how to delete one. list() is [] before
+	// anything has been saved and before a folder has even been named, so a
+	// load menu needs no guard. remove() answers false for a slot that was
+	// not there.
+	list() { return H.saveList(); },
+	remove(name) { return H.saveRemove(name); },
 };
 
 // -----------------------------------------------------------------------
@@ -1954,9 +2054,79 @@ export const three = {
 		return { width, height };
 	},
 
-	// How big the window is, and how to make it bigger. Zero everywhere
-	// under `--headless`.
+	// How big the window is, what it is called, and whether it fills a
+	// display. Zero and false everywhere under `--headless`.
 	window: windowSurface,
+
+	// Read and write the game's own save folder. See the block above `save`.
+	save,
+
+	// Pin the render size, instead of letting it follow the window.
+	//
+	//   three.setRenderSize(1280, 720);   // render here, upscale to the window
+	//   three.setRenderSize(null);        // back to following the window
+	//
+	// BY DEFAULT THE PICTURE FOLLOWS THE WINDOW: drag an edge, call
+	// three.window.resize, go fullscreen, and the offscreen target moves
+	// with it, so the window always shows its own pixels rather than
+	// stretched ones. --width/--height are the size the window opens at.
+	//
+	// This is the escape hatch, and the reason it exists is performance: a
+	// render size deliberately below the window is upscaled to fill it,
+	// which is the "render scale" slider a settings screen has. Once set,
+	// the window no longer moves it — pass null to give it back.
+	//
+	// After it, three.renderSize(), the PNG a screenshot returns and the
+	// coordinates scene.pick(x, y) counts in are all the new size.
+	//
+	// Returns true when it has already happened and false when it is
+	// queued: called from inside the animation loop it takes effect
+	// between that frame and the next, because the images it frees are the
+	// ones that frame is drawing into. Called from a script or a tool call
+	// it is immediate. Either way, read the size back on a later frame.
+	//
+	// A size the device will not allocate throws, and the old target is
+	// still there and still being drawn.
+	setRenderSize(width, height) {
+		if (width === null || width === undefined) return H.renderFollowWindow();
+		return H.renderResize(width, height);
+	},
+
+	// What a game declares about itself, at the top of main.js.
+	//
+	//   three.configure({
+	//     title: 'Wumpa Run',
+	//     fullscreen: false,
+	//     saveDir: 'wumpa-run',
+	//   });
+	//
+	// Every key is optional and anything left out is left alone. There are
+	// no command-line flags for these: a player never sees a command line,
+	// and a settings screen has to change the same things at runtime — so
+	// `title` and `fullscreen` are live properties on `three.window` as
+	// well, and this is the one call that sets them before the first frame.
+	//
+	// `saveDir` is boot-only and has no property beside it, deliberately:
+	// moving it mid-run would strand everything already written. It is a
+	// FOLDER NAME and not a path — a separator in it is refused — and it
+	// answers with where the folder actually is, which is also
+	// `three.save.path`.
+	//
+	// Returns { title, fullscreen, saveDir } as they stand after the call,
+	// so a boot log can print one line and be accurate.
+	configure(options = {}) {
+		if (options === null || typeof options !== 'object') {
+			throw new TypeError('three.configure({ title, fullscreen, saveDir }) wants an object');
+		}
+		if (options.title !== undefined) H.windowTitleSet(String(options.title));
+		if (options.fullscreen !== undefined) H.windowFullscreenSet(!!options.fullscreen);
+		if (options.saveDir !== undefined) H.saveDirSet(String(options.saveDir));
+		return {
+			title: H.windowTitleGet(),
+			fullscreen: H.windowFullscreenGet(),
+			saveDir: H.saveDirGet(),
+		};
+	},
 
 	input,
 

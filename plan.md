@@ -97,10 +97,11 @@ Crossfading, morph targets and sockets are built. What they left open:
 ## 6. Audio, saving, and the rest
 
 - [ ] **Audio.** A new dependency and a new thread. `three.sound(path)`, `play`,
-      `stop`, volume; positional audio is a cheap addition to `tick`.
-- [ ] **Saving.** A write verb confined to a single state directory — never the
-      assets root, never an arbitrary path. **The one place in this plan where the
-      sandbox widens on purpose**, so say it in the doc comment.
+      `stop`, volume; positional audio is a cheap addition to `tick`. The
+      dependency worth trying first is **miniaudio** — one public-domain header
+      carrying CoreAudio, WASAPI and ALSA/PulseAudio, with WAV, MP3 and FLAC
+      decoding already in it — built as a `lib/audio.c3l` the way `quickjs.c3l`
+      builds its archive per target. `stb_vorbis` beside it if `.ogg` is wanted.
 - [ ] **Timers, `structuredClone`,** and whatever else a real game hits.
 
 ## 7. Physics — bindings that do not exist
@@ -232,6 +233,34 @@ the example it was measured against looked like before and after.
       of `three.stats()` and there is nowhere to draw either — §5's text work is
       what unblocks it, and until then the numbers reach a person through
       `console.log` and a probe.
+
+---
+
+## 22. Shipping a game
+
+What a bundle needs that a viewer does not. Most of it is built: the cache no
+longer follows the launcher around, a game names itself and its save folder
+through `three.configure`, the window can be titled and made fullscreen, the
+picture follows the window, and saves have a directory of their own —
+`test/shipping_test.c3` is the whole of it in one file. Audio is §6. Steamworks
+and macOS notarisation are deliberately absent: neither can be done from this
+repo.
+
+- [ ] **No gamepad.** Steam Input presents every controller as XInput or evdev,
+      so this is the whole of controller support without Steamworks:
+      `XInputGetState`, `/dev/input/js*`, and GameController on macOS. Shape it
+      like `three.input` — `three.gamepad(0)`, buttons by name, axes as floats.
+- [ ] **The fullscreen and title backends have only been run on macOS.** The
+      other three compile — `c3c build test-win` in `lib/window.c3l` links a
+      Windows binary and `--target linux-x64` type-checks both Linux backends —
+      and compiling is what §1 already says is not enough. What is unverified is
+      four calls: `SetWindowTextW` and the borderless `WS_POPUP` swap,
+      `_NET_WM_NAME` and the `_NET_WM_STATE` message, and Wayland's two
+      `xdg_toplevel` requests.
+- [ ] **A save is bytes and text and nothing else.** No `three.save` verb moves
+      a file *into* the folder from elsewhere, which is what importing a save
+      would want. Leave it until somebody asks; the shape would be a path
+      argument, and a path argument is the thing this whole file refuses.
 
 ---
 
