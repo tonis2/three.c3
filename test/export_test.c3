@@ -35,6 +35,13 @@
  halves of it: that a batch of copies survives as one draw call *and* that each
  of them comes back the colour it went in.
 
+ **Rigs used to be a third**, and are now the subject of the last four. A skinned
+ character exported as a bind-pose statue with no skeleton and no clips; it now
+ goes out with all three, re-read from the source document because a rig does not
+ survive as far as a frame. What has to be checked is the split: a skeleton per
+ copy, because glTF places a skinned mesh by its joints, and one set of keyframes
+ between them, because those are the kilobytes.
+
  ## Two of these read the file rather than reloading it
 
  Everything about *sharing* goes through a load, for the reason above. But
@@ -2625,5 +2632,229 @@ fn void a_layered_material_bakes_instead_of_writing_its_stack() @test
 			"the extension must not be beside the bake: %s", json);
 		test::@check(!json.contains("baseColorTexture"),
 			"and neither must the base map the body already sampled: %s", json);
+	};
+}
+
+// ============================================================================
+// Rigs, clips and blend shapes
+// ============================================================================
+
+<*
+ A skinned character exports as a character rather than as a statue.
+
+ What has to be in the file is four things that have to agree: the vertices'
+ JOINTS_0 and WEIGHTS_0, a skeleton of nodes, a skin naming those nodes in the
+ order the attribute indexes them, and the inverse bind matrices. Any one of them
+ missing is a mesh that comes back either unposed or turned inside out, and the
+ reload is what says all four agree — `Assets.load` reads the skin the same way
+ it reads any other file's, so a character that comes back with its clips is one
+ whose rig the loader could make sense of.
+
+ The clips are the second half. They are read out of the source document rather
+ than off the frame, for `write_skeleton`'s reason, and a character that arrives
+ with `Bend` and `Twist` on it is one a viewer can play.
+*>
+fn void a_skinned_copy_exports_its_rig() @test
+{
+	String path = "build/export_rig.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = three.load("test/fixtures/skinned.glb");
+			scene.add(asset.instantiate());
+			const report = scene.export("build/export_rig.glb");
+
+			new three.Scene();
+			const back = three.load("build/export_rig.glb");
+			return {
+				wrote: [report.skins, report.bones, report.clips],
+				clips: back.animations,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"wrote":[1,2,2],"clips":["Bend","Twist"]}`,
+			"one skeleton of two bones, both clips, and they load back; got %s",
+			result.value
+		);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"JOINTS_0"`) && json.contains(`"WEIGHTS_0"`), "the vertices name their joints");
+		test::@check(json.contains(`"skins":[`) && json.contains(`"inverseBindMatrices"`), "and the skin names them back");
+		// The placement is on the wrapper and not on the node with the skin, which
+		// is not a detail: a reader ignores a skinned node's own transform, so a
+		// character written with its position there is a character at the origin.
+		test::@check(!json.contains(`"skin":0,"translation"`), "the skinned node carries no transform of its own");
+	};
+}
+
+<*
+ Two copies are two skeletons and one set of keyframes.
+
+ Both halves are forced, and they pull in opposite directions. The *skeletons*
+ have to be per copy because glTF places a skinned mesh by where its joints are
+ and ignores the node's own transform — one shared skeleton would draw both
+ characters standing in the same spot. The *keyframes* must not be, because they
+ are the kilobytes: a clip is written once and given a channel onto each
+ skeleton, so a crowd costs a channel a bone and not a curve a bone.
+
+ The inverse bind matrices go with the keyframes rather than with the skeletons.
+ They say how a vertex leaves the bind pose, which is a property of the rig and
+ not of where a copy is standing — one MAT4 accessor in the file, however many
+ wear it.
+
+ Flattened, because that is the walk where two copies of one character would
+ otherwise meet in a batch: they arrive wrapped in a group each, so no two of
+ them are siblings and the hierarchical walk never compares them.
+
+ The one batch the report counts is the fixture's other mesh — `Prop` is not
+ rigged, and its two copies fold into an instanced node exactly as they should.
+ That is the contrast worth having in the same file: the refusal is about the
+ rig, not about copies.
+*>
+fn void two_copies_are_two_skeletons_and_one_set_of_keyframes() @test
+{
+	String path = "build/export_crowd.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = three.load("test/fixtures/skinned.glb");
+			const a = asset.instantiate();
+			const b = asset.instantiate();
+			b.position.x = 4;
+			scene.add(a);
+			scene.add(b);
+			const report = scene.export("build/export_crowd.glb", { flatten: true });
+			return [report.skins, report.bones, report.clips, report.batches];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == "[2,4,2,1]",
+			"two skeletons of two bones, the clips written once, and only the unrigged prop batched; got %s",
+			result.value
+		);
+
+		String json = json_chunk(path);
+		test::@check(occurrences(json, `"skin":`) == 2, "a skin per copy: %s", json);
+		test::@check(occurrences(json, `"type":"MAT4"`) == 1, "and one set of inverse binds between them");
+		// A channel is a pair of integers and a sampler is a curve. Two copies mean
+		// twice the channels and exactly the same samplers.
+		test::@check(
+			occurrences(json, `"sampler":`) == 2 * occurrences(json, `"input":`),
+			"two channels per sampler, which is one curve driving both copies: %s",
+			json
+		);
+	};
+}
+
+<*
+ Blend shapes survive, and each copy keeps the weights it was drawn with.
+
+ The displacements are the geometry's and are written once — twelve plants at
+ twelve growth stages share one set of targets exactly as they share one set of
+ positions. The *weights* are the copy's, and `node.weights` is the only channel
+ glTF has for them: a mesh's own weights belong to the shape and so to every copy
+ of it.
+
+ Which is why a morphing copy is never folded into an instanced node. These two
+ are siblings drawing one mesh with one material — the batch's whole key — so
+ without that refusal they would come back as one node in one shape, and the
+ difference between them is the thing being exported.
+*>
+fn void a_morphing_copy_carries_its_own_weights() @test
+{
+	String path = "build/export_morph.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = three.load("test/fixtures/morph.glb");
+			const shape = asset.mesh("Face");
+
+			// Added first: the target count is read off the uploaded geometry, so a
+			// weight set before the add is one nothing can check.
+			const a = new three.Mesh(shape);
+			scene.add(a);
+			a.weights = [1, 0];
+
+			const b = new three.Mesh(shape);
+			b.position.x = 3;
+			scene.add(b);
+			b.weights = [0, 0.5];
+
+			const report = scene.export("build/export_morph.glb");
+
+			new three.Scene();
+			const back = three.load("build/export_morph.glb");
+			const shapes = [];
+			const reloaded = new three.Scene();
+			reloaded.add(back.instantiate());
+			reloaded.traverse((o) => { if (o.morphs > 0) shapes.push(o.morphs); });
+
+			return {
+				wrote: [report.meshes, report.morphed, report.batches],
+				morphs: shapes,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `{"wrote":[1,2,0],"morphs":[2,2]}`,
+			"one mesh, two copies wearing their own weights, nothing batched; got %s",
+			result.value
+		);
+
+		String json = json_chunk(path);
+		// One `targets` array, because the displacements are the shape's. Two
+		// `weights`, because what each copy is wearing is not.
+		test::@check(occurrences(json, `"targets":[`) == 1, "the displacements are written once: %s", json);
+		test::@check(occurrences(json, `"weights":[`) == 2, "and the weights once per copy: %s", json);
+		test::@check(json.contains(`"weights":[1,0]`) && json.contains(`"weights":[0,0.5]`), "with the values drawn");
+	};
+}
+
+<*
+ A mesh with no rig is written exactly as it always was.
+
+ The check that none of this leaks into the overwhelming majority of files. A box
+ has no joints to name and no shapes to blend, so its primitive has neither, its
+ node carries no weights, and the document has no `skins` array at all — an empty
+ one would be a file claiming a rig it does not have.
+*>
+fn void an_unrigged_scene_says_nothing_about_rigs() @test
+{
+	String path = "build/export_plain.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			const report = scene.export("build/export_plain.glb");
+			return [report.skins, report.bones, report.clips, report.morphed];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[0,0,0,0]", "nothing rigged and nothing morphing; got %s", result.value);
+
+		String json = json_chunk(path);
+		test::@check(!json.contains(`"skins"`), "no skins array: %s", json);
+		test::@check(!json.contains(`"animations"`), "no animations array");
+		test::@check(!json.contains(`"targets"`) && !json.contains(`"weights"`), "and no morph keys");
 	};
 }

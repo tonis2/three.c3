@@ -25,3 +25,6 @@
 [submodule "lib/ktx.c3l"]
 	path = lib/ktx.c3l
 	url = https://github.com/tonis2/ktx.c3.git
+[submodule "lib/cui.c3l"]
+	path = lib/cui.c3l
+	url = https://github.com/tonis2/cui.git

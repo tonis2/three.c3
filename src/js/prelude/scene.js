@@ -401,9 +401,36 @@ export class Scene extends Object3D {
 	// and the names of the copies inside them are gone. Leave it off for a
 	// file a person will open; turn it on for a file that is a payload.
 	//
+	// **Characters go out rigged.** A skinned copy is written with a
+	// skeleton of its own, a skin naming those joints, and the
+	// asset's clips as glTF animations driving them — read back out
+	// of the source file, because a rig does not survive as far as a
+	// frame. The skeleton is the file's bind pose rather than the
+	// pose the copy is standing in, which is the one thing this gives
+	// up: a character mid-stride exports standing, with the stride
+	// beside it as a clip. `skins`, `bones` and `clips` count what
+	// went in.
+	//
+	// One skeleton per copy, and that is glTF's rule rather than a
+	// choice — a reader ignores a skinned node's own transform, so a
+	// copy is placed by where its joints are and two copies cannot
+	// share a set of them. The vertices, the inverse bind matrices
+	// and the keyframes are still written once between them.
+	//
+	// **Blend shapes go out too**, as morph targets on the primitive,
+	// with each copy's weights on its own node — the per-copy channel
+	// glTF has for them. Twelve plants at twelve growth stages come
+	// back as twelve nodes over one mesh, the way they were drawn.
+	// `morphed` counts the copies that carried any.
+	//
+	// A skinned or morphing copy is never folded into an instanced
+	// node: `EXT_mesh_gpu_instancing` has an attribute for a
+	// transform and one for a colour, and none for a pose or a
+	// weight.
+	//
 	// Answers with { path, meshes, entries, materials, images, nodes,
 	// instances, batches, skipped, shaded, bakedImages, bakedColors,
-	// layers, bytes }.
+	// layers, skins, bones, clips, morphed, bytes }.
 	//
 	// `bake` is the option that gets a ShaderMaterial's shading into
 	// the file. glTF describes surfaces and a ShaderMaterial is a
