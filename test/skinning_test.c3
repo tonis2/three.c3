@@ -1193,3 +1193,415 @@ fn void stats_reports_what_skinning_cost() @test
 		test::@check(stats.pose_bytes > 0, "and it is not zero, which is the number that would mislead");
 	};
 }
+
+// ---- crossfading, on the baked path ----------------------------------------
+
+<*
+ Which clip of the fixture is which, by name rather than by position.
+
+ The file has `Bend` and `Twist` in that order and has had for as long as it has
+ existed — but a check that reads `clips[0]` fails silently into "the other clip"
+ the day somebody adds a third, and the failure it produces is a pose that is
+ wrong rather than a test that is red.
+*>
+fn uint clip_called(three::Asset* asset, String name)
+{
+	foreach (i, &clip : asset.clips)
+	{
+		if (clip.name == name) return (uint)i;
+	}
+	test::@check(false, "the fixture has no clip called '%s'", name);
+	return 0;
+}
+
+<*
+ A baked character mid-crossfade names one frame of each clip.
+
+ **This is the whole of what the baked path costs a fade**: two offsets and a
+ weight on the instance, so a crowd mid-transition is still a crowd. There are no
+ matrices to compute and nothing to upload — the two frames were baked when the
+ file first drew — and `shaders/mesh.slang` mixes them.
+
+ The offsets are checked against the segments they have to be inside rather than
+ against numbers written down here: an offset that lands in the wrong clip's
+ segment poses the character out of a table it was never meant to read, which
+ draws perfectly and is completely wrong.
+*>
+fn void a_crossfading_character_names_both_baked_frames() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId character = node_at(scene, root, "Character");
+
+		three::Asset* asset = renderer.pass.assets.slot(id);
+		if (asset == null || asset.skins.len() == 0) return;
+
+		three::BakedPose* bend = asset.segment(0, clip_called(asset, "Bend"));
+		three::BakedPose* twist = asset.segment(0, clip_called(asset, "Twist"));
+		test::@check(bend != null && twist != null, "both clips baked a segment");
+		if (bend == null || twist == null) return;
+
+		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0.5f);
+		test::@check(scene.node(character).blend == 0,
+			"a character that has never faded carries a blend of %f", scene.node(character).blend);
+
+		scene.play(root, "Twist", loop: true, speed: 1.0f, time: 0, fade: 1.0f);
+
+		// At the instant the fade starts the old pose is all there is to see. The
+		// shader reads `blend` as how much of `pose_from` is still showing, so this
+		// being anything but 1 is a character that pops onto the new clip and then
+		// fades back out of it.
+		test::@check(
+			math::abs(scene.node(character).blend - 1.0f) < 0.0001f,
+			"the fade starts showing %f of the outgoing frame, expected all of it",
+			scene.node(character).blend
+		);
+
+		scene.step_animations(0.5f);
+
+		float weight = scene.node(character).blend;
+		test::@check(
+			math::abs(weight - 0.5f) < 0.0001f,
+			"halfway through a one-second fade %f of the old frame is left, expected 0.5", weight
+		);
+
+		uint from = scene.node(character).pose_from;
+		uint into = scene.node(character).pose;
+		test::@check(
+			from >= bend.frame_offset && from < bend.frame_offset + bend.frame_count * bend.joint_count,
+			"the outgoing offset %d is outside Bend's segment [%d, %d)",
+			from, bend.frame_offset, bend.frame_offset + bend.frame_count * bend.joint_count
+		);
+		test::@check(
+			into >= twist.frame_offset && into < twist.frame_offset + twist.frame_count * twist.joint_count,
+			"the incoming offset %d is outside Twist's segment [%d, %d)",
+			into, twist.frame_offset, twist.frame_offset + twist.frame_count * twist.joint_count
+		);
+	};
+}
+
+<*
+ A finished fade leaves nothing behind.
+
+ The shader reads `blend` of zero as "one palette lookup", so a fade that ends
+ without clearing it costs every character it ever touched a second read of the
+ pose table for the rest of the session — and pins it a hair off the clip it is
+ playing.
+*>
+fn void a_finished_fade_clears_the_second_frame() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId character = node_at(scene, root, "Character");
+
+		scene.play(root, "Bend", loop: true);
+		scene.play(root, "Twist", loop: true, speed: 1.0f, time: 0, fade: 0.25f);
+
+		scene.step_animations(0.25f);
+		scene.step_animations(0.1f);
+
+		test::@check(scene.node(character).blend == 0,
+			"after the fade %f of the old frame is still weighted in", scene.node(character).blend);
+		test::@check(scene.node(character).pose_from == 0,
+			"after the fade the outgoing offset is still %d", scene.node(character).pose_from);
+	};
+}
+
+<*
+ A crossfade does not split the draw call.
+
+ The same thesis `a_crowd_at_different_phases_is_one_draw_call` states, asked of
+ the transition rather than of the phase: `pose_from` and `blend` are per instance
+ like `pose` is, so half a crowd mid-fade and half not is still one
+ `vkCmdDrawIndexed`. If this ever reports more, a fade has become bucket state.
+*>
+fn void a_crowd_mid_crossfade_is_still_one_draw_call() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		const uint COPIES = 12;
+		for (uint i = 0; i < COPIES; i++)
+		{
+			three::NodeId copy = scene.instantiate(id);
+			scene.play(copy, "Bend", loop: true, speed: 1.0f, time: (float)i * 0.1f);
+			// Every other one is mid-fade, so the frame holds both kinds at once —
+			// which is the arrangement that would split a bucket if either field
+			// had been put on the draw record.
+			if (i % 2 == 0) scene.play(copy, "Twist", loop: true, speed: 1.0f, time: 0, fade: 1.0f);
+		}
+		scene.step_animations(0.2f);
+
+		renderer.render_offscreen()!!;
+
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(
+			stats.draw_calls <= 2,
+			"%d copies half of them mid-fade drew %d calls, expected the fixture's 2",
+			COPIES, stats.draw_calls
+		);
+	};
+}
+
+// ---- sockets ---------------------------------------------------------------
+
+<*
+ The largest componentwise difference between two transforms.
+
+ A whole matrix rather than a position, because the joint these tests are about is
+ one a clip *rotates*: its origin does not move, so comparing positions compares
+ two numbers that were always going to be equal.
+*>
+fn float matrices_apart(Matrix4f a, Matrix4f b)
+{
+	float worst = 0;
+	for (usz i = 0; i < 16; i++)
+	{
+		float apart = math::abs(a.m[i] - b.m[i]);
+		if (apart > worst) worst = apart;
+	}
+	return worst;
+}
+
+<*
+ A socket on a baked character sits exactly where the live bone does.
+
+ **The check the whole feature rests on**, and the reason it is worth a live copy
+ in the scene rather than arithmetic written down here: a socket recovers the
+ bone's transform from the pose table with `pose * bind`, and the only honest way
+ to know that recovery is right is to compare it against the same bone posed the
+ other way, from its own node. The fixture's `Mid` is the joint `Bend` turns, so a
+ recovery that dropped the bind matrix, transposed it or read the wrong joint puts
+ the socket somewhere this comparison can see.
+
+ A whole second at thirty frames a second is a baked frame exactly, so the two are
+ being asked about one instant rather than about instants half a frame apart.
+*>
+fn void a_socket_sits_where_the_live_bone_does() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId baked = scene.instantiate(id, name: "baked");
+		three::NodeId live = scene.instantiate(id, name: "live", skeleton: true);
+
+		three::NodeId marker = scene.add_group(baked, "marker");
+		test::@check(scene.attach_socket(marker, baked, "Mid"), "`Mid` would not take a socket");
+
+		scene.play(baked, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+		scene.play(live, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+		scene.update_world_matrices();
+
+		three::NodeId bone = node_at(scene, live, "Mid");
+		test::@check(bone.is_set(), "the live copy kept its `Mid` bone");
+		if (!bone.is_set()) return;
+
+		// The whole matrix and not the position: `Bend` *rotates* `Mid`, so a joint
+		// origin that never moves is the correct answer to "where is the bone" and
+		// a useless one to "is the recovery right". What rides a socket is offset
+		// from it, and the offset is what the rotation moves.
+		float apart = matrices_apart(scene.node(marker).world, scene.node(bone).world);
+		test::@check(
+			apart < 0.001f,
+			"the socket's transform is %f away from the live bone's, componentwise", apart
+		);
+	};
+}
+
+<*
+ A socket moves when the character does.
+
+ The weaker half of the check above and the one that fails differently: a socket
+ that never updated would still agree with the live bone at the rest pose, because
+ both start there. This says the pose reaches it at all.
+*>
+fn void a_socket_follows_the_pose() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId marker = scene.add_group(root, "marker");
+		test::@check(scene.attach_socket(marker, root, "Mid"), "`Mid` would not take a socket");
+
+		scene.update_world_matrices();
+		Matrix4f at_rest = scene.node(marker).world;
+
+		scene.play(root, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+		scene.update_world_matrices();
+
+		test::@check(
+			matrices_apart(at_rest, scene.node(marker).world) > 0.01f,
+			"the socket's transform did not change across the whole clip"
+		);
+	};
+}
+
+<*
+ A file nothing is socketed to keeps no second copy of its pose table.
+
+ The mirror is the one thing sockets cost, and it is paid per asset on the first
+ attachment. An eager mirror would double the pose memory of every rigged file in
+ a project whether or not anything ever asked where a bone was — which for a
+ crowd, the case the baked path exists for, is the memory the whole design was
+ avoiding.
+*>
+fn void the_pose_mirror_is_not_built_unless_asked() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId root = scene.instantiate(id);
+		scene.play(root, "Bend", loop: true);
+		scene.step_animations(0.5f);
+
+		three::Asset* asset = renderer.pass.assets.slot(id);
+		test::@check(asset.pose_matrices > 0, "the fixture baked a pose table");
+		test::@check(
+			asset.pose_mirror.len == 0,
+			"a character that was loaded, played and stepped mirrored %d matrices anyway", asset.pose_mirror.len
+		);
+
+		three::NodeId marker = scene.add_group(root, "marker");
+		test::@check(scene.attach_socket(marker, root, "Mid"), "`Mid` would not take a socket");
+		test::@check(
+			asset.pose_mirror.len == asset.pose_matrices,
+			"the mirror is %d matrices against a table of %d", asset.pose_mirror.len, asset.pose_matrices
+		);
+	};
+}
+
+<*
+ A live character refuses a socket, and the refusal is the useful answer.
+
+ With `skeleton: true` the bone is a node in the scene already, so attaching to it
+ is `add` and nothing else — a second mechanism beside that would be two answers
+ to one question, and the one that silently won would depend on which was asked
+ first.
+*>
+fn void a_live_character_refuses_a_socket() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId root = scene.instantiate(id, name: "hero", skeleton: true);
+		three::NodeId marker = scene.add_group(root, "marker");
+
+		test::@check(!scene.attach_socket(marker, root, "Mid"), "a live character took a socket");
+		test::@check(node_at(scene, root, "Mid").is_set(), "and its bone is a node, which is the alternative");
+	};
+}
+
+<*
+ A bone the rig does not have is refused rather than guessed at.
+*>
+fn void an_unknown_bone_takes_no_socket() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId marker = scene.add_group(root, "marker");
+
+		test::@check(!scene.attach_socket(marker, root, "Elbow"), "a bone the rig has no name for took a socket");
+		test::@check(scene.attach_socket(marker, root, "Root"), "and the one it does have did not");
+		test::@check(scene.detach_socket(marker), "detaching found nothing to detach");
+		test::@check(!scene.detach_socket(marker), "and detaching twice found something the second time");
+	};
+}
+
+<*
+ A script attaches a prop to a bone, and it rides the pose.
+
+ The script-side twin of `a_socket_sits_where_the_live_bone_does`, checking the
+ half that lives in JavaScript: `socket()` has to build a holder, get it
+ materialized, and reach `bindSocket` with a root the host can find the rig
+ through. The answer is a world position, because a holder that was created and
+ never bound would sit at the character's origin and every other assertion would
+ still pass.
+*>
+fn void a_script_can_put_a_prop_on_a_bone() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = await three.load('test/fixtures/skinned.glb');
+			const actor = asset.instantiate();
+			scene.add(actor);
+
+			const hand = actor.socket('Mid');
+			// Offset from the bone, because Bend rotates Mid rather than moving
+			// it: something sitting exactly on the joint would not move even if
+			// the socket worked perfectly.
+			const sword = new three.Group();
+			sword.position.set(1, 0, 0);
+			hand.add(sword);
+
+			const before = sword.getWorldPosition().toArray().join(',');
+			actor.play('Bend', { loop: false, time: 1 });
+			const after = sword.getWorldPosition().toArray().join(',');
+			return { bones: asset.bones.join('|'), moved: before !== after };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"bones":"Root|Mid","moved":true}`,
+			"expected the rig's bones and a prop that moved with the clip, got '%s'", result.value
+		);
+	};
+}
+
+<*
+ A script asking for a bone the rig has not gets told what it does have.
+
+ The bone names of a rig are unguessable — `mixamorig:RightHand`, `hand.R`,
+ `Bone.014`, depending on who exported it — and a baked instantiation drops the
+ bone nodes, so the tree cannot answer either. `asset.bones` is the list and the
+ error quotes it, which is the difference between a one-line fix and a session
+ spent guessing.
+*>
+fn void an_unknown_socket_says_what_the_rig_has() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = await three.load('test/fixtures/skinned.glb');
+			const actor = asset.instantiate();
+			scene.add(actor);
+			try {
+				actor.socket('Elbow');
+				return { threw: false };
+			} catch (e) {
+				return { threw: true, named: e.message.includes('Root, Mid'), quoted: e.message.includes('"Elbow"') };
+			}
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"threw":true,"named":true,"quoted":true}`,
+			"the error names the bone asked for and the ones the rig has, got '%s'", result.value
+		);
+	};
+}

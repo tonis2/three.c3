@@ -271,6 +271,11 @@ struct GpuMesh
 	// 16-bit device features reading them narrow would require.
 	vk::Memory joints;
 	vk::Memory weights;
+	// glTF morph targets: `morph_targets` blocks of `vertex_count` `MorphDelta`
+	// each, target-major, so target t's displacements are contiguous and the
+	// shader's inner loop walks one block per target. Empty on the overwhelming
+	// majority of files, which carry none.
+	vk::Memory morph;
 	vk::Memory indices;
 	uint vertex_count;
 	uint index_count;
@@ -281,6 +286,9 @@ struct GpuMesh
 	// the node rather than here (`AssetNode.skin`), because that is where glTF puts
 	// it; this only says the geometry can be posed at all.
 	bool has_skin;
+	// How many blocks `morph` holds. Zero is "this mesh does not morph" and is
+	// what every mesh in every file without the attribute carries.
+	uint morph_targets;
 	float[4] base_color;
 	// Index into `Assets.textures`, or -1 for "no texture": the material samples
 	// the shared 1x1 white image instead.
@@ -453,6 +461,12 @@ struct Asset
 
 	vk::Memory poses;
 	List{BakedPose} baked;
+
+	// A CPU copy of `poses`, and empty until something asks where a bone is —
+	// `Assets.ensure_pose_mirror`, which is the only thing that fills it and has
+	// the argument for why it re-bakes rather than keeping the array the bake
+	// already built. A file nothing is socketed to never allocates it.
+	Matrix4f[] pose_mirror;
 	// How many `Matrix4f` the buffer holds, which `stats()` reports as bytes and
 	// which bounds every offset written into an instance.
 	uint pose_matrices;
@@ -1896,6 +1910,8 @@ fn void free_nodes(Asset* asset) @local
 	asset.poses = {};
 	asset.baked.free();
 	asset.baked = {};
+	if (asset.pose_mirror.len > 0) mem::free(asset.pose_mirror);
+	asset.pose_mirror = {};
 	asset.pose_matrices = 0;
 }
 
@@ -1975,6 +1991,7 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 			case gltf::AnimationProperty.TRANSLATION: path = AnimatedPath.TRANSLATION;
 			case gltf::AnimationProperty.ROTATION: path = AnimatedPath.ROTATION;
 			case gltf::AnimationProperty.SCALE: path = AnimatedPath.SCALE;
+			case gltf::AnimationProperty.WEIGHTS: path = AnimatedPath.WEIGHTS;
 			default: continue;
 		}
 
@@ -1987,12 +2004,30 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 		gltf::Accessor values = owner.stream.gltf.accessors[sampler.output];
 		if (times.count == 0 || values.count == 0) continue;
 
-		uint stride = path == AnimatedPath.ROTATION ? 4 : 3;
 		// LINEAR and STEP store one value per key; CUBICSPLINE stores three.
 		// A file whose counts disagree with its own interpolation is malformed,
 		// and reading it would run off the end of the buffer.
 		uint per_key = sampler.interpolation == gltf::Interpolation.CUBICSPLINE ? 3 : 1;
-		if (values.count != times.count * per_key) continue;
+
+		// A transform channel's element *is* the value — one VEC3 or one VEC4 per
+		// key. A WEIGHTS channel's elements are scalars, one per target per key, so
+		// its stride is how many targets the mesh has — and **the sampler is the
+		// only place that number appears in a form a channel can read**, since the
+		// channel names a node and the targets are on the node's mesh.
+		bool scalar = path == AnimatedPath.WEIGHTS;
+		uint stride;
+		if (scalar)
+		{
+			uint per_frame = (uint)times.count * per_key;
+			if (per_frame == 0 || values.count % per_frame != 0) continue;
+			stride = (uint)(values.count / per_frame);
+			if (stride == 0) continue;
+		}
+		else
+		{
+			stride = path == AnimatedPath.ROTATION ? 4 : 3;
+			if (values.count != times.count * per_key) continue;
+		}
 
 		AnimationChannel built = {
 			.node = channel.target.node,
@@ -2000,20 +2035,33 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 			.interp = sampler.interpolation,
 			.stride = stride,
 			.times = mem::new_array(float, times.count),
-			.values = mem::new_array(float, (usz)values.count * stride),
+			// A scalar channel's accessor already holds one float per slot, so the
+			// flat array is the accessor's own length; a vector channel's holds one
+			// element per key and is unpacked into `stride` floats each.
+			.values = mem::new_array(float, scalar ? (sz)values.count : (sz)values.count * stride),
 		};
 
 		for (sz k = 0; k < times.count; k++)
 		{
 			built.times[k] = owner.stream.@cast_buffer(times, k, float);
 		}
-		for (sz k = 0; k < values.count; k++)
+		if (scalar)
 		{
-			// Read as a Vec4 regardless: a VEC3 accessor's stride is what
-			// `@cast_buffer` uses to step, so this reads three floats and one
-			// past them, and only `stride` of them are kept.
-			Vec4 value = owner.stream.@cast_buffer(values, k, Vec4);
-			for (uint c = 0; c < stride; c++) built.values[(usz)k * stride + c] = value[c];
+			for (sz k = 0; k < values.count; k++)
+			{
+				built.values[k] = owner.stream.@cast_buffer(values, k, float);
+			}
+		}
+		else
+		{
+			for (sz k = 0; k < values.count; k++)
+			{
+				// Read as a Vec4 regardless: a VEC3 accessor's stride is what
+				// `@cast_buffer` uses to step, so this reads three floats and one
+				// past them, and only `stride` of them are kept.
+				Vec4 value = owner.stream.@cast_buffer(values, k, Vec4);
+				for (uint c = 0; c < stride; c++) built.values[(usz)k * stride + c] = value[c];
+			}
 		}
 
 		owner.clips[clip].channels.push(built);
@@ -2139,6 +2187,132 @@ fn Quaternionf quat_from_basis(Vec3 x, Vec3 y, Vec3 z)
 }
 
 <*
+ Reads a primitive's morph targets and uploads them as one buffer.
+
+ glTF stores a target as *displacements* from the base mesh, one accessor per
+ attribute per target, and this packs them target-major into
+ `morph_targets * vertex_count` `MorphDelta`. Target-major because the shader's
+ loop is over targets and the vertex is fixed, so each iteration reads one
+ contiguous block.
+
+ **A target with no POSITION accessor ends the read.** The specification requires
+ one, a target without it displaces nothing, and carrying it as a hole would make
+ the block index the shader computes disagree with the array — so the honest
+ answer to a malformed file is fewer targets, not misaligned ones.
+
+ NORMAL is optional and absent from plenty of files. It comes through as zeroes
+ rather than as a flag: the sum is a displacement either way, and a branch per
+ target per vertex would cost more than adding zero.
+
+ The buffers behind the target accessors are paged in here. `load_mesh_buffers`
+ walks `primitive.attributes` and morph accessors are not in it, so without this
+ the read would be against a buffer nobody opened.
+*>
+fn void? read_morph_targets(
+	Gpu* gpu,
+	gltf::GltfStream* stream,
+	gltf::Primitive primitive,
+	GpuMesh* out
+) @local
+{
+	if (primitive.targets.len() == 0 || out.vertex_count == 0) return;
+
+	uint count = 0;
+	foreach (&target : primitive.targets)
+	{
+		sz? position = target.get("POSITION");
+		if (catch position) break;
+		if (position >= stream.gltf.accessors.len()) break;
+
+		gltf::Accessor accessor = stream.gltf.accessors[position];
+		gltf::BufferView view = stream.gltf.bufferViews[accessor.view];
+		if (catch stream.load_buffer(view.buffer)) break;
+
+		sz? normal = target.get("NORMAL");
+		if (try normal && normal < stream.gltf.accessors.len())
+		{
+			gltf::BufferView normal_view = stream.gltf.bufferViews[stream.gltf.accessors[normal].view];
+			if (catch stream.load_buffer(normal_view.buffer)) break;
+		}
+		count++;
+	}
+	if (count == 0) return;
+
+	usz total = (usz)count * (usz)out.vertex_count;
+	MorphDelta[] deltas = mem::new_array(MorphDelta, (sz)total);
+	defer free(deltas);
+
+	for (uint t = 0; t < count; t++)
+	{
+		gltf::AttributeMap target = primitive.targets[t];
+		gltf::Accessor position = stream.gltf.accessors[target.get("POSITION")!!];
+
+		sz? normal_index = target.get("NORMAL");
+		bool has_normal = false;
+		gltf::Accessor normal;
+		if (try normal_index && normal_index < stream.gltf.accessors.len())
+		{
+			normal = stream.gltf.accessors[normal_index];
+			has_normal = normal.count >= position.count;
+		}
+
+		usz base = (usz)t * (usz)out.vertex_count;
+		for (uint i = 0; i < out.vertex_count; i++)
+		{
+			// A target accessor shorter than the mesh displaces the vertices it
+			// covers and leaves the rest where they are, which is visible and local
+			// rather than a read past the buffer.
+			if (i >= position.count) break;
+			deltas[base + i].position = stream.@cast_buffer(position, i, Vec3);
+			if (has_normal) deltas[base + i].normal = stream.@cast_buffer(normal, i, Vec3);
+		}
+	}
+
+	out.morph = gpu.upload_stream(deltas.ptr, MorphDelta::size * (sz)total)!;
+	out.morph_targets = count;
+	grow_bounds_by_morph(stream, primitive, count, out);
+}
+
+<*
+ The mesh's box, opened up by as much as a morph target can move it.
+
+ Read out of the target POSITION accessors' `min`/`max`, which glTF requires, so
+ this costs no vertex pass. **The componentwise maximum over targets, not the
+ sum**: a normalized morph set — the usual thing, a face where the expressions
+ add up to one — never displaces a vertex further than its largest single target,
+ and summing fifty of those would draw a box the size of the room and cull
+ nothing. A script that drives many targets to 1 at once can still push a vertex
+ outside this, and the cost of that is a character clipped at the edge of the
+ screen rather than anything worse.
+*>
+fn void grow_bounds_by_morph(
+	gltf::GltfStream* stream,
+	gltf::Primitive primitive,
+	uint count,
+	GpuMesh* out
+) @local
+{
+	Vec3 reach = { 0, 0, 0 };
+
+	for (uint t = 0; t < count; t++)
+	{
+		gltf::Accessor position = stream.gltf.accessors[primitive.targets[t].get("POSITION")!!];
+		if (position.min.len < 3 || position.max.len < 3) continue;
+
+		for (uint axis = 0; axis < 3; axis++)
+		{
+			float low = math::abs((float)position.min[axis]);
+			float high = math::abs((float)position.max[axis]);
+			float most = low > high ? low : high;
+			if (most > reach[axis]) reach[axis] = most;
+		}
+	}
+
+	out.bounds.min = out.bounds.min - reach;
+	out.bounds.max = out.bounds.max + reach;
+}
+
+<*
  Read one primitive's streams into tightly packed arrays and upload them.
 
  The `@each_*` macros are used rather than a memcpy of the accessor's range
@@ -2255,6 +2429,8 @@ fn GpuMesh? Assets.upload_primitive(
 		out.joints = gpu.upload_stream(joints.entries, uint[4]::size * joints.len())!;
 		out.weights = gpu.upload_stream(weights.entries, Vec4::size * weights.len())!;
 	}
+
+	read_morph_targets(gpu, stream, primitive, &out)!;
 
 	out.build_bvh(positions.array_view(), indices.array_view());
 
@@ -3342,6 +3518,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 		gpu.retire_memory(self.colors);
 		gpu.retire_memory(self.joints);
 		gpu.retire_memory(self.weights);
+		gpu.retire_memory(self.morph);
 	}
 	self.positions = {};
 	self.indices = {};
@@ -3350,6 +3527,8 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	self.colors = {};
 	self.joints = {};
 	self.weights = {};
+	self.morph = {};
+	self.morph_targets = 0;
 
 	// `free_indexed` rather than `free`: the root owns the sorted-index array
 	// that every node below it points into, and the plain `free` leaves it.

@@ -43,7 +43,7 @@ fn void a_directory_is_described_without_being_loaded() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 5, "every glTF in test/fixtures (%d)", found.len());
+	test::@check(found.len() == 6, "every glTF in test/fixtures (%d)", found.len());
 
 	three::InventoryEntry* entry = named(&found, "textured.glb");
 	if (entry == null) return;

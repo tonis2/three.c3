@@ -106,6 +106,43 @@ export class Mesh extends Object3D {
 		if (this._i >= 0) H.setVariant(this._i, this._g, n);
 	}
 
+	// -------------------------------------------------------------------
+	// Morph targets
+	//
+	// A blend shape is a displacement of every vertex, and `weights` is how
+	// much of each one this copy wears. `mesh.morphs` is how many the
+	// geometry has; a mesh with none answers 0 and `weights` is empty.
+	//
+	// **Per copy, like colour and variant.** Two faces built from one head
+	// mesh wear different expressions and stay one draw call — the
+	// displacements are shared, and only the handful of floats per copy is
+	// not. Weights outside 0..1 are allowed and do what you would expect;
+	// glTF does not clamp them either, and an exaggerated expression is a
+	// legitimate thing to ask for.
+	//
+	// Addressed by index rather than by name because glTF puts target names
+	// in `mesh.extras.targetNames`, which is a convention rather than a
+	// required field — there is nothing to read on a file that omits it.
+
+	get morphs() {
+		if (this._morphs === undefined) {
+			const ref = this._ref();
+			this._morphs = ref ? H.meshMorphs(ref.asset, ref.assetGeneration, ref.mesh) : 0;
+		}
+		return this._morphs;
+	}
+
+	get weights() {
+		if (!this._weights) this._weights = new MorphWeights(this);
+		return this._weights;
+	}
+
+	// `mesh.weights = [0.5, 0]` as well as `mesh.weights[0] = 0.5`, because
+	// setting the whole expression at once is the commoner of the two and a
+	// getter with no setter would swallow it — the trap `mesh.geometry`
+	// refuses out loud.
+	set weights(values) { this.weights.set(values); }
+
 	// Assignable before the mesh is in a scene, like `name` and `visible`, and
 	// replayed by `_materialize` for the same reason: an object is a detached
 	// description until it is added, and a script that sets up a mesh and then
@@ -128,6 +165,78 @@ export class Mesh extends Object3D {
 		this._material = v;
 		if (this._i >= 0) H.setMaterial(this._i, this._g, index);
 	}
+}
+
+// One mesh copy's morph weights, live the way `position` is: writing an element
+// reaches the host, and reading one reads what was written.
+//
+// An indexed accessor per target rather than a Proxy, for the reason the whole
+// prelude is JavaScript: an agent writes `head.weights[2] = 1` and expects it to
+// work, and defined properties make that ordinary property access rather than a
+// trap with its own cost and its own edge cases. The count is fixed at
+// construction because a geometry is immutable, so there is no case where the
+// number of targets changes under one of these.
+//
+// **The whole vector is sent on every write.** A face has a handful of targets
+// and the alternative is a crossing per element per frame; this is the same
+// choice `position` makes for its three numbers and for the same reason.
+export class MorphWeights {
+	constructor(owner) {
+		this._o = owner;
+		this._v = new Array(owner.morphs).fill(0);
+		for (let i = 0; i < this._v.length; i++) {
+			Object.defineProperty(this, i, {
+				enumerable: true,
+				get: () => this._v[i],
+				set: (value) => { this._v[i] = toWeight(value); this._push(); },
+			});
+		}
+	}
+
+	get length() { return this._v.length; }
+
+	// Shorter than the target count leaves the rest where they are, which makes
+	// `set([1])` on a twenty-target face one call rather than twenty numbers a
+	// script has to carry. Longer is refused, because a script passing more
+	// weights than there are targets has miscounted something.
+	set(values) {
+		if (!Array.isArray(values) && !ArrayBuffer.isView(values)) {
+			throw new TypeError('mesh.weights = wants an array of numbers');
+		}
+		if (values.length > this._v.length) {
+			throw new RangeError(
+				`this geometry has ${this._v.length} morph target${this._v.length === 1 ? '' : 's'}, `
+				+ `got ${values.length} weights`
+			);
+		}
+		for (let i = 0; i < values.length; i++) this._v[i] = toWeight(values[i]);
+		this._push();
+		return this;
+	}
+
+	fill(value) {
+		const weight = toWeight(value);
+		for (let i = 0; i < this._v.length; i++) this._v[i] = weight;
+		this._push();
+		return this;
+	}
+
+	toArray() { return this._v.slice(); }
+	toJSON() { return this.toArray(); }
+	[Symbol.iterator]() { return this._v[Symbol.iterator](); }
+	toString() { return `[${this._v.join(', ')}]`; }
+
+	// Nothing is sent while the mesh is a detached description; `_materialize`
+	// replays it at the add, the way colour and variant are replayed.
+	_push() {
+		if (this._o._i >= 0) H.setMorphWeights(this._o._i, this._o._g, this._v);
+	}
+}
+
+function toWeight(value) {
+	const weight = +value;
+	if (!Number.isFinite(weight)) throw new TypeError(`a morph weight wants a number, got ${value}`);
+	return weight;
 }
 
 // There is one scene at a time, and `new three.Scene()` is what empties it.

@@ -215,6 +215,12 @@ struct MeshPass
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] pose_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] pose_capacity;
 
+	// This frame's morph weights, one float per target per morphing copy —
+	// `write_morph_weights`. Per frame in flight for the palette's reason and under
+	// the same rule; empty in every scene where nothing morphs, which is most.
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] morph_buffers;
+	sz[MAX_FRAMES_IN_FLIGHT] morph_capacity;
+
 	// ---- Compute skinning, which is opt-in per character ---------------------
 	//
 	// Built on the first frame that has a compute-routed character in it, and not
@@ -289,6 +295,9 @@ struct MeshPass
 	// — `write_tables`.
 	ulong table_address;
 	ulong live_address;
+	// Where this frame's morph weights are, or 0 when nothing morphed —
+	// `write_morph_weights`.
+	ulong morph_address;
 	// Where this frame's deformed vertices are, or 0 when no soft body drew —
 	// `write_soft_vertices`.
 	ulong soft_address;
@@ -870,6 +879,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 
 	self.scene.update_world_matrices();
 	ulong live_address = self.write_live_poses(gpu, slot)!;
+	// Before the draw list for `write_live_poses`' reason, and it is the same
+	// reason: this writes each morphing copy's slice offset back into its node, and
+	// `build_draw_list` copies that into the instance a moment later.
+	ulong morph_address = self.write_morph_weights(gpu, slot)!;
+	self.morph_address = morph_address;
 
 	// Before the draw list, because the draw list depends on the answer. A caster
 	// the camera cannot see still throws a shadow into the frame, so a frame with a
@@ -961,6 +975,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.view_projection = view_projection,
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time, 0 },
 		.live_poses = live_address,
+		.morph_weights = morph_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
 		.debug = { (float)self.debug_view, 0, 0, 0 },
@@ -1139,6 +1154,14 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		ulong soft_positions = self.soft_address + (ulong)soft_offset * Vec3::size;
 		ulong soft_normals = soft_positions + (ulong)mesh.vertex_count * Vec3::size;
 
+		// Three ways this bucket can have nothing to displace: the mesh carries no
+		// targets, the compute pass already displaced it, or nothing in the frame
+		// morphs so there is no weight buffer to index. A soft bucket is the fourth
+		// — its positions are this frame's deformed ones, and a blend shape authored
+		// against the rest mesh displacing those is two deformations fighting over
+		// one vertex.
+		bool morphing = mesh.morph_targets > 0 && !preskinned && !soft && self.morph_address != 0;
+
 		records[recorded] = {
 			.positions = soft ? soft_positions : mesh.positions.address,
 			.normals = soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0),
@@ -1147,6 +1170,10 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.joints = skinned ? mesh.joints.address : 0,
 			.weights = skinned ? mesh.weights.address : 0,
 			.palette = skinned ? owner.poses.address : 0,
+			// Not on a soft bucket: a soft body's positions are this frame's
+			// deformed ones, and displacing them by a blend shape authored against
+			// the rest mesh would be two deformations fighting over one vertex.
+			.morph = morphing ? mesh.morph.address : 0,
 			.posed = preskinned
 				? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size
 				: 0,
@@ -1156,7 +1183,12 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
 				| (skinned ? FLAG_HAS_SKIN : 0)
 				| (preskinned ? FLAG_PRESKINNED : 0),
-			.skin_stride = preskinned ? mesh.vertex_count : 0,
+			// The mesh's vertex count, and two readers want it for the same reason:
+			// both the compute pass's output and the morph target table hold one
+			// block per copy or per target, so finding block `n` means multiplying by
+			// this. Zero when neither reader is running, which is most buckets.
+			.skin_stride = (preskinned || morphing) ? mesh.vertex_count : 0,
+			.morph_targets = morphing ? mesh.morph_targets : 0,
 			.uv_transform = material.uv_transform_or_identity(),
 			.surface = material.surface(),
 		};
@@ -1738,6 +1770,75 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 }
 
 <*
+ This frame's morph weights, for every copy that is wearing any, and the buffer's
+ address.
+
+ The fourth of the per-frame writers and by far the cheapest: one float per target
+ per morphing copy, so a face with twenty targets costs eighty bytes a frame. The
+ expensive half of a morph — the displacements themselves — was uploaded with the
+ geometry and is shared by every copy.
+
+ Two passes over the table for `write_live_poses`' reason: the first sizes the
+ buffer and the second fills it, because growing while writing would move the
+ addresses already handed out.
+
+ **The offset written back into the node is one more than the slice's**, so that
+ zero can go on meaning "this copy does not morph". A copy whose weights were
+ cleared, or whose entry was swept because its node died, keeps zero and the
+ shader skips the loop for it.
+
+ Returns zero when nothing morphs, which leaves `FrameBlock.morph_weights` null —
+ and no bucket names a displacement buffer either, because `record` makes both
+ decisions off this same address.
+*>
+fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
+{
+	self.scene.sweep_morphs();
+	if (self.scene.morphs.len() == 0) return 0;
+
+	sz needed = 0;
+	foreach (&entry : self.scene.morphs)
+	{
+		if (self.scene.morph_target_count(entry.node) == 0) continue;
+		needed += entry.weights.len();
+	}
+	if (needed == 0) return 0;
+
+	if (self.morph_capacity[slot] < needed)
+	{
+		sz capacity = self.morph_capacity[slot] > 0 ? self.morph_capacity[slot] : 64;
+		while (capacity < needed) capacity *= 2;
+
+		// Safe only because this slot's fence has been waited on — the same rule
+		// the instance, draw and palette buffers are freed under.
+		if (self.morph_buffers[slot].buffer != null) self.morph_buffers[slot].free();
+
+		self.morph_buffers[slot] = gpu.create_dynamic(float::size * (sz)capacity)!;
+		self.morph_capacity[slot] = capacity;
+	}
+
+	float* weights = (float*)self.morph_buffers[slot].data();
+	uint at = 0;
+
+	foreach (&entry : self.scene.morphs)
+	{
+		Node* node = self.scene.node(entry.node);
+		if (node == null) continue;
+		if (self.scene.morph_target_count(entry.node) == 0)
+		{
+			node.morph = 0;
+			continue;
+		}
+
+		foreach (i, weight : entry.weights) weights[at + i] = weight;
+		node.morph = at + 1;
+		at += (uint)entry.weights.len();
+	}
+
+	return self.morph_buffers[slot].address;
+}
+
+<*
  This frame's deformed vertices, for every soft body that is being drawn.
 
  Positions and then normals, one block per soft bucket, in one buffer — the same
@@ -1917,9 +2018,14 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 			.baked = owner.poses.address,
 			.live = self.live_address,
 			.output = output_address + (ulong)self.posed_offsets[i] * SkinnedVertex::size,
+			// The morph happens before the blend here exactly as it does in the
+			// vertex shader, or `skinning: 'compute'` would be a different face.
+			.morph = (mesh.morph_targets > 0 && self.morph_address != 0) ? mesh.morph.address : 0,
+			.morph_weights = self.morph_address,
 			.vertex_count = mesh.vertex_count,
 			.instance_count = bucket.count,
 			.flags = mesh.has_normals ? FLAG_HAS_NORMALS : 0,
+			.morph_targets = (mesh.morph_targets > 0 && self.morph_address != 0) ? mesh.morph_targets : 0,
 		};
 
 		vk::cmdPushConstants(
@@ -2524,6 +2630,9 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.draw_buffers[i].buffer != null) self.draw_buffers[i].free();
 		if (self.table_buffers[i].buffer != null) self.table_buffers[i].free();
 		self.table_capacity[i] = 0;
+		if (self.morph_buffers[i].buffer != null) self.morph_buffers[i].free();
+		self.morph_buffers[i] = {};
+		self.morph_capacity[i] = 0;
 		if (self.pose_buffers[i].buffer != null) self.pose_buffers[i].free();
 		if (self.posed_buffers[i].buffer != null) self.posed_buffers[i].free();
 		if (self.soft_buffers[i].buffer != null) self.soft_buffers[i].free();

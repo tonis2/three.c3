@@ -66,6 +66,22 @@ struct Instance
     // the same baked table and stay a single vkCmdDrawIndexed. Zero on a mesh with
     // no skin, and pointing at the skin's rest pose on one that has never played.
     uint pose;
+
+    // The frame this copy is crossfading *out of*, and how much of it is still
+    // showing — 1 when a fade begins, counting down to 0 as the new pose arrives.
+    //
+    // **Zero is "not fading", and it is zero because that is the quiet default.**
+    // A copy that has never crossfaded, a mesh with no skin and a freshly recycled
+    // slot all carry zero here, and zero reads as `pose` alone. See `skin_matrix`
+    // for what mixing two baked frames costs and why it is taken.
+    uint pose_from;
+    float blend;
+
+    // Which slice of `FrameBlock.morph_weights` this copy reads, plus one. Zero is
+    // "this copy does not morph", and is the quiet default every copy of every
+    // unmorphed mesh carries. Per instance for `pose`'s reason: two faces built
+    // from one head mesh wear different expressions and stay one draw call.
+    uint morph;
 };
 
 // One light, and there are four slots for them in the frame block.
@@ -164,6 +180,19 @@ struct FrameBlock
     // had when there was one light, and `shaders/shadow.slang` reads
     // `light_view_projection` at 88 by that offset.
     Light lights[4];
+    // This frame's morph weights: one float per target per morphing copy, packed
+    // end to end. An instance names its slice with `Instance.morph`, and the
+    // bucket says how many of them to read with `Draw.morph_targets`.
+    //
+    // **Here rather than in the draw record** for `live_poses`' reason: the record
+    // is per bucket, and a weight pointer there would split a morphing copy of a
+    // mesh away from the still copies it shares a draw call with. Null in a frame
+    // where nothing morphs, which is every frame of most projects.
+    //
+    // **After `lights` on purpose**, which is the rule the comment above states:
+    // every field kept the offset it had, so nothing that reads this block by
+    // offset had to change.
+    float* morph_weights;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -195,6 +224,19 @@ struct FrameBlock
 // of one. `shaders/skin.slang` writes it and `gpu/pipeline.c3` declares the same
 // 24 bytes.
 struct SkinnedVertex
+{
+    float3 position;
+    float3 normal;
+};
+
+// One vertex's displacement for one morph target. Byte for byte what
+// `gpu/pipeline.c3` declares, and the same 24 bytes as `SkinnedVertex`.
+//
+// **Displacements, not positions.** glTF stores morph targets as deltas from the
+// base mesh, and that is the only form that composes: a face wearing a smile and
+// a blink at once is the sum of two displacements, where the sum of two absolute
+// positions is not a face.
+struct MorphDelta
 {
     float3 position;
     float3 normal;
@@ -242,18 +284,30 @@ struct Draw
     // across the surface as the character moved — an effect that looks like a
     // material bug and is a record that changed meaning underneath it.
     SkinnedVertex* posed;
+    // This mesh's morph targets: `morph_targets` blocks of `vertex_count`
+    // displacements each, target-major, so one target's block is contiguous and
+    // the loop below walks it with one stride. Null on every mesh without them,
+    // which is nearly all of them.
+    MorphDelta* morph;
     // rgb: albedo factor. a: the alpha this returns — the mesh's own alpha
     // times `material.opacity`, folded together on the C3 side so the shader
     // sees one number. Ignored by an opaque pipeline, which writes no alpha at
     // all; `BlendMode` says which pipelines read it.
     float4 base_color;
     uint flags;
-    // The mesh's vertex count, and only meaningful under FLAG_PRESKINNED: the
-    // compute pass writes one posed copy of the mesh per instance into a single
-    // buffer, so a vertex is found at `iid * skin_stride + vid`. Zero everywhere
-    // else, where the streams hold one shared copy and SV_VertexID indexes it
-    // directly.
+    // The mesh's vertex count, and the stride two readers need. Under
+    // FLAG_PRESKINNED the compute pass wrote one posed copy of the mesh per
+    // instance into a single buffer, so a vertex is at `iid * skin_stride + vid`.
+    // Under `morph_targets` the displacement table holds one block per target, so
+    // target t's delta for this vertex is at `t * skin_stride + vid`. Zero when
+    // neither is running, where the streams hold one shared copy and SV_VertexID
+    // indexes it directly.
     uint skin_stride;
+    // How many of `morph`'s blocks to apply, and how many weights this bucket's
+    // instances read. **Zero is the whole test** — a mesh with no targets, a soft
+    // bucket, or a frame with no weight buffer all arrive here as zero and the
+    // loop does not run.
+    uint morph_targets;
     // xy: how many times the texture repeats across the surface. zw: where it
     // starts. `{1, 1, 0, 0}` is the identity and is what a material with no
     // transform is given — `scene/material.c3` says why a zero repeat means
@@ -345,6 +399,23 @@ static const uint POSE_MASK = 0x7fffffffu;
 // `shaders/sky.slang`'s header has the argument.
 [vk::binding(2, 0)] Sampler2D environment_map;
 
+// The four influences of one vertex against one palette, summed into the matrix
+// that poses it.
+//
+// Split out of `skin_matrix` so a crossfade can spend it twice: the two frames a
+// fade sits between are two offsets into one buffer, and everything else about
+// the vertex — its joints, its weights — is the same for both.
+float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+    // Summed rather than interpolated: linear blend skinning is a weighted sum of
+    // the joint matrices, and the weights are normalised on upload so the sum is
+    // affine. This is the one place the four influences per vertex are spent.
+    return weights.x * palette[base + joints.x]
+         + weights.y * palette[base + joints.y]
+         + weights.z * palette[base + joints.z]
+         + weights.w * palette[base + joints.w];
+}
+
 // The four influences of one vertex, blended into the matrix that poses it.
 //
 // **Which buffer the palette lives in is a property of the instance, not of the
@@ -357,6 +428,24 @@ static const uint POSE_MASK = 0x7fffffffu;
 // An `if` rather than a ternary, for the reason `vertexMain` gives below: a
 // ternary invites the compiler to evaluate both sides, and one of these two
 // pointers is null on any given draw.
+// **The crossfade below is a lie, and this is the name of it: it mixes joint
+// *matrices*, not the transforms that produced them.** A weighted sum of two
+// rigid transforms is not a rigid transform — the rotation part contracts toward
+// the chord between the two orientations, so a joint halfway through a fade is
+// fractionally shorter than the bone it is meant to be, and two poses a half-turn
+// apart pass through zero and turn the limb inside out on the way.
+//
+// It is taken anyway, on the baked path only, because the alternative is not a
+// better crossfade — it is no crossfade at all. A baked pose *is* a table lookup;
+// recovering the TRS triples behind two frames in order to slerp them means
+// decomposing a hundred and twenty matrices per character per frame, which is the
+// live palette with extra steps and a worse constant. A fade is short and runs
+// between two poses of one rig, where the contraction is a fraction of a percent
+// of a bone length for a fraction of a second.
+//
+// **A character that cannot afford the lie asks for the live path.** There
+// `AnimationPlayer` blends positions with a lerp and rotations with a slerp, on
+// the bone nodes themselves, and `blend` never rises above zero here.
 float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
 {
     float4x4* palette = draw.palette;
@@ -366,13 +455,13 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
     uint4 joints = draw.joints[vid];
     float4 weights = draw.weights[vid];
 
-    // Summed rather than interpolated: linear blend skinning is a weighted sum of
-    // the joint matrices, and the weights are normalised on upload so the sum is
-    // affine. This is the one place the four influences per vertex are spent.
-    return weights.x * palette[base + joints.x]
-         + weights.y * palette[base + joints.y]
-         + weights.z * palette[base + joints.z]
-         + weights.w * palette[base + joints.w];
+    float4x4 pose = blend_joints(palette, base, joints, weights);
+    // Uniform across an instance, so this is a scalar branch: a crowd that is not
+    // fading pays one compare and reads one palette.
+    if (instance.blend <= 0.0) return pose;
+
+    float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
+    return pose + (from - pose) * instance.blend;
 }
 
 struct VertexOutput
@@ -400,6 +489,42 @@ struct VertexOutput
     float4 sv_position : SV_Position;
 };
 
+// The base vertex, displaced by every morph target this bucket carries.
+//
+// **Before the skin and never after.** A blend shape is authored against the rest
+// mesh — the modeller moved those vertices with the character in its bind pose —
+// so displacing a vertex the joints have already moved would apply a rest-space
+// offset in posed space, and the correction would swing with the limb. glTF says
+// the same thing in the same order: morph, then skin, then the model matrix.
+//
+// A loop rather than a fixed set of slots, because a face is twenty targets and a
+// flag is two. The count is uniform across a draw, so this is one loop and not
+// divergence, and it does not run at all when `morph_targets` is zero — which is
+// every bucket in most frames, and every pre-skinned bucket always, because the
+// compute pass did this already.
+void apply_morph(Draw draw, Instance instance, uint vid, inout float3 position, inout float3 normal)
+{
+    if (draw.morph_targets == 0 || instance.morph == 0) return;
+
+    // Stored plus one, so zero can mean "this copy does not morph" — which is what
+    // a copy whose weights were cleared carries, and every copy of every unmorphed
+    // mesh with it.
+    uint base = instance.morph - 1;
+
+    for (uint t = 0; t < draw.morph_targets; t++)
+    {
+        float weight = push.frame[0].morph_weights[base + t];
+        // Skipped rather than multiplied by zero: a face wears two of its twenty
+        // expressions, so the branch is taken far more often than not and costs one
+        // compare against two multiply-adds and a 24-byte read.
+        if (weight == 0.0) continue;
+
+        MorphDelta delta = draw.morph[t * draw.skin_stride + vid];
+        position += weight * delta.position;
+        normal += weight * delta.normal;
+    }
+}
+
 [shader("vertex")]
 VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
@@ -414,6 +539,8 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
+
+    apply_morph(draw, instance, vid, position, normal);
 
     // The two ways a vertex gets posed, and a bucket is at most one of them.
     //

@@ -112,7 +112,7 @@ export const DOCS = {
 				'activate()', 'dispose()',
 				'unload()', 'export(path)', 'pick(x, y)', 'raycast(origin, direction)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, { loop, speed, time })', 'stop()', 'toJSON()',
+				'play(name, { loop, speed, time, fade })', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent', 'animations',
@@ -168,12 +168,36 @@ export const DOCS = {
 				'static (this will not move again: drawn into the shadow map once and kept)',
 				'collides (false takes it out of every spatial query — scenery, not a wall)',
 				'animations (empty unless this came from asset.instantiate())',
+				'morphs (how many morph targets the geometry has, 0 for most)',
+				'weights (per copy, free: how much of each morph target this one wears)',
 			],
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
+		},
+		MorphTargets: {
+			construct: 'mesh.weights — on a geometry that has any',
+			note:
+				'Blend shapes: a glTF morph target is a displacement of every vertex, and mesh.weights is '
+				+ 'how much of each one this copy wears. mesh.morphs is how many the geometry has and is 0 '
+				+ 'for anything that is not a blend-shape mesh. Write mesh.weights[1] = 0.5 or '
+				+ 'mesh.weights = [0.5, 0] — a shorter array leaves the rest where they are, so setting one '
+				+ 'expression on a twenty-target face is one call. Weights outside 0..1 are allowed and '
+				+ 'exaggerate; glTF does not clamp them either. '
+				+ 'ADDRESSED BY INDEX, not by name: glTF puts target names in mesh.extras.targetNames, '
+				+ 'which is a convention rather than a required field, so there is nothing to read on a '
+				+ 'file that omits it. '
+				+ 'PER COPY AND FREE, like color and variant: the displacements live on the asset and only '
+				+ 'a handful of floats per copy do not, so two faces built from one head mesh wear '
+				+ 'different expressions and stay ONE draw call. An all-zero vector takes the copy off the '
+				+ 'morph path entirely, so a face that has finished an expression costs nothing again. '
+				+ 'A file that ANIMATES its weights just works: play() drives them like any other channel, '
+				+ 'and a crossfade blends them. Morph runs before skinning, so a rigged face morphs and '
+				+ 'then poses, which is the order glTF specifies.',
+			properties: ['length (the target count)'],
+			methods: ['set(values)', 'fill(v)', 'toArray()'],
 		},
 		Material: {
 			construct: 'not constructed — it is what MeshLambertMaterial and ShaderMaterial share',
@@ -439,14 +463,17 @@ export const DOCS = {
 				+ 'there is one transform to move rather than a convention to remember. '
 				+ 'asset.instantiate() answers with one '
 				+ 'of these carrying the file\'s own node hierarchy, and that one is what animations, '
-				+ 'play(name, {loop, speed}) and stop() work on — a glTF clip drives a whole subtree, so '
-				+ 'its root is where it is played. On a hand-built Group animations is empty and play() '
-				+ 'throws saying which door to use. There is no AnimationMixer: one clip at a time, no '
-				+ 'crossfade.',
+				+ 'play(name, {loop, speed, time, fade}) and stop() work on — a glTF clip drives a whole '
+				+ 'subtree, so its root is where it is played. On a hand-built Group animations is empty '
+				+ 'and play() throws saying which door to use. There is no AnimationMixer: one clip at a '
+				+ 'time plus a crossfade. fade is seconds to blend out of whatever is playing, and asking '
+				+ 'to fade into the clip already playing does nothing — which is what makes '
+				+ 'play(state.clip, { fade: 0.2 }) safe to call from a state machine every frame. '
+				+ 'Restarting a clip outright is play() without a fade.',
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 			properties: [
 				'position', 'rotation', 'scale', 'visible', 'name', 'children', 'parent',
@@ -580,6 +607,7 @@ export const DOCS = {
 			properties: [
 				'path', 'meshes (names, in load order)', 'animations (clip names)',
 				'images (how many pictures the file holds)',
+				'bones (the rig\'s joint names — what socket(name) takes. Empty for a file with no skin)',
 			],
 			methods: [
 				'mesh(name)', 'meshAt(index)', 'imageAt(index, { colorSpace, generateMipmaps })',
@@ -629,6 +657,26 @@ export const DOCS = {
 				+ 'In a one-shot script with no animation loop running there is no frame to protect and '
 				+ 'it costs what the synchronous path costs. They reject if the asset is unloaded before '
 				+ 'their turn comes up.',
+		},
+		Sockets: {
+			construct: 'character.socket(boneName)',
+			note:
+				'Put the sword in the hand. socket(name) answers with an object parented to a bone of an '
+				+ 'instantiated character — add() things to it and they ride the animation. asset.bones is '
+				+ 'the list of names to pass, and it has to be: a rig calls its hand mixamorig:RightHand or '
+				+ 'hand.R or Bone.014 depending on who exported it, and the names are not guessable. '
+				+ 'THE TWO KINDS OF CHARACTER ANSWER DIFFERENTLY AND THAT IS THE POINT. With '
+				+ '{ skeleton: true } the bones already are objects in the tree, so socket() hands back the '
+				+ 'bone itself and everything is the ordinary scene graph. A baked character has no bone '
+				+ 'objects at all — dropping them is what makes a hundred of them a hundred nodes — so it '
+				+ 'makes a holder and the engine keeps it on the bone, reading the transform out of the '
+				+ 'same pose table the character is drawn from. Either way what comes back is something '
+				+ 'you can add() to, place relative to, and remove. '
+				+ 'It costs a second copy of the file\'s pose table, once per ASSET and only from the first '
+				+ 'socket on it — so a crowd nobody attaches anything to pays nothing. A socket on a '
+				+ 'character standing still costs nothing per frame either; it is rewritten only when the '
+				+ 'pose changes. Asking for a bone the rig has not throws with the list of the ones it has.',
+			methods: ['socket(boneName)'],
 		},
 		Geometry: {
 			construct: 'not constructible — use one of the seven shapes below',
@@ -993,6 +1041,7 @@ export const DOCS = {
 				+ 'line pipeline tests no depth, because the times you ask where something is are the '
 				+ 'times it is inside a wall.',
 			properties: [
+				'morphs, weights (inherited from Mesh — a helper\'s geometry has no morph targets, so 0 and empty)',
 				'box (settable — the helper moves and rescales to it)',
 				'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
 				'color (per copy, free: [r,g,b] or 0xff8800)',
@@ -1005,7 +1054,7 @@ export const DOCS = {
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 		},
 		BoxHelper: {
@@ -1019,6 +1068,7 @@ export const DOCS = {
 				+ 'scene.add(piece); scene.add(new three.BoxHelper(piece)) — and a nested piece takes '
 				+ 'piece.parent.add(...). Nothing watches the object, so call update() after moving it.',
 			properties: [
+				'morphs, weights (inherited from Mesh — a helper\'s geometry has no morph targets, so 0 and empty)',
 				'object (what it measures, read-only)',
 				'box (the box it is currently drawn on)',
 				'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
@@ -1032,7 +1082,7 @@ export const DOCS = {
 			methods: [
 				'update()', 'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)',
 				'getWorldPosition()', 'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)',
-				'alignTo(other, opts)', 'play(name, opts)', 'stop()', 'toJSON()',
+				'alignTo(other, opts)', 'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 		},
 		AxesHelper: {
@@ -1054,7 +1104,7 @@ export const DOCS = {
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 		},
 		GridHelper: {
@@ -1067,6 +1117,7 @@ export const DOCS = {
 				+ 'draw call. There is no `size` to read back because the size IS the scale: grid.scale.x, '
 				+ 'and it is live. Divisions are capped at 256.',
 			properties: [
+				'morphs, weights (inherited from Mesh — a helper\'s geometry has no morph targets, so 0 and empty)',
 				'divisions (read-only — a different count is a different mesh)',
 				'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
 				'color (per copy, free)',
@@ -1079,7 +1130,7 @@ export const DOCS = {
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 		},
 		WireframeHelper: {
@@ -1097,6 +1148,7 @@ export const DOCS = {
 				+ 'it to the pixel. Each shared edge is drawn once. A Group has no triangles of its own: '
 				+ 'traverse it and make one per Mesh.',
 			properties: [
+				'morphs, weights (inherited from Mesh — a helper\'s geometry has no morph targets, so 0 and empty)',
 				'of (the name of the mesh these edges belong to)',
 				'position', 'rotation', 'scale', 'visible', 'name', 'geometry', 'children', 'parent',
 				'color (per copy, free)',
@@ -1109,7 +1161,7 @@ export const DOCS = {
 			methods: [
 				'add(...)', 'remove(...)', 'traverse(fn)', 'getObjectByName(name)', 'getWorldPosition()',
 				'boundingBox()', 'boundsInParent()', 'align(axis, edge, at)', 'alignTo(other, opts)',
-				'play(name, opts)', 'stop()', 'toJSON()',
+				'play(name, opts)', 'stop()', 'socket(bone)', 'toJSON()',
 			],
 		},
 	},

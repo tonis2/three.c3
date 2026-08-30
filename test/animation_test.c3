@@ -588,3 +588,211 @@ fn void a_sampled_transform_reaches_the_frame() @test
 		test::@check(stats.unique_meshes == 4, "an animated prop drew %d meshes", stats.unique_meshes);
 	};
 }
+
+// ============================================================================
+// Crossfading
+// ============================================================================
+
+<*
+ The node called `name` under `root`, so two copies of one file can be told
+ apart.
+
+ `named` searches the whole scene and answers with the first match, which is what
+ every check above wants and exactly what a test with two copies of `hierarchy.glb`
+ in it cannot use — both copies have an `arm`.
+*>
+fn three::NodeId under(three::Scene* scene, three::NodeId root, String name)
+{
+	three::Node* node = scene.node(root);
+	if (node == null) return three::NO_NODE;
+	if (node.name == name) return root;
+
+	foreach (child : node.children)
+	{
+		three::NodeId found = under(scene, child, name);
+		if (found.is_set()) return found;
+	}
+	return three::NO_NODE;
+}
+
+<*
+ How far a rotation turns, in radians.
+
+ Through `acos` of the real part, clamped: a quaternion a float short of unit
+ makes `acos` answer NaN, and a NaN compares false against every bound a check
+ could put on it — so the test would pass by failing to fail.
+*>
+fn float turn_of(Quaternionf rotation)
+{
+	float real = rotation.l;
+	if (real < -1) real = -1;
+	if (real > 1) real = 1;
+	return 2.0f * math::acos(real);
+}
+
+<*
+ Half a crossfade is half the turn.
+
+ `spin` takes `arm` from the identity to a quarter turn, and the clip being faded
+ out of — `slide` — does not touch `arm` at all, so the fade starts from the
+ identity. The slerp midpoint of an arc that starts at the identity is *exactly*
+ half its angle, which makes this an equality rather than a shape somebody has to
+ eyeball: a fade that snapped to the new clip a frame late would be at the full
+ angle, and one that snapped early would be at zero.
+
+ The reference copy plays `spin` outright and is stepped by the same call, so the
+ angle being halved is the file's own number and not one written down here.
+*>
+fn void half_a_crossfade_is_half_the_turn() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId reference = scene.instantiate(id, scene.root, "reference");
+		three::NodeId faded = scene.instantiate(id, scene.root, "faded");
+		three::NodeId reference_arm = under(scene, reference, "arm");
+		three::NodeId faded_arm = under(scene, faded, "arm");
+
+		test::@check(scene.play(faded, "slide"), "`slide` would not play");
+		test::@check(scene.play(reference, "spin"), "the reference would not play `spin`");
+		test::@check(scene.play(faded, "spin", fade: 1.0f), "`spin` would not fade in");
+
+		// None of the incoming clip has arrived yet, so the arm is still where the
+		// clip on its way out left it — and `slide` leaves it at the identity.
+		float at_start = turn_of(scene.node(faded_arm).rotation);
+		test::@check(at_start < 0.001f, "the fade starts at %f radians, expected 0", at_start);
+
+		scene.step_animations(0.5f);
+
+		float full = turn_of(scene.node(reference_arm).rotation);
+		float half = turn_of(scene.node(faded_arm).rotation);
+		test::@check(full > 0.1f, "the reference turned %f radians, so there is nothing to be half of", full);
+		test::@check(
+			math::abs(half - full * 0.5f) < 0.002f,
+			"halfway through the fade the arm is at %f radians, expected half of %f", half, full
+		);
+	};
+}
+
+<*
+ A finished fade lands exactly on the clip it was fading into.
+
+ The other end of the check above, and the one that says the fade *stops*: a
+ weight that never quite reaches one leaves a character permanently a few percent
+ short of every pose it plays, which looks like a rig with soft joints rather than
+ like a bug.
+*>
+fn void a_finished_fade_is_the_new_clip_exactly() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId reference = scene.instantiate(id, scene.root, "reference");
+		three::NodeId faded = scene.instantiate(id, scene.root, "faded");
+		three::NodeId reference_arm = under(scene, reference, "arm");
+		three::NodeId faded_arm = under(scene, faded, "arm");
+
+		scene.play(faded, "slide");
+		scene.play(reference, "spin");
+		scene.play(faded, "spin", fade: 0.5f);
+
+		// Past the end of the fade, not up to it: the frame the weight reaches one
+		// on is the frame it has to be exact on.
+		scene.step_animations(0.5f);
+		scene.step_animations(0.25f);
+
+		float want = turn_of(scene.node(reference_arm).rotation);
+		float got = turn_of(scene.node(faded_arm).rotation);
+		test::@check(
+			math::abs(got - want) < 0.0001f,
+			"after the fade the arm is at %f radians and the reference is at %f", got, want
+		);
+	};
+}
+
+<*
+ The clip a fade is leaving goes on running while it leaves.
+
+ A walk faded into a wave keeps walking for the length of the fade. Holding the
+ outgoing clip on the frame it was on when the fade started would stop the legs a
+ beat before the arms move, which reads as a hitch rather than as a transition —
+ and it is the cheaper implementation, so it is the one to check against.
+
+ `tip` is `slide`'s channel and `spin` never touches it, so anything that moves it
+ during the fade is the outgoing clock.
+*>
+fn void the_clip_a_fade_leaves_goes_on_running() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
+		three::NodeId tip = under(scene, prop, "tip");
+
+		scene.play(prop, "slide");
+		scene.step_animations(0.5f);
+		Vec3 when_the_fade_starts = scene.node(tip).position;
+
+		scene.play(prop, "spin", fade: 1.0f);
+		scene.step_animations(0.5f);
+		Vec3 during = scene.node(tip).position;
+
+		test::@check(
+			!near(during, when_the_fade_starts),
+			"`tip` sat at (%.3f) for the whole fade — the outgoing clip stopped stepping",
+			when_the_fade_starts.x
+		);
+	};
+}
+
+<*
+ Fading into the clip that is already playing does nothing at all.
+
+ **The call a locomotion state machine makes is `play(state.clip, { fade })` every
+ time it runs.** Starting a fresh fade on each of those would hold the character
+ at the start of a crossfade forever — a bug that looks like the animation system
+ being broken rather than like the script asking for the wrong thing — so the
+ request is a no-op instead, and restarting a clip outright is `play` without a
+ fade.
+*>
+fn void fading_into_the_playing_clip_does_nothing() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId prop = scene.instantiate(id, scene.root, "prop");
+		three::NodeId tip = under(scene, prop, "tip");
+
+		scene.play(prop, "slide");
+		scene.step_animations(1.0f);
+		Vec3 midway = scene.node(tip).position;
+
+		test::@check(scene.play(prop, "slide", fade: 0.5f), "a redundant fade answered false");
+		Vec3 after = scene.node(tip).position;
+		test::@check(
+			near(after, midway),
+			"asking to fade into the playing clip moved `tip` from (%.3f) to (%.3f) — it restarted",
+			midway.x, after.x
+		);
+
+		// And ten more of the same call leave it running rather than pinned.
+		for (int i = 0; i < 10; i++)
+		{
+			scene.play(prop, "slide", fade: 0.5f);
+			scene.step_animations(0.05f);
+		}
+		Vec3 still_going = scene.node(tip).position;
+		test::@check(
+			!near(still_going, after),
+			"ten redundant fades pinned `tip` at (%.3f)", after.x
+		);
+	};
+}

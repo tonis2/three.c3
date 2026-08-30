@@ -45,11 +45,16 @@ somebody has one. The third wants ten minutes with a mouse.
 
 ## 3. Skinning
 
-- [ ] **Blending / crossfade between clips.** §17 has the two answers — ordinary
-      work on the live path, a shader change with a named lie on the baked one.
-- [ ] **Morph targets.**
-- [ ] **Sockets.** A bone's world transform is `pose * bind` and `AssetSkin.bind`
-      is kept for it; nothing reads it yet.
+Crossfading, morph targets and sockets are built. What they left open:
+
+- [ ] **A glTF node with several primitives only morphs its first.** Each
+      primitive became its own scene node and only one of them carries the glTF
+      index a WEIGHTS channel names. A face is one primitive in every file that
+      exists; a face split across two materials is where this shows.
+- [ ] **Nothing exercises a morph and a skin on one mesh.** The order is written
+      into all four shaders and into `write_morph_weights`, and no fixture has
+      both — so the property that a rigged face morphs *then* poses is argued for
+      and not measured. It wants a fixture, not a design.
 - [ ] **Re-run the compute→vertex barrier injection on a machine with a fuller
       validation layer.** Deleting that barrier left the suite green here, under
       the ordinary layer and under synchronization validation both. The check that
@@ -145,9 +150,9 @@ what it measured, is `notes.md` §17; the ordering argument that used to head th
 section went with them, because the order was the argument and it has been
 followed.
 
-- [ ] **Animation blending**, and **clip events** with it: a sorted time list per
-      clip compared against the player's clock, fired into a JS callback. Cheap on
-      both paths.
+- [ ] **Clip events**: a sorted time list per clip compared against the player's
+      clock, fired into a JS callback. Cheap on both paths. The blending it was
+      bundled with is built — §3.
 - [ ] **Inverse kinematics.** `collision::ik::solve_chain`
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a

@@ -82,6 +82,26 @@ struct Instance
 	// else, so they key a hundred different frames out of one baked table and stay
 	// a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
 	uint pose;
+
+	// The frame this copy is crossfading *out of*, and how much of it is still
+	// showing — 1 when the fade starts and 0 when it is over. 0 and 0 on every
+	// copy that is not mid-fade, which is every copy in almost every frame, and
+	// which is why zero is the value that means "not fading".
+	//
+	// The pair is what makes a crossfade cost a baked character nothing it was
+	// not already paying: two offsets and a weight still disagree per instance
+	// and nothing else does, so a crowd mid-fade is still one draw call. What it
+	// buys and what it costs in accuracy is `skin_matrix` in `shaders/mesh.slang`.
+	uint pose_from;
+	float blend;
+
+	// Which slice of this frame's morph weights this copy reads, **plus one** — so
+	// zero is "this copy does not morph", which is the quiet default and what
+	// every copy of every mesh in every file without targets carries.
+	//
+	// Per instance for `pose`'s reason: two faces built from one head mesh have to
+	// be able to wear different expressions and still be one draw call.
+	uint morph;
 }
 
 <*
@@ -423,6 +443,15 @@ struct Scene
 	// trade.
 	List{AnimationPlayer} players;
 
+	// The nodes being kept on bones — `Scene.attach_socket`. Empty in every scene
+	// that has not asked for one, which is almost all of them.
+	List{Socket} sockets;
+
+	// The nodes carrying morph weights — `Scene.set_morph_weights`. A side table
+	// rather than a field on `Node`, because a scene of ten thousand crates should
+	// not carry ten thousand empty lists for a feature none of them use.
+	List{MorphWeights} morphs;
+
 	// Rebuilt by `update`; read by `MeshPass.record`.
 	List{Draw} draws;
 	List{Instance} instances;
@@ -670,6 +699,8 @@ fn Scene* Scene.init(&self)
 	self.nodes.init(mem, 64);
 	self.free_slots.init(mem, 16);
 	self.players.init(mem, 4);
+	self.sockets.init(mem, 4);
+	self.morphs.init(mem, 4);
 	self.draws.init(mem, 64);
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
@@ -822,6 +853,11 @@ fn void Scene.free(&self)
 	self.free_slots.free();
 	foreach (&player : self.players) player.free();
 	self.players.free();
+	self.sockets.free();
+	self.sockets = {};
+	foreach (&entry : self.morphs) entry.weights.free();
+	self.morphs.free();
+	self.morphs = {};
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
@@ -967,6 +1003,8 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 
 	node.skin = -1;
 	node.pose = 0;
+	node.pose_from = 0;
+	node.blend = 0;
 	// A character cannot be a static caster — `set_static_caster` refuses one, and
 	// this is the other door: a node may be given a skin *after* it was marked
 	// static, and a pose offset moving is a silhouette moving with no transform to
@@ -1078,6 +1116,7 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 		.root = root,
 		.asset = asset,
 		.clip = -1,
+		.from_clip = -1,
 		.speed = 1,
 		.live_skin = live_skin && loaded.skins.len() > 0,
 	};
@@ -1118,9 +1157,10 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 
  @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
  @param time : `Seconds into the clip to start at, measured from its own start. What a crowd needs: a hundred characters playing one walk cycle at a hundred phases is a hundred different values of this and one baked clip.`
+ @param fade : `Seconds to crossfade out of whatever is playing. Zero is the snap, and asking for one when the clip named is already the clip playing is a no-op — which is what makes calling this every frame from a state machine safe.`
  @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
 *>
-fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f, float time = 0)
+fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float speed = 1.0f, float time = 0, float fade = 0)
 {
 	if (self.assets == null) return false;
 	AnimationPlayer* player = self.player(root);
@@ -1138,6 +1178,30 @@ fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float spee
 
 	self.assets.ensure_clip(player.asset, (uint)found);
 
+	// **Asking to fade into the clip already playing does nothing at all.** The
+	// call a locomotion state machine makes is `play(state.clip, { fade })` every
+	// time it runs, and restarting the fade on every one of those would hold the
+	// character at the start of a fade forever. Restarting a clip outright is
+	// still `play` without a fade.
+	if (fade > 0 && player.playing && player.clip == found) return true;
+
+	// What the fade leaves behind, taken before the fields below are overwritten.
+	// Nothing playing means nothing to fade from, and fading up out of a rest pose
+	// is a pop with extra steps — so the fade is skipped rather than half-applied.
+	if (fade > 0 && player.playing && player.clip >= 0)
+	{
+		player.from_clip = player.clip;
+		player.from_time = player.time;
+		player.from_speed = player.speed;
+		player.from_loop = player.loop;
+		player.fade = 0;
+		player.fade_duration = fade;
+	}
+	else
+	{
+		player.from_clip = -1;
+	}
+
 	player.clip = found;
 	player.speed = speed;
 	player.loop = loop;
@@ -1147,11 +1211,12 @@ fn bool Scene.play(&self, NodeId root, String clip, bool loop = true, float spee
 	// spread with `i / count * duration` and not have to know the duration.
 	if (loop) player.time = (float)clip_loop_time(&self.assets.slot(player.asset).clips[found], player.time);
 
-	player.apply(self, &self.assets.slot(player.asset).clips[found]);
-	// And the skin, for `apply`'s own reason one level down: a character placed and
-	// played in the same breath should be posed at the frame it asked for rather
-	// than sitting in its bind pose until something steps the clock.
-	player.key_pose(self, self.assets.slot(player.asset), &self.assets.slot(player.asset).clips[found]);
+	// Posed at the frame it asked for rather than sitting in its bind pose until
+	// something steps the clock — nodes and skin both, which is what `repose` is.
+	player.repose(self, loaded);
+	// And anything hanging off a bone with it: a sword attached to a character
+	// that is then played should be in the played hand, not in the rest hand.
+	self.update_sockets();
 	return true;
 }
 
@@ -1167,6 +1232,10 @@ fn bool Scene.stop(&self, NodeId root)
 	AnimationPlayer* player = self.player(root);
 	if (player == null) return false;
 	player.playing = false;
+	// And the fade with it. A stopped player still steps the clip it is fading out
+	// of — that is what finishes a fade whose destination is a short one-shot — so
+	// leaving this set would make `stop()` mean "keep moving for another 200ms".
+	player.from_clip = -1;
 	return true;
 }
 
@@ -1189,6 +1258,8 @@ fn bool Scene.step_animations(&self, float dt)
 		player.advance(self, self.assets, dt);
 		if (player.playing) playing = true;
 	}
+	// After the players, because a socket reads the pose they have just written.
+	self.update_sockets();
 	return playing;
 }
 
@@ -1290,6 +1361,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// skeleton, reading joint matrices out of an asset it does not name.
 	node.skin = -1;
 	node.pose = 0;
+	node.pose_from = 0;
+	node.blend = 0;
+	node.morph = 0;
 	node.preskinned = false;
 	// Dynamic until a script says otherwise, and reset for `material`'s reason: a
 	// recycled slot that stayed static would put a new node into a shadow map
@@ -2302,6 +2376,13 @@ fn void Scene.build_draw_list(
 				// about. Zero on everything that is not skinned, which the shader
 				// reads as nothing because the bucket's flags say there is no skin.
 				.pose = node.pose,
+				// Zero on everything that is not mid-crossfade. `AnimationPlayer`
+				// is the only writer of either.
+				.pose_from = node.pose_from,
+				.blend = node.blend,
+				// Written by `MeshPass.write_morph_weights` just before this walk,
+				// and zero on everything it did not touch.
+				.morph = node.morph,
 			});
 		}
 		placed++;
