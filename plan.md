@@ -117,9 +117,6 @@ What the chain does not cover, roughly in the order it would grow:
 - [ ] **A second `reads` tap per pass**, or a pass fanning out to two consumers.
 - [ ] **MRT** — a pass writing two attachments.
 - [ ] **Normals and motion vectors in a post body.** Depth is built.
-- [ ] **The material unit.** The actual PBR work — §2's blocker, and it touches
-      nothing above it. Separable from the pass work; only the format rule sits
-      across both.
 - [ ] **IBL bake**, on `texture.c3`'s one-shot path. `hostImageCopy` lands here.
 - [ ] **Fuse the pointwise passes** into one local read, measured against the
       chain rather than assumed. The first step whose value is a number and not a
@@ -204,52 +201,10 @@ All four items are built. What they left open:
 **Built.** `notes.md` §21 has the shape, the three decisions it forced and what
 the example it was measured against looked like before and after.
 
-- [ ] **A second kind of enemy in an example, to check the claim.** §21's own
-      acceptance test was "adding a second kind of enemy is its own storage and
-      its own systems, and nothing else changes", and `examples/wumpa_run.js`
-      demonstrates one — so the claim is argued rather than shown. A flying
-      enemy would settle it. **Do it after §23**, which replaces the storage
-      half; the systems half of §21 is unaffected either way.
 - [ ] **`three.systems.report()` has no way to reach a HUD.** It is the CPU half
       of `three.stats()` and there is nowhere to draw either — §5's text work is
       what unblocks it, and until then the numbers reach a person through
       `console.log` and a probe.
-
----
-
-## 23. Entities as classes
-
-**Built.** `class Critter extends three.Entity` — registering itself from its own
-statics — with `three.track(Class, options)` beside it for a class that cannot
-extend. `Class.on(event, matcher, fn)`, `three.emit`, `three.instanceOf`, the
-`near` event, `static volume` and the columns are all in
-`src/js/prelude/entity.js`; `test/entity_test.c3` has twenty tests and
-`examples/wumpa_run.js` is converted — the PLAYER included, so the file's last
-five free functions and its `ctl`/`state`/`intent` bags are a `class Player
-extends three.Entity` with `step`, `spin`, `hurt`, `collect`, `look` and `pose`
-on it, and its hand-built kinematic capsule is a `static volume`. **`cast.js`, `kind.js` and `assemble.js` are deleted**, the first two with
-their coverage ported. The design, what it replaced and the measurement below
-are the module header's.
-
-**The gather is measured**, which was the open question: 115–148 ns per entity,
-flat — 0.02 % of a frame at ten entities, 1.4 % at a thousand, 7 % at five
-thousand. So `columns` is an option a game reaches for in the low thousands and
-not before, and `entity.js`'s header carries the table.
-
-- [ ] **`c.position[0]` or `c.position.x`.** The subarray is what shipped and it
-      is free; an xyz wrapper costs a getter per access and the benchmark above
-      is the budget it has to fit in. The one place the raw form reads badly is
-      `wumpa_run.js`'s `arc` system, which is nine `[0]`/`[1]`/`[2]` in a row.
-- [ ] **`near` fires every tick inside the radius, not on the crossing.** That is
-      what the hand-written loop it replaced did, and a rule wanting the edge
-      keeps its own flag. Revisit when something wants `enter`/`leave` semantics
-      on a distance rather than on a trigger volume.
-- [ ] **A second tracked class in an example, to check §21 and §22's claim.** A
-      flying enemy: its own class, its own columns, its own systems and its own
-      rules, with nothing in the pack's six or the frame's seven edited. It is
-      the same acceptance test both of those sections set themselves and neither
-      has been shown.
-
 
 ---
 
