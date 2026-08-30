@@ -69,11 +69,11 @@ somebody has one. The third wants ten minutes with a mouse.
 - [ ] **A scene has no way to say which keys it binds.** Seven keys bound to a
       character had to be delivered in a chat message. Smallest possible version
       of this section, and already missed.
-- [ ] **A one-line overlay before the library.** Lives, coins, `r.hit.name` and
-      "you won" have nowhere to go but `console.log`, which the window does not
-      show. `three.debug.overlay(string)` drawn this frame and gone the next.
-      Not widgets; the consume question does not arise. §21's `systems.report()`
-      is waiting on the same pixel.
+- [ ] **Draw the one-line overlay.** `three.debug.overlay(string)` exists and
+      reaches `console.log` and the run's `debug` array only; the window still
+      shows no text. One line, this frame, gone the next — not widgets, so the
+      consume question does not arise. §21's `systems.report()` waits on the
+      same pixel.
 
 ## 6. Audio, saving, and the rest
 
@@ -98,11 +98,6 @@ Cheap to decide, expensive to discover.
       reference to? Probably nothing good and probably acceptable — but a known
       answer rather than a discovered one. **No longer gates §8**: a reload is a
       new context, so the hazard is not on that path.
-- [ ] **`run_script` of an Entity game cannot rebuild the level.** `three.reload()`
-      is a new context and does not have this problem; `run_script` shares the
-      class registry. A second `class Player extends three.Entity` throws, and
-      the only way out is killing the process. §23 has the dispose half; this is
-      whether `run_script` should call it, or whether there is a `three.reset()`.
 
 ## 11. Verification
 
@@ -148,7 +143,7 @@ count is not the trigger and never was.
 
 ## 17. Gameplay
 
-**Everything here but the two below was built.** What each of them settled, and
+**Everything here but the three below was built.** What each of them settled, and
 what it measured, is `notes.md` §17; the ordering argument that used to head this
 section went with them, because the order was the argument and it has been
 followed.
@@ -160,25 +155,6 @@ followed.
       (`lib/collision.c3l/src/ik.c3`) exists with a `shortest_arc` beside it and
       nothing in `src/` calls either. Live skinning already lets a script write a
       bone, so foot planting, a look-at and a weapon aim are a binding away.
-- [ ] **`pressed()` in the fixed loop.** Edges are a frame fact; gameplay is 0–8
-      fixed steps of that frame. `examples/wumpa_run.js` and `examples/mario.js`
-      both grew a `latch` system and an `intent` object to carry `space` across
-      the boundary. Either `pressed` stays true for every fixed step of the frame
-      that saw the edge, or there is a `consume` that is safe in `phase: 'fixed'`.
-      The latch is the first thing a platformer copies, which means it is missing.
-- [ ] **`moveAndSlide` does not see kinematic motion.** A lift the capsule is
-      standing on is ice unless the game adds `dy` by hand after the sweep.
-      `r.groundVelocity`, or adding it inside the call, is the whole of riding.
-      The controller still touches no rigidbody — this is the mesh `r.ground`
-      already named, moving between sweeps.
-- [ ] **`camera.attach` offset is world space.** A third-person follow behind the
-      player is not expressible: the offset does not turn with the object, and
-      `lag` is milliseconds next to a `dt` in seconds. `{ behind, height }` in the
-      object's heading, lag in seconds, is the camera a platformer otherwise
-      writes by guessing yaw.
-- [ ] **`s.time` / `v.time`.** `Post` already has `p.time` on the game clock. A
-      ShaderMaterial still takes a uniform and a system to write it every frame,
-      once per waving material. Same clock, same `timeScale`.
 - [ ] GPU Particles
 
 
@@ -220,9 +196,6 @@ All four items are built. What they left open:
       Honest, and undocumented anywhere a script can see it.
 - [ ] **The large bucket's threshold of 64 cells is a guess with an argument
       rather than a measurement.**
-- [ ] **Delete the `size().length_sq() > 0.1` lower bound** in
-      `spatial_hash.c3` whenever somebody is next in that file. A one-cell box
-      costs one cell; there is nothing for a floor under it to protect.
 
 ---
 
@@ -241,20 +214,6 @@ the example it was measured against looked like before and after.
       of `three.stats()` and there is nowhere to draw either — §5's text work is
       what unblocks it, and until then the numbers reach a person through
       `console.log` and a probe.
-
----
-
-## 22. Kinds, assemble, and composing a game
-
-**Built.** `three.kind`, `three.kindOf` and `Cast.of`;
-`notes.md` §22 has how they work and what was decided. `examples/wumpa_run.js`
-is converted and its header has the before/after.
-
-- [ ] **The event/rules system is designed, in §23.3.** It landed as
-      `Class.on(event, matcher, fn)` rather than `three.on(a, verb, b, fn)`:
-      dispatch is on a pair, and hanging the rule off the subject's class is what
-      fixes the argument order. `three.kindOf(object)` was built for it and
-      becomes `three.instanceOf(object)` there.
 
 ---
 
@@ -290,14 +249,6 @@ not before, and `entity.js`'s header carries the table.
       rules, with nothing in the pack's six or the frame's seven edited. It is
       the same acceptance test both of those sections set themselves and neither
       has been shown.
-- [ ] **`Class.dispose()` after the scene is gone.** `disposeInactive()` frees the
-      nodes and leaves the names. A second `class Player extends three.Entity`
-      then throws "already a tracked class called 'Player'", and calling
-      `Player.dispose()` throws `this Scene was disposed` before it deletes the
-      name — so the only way out is killing the process. `Track.dispose` has to
-      free `byName` even when `remove` cannot unparent. `examples/mario.js` is the
-      script that found it: a `run_script` of the same file is the agent loop,
-      and it is the one that cannot run twice.
 
 
 ---
