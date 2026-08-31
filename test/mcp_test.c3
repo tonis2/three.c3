@@ -311,7 +311,7 @@ fn void get_api_docs_answers_with_an_index() @test
 			"and the divergences: %s", response);
 		test::@check(response.contains("ShaderMaterial"), "the class NAMES are there");
 		test::@check(
-			!response.contains("Read a .glb or .gltf"),
+			!response.contains("Read a `.glb` or `.gltf`"),
 			"but not the prose behind them: %s",
 			response
 		);
@@ -329,7 +329,7 @@ fn void get_api_docs_still_dumps_everything_when_asked() @test
 		String response = call(server, "get_api_docs", `{"all":true}`);
 		defer response.free(mem);
 
-		test::@check(response.contains("Read a .glb or .gltf"), "the function prose is in there");
+		test::@check(response.contains("Read a `.glb` or `.gltf`"), "the function prose is in there");
 		test::@check(response.contains("drawCalls"), "and the stats block: %s", response[:512]);
 	};
 }
@@ -352,7 +352,7 @@ fn void get_api_docs_searches_the_whole_surface() @test
 		test::@check(response.contains("differences.convex-geometry"), "and so is the difference");
 		test::@check(response.contains("the bound of a scan"), "with the prose, not just the name");
 		test::@check(
-			!response.contains("Read a .glb or .gltf"),
+			!response.contains("Read a `.glb` or `.gltf`"),
 			"and nothing that does not match: %s",
 			response
 		);
@@ -400,7 +400,7 @@ fn void get_api_docs_writes_a_file_to_grep() @test
 		defer response.free(mem);
 
 		test::@check(response.contains(path), "the answer names the file: %s", response);
-		test::@check(!response.contains("Read a .glb or .gltf"), "and is not the docs themselves");
+		test::@check(!response.contains("Read a `.glb` or `.gltf`"), "and is not the docs themselves");
 
 		char[]? written = file::load(mem, path);
 		test::@check(@ok(written), "the file is there");
@@ -410,7 +410,7 @@ fn void get_api_docs_writes_a_file_to_grep() @test
 			String markdown = (String)bytes;
 			test::@check(markdown.contains("### classes.ConvexGeometry"), "one heading per entry");
 			test::@check(markdown.contains("the bound of a scan"), "with the prose under it");
-			test::@check(markdown.contains("Read a .glb or .gltf"), "and the whole surface in it");
+			test::@check(markdown.contains("Read a `.glb` or `.gltf`"), "and the whole surface in it");
 		}
 	};
 }

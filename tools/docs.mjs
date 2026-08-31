@@ -7,16 +7,14 @@
 // the folder into `src/js/prelude/docs.data.js`: one object, the shape
 // `docs.js` walks. `docs/README.md` is the guide to the format.
 //
-// This lives under `site/` and the engine does not run it. `c3c build` embeds
-// `docs.data.js` and nothing more, which is why that file is committed rather
-// than generated on the way past: an engine build that shelled out to a script
-// in the website folder would have the dependency backwards, and one that
-// silently regenerated an embedded artifact is the trap `runtime.c3` warns
-// about. So the flow is: edit `docs/`, run this, commit both. `--check` is what
-// stops the two drifting — it fails if the committed module is not what the
-// folder compiles to, and CI runs it.
+// The engine does not run this. `c3c build` embeds `docs.data.js` and nothing
+// more, which is why that file is committed rather than generated on the way
+// past: a build that silently regenerated an embedded artifact is the trap
+// `runtime.c3` warns about. So the flow is: edit `docs/`, run this, commit both.
+// `--check` is what stops the two drifting — it fails if the committed module
+// is not what the folder compiles to, and CI runs it.
 //
-//   node site/tools/docs.mjs           write docs.data.js if the docs changed
+//   node tools/docs.mjs           write docs.data.js if the docs changed
 //   node tools/docs.mjs --check   compile and report, write nothing
 //   node tools/docs.mjs --print   the compiled object, as JSON, to stdout
 //
@@ -422,7 +420,7 @@ function byName(a, b) {
 // line separators JSON allows raw and older parsers do not are escaped.
 export function moduleSource({ data, sections }) {
 	const literal = value => JSON.stringify(value, null, '\t').replace(/[\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16)}`);
-	return '// Generated from docs/ by site/tools/docs.mjs — edit the Markdown, not this file.\n'
+	return '// Generated from docs/ by tools/docs.mjs — edit the Markdown, not this file.\n'
 		+ '// `c3c build` regenerates it; `docs.js` reads it.\n\n'
 		+ `export const DATA = ${literal(data)};\n\n`
 		+ `export const SECTIONS = ${literal(sections)};\n`;
@@ -439,8 +437,8 @@ export async function current(compiled) {
 
 	const where = relative(repoRoot, output);
 	throw new Error(have === null
-		? `${where} is missing — run \`node site/tools/docs.mjs\` and commit it`
-		: `${where} is not what docs/ compiles to — run \`node site/tools/docs.mjs\` and commit the result`);
+		? `${where} is missing — run \`node tools/docs.mjs\` and commit it`
+		: `${where} is not what docs/ compiles to — run \`node tools/docs.mjs\` and commit the result`);
 }
 
 // Writes `docs.data.js`, and only if it changed, so an untouched docs folder
