@@ -610,6 +610,9 @@ fn void JsRuntime.close(&self)
 	// `Texture` objects own, which will never be disposed now that the context
 	// is going. See `release_script_textures`.
 	self.release_script_textures();
+	// And the last kind of reference this context holds: the `ArrayBuffer`s a
+	// native plugin published over its own memory. See `plugin/host_js.c3`.
+	self.release_plugin_buffers();
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
@@ -654,7 +657,7 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
  module named for it. See `js/modules.c3`.
 
  @param specifier : `Root-relative, and also what a stack trace calls it and what its own imports resolve against.`
- @require self.modules.root.len > 0 : "a module needs an assets root to resolve against"
+ @require self.modules.root.len > 0 || specifier.starts_with(PLUGIN_SCHEME) : "a module needs a root to resolve against"
 *>
 fn RunResult JsRuntime.run_module(&self, String specifier)
 {

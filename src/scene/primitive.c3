@@ -790,6 +790,11 @@ fn AssetId? Assets.upload_built(
 		.index_count = (uint)geometry.indices.len(),
 		.has_normals = geometry.normals.len() == geometry.positions.len(),
 		.has_uvs = geometry.uvs.len() == geometry.positions.len(),
+		// The same optional-by-length test as the two above. Nothing three.c3
+		// tessellates fills this — a box has no colour attribute and a hull never
+		// had one — but a mesh handed in from outside does, and the exporter's
+		// re-read path fills it for a mesh that came out of a file carrying one.
+		.has_colors = geometry.colors.len() == geometry.positions.len(),
 		.base_color = srgb_to_linear_rgb(PRIMITIVE_COLOR),
 		.texture = -1,
 		.bounds = bounds_of(geometry.positions.array_view()),
@@ -816,6 +821,10 @@ fn AssetId? Assets.upload_built(
 	if (mesh.has_uvs)
 	{
 		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
+	}
+	if (mesh.has_colors)
+	{
+		mesh.colors = gpu.upload_stream(geometry.colors.entries, Vec4::size * geometry.colors.len())!;
 	}
 	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
 	// Not for lines. The index buffer is pairs and `build_bvh` reads it in threes,

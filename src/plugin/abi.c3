@@ -38,7 +38,7 @@ module three_abi;
  this engine or was not, and a host that loaded a mismatched one would be
  reading a struct by a map that no longer describes it.
 *>
-const uint ABI_VERSION = 6;
+const uint ABI_VERSION = 11;
 
 // The symbol the host looks for. One per image.
 const ZString PLUGIN_ENTRY = "three_plugin_main";
@@ -223,6 +223,105 @@ alias AddGroupFn = fn Node(Scene scene, Node parent, ZString name);
 alias AddMeshFn  = fn Node(Scene scene, Asset asset, uint mesh, Node parent, ZString name);
 
 <*
+ Geometry a plugin computed, as an asset it can then place.
+
+ The door `plugin_abi.md` §5 left for a plugin that is not placing files. Three
+ kinds of thing need it and none of them can be a `.glb` on disk: a mesh built
+ from a voxel grid, one edited vertex by vertex, and one whose colours change
+ while it is on screen.
+
+ ## Streams
+
+ `positions` and `normals` are three floats each and `colors` is four; all three
+ are `vertex_count` long and `normals` and `colors` may be null. `indices` is
+ `index_count` long, wound counter-clockwise, and must be a multiple of three.
+ Nothing is retained: the arrays are read during the call and the caller may free
+ them the moment it returns — §6's rule, and the reason there is no matching
+ release verb.
+
+ A mesh with no colour stream draws in the material's own colour and a node's
+ `set_color` multiplies it, which is the cheap way to tint a whole model. The
+ stream is for the other case, where the tint is per vertex and the point of the
+ picture — a weight map, a heat map, a segmentation.
+
+ ## `key` is an identity, not a name
+
+ Two calls with the same key answer with the same asset and the second one
+ uploads nothing, exactly as two `new three.BoxGeometry(1,1,1)` do. That makes a
+ rebuild cheap to ask for and is a trap for a plugin whose mesh *changed*: a key
+ that does not move means the new vertices are silently dropped. Vary it —
+ append a counter — and give the old one back with `remove_node` followed by
+ `unload_unused`.
+
+ NO_ASSET if the streams do not describe a mesh: no vertices, fewer than three
+ indices, or an index count that is not a multiple of three.
+*>
+alias BuildMeshFn = fn Asset(
+	ZString key,
+	float* positions,
+	float* normals,
+	float* colors,
+	uint vertex_count,
+	uint* indices,
+	uint index_count
+);
+
+<*
+ Free every asset nothing in any scene still names. `three.unloadUnused()`.
+
+ What a plugin that rebuilds its geometry calls after taking the old node out.
+ Answers how many assets went, which is zero on the ordinary frame where nothing
+ was dropped — so it is cheap to call unconditionally after a rebuild rather than
+ tracking whether one is owed.
+*>
+alias UnloadUnusedFn = fn uint();
+
+<*
+ The part of the window the scene draws into, as fractions of it — x, y, width,
+ height, y down from the top.
+
+ `{ 0, 0, 1, 1 }` is the whole window and is where a host starts. Anything else
+ is a *pane*: a plugin that draws an interface around the scene sets this to the
+ rect of the element the scene belongs in, and the engine scissors to it and
+ takes the projection's aspect from it. Without that the model is centred on the
+ window rather than on the pane and is stretched by the window's shape, which
+ reads as the camera being subtly wrong rather than as a rect being unset.
+
+ Fractions rather than pixels because the two ends measure differently: a laid-out
+ interface is in logical points and the attachment is in physical ones. A fraction
+ needs no backing-scale factor and survives a resize between this call and the
+ frame that reads it.
+
+ A rect that lands outside the window is clamped into it, and one that resolves to
+ less than a pixel is drawn as one pixel — a pane dragged shut is a picture nobody
+ can see, which is right, rather than a validation error.
+*>
+alias SetViewRectFn = fn void(float x, float y, float width, float height);
+
+<*
+ The camera, as the orbit it already is.
+
+ Every field of the engine's own camera except roll, which a plugin that wants it
+ can reach from a script. Angles in degrees: yaw turns around +Y with zero
+ putting the eye on +Z, pitch lifts the eye above the horizon, and `fov` is
+ vertical.
+
+ A plugin that draws its own overlays over the scene — a gizmo, a bone, a label
+ pinned to a joint — needs the projection it is projecting with to be the one the
+ scene was drawn with. Pushing the camera every frame is what makes those the
+ same numbers rather than two things kept in step by hand. Note the *aspect* is
+ not here: it is the view rect's, which the engine already knows and the plugin
+ would otherwise have to compute the same way twice.
+*>
+alias SetCameraFn = fn void(
+	float target_x, float target_y, float target_z,
+	float distance,
+	float yaw, float pitch,
+	float fov,
+	float near_plane, float far_plane
+);
+
+<*
  The interface: the two verbs that let a plugin own the screen's foreground.
 
  A `void*` rather than a `cui::Ui*` because this file is compiled into images
@@ -241,6 +340,26 @@ alias UiContextFn = fn void*();
 // null to clear. A script's `three.ui.set` and this are exclusive: the last
 // writer holds the floor.
 alias UiSetRootFn = fn void(void* element);
+
+<*
+ A place inside the plugin's own tree for a script's snapshot, or null to
+ withdraw the offer.
+
+ The verb that stops a native plugin and a script being two writers over one
+ floor. `ui_set_root` says "the interface is mine"; this says "and scripts draw
+ *here*", naming a `cui::Element*` of the tree already mounted. `three.ui.set`
+ then lands inside the plugin's layout instead of replacing it.
+
+ The obligation is one line long: withdraw before the element goes. cui releases
+ a subtree children-first, so a widget's `unmount` hook runs after the snapshot
+ under it was recycled — safe, because the host checks, but too late to be
+ tidy. `ui_set_root` withdraws for a plugin that rebuilds wholesale.
+
+ Withdrawing clears the snapshot rather than re-homing it, and a script watches
+ `three.ui.slot.generation` to know it must draw again. One slot per host: see
+ `render/ui.c3`'s `set_slot` for why, and for what the second would cost.
+*>
+alias UiSetSlotFn = fn void(void* element);
 
 <*
  JavaScript, without QuickJS in the plugin's build.
@@ -307,6 +426,82 @@ alias JsThrowFn = fn void(JsCall call, ZString message);
 alias JsEvalFn = fn bool(ZString name, char* source, usz len);
 
 <*
+ The element type a buffer is read or published as.
+
+ The ABI's own numbering, deliberately not quickjs's `ARRAY_*` — those are
+ `JSTypedArrayEnum` values, and a contract two images are compiled against
+ separately should not be a third library's enum reachable by neither of them.
+ `host_js.c3` maps them across in one switch, which is the place a quickjs bump
+ would break loudly rather than silently.
+*>
+const int BUFFER_U8  = 0;
+const int BUFFER_I32 = 1;
+const int BUFFER_U32 = 2;
+const int BUFFER_F32 = 3;
+const int BUFFER_F64 = 4;
+
+<*
+ An argument's bytes, borrowed for the duration of the call.
+
+ The other half of `js_arg_text`, and the verb that makes item 4 of
+ `plugin_plan.md` possible: a plugin cannot link quickjs, so a typed array is
+ unreadable to it unless the host hands over the pointer. Any typed array or
+ `ArrayBuffer` answers; a plain `Array` does not, because it has no contiguous
+ bytes to point at.
+
+ **Bytes, not elements.** The length is in bytes and the pointer is untyped,
+ because the plugin already knows what it asked the script to pack — and a
+ length in elements would need the kind to mean anything, which is one more
+ thing for the two sides to disagree about.
+
+ `bytes` is written even when the answer is zero, so a caller that ignores the
+ return value reads a null rather than whatever was in the variable.
+
+ @param bytes : `Where to write the borrowed pointer. Valid only until the verb returns.`
+ @return `The length in bytes, or zero for anything that is not a buffer.`
+*>
+alias JsArgBufferFn = fn usz(JsCall call, int at, char** bytes);
+
+<*
+ A typed array as the call's answer.
+
+ `shared` is the whole decision. False copies the bytes into an array
+ JavaScript owns, which is what a result computed into scratch wants — the
+ plugin is free the moment the verb returns and there is no lifetime rule at
+ all. True publishes a **frozen, zero-copy view over the plugin's own memory**,
+ which is what a per-frame read of a large array wants and what
+ `crig/src/mcp/jsdata.c3` proved against the executable.
+
+ A shared view is recorded by its base address, and `js_drop_buffer` is how the
+ plugin says the memory behind it is gone. Nothing else can know: the host has
+ no idea when a plugin reallocates, so a shared buffer that is never dropped is
+ a script reading released pages.
+
+ Nothing is answered when `len` is zero or `bytes` is null — the call keeps
+ whatever it had, which for a verb that wrote nothing else is `undefined`.
+
+ @param kind : `One of the BUFFER_* constants above.`
+*>
+alias JsReturnBufferFn = fn void(JsCall call, char* bytes, usz len, int kind, bool shared);
+
+<*
+ Detach every shared view over `bytes`, before the memory goes away.
+
+ A read through a detached view throws `TypeError: detached ArrayBuffer` at that
+ moment, which is the whole point: the alternative is not an error but a wrong
+ answer some time later.
+
+ Null drops every view this plugin shared, which is what a plugin does when it
+ rebuilds a whole document. Idempotent, and harmless for an address that was
+ never shared.
+
+ Not a `JsCall` verb: it is called when the memory changes, which is almost
+ never inside a verb body. The host's runtime is the only thing it needs, and
+ the host already knows which one that is.
+*>
+alias JsDropBufferFn = fn void(char* bytes);
+
+<*
  MCP: a plugin's tools land in three's server beside `run_script`.
 
  `mcp::ToolDef` is already a C registration record — a name, a description, a
@@ -331,11 +526,56 @@ alias McpCall = void*;
 alias McpToolFn = fn bool(void* user, McpCall call);
 
 <*
+ One tool, as the record `mcp::ToolDef` already is.
+
+ A struct rather than seven arguments because that is what it is on the far side,
+ and because the two flags below were found by the first real consumer rather
+ than guessed: crig hides 21 of its 27 tools and three of them answer with a
+ picture. A signature that had to grow twice in a week is one that should have
+ been a struct.
+*>
+struct McpTool
+{
+	ZString name;
+	ZString description;
+	// Raw JSON, inserted verbatim into `tools/list`.
+	ZString input_schema;
+	McpToolFn body;
+	void* user;
+
+	<*
+	 Whether `tools/list` leaves this one out.
+
+	 **Hidden is not disabled** — `tools/call` dispatches to it exactly as before.
+	 The flag decides what a client is *told about*, nothing else. crig's argument
+	 for it is the one that matters: its hidden tools are thirty-five thousand
+	 characters of description and schema that would otherwise sit in every
+	 session's context whether or not anything was rigged, and `run_script`
+	 reaches all of them anyway.
+	*>
+	bool hidden;
+
+	<*
+	 Whether the reply is the content array itself rather than text to put in one.
+
+	 Off is the ordinary tool. On is for a tool whose answer is not text at all —
+	 an image block carries base64 in a `data` member beside a `mimeType`, and
+	 escaping that structure into a text block would deliver the characters of the
+	 JSON instead of the JSON. A raw reply must be a well-formed JSON array of
+	 content blocks; nothing validates it.
+	*>
+	bool raw_content;
+}
+
+<*
  Register one tool. False if the name is taken — by three, or by a tool this
  plugin already added — rather than shadowing it, because a client that called
  `screenshot` and reached something else has no way to find out.
+
+ The record is copied, including its strings, so a plugin may build one on the
+ stack and let it go.
 *>
-alias McpAddToolFn = fn bool(ZString name, ZString description, ZString input_schema, McpToolFn body, void* user);
+alias McpAddToolFn = fn bool(McpTool* tool);
 
 // The call's arguments, as the JSON object the client sent. Borrowed for the
 // call; `{}` when it sent none.
@@ -388,9 +628,14 @@ struct HostApi
 	SetParentFn        set_parent;
 	AddGroupFn         add_group;
 	AddMeshFn          add_mesh;
+	BuildMeshFn        build_mesh;
+	UnloadUnusedFn     unload_unused;
+	SetViewRectFn      set_view_rect;
+	SetCameraFn        set_camera;
 
 	UiContextFn ui_context;
 	UiSetRootFn ui_set_root;
+	UiSetSlotFn ui_set_slot;
 
 	JsDefineFn       js_define;
 	JsArgNumberFn    js_arg_number;
@@ -400,6 +645,9 @@ struct HostApi
 	JsReturnBoolFn   js_return_bool;
 	JsThrowFn        js_throw;
 	JsEvalFn         js_eval;
+	JsArgBufferFn    js_arg_buffer;
+	JsReturnBufferFn js_return_buffer;
+	JsDropBufferFn   js_drop_buffer;
 
 	McpAddToolFn mcp_add_tool;
 	McpArgsFn    mcp_args;
@@ -455,6 +703,32 @@ struct PluginDesc
 	// string literal is the expected answer.
 	ZString name;
 	void* ctx;
+
+	<*
+	 The plugin's own JavaScript directory, or null for a plugin that ships none.
+
+	 **A relative path is relative to the plugin's binary, not to the process.**
+	 That is what makes the pair a bundle: the `.js` travels with the `.dylib`,
+	 and a plugin works whatever directory three was started in. An absolute path
+	 is used as written.
+
+	 Its modules resolve under `plugin:` — `plugin:panels/rig.js` is a file, and
+	 `./shared.js` inside it resolves as it would anywhere. The space is separate
+	 from the one `--assets` owns, so a game directory and a plugin directory can
+	 both be live in one process, and it is readable from the outside: a game's
+	 `main.js` may import a plugin's panel to extend it.
+	*>
+	ZString scripts;
+	<*
+	 The module three evaluates once the plugin's verbs are installed, relative to
+	 `scripts`, or null for a directory that is only ever imported *from*.
+
+	 Evaluated inside `install_js`'s call, which is what makes it survive a reload:
+	 the runtime after a reload is a different object, the verbs are installed into
+	 it again, and this is run against it again. A panel written against the
+	 editor is therefore edited and reloaded with shift+R, no rebuild involved.
+	*>
+	ZString entry;
 
 	PluginFrameFn      frame;
 	PluginEventFn      event;

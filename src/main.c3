@@ -130,6 +130,10 @@ struct Options
 	// up. See `plugin_abi.md` — three owns the window, the device and the server,
 	// and the plugin owns what the application is.
 	String plugin;
+	// `--shader-dir ""` turns off the working directory's shader override, which a
+	// plugin run from its own checkout usually wants — see `set_shader_override`.
+	String shader_dir;
+	bool shader_dir_given;
 	// Everything after `--`, handed over verbatim. three never reads it, so a
 	// plugin's flags may collide with three's freely.
 	String[] plugin_args;
@@ -197,6 +201,14 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
+			case "--shader-dir":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				// Only the empty string is meaningful today: it turns the working
+				// directory's `shaders/` override off. A real directory would be the
+				// obvious next step and nothing here refuses one — it is simply not
+				// what the flag is for yet.
+				opts.shader_dir = args[++i];
+				opts.shader_dir_given = true;
 			case "--plugin":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.plugin = args[++i];
@@ -282,6 +294,7 @@ fn void usage()
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
+	io::printn("  --shader-dir <dir>    override the built-in shaders (empty string: never)");
 	io::printn("  -h, --help            this");
 	io::printn("");
 	io::printn("  There is no file argument: a model is loaded from a script, with");
@@ -366,6 +379,12 @@ macro @debug_log(format, ...)
 *>
 fn void choose_caches(Options opts)
 {
+	// The shader *override* rather than the shader cache, and settled here because
+	// this is where every "where does a file come from" decision is made. A plugin
+	// run is the case it exists for: three's working directory is then the
+	// plugin's checkout, and a `shaders/` in there is not three's.
+	if (opts.shader_dir_given && opts.shader_dir.len == 0) set_shader_override(false);
+
 	@pool()
 	{
 		if (opts.cache_dir_set && opts.cache_dir.len == 0)

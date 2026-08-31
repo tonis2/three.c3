@@ -120,9 +120,14 @@ three_abi::HostApi engine_api = {
 	.set_parent        = &host_set_parent,
 	.add_group         = &host_add_group,
 	.add_mesh          = &host_add_mesh,
+	.build_mesh        = &host_build_mesh,
+	.unload_unused     = &host_unload_unused,
+	.set_view_rect     = &host_set_view_rect,
+	.set_camera        = &host_set_camera,
 
 	.ui_context  = &host_ui_context,
 	.ui_set_root = &host_ui_set_root,
+	.ui_set_slot = &host_ui_set_slot,
 };
 
 <*
@@ -155,6 +160,10 @@ struct PluginHost
 	// `dlopen`'s handle. Null when nothing is loaded — `active` is that question.
 	void* image;
 	three_abi::PluginDesc desc;
+	// `desc.scripts` made absolute against the image, or empty for a plugin that
+	// ships none. Resolved once here rather than at every reload, because the
+	// answer cannot change while the image is open. Owned; freed by `unload`.
+	String scripts;
 }
 
 fn bool PluginHost.active(&self) => self.image != null;
@@ -223,7 +232,39 @@ fn void? load_plugin(PluginHost* host, String path, Renderer* renderer, String[]
 	}
 
 	if (host.desc.name != null) plugin_name = host.desc.name;
+	host.scripts = plugin_scripts_dir(path, host.desc.scripts, mem);
 	io::printfn("three: plugin %s (ABI %d)", plugin_name.str_view(), host.desc.abi_version);
+	if (host.scripts.len > 0) io::printfn("three: plugin scripts %s", host.scripts);
+}
+
+<*
+ Where a plugin's `scripts` directory actually is.
+
+ A relative path is resolved against the *image*, not the working directory —
+ `plugin_abi.md`'s `PluginDesc.scripts` says why: the `.js` and the `.dylib` are
+ one bundle, and three is started from wherever the user happens to be. An
+ absolute path is its own answer, and a bare filename with no directory in the
+ image path leaves nothing to resolve against and is used as written.
+
+ Not `realpath`'d. The join can hold a `..` — `build/../assets/js` is what a
+ checkout produces — and the filesystem resolves those perfectly well; spending a
+ syscall to make the diagnostic prettier would also make it lie about symlinks.
+*>
+fn String plugin_scripts_dir(String image, ZString declared, Allocator allocator) @local
+{
+	if (declared == null) return "";
+	String named = declared.str_view();
+	if (named.len == 0) return "";
+	if (named[0] == '/') return named.copy(allocator);
+
+	usz cut = 0;
+	bool has_dir = false;
+	foreach (i, c : image)
+	{
+		if (c == '/') { cut = (usz)i; has_dir = true; }
+	}
+	if (!has_dir) return named.copy(allocator);
+	return string::format(allocator, "%s/%s", image[:cut], named);
 }
 
 // One iteration's worth. Null is "nothing to do" rather than an error, so a
@@ -277,6 +318,11 @@ fn void unload(PluginHost* host) @local
 	// through it, and this only ends the plugin's use of it.
 	plugin_name = "plugin";
 	plugin_frame_requested = false;
+	if (host.scripts.len > 0)
+	{
+		host.scripts.free(mem);
+		host.scripts = "";
+	}
 	if (host.image != null)
 	{
 		libc::dlclose(host.image);
@@ -316,6 +362,30 @@ fn Scene* resolve(three_abi::Scene scene, three_abi::Node node, NodeId* out) @lo
 {
 	Scene* found = scene_of(scene);
 	if (found == null) return null;
+	NodeId id = to_node_id(node);
+	if (found.node(id) == null) return null;
+	*out = id;
+	return found;
+}
+
+<*
+ The same, for a verb whose node argument is a *parent*: NO_NODE is the scene's
+ root rather than nothing.
+
+ A plugin cannot name the root any other way — the root's handle is never
+ answered by anything, and `place` already reads a missing parent as "at the top
+ of the scene". Without this, `add_mesh` and `add_group` refuse the only parent a
+ plugin placing its first object has, which reads as the verb being broken.
+*>
+fn Scene* resolve_parent(three_abi::Scene scene, three_abi::Node node, NodeId* out) @local
+{
+	Scene* found = scene_of(scene);
+	if (found == null) return null;
+	if (node == three_abi::NO_NODE)
+	{
+		*out = found.root;
+		return found;
+	}
 	NodeId id = to_node_id(node);
 	if (found.node(id) == null) return null;
 	*out = id;
@@ -575,7 +645,9 @@ fn bool host_set_parent(three_abi::Scene scene, three_abi::Node node, three_abi:
 	NodeId id;
 	Scene* found = resolve(scene, node, &id);
 	if (found == null) return false;
-	NodeId under = to_node_id(parent);
+	// NO_NODE is the root, as it is for `add_group` and `add_mesh` — "take this
+	// back to the top of the scene", which a plugin has no other way to say.
+	NodeId under = parent == three_abi::NO_NODE ? found.root : to_node_id(parent);
 	// Refused rather than half-done across scenes: two scenes are two node pools,
 	// so this would destroy the subtree and rebuild it under the other root, which
 	// is exactly what re-parenting is documented not to do.
@@ -587,7 +659,7 @@ fn bool host_set_parent(three_abi::Scene scene, three_abi::Node node, three_abi:
 fn three_abi::Node host_add_group(three_abi::Scene scene, three_abi::Node parent, ZString name) @local
 {
 	NodeId id;
-	Scene* found = resolve(scene, parent, &id);
+	Scene* found = resolve_parent(scene, parent, &id);
 	if (found == null) return three_abi::NO_NODE;
 	NodeId made = found.add_group(id, name == null ? "" : name.str_view());
 	return made.is_set() ? three_abi::pack(made.index, made.generation) : three_abi::NO_NODE;
@@ -602,12 +674,153 @@ fn three_abi::Node host_add_mesh(
 ) @local
 {
 	NodeId id;
-	Scene* found = resolve(scene, parent, &id);
+	Scene* found = resolve_parent(scene, parent, &id);
 	if (found == null || api_pass == null) return three_abi::NO_NODE;
 	AssetId of = { three_abi::unpack_index(asset), three_abi::unpack_generation(asset) };
 	if (api_pass.assets.mesh(of, mesh) == null) return three_abi::NO_NODE;
 	NodeId made = found.add_mesh(of, mesh, id, name == null ? "" : name.str_view());
 	return made.is_set() ? three_abi::pack(made.index, made.generation) : three_abi::NO_NODE;
+}
+
+<*
+ Geometry from a plugin's arrays, as an asset.
+
+ Copied into a `GeometryBuilder` and pushed through `upload_built`, so a mesh a
+ plugin computed and one three.c3 tessellated are the same thing afterwards:
+ same slot, same dedup by key, same picking tree, same unload path. The copy is
+ the price of the ABI's no-ownership rule — the arrays are the caller's and are
+ freed the moment this returns — and it is paid once per rebuild, not per frame.
+
+ Indices are bounds-checked against the vertex count. That is not paranoia about
+ the plugin: an out-of-range index is a device fault with no host-side symptom,
+ which would be reported as "three crashed" rather than as "the plugin sent a bad
+ mesh", and the walk is already being paid for by the copy beside it.
+*>
+fn three_abi::Asset host_build_mesh(
+	ZString key,
+	float* positions,
+	float* normals,
+	float* colors,
+	uint vertex_count,
+	uint* indices,
+	uint index_count
+) @local
+{
+	if (api_pass == null || api_renderer == null) return three_abi::NO_ASSET;
+	if (positions == null || indices == null || vertex_count == 0) return three_abi::NO_ASSET;
+	if (index_count < 3 || index_count % 3 != 0) return three_abi::NO_ASSET;
+
+	String name = key == null ? "" : key.str_view();
+	// The same dedup `Assets.primitive` does, and asked before the copy rather
+	// than after it — the point of a key is that a rebuild under one costs
+	// nothing, and a walk over the vertices first would spend most of that.
+	if (try hit = api_pass.assets.built(name))
+	{
+		return three_abi::pack(hit.index, hit.generation);
+	}
+
+	for (uint i = 0; i < index_count; i++)
+	{
+		if (indices[i] >= vertex_count)
+		{
+			io::eprintfn(
+				"[%s] build_mesh(%s): index %d at %d is past the %d vertices given",
+				plugin_name.str_view(), name, indices[i], i, vertex_count);
+			return three_abi::NO_ASSET;
+		}
+	}
+
+	GeometryBuilder geometry;
+	geometry.init();
+	defer geometry.free();
+
+	for (uint i = 0; i < vertex_count; i++)
+	{
+		usz at = (usz)i * 3;
+		geometry.positions.push({ positions[at], positions[at + 1], positions[at + 2] });
+	}
+	// Both optional, and optional by *length* on the far side — `upload_built`
+	// asks whether the stream is as long as the positions rather than whether a
+	// flag was set, so leaving one empty here is the whole of switching it off.
+	if (normals != null)
+	{
+		for (uint i = 0; i < vertex_count; i++)
+		{
+			usz at = (usz)i * 3;
+			geometry.normals.push({ normals[at], normals[at + 1], normals[at + 2] });
+		}
+	}
+	if (colors != null)
+	{
+		for (uint i = 0; i < vertex_count; i++)
+		{
+			usz at = (usz)i * 4;
+			geometry.colors.push({ colors[at], colors[at + 1], colors[at + 2], colors[at + 3] });
+		}
+	}
+	for (uint i = 0; i < index_count; i++) geometry.indices.push(indices[i]);
+
+	AssetId? built = api_pass.assets.upload_built(&api_renderer.gpu, name, name, &geometry);
+	if (catch err = built)
+	{
+		io::eprintfn("[%s] build_mesh(%s) failed: %s", plugin_name.str_view(), name, err);
+		return three_abi::NO_ASSET;
+	}
+	return three_abi::pack(built.index, built.generation);
+}
+
+fn uint host_unload_unused() @local
+{
+	if (api_pass == null || api_renderer == null) return 0;
+	UnloadReport report = api_pass.assets.unload_unused(&api_renderer.gpu);
+	// Files, not meshes: a plugin rebuilding one mesh made one asset and wants to
+	// know that one asset went. `report.meshes` counts pieces given back out of a
+	// file that stayed, which is a kit's number rather than a generated mesh's.
+	return report.assets;
+}
+
+fn void host_set_view_rect(float x, float y, float width, float height) @local
+{
+	if (api_pass == null) return;
+	// Stored as given and resolved against the attachment at `prepare` — see
+	// `MeshPass.resolve_view_rect`, which is where the clamping lives. A plugin
+	// setting this from a laid-out element does not know the backing scale and
+	// should not have to.
+	api_pass.view_rect = { x, y, width, height };
+}
+
+<*
+ The camera, from the plugin's own orbit.
+
+ A follow is cleared, because the two are the same job: `CameraFollow` writes the
+ target every frame, and a plugin pushing one every frame as well would produce a
+ camera that snaps between two answers. The plugin asked most recently, so the
+ plugin wins.
+
+ `clamp_angles` runs, as it does for every other writer. Its pitch limit is 89°
+ and so is crig's, so a plugin that clamped its own first is unchanged by this —
+ which is the property that matters, since a plugin projecting its own overlays
+ is relying on the two ends agreeing to the float.
+*>
+fn void host_set_camera(
+	float target_x, float target_y, float target_z,
+	float distance,
+	float yaw, float pitch,
+	float fov,
+	float near_plane, float far_plane
+) @local
+{
+	if (api_pass == null) return;
+	api_pass.follow = {};
+	Camera* camera = &api_pass.camera;
+	camera.target = { target_x, target_y, target_z };
+	camera.distance = distance;
+	camera.yaw = yaw;
+	camera.pitch = pitch;
+	camera.fov = fov;
+	camera.near_plane = near_plane;
+	camera.far_plane = far_plane;
+	camera.clamp_angles();
 }
 
 <*
@@ -639,6 +852,12 @@ fn void host_ui_set_root(void* element) @local
 {
 	if (api_renderer == null) return;
 	api_renderer.ui.set_plugin_root(element);
+}
+
+fn void host_ui_set_slot(void* element) @local
+{
+	if (api_renderer == null) return;
+	api_renderer.ui.set_slot(element);
 }
 
 // The empty handle is the engine's own NO_NODE rather than index `uint::max`

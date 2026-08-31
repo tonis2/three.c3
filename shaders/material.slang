@@ -481,11 +481,11 @@ struct VertexOutput
     // as the struct is.
     float4 color : COLOR0;
     nointerpolation uint variant : TEXCOORD2;
-    // COLOR1, and **`mesh.slang` has no counterpart** — it is the third varying
-    // this shader carries and that one does not, after `world` and `variant`. A
-    // colour attribute changes no pixel without a body to read it, so paying for
-    // the interpolation in the shader that has no body would be paying for
-    // nothing on every draw in the frame.
+    // COLOR1, and `mesh.slang` carries the same varying under the same semantic.
+    // It did not until that shader started multiplying COLOR_0 into albedo — see
+    // its own comment on this field for what changed and what the extra
+    // interpolation costs. Here a body reads it and may do anything with it;
+    // there it is a plain glTF factor.
     float4 vertex_color : COLOR1;
     float4 sv_position : SV_Position;
 };

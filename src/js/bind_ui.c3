@@ -64,6 +64,18 @@ struct UiHandlers
 	qjs::Value select;
 	qjs::Value toggle;
 	qjs::Value hover;
+	// The three cui's application widgets need and nothing else does. `confirm`
+	// and `dismiss` are a question's two answers, and `choose` is a file browser
+	// row being activated as opposed to merely selected — the distinction that
+	// makes a browser usable with single clicks.
+	qjs::Value confirm;
+	qjs::Value dismiss;
+	qjs::Value choose;
+	// The pointer on a `draw` node — position, buttons, modifiers and wheel,
+	// inside the hit test. `onClick` is the same pointer with everything but the
+	// fact of it thrown away, and the two are separate because most panels want
+	// only the small one.
+	qjs::Value pointer;
 	bool has_click;
 	bool has_change;
 	bool has_commit;
@@ -71,6 +83,10 @@ struct UiHandlers
 	bool has_select;
 	bool has_toggle;
 	bool has_hover;
+	bool has_confirm;
+	bool has_dismiss;
+	bool has_choose;
+	bool has_pointer;
 }
 
 fn void UiHandlers.release(&self, qjs::Context* js)
@@ -82,6 +98,10 @@ fn void UiHandlers.release(&self, qjs::Context* js)
 	if (self.has_select) js.release(self.select);
 	if (self.has_toggle) js.release(self.toggle);
 	if (self.has_hover) js.release(self.hover);
+	if (self.has_confirm) js.release(self.confirm);
+	if (self.has_dismiss) js.release(self.dismiss);
+	if (self.has_choose) js.release(self.choose);
+	if (self.has_pointer) js.release(self.pointer);
 	*self = { };
 }
 
@@ -97,6 +117,7 @@ fn void JsRuntime.bind_ui_verbs(&self, qjs::Value host)
 	self.bind(host, "uiPatch", &js_ui_patch, 2);
 	self.bind(host, "uiClear", &js_ui_clear, 0);
 	self.bind(host, "uiMeasure", &js_ui_measure, 3);
+	self.bind(host, "uiSlot", &js_ui_slot, 0);
 }
 
 // ============================================================================
@@ -329,6 +350,50 @@ fn void js_ui_measure(
 }
 
 <*
+ `three.ui.slot` — whether a native plugin has offered a place to draw, and how
+ big it is.
+
+ The read half of `plugin/abi.c3`'s `ui_set_slot`. A snapshot does not survive
+ the slot it was grafted into, so a panel written against an editor watches
+ `generation` and re-`set`s when it moves — a pane switched away from and back
+ is a different element, and the number is how a script hears about it.
+
+ Deliberately not routed through `ui_layer`: asking where a panel may go must
+ not bring a GPU device up, because the answer for a context without one is
+ "nowhere" and that is not an error.
+*>
+fn void js_ui_slot(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	bool present = self.renderer != null && self.renderer.ui.slot != null;
+	Vec2 size = present ? self.renderer.ui.slot_size() : (Vec2){ 0, 0 };
+	// The pane's corner in window points, which is what turns a `three.input`
+	// pointer reading into a position inside a panel — see `UiLayer.slot_origin`.
+	Vec2 origin = present ? self.renderer.ui.slot_origin() : (Vec2){ 0, 0 };
+	// Reported whether or not there is a slot, because the bump that matters most
+	// is the one where an offer was withdrawn.
+	uint generation = self.renderer == null ? 0 : self.renderer.ui.slot_generation;
+
+	qjs::Value answer = js.object();
+	js.set_property(answer, "present", qjs::bool_value(present));
+	js.set_property(answer, "generation", qjs::number_value((double)generation));
+	js.set_property(answer, "x", qjs::number_value((double)origin.x));
+	js.set_property(answer, "y", qjs::number_value((double)origin.y));
+	js.set_property(answer, "width", qjs::number_value((double)size.x));
+	js.set_property(answer, "height", qjs::number_value((double)size.y));
+	*out = answer;
+}
+
+<*
  `three.ui.patch(key, props)` — write the named fields of one keyed node.
 
  The retained half of the API, keyed by string rather than by handle: a HUD that
@@ -419,6 +484,12 @@ fn void js_ui_patch(
 			read_rows(&js, layer, props, node);
 			relist = true;
 		}
+		else if (has_prop(&js, props, "menus"))
+		{
+			layer.reset_list(node);
+			read_menus(&js, layer, props, node);
+			relist = true;
+		}
 		if (relist) layer.relist(node);
 	};
 }
@@ -465,6 +536,68 @@ fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::V
 }
 
 <*
+ Where a `fileBrowser` may look, and how its paths are written back.
+
+ **A browser rooted anywhere is a script reading the whole disk**, one directory
+ listing at a time, so it is confined by exactly the rule every other path a
+ script names is confined by — `resolve_asset`'s. The start is resolved through
+ that call, so `models` is the assets directory's `models`, `plugin:kits` is the
+ plugin's, and `../..` is refused; the root that resolution landed in becomes the
+ browser's own, and `render/ui.c3` sends any move outside it straight back.
+
+ A refused start opens at the root rather than raising. A browser is how somebody
+ recovers from a bad path — cui's own listing survives being pointed at one — and
+ refusing the whole node would take the panel down instead.
+
+ Paths come back the way the script would have written them: root-relative, with
+ the scheme they opened under, so a path out of `onChoose` is a path `three.load`
+ accepts. That is the same promise `three.inventory` makes about the paths it
+ hands back, and it is what makes the two verbs compose.
+
+ **A process with no assets directory and no plugin is not confined**, and that
+ is deliberate rather than a hole left open: it is the `--mcp` and CLI case,
+ where `locate` already uses a path as written because there is no directory to
+ be relative to and confining to nothing would refuse every path there is. A run
+ that wants the rule is a run that was given a root.
+*>
+fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
+{
+	String asked = spec.text;
+	// The prefix decides which of the two roots this browser belongs to, before
+	// anything is resolved — the same first question `resolve_asset` asks.
+	bool schemed = asked.starts_with(PLUGIN_SCHEME);
+	String root = schemed ? self.modules.scheme_root : self.modules.root;
+
+	spec.root = root;
+	spec.scheme = root.len > 0 && schemed ? PLUGIN_SCHEME : "";
+
+	if (root.len == 0)
+	{
+		// A `plugin:` start in a process with no plugin names no directory at
+		// all, and passing the prefix through as a path would open a folder with
+		// a colon in its name. Empty is cui's "wherever the process started".
+		spec.text = schemed ? "" : asked;
+		return;
+	}
+
+	// The bare scheme, or nothing said: the root itself, which is what "open the
+	// browser" means when nowhere in particular was asked for.
+	if (asked.len == 0 || asked == PLUGIN_SCHEME)
+	{
+		spec.text = root;
+		return;
+	}
+
+	String? where = self.resolve_asset(asked, tmem);
+	if (catch where)
+	{
+		spec.text = root;
+		return;
+	}
+	spec.text = where;
+}
+
+<*
  One node and everything under it, depth first.
 
  Pre-order because that is the order `push_node` hands out the indices children
@@ -478,7 +611,7 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	UiLayer* layer = &self.renderer.ui;
 
 	int kind = (int)prop_number(js, value, "k", -1);
-	if (kind < 0 || kind > UiNodeKind.TEXTFIELD.ordinal) return UI_BAD_PARENT~;
+	if (kind < 0 || kind > UiNodeKind.FILE_BROWSER.ordinal) return UI_BAD_PARENT~;
 
 	UiNodeSpec spec = {
 		.kind = UiNodeKind::from_ordinal((usz)kind),
@@ -508,6 +641,9 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 
 		.text = prop_text(js, value, "text", tmem),
 		.suffix = prop_text(js, value, "suffix", tmem),
+		.title = prop_text(js, value, "title", tmem),
+		.confirm_label = prop_text(js, value, "confirm", tmem),
+		.decline_label = prop_text(js, value, "decline", tmem),
 		.font = (uint)math::max(prop_number(js, value, "font"), 0.0),
 		.text_size = prop_float(js, value, "textSize"),
 
@@ -537,6 +673,10 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	taken.has_select = take_handler(js, value, "onSelect", &taken.select);
 	taken.has_toggle = take_handler(js, value, "onToggle", &taken.toggle);
 	taken.has_hover  = take_handler(js, value, "onHover", &taken.hover);
+	taken.has_confirm = take_handler(js, value, "onConfirm", &taken.confirm);
+	taken.has_dismiss = take_handler(js, value, "onDismiss", &taken.dismiss);
+	taken.has_choose  = take_handler(js, value, "onChoose", &taken.choose);
+	taken.has_pointer = take_handler(js, value, "onPointer", &taken.pointer);
 
 	spec.on_click  = taken.has_click;
 	spec.on_change = taken.has_change;
@@ -545,6 +685,16 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	spec.on_select = taken.has_select;
 	spec.on_toggle = taken.has_toggle;
 	spec.on_hover  = taken.has_hover;
+	spec.on_confirm = taken.has_confirm;
+	spec.on_dismiss = taken.has_dismiss;
+	spec.on_choose  = taken.has_choose;
+	spec.on_pointer = taken.has_pointer;
+
+	// Where a `fileBrowser` may look, decided here and enforced in
+	// `render/ui.c3`. This file is the one that knows what an assets directory
+	// is, and that is the whole reason the policy is written here rather than
+	// beside the widget it confines.
+	if (spec.kind == UiNodeKind.FILE_BROWSER) self.confine_browser(&spec);
 
 	// A Tree reports the two edges with different verbs; the JS side spells them
 	// onSelect and onToggle, and `UiNodeSpec` keeps them apart for the same
@@ -570,6 +720,13 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 			read_options(js, layer, value, index);
 		case TREE:
 			read_rows(js, layer, value, index);
+		case MENU:
+			read_menus(js, layer, value, index);
+		case FILE_BROWSER:
+			// The mask rides on `options` because it is the same thing: a
+			// borrowed `String[]` the snapshot fills in, and a second pair of
+			// push verbs for it would differ from `push_option` by nothing.
+			read_options(js, layer, value, index);
 		default:
 			break;
 	}
@@ -643,6 +800,44 @@ fn void read_options(qjs::Context* js, UiLayer* layer, qjs::Value node, uint ind
 	}
 }
 
+<*
+ A `menu` bar's two levels, in order.
+
+ One pass rather than two verbs, because the nesting is the whole difference
+ between this and `read_options`: an item belongs to the title above it, and the
+ layer records that by which `push_menu` was last.
+*>
+fn void read_menus(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+{
+	qjs::Value menus = js.property(node, "menus");
+	defer js.release(menus);
+	long count = menus.is_undefined() || menus.is_null() ? 0 : js.length(menus);
+
+	for (long i = 0; i < count; i++)
+	{
+		qjs::Value menu = js.index(menus, (uint)i);
+		defer js.release(menu);
+		layer.push_menu(index, prop_text(js, menu, "title", tmem));
+
+		qjs::Value items = js.property(menu, "items");
+		defer js.release(items);
+		long entries = items.is_undefined() || items.is_null() ? 0 : js.length(items);
+		for (long at = 0; at < entries; at++)
+		{
+			qjs::Value item = js.index(items, (uint)at);
+			defer js.release(item);
+			layer.push_menu_item(
+				index,
+				prop_text(js, item, "label", tmem),
+				prop_text(js, item, "shortcut", tmem),
+				prop_truth(js, item, "checked"),
+				prop_truth(js, item, "disabled"),
+				prop_truth(js, item, "separator")
+			);
+		}
+	}
+}
+
 fn void read_rows(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
 {
 	qjs::Value rows = js.property(node, "rows");
@@ -669,6 +864,47 @@ fn void read_rows(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index)
 // ============================================================================
 
 <*
+ A POINTER event as the object a script reads.
+
+ `x` and `y` are the node's own coordinates, `phase` is which edge this is, and
+ the four modifier flags are spelled out rather than handed over as the bitmask
+ they arrived in — a script writing `event.shift` is the whole reason this is an
+ object and not a number.
+
+ `button` is only meaningful on a down or an up; `buttons` is the level state and
+ is what a drag tests. Both are here because a script that had to reconstruct one
+ from the other would be keeping input state of its own, which is the thing this
+ event exists to stop it doing.
+*>
+fn qjs::Value JsRuntime.pointer_object(&self, UiEvent event)
+{
+	qjs::Value out = self.js.object();
+	self.js.set_property(out, "phase", self.js.string(ui_phase_name(event.phase)));
+	self.js.set_property(out, "x", qjs::number_value((double)event.at.x));
+	self.js.set_property(out, "y", qjs::number_value((double)event.at.y));
+	self.js.set_property(out, "buttons", qjs::int_value((int)event.buttons));
+	self.js.set_property(out, "button", qjs::int_value((int)event.index));
+	self.js.set_property(out, "wheel", qjs::number_value((double)event.value));
+	self.js.set_property(out, "wheelX", qjs::number_value((double)event.wheel_x));
+	self.js.set_property(out, "shift", qjs::bool_value((event.modifiers & 1) != 0));
+	self.js.set_property(out, "ctrl", qjs::bool_value((event.modifiers & 2) != 0));
+	self.js.set_property(out, "alt", qjs::bool_value((event.modifiers & 4) != 0));
+	self.js.set_property(out, "meta", qjs::bool_value((event.modifiers & 8) != 0));
+	return out;
+}
+
+fn String ui_phase_name(UiPointerPhase phase) @local
+{
+	switch (phase)
+	{
+		case DOWN: return "down";
+		case UP: return "up";
+		case WHEEL: return "wheel";
+		default: return "move";
+	}
+}
+
+<*
  One widget callback, from inside `Ui.process_input`.
 
  Installed as the layer's listener by `ui_layer`. The node index is the position
@@ -691,7 +927,7 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	bool* alive;
 	String what;
 	int argc;
-	qjs::Value[1] argv;
+	qjs::Value[2] argv;
 
 	switch (event.kind)
 	{
@@ -753,11 +989,63 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			what = "onSubmit";
 			argc = 1;
 			argv[0] = self.js.string(event.text);
+		case CONFIRM:
+			callback = handlers.confirm;
+			alive = &handlers.has_confirm;
+			what = "onConfirm";
+		case DISMISS:
+			callback = handlers.dismiss;
+			alive = &handlers.has_dismiss;
+			what = "onDismiss";
+		case MENU_PICK:
+			// The one handler here that takes two numbers: a bar is a list of
+			// lists, and which title it was is not recoverable from the item.
+			callback = handlers.select;
+			alive = &handlers.has_select;
+			what = "onSelect";
+			argc = 2;
+			argv[0] = qjs::int_value((int)event.index);
+			argv[1] = qjs::int_value((int)event.item);
+		case FILE_CHOOSE:
+			callback = handlers.choose;
+			alive = &handlers.has_choose;
+			what = "onChoose";
+			argc = 1;
+			argv[0] = self.js.string(event.text);
+		case FILE_SELECT:
+			callback = handlers.select;
+			alive = &handlers.has_select;
+			what = "onSelect";
+			argc = 1;
+			argv[0] = self.js.string(event.text);
+		case FILE_DIRECTORY:
+			// `onChange` rather than a fourth name, because where the browser is
+			// IS its value — the thing a breadcrumb beside it displays.
+			callback = handlers.change;
+			alive = &handlers.has_change;
+			what = "onChange";
+			argc = 1;
+			argv[0] = self.js.string(event.text);
+		case POINTER:
+			// One object rather than nine positional arguments. Everything else
+			// here hands over the one number the widget changed; this hands over
+			// a pointer, and a panel reads two or three fields of it and ignores
+			// the rest — which is what a named bag is for. Built only when there
+			// is somebody to give it to, because this fires every frame the
+			// pointer is over the node.
+			callback = handlers.pointer;
+			alive = &handlers.has_pointer;
+			what = "onPointer";
+			if (handlers.has_pointer)
+			{
+				argc = 1;
+				argv[0] = self.pointer_object(event);
+			}
 	}
 
 	if (!*alive)
 	{
-		if (argc > 0) self.js.release(argv[0]);
+		for (int i = 0; i < argc; i++) self.js.release(argv[i]);
 		return;
 	}
 
@@ -772,7 +1060,7 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	@pool()
 	{
 		qjs::Value? answer = self.js.call(callback, qjs::undefined_value(), argv[:argc]);
-		if (argc > 0) self.js.release(argv[0]);
+		for (int i = 0; i < argc; i++) self.js.release(argv[i]);
 
 		if (catch err = answer)
 		{

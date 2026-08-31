@@ -168,6 +168,30 @@ struct MeshPass
 	// most of why `frameAll` would otherwise leave the subject at a third of the
 	// width. Seeded in `init` so the very first fit is already right.
 	float aspect;
+	<*
+	 The part of the attachment the scene draws into, as fractions of it: x, y,
+	 width, height, with y measured down from the top like every other rect in the
+	 interface. `{ 0, 0, 1, 1 }` — the whole target — until something sets it.
+
+	 Fractions rather than pixels because the two ends measure in different units.
+	 A host setting this has a rect from a laid-out interface, in *logical* points;
+	 the attachment is in physical ones, and the factor between them is the
+	 window's backing scale, which changes when a window is dragged between
+	 displays. A fraction survives that, and survives a resize between the frame
+	 that set it and the frame that draws.
+
+	 It moves both the scissor and the aspect — `set_viewport_rect` has why both
+	 and not just the scissor. Culling, the shadow fit and `frame_camera` all read
+	 `aspect`, so they follow the pane rather than the window without knowing this
+	 field exists.
+	*>
+	float[4] view_rect;
+	// `view_rect` in physical pixels, as `prepare` resolved it against the target,
+	// and whether it is anything other than the whole of it. `record` has no
+	// target to measure and runs immediately after `prepare`, so this is the one
+	// place the resolution happens.
+	vk::Rect2D scene_rect;
+	bool scene_rect_partial;
 	// The lights this frame is drawn with, and the ambient floor under them. The
 	// active scene's own — `SceneLook` is where a script's writes land, and
 	// `activate_scene` is the only thing that copies one here.
@@ -449,6 +473,8 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// rather than here, because the same is true of every later resize and one
 	// guard at the point of use is the one that cannot be missed.
 	self.aspect = (float)target.extent.width / (float)target.extent.height;
+	// The whole of it, which is what every host that never asks for a pane gets.
+	self.view_rect = { 0, 0, 1, 1 };
 
 	// Set here rather than by the loaders, which is where it used to be and was a
 	// bug: `ready` guards `record` against running without a *pipeline*, and the
@@ -830,6 +856,44 @@ fn void MeshPass.derive_camera_planes(&self)
 }
 
 <*
+ `view_rect` against this frame's attachment, in pixels.
+
+ Clamped into the attachment and floored at one pixel each way. Vulkan requires a
+ scissor inside the render area and rejects a zero-extent viewport, and a pane
+ can legitimately be both — an area dragged shut, a tab in the middle of a split,
+ a window collapsed to nothing. A one-pixel scene is a frame nobody can see,
+ which is the right picture for a pane nobody can see; a validation error is not.
+
+ `scene_rect_partial` is what `record` branches on, and it answers false for a
+ rect that resolved to the whole attachment however it was written — so a host
+ that sets `{ 0, 0, 1, 1 }` explicitly costs the same as one that never set it.
+*>
+fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
+{
+	float width  = (float)extent.width;
+	float height = (float)extent.height;
+
+	float x = math::clamp(self.view_rect[0], 0.0f, 1.0f) * width;
+	float y = math::clamp(self.view_rect[1], 0.0f, 1.0f) * height;
+	// Against what is left rather than against the whole, so a rect running off
+	// the right edge is trimmed rather than wrapped back to the origin.
+	float w = math::clamp(self.view_rect[2], 0.0f, 1.0f) * width;
+	float h = math::clamp(self.view_rect[3], 0.0f, 1.0f) * height;
+	if (x + w > width) w = width - x;
+	if (y + h > height) h = height - y;
+
+	uint rx = (uint)x;
+	uint ry = (uint)y;
+	uint rw = w >= 1.0f ? (uint)w : 1;
+	uint rh = h >= 1.0f ? (uint)h : 1;
+	if (rx + rw > extent.width) rx = extent.width - rw;
+	if (ry + rh > extent.height) ry = extent.height - rh;
+
+	self.scene_rect = { .offset = { (int)rx, (int)ry }, .extent = { .width = rw, .height = rh } };
+	self.scene_rect_partial = rx != 0 || ry != 0 || rw != extent.width || rh != extent.height;
+}
+
+<*
  Records the draws.
 
  @param slot : `Which frame in flight this is. Selects the instance array and the draw records to write, and must be one whose fence has already been waited on.`
@@ -844,7 +908,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// it needs to be. Costs nothing unless something is pending.
 	self.collect_materials(gpu);
 
-	float aspect = (float)target.extent.width / (float)target.extent.height;
+	self.resolve_view_rect(target.extent);
+	float aspect = (float)self.scene_rect.extent.width / (float)self.scene_rect.extent.height;
 	// Remembered for `frame_camera`, which runs between frames and so has no target
 	// of its own to measure. A resize therefore reaches the next fit.
 	self.aspect = aspect;
@@ -1208,6 +1273,14 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 *>
 fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
+	// Before the sky, so the background lands in the pane too — a sky drawn over
+	// the whole window behind an interface that only opens a hole for the pane
+	// would show through every gap the interface has.
+	// 
+	// Only when it is a pane. `begin_render` has already set the full viewport, so
+	// the ordinary full-target frame records nothing extra here and is unchanged.
+	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
+
 	// First, and the ordering is load-bearing — `render/sky.c3` has why a sky
 	// drawn last would paint over glass.
 	// 

@@ -115,19 +115,13 @@ fn void fill_mcp_api(three_abi::HostApi* api)
 
 // ---------------------------------------------------------------- the verbs
 
-fn bool host_mcp_add_tool(
-	ZString name,
-	ZString description,
-	ZString schema,
-	three_abi::McpToolFn body,
-	void* user
-) @local
+fn bool host_mcp_add_tool(three_abi::McpTool* def) @local
 {
-	if (plugin_server == null || body == null || name == null) return false;
+	if (plugin_server == null || def == null || def.body == null || def.name == null) return false;
 
 	// Refused rather than shadowed: a client that called `screenshot` and reached
 	// something else has no way to find out that it did.
-	String wanted = name.str_view();
+	String wanted = def.name.str_view();
 	for (usz i = 0; i < plugin_server.tools_len; i++)
 	{
 		if (plugin_server.tools[i].name == wanted)
@@ -139,11 +133,13 @@ fn bool host_mcp_add_tool(
 
 	PluginTool* tool = mem::new(PluginTool);
 	*tool = {
-		.body        = body,
-		.user        = user,
+		.body        = def.body,
+		.user        = def.user,
 		.name        = wanted.copy(mem),
-		.description = description == null ? "".copy(mem) : description.str_view().copy(mem),
-		.schema      = schema == null ? `{"type":"object"}`.copy(mem) : schema.str_view().copy(mem),
+		.description = def.description == null ? "".copy(mem) : def.description.str_view().copy(mem),
+		.schema      = def.input_schema == null
+			? `{"type":"object"}`.copy(mem)
+			: def.input_schema.str_view().copy(mem),
 	};
 	if (plugin_tools.allocator == null) plugin_tools.init(mem, 4);
 	plugin_tools.push(tool);
@@ -155,6 +151,8 @@ fn bool host_mcp_add_tool(
 			.input_schema = tool.schema,
 			.handler      = &plugin_tool_thunk,
 			.user_data    = tool,
+			.raw_content  = def.raw_content,
+			.hidden       = def.hidden,
 		}
 	);
 	return true;
