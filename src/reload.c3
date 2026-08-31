@@ -52,7 +52,8 @@ fn void? reload(
 	Renderer* renderer = null,
 	c3w::Window* window = null,
 	String assets = "",
-	String script = ""
+	String script = "",
+	PluginHost* plugin = null
 )
 {
 	Gpu* gpu = renderer != null ? &renderer.gpu : null;
@@ -69,6 +70,11 @@ fn void? reload(
 	runtime.window = window;
 	runtime.activate_scene(pass.scene);
 	runtime.restore_persist(kept);
+
+	// Before `boot_world`, exactly as in `live`: the runtime here is a new object,
+	// so a plugin's namespace went with the old one, and a game's `main.js` would
+	// otherwise run against a `globalThis` that no longer has it.
+	plugin_js_ready(plugin, runtime);
 
 	boot_world(runtime, assets, script)!;
 }

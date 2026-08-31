@@ -652,6 +652,12 @@ struct UiLayer
 	List{UiNode} nodes;
 	cui::Element* tree;
 
+	// A native plugin's tree, grafted onto the same floor. Separate from `tree`
+	// because the two have different owners: this one has no `UiNode` records
+	// behind it and nothing here built it. Only one of the two is mounted at a
+	// time — see `set_plugin_root`.
+	cui::Element* foreign;
+
 	// The snapshot being built, between `begin_tree` and `commit_tree`. Separate
 	// from the live one so a tree that fails halfway leaves the interface exactly
 	// as it was — a panel that half-disappeared because a colour was malformed is
@@ -775,6 +781,8 @@ fn void UiLayer.free(&self)
 	self.pass.free();
 	self.ui.free();
 	self.ui = null;
+	// Freed with every other element by `Ui.free` above, whichever image built it.
+	self.foreign = null;
 	self.overlay_text.free();
 	self.held.free();
 	foreach (i, node : self.nodes) self.nodes[i].free();
@@ -920,6 +928,14 @@ fn void UiLayer.commit_tree(&self)
 	if (!self.open) return;
 	self.open = false;
 
+	// A plugin's tree loses the floor to a script's, by the same last-writer rule
+	// `set_plugin_root` states from the other side.
+	if (self.foreign)
+	{
+		self.ui.unmount(self.foreign);
+		self.foreign = null;
+	}
+
 	if (self.tree) self.ui.unmount(self.tree);
 	self.tree = self.pending;
 	self.pending = null;
@@ -997,6 +1013,60 @@ fn void UiLayer.clear_tree(&self)
 	}
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.clear();
+	self.ui.request_frame();
+}
+
+<*
+ The `cui::Ui` a native plugin builds into, as an opaque pointer.
+
+ The one verb that hands a plugin something of cui's rather than a value of this
+ project's: `UiNodeSpec` exists so `js/bind_ui.c3` never names a cui type, and a
+ plugin linked against the same cui has no such problem. It is `void*` at the
+ boundary because `plugin/abi.c3` is compiled into images that have no cui at
+ all — the plugin casts it back on its own side.
+
+ Brings the layer up on the first call, so a plugin that wants an interface pays
+ for one and a plugin that does not never allocates a buffer.
+
+ @return `The Ui, or null if the layer could not be brought up.`
+*>
+fn void* UiLayer.context(&self, Gpu* gpu, Target* target)
+{
+	if (catch self.ensure(gpu, target)) return null;
+	return self.ui;
+}
+
+<*
+ Grafts a plugin's widget tree onto the content floor.
+
+ The script's snapshot and a plugin's tree are exclusive rather than composited:
+ both would claim the same floor and the same pointer, and a HUD half-owned by
+ two writers is a question with no good answer. Whichever set last is the one
+ mounted, and the debug overlay is above both either way.
+
+ `root` is a `cui::Element*` built with the Ui `context` answered. Nothing here
+ takes ownership of the widgets behind it — cui already owns every element it
+ built, and unmounting returns them to its free-list whichever image called it.
+
+ @param root : `The tree to mount, or null to clear.`
+*>
+fn void UiLayer.set_plugin_root(&self, void* root)
+{
+	if (self.ui == null) return;
+
+	// The script's half goes first, and completely: `clear_tree` also drops the
+	// `UiNode` records, so a later `three.ui.patch` faults on a missing key
+	// rather than editing a tree that is no longer on screen.
+	if (self.tree) self.clear_tree();
+
+	if (self.foreign)
+	{
+		self.ui.unmount(self.foreign);
+		self.foreign = null;
+	}
+
+	self.foreign = (cui::Element*)root;
+	if (self.foreign) self.content.append(self.foreign);
 	self.ui.request_frame();
 }
 
