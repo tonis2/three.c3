@@ -121,8 +121,8 @@ const uint JS_MAX_JOBS = 100_000;
  them without a rebuild.
 
  `docs.data.js` is the one compiled from something else — `docs/`, by
- `site/tools/docs.mjs`. No build step regenerates it, deliberately: it is
- committed, and `node site/tools/docs.mjs --check` fails if it is not what the
+ `tools/docs.mjs`. No build step regenerates it, deliberately: it is
+ committed, and `node tools/docs.mjs --check` fails if it is not what the
  folder compiles to. That keeps it in the first category rather than the
  second — a file in the tree, as stale as anything else that is committed
  wrong, and never something a build quietly rewrote underneath you.
