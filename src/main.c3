@@ -126,6 +126,13 @@ struct Options
 	*>
 	String cache_dir;
 	bool cache_dir_set;
+	// `--plugin <path>`: a native application plugin, loaded once the engine is
+	// up. See `plugin_abi.md` — three owns the window, the device and the server,
+	// and the plugin owns what the application is.
+	String plugin;
+	// Everything after `--`, handed over verbatim. three never reads it, so a
+	// plugin's flags may collide with three's freely.
+	String[] plugin_args;
 	bool help;
 }
 
@@ -190,6 +197,14 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
+			case "--plugin":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.plugin = args[++i];
+			case "--":
+				// The rest is the plugin's. Captured whole and never looked at,
+				// which is what lets a plugin have a `--script` of its own.
+				opts.plugin_args = args[(i + 1)..];
+				i = args.len;
 			case "--mcp-stdio":
 				// The same optional port, for the same reason — and a port already
 				// named by an earlier `--mcp` is kept, so the two flags compose in
@@ -502,7 +517,11 @@ fn void? run(Options opts)
 	// for the shader either.
 	renderer.pass.init(&renderer.gpu, &renderer.target)!;
 
-	if (opts.script.len == 0 && opts.assets.len == 0)
+	PluginHost plugin;
+	defer plugin.close();
+	if (opts.plugin.len > 0) load_plugin(&plugin, opts.plugin, &renderer, opts.plugin_args)!;
+
+	if (opts.script.len == 0 && opts.assets.len == 0 && opts.plugin.len == 0)
 	{
 		// The placeholder for "nothing was given", and only then. A script or a
 		// game builds its own scene, and since `new three.Scene()` stopped emptying
@@ -517,7 +536,7 @@ fn void? run(Options opts)
 	SceneStats stats = renderer.pass.stats();
 	io::printfn(
 		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
-		opts.script.len > 0 || opts.assets.len > 0 ? "empty scene" : "built-in triangle",
+		opts.script.len > 0 || opts.assets.len > 0 || opts.plugin.len > 0 ? "empty scene" : "built-in triangle",
 		stats.draw_calls,
 		stats.instances,
 		stats.unique_meshes,
@@ -531,12 +550,13 @@ fn void? run(Options opts)
 	// window. They compose — `--assets ./game --mcp` plays and answers tool calls
 	// at the same time, and `--script` adds one more thing for the same loop to
 	// have run before the first frame.
-	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0)
+	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0 || opts.plugin.len > 0)
 	{
 		live(
 			&renderer,
 			windowed ? &window : null,
 			opts.mcp_port,
+			plugin: plugin.active() ? &plugin : null,
 			assets: opts.assets,
 			screenshot: opts.screenshot,
 			script: opts.script,
@@ -962,12 +982,14 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @param port : `Zero to run without a listener, which is a game with no agent attached.`
  @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
  @param script : `One .js file, or empty. Run once, as a script, before the first frame — see boot_script.`
- @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
+ @param plugin : `A loaded native plugin, or null. Its frame runs between the tick and the draw — see plugin_abi.md §11.`
+ @require port > 0 || assets.len > 0 || script.len > 0 || plugin != null : "a loop that neither serves, plays nor hosts a plugin has nothing to do"
 *>
 fn void? live(
 	Renderer* renderer,
 	c3w::Window* window,
 	int port,
+	PluginHost* plugin = null,
 	String assets = "",
 	String screenshot = "",
 	String script = "",
@@ -986,6 +1008,10 @@ fn void? live(
 	// rather than pretends about.
 	runtime.window = window;
 
+	// Before `boot_world`, so a script or a game's `main.js` can already call the
+	// plugin's verbs on its first line.
+	plugin_js_ready(plugin, &runtime);
+
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
 	// attaches to should be the one `main.js` built.
@@ -998,7 +1024,7 @@ fn void? live(
 	// scene and call it the game.
 	if (frames > 0)
 	{
-		play_frames(renderer, &runtime, frames, screenshot, every, camera)!;
+		play_frames(renderer, &runtime, frames, screenshot, every, camera, plugin)!;
 		return;
 	}
 
@@ -1007,6 +1033,9 @@ fn void? live(
 	// than something returned from a builder.
 	ToolHost host      = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = new_mcp_server(&host);
+	// After three's own three, so a plugin cannot take a name the engine uses —
+	// `mcp_add_tool` refuses one that is already there.
+	plugin_install_tools(plugin, &server);
 
 	mcp::Listener listener;
 	// The wake is what lets the window sleep. Without it an idle loop parked in
@@ -1060,6 +1089,10 @@ fn void? live(
 	Clock since_start  = clock::now();
 	long last_tick_ns  = 0;
 	long last_frame_ns = 0;
+	// The plugin's own clock. Separate from `last_tick_ns`, which paces the
+	// headless tick rather than measuring it — a plugin wants elapsed time on
+	// every iteration, windowed or not.
+	long last_plugin_ns = 0;
 
 	// Whether the last iteration left nothing to do. Read at the top of the next
 	// one, which is the only place the question can be asked: the answer has to be
@@ -1130,11 +1163,14 @@ fn void? live(
 		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
-			reload(&runtime, &renderer.pass, renderer, window, assets, script)!;
+			reload(&runtime, &renderer.pass, renderer, window, assets, script, plugin)!;
 			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
 		}
 
 		long elapsed_ns = (long)since_start.to_now();
+
+		float plugin_dt = (float)((double)(elapsed_ns - last_plugin_ns) / 1_000_000_000.0);
+		last_plugin_ns = elapsed_ns;
 
 		if (window != null)
 		{
@@ -1142,6 +1178,16 @@ fn void? live(
 			// gets its first frame on this iteration, and the frame presented is the
 			// one the callback just built.
 			runtime.tick((double)elapsed_ns / 1_000_000.0, input);
+
+			// After the tick and before the draw, for the tick's own reason: what a
+			// plugin writes here is in the frame presented below rather than the
+			// next one.
+			// 
+			// It does not enter `quiet`. A plugin that wants the loop kept awake
+			// has no way to say so yet — the interface it builds will answer for it
+			// through `ui_idle` once §7 lands, and a plugin that animates without
+			// one wants a verb rather than a term here.
+			if (plugin != null) plugin.frame(plugin_dt);
 
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between requests,
@@ -1187,6 +1233,10 @@ fn void? live(
 				// `three.input.isDown` answers false rather than throwing. A script
 				// written for a window still runs here; it just gets no input.
 				runtime.tick((double)elapsed_ns / 1_000_000.0);
+				// Paced with the tick and for its reason: a plugin that behaved
+				// differently under `--headless` would be a difference an agent has
+				// no window to see.
+				if (plugin != null) plugin.frame(plugin_dt);
 			}
 			if (handled == 0)
 			{
@@ -1245,7 +1295,8 @@ fn void? play_frames(
 	uint frames,
 	String screenshot = "",
 	uint every = 0,
-	String camera = ""
+	String camera = "",
+	PluginHost* plugin = null
 )
 {
 	// Once here as well as before each shot: a callback that reads the camera on
@@ -1261,6 +1312,10 @@ fn void? play_frames(
 	for (uint i = 0; i < frames; i++)
 	{
 		runtime.tick((double)i * (double)HEADLESS_FRAME_MS);
+		// Beside the tick and paced with it: a bounded run is how a plugin is
+		// checked without a person watching, and one whose frame never ran would
+		// be captured in the state its `three_plugin_main` left behind.
+		if (plugin != null) plugin.frame((float)HEADLESS_FRAME_MS / 1000.0f);
 
 		said.clear();
 		runtime.take_frame_output(&said);
