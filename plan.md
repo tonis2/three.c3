@@ -8,12 +8,6 @@ into `notes.md` if it explains something, into `git log -p -- plan.md` if it doe
 not. That deletion is a habit, not a one-off event, and it is the only thing
 keeping this file short enough to read in one sitting.
 
-**Section numbers are load-bearing.** Fifty-odd source comments cite them — §4's
-half-match rule, §12's specular decision, §15's draw record — so a number stays
-even when one line is left under it. **`notes.md` uses the same numbers**, so a
-citation to §N resolves against whichever of the two files still has material
-under it; a section missing from *this* file has no work left in it.
-
 ---
 
 ## 1. Platform defects
