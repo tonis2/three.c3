@@ -524,6 +524,11 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.js = qjs::open(JS_MEMORY_LIMIT, JS_STACK_LIMIT)!;
 	self.pass = pass;
 	self.renderer = renderer;
+	// The bindings below call the engine through `engine_api`, so it has to be
+	// pointed at this pass before any of them can run — §5. Idempotent, and
+	// deliberately not only here: a plugin loads before any runtime opens, and
+	// `run` points it at the same engine for that window.
+	engine_open(pass, renderer);
 	self.controls = DEFAULT_CONTROLS;
 	// Started here as well as in `MeshPass.init`, because a `MeshPass` built by
 	// hand — every check in `test/` that needs no device — never runs that, and
