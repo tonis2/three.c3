@@ -59,23 +59,6 @@ Crossfading, morph targets and sockets are built. What they left open:
 
 ## 5. UI and text
 
-- [x] **Draw the one-line overlay.** `three.debug.overlay(string)` now draws into
-      the offscreen target, so the window, `--screenshot` and the MCP screenshot
-      all carry it. §21's `systems.report()` is the same pixel with more lines.
-- [x] **The frame slot and the owner.** `cui.c3l` is bound: `render/ui.c3` holds
-      the `Ui` and the `CanvasPass`, `Target.begin_overlay` opens the rendering,
-      and `three_tests::ui` holds the two claims — the line appears, the frame
-      under it survives. `UI.md` is the design doc.
-- [x] **`three.ui.draw(ops)`.** The seven `Painter` primitives — rect, circle,
-      ellipse, line, arc, text, shadow — as a screen-space op list, plus
-      `three.ui.measure`. Crosshair, health arc, damage flash, minimap. `UI.md`
-      §8.1.
-- [x] **`three.ui.set(tree)`.** Seventeen node types, callbacks, `key` and
-      `three.ui.patch(key, props)`. `UI.md` §8.2.
-- [x] **The consume flag.** `drive_window` in `main.c3` is the one poll-and-drive
-      block both loops call, and `wants_pointer` / `wants_keys` gate the camera,
-      the hover raycast, the cursor shape and the `MouseState` a script sees.
-      `UI.md` §5.
 - [ ] **A scene has no way to say which keys it binds.** Seven keys bound to a
       character had to be delivered in a chat message. Smallest possible version
       of this section, and already missed — the interface can display the list
