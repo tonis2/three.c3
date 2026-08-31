@@ -1193,6 +1193,9 @@ fn void? live(
 			// redrew when a tool was called would stop responding between requests,
 			// which reads as a hung application.
 			bool ui_idle   = renderer.ui.idle();
+			// Read here rather than in the chain below, for `ui_idle`'s reason: the
+			// read is what clears the latch.
+			bool wants_more = plugin != null && plugin.take_frame_request();
 			bool presented = renderer.frame()!;
 
 			// When the next fetch is allowed to sleep in the kernel. Every term is
@@ -1215,8 +1218,12 @@ fn void? live(
 			//   panel that a click has just changed still owes a frame. Read
 			//   unconditionally rather than inside the `&&` chain, because reading
 			//   is what clears it and a short-circuit would leave it standing.
+			// - `wants_more` — a plugin that animates without drawing an interface
+			//   is invisible to every term above: `is_animating` is the runtime's
+			//   question and `ui_idle` is cui's, and a plugin moving nodes from its
+			//   own `frame` is neither. Read with `ui_idle` and for its reason.
 			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0
-				&& ui_idle;
+				&& ui_idle && !wants_more;
 		}
 		else
 		{

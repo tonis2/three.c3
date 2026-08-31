@@ -32,6 +32,7 @@ import std::math;
 import std::math::vector;
 import collision;
 import qjs;
+import three_abi;
 import std::collections::list;
 
 <*
@@ -333,6 +334,30 @@ struct NodeRef
 {
 	Scene* scene;
 	NodeId id;
+}
+
+<*
+ The same reference as the ABI spells it: `plugin_abi.md` §5.
+
+ > `install_bindings` is the vtable's first consumer, not its sibling.
+
+ So the verbs below stop calling `Scene` methods directly and call
+ `engine_api` instead, and every one of them becomes a live test of the entry a
+ plugin uses. The conversion is the last line of each function; `arg_handle` still
+ does the resolving and the raising, because those are JavaScript's half — a
+ vtable has no way to throw.
+
+ Two handles rather than one because the ABI takes both: a node handle is unique
+ across scenes, so the host *could* search, and this side has already searched.
+*>
+fn three_abi::Scene abi_scene(NodeRef ref) @inline => (three_abi::Scene)ref.scene.id;
+fn three_abi::Node abi_node(NodeId id) @inline => three_abi::pack(id.index, id.generation);
+
+// The way back, for the verbs that make a node rather than write to one.
+fn NodeId from_abi_node(three_abi::Node node) @inline
+{
+	if (node == three_abi::NO_NODE) return NO_NODE;
+	return { three_abi::unpack_index(node), three_abi::unpack_generation(node) };
 }
 
 <*
@@ -729,22 +754,35 @@ fn void js_add(
 
 		if (index < 0)
 		{
-			*out = handle_value(&js, parent.scene.add_group(parent.id, name));
+			three_abi::Node made = engine_api.add_group(
+				abi_scene(parent), abi_node(parent.id), name.zstr_tcopy()
+			);
+			*out = handle_value(&js, from_abi_node(made));
 			return;
 		}
 
 		AssetId asset = arg_asset(self, &js, argc, args, 0, out);
 		if (!asset.is_set()) return;
 
-		if (self.pass.assets.mesh(asset, (uint)mesh) == null)
+		// No retain here since G2: `Scene.create_slot` takes the reference, so
+		// the count has one implementation rather than one per caller.
+		three_abi::Node made = engine_api.add_mesh(
+			abi_scene(parent),
+			three_abi::pack(asset.index, asset.generation),
+			(uint)mesh,
+			abi_node(parent.id),
+			name.zstr_tcopy()
+		);
+		// The vtable's one refusal here is a mesh index the asset does not have,
+		// and it is worth a sentence rather than a null handle: it is the mistake a
+		// script makes, and `NO_NODE` would surface three lines later as a missing
+		// object with no reason attached.
+		if (made == three_abi::NO_NODE)
 		{
 			*out = js.raise(string::tformat("there is no mesh %d in asset %d", mesh, index));
 			return;
 		}
-
-		// No retain here since G2: `Scene.create_slot` takes the reference, so
-		// the count has one implementation rather than one per caller.
-		*out = handle_value(&js, parent.scene.add_mesh(asset, (uint)mesh, parent.id, name));
+		*out = handle_value(&js, from_abi_node(made));
 	};
 }
 
@@ -764,14 +802,12 @@ fn void js_remove(
 	if (ref.scene == null) return;
 
 	// The root is the scene itself; emptying it is `scene.unload()` and freeing it
-	// is `scene.dispose()`.
-	if (ref.id == ref.scene.root)
+	// is `scene.dispose()`. The vtable answers false; the sentence is this side's,
+	// because it names JavaScript methods a plugin does not have.
+	if (!engine_api.remove_node(abi_scene(ref), abi_node(ref.id)))
 	{
 		*out = js.raise("the Scene cannot be removed — scene.unload() empties it, scene.dispose() frees it");
-		return;
 	}
-
-	ref.scene.remove(ref.id);
 }
 
 fn void js_set_parent(
@@ -794,14 +830,12 @@ fn void js_set_parent(
 	// Two scenes are two node pools, so this would have to destroy the subtree and
 	// rebuild it under the other root — which is exactly what re-parenting is
 	// documented *not* to do, since a rebuild invalidates every handle into
-	// something that never left the graph. Refused rather than half-done.
-	if (ref.scene != parent.scene)
+	// something that never left the graph. Refused rather than half-done, and the
+	// vtable refuses it by not finding the parent in the node's own scene.
+	if (!engine_api.set_parent(abi_scene(ref), abi_node(ref.id), abi_node(parent.id)))
 	{
 		*out = js.raise("an object cannot be moved between scenes — rebuild it in the one you want it in");
-		return;
 	}
-
-	ref.scene.set_parent(ref.id, parent.id);
 }
 
 <*
@@ -826,31 +860,36 @@ fn void js_set_transform(
 
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
-	NodeId id = ref.id;
 
 	// `game.md` G5/S6. The camera resolves a script and a drag by
 	// last-writer-wins because both describe the same intent; a solver and a
 	// script writing the same transform every frame describe two, and the
 	// result is jitter rather than a compromise. So this is a refusal and not
-	// a merge.
-	if (ref.scene.physics.owns_transform(id))
-	{
-		*out = js.raise(ref.scene.physics.transform_refusal(id));
-		return;
-	}
-
-	Node* node = ref.scene.node(id);
-	node.position = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
-	// Euler in, quaternion stored — the one-way conversion `node.c3`'s header
-	// describes. JavaScript keeps the triple it sent, so nothing converts back.
-	node.rotation = quat_from_euler(
-		{ arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) }
+	// a merge — and the vtable answers while this side throws, because a table of
+	// function pointers has no way to raise a JavaScript exception.
+	bool wrote = engine_api.set_transform(
+		abi_scene(ref),
+		abi_node(ref.id),
+		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4),
+		arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7),
+		arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10)
 	);
-	node.scale = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
-	// Not `node.dirty = true`: the flag alone stopped being enough in §19.5, when
-	// the world-matrix walk gained the right to skip itself. See
-	// `Scene.mark_moved`.
-	ref.scene.mark_moved(id);
+	if (!wrote) *out = raise_refusal(&js, ref);
+}
+
+<*
+ Turns the vtable's `false` into the sentence a script sees.
+
+ Asked for only after a refusal, so the second call costs nothing in the ordinary
+ case — and it keeps the *reason* with the solver that owns it rather than
+ duplicating the wording on this side.
+*>
+fn qjs::Value raise_refusal(qjs::Context* js, NodeRef ref) @local
+{
+	char[256] buffer;
+	usz len = engine_api.transform_refusal(abi_scene(ref), abi_node(ref.id), &buffer[0], buffer.len);
+	if (len == 0) return js.raise("that object cannot be moved");
+	return js.raise(((ZString)&buffer[0]).str_view());
 }
 
 <*
@@ -885,21 +924,15 @@ fn void js_set_quaternion(
 	// The same refusal `js_set_transform` makes, and it has to be here too: a
 	// script that only ever wrote `.quaternion` would otherwise fight the
 	// solver through the one door that was left open.
-	if (ref.scene.physics.owns_transform(ref.id))
-	{
-		*out = js.raise(ref.scene.physics.transform_refusal(ref.id));
-		return;
-	}
-
-	ref.scene.set_quaternion(
-		ref.id,
-		{
-			arg_float(&js, argc, args, 2),
-			arg_float(&js, argc, args, 3),
-			arg_float(&js, argc, args, 4),
-			arg_float(&js, argc, args, 5),
-		}
+	bool wrote = engine_api.set_quaternion(
+		abi_scene(ref),
+		abi_node(ref.id),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4),
+		arg_float(&js, argc, args, 5)
 	);
+	if (!wrote) *out = raise_refusal(&js, ref);
 }
 
 <*
@@ -1212,7 +1245,7 @@ fn void js_set_visible(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	ref.scene.set_visible(ref.id, arg_truth(&js, argc, args, 2));
+	engine_api.set_visible(abi_scene(ref), abi_node(ref.id), arg_truth(&js, argc, args, 2));
 }
 
 <*
@@ -1236,7 +1269,7 @@ fn void js_set_collides(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	ref.scene.set_collides(ref.id, arg_truth(&js, argc, args, 2));
+	engine_api.set_collides(abi_scene(ref), abi_node(ref.id), arg_truth(&js, argc, args, 2));
 }
 
 <*
@@ -1263,7 +1296,7 @@ fn void js_set_static(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	*out = qjs::bool_value(ref.scene.set_static_caster(ref.id, arg_truth(&js, argc, args, 2)));
+	*out = qjs::bool_value(engine_api.set_static(abi_scene(ref), abi_node(ref.id), arg_truth(&js, argc, args, 2)));
 }
 
 fn void js_set_name(
@@ -1283,7 +1316,7 @@ fn void js_set_name(
 
 	@pool()
 	{
-		ref.scene.set_name(ref.id, arg_text(&js, argc, args, 2, tmem));
+		engine_api.set_name(abi_scene(ref), abi_node(ref.id), arg_text(&js, argc, args, 2, tmem).zstr_tcopy());
 	};
 }
 
@@ -1314,14 +1347,13 @@ fn void js_set_color(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	ref.scene.set_color(
-		ref.id,
-		{
-			arg_float(&js, argc, args, 2),
-			arg_float(&js, argc, args, 3),
-			arg_float(&js, argc, args, 4),
-			arg_float(&js, argc, args, 5),
-		}
+	engine_api.set_color(
+		abi_scene(ref),
+		abi_node(ref.id),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4),
+		arg_float(&js, argc, args, 5)
 	);
 }
 
@@ -1349,7 +1381,7 @@ fn void js_set_variant(
 	if (ref.scene == null) return;
 
 	int variant = arg_int(&js, argc, args, 2);
-	ref.scene.set_variant(ref.id, variant < 0 ? 0 : (uint)variant);
+	engine_api.set_variant(abi_scene(ref), abi_node(ref.id), variant < 0 ? 0 : (uint)variant);
 }
 
 <*
@@ -1375,8 +1407,9 @@ fn void js_world_position(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	ref.scene.update_world_matrices();
-	*out = vec3_value(&js, ref.scene.node(ref.id).world_position());
+	float[3] at;
+	if (!engine_api.world_position(abi_scene(ref), abi_node(ref.id), &at[0])) return;
+	*out = vec3_value(&js, (Vec3){ at[0], at[1], at[2] });
 }
 
 <*
@@ -1406,9 +1439,16 @@ fn void js_object_bounds(
 	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
 	if (ref.scene == null) return;
 
-	bool found           = false;
-	collision::Aabb3 box = ref.scene.subtree_bounds(&self.pass.assets, ref.id, &found);
-	*out = found ? aabb_value(&js, box) : qjs::null_value();
+	// Six floats rather than an `Aabb3`, which is the ABI's shape: a caller-provided
+	// buffer, and the bool separating "nothing under it draws" from a zero-sized
+	// box at the origin.
+	float[6] box;
+	if (!engine_api.object_bounds(abi_scene(ref), abi_node(ref.id), &box[0]))
+	{
+		*out = qjs::null_value();
+		return;
+	}
+	*out = aabb_value(&js, (collision::Aabb3){ { box[0], box[1], box[2] }, { box[3], box[4], box[5] } });
 }
 
 // ============================================================================
