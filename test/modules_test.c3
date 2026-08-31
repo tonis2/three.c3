@@ -236,3 +236,173 @@ fn void without_an_assets_root_a_path_is_left_alone() @test
 		"and one that climbs, which is the caller's business here (%s)",
 		@asset_path("", "../up/one.glb"));
 }
+
+<*
+ `plugin_abi.md` §8: a plugin ships a `.dylib` and a directory of `.js`, and its
+ modules live under `plugin:` rather than under the root `--assets` owns.
+
+ Without an assets root at all, which is the case that matters — crig runs with
+ no `--assets` and a plugin's panels still have to resolve.
+*>
+fn void a_plugin_scheme_resolves_without_an_assets_root() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_plugin_scripts("test/fixtures/plugin");
+
+	three::RunResult booted = runtime.run_module("plugin:main.js");
+	defer booted.free();
+	test::@check(booted.ok, "plugin:main.js evaluates with no game directory (%s)", booted.error);
+	test::@check(booted.log.contains("plugin: readout"),
+		"and its own sibling import resolved (%s)", booted.log);
+}
+
+<*
+ Both roots at once, which is the arrangement `set_plugin_root` exists for: a
+ prefix cannot collide with a directory, so a game and a plugin can each have
+ their own `shared.js` and neither shadows the other.
+*>
+fn void the_two_roots_are_addressed_apart() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("test/fixtures/game");
+	runtime.set_plugin_scripts("test/fixtures/plugin");
+
+	three::RunResult borrowed = runtime.run_module("borrows.js");
+	defer borrowed.free();
+	test::@check(borrowed.ok, "a game module resolves against both (%s)", borrowed.error);
+
+	three::RunResult read = runtime.run("return globalThis.__borrowed.whose;");
+	defer read.free();
+	test::@check(read.value == "\"game\"",
+		"a bare './shared.js' is the game's, not the plugin's (%s)", read.value);
+}
+
+<*
+ The one place this space differs from `three:`, and the difference is
+ deliberate — see `qjs::ModuleLoader.set_scheme`. An embedded module is the
+ engine's internals; a plugin's panel is a file somebody shipped and can open,
+ and importing one to extend an editor is a thing to allow.
+*>
+fn void a_game_may_import_a_plugins_panel() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("test/fixtures/game");
+	runtime.set_plugin_scripts("test/fixtures/plugin");
+
+	three::RunResult borrowed = runtime.run_module("borrows.js");
+	defer borrowed.free();
+	test::@check(borrowed.ok, "the import is allowed (%s)", borrowed.error);
+
+	three::RunResult read = runtime.run("return globalThis.__borrowed.title;");
+	defer read.free();
+	test::@check(read.value == "\"readout\"", "and it is the plugin's module (%s)", read.value);
+}
+
+<*
+ `..` past the scheme's own root is refused rather than escaping into whatever
+ directory sits beside it — the containment `resolve_module` gives the assets
+ root, applied to this one.
+*>
+fn void a_plugin_module_cannot_climb_out_of_its_directory() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_plugin_scripts("test/fixtures/plugin");
+
+	three::RunResult refused = runtime.run_module("plugin:../game/main.js");
+	defer refused.free();
+	test::@check(!refused.ok, "the climb is refused");
+}
+
+<*
+ A plugin's *data*, not only its modules — `plugin_plan.md` item 3.
+
+ Item 1 gave a plugin's scripts a home and stopped there, so a plugin could ship
+ a panel but not the icon on it: `locate` read `root` alone and knew nothing
+ about the scheme, which made `--assets` the only directory `three.load` could
+ see. A bundle whose code travels and whose files do not is not a bundle.
+
+ Resolution rather than loading, for the reason the whole file is: what is under
+ test is which directory a name means, and a check that had to open a `.glb` to
+ prove it would be testing the loader.
+*>
+macro String @plugin_path(#assets, #scripts, #path)
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	if (#assets.len > 0) runtime.set_assets_root(#assets);
+	if (#scripts.len > 0) runtime.set_plugin_scripts(#scripts);
+
+	String? answer = runtime.resolve_asset(#path, tmem);
+	if (catch err = answer) return string::tformat("<%s>", err);
+	return answer;
+}
+
+fn void a_plugins_assets_resolve_under_its_own_scheme() @test
+{
+	test::@check(@plugin_path("", "plugins/hello", "plugin:icons/bone.png") == "plugins/hello/icons/bone.png",
+		"with no game directory at all (%s)",
+		@plugin_path("", "plugins/hello", "plugin:icons/bone.png"));
+
+	// Both roots at once, which is the arrangement that would have been wrong
+	// before: a prefixed path is the plugin's and a bare one is still the game's.
+	test::@check(@plugin_path("game", "plugins/hello", "plugin:kit.glb") == "plugins/hello/kit.glb",
+		"the prefix names the plugin's directory (%s)",
+		@plugin_path("game", "plugins/hello", "plugin:kit.glb"));
+	test::@check(@plugin_path("game", "plugins/hello", "kit.glb") == "game/kit.glb",
+		"and a bare name is still the game's (%s)",
+		@plugin_path("game", "plugins/hello", "kit.glb"));
+}
+
+<*
+ The scheme's root confines the scheme's paths, exactly as the assets root
+ confines a game's.
+
+ And a prefix with no directory behind it is refused rather than quietly
+ stripped: answering the bare tail would resolve `plugin:shared.js` to the
+ *game's* `shared.js`, which is the one collision the prefix exists to prevent.
+*>
+fn void a_plugin_path_is_confined_to_the_plugins_directory() @test
+{
+	test::@check(@plugin_path("", "plugins/hello", "plugin:../secrets") == "<qjs::MODULE_ESCAPES_ROOT>",
+		"climbing out is refused (%s)", @plugin_path("", "plugins/hello", "plugin:../secrets"));
+	test::@check(@plugin_path("game", "", "plugin:kit.glb") == "<qjs::MODULE_IS_NOT_A_FILE>",
+		"and so is a prefix with no plugin loaded (%s)", @plugin_path("game", "", "plugin:kit.glb"));
+}
+
+<*
+ Readable by name, and deliberately not writable by one.
+
+ `three.load` and `scene.export` used to go through one door, and opening that
+ door onto a plugin's directory would have let a game's script overwrite the
+ application's own panels. They are two doors now — `resolve_asset` and
+ `resolve_write` — and this is the difference between them.
+*>
+fn void a_plugins_directory_is_read_only_to_a_script() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("game");
+	runtime.set_plugin_scripts("plugins/hello");
+
+	String? reading = runtime.resolve_asset("plugin:kit.glb", tmem);
+	test::@check(!@catch(reading) && reading!! == "plugins/hello/kit.glb", "a read resolves");
+
+	String? writing = runtime.resolve_write("plugin:kit.glb", tmem);
+	test::@check(@catch(writing) == qjs::MODULE_ESCAPES_ROOT,
+		"a write into the plugin's directory is refused");
+
+	// And the narrower door is still the ordinary one for everything else.
+	String? ordinary = runtime.resolve_write("out.glb", tmem);
+	test::@check(!@catch(ordinary) && ordinary!! == "game/out.glb",
+		"a game still writes inside its own directory");
+}

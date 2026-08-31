@@ -40,6 +40,7 @@ const KIND = {
 	column: 0, row: 1, stack: 2, padding: 3, grid: 4, clip: 5, anchored: 6, scroll: 7,
 	rect: 8, label: 9, draw: 10,
 	button: 11, checkbox: 12, slider: 13, select: 14, tree: 15, textfield: 16,
+	confirmDialog: 17, menu: 18, fileBrowser: 19,
 };
 
 // The seven Painter primitives, in the order `UiOpKind` declares them.
@@ -259,7 +260,9 @@ function normalise(node, path) {
 	// The caption, which every widget that has one spells differently in prose
 	// and identically here. A textfield is the exception and is handled below:
 	// its `text` is a value somebody typed, not a label.
-	if (type !== 'textfield') {
+	// `fileBrowser` is the second exception for the first one's reason: its
+	// `text` is where the listing opens, not something written on it.
+	if (type !== 'textfield' && type !== 'fileBrowser') {
 		const caption = node.text ?? node.label;
 		if (caption !== undefined && caption !== null) out.text = String(caption);
 		else if (type === 'label') out.text = '';
@@ -299,6 +302,28 @@ function normalise(node, path) {
 		case 'draw':
 			out.ops = normaliseOps(node.ops, `${where} ops`) ?? [];
 			break;
+		case 'confirmDialog':
+			// The question is `text`, which the caption block above has already
+			// read — `message` is the spelling that reads best at the call site
+			// and wins where both are given.
+			if (node.message !== undefined && node.message !== null) out.text = String(node.message);
+			out.title = String(node.title ?? '');
+			if (node.confirm !== undefined) out.confirm = String(node.confirm);
+			if (node.decline !== undefined) out.decline = String(node.decline);
+			// `open` rides on `checked` because it is the same kind of field: one
+			// the user can change under you, so a snapshot that does not name it
+			// leaves the answer nobody has given yet on the screen.
+			if (node.open !== undefined) out.checked = !!node.open;
+			break;
+		case 'menu':
+			out.menus = normaliseMenus(node.menus, `${where} menus`);
+			break;
+		case 'fileBrowser':
+			out.text = String(node.start ?? node.path ?? '');
+			// The mask rides on `options` for the reason a Select's do: it is a
+			// borrowed array of strings and the host fills it with one verb.
+			out.options = (node.mask ?? []).map(String);
+			break;
 	}
 
 	put(out, 'onClick', handler(node.onClick, `${where} onClick`));
@@ -308,6 +333,13 @@ function normalise(node, path) {
 	put(out, 'onSelect', handler(node.onSelect, `${where} onSelect`));
 	put(out, 'onToggle', handler(node.onToggle, `${where} onToggle`));
 	put(out, 'onHover', handler(node.onHover, `${where} onHover`));
+	put(out, 'onConfirm', handler(node.onConfirm, `${where} onConfirm`));
+	put(out, 'onDismiss', handler(node.onDismiss, `${where} onDismiss`));
+	put(out, 'onChoose', handler(node.onChoose, `${where} onChoose`));
+	// The pointer, on a `draw` node and nowhere else — every other kind is a
+	// widget cui hit-tests for you, and one that wanted raw coordinates would be
+	// asking to reimplement the widget it is standing on.
+	put(out, 'onPointer', handler(node.onPointer, `${where} onPointer`));
 
 	// `child` and `children` are the same thing said two ways, because a Padding
 	// with one child reads badly as an array of one and a Column with six reads
@@ -331,6 +363,48 @@ function normalise(node, path) {
 	if (type === 'scroll' && (out.ch === undefined || out.ch.length === 0)) out.ch = [{ k: KIND.stack }];
 
 	return out;
+}
+
+// A menu bar's two levels. A string is a title-less entry's label and `'-'` or
+// `null` is a divider, because that is how a menu is written down when nobody is
+// making you name the fields.
+//
+// `MenuQuery` — cui's poll-at-open callback for an item's checked and disabled
+// state — deliberately has no spelling here. It exists so a check mark set by a
+// keyboard shortcut is right without anyone pushing an update into the menu
+// data, and a widget IS somebody pushing: it re-renders from its own state and
+// the snapshot carries the answer.
+function normaliseMenus(menus, where) {
+	if (menus === undefined || menus === null) return [];
+	if (!Array.isArray(menus)) throw new TypeError(`${where} wants an array of menus`);
+	return menus.map((menu, i) => {
+		if (menu === null || typeof menu !== 'object') {
+			throw new TypeError(`${where}[${i}] is { title, items: [...] }`);
+		}
+		return {
+			title: String(menu.title ?? menu.label ?? ''),
+			items: normaliseMenuItems(menu.items, `${where}[${i}] items`),
+		};
+	});
+}
+
+function normaliseMenuItems(items, where) {
+	if (items === undefined || items === null) return [];
+	if (!Array.isArray(items)) throw new TypeError(`${where} wants an array of items`);
+	return items.map((item, i) => {
+		if (item === null || item === undefined || item === '-') return { separator: true };
+		if (typeof item === 'string') return { label: item };
+		if (typeof item !== 'object') {
+			throw new TypeError(`${where}[${i}] is a string, '-', or { label, shortcut, checked, disabled }`);
+		}
+		return {
+			label: String(item.label ?? ''),
+			shortcut: item.shortcut === undefined ? '' : String(item.shortcut),
+			checked: !!item.checked,
+			disabled: !!item.disabled,
+			separator: !!item.separator,
+		};
+	});
 }
 
 function normaliseRows(rows, where) {
@@ -426,6 +500,21 @@ export const ui = {
 	//
 	// Coordinates are the same top-left image pixels `three.input.pointer`
 	// arrives in, so a reticle at the cursor needs no conversion.
+	//
+	// A `draw` node INSIDE a tree can take the pointer as well as paint it —
+	// `onPointer: e => ...`, called with
+	// `{ phase, x, y, buttons, button, wheel, wheelX, shift, ctrl, alt, meta }`.
+	// `phase` is 'move', 'down', 'up' or 'wheel'; `x` and `y` are the node's own
+	// coordinates; `buttons` is a bitmask (1 left, 2 right, 4 middle) of what is
+	// held, and `button` is which one a down or an up is about.
+	//
+	// That is different from `three.input.pointer` in the way that matters: this
+	// one goes through the hit test, so it does not fire through an open menu, a
+	// modal or whatever the host painted over the panel, and a press captures so
+	// a drag survives leaving the node. A press, a release and the wheel are
+	// consumed; a bare move is not, so a pointer passing over still reaches a
+	// scroll above it. It is what a timeline, a curve editor or a gizmo is made
+	// of, and the panel does not have to know where it was put.
 	draw(ops) {
 		alone('draw');
 		if (ops === null || ops === undefined) { H.uiClear(); return; }
@@ -452,9 +541,9 @@ export const ui = {
 	//   three.frame(() => three.ui.patch('fps', { text: `${fps | 0} fps` }));
 	//
 	// The fields it accepts are the ones that are values rather than structure —
-	// text, value, checked, selected, offset, disabled, color, min, max, size —
-	// plus `ops`, `options` and `rows`, which replace a list wholesale. Anything
-	// that would change the shape of the tree is a `set`.
+	// text, value, checked, open, selected, offset, disabled, color, min, max,
+	// size — plus `ops`, `options`, `rows` and `menus`, which replace a list
+	// wholesale. Anything that would change the shape of the tree is a `set`.
 	patch(key, props) {
 		if (key === null || key === undefined) throw new TypeError('three.ui.patch(key, props) wants a key');
 		if (props === null || typeof props !== 'object') {
@@ -465,6 +554,10 @@ export const ui = {
 		if ('text' in props) out.text = String(props.text);
 		if ('value' in props) out.value = num(props.value, `${where} value`);
 		if ('checked' in props) out.checked = !!props.checked;
+		// A confirmDialog going up and coming down is a patch and not a rebuild:
+		// a `set` would build a second dialog, and the answer somebody is halfway
+		// through giving would be to the one just thrown away.
+		if ('open' in props) out.checked = !!props.open;
 		if ('selected' in props) out.selected = num(props.selected, `${where} selected`);
 		if ('offset' in props) out.offset = num(props.offset, `${where} offset`);
 		if ('disabled' in props) out.disabled = !!props.disabled;
@@ -475,6 +568,7 @@ export const ui = {
 		if ('ops' in props) out.ops = normaliseOps(props.ops, `${where} ops`);
 		if ('options' in props) out.options = (props.options ?? []).map(String);
 		if ('rows' in props) out.rows = normaliseRows(props.rows, `${where} rows`);
+		if ('menus' in props) out.menus = normaliseMenus(props.menus, `${where} menus`);
 		H.uiPatch(String(key), out);
 	},
 
@@ -486,5 +580,44 @@ export const ui = {
 	measure(text, options) {
 		const opts = options ?? {};
 		return H.uiMeasure(String(text ?? ''), num(opts.font, 'three.ui.measure font'), num(opts.size, 'three.ui.measure size'));
+	},
+
+	// Where a native plugin has offered to let a script draw, if one has.
+	//
+	// `{ present, generation, x, y, width, height }`. A host loaded with `--plugin` can
+	// name an element of its OWN layout as the place a snapshot goes, and then
+	// `set` lands in that pane instead of over the top of the application. With
+	// no plugin, or with one that has offered nothing, `present` is false and
+	// `set` behaves exactly as it always has: the whole frame is yours.
+	//
+	// A snapshot does not survive the slot. The pane can be closed, or its tab
+	// switched, and cui recycles what was in it — so a panel written against an
+	// editor watches the generation and draws itself again:
+	//
+	//     let seen = -1;
+	//     three.systems.frame('panel', () => {
+	//       const slot = three.ui.slot;
+	//       if (!slot.present) return;
+	//       if (slot.generation !== seen) { seen = slot.generation; three.ui.set(panel(slot)); }
+	//       three.ui.patch('count', { text: `${n}` });
+	//     });
+	//
+	// `width` and `height` are the pane's, in the same points every other number
+	// in this file is in, and are zero for the one frame between the plugin
+	// offering the slot and cui laying it out.
+	//
+	// `x` and `y` are the pane's top-left corner in window points, and they are
+	// there for one job: `three.input.pointer` is the WINDOW's and knows nothing
+	// about panes, so a panel that draws its own controls with `three.ui.draw`
+	// subtracts them to hit-test:
+	//
+	//     const p = three.input.pointer;
+	//     const local = { x: p.x - slot.x, y: p.y - slot.y };
+	//
+	// Widgets in a snapshot never need this — cui lays them out and cui hit-tests
+	// them. Note that the reading is global, so it is true through an open menu
+	// the host painted over the pane; a `draw` node does not own the pointer yet.
+	get slot() {
+		return H.uiSlot();
 	},
 };

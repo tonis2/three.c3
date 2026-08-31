@@ -1836,6 +1836,44 @@ What a string will take, as `[width, height]` in pixels. `options` is `{ font, s
 Drawing text by hand is arithmetic without it — centring a readout inside an arc is a measured width — and this is
 the same measurement the renderer makes when it lays the glyphs down, so positioning by it lands where they go.
 
+## three.ui.slot
+
+Where a native plugin has offered to let a script draw, if one has:
+`{ present, generation, x, y, width, height }`.
+
+A host loaded with `--plugin` can name an element of its **own** interface as the place a snapshot goes. With one
+offered, `three.ui.set` lands in that pane and the application around it stays on screen; without one — no plugin,
+or a plugin that has offered nothing — `present` is false and `set` behaves as it always has, taking the frame.
+
+The snapshot does not survive the slot. The pane can be closed or its tab switched, and what was in it is
+recycled, so a panel written against an editor watches the generation and draws itself again:
+
+```js
+let seen = -1;
+three.systems.frame('panel', () => {
+  const slot = three.ui.slot;
+  if (!slot.present) return;
+  if (slot.generation !== seen) { seen = slot.generation; three.ui.set(panel(slot)); }
+  three.ui.patch('count', { text: `${n}` });
+});
+```
+
+`width` and `height` are the pane's, in the same points every other number here is in, and are zero for the one
+frame between the plugin offering the slot and the interface laying it out.
+
+`x` and `y` are the pane's top-left corner in window points. They are there for one job: `three.input.pointer` is
+the **window's** and knows nothing about panes, so a panel that draws its own controls with `three.ui.draw`
+subtracts them to hit-test.
+
+```js
+const p = three.input.pointer;
+const local = { x: p.x - slot.x, y: p.y - slot.y };
+```
+
+Widgets in a snapshot never need this — the interface lays them out and hit-tests them. The pointer reading is
+global, so it is true through a menu the host has painted over the pane; a `draw` node does not own the pointer
+yet.
+
 ## three.ui.clear()
 
 Takes the interface down, mounted widgets included.

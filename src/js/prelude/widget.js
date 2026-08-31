@@ -98,15 +98,18 @@ const SYSTEM = 'ui.widgets';
 // rebuild — because the host reads a value it was never given as absent rather
 // than as zero, and that difference is what keyed carry-over turns on.
 const VALUES = [
-	'text', 'value', 'checked', 'selected', 'offset',
-	'disabled', 'color', 'min', 'max', 'size', 'ops', 'options', 'rows',
+	'text', 'value', 'checked', 'open', 'selected', 'offset',
+	'disabled', 'color', 'min', 'max', 'size', 'ops', 'options', 'rows', 'menus',
 ];
 const VALUE = new Set(VALUES);
 
 // Everything a node can attach a function to. Compared by PRESENCE and never by
 // identity: the host binds a handler when the node is built, so gaining or
 // losing one is structure, and the dispatcher standing in for it never changes.
-const HANDLER = new Set(['onClick', 'onChange', 'onCommit', 'onSubmit', 'onSelect', 'onToggle', 'onHover']);
+const HANDLER = new Set([
+	'onClick', 'onChange', 'onCommit', 'onSubmit', 'onSelect', 'onToggle', 'onHover',
+	'onConfirm', 'onDismiss', 'onChoose', 'onPointer',
+]);
 
 // Not enumerable: a widget is a plain object a game puts its own fields on, and
 // `JSON.stringify(hud)` should answer with those and not with this file's
@@ -127,6 +130,10 @@ const EMPTY = [];
 // A kind with no slot for a type refuses that argument by name rather than
 // dropping it: a number handed to a Column is a mistake, and a Column that
 // ignored it is a layout that silently did not happen.
+//
+// `text: true` is the ordinary answer and means the string fills `text`. A NAME
+// is for the one kind whose string is not a caption: a file browser's is where
+// the listing opens.
 const SCHEMA = {
 	column: { container: true },
 	row: { container: true },
@@ -139,13 +146,16 @@ const SCHEMA = {
 	panel: { container: true },
 	rect: {},
 	label: { text: true },
-	draw: { list: 'ops' },
+	draw: { list: 'ops', fn: 'onPointer' },
 	button: { text: true, fn: 'onClick' },
 	checkbox: { text: true, bool: 'checked', fn: 'onChange' },
 	slider: { text: true, number: 'value', fn: 'onChange' },
 	select: { list: 'options', number: 'selected', fn: 'onChange' },
 	tree: { list: 'rows', number: 'selected', fn: 'onSelect' },
 	textfield: { text: true, fn: 'onChange' },
+	confirmDialog: { text: true, bool: 'open', fn: 'onConfirm' },
+	menu: { list: 'menus', fn: 'onSelect' },
+	fileBrowser: { text: 'start', list: 'mask', fn: 'onChoose' },
 };
 
 // The nine anchors, spelled the way a person says them. `'top-left'`,
@@ -209,13 +219,15 @@ export class Node {
 		}
 
 		switch (typeof arg) {
-			case 'string':
-				if (schema.text && this.props.text === undefined) this.props.text = arg;
+			case 'string': {
+				const slot = schema.text === true ? 'text' : schema.text;
+				if (slot !== undefined && this.props[slot] === undefined) this.props[slot] = arg;
 				// A bare string among a container's children is a caption, which
 				// is what somebody writing one meant.
 				else if (schema.container) this.children.push(new Label(arg));
 				else throw new TypeError(`new ${this.constructor.name}: '${arg}' has nowhere to go`);
 				return;
+			}
 			case 'number':
 				if (schema.number !== undefined && this.props[schema.number] === undefined) {
 					this.props[schema.number] = arg;
@@ -275,6 +287,33 @@ export class Slider extends Node { constructor(...args) { super('slider', args);
 export class Select extends Node { constructor(...args) { super('select', args); } }
 export class Tree extends Node { constructor(...args) { super('tree', args); } }
 export class TextField extends Node { constructor(...args) { super('textfield', args); } }
+
+// cui's application widgets, which are the three that are worth having a class
+// for and not worth writing again: a question with two answers, an application
+// menu bar, and a directory listing you can pick a file out of.
+//
+//     new ConfirmDialog('Delete 17 dots?', this.asking, () => this.del(),
+//         { title: 'Delete', confirm: 'Delete', decline: 'Keep',
+//           onDismiss: () => { this.asking = false; } });
+//
+//     new MenuBar([
+//         { title: 'File', items: ['New', 'Open…', '-', { label: 'Quit', shortcut: 'Ctrl+Q' }] },
+//         { title: 'View', items: [{ label: 'Wireframe', checked: this.wire }] },
+//     ], (menu, item) => this.run(menu, item));
+//
+//     new FileBrowser('models', ['*.glb'], path => three.load(path));
+//
+// A MenuBar's handler takes TWO numbers — which title, then which entry —
+// because a bar is a list of lists and a flat ordinal would make the panel
+// count the length of every menu before the one that was clicked.
+//
+// A FileBrowser's paths are relative to the directory it was confined to, which
+// is the assets root or the plugin's, so a path out of `onChoose` is a path
+// `three.load` takes. It sizes itself to its content and wants a Scroll above
+// it, cui's shape for every list.
+export class ConfirmDialog extends Node { constructor(...args) { super('confirmDialog', args); } }
+export class MenuBar extends Node { constructor(...args) { super('menu', args); } }
+export class FileBrowser extends Node { constructor(...args) { super('fileBrowser', args); } }
 
 // What a card is made of, since every interface here is made of cards: a
 // background behind a padded column, sized to what is in it.
@@ -714,4 +753,5 @@ export const nodes = {
 	Column, Row, Stack, Padding, Grid, Clip, Anchored, Scroll, Panel,
 	Rect, Label, Drawing,
 	Button, Checkbox, Slider, Select, Tree, TextField,
+	ConfirmDialog, MenuBar, FileBrowser,
 };

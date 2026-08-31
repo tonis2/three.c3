@@ -32,6 +32,7 @@ import image;
 import std::core::test;
 import std::math;
 import std::io;
+import std::io::path;
 
 const uint W = 200;
 const uint H = 120;
@@ -354,7 +355,32 @@ struct Heard
 	bool flag;
 	float value;
 	usz index;
+	usz item;
+	// The pointer half. Kept as two floats rather than a Vec2 so a failure
+	// message can name the axis that was wrong.
+	three::UiPointerPhase phase;
+	// The last phase that was not a move. One `feed` dispatches the wheel, then
+	// the button edges, then the move — in that order and all in the frame the
+	// test called `point` for — so the edge a test is asking about is never the
+	// last thing it heard.
+	three::UiPointerPhase edge;
+	float at_x;
+	float at_y;
+	uint buttons;
+	uint modifiers;
+	float wheel;
+	// Counted apart from `calls`, because a pointer fires on every frame it is
+	// over the node and the negative test is about this number being zero while
+	// the interface as a whole is perfectly busy.
+	uint pointers;
+	// The event's text, copied. `UiEvent.text` is the widget's own buffer or a
+	// temporary the frame's pool takes back, so a test that kept the view would
+	// be reading whatever the next frame wrote there.
+	char[256] spoken;
+	usz spoken_len;
 }
+
+fn String Heard.said(&self) => (String)self.spoken[:self.spoken_len];
 
 fn void listen(void* host, uint node, three::UiEvent event)
 {
@@ -365,6 +391,85 @@ fn void listen(void* host, uint node, three::UiEvent event)
 	heard.flag = event.flag;
 	heard.value = event.value;
 	heard.index = event.index;
+	heard.item = event.item;
+	heard.phase = event.phase;
+	heard.at_x = event.at.x;
+	heard.at_y = event.at.y;
+	heard.buttons = event.buttons;
+	heard.modifiers = event.modifiers;
+	if (event.kind == three::UiEventKind.POINTER)
+	{
+		heard.pointers++;
+		// The wheel travels with its own edge for the same reason `edge` exists:
+		// the move that follows it in the same frame carries no delta.
+		if (event.phase != three::UiPointerPhase.MOVE)
+		{
+			heard.edge = event.phase;
+			heard.wheel = event.value;
+		}
+	}
+	usz room = (usz)heard.spoken.len;
+	heard.spoken_len = event.text.len < room ? event.text.len : room;
+	if (heard.spoken_len > 0) heard.spoken[:heard.spoken_len] = event.text[:heard.spoken_len];
+}
+
+<*
+ A window with room for cui's application widgets to lay out in.
+
+ The 200x120 above is a HUD's worth of frame, and a centred `ConfirmDialog` is
+ 380 wide before its insets and a menu bar is as wide as its titles. Measured
+ against a frame that small every one of them comes out clipped, and the test
+ would be asserting things about the clipping rather than about the widget.
+*>
+macro @with_panel(; @body(three::Renderer* renderer))
+{
+	vk::Instance instance = three::create_instance(true, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 520, 400, validate: true)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	@body(&renderer);
+}
+
+// One frame, so the emit pass writes the absolute origins every hit test reads.
+fn void frame(three::Renderer* renderer)
+{
+	image::Image shot = renderer.capture()!!;
+	shot.free();
+}
+
+// A press and a release in the middle of an element cui has stamped with a name.
+// `MenuBar` stamps every title and item, and `Dialog` stamps its close glyph,
+// which is what lets these tests click what a person would click rather than a
+// pair of numbers that stops being right the moment a font changes.
+fn bool click_id(three::Renderer* renderer, String id)
+{
+	cui::Element*? found = renderer.ui.ui.find_id(id);
+	if (catch found) return false;
+	float x = found.absolute.x + found.size.x * 0.5f;
+	float y = found.absolute.y + found.size.y * 0.5f;
+	point(renderer, x, y, true);
+	point(renderer, x, y, false);
+	return true;
+}
+
+<*
+ The last element of a subtree, walking down the last child each time.
+
+ `ConfirmDialog` paints its two buttons with one widget, and that widget is
+ `@local` to cui — there is no type to name and no id stamped on it. It is
+ always the last thing built under the panel, though, which is the same fact
+ the layout relies on: the answers are what a dialog ends with.
+*>
+fn cui::Element* last_leaf(cui::Element* from)
+{
+	cui::Element* walk = from;
+	while (walk.children.len() > 0) walk = walk.children[walk.children.len() - 1];
+	return walk;
 }
 
 // A tree of one node, which is what most of these want.
@@ -374,6 +479,12 @@ fn uint one_node(three::Renderer* renderer, three::UiNodeSpec spec)
 	uint at = renderer.ui.push_node(spec, -1)!!;
 	renderer.ui.commit_tree();
 	return at;
+}
+
+// One frame of wheel at a place in the image, nothing pressed.
+fn void wheel(three::Renderer* renderer, float x, float y, float delta)
+{
+	renderer.ui.feed({ .inside = true, .x = x, .y = y, .scroll = delta }, {}, "", 16.0);
 }
 
 // One frame of pointer at a place in the image, with the left button as given.
@@ -970,6 +1081,537 @@ fn void patching_a_draw_list_replaces_it() @test
 }
 
 // ============================================================================
+// The pointer on a `draw` node
+// ============================================================================
+
+<*
+ A painting is handed the whole pointer, in its own coordinates.
+
+ The half of `plan.md` §1 that was still true: a script could paint anything and
+ could not be told where the pointer was, so it polled `three.input.pointer` —
+ which is the WINDOW's, in window coordinates, and knows nothing about panes,
+ menus or modals. This is the same pointer delivered through the hit test, so
+ the numbers are the node's own and the drag survives leaving it.
+
+ The node is put under a `padding` on purpose. A local position that were
+ secretly the window's would agree with it at the origin and nowhere else, and a
+ test at the origin is a test that cannot fail.
+*>
+fn void a_draw_node_is_handed_the_pointer_in_its_own_coordinates() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint pad = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.PADDING, .insets = { 40, 30, 0, 0 } },
+			-1
+		)!!;
+		uint panel = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.DRAW, .size = { 60, 40 }, .on_pointer = true },
+			(int)pad
+		)!!;
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		// Fifteen in and fifteen down from the node's own top-left corner.
+		point(renderer, 55, 45, true);
+		test::@check(heard.pointers > 0, "the pointer never reached the painting");
+		test::@check(heard.node == panel, "the pointer was attributed to node %d rather than %d", heard.node, panel);
+		test::@check(
+			heard.edge == three::UiPointerPhase.DOWN,
+			"the press arrived as %s",
+			heard.edge
+		);
+		test::@check(
+			heard.at_x == 15.0 && heard.at_y == 15.0,
+			"the position came over as (%f, %f) rather than the node's own (15, 15)",
+			heard.at_x,
+			heard.at_y
+		);
+		test::@check(heard.buttons == 1, "the held buttons came over as %d rather than the left one", heard.buttons);
+		test::@check(heard.index == 0, "the press named button %d rather than the left one", heard.index);
+
+		// Dragged clean off the node. The press captured the pointer, so this
+		// still arrives — and it arrives with a coordinate outside the box, which
+		// is what a drag on a timeline needs and what a hit test alone would not
+		// give: without the capture the move goes to whatever is under it now.
+		renderer.ui.feed({ .inside = true, .down = true, .x = 150, .y = 100 }, {}, "", 16.0);
+		test::@check(
+			heard.phase == three::UiPointerPhase.MOVE,
+			"the drag past the edge arrived as %s",
+			heard.phase
+		);
+		test::@check(
+			heard.at_x == 110.0 && heard.at_y == 70.0,
+			"the dragged position came over as (%f, %f) rather than (110, 70)",
+			heard.at_x,
+			heard.at_y
+		);
+		test::@check(heard.buttons == 1, "the drag lost the button that started it");
+
+		point(renderer, 150, 100, false);
+		test::@check(heard.edge == three::UiPointerPhase.UP, "the release arrived as %s", heard.edge);
+		test::@check(heard.buttons == 0, "the release still reported a held button");
+
+		uint before = heard.pointers;
+		wheel(renderer, 55, 45, 3.0);
+		test::@check(heard.pointers > before, "the wheel over the painting reached nobody");
+		test::@check(
+			heard.edge == three::UiPointerPhase.WHEEL,
+			"the wheel arrived as %s",
+			heard.edge
+		);
+		test::@check(heard.wheel == 3.0, "the wheel delta came over as %f", heard.wheel);
+	};
+}
+
+<*
+ A modal over a painting takes the pointer, and the painting hears nothing.
+
+ **This is the whole of item 8.** Painting already worked and the position was
+ already reachable — through `three.input.pointer`, which is global and fires
+ through an open menu, through a modal, through whatever the host drew on top.
+ What was missing was not coordinates but the RIGHT to them, and the only way to
+ tell the two apart is to put something over the panel and check that the panel
+ goes quiet.
+
+ Both of cui's ways of being on top are checked, because they are different
+ mechanisms: a modal `Dialog` is a full-frame element that consumes, and an open
+ `MenuBar` is a window-filling catcher on a raised subtree.
+*>
+fn void a_draw_node_under_a_modal_or_an_open_menu_never_sees_the_pointer() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint stack = renderer.ui.push_node({ .kind = three::UiNodeKind.STACK }, -1)!!;
+		uint panel = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.DRAW, .on_pointer = true },
+			(int)stack
+		)!!;
+		uint ask = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.CONFIRM_DIALOG,
+				.key = "ask",
+				.title = "Delete",
+				.text = "Delete it?",
+				.on_confirm = true,
+			},
+			(int)stack
+		)!!;
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		// Closed, the dialog is zero-sized and the painting owns the frame. This
+		// is the control: without it a test that passes because nothing works at
+		// all looks exactly like a test that passes.
+		point(renderer, 260, 200, true);
+		point(renderer, 260, 200, false);
+		test::@check(heard.pointers > 0, "the painting had no pointer to lose");
+
+		renderer.ui.patch(ask, { .has_checked = true, .checked = true });
+		frame(renderer);
+
+		uint quiet = heard.pointers;
+		point(renderer, 260, 200, true);
+		point(renderer, 260, 200, false);
+		point(renderer, 40, 380, true);
+		point(renderer, 40, 380, false);
+		test::@check(
+			heard.pointers == quiet,
+			"the painting under an open modal still took %d pointer events",
+			heard.pointers - quiet
+		);
+		test::@check(renderer.ui.wants_pointer, "the modal did not take the pointer either");
+
+		// Down again, and now an open menu over the same painting.
+		renderer.ui.patch(ask, { .has_checked = true, .checked = false });
+		frame(renderer);
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		stack = renderer.ui.push_node({ .kind = three::UiNodeKind.STACK }, -1)!!;
+		panel = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.DRAW, .on_pointer = true },
+			(int)stack
+		)!!;
+		uint bar = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.MENU, .on_select = true },
+			(int)stack
+		)!!;
+		renderer.ui.push_menu(bar, "File");
+		renderer.ui.push_menu_item(bar, "New", "", false, false, false);
+		renderer.ui.push_menu_item(bar, "Quit", "", false, false, false);
+		renderer.ui.commit_tree();
+		frame(renderer);
+
+		test::@check(click_id(renderer, "File"), "the bar had no File title");
+		frame(renderer);
+		test::@check(
+			renderer.ui.nodes[bar].element.widget_as(cui::widgets::MenuBar).open == 1,
+			"the menu did not open"
+		);
+
+		// Well below the bar and well clear of the dropdown: the catcher's
+		// territory, and the painting's if the menu were not open.
+		quiet = heard.pointers;
+		point(renderer, 400, 360, true);
+		point(renderer, 400, 360, false);
+		test::@check(
+			heard.pointers == quiet,
+			"the painting under an open menu still took %d pointer events",
+			heard.pointers - quiet
+		);
+	};
+}
+
+// ============================================================================
+// cui's application widgets
+// ============================================================================
+
+<*
+ A confirmation crosses as one node, and whether the question is up survives a
+ rebuild that does not mention it.
+
+ The carry is the whole of what makes this usable from a panel that re-renders:
+ a HUD that rebuilt for any other reason — a frame counter, a mode switch —
+ would otherwise take the user's unanswered question off the screen, and the
+ script would never find out that it had.
+*>
+fn void a_confirmation_keeps_its_question_across_a_rebuild() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		one_node(
+			renderer,
+			{
+				.kind = three::UiNodeKind.CONFIRM_DIALOG,
+				.key = "ask",
+				.title = "Delete",
+				.text = "Delete 17 dots?",
+				.confirm_label = "Delete",
+				.decline_label = "Keep",
+				.checked = true,
+				.has_checked = true,
+				.on_confirm = true,
+				.on_dismiss = true,
+			}
+		);
+		frame(renderer);
+
+		uint at = renderer.ui.node_for("ask")!!;
+		cui::Element* elem = renderer.ui.nodes[at].element;
+		cui::widgets::ConfirmDialog* dialog = elem.widget_as(cui::widgets::ConfirmDialog);
+		test::@check(dialog.asking(elem), "the question the snapshot opened was not up");
+		test::@check(
+			dialog.message.str_view() == "Delete 17 dots?",
+			"the message did not cross: '%s'",
+			dialog.message.str_view()
+		);
+
+		// The same node again with nothing said about `open`. A new element every
+		// time — `push_node` builds rather than reuses — so this is the carry and
+		// not the element surviving.
+		one_node(
+			renderer,
+			{ .kind = three::UiNodeKind.CONFIRM_DIALOG, .key = "ask", .text = "Delete 17 dots?", .on_confirm = true }
+		);
+		frame(renderer);
+		at = renderer.ui.node_for("ask")!!;
+		elem = renderer.ui.nodes[at].element;
+		test::@check(
+			elem.widget_as(cui::widgets::ConfirmDialog).asking(elem),
+			"a rebuild that said nothing about `open` took the question down"
+		);
+
+		// And a snapshot that DOES say it wins, which is the other half of the
+		// same rule.
+		one_node(
+			renderer,
+			{
+				.kind = three::UiNodeKind.CONFIRM_DIALOG,
+				.key = "ask",
+				.text = "Delete 17 dots?",
+				.has_checked = true,
+				.on_confirm = true,
+			}
+		);
+		frame(renderer);
+		at = renderer.ui.node_for("ask")!!;
+		elem = renderer.ui.nodes[at].element;
+		test::@check(
+			!elem.widget_as(cui::widgets::ConfirmDialog).asking(elem),
+			"a snapshot that closed the question was overruled by the carry"
+		);
+	};
+}
+
+<*
+ Both answers reach the listener, and they are two different events.
+
+ A dialog whose Cancel could not be told from its OK is a dialog the caller has
+ to guess about, and cui already treats every other way out — the close glyph,
+ ESC — as declining. The close glyph is what this drives, because `Dialog` stamps
+ it with an id and a test that clicked at computed coordinates would be asserting
+ about the font.
+*>
+fn void a_confirmations_two_answers_are_two_events() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+		one_node(
+			renderer,
+			{
+				.kind = three::UiNodeKind.CONFIRM_DIALOG,
+				.key = "ask",
+				.title = "Delete",
+				.text = "Delete it?",
+				.checked = true,
+				.has_checked = true,
+				.on_confirm = true,
+				.on_dismiss = true,
+			}
+		);
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		uint at = renderer.ui.node_for("ask")!!;
+
+		// The two buttons are one widget and the last thing under the panel. The
+		// confirming one is the right-hand half of it — the answer that does
+		// something sits where the pointer ends up — and fifteen pixels in from
+		// that edge is inside it whatever "OK" measures, since a button is its
+		// label plus fourteen pixels of padding at each end.
+		cui::Element* answers = last_leaf(renderer.ui.ui.find_id("cui-confirm-panel")!!);
+		float y = answers.absolute.y + answers.size.y * 0.5f;
+		float x = answers.absolute.x + answers.size.x - 15.0f;
+
+		point(renderer, x, y, true);
+		point(renderer, x, y, false);
+
+		test::@check(heard.calls == 1, "the confirming button fired %d times", heard.calls);
+		test::@check(
+			heard.kind == three::UiEventKind.CONFIRM,
+			"the confirming button reported %s",
+			heard.kind
+		);
+		test::@check(heard.node == at, "the answer was attributed to node %d rather than %d", heard.node, at);
+
+		cui::Element* elem = renderer.ui.nodes[at].element;
+		test::@check(
+			!elem.widget_as(cui::widgets::ConfirmDialog).asking(elem),
+			"answering left the question up"
+		);
+
+		// Up again through `patch`, which is the verb a class uses — a `set`
+		// would build a second dialog and the answer would go to the one that had
+		// just been thrown away.
+		renderer.ui.patch(at, { .has_checked = true, .checked = true });
+		frame(renderer);
+		test::@check(
+			elem.widget_as(cui::widgets::ConfirmDialog).asking(elem),
+			"patching `open` did not put the question back up"
+		);
+
+		heard = { };
+		test::@check(click_id(renderer, "dialog-close"), "the dialog had no close glyph to click");
+		test::@check(heard.calls == 1, "the close glyph fired %d times", heard.calls);
+		test::@check(
+			heard.kind == three::UiEventKind.DISMISS,
+			"closing the panel reported %s rather than a dismissal",
+			heard.kind
+		);
+	};
+}
+
+<*
+ A menu bar reports which title and which entry, and a separator does not shift
+ the count.
+
+ Two coordinates rather than one, because a bar is a list of lists: a flat item
+ ordinal would make the panel add up the length of every menu before the one that
+ was clicked, and keep that sum in step with its own data. The separator is in
+ the tree here on purpose — it is an entry cui builds an element for, so a
+ recovery that counted only the selectable rows would be off by one from here on.
+*>
+fn void a_menu_bar_reports_which_title_and_which_entry() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint bar = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.MENU, .key = "bar", .on_select = true },
+			-1
+		)!!;
+		renderer.ui.push_menu(bar, "File");
+		renderer.ui.push_menu_item(bar, "New", "", false, false, false);
+		renderer.ui.push_menu_item(bar, "", "", false, false, true);
+		renderer.ui.push_menu_item(bar, "Quit", "Ctrl+Q", false, false, false);
+		renderer.ui.push_menu(bar, "View");
+		renderer.ui.push_menu_item(bar, "Wireframe", "", true, false, false);
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		cui::widgets::MenuBar* widget = renderer.ui.nodes[bar].element.widget_as(cui::widgets::MenuBar);
+		test::@check(widget.menus.len == 2, "the bar took %d menus", widget.menus.len);
+		test::@check(widget.menus[0].items.len == 3, "the first menu took %d entries", widget.menus[0].items.len);
+		test::@check(widget.menus[1].items.len == 1, "the second menu took %d entries", widget.menus[1].items.len);
+		test::@check(
+			widget.menus[1].items[0].label == "Wireframe",
+			"the second menu's entry came out as '%s' — the runs are crossed",
+			widget.menus[1].items[0].label
+		);
+
+		test::@check(click_id(renderer, "View"), "the bar had no View title");
+		// The dropdown does not exist until the bar rebuilds, and the rebuild is
+		// deferred to the next frame — which is the same frame that gives its
+		// rows the origins the click below is aimed at.
+		frame(renderer);
+
+		test::@check(click_id(renderer, "Wireframe"), "the open menu had no Wireframe entry");
+		test::@check(heard.calls == 1, "the entry fired %d times", heard.calls);
+		test::@check(heard.kind == three::UiEventKind.MENU_PICK, "the entry reported %s", heard.kind);
+		test::@check(heard.node == bar, "the pick was attributed to node %d rather than %d", heard.node, bar);
+		test::@check(heard.index == 1, "the pick named menu %d rather than 1", heard.index);
+		test::@check(heard.item == 0, "the pick named entry %d rather than 0", heard.item);
+
+		// And the far side of the separator, which is the entry an off-by-one
+		// would get wrong.
+		heard = { };
+		test::@check(click_id(renderer, "File"), "the bar had no File title");
+		frame(renderer);
+		test::@check(click_id(renderer, "Quit"), "the open menu had no Quit entry");
+		test::@check(heard.calls == 1, "the entry fired %d times", heard.calls);
+		test::@check(heard.index == 0, "the pick named menu %d rather than 0", heard.index);
+		test::@check(heard.item == 2, "the pick named entry %d rather than 2 — the separator was not counted", heard.item);
+	};
+}
+
+<*
+ A browser lists its root, hands paths back the way the script wrote them, and
+ cannot be walked out of.
+
+ The confinement is the point. cui's `FileBrowser` walks wherever its rows take
+ it — `..` at any depth, up to the filesystem root — and it has no notion of a
+ root to give it one, so the rule is applied from outside: a move that landed
+ outside is sent straight back and told nobody. Without it a game's panel is a
+ directory listing of somebody's home directory, one folder at a time.
+*>
+fn void a_file_browser_hands_back_relative_paths_and_cannot_be_walked_out_of() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		Path here = path::cwd(mem)!!;
+		defer here.free(mem);
+		String root = string::tformat("%s/test/fixtures", (String)here);
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint at = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.FILE_BROWSER,
+				.key = "files",
+				.root = root,
+				.on_select = true,
+				.on_choose = true,
+				.on_change = true,
+			},
+			-1
+		)!!;
+		renderer.ui.push_option(at, "*.glb");
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		cui::Element* elem = renderer.ui.nodes[at].element;
+		cui::widgets::FileBrowser* browser = elem.widget_as(cui::widgets::FileBrowser);
+		test::@check(
+			browser.directory.str_view() == root,
+			"the browser opened at '%s' rather than at its root",
+			browser.directory.str_view()
+		);
+		test::@check(browser.mask.len == 1, "the mask crossed as %d patterns", browser.mask.len);
+
+		// Every row is one `row_height` tall and the list starts at the element's
+		// own origin, so a row is arithmetic rather than a search.
+		float step = cui::widgets::DEFAULT_FILE_BROWSER_STYLE.row_height;
+		int model = browser.entry_at_name("hierarchy.glb");
+		test::@check(model >= 0, "the mask hid the models it was written for");
+
+		float y = elem.absolute.y + (float)model * step + step * 0.5f;
+		float x = elem.absolute.x + 20.0f;
+		point(renderer, x, y, true);
+		point(renderer, x, y, false);
+
+		test::@check(heard.kind == three::UiEventKind.FILE_SELECT, "the first click reported %s", heard.kind);
+		test::@check(
+			heard.said() == "hierarchy.glb",
+			"the selection came back as '%s' rather than relative to the root",
+			heard.said()
+		);
+
+		// The second click on the selected row is what activates it, which is the
+		// same two-step every list in cui uses and what lets a browser be driven
+		// by anything that cannot express a double click.
+		heard = { };
+		point(renderer, x, y, true);
+		point(renderer, x, y, false);
+		test::@check(heard.kind == three::UiEventKind.FILE_CHOOSE, "the second click reported %s", heard.kind);
+		test::@check(heard.said() == "hierarchy.glb", "the choice came back as '%s'", heard.said());
+
+		// `..` twice: selected, then activated. The move lands above the root, so
+		// the browser is put straight back and the script is told nothing about
+		// where it briefly was.
+		test::@check(browser.has_parent, "the listing offered no way up to refuse");
+		heard = { };
+		float up = elem.absolute.y + step * 0.5f;
+		point(renderer, x, up, true);
+		point(renderer, x, up, false);
+		point(renderer, x, up, true);
+		point(renderer, x, up, false);
+
+		test::@check(
+			browser.directory.str_view() == root,
+			"the browser walked out of its root to '%s'",
+			browser.directory.str_view()
+		);
+		test::@check(
+			heard.kind != three::UiEventKind.FILE_DIRECTORY || heard.said() == "",
+			"a directory above the root was reported as '%s'",
+			heard.said()
+		);
+
+		// A directory INSIDE the root is a perfectly good move, and it is
+		// reported relative to the root like everything else.
+		heard = { };
+		int folder = browser.entry_at_name("game");
+		test::@check(folder >= 0, "the listing hid its subdirectories");
+		float into = elem.absolute.y + (float)folder * step + step * 0.5f;
+		point(renderer, x, into, true);
+		point(renderer, x, into, false);
+		point(renderer, x, into, true);
+		point(renderer, x, into, false);
+
+		test::@check(
+			heard.kind == three::UiEventKind.FILE_DIRECTORY,
+			"walking into a folder reported %s",
+			heard.kind
+		);
+		test::@check(heard.said() == "game", "the new directory came back as '%s'", heard.said());
+	};
+}
+
+// ============================================================================
 // The JavaScript binding
 // ============================================================================
 
@@ -1019,6 +1661,124 @@ fn void a_script_builds_a_tree() @test
 		test::@check(result.ok, "the script ran: %s", result.error);
 		test::@check(renderer.ui.nodes.len() == 6, "the tree came over as %d nodes", renderer.ui.nodes.len());
 		test::@check(@ok(renderer.ui.node_for("fps")), "the key did not cross");
+	};
+}
+
+<*
+ cui's application widgets cross from JavaScript, as classes.
+
+ The whole of item 7 in one script: three classes on `three.ui`, a widget's
+ `render()` describing them, the normaliser in `ui.js` turning the shorthands —
+ a bare string for a menu entry, `'-'` for a divider, an array for a mask — into
+ the canonical shape, and `bind_ui.c3` pushing two nested levels of it.
+*>
+fn void a_script_builds_cuis_application_widgets() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const { Column, ConfirmDialog, MenuBar, FileBrowser } = three.ui;
+			class Shell extends three.Widget {
+				render() {
+					return new Column({ gap: 0 },
+						new MenuBar([
+							{ title: 'File', items: ['New', '-', { label: 'Quit', shortcut: 'Ctrl+Q' }] },
+							{ title: 'View', items: [{ label: 'Wireframe', checked: true }] },
+						], (menu, item) => { this.picked = [menu, item]; }),
+						new FileBrowser('models', ['*.glb', '*.gltf'], path => { this.opened = path; }),
+						new ConfirmDialog('Delete it?', true, () => {}, {
+							title: 'Delete', confirm: 'Delete', decline: 'Keep', onDismiss: () => {},
+						}),
+					);
+				}
+			}
+			Shell.mount();
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		// stack (the widget layer's root) > column > the three of them.
+		test::@check(renderer.ui.nodes.len() == 5, "the tree came over as %d nodes", renderer.ui.nodes.len());
+
+		int bar = -1;
+		int files = -1;
+		int ask = -1;
+		foreach (i, node : renderer.ui.nodes)
+		{
+			switch (node.kind)
+			{
+				case three::UiNodeKind.MENU: bar = (int)i;
+				case three::UiNodeKind.FILE_BROWSER: files = (int)i;
+				case three::UiNodeKind.CONFIRM_DIALOG: ask = (int)i;
+				default: break;
+			}
+		}
+		test::@check(bar >= 0 && files >= 0 && ask >= 0, "one of the three kinds did not cross");
+
+		cui::widgets::MenuBar* menus = renderer.ui.nodes[bar].element.widget_as(cui::widgets::MenuBar);
+		test::@check(menus.menus.len == 2, "the bar took %d titles", menus.menus.len);
+		test::@check(menus.menus[0].items.len == 3, "File took %d entries", menus.menus[0].items.len);
+		test::@check(menus.menus[0].items[0].label == "New", "the bare string was not read as a label");
+		test::@check(menus.menus[0].items[1].separator, "'-' did not become a divider");
+		test::@check(menus.menus[0].items[2].shortcut == "Ctrl+Q", "the shortcut did not cross");
+		test::@check(menus.menus[1].items[0].checked, "the checked flag did not cross");
+
+		cui::widgets::FileBrowser* browser =
+			renderer.ui.nodes[files].element.widget_as(cui::widgets::FileBrowser);
+		test::@check(browser.mask.len == 2, "the mask crossed as %d patterns", browser.mask.len);
+		test::@check(browser.mask[1] == "*.gltf", "the mask came over as '%s'", browser.mask[1]);
+
+		cui::Element* dialog = renderer.ui.nodes[ask].element;
+		cui::widgets::ConfirmDialog* question = dialog.widget_as(cui::widgets::ConfirmDialog);
+		test::@check(question.title == "Delete", "the title came over as '%s'", question.title);
+		test::@check(question.confirm_text() == "Delete", "the confirming label came over as '%s'", question.confirm_text());
+		test::@check(question.decline_text() == "Keep", "the declining label came over as '%s'", question.decline_text());
+		test::@check(
+			question.message.str_view() == "Delete it?",
+			"the message came over as '%s'",
+			question.message.str_view()
+		);
+		test::@check(question.asking(dialog), "the positional boolean did not open the question");
+	};
+}
+
+<*
+ A script reads the pointer off a `draw` node as one named object.
+
+ Nine positional arguments would be the alternative and nobody would remember
+ the order. A panel reads two or three fields of this and ignores the rest, which
+ is what a bag is for — and `shift` is spelled out rather than left as a bit,
+ because `if (e.shift)` is the line somebody writes.
+*>
+fn void a_script_reads_the_pointer_off_a_draw_node() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			globalThis.seen = [];
+			three.ui.set({ type: 'padding', insets: [40, 30, 0, 0], child: {
+				type: 'draw', width: 60, height: 40,
+				ops: [{ op: 'rect', at: [0, 0], size: [60, 40], color: 0x224466 }],
+				onPointer: e => { globalThis.seen.push(e); },
+			}});
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		frame(renderer);
+		point(renderer, 55, 45, true);
+		point(renderer, 55, 45, false);
+
+		three::RunResult read = run.run(`
+			const seen = globalThis.seen;
+			const down = seen.find(e => e.phase === 'down');
+			if (!down) return 'never went down: ' + seen.map(e => e.phase).join('/');
+			return [down.x, down.y, down.buttons, down.button, down.shift, down.ctrl,
+				seen.some(e => e.phase === 'up')].join(',');
+		`);
+		defer read.free();
+		test::@check(read.ok, "the read-back ran: %s", read.error);
+		test::eq(read.value, `"15,15,1,0,false,false,true"`);
 	};
 }
 
@@ -1703,3 +2463,244 @@ fn void an_open_dropdown_paints_and_hits_over_what_is_under_it() @test
 		);
 	};
 }
+
+// ============================================================================
+// The slot: a plugin's tree and a script's, composed
+// ============================================================================
+
+// A plugin's tree: a full-frame stack with one element inside it that the
+// plugin means to hand over. The shape crig has — a workspace with a pane in it.
+fn cui::Element* plugin_tree(three::Renderer* renderer, cui::Element** inner)
+{
+	cui::Ui* ui = (cui::Ui*)renderer.ui.context(&renderer.gpu, &renderer.target);
+	*inner = ui.@node((cui::widgets::Stack){ });
+	return ui.@node((cui::widgets::Stack){ }, *inner);
+}
+
+<*
+ With a slot the two doors compose instead of evicting each other.
+
+ The whole point of `set_slot`, and the one claim worth a test: before it, a
+ `three.ui.set` under a native plugin took the floor and blanked the application,
+ so an editor written in cui could host no scripted panel at all. After it both
+ are mounted and the snapshot hangs from the element the plugin named — not from
+ `content`, which is what would make it an overlay rather than a pane.
+*>
+fn void a_slot_lets_a_plugin_and_a_script_share_the_interface() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Element* inner;
+		cui::Element* root = plugin_tree(renderer, &inner);
+		renderer.ui.set_plugin_root(root);
+		renderer.ui.set_slot(inner);
+
+		one_node(
+			renderer,
+			{ .kind = three::UiNodeKind.RECT, .size = { 60, 20 }, .color = { 1.0, 1.0, 1.0, 1.0 } }
+		);
+
+		test::@check(renderer.ui.foreign == root, "the script's set evicted the plugin's tree");
+		test::@check(renderer.ui.tree != null, "the snapshot was not built");
+		test::@check(
+			renderer.ui.tree.parent == inner,
+			"the snapshot hung from the floor rather than from the slot"
+		);
+	};
+}
+
+<*
+ Without a slot they are exclusive, exactly as they were.
+
+ The other half of the same change: `commit_tree` learned a branch, and the
+ branch it did not take has to behave the way `set_plugin_root` has always
+ documented — last writer holds the floor.
+*>
+fn void with_no_slot_the_plugin_still_loses_the_floor() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Element* inner;
+		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
+
+		test::@check(renderer.ui.foreign == null, "the plugin's tree survived a set it should not have");
+		test::@check(renderer.ui.tree != null, "the snapshot was not built");
+		test::@check(
+			renderer.ui.tree.parent == renderer.ui.content,
+			"the snapshot did not land on the content floor"
+		);
+	};
+}
+
+<*
+ Withdrawing the offer takes the panel with it, and says so.
+
+ There is no re-homing: cui has no detach that keeps an element alive, so a
+ snapshot moved out of a slot is a rebuild either way. The generation is the
+ whole of how a script finds out — a pane that was tabbed away from is gone, and
+ a panel that never heard about it would never draw again.
+*>
+fn void withdrawing_a_slot_clears_the_panel_and_moves_the_generation() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Element* inner;
+		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+		renderer.ui.set_slot(inner);
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
+
+		uint before = renderer.ui.slot_generation;
+		renderer.ui.set_slot(null);
+
+		test::@check(renderer.ui.slot == null, "the offer stood after it was withdrawn");
+		test::@check(renderer.ui.tree == null, "the snapshot outlived the slot it was in");
+		test::eq(renderer.ui.nodes.len(), 0);
+		test::@check(
+			renderer.ui.slot_generation != before,
+			"the generation did not move, so no script would ever redraw"
+		);
+		test::@check(renderer.ui.foreign != null, "withdrawing took the plugin's tree with it");
+	};
+}
+
+<*
+ A slot cui recycled under the layer's feet is dropped, not grafted into.
+
+ The failure this exists for: cui releases a subtree children-first, so a pane
+ that rebuilt took the snapshot with it and the plugin's `unmount` hook heard
+ about it one step too late. A layer that trusted its pointer would then append
+ the next snapshot to an element on the free-list — a corruption with no symptom
+ until something unrelated draws in the wrong place.
+
+ Here nobody withdraws at all, which is the worst version of it, and the next
+ `set` has to notice on its own and fall back to the floor.
+*>
+fn void a_recycled_slot_is_noticed_by_the_next_snapshot() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Element* inner;
+		cui::Element* root = plugin_tree(renderer, &inner);
+		renderer.ui.set_plugin_root(root);
+		renderer.ui.set_slot(inner);
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
+
+		// The pane rebuild, without the withdrawal that should have gone with it.
+		// Takes the snapshot underneath along with the slot, exactly as cui would.
+		renderer.ui.ui.unmount(inner);
+		uint before = renderer.ui.slot_generation;
+
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 40, 10 } });
+
+		test::@check(renderer.ui.slot == null, "the recycled slot was still being grafted into");
+		test::@check(
+			renderer.ui.slot_generation != before,
+			"a slot that went away did not move the generation"
+		);
+		test::@check(renderer.ui.tree != null, "the fallback snapshot was not built");
+		test::@check(
+			renderer.ui.tree.parent == renderer.ui.content,
+			"the snapshot did not fall back to the content floor"
+		);
+	};
+}
+
+<*
+ Replacing a plugin's whole tree withdraws the offer inside it.
+
+ The withdrawal a plugin that rebuilds wholesale does not have to make, and the
+ ordering that makes it sound: the slot pointer goes first, so the snapshot under
+ it is released while it is still attached to something, and only then does the
+ tree that held it come off the floor.
+*>
+fn void a_new_plugin_root_withdraws_the_slot_in_the_old_one() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Element* inner;
+		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+		renderer.ui.set_slot(inner);
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
+
+		cui::Element* second;
+		renderer.ui.set_plugin_root(plugin_tree(renderer, &second));
+
+		test::@check(renderer.ui.slot == null, "the old tree's slot was still on offer");
+		test::@check(renderer.ui.tree == null, "the snapshot survived the tree it was grafted into");
+		test::eq(renderer.ui.nodes.len(), 0);
+
+		// And the new tree is usable: the offer is made again and takes.
+		renderer.ui.set_slot(second);
+		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 30, 30 } });
+		test::@check(renderer.ui.tree != null, "nothing drew into the new tree's slot");
+		test::@check(renderer.ui.tree.parent == second, "the snapshot missed the new slot");
+	};
+}
+
+<*
+ A slot reports where it is, not only how big it is.
+
+ `three.input.pointer` is the window's and knows nothing about panes, so a script
+ drawing its own controls into a slot has only one way to turn a pointer reading
+ into a position inside its panel: subtract the slot's corner. That is the whole
+ job of `slot_origin`, and the check is that it is the *inset* corner rather than
+ the plugin root's — a padding of 24 is a panel that starts 24 in.
+
+ A frame first, because `absolute` is written by the emit pass: the same reason
+ the click tests above draw before they point.
+*>
+fn void a_slot_reports_its_corner_and_not_just_its_size() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		cui::Ui* ui = (cui::Ui*)renderer.ui.context(&renderer.gpu, &renderer.target);
+		cui::Element* inner = ui.@node((cui::widgets::Stack){ });
+		cui::Element* root = ui.@node(
+			(cui::widgets::Padding){ .insets = { 24, 24, 24, 24 } },
+			inner
+		);
+
+		renderer.ui.set_plugin_root(root);
+		renderer.ui.set_slot(inner);
+
+		one_node(
+			renderer,
+			{ .kind = three::UiNodeKind.RECT, .size = { 60, 20 }, .color = { 1.0, 1.0, 1.0, 1.0 } }
+		);
+
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		Vec2 origin = renderer.ui.slot_origin();
+		test::@check(origin.x == 24.0 && origin.y == 24.0,
+			"the slot's corner came back as %f, %f rather than the padding's 24, 24",
+			origin.x, origin.y);
+		test::@check(renderer.ui.slot_size().x > 0, "and the size still answers beside it");
+	};
+}
+
+<*
+ With nothing offered the corner is the origin rather than a stale reading.
+
+ `three.ui.slot` reports `present: false` in the same breath, so a script never
+ has to tell "no slot" from "a slot at 0, 0" — but the numbers still have to be
+ zero, because a panel that ignored `present` would otherwise hit-test against
+ wherever the last slot happened to be.
+*>
+fn void no_slot_reports_no_corner() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		one_node(
+			renderer,
+			{ .kind = three::UiNodeKind.RECT, .size = { 60, 20 }, .color = { 1.0, 1.0, 1.0, 1.0 } }
+		);
+
+		Vec2 origin = renderer.ui.slot_origin();
+		test::@check(origin.x == 0.0 && origin.y == 0.0,
+			"an unoffered slot answered %f, %f", origin.x, origin.y);
+	};
+}
+

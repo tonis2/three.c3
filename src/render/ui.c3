@@ -167,13 +167,22 @@ struct UiPainting (cui::Widget)
 	uint node;
 	bool clickable;
 	bool hoverable;
+	// The whole pointer — position, buttons, modifiers, wheel — rather than the
+	// fact of a click. What a dopesheet, a curve editor or a gizmo is made of,
+	// and the reason those are writable in JavaScript at all.
+	bool pointing;
+	// `solid` on a `draw` node. Carried here because `layout` below decides this
+	// element's `ignores_pointer` every pass and would otherwise overwrite what
+	// `push_node` set — so without it `solid` would mean one thing on every kind
+	// and nothing on this one.
+	bool blocking;
 	// Re-pointed by `commit_tree` once the node's op list has stopped growing.
 	UiOp[] ops;
 }
 
 fn Vec2 UiPainting.layout(&self, cui::Element* elem, cui::Constraints constraints) @dynamic
 {
-	elem.ignores_pointer = !self.clickable && !self.hoverable;
+	elem.ignores_pointer = !self.clickable && !self.hoverable && !self.pointing && !self.blocking;
 	return constraints.constrain(
 		{
 			self.size.x > 0 ? self.size.x : constraints.max.x,
@@ -232,28 +241,119 @@ fn void UiPainting.paint(&self, cui::Element* elem, cui::Painter* painter) @dyna
 }
 
 <*
- Consumes a press when the script asked for clicks, so the pointer is captured
- and a release outside still resolves — and so the scene under it does not also
- get the click.
+ The pointer, on the two terms a `draw` node can ask for it.
 
- @return `True for a left press or release once the node declared onClick.`
+ `onClick` is the small one: a press is consumed so the pointer is captured and a
+ release outside still resolves, and so the scene under it does not also get the
+ click.
+
+ `onPointer` is the whole thing — position, buttons, modifiers and wheel, every
+ frame the pointer is here or captured. It is what makes a timeline, a curve
+ editor or a gizmo writable in JavaScript, and the reason it is delivered HERE
+ rather than read off `three.input.pointer` is that this is inside the hit test.
+ A script polling the global pointer is told about a drag that started on an open
+ menu, on a modal, on whatever the host painted over it; a script handed this one
+ is not, because cui gave the event to the menu instead.
+
+ What is consumed, and why it is not the same for every phase:
+
+ - **PRESS** consumes, which is also what captures the pointer — a drag that
+   leaves the node must keep arriving or every drag ends at the first edge.
+ - **RELEASE** consumes, so the press and its release are one gesture.
+ - **MOVE** does not, the rule `FileBrowser` follows: a pointer merely passing
+   over a panel must still reach a `Scroll` above it. A move during a capture
+   arrives regardless, which is the half a drag needs.
+ - **SCROLL** consumes when the node asked for the pointer. A panel that draws
+   its own timeline owns the wheel over it — that is what zooming a dopesheet is
+   — and a node that wanted the wheel to fall through would not have asked.
+
+ @return `True when this element took the event.`
 *>
 fn bool UiPainting.on_mouse(&self, cui::Element* elem, cui::MouseEvent event) @dynamic
 {
-	if (!self.clickable) return false;
-	if (event.button != cui::MouseButton.LEFT) return false;
+	if (self.pointing) ui_fire(elem, ui_pointer_event(elem, event));
 
+	if (self.clickable && event.button == cui::MouseButton.LEFT)
+	{
+		switch (event.kind)
+		{
+			case PRESS:
+				return true;
+			case RELEASE:
+				bool inside = event.pos.x >= 0 && event.pos.y >= 0
+					&& event.pos.x < elem.size.x && event.pos.y < elem.size.y;
+				if (inside) ui_fire(elem, { .kind = UiEventKind.CLICK });
+				return true;
+			default:
+				break;
+		}
+	}
+
+	if (!self.pointing) return false;
+	return event.kind != cui::MouseEventKind.MOVE;
+}
+
+<*
+ One cui mouse event as the flat `UiEvent` everything here crosses on.
+
+ The position is the ELEMENT's, not the window's. A hit-tested widget is told
+ where the pointer is inside itself, and a script handed window coordinates would
+ have to subtract an origin — which is `three.ui.slot` all over again, on a node
+ whose whole point is that it does not have to know where it was put.
+
+ Buttons and modifiers are read off the frame's input rather than off the event,
+ because `MouseEvent.button` says which button this edge is about and says
+ nothing about the other two. A drag with the right button held is one test on
+ `buttons`, and shift-dragging is one test on `modifiers`.
+*>
+fn UiEvent ui_pointer_event(cui::Element* elem, cui::MouseEvent event) @local
+{
+	cui::Input* input = &elem.ui.input;
+
+	UiPointerPhase phase;
 	switch (event.kind)
 	{
-		case PRESS:
-			return true;
-		case RELEASE:
-			bool inside = event.pos.x >= 0 && event.pos.y >= 0 && event.pos.x < elem.size.x && event.pos.y < elem.size.y;
-			if (inside) ui_fire(elem, { .kind = UiEventKind.CLICK });
-			return true;
-		default:
-			return false;
+		case PRESS:   phase = UiPointerPhase.DOWN;
+		case RELEASE: phase = UiPointerPhase.UP;
+		case SCROLL:  phase = UiPointerPhase.WHEEL;
+		default:      phase = UiPointerPhase.MOVE;
 	}
+
+	uint buttons;
+	if (input.down[0]) buttons |= 1;
+	if (input.down[1]) buttons |= 2;
+	if (input.down[2]) buttons |= 4;
+
+	uint modifiers;
+	if (input.key_down((cui::Key)cui::Key.LEFT_SHIFT) || input.key_down((cui::Key)cui::Key.RIGHT_SHIFT))
+	{
+		modifiers |= 1;
+	}
+	if (input.key_down((cui::Key)cui::Key.LEFT_CTRL) || input.key_down((cui::Key)cui::Key.RIGHT_CTRL))
+	{
+		modifiers |= 2;
+	}
+	if (input.key_down((cui::Key)cui::Key.LEFT_ALT) || input.key_down((cui::Key)cui::Key.RIGHT_ALT))
+	{
+		modifiers |= 4;
+	}
+	if (input.key_down((cui::Key)cui::Key.LEFT_SUPER) || input.key_down((cui::Key)cui::Key.RIGHT_SUPER))
+	{
+		modifiers |= 8;
+	}
+
+	return {
+		.kind = UiEventKind.POINTER,
+		.phase = phase,
+		.at = event.pos,
+		.buttons = buttons,
+		.modifiers = modifiers,
+		// Which button this edge is about, for DOWN and UP. `MouseButton`'s own
+		// order, which is the order `Cursor` already carries them in.
+		.index = (usz)event.button.ordinal,
+		.value = event.scroll,
+		.wheel_x = event.scroll_x,
+	};
 }
 
 fn void UiPainting.on_hover(&self, cui::Element* elem, bool entered) @dynamic
@@ -327,13 +427,28 @@ fn Vec2 UiWrap.layout(&self, cui::Element* elem, cui::Constraints constraints) @
  Every node type a snapshot may name.
 
  The first eight are layout and hold nothing but numbers; the next three paint;
- the last six are the interactive built-ins, and the only thing they add is a
- function. `js/prelude/ui.js` maps the `type` string onto these and refuses
- anything else by name, so a typo is a message rather than a missing panel.
+ the six after those are the interactive built-ins, and the only thing they add
+ is a function. The last three are cui's application widgets — a confirmation, a
+ menu bar and a directory listing. `js/prelude/ui.js` maps the `type` string onto
+ these and refuses anything else by name, so a typo is a message rather than a
+ missing panel.
 
- `MenuBar`, `Dialog`, `FileBrowser` and the `AreaHost` family are deliberately
- absent — see UI.md §8.3. They are not snapshot-shaped: their contents are
- function pointers cui evaluates rather than subtrees it holds.
+ Those last three were once absent under the note that cui's application widgets
+ "are not snapshot-shaped: their contents are function pointers cui evaluates
+ rather than subtrees it holds". That is true of `Dialog` and of the `AreaHost`
+ family and was never true of these: a `ConfirmDialog` is four strings and two
+ callbacks, a `MenuBar` is `Select`'s options one level deeper, and a
+ `FileBrowser` is a path and a list of patterns.
+
+ `Dialog` and `AreaHost` are still absent, and stay absent until cui grows an
+ `Element*` a dialog *borrows* in place of the `ViewBuilder` it calls: the
+ subtree that builder returns is released wholesale on close, so handing a
+ dialog the snapshot's children would have cui free elements this layer owns and
+ then hand the freed pointers back on the next open.
+
+ Appended rather than inserted, and that is a rule rather than a preference:
+ `js/prelude/ui.js`'s `KIND` table is these ordinals written out in JavaScript,
+ and `bind_ui.c3` bounds-checks an incoming `k` against the last of them.
 *>
 enum UiNodeKind : char
 {
@@ -354,6 +469,9 @@ enum UiNodeKind : char
 	SELECT,
 	TREE,
 	TEXTFIELD,
+	CONFIRM_DIALOG,
+	MENU,
+	FILE_BROWSER,
 }
 
 <*
@@ -364,6 +482,11 @@ enum UiNodeKind : char
  a scene somebody is looking at: a caption, a panel background and a health bar
  must not become dead zones, and the one that genuinely wants to block — a modal
  scrim — is rare enough to ask for it.
+
+ `DRAW` is the one kind this cannot answer for, and it is not an omission: a
+ painting takes the pointer when the SNAPSHOT attached a handler to it, which is
+ a fact about a node rather than about a kind. `UiPainting.layout` decides it
+ there, from the same three flags, and overwrites what this decided here.
 *>
 fn bool UiNodeKind.interactive(self)
 {
@@ -376,6 +499,9 @@ fn bool UiNodeKind.interactive(self)
 		case SELECT:
 		case TREE:
 		case TEXTFIELD:
+		case CONFIRM_DIALOG:
+		case MENU:
+		case FILE_BROWSER:
 			return true;
 		default:
 			return false;
@@ -443,6 +569,13 @@ struct UiNodeSpec
 	// Text
 	String text;
 	String suffix;
+	// A `confirmDialog`'s heading and the words on its two answers. Fields of
+	// their own rather than three more meanings for `text`, which is already the
+	// question being asked: all four strings are present at once, and a snapshot
+	// that had to spell three of them positionally would be unreadable.
+	String title;
+	String confirm_label;
+	String decline_label;
 	uint font;
 	float text_size;
 
@@ -457,6 +590,20 @@ struct UiNodeSpec
 	bool checked;
 	bool disabled;
 	usz selected;
+
+	// A `fileBrowser`'s confinement, and the only field on this struct that is a
+	// policy rather than a description. `root` is the absolute directory it opens
+	// under and may not climb out of; `scheme` is the prefix its paths are
+	// written back to JavaScript with. `js/bind_ui.c3` decides both — it is the
+	// file that knows what an assets directory is — and `ui_file_directory`
+	// enforces them, because cui's `FileBrowser` has no notion of a root and this
+	// binding does not change cui to give it one.
+	//
+	// An empty `root` is no confinement, which is not an oversight: it is the
+	// same answer `JsRuntime.resolve_asset` gives a process with no assets
+	// directory, where confining to nothing would refuse every path there is.
+	String root;
+	String scheme;
 
 	// Which of the five stateful fields the snapshot actually named.
 	bool has_text;
@@ -475,6 +622,10 @@ struct UiNodeSpec
 	bool on_select;
 	bool on_toggle;
 	bool on_hover;
+	bool on_confirm;
+	bool on_dismiss;
+	bool on_choose;
+	bool on_pointer;
 }
 
 <*
@@ -496,6 +647,28 @@ enum UiEventKind : char
 	ROW_TOGGLE,
 	TEXT_CHANGE,
 	TEXT_SUBMIT,
+	CONFIRM,
+	DISMISS,
+	MENU_PICK,
+	FILE_CHOOSE,
+	FILE_SELECT,
+	FILE_DIRECTORY,
+	POINTER,
+}
+
+<*
+ Which edge of the pointer a POINTER event is.
+
+ Four rather than one flag apiece, because a script switches on this once and a
+ panel that had to work out "a press this frame that was not a press last frame"
+ is a panel reimplementing the edge detection cui already did.
+*>
+enum UiPointerPhase : char
+{
+	MOVE,
+	DOWN,
+	UP,
+	WHEEL,
 }
 
 struct UiEvent
@@ -503,12 +676,33 @@ struct UiEvent
 	UiEventKind kind;
 	// TOGGLE's new state, HOVER's entered/left.
 	bool flag;
-	// SLIDE and COMMIT.
+	// SLIDE and COMMIT, and POINTER's vertical wheel delta.
 	float value;
-	// PICK, ROW_SELECT and ROW_TOGGLE.
+	// POINTER's horizontal wheel delta. A field of its own rather than a second
+	// meaning for something: a trackpad sends both at once, and a timeline that
+	// pans on one axis and zooms on the other needs to tell them apart.
+	float wheel_x;
+	// POINTER, in the node's OWN coordinates — see `ui_pointer_event`.
+	Vec2 at;
+	// POINTER's phase, and the only field that says which edge this is.
+	UiPointerPhase phase;
+	// POINTER: which buttons are held, as bits in `cui::MouseButton` order —
+	// 1 left, 2 right, 4 middle. The state during the event, so a drag is one
+	// test rather than a flag the script has to keep itself.
+	uint buttons;
+	// POINTER: shift, ctrl, alt, super, as bits in that order.
+	uint modifiers;
+	// PICK, ROW_SELECT and ROW_TOGGLE. MENU_PICK's is which title on the bar,
+	// and POINTER's is which button a DOWN or an UP is about.
 	usz index;
-	// TEXT_CHANGE and TEXT_SUBMIT. Borrowed for the call only — it is the
-	// widget's own buffer and the next keystroke rewrites it.
+	// MENU_PICK's entry under that title, and the only event with two ordinals.
+	// A bar is a list of lists, and a flat item number would make a script that
+	// wanted to know what was clicked count the length of every menu before it —
+	// which is a thing it would then have to keep in step with its own data.
+	usz item;
+	// TEXT_CHANGE, TEXT_SUBMIT and the three FILE_ events. Borrowed for the call
+	// only — it is the widget's own buffer and the next keystroke rewrites it,
+	// or a temporary that the frame's pool takes back.
 	String text;
 }
 
@@ -546,6 +740,20 @@ struct UiNode
 	List{String} options;
 	List{cui::widgets::TreeRow} rows;
 	List{UiOp} ops;
+	// A `menu`'s two levels. The bar borrows `menus`, and each `Menu` in it
+	// borrows a run of `items` — one list for every dropdown rather than a list
+	// per menu, because a `Menu[]` has to be contiguous and a list of lists would
+	// be a second allocation per title that `drop_list` would then have to walk.
+	// Which run belongs to which title is carried in `Menu.items.len` while the
+	// pushes are happening; `repoint` is where the pointers are filled in.
+	List{cui::widgets::Menu} menus;
+	List{cui::widgets::MenuItem} items;
+
+	// A `fileBrowser`'s confinement, copied off the spec and pointing into
+	// `owned` — the directory it may not climb out of and the prefix its paths
+	// are written back with. Empty on every other kind.
+	String root;
+	String scheme;
 }
 
 fn void UiNode.free(&self)
@@ -558,6 +766,8 @@ fn void UiNode.free(&self)
 	self.options.free();
 	self.rows.free();
 	self.ops.free();
+	self.menus.free();
+	self.items.free();
 	if (self.key) self.key.free();
 	*self = { };
 }
@@ -576,6 +786,8 @@ fn void UiNode.drop_list(&self)
 	self.options.clear();
 	self.rows.clear();
 	self.ops.clear();
+	self.menus.clear();
+	self.items.clear();
 }
 
 <*
@@ -655,8 +867,20 @@ struct UiLayer
 	// A native plugin's tree, grafted onto the same floor. Separate from `tree`
 	// because the two have different owners: this one has no `UiNode` records
 	// behind it and nothing here built it. Only one of the two is mounted at a
-	// time — see `set_plugin_root`.
+	// time — see `set_plugin_root` — unless there is a `slot`, which is the
+	// arrangement where they compose instead.
 	cui::Element* foreign;
+
+	// Where a script's snapshot is grafted when a plugin has offered a place for
+	// it *inside* its own layout. Null is the original arrangement: the snapshot
+	// hangs from `content` and whichever of the two wrote last holds the floor.
+	// See `set_slot`.
+	cui::Element* slot;
+	// Bumped whenever the offer is made or withdrawn. A slot going away takes
+	// the snapshot with it, so a script reads this through `three.ui.slot` and
+	// re-`set`s when the number moves — there is no callback, because a panel
+	// that redraws itself from a frame system already has the one loop it needs.
+	uint slot_generation;
 
 	// The snapshot being built, between `begin_tree` and `commit_tree`. Separate
 	// from the live one so a tree that fails halfway leaves the interface exactly
@@ -783,6 +1007,7 @@ fn void UiLayer.free(&self)
 	self.ui = null;
 	// Freed with every other element by `Ui.free` above, whichever image built it.
 	self.foreign = null;
+	self.slot = null;
 	self.overlay_text.free();
 	self.held.free();
 	foreach (i, node : self.nodes) self.nodes[i].free();
@@ -928,15 +1153,23 @@ fn void UiLayer.commit_tree(&self)
 	if (!self.open) return;
 	self.open = false;
 
-	// A plugin's tree loses the floor to a script's, by the same last-writer rule
-	// `set_plugin_root` states from the other side.
-	if (self.foreign)
+	// A slot that went away since the last `set` — its pane was closed, or its
+	// tab switched, and the plugin did not withdraw. Falling back to the floor is
+	// the pre-slot arrangement rather than a panel that quietly fails to appear.
+	if (self.slot && !self.attached(self.slot))
 	{
-		self.ui.unmount(self.foreign);
-		self.foreign = null;
+		self.slot = null;
+		self.slot_generation++;
 	}
 
-	if (self.tree) self.ui.unmount(self.tree);
+	// A plugin's tree loses the floor to a script's, by the same last-writer rule
+	// `set_plugin_root` states from the other side. With a slot they compose
+	// instead: the plugin keeps the floor and the snapshot lands inside it.
+	if (self.slot == null) self.drop_foreign();
+
+	// Conditional because in a slot the old snapshot can be gone already,
+	// recycled with the plugin's subtree that held it — see `drop_tree`.
+	if (self.tree && self.attached(self.tree)) self.ui.unmount(self.tree);
 	self.tree = self.pending;
 	self.pending = null;
 
@@ -947,7 +1180,7 @@ fn void UiLayer.commit_tree(&self)
 
 	self.repoint();
 
-	if (self.tree) self.content.append(self.tree);
+	if (self.tree) (self.slot ? self.slot : self.content).append(self.tree);
 	if (self.pending_focus >= 0 && (sz)self.pending_focus < self.nodes.len())
 	{
 		self.nodes[self.pending_focus].element.request_focus();
@@ -980,6 +1213,22 @@ fn void repoint_node(UiNode* node) @local
 			node.element.widget_as(cui::widgets::Tree).rows = node.rows.array_view();
 		case DRAW:
 			node.element.widget_as(UiPainting).ops = node.ops.array_view();
+		case MENU:
+			// Two levels, and the inner one first: each `Menu` was given a slice
+			// whose length is right and whose pointer was into a block the next
+			// push may have freed. The runs are contiguous and in push order, so
+			// walking a cursor along them recovers where each one starts without
+			// storing it.
+			usz at = 0;
+			foreach (i, menu : node.menus)
+			{
+				usz count = menu.items.len;
+				node.menus[i].items = node.items.array_view()[at : count];
+				at += count;
+			}
+			node.element.widget_as(cui::widgets::MenuBar).menus = node.menus.array_view();
+		case FILE_BROWSER:
+			node.element.widget_as(cui::widgets::FileBrowser).mask = node.options.array_view();
 		default:
 			break;
 	}
@@ -1006,14 +1255,61 @@ fn void UiLayer.clear_tree(&self)
 {
 	if (self.ui == null) return;
 	if (self.open) self.abandon_tree();
+	self.drop_tree();
+}
+
+<*
+ Takes the snapshot down, releasing it only if it is still in a tree.
+
+ On `content` the check never fails and this is the plain unmount it has always
+ been: the layer put the snapshot there and nothing else can take it away. In a
+ slot it can be gone already — cui releases a subtree children-first, so a pane
+ that rebuilt recycled the snapshot before the plugin's own widget was told, and
+ unmounting it a second time would corrupt the free-list.
+
+ Reading a released element is defined rather than lucky: cui zeroes it and keeps
+ the allocation on `all_elements`, so an orphan answers `parent == null` and the
+ walk stops there. It cannot have been handed out again either, because cui only
+ allocates elements in the build pass and a widget's `unmount` fires in the
+ release that runs immediately before it.
+*>
+fn void UiLayer.drop_tree(&self)
+{
 	if (self.tree)
 	{
-		self.ui.unmount(self.tree);
+		if (self.attached(self.tree)) self.ui.unmount(self.tree);
 		self.tree = null;
 	}
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.clear();
 	self.ui.request_frame();
+}
+
+<*
+ Takes a plugin's tree off the floor, releasing it only if it is still on one.
+
+ Conditional for the same reason `drop_tree` is, and against a narrower mistake:
+ a plugin that released its own root without saying so. That was always a
+ contract violation and is not one this can repair — the pointer is gone either
+ way — but unmounting a recycled element would corrupt cui's free-list, and
+ forgetting it merely loses a tree that is already lost.
+*>
+fn void UiLayer.drop_foreign(&self)
+{
+	if (self.foreign == null) return;
+	if (self.attached(self.foreign)) self.ui.unmount(self.foreign);
+	self.foreign = null;
+}
+
+// Whether an element still hangs from this Ui at all. Linear in the depth of the
+// tree and asked once per `set`, not per frame.
+fn bool UiLayer.attached(&self, cui::Element* element)
+{
+	for (cui::Element* walk = element; walk != null; walk = walk.parent)
+	{
+		if (walk == self.ui.root) return true;
+	}
+	return false;
 }
 
 <*
@@ -1054,20 +1350,110 @@ fn void UiLayer.set_plugin_root(&self, void* root)
 {
 	if (self.ui == null) return;
 
+	// The slot is an element of the tree being replaced, so it goes with it. It
+	// goes *first* and by hand rather than through `set_slot`, so that the
+	// snapshot below is released while it is still attached to something — this
+	// is the withdrawal a plugin that rebuilds wholesale does not have to make.
+	if (self.slot)
+	{
+		self.slot = null;
+		self.slot_generation++;
+	}
+
 	// The script's half goes first, and completely: `clear_tree` also drops the
 	// `UiNode` records, so a later `three.ui.patch` faults on a missing key
 	// rather than editing a tree that is no longer on screen.
 	if (self.tree) self.clear_tree();
 
-	if (self.foreign)
-	{
-		self.ui.unmount(self.foreign);
-		self.foreign = null;
-	}
+	self.drop_foreign();
 
 	self.foreign = (cui::Element*)root;
 	if (self.foreign) self.content.append(self.foreign);
 	self.ui.request_frame();
+}
+
+<*
+ Offers a place inside a plugin's own layout for a script's snapshot, or
+ withdraws it.
+
+ The one verb that gets past the last-writer rule above. Without it a plugin and
+ a script are two writers arguing over one floor, so an editor written natively
+ can host no scripted panel at all and every `three.ui.set` under it blanks the
+ application. With it the two compose: the plugin keeps the floor, names an
+ element of its tree, and a snapshot lands there — laid out by the pane that
+ holds it, clipped by it, hit-tested in its order.
+
+ `element` is a `cui::Element*` built with the Ui `context` answered, already in
+ the mounted tree. Nothing here takes ownership of it: cui owns every element it
+ built, which is the same rule and the same reason as `set_plugin_root`.
+
+ ## What a plugin owes
+
+ One thing: withdraw before the element goes. cui releases a subtree
+ children-first, so a widget's own `unmount` fires *after* the snapshot beneath
+ it has been recycled — too late to release it properly, though `drop_tree`
+ makes it safe. `set_plugin_root` withdraws on the plugin's behalf, which covers
+ a rebuild of the whole tree; a pane that comes and goes has to say so itself.
+
+ ## One slot, and the snapshot does not survive it
+
+ One, because the layer keeps exactly one `nodes` table and one `tree`, and a
+ second mount point would mean a second of each along with a way for `set` to
+ say which it meant. It is the change to make when a plugin wants two panels,
+ and not before.
+
+ Withdrawing clears the snapshot rather than moving it back to the floor: cui has
+ no detach that keeps an element alive, so a move is a rebuild either way. The
+ script is told by `slot_generation` and re-`set`s — a pane switched away from
+ and back is a different element, and its panel is drawn again.
+
+ @param element : `The mount point, or null to withdraw.`
+*>
+fn void UiLayer.set_slot(&self, void* element)
+{
+	if (self.ui == null) return;
+
+	cui::Element* offered = (cui::Element*)element;
+	if (offered == self.slot) return;
+
+	// Either way the snapshot goes: into a slot it would have to be moved, out of
+	// one it is already gone. One rule instead of two, and the generation is what
+	// tells the script to draw it again.
+	self.drop_tree();
+	self.slot = offered;
+	self.slot_generation++;
+	self.ui.request_frame();
+}
+
+<*
+ How big the offered mount point came out, in logical points.
+
+ What a script needs to fit a panel to a pane it did not lay out. Zero until the
+ element has been through a layout pass, which is one frame after the plugin
+ built it.
+*>
+fn Vec2 UiLayer.slot_size(&self)
+{
+	if (self.slot == null) return { 0, 0 };
+	return self.slot.size;
+}
+
+<*
+ Where the offered mount point sits, in the same logical points `slot_size` is in.
+
+ The reason it is reported at all is `three.input.pointer`, which is the window's
+ and knows nothing about panes: a script drawing its own controls with
+ `three.ui.draw` has to subtract this to hit-test them. Widgets in a snapshot
+ never need it — they are laid out by cui and hit-tested by cui.
+
+ cui's `absolute` and so written by the *emit* pass rather than by layout: zero
+ until the element has been painted once, which is the same one-frame caveat
+ `slot_size` carries and for the same reason.
+*>
+fn Vec2 UiLayer.slot_origin(&self)
+{
+	if (self.slot == null) return { 0, 0 };
+	return self.slot.absolute;
 }
 
 <*
@@ -1147,6 +1533,7 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	// writes `value: 0.5` means it, and one that omits it means "leave what the
 	// drag left there".
 	String carried;
+	String browsing;
 	UiNode* prior = self.carry(spec.key, spec.kind);
 	bool keep_open;
 	if (prior != null && prior.element != null)
@@ -1167,6 +1554,22 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				if (!spec.has_selected) spec.selected = prior.element.widget_as(cui::widgets::Tree).selected;
 			case TEXTFIELD:
 				if (!spec.has_text) carried = prior.element.widget_as(cui::widgets::TextField).value();
+			case CONFIRM_DIALOG:
+				// Whether a question is up is the one thing about a confirmation
+				// the user decides, so it carries like a scroll offset does: a
+				// snapshot that names `open` means it, and one that does not
+				// leaves the answer the user has not given yet on screen.
+				if (!spec.has_checked)
+				{
+					spec.checked = prior.element
+						.widget_as(cui::widgets::ConfirmDialog)
+						.asking(prior.element);
+				}
+			case FILE_BROWSER:
+				// Where the user has walked to, which is the browser's whole
+				// state: without this, a panel that re-renders for any other
+				// reason snaps the listing back to wherever it opened.
+				browsing = prior.element.widget_as(cui::widgets::FileBrowser).directory.str_view();
 			default:
 				break;
 		}
@@ -1179,6 +1582,8 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	node.options.init(mem, 0);
 	node.rows.init(mem, 0);
 	node.ops.init(mem, 0);
+	node.menus.init(mem, 0);
+	node.items.init(mem, 0);
 	if (spec.key.len > 0)
 	{
 		node.key.init(mem, spec.key.len);
@@ -1188,9 +1593,29 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	UiNode* held = &self.building[index];
 
 	// Every string a widget borrows, copied before the widget exists.
-	String text   = spec.text.len > 0 ? held.keep(spec.text) : "";
-	String suffix = spec.suffix.len > 0 ? held.keep(spec.suffix) : "";
+	String text    = spec.text.len > 0 ? held.keep(spec.text) : "";
+	String suffix  = spec.suffix.len > 0 ? held.keep(spec.suffix) : "";
+	String title   = spec.title.len > 0 ? held.keep(spec.title) : "";
+	String confirm = spec.confirm_label.len > 0 ? held.keep(spec.confirm_label) : "";
+	String decline = spec.decline_label.len > 0 ? held.keep(spec.decline_label) : "";
 	if (spec.kind == UiNodeKind.TEXTFIELD && !spec.has_text && carried.len > 0) carried = held.keep(carried);
+
+	// The confinement outlives the call the same way a label does, because it is
+	// read from a widget callback on some later frame — see `ui_file_directory`.
+	if (spec.kind == UiNodeKind.FILE_BROWSER)
+	{
+		if (spec.root.len > 0) held.root = held.keep(spec.root);
+		if (spec.scheme.len > 0) held.scheme = held.keep(spec.scheme);
+		// Where the browser opens: what the user was last looking at if this is a
+		// rebuild of one, and what the snapshot asked for otherwise. Confined
+		// either way, so a carried directory from a snapshot whose root has since
+		// changed cannot outlive the rule that let it in.
+		if (browsing.len > 0 && ui_inside(browsing, held.root)) text = held.keep(browsing);
+		// A confined browser always opens inside its root: `FileBrowser.mount`
+		// falls back to the *working directory* for an empty start, and a game's
+		// working directory is wherever somebody typed the command.
+		if (text.len == 0) text = held.root;
+	}
 
 	cui::widgets::MainAlign main   = cui::widgets::MainAlign::from_ordinal(spec.main_align > 3 ? 0 : (usz)spec.main_align);
 	cui::widgets::CrossAlign cross = cui::widgets::CrossAlign::from_ordinal(
@@ -1284,6 +1709,8 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 					.node = index,
 					.clickable = spec.on_click,
 					.hoverable = spec.on_hover,
+					.pointing = spec.on_pointer,
+					.blocking = spec.solid,
 				}
 			);
 		case BUTTON:
@@ -1389,6 +1816,83 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 					},
 				}
 			);
+		case CONFIRM_DIALOG:
+			// The message and the two callbacks are NOT set here: a
+			// `ConfirmDialog` takes them through `ask`, which copies the sentence
+			// into a buffer of its own — the whole reason the widget exists is
+			// that the question is decided when it is asked rather than when the
+			// tree is built. Opening it is below, once the element is on the node.
+			element = self.ui.@node(
+				(cui::widgets::ConfirmDialog){
+					.title = title,
+					.confirm_label = confirm,
+					.decline_label = decline,
+					.style = {
+						...cui::widgets::DEFAULT_DIALOG_STYLE,
+						.panel_color = ui_color(spec.color, cui::widgets::DEFAULT_DIALOG_STYLE.panel_color),
+						.panel_border = ui_color(spec.border_color, cui::widgets::DEFAULT_DIALOG_STYLE.panel_border),
+						.text_color = ui_color(spec.text_color, cui::widgets::DEFAULT_DIALOG_STYLE.text_color),
+						.font = spec.font,
+						.text_size = spec.text_size > 0
+							? spec.text_size
+							: cui::widgets::DEFAULT_DIALOG_STYLE.text_size,
+					},
+					.buttons = {
+						...cui::widgets::DEFAULT_CONFIRM_BUTTONS,
+						.accent = ui_color(spec.accent, cui::widgets::DEFAULT_CONFIRM_BUTTONS.accent),
+						.hover = ui_color(spec.hover_color, cui::widgets::DEFAULT_CONFIRM_BUTTONS.hover),
+						.press = ui_color(spec.press_color, cui::widgets::DEFAULT_CONFIRM_BUTTONS.press),
+						.font = spec.font,
+					},
+				}
+			);
+		case MENU:
+			// `menus` is empty until `repoint`, for the reason a Select's options
+			// are: `push_menu` is still growing the list a `Menu[]` would point
+			// into. A bar with nothing in it is a strip of background, which is
+			// exactly what a snapshot that named no menus asked for.
+			element = self.ui.@node(
+				(cui::widgets::MenuBar){
+					.style = {
+						...cui::widgets::DEFAULT_MENU_STYLE,
+						.bar_color = ui_color(spec.color, cui::widgets::DEFAULT_MENU_STYLE.bar_color),
+						.panel_color = ui_color(spec.color, cui::widgets::DEFAULT_MENU_STYLE.panel_color),
+						.bar_border = ui_color(spec.border_color, cui::widgets::DEFAULT_MENU_STYLE.bar_border),
+						.panel_border = ui_color(spec.border_color, cui::widgets::DEFAULT_MENU_STYLE.panel_border),
+						.hover_color = ui_color(spec.hover_color, cui::widgets::DEFAULT_MENU_STYLE.hover_color),
+						.open_color = ui_color(spec.accent, cui::widgets::DEFAULT_MENU_STYLE.open_color),
+						.text_color = ui_color(spec.text_color, cui::widgets::DEFAULT_MENU_STYLE.text_color),
+						.font = spec.font,
+						.text_size = spec.text_size > 0
+							? spec.text_size
+							: cui::widgets::DEFAULT_MENU_STYLE.text_size,
+						.bar_height = spec.size.y > 0 ? spec.size.y : cui::widgets::DEFAULT_MENU_STYLE.bar_height,
+					},
+				}
+			);
+		case FILE_BROWSER:
+			// `on_directory` is wired whether or not the script asked for it: it
+			// is what enforces the root, and a browser that only reported where it
+			// had gone when somebody was listening would be confined only when
+			// somebody was listening. `ui_file_directory` drops the event itself
+			// when there is no handler.
+			element = self.ui.@node(
+				(cui::widgets::FileBrowser){
+					.start = text,
+					.on_choose = spec.on_choose ? &ui_file_choose : null,
+					.on_select = spec.on_select ? &ui_file_select : null,
+					.on_directory = &ui_file_directory,
+					.style = {
+						...cui::widgets::DEFAULT_FILE_BROWSER_STYLE,
+						.text = ui_color(spec.text_color, cui::widgets::DEFAULT_FILE_BROWSER_STYLE.text),
+						.selected = ui_color(spec.accent, cui::widgets::DEFAULT_FILE_BROWSER_STYLE.selected),
+						.hover = ui_color(spec.hover_color, cui::widgets::DEFAULT_FILE_BROWSER_STYLE.hover),
+						.text_size = spec.text_size > 0
+							? spec.text_size
+							: cui::widgets::DEFAULT_FILE_BROWSER_STYLE.text_size,
+					},
+				}
+			);
 	}
 
 	// Decoration is transparent to the pointer, and it has to be opt-out rather
@@ -1405,6 +1909,31 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	{
 		String start = spec.has_text ? text : carried;
 		if (start.len > 0) element.widget_as(cui::widgets::TextField).set_text(element, start);
+	}
+
+	// A question goes up through `ask` rather than through fields, because `ask`
+	// is where the sentence is copied into the widget's own buffer and where the
+	// two answers are attached — the whole reason `ConfirmDialog` exists is that
+	// the message is decided when the question is asked. It is safe on an element
+	// with no children, which is every element at this point: it records the
+	// request and asks for a build, the path a hand-written one takes on its
+	// first frame.
+	//
+	// Asked and then withdrawn when the snapshot says the question is down,
+	// rather than skipped: that loads the sentence and both callbacks without
+	// showing anything, so `patch({ open: true })` later has something to put up
+	// and somewhere to send the answer. Withdrawing before the first build runs
+	// neither callback — there is no panel yet to close.
+	if (spec.kind == UiNodeKind.CONFIRM_DIALOG)
+	{
+		cui::widgets::ConfirmDialog* dialog = element.widget_as(cui::widgets::ConfirmDialog);
+		dialog.ask(
+			element,
+			text,
+			spec.on_confirm ? &ui_confirm : null,
+			spec.on_dismiss ? &ui_decline : null
+		);
+		if (!spec.checked) dialog.withdraw(element);
 	}
 
 	self.building[index].element = element;
@@ -1429,7 +1958,8 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 }
 
 <*
- One option of a `select`, in order.
+ One option of a `select`, in order — and one mask pattern of a `fileBrowser`,
+ which wants the same thing: a borrowed `String[]` the snapshot fills in.
 
  Separate from the node because a widget borrows the array and the list has to
  stop growing before anything may point at it — `repoint` is where that happens.
@@ -1441,6 +1971,68 @@ fn void UiLayer.push_option(&self, uint node, String label)
 	UiNode* held = self.at(node);
 	if (held == null) return;
 	held.options.push(held.keep_listed(label));
+}
+
+<*
+ One title on a `menu` bar, in order. Its entries follow it.
+
+ @param node : `The index push_node answered with.`
+*>
+fn void UiLayer.push_menu(&self, uint node, String title)
+{
+	UiNode* held = self.at(node);
+	if (held == null) return;
+	held.menus.push({ .title = held.keep_listed(title) });
+}
+
+<*
+ One entry under the last title pushed.
+
+ `MenuQuery` — the callback cui polls for an item's checked and disabled state
+ each time its dropdown opens — deliberately does not cross. It exists so a check
+ mark set by a keyboard shortcut is right without anyone pushing an update into
+ the menu data, and a JavaScript panel is the case where there IS somebody
+ pushing: it re-renders from its own state and the snapshot carries the answer.
+ A function pointer that had to reach back into the interpreter to be asked a
+ question mid-layout would be the one callback here that is not a *report* of
+ something that happened.
+
+ `on_select` is attached to every entry rather than only to a bar whose script
+ asked for one. cui puts that function on the item and not on the bar, so making
+ it conditional would mean pushing the node's handler set down into every entry;
+ the listener already drops an event nobody is holding a handler for, and a
+ chosen item closes its menu either way.
+
+ @param node : `The index push_node answered with. Ignored before the first push_menu.`
+ @param shortcut : `Drawn right-aligned and dim. A reminder only — nothing here binds a key.`
+ @param separator : `A divider. Every other field of the entry is ignored, cui's own rule.`
+*>
+fn void UiLayer.push_menu_item(
+	&self, uint node, String label, String shortcut, bool checked, bool disabled, bool separator
+)
+{
+	UiNode* held = self.at(node);
+	if (held == null || held.menus.len() == 0) return;
+
+	held.items.push(
+		{
+			.label = separator ? "" : held.keep_listed(label),
+			.shortcut = separator || shortcut.len == 0 ? "" : held.keep_listed(shortcut),
+			.on_select = separator ? null : &ui_menu_pick,
+			.checked = checked,
+			.disabled = disabled,
+			.separator = separator,
+		}
+	);
+
+	// The run this entry belongs to, written as a slice of the list *as it
+	// stands*. The pointer is stale the moment the list grows again and `repoint`
+	// replaces it; the length is the part that is being recorded, and it is
+	// recorded here because this is the only place that knows which title is
+	// still open.
+	sz last = held.menus.len() - 1;
+	usz count = held.menus[last].items.len + 1;
+	held.menus[last].items = held.items.array_view()[(usz)held.items.len() - count..];
 }
 
 <*
@@ -1635,6 +2227,52 @@ fn void UiLayer.patch(&self, uint node, UiPatch fields)
 				widget.size = fields.size;
 				resize = true;
 			}
+		case CONFIRM_DIALOG:
+			// Putting the question up and taking it down is a patch and not a
+			// rebuild, which is the only thing that makes a confirmation usable
+			// from a class: a `set` would build a second `ConfirmDialog` element,
+			// and the answer the user is halfway through giving would be to the
+			// one that had just been thrown away.
+			cui::widgets::ConfirmDialog* widget = elem.widget_as(cui::widgets::ConfirmDialog);
+			if (fields.has_checked)
+			{
+				if (fields.checked)
+				{
+					@pool()
+					{
+						// Copied, and this is not defensive: `ask` clears its own
+						// buffer before appending to it, so handing it a view OF
+						// that buffer — which is what re-opening with nothing new
+						// to say does — is an overlapping copy. cui guards
+						// `FileBrowser.go_to` against exactly this case and does
+						// not guard `ask`. The copy is gone at the end of the
+						// call, by which time `ask` has finished reading it.
+						String said = fields.has_text ? fields.text : widget.message.str_view().tcopy();
+
+						// The callbacks the node was built with, again: `ask`
+						// reads them at the moment the answer is given, so
+						// re-asking with the pair already on the widget keeps
+						// whichever of the two the snapshot attached and drops
+						// neither.
+						widget.ask(elem, said, widget.on_confirm, widget.on_decline);
+					};
+				}
+				else
+				{
+					widget.withdraw(elem);
+				}
+			}
+			else if (fields.has_text && widget.asking(elem))
+			{
+				widget.ask(elem, fields.text, widget.on_confirm, widget.on_decline);
+			}
+			// Returns rather than falling through to the invalidation below, and
+			// that is load-bearing. A `ConfirmDialog` is a composite with no paint
+			// of its own, so `request_paint` routes to `request_build` — and its
+			// `build` reads `open_when_built` and clears it on the way past. So
+			// asking politely for a repaint here would rebuild the panel `ask`
+			// has just opened, closed. Both verbs invalidate correctly already.
+			return;
 		default:
 			break;
 	}
@@ -1686,6 +2324,18 @@ fn void UiLayer.relist(&self, uint node)
 	UiNode* live = self.at(node);
 	if (live == null || live.element == null) return;
 	repoint_node(live);
+
+	// A `fileBrowser` whose mask was replaced has to read the directory again:
+	// the filter is applied when the listing is taken and nowhere else, so
+	// re-pointing alone would change what the browser is allowed to show and not
+	// what it is showing. Guarded on the widget having mounted, because the
+	// buffer `rescan` reads the directory out of is made there.
+	if (live.kind == UiNodeKind.FILE_BROWSER)
+	{
+		cui::widgets::FileBrowser* browser = live.element.widget_as(cui::widgets::FileBrowser);
+		if (browser.directory.data() != null) browser.rescan();
+	}
+
 	live.element.request_layout();
 	self.ui.request_frame();
 }
@@ -1823,6 +2473,203 @@ fn void ui_typed(cui::Ui* ui, String text) @local
 fn void ui_submit(cui::Ui* ui, String text) @local
 {
 	ui_signal(ui, UiNodeKind.TEXTFIELD, { .kind = UiEventKind.TEXT_SUBMIT, .text = text });
+}
+
+fn void ui_confirm(cui::Ui* ui) @local
+{
+	ui_signal(ui, UiNodeKind.CONFIRM_DIALOG, { .kind = UiEventKind.CONFIRM });
+}
+
+<*
+ Every way out of a confirmation that is not the confirming button — Cancel, the
+ close glyph, ESC.
+
+ It reaches the node the same way a click does even though the panel is on its
+ way out, because cui defers the release to the build pass: the subtree the
+ answer came from is still hanging off this node's element while the callback
+ runs, which is exactly what `locate` walks.
+*>
+fn void ui_decline(cui::Ui* ui) @local
+{
+	ui_signal(ui, UiNodeKind.CONFIRM_DIALOG, { .kind = UiEventKind.DISMISS });
+}
+
+<*
+ Which title and which entry, worked out from the row the release landed on.
+
+ cui puts `on_select` on the `MenuItem` and hands it nothing but the `Ui`, so an
+ entry cannot say which of the hundred on a bar it is — and unlike every other
+ widget here there is no per-node function to give it, because the function is
+ per item. Both coordinates are recovered from the tree instead:
+
+ - **the entry** is its position among its siblings. A dropdown's `Column` holds
+   one element per entry, separators included and in push order, so the child
+   index IS the index into the items the snapshot pushed.
+ - **the title** is the bar's own `open`, which is still the menu being chosen
+   from: `MenuItemRow` closes the bar after the callback returns, not before.
+
+ Matching on the label instead was the obvious alternative and is worse: two
+ menus may carry the same word, and `Edit > Copy` and `View > Copy` would then be
+ one event.
+*>
+fn void ui_menu_pick(cui::Ui* ui) @local
+{
+	UiLayer* layer = ui.inherit(UiLayer) ?? null;
+	if (layer == null || layer.listener == null) return;
+
+	// Captured first for the same reason `ui_signal` reads it first: the press
+	// that armed this release is what took the capture, and the pointer may have
+	// left the row by the time the button came up.
+	cui::Element* row = ui_menu_row(ui.captured);
+	if (row == null) row = ui_menu_row(ui.hovered);
+	if (row == null || row.parent == null) return;
+
+	usz entry;
+	bool found;
+	foreach (i, sibling : row.parent.children)
+	{
+		if (sibling != row) continue;
+		entry = (usz)i;
+		found = true;
+		break;
+	}
+	if (!found) return;
+
+	cui::Element* bar = row.widget_as(cui::widgets::MenuItemRow).bar;
+	if (bar == null) return;
+	int at = layer.locate(bar, UiNodeKind.MENU);
+	if (at < 0) return;
+
+	usz open = bar.widget_as(cui::widgets::MenuBar).open;
+	if (open == 0) return;
+
+	layer.listener(layer.host, (uint)at, { .kind = UiEventKind.MENU_PICK, .index = open - 1, .item = entry });
+}
+
+// The nearest dropdown entry at or above `from`, or null. A walk rather than a
+// cast because a menu row is a leaf today and need not stay one.
+fn cui::Element* ui_menu_row(cui::Element* from) @local
+{
+	for (cui::Element* e = from; e != null; e = e.parent)
+	{
+		if (e.is_widget(cui::widgets::MenuItemRow)) return e;
+	}
+	return null;
+}
+
+<*
+ Whether a path is at or under a root.
+
+ An empty root is "no confinement" rather than "nothing is inside it", which is
+ the reading a host with no assets directory needs — see `UiNodeSpec.root`. The
+ separator test is what stops `/home/ada/models-old` counting as inside
+ `/home/ada/models`.
+*>
+fn bool ui_inside(String path, String root) @local
+{
+	if (root.len == 0) return true;
+	if (path.len < root.len || !path.starts_with(root)) return false;
+	return path.len == root.len || path[root.len] == '/';
+}
+
+<*
+ A path as the script would have written it: relative to the browser's root, with
+ the scheme it opened under.
+
+ So that a path out of `onChoose` is a path `three.load` accepts, which is the
+ same promise `three.inventory` makes about the paths it hands back. The root
+ itself comes out empty — there is no name for "here" that is also a filename.
+
+ The answer either points into `path` or into the temp allocator, so it is good
+ for the call and no longer, which is what `UiEvent.text` already says of itself.
+*>
+fn String UiNode.written(&self, String path)
+{
+	if (self.root.len == 0) return path;
+	if (!ui_inside(path, self.root)) return "";
+	String tail = path.len > self.root.len ? path[self.root.len + 1..] : "";
+	return self.scheme.len == 0 ? tail : string::tformat("%s%s", self.scheme, tail);
+}
+
+fn void ui_file_choose(cui::Ui* ui, String path) @local
+{
+	ui_file_report(ui, UiEventKind.FILE_CHOOSE, path);
+}
+
+fn void ui_file_select(cui::Ui* ui, String path) @local
+{
+	ui_file_report(ui, UiEventKind.FILE_SELECT, path);
+}
+
+// A row's path, on its way out. Located like every other pointer-driven event,
+// and rewritten by the node whose confinement it landed in.
+fn void ui_file_report(cui::Ui* ui, UiEventKind kind, String path) @local
+{
+	UiLayer* layer = ui.inherit(UiLayer) ?? null;
+	if (layer == null || layer.listener == null) return;
+
+	int at = layer.locate(ui.captured, UiNodeKind.FILE_BROWSER);
+	if (at < 0) at = layer.locate(ui.hovered, UiNodeKind.FILE_BROWSER);
+	if (at < 0) at = layer.locate(ui.focused, UiNodeKind.FILE_BROWSER);
+	if (at < 0) return;
+
+	@pool()
+	{
+		layer.listener(layer.host, (uint)at, { .kind = kind, .text = layer.nodes[at].written(path) });
+	};
+}
+
+<*
+ The listing moved, and the one place the root is enforced.
+
+ cui's `FileBrowser` walks wherever the rows take it — `..` at any depth, up to
+ the filesystem root — and giving it a root of its own would be a change to cui,
+ which is a library this repository shares. So the confinement is applied from
+ outside, on the report every move already makes: a move that landed outside is
+ sent straight back to the root and told nobody. The bounce recurses exactly
+ once, because the root is inside itself.
+
+ A browser is not the only thing this protects. A script cannot `three.load`
+ outside the assets directory anyway — `resolve_asset` sees to that — so what
+ would leak without this is the *listing*: the names of every file the user
+ walked past, handed to a game's panel one directory at a time.
+
+ Located by the identity of the string rather than by the pointer, because this
+ one also fires from `mount`, where there is nothing hovered, captured or focused
+ to work back from. Both of cui's call sites pass `directory.str_view()`, so the
+ pointer names the widget exactly.
+*>
+fn void ui_file_directory(cui::Ui* ui, String path) @local
+{
+	UiLayer* layer = ui.inherit(UiLayer) ?? null;
+	if (layer == null) return;
+
+	int at = -1;
+	foreach (i, node : layer.nodes)
+	{
+		if (node.kind != UiNodeKind.FILE_BROWSER || node.element == null) continue;
+		if (node.element.widget_as(cui::widgets::FileBrowser).directory.str_view().ptr != path.ptr) continue;
+		at = (int)i;
+		break;
+	}
+	if (at < 0) return;
+
+	UiNode* node = &layer.nodes[at];
+	if (!ui_inside(path, node.root))
+	{
+		node.element.widget_as(cui::widgets::FileBrowser).go_to(node.element, node.root);
+		return;
+	}
+
+	if (layer.listener == null) return;
+	@pool()
+	{
+		layer.listener(
+			layer.host,
+			(uint)at,
+			{ .kind = UiEventKind.FILE_DIRECTORY, .text = node.written(path) }
+		);
+	};
 }
 
 // ============================================================================

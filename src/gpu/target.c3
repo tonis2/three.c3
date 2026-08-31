@@ -423,16 +423,38 @@ fn void Target.begin_overlay(&self, vk::CommandBuffer cmd)
 *>
 fn void set_full_viewport(vk::CommandBuffer cmd, vk::Extent2D extent, bool flip_y)
 {
-	float width  = (float)extent.width;
-	float height = (float)extent.height;
+	set_viewport_rect(cmd, { .offset = { 0, 0 }, .extent = extent }, flip_y);
+}
+
+<*
+ The same, over part of the attachment rather than all of it.
+
+ What `set_full_viewport` delegates to, and what a host drawing the scene inside
+ a pane of a larger interface sets instead — `MeshPass.view_rect`. The scissor
+ is the rect exactly; the viewport is the rect too, which is what makes the
+ projection's aspect the *pane's* rather than the window's and puts the middle of
+ the picture in the middle of the pane instead of the middle of the window.
+
+ The clear is untouched by either: `begin_render_to` clears through the render
+ area, which is always the whole attachment, so the target outside the rect is
+ the clear colour rather than last frame's.
+
+ @param rect : `Physical pixels, and must lie inside the attachment — Vulkan requires a scissor within the render area, and a pane scrolled off the edge has to be clamped by the caller.`
+*>
+fn void set_viewport_rect(vk::CommandBuffer cmd, vk::Rect2D rect, bool flip_y)
+{
+	float x      = (float)rect.offset.x;
+	float y      = (float)rect.offset.y;
+	float width  = (float)rect.extent.width;
+	float height = (float)rect.extent.height;
 	vk::cmdSetViewport(
 		cmd,
 		0,
 		1,
 		(vk::Viewport[]) {
 			{
-				.x = 0,
-				.y = flip_y ? height : 0,
+				.x = x,
+				.y = flip_y ? y + height : y,
 				.width = width,
 				.height = flip_y ? -height : height,
 				.minDepth = 0.0,
@@ -440,7 +462,7 @@ fn void set_full_viewport(vk::CommandBuffer cmd, vk::Extent2D extent, bool flip_
 			}
 		}
 	);
-	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { { .offset = { 0, 0 }, .extent = extent } });
+	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { rect });
 }
 
 <*

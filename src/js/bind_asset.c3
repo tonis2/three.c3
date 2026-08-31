@@ -962,9 +962,10 @@ fn void js_wireframe(
 <*
  `exportScene(path)` — write the scene to a `.glb`, and say what went into it.
 
- `js_load`'s other half, through the same door: the path is resolved by
- `resolve_asset`, so under `--assets` a script may write inside the game
- directory and nowhere else.
+ `js_load`'s other half, through a narrower door: the path is resolved by
+ `resolve_write`, so under `--assets` a script may write inside the game
+ directory and nowhere else — a plugin's directory is readable by name and
+ deliberately not writable by one.
 
  No device is needed and none is used. `scene/export.c3` reads a mesh out of the
  file it came from or tessellates it again from its description, so an export is
@@ -1016,7 +1017,7 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 			return;
 		}
 
-		String? writing = self.resolve_asset(path, tmem);
+		String? writing = self.resolve_write(path, tmem);
 		if (catch err = writing)
 		{
 			if (err == qjs::MODULE_ESCAPES_ROOT)

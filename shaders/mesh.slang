@@ -250,13 +250,12 @@ struct Draw
     float3* positions;
     float3* normals;
     float2* uvs;
-    // glTF's COLOR_0, if the file carried one. **Nothing in this shader reads
-    // it**, and that is not an oversight: a colour attribute changes no pixel of
-    // a `MeshLambertMaterial` here, so the only stage that can see it is a
-    // material body — `material.slang` hands it over as `s.vertex_color`. It is
-    // declared here because the record is one struct shared by both shaders and
-    // an offset that differed between them would read geometry from the wrong
-    // address.
+    // glTF's COLOR_0, if the file carried one. Multiplied into albedo below when
+    // `FLAG_HAS_COLORS` is set — the specification defines it as a **linear**
+    // factor on the base colour, so it is used as it arrives and not decoded, on
+    // the same reasoning that leaves `base_color` alone. `material.slang` also
+    // hands it to a body as `s.vertex_color`, where a body may do something else
+    // with it entirely.
     float4* colors;
     // glTF's JOINTS_0 and WEIGHTS_0: which four joints move this vertex and how
     // strongly. Widened to uint4 on upload from whatever width the file stored
@@ -486,6 +485,18 @@ struct VertexOutput
     // same order, which `material.slang`'s header explains is a wire format
     // rather than a coincidence.
     float4 color : COLOR0;
+    // glTF's COLOR_0, white when the mesh carries none.
+    //
+    // **This used to say `mesh.slang` had no counterpart to `material.slang`'s
+    // COLOR1**, on the argument that a colour attribute changes no pixel without
+    // a body to read it. That was true while nothing here read it and stopped
+    // being true when this shader started multiplying it into albedo: glTF
+    // defines COLOR_0 as a linear factor on the base colour, Three.js's loader
+    // turns `vertexColors` on for a primitive that has one, and a file that
+    // arrived painted was rendering grey. The cost is one interpolated float4 on
+    // every draw, paid whether or not the mesh has the attribute, because a
+    // varying is part of the pipeline rather than of the draw.
+    float4 vertex_color : COLOR1;
     float4 sv_position : SV_Position;
 };
 
@@ -539,6 +550,13 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // sides and load through the null pointer it was meant to avoid.
     float3 normal = float3(0.0, 1.0, 0.0);
     if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[vid];
+
+    // White is the identity for the multiply in the fragment stage, so a mesh
+    // with no colour attribute and a mesh painted white are the same surface —
+    // which is what lets the fragment stage multiply unconditionally and carry
+    // no second branch. Same rule and same sentence as `material.slang`'s.
+    output.vertex_color = float4(1.0, 1.0, 1.0, 1.0);
+    if ((draw.flags & FLAG_HAS_COLORS) != 0) output.vertex_color = draw.colors[vid];
 
     apply_morph(draw, instance, vid, position, normal);
 
@@ -956,7 +974,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // every node starts at.
     Draw draw = push.draw[0];
 
-    float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+    // Three factors, in three spaces, and the asymmetry is the point — see the
+    // block above `vertexMain`. The mesh's own is linear and used raw; the
+    // instance's came from a script's hex and is decoded; the vertex attribute is
+    // linear by the glTF specification and so is used raw as well.
+    float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb) * input.vertex_color.rgb;
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
         albedo *= base_color_map.Sample(input.uv * draw.uv_transform.xy + draw.uv_transform.zw).rgb;
@@ -990,6 +1012,6 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         albedo * lambert(normal) * (1.0 - surface.y)
             + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z)
             + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z),
-        draw.base_color.a * input.color.a
+        draw.base_color.a * input.color.a * input.vertex_color.a
     );
 }
