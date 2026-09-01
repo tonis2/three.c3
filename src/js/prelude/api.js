@@ -649,6 +649,43 @@ const camera = {
 		return new Vector3(null, mx, 0, mz);
 	},
 
+	// The world-space ray through a pixel of the rendered image, as
+	// `{ origin, direction }` — two Vector3s, the direction unit length, and
+	// exactly what `scene.raycast(origin, direction)` takes.
+	//
+	//     const r = three.camera.ray(x, y);
+	//     const t = -r.origin.y / r.direction.y;          // where it meets y = 0
+	//     const on = r.origin.clone().addScaledVector(r.direction, t);
+	//
+	// **This is the question `scene.pick(x, y)` cannot be asked.** A pick
+	// needs something already under the cursor, so dragging a piece across
+	// bare ground and dropping one where nothing is yet — the two things an
+	// editor does most — have nothing to pick. Both are this ray met with a
+	// plane the script chose.
+	//
+	// `x` and `y` are the rendered image's pixels from its top-left corner:
+	// the same ones `scene.pick(x, y)` takes, `three.input.pointer` answers
+	// in and `three.renderSize()` counts, so a cursor position feeds both
+	// without conversion. The ray goes through the pixel's CENTRE, which is
+	// where the rasterizer decided its colour.
+	//
+	// It is the same ray a pick casts rather than a second derivation from
+	// `position()`, `forward()` and `fov` — so `raycast` on it finds what
+	// `pick` finds at that pixel, at the same `distance`. The origin is
+	// therefore on the near plane and not at the eye: what sits in front of
+	// the near plane is invisible, and a ray taken from the picture does not
+	// hit it either.
+	ray(x, y) {
+		if (!(Number.isFinite(+x) && Number.isFinite(+y))) {
+			throw new TypeError('three.camera.ray(x, y) wants two pixel coordinates');
+		}
+		const r = H.cameraRay(+x, +y);
+		return {
+			origin: new Vector3(null, r[0], r[1], r[2]),
+			direction: new Vector3(null, r[3], r[4], r[5]),
+		};
+	},
+
 	// What the camera is following, or null. Also how a script finds out
 	// that what it was following has been destroyed: the host drops the
 	// attachment silently, because the alternative is throwing from inside a
@@ -1750,6 +1787,55 @@ export const three = {
 		}
 		const chosen = uploadOptions(options, 'three.texture(path, options)');
 		return new Texture(H.texture(path, chosen.code, chosen.mips), path, chosen.space);
+	},
+
+	// A text file out of the assets directory. The third thing that lives
+	// there beside the .glb and the .png: the level list that places a kit, a
+	// table of stats, a line of dialogue — a file a person edits in the repo,
+	// beside the kit it refers to, that ships with the game.
+	//
+	// It is three.load's door with nothing loaded through it, so the sandbox
+	// is the same one: a path that climbs out of the assets directory throws,
+	// a leading '/' means that directory rather than the disk's root, and the
+	// paths three.inventory() hands back are paths this accepts. Without
+	// --assets the path is used as written, exactly as three.load's is.
+	//
+	// READ-ONLY. three.save is where a script writes what a player did, and
+	// scene.export(path) is where it writes a .glb; there is no door here that
+	// puts a file into the game's own directory.
+	//
+	// null for a file that is not there — three.save.readText's answer, not
+	// three.load's throw, because "no level here yet" is a question an editor
+	// asks rather than a failure. Over 4 MB throws, and so does a file whose
+	// bytes are not UTF-8: this reads text, and a .glb read by mistake says so.
+	readText(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.readText(path) wants a path to a file in the assets directory');
+		}
+		return H.assetText(path);
+	},
+
+	// The same file, parsed. What three.save.read is to three.save.readText,
+	// and for the same reason: JSON is what a level gets written as, and the
+	// parse belongs on this side rather than in a second host verb.
+	//
+	//   const level = three.readJSON('levels/lumbridge.json') ?? [];
+	//   for (const [piece, x, y, z, turns] of level) {
+	//     const m = kit.mesh(piece);
+	//     m.position.set(x, y, z);
+	//     m.rotation.y = turns * Math.PI / 2;
+	//     scene.add(m);
+	//   }
+	//
+	// null for a file that is not there, like readText. A file that is there
+	// and is not JSON throws from JSON.parse, naming the position — which is
+	// what a hand-edited level file gets wrong.
+	readJSON(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.readJSON(path) wants a path to a file in the assets directory');
+		}
+		const text = H.assetText(path);
+		return text === null ? null : JSON.parse(text);
 	},
 
 	// Draws one frame into the offscreen target. The PNG that `run_script`

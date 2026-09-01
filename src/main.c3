@@ -200,6 +200,10 @@ fn void usage()
 	io::printn("  There is no file argument: a model is loaded from a script, with");
 	io::printn("  three.load(\"model.glb\"), which is what hands it back as an object.");
 	io::printn("");
+	io::printn("  --assets is also the root those paths resolve under, and the only directory");
+	io::printn("  a script may write in. It pairs with --script whether or not the directory");
+	io::printn("  has a main.js of its own to boot.");
+	io::printn("");
 	// Said here rather than in the flag list because it is four things, and because
 	// this is where somebody goes when a run is misbehaving. Every build has it —
 	// the shipped binary is this binary — so the line is the same wherever it prints.

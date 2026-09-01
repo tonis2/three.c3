@@ -1,6 +1,9 @@
 // three.c3 — Object3D and Group: the scene graph's nodes and their transforms.
 
-import { Vector3, axisIndex, boxFromSix, refBounds, transformBox, asTriple } from './math.js';
+import {
+	Vector3, axisIndex, boxFromSix, refBounds, transformBox, asTriple,
+	localMatrix3, multiplyMatrix3, applyMatrix3, invertMatrix3,
+} from './math.js';
 
 const H = globalThis.__three;
 
@@ -476,11 +479,7 @@ export class Object3D {
 	// is, so set them first.
 	align(axis, edge, at) {
 		const box = this.boundsInParent();
-		if (box === null) {
-			throw new Error(
-				'align() needs a box, and this object draws nothing — it is a Group with no meshes '
-				+ 'under it, or its geometry is not resident. Align a Mesh, or add one first.');
-		}
+		if (box === null) throw new Error(noBox('align()'));
 		const key = ['x', 'y', 'z'][axisIndex(axis, 'align()')];
 		const to = +at;
 		if (!Number.isFinite(to)) throw new TypeError(`align(${axis}, ${edge}, at) wants a number for at`);
@@ -488,26 +487,163 @@ export class Object3D {
 		return this;
 	}
 
-	// The same move, expressed against a sibling instead of a number.
+	// The same move, expressed against another object instead of a number.
 	//
 	//   window.alignTo(wall, { axis: 'z', mine: 'min', theirs: 'max', offset: -0.28 })
 	//
-	// Siblings, because each box is measured in its own parent's frame and
-	// two different parents are two different frames. Refused rather than
-	// silently wrong — see the note above `boundingBox`.
-	alignTo(other, { axis = 'y', mine = 'min', theirs = 'max', offset = 0 } = {}) {
+	// **A placement is usually more than one axis, so a call can be.** Name the
+	// axes and the whole sentence is one call — "my back face on your front
+	// face, centred on you in x, standing on you in y":
+	//
+	//   lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center', y: 'min' })
+	//
+	// An axis is either a string — one word for both faces, so `'center'` is
+	// centred on it and `'min'` is flush with its low side — or the long
+	// `{ mine, theirs, offset }`, whose defaults are the `min`-against-`max` of
+	// the single-axis form. **An axis nobody named does not move**, which is what
+	// makes this safe to reach for after a piece is already standing on the floor.
+	// The old four keys still mean what they meant, and mixing the two spellings
+	// is allowed: a named axis wins over `axis` naming the same one.
+	//
+	// Siblings by default, because each box is measured in its own parent's
+	// frame and two different parents are two different frames. `world: true`
+	// is the cross-parent form — see `_alignInWorld`.
+	alignTo(other, options = {}) {
 		if (!(other instanceof Object3D)) {
 			throw new TypeError('alignTo(other) wants another object as its first argument');
 		}
+		if (options === null || typeof options !== 'object') {
+			throw new TypeError('alignTo(other, options) wants an options object as its second argument');
+		}
+		const specs = alignSpecs(options, 'alignTo()');
+		if (options.world) return this._alignInWorld(other, specs);
 		if (other.parent !== this.parent) {
 			throw new Error(
 				'alignTo() aligns siblings: both objects must share a parent, because a box is '
-				+ 'measured in the frame of the parent it hangs from. For anything else, measure '
-				+ 'with boundsInParent() and place with align(axis, edge, number).');
+				+ 'measured in the frame of the parent it hangs from. For two objects in different '
+				+ 'frames, pass `world: true` — that measures both in world space and moves this one '
+				+ 'by the step that comes to, in its own parent\'s frame.');
 		}
 		const box = other.boundsInParent();
 		if (box === null) throw new Error('alignTo(): the object aligned to draws nothing, so it has no box');
-		return this.align(axis, mine, box.edge(axis, theirs) + (+offset));
+		const mine = this.boundsInParent();
+		if (mine === null) throw new Error(noBox('alignTo()'));
+		// One measurement for however many axes: a move along x cannot change
+		// where this box's y faces are, so the steps are independent and there
+		// is nothing to re-measure between them.
+		for (const s of specs) {
+			this.position[s.key] += box.edge(s.axis, s.theirs) + s.offset - mine.edge(s.axis, s.mine);
+		}
+		return this;
+	}
+
+	// `alignTo(other, { world: true, ... })`: the same sentence about two
+	// objects that do NOT share a parent — a lean-to against a hall in another
+	// group, a sign on a building, a lid on a crate someone else parented.
+	//
+	// **The faces are world faces and the axes are world axes.** Both boxes come
+	// from the host, in world space, and the step that closes the gap is worked
+	// out there. What crosses back into this object's own frame is that step —
+	// one vector through the inverse of its parents' rotation-and-scale — and a
+	// translation converts exactly, whatever those parents are: a non-uniform
+	// scale, a rotation of 30 degrees, an ancestor with both. So the piece lands
+	// with its world faces where they were asked for, and `position` may be a
+	// diagonal number that looks like nothing in particular. That is the frame
+	// change, not a rounding error.
+	//
+	// The approximation is the one every box here has: a world box is
+	// axis-aligned in *world*, so a piece turned 30 degrees is measured by the
+	// upright box around it and touches by that box. `boundsInParent()` is the
+	// tighter answer whenever the two objects really are siblings, and staying
+	// with the sibling form is why this is opt-in rather than the default.
+	//
+	// Two objects that share a parent after all are allowed rather than refused:
+	// the answer is then the sibling answer whenever nothing above them turns or
+	// squashes the frame, and the world-axis answer when something does. It
+	// costs two host calls where the sibling form costs none.
+	_alignInWorld(other, specs) {
+		if (this._i < 0 || other._i < 0) {
+			throw new Error(
+				'alignTo({ world: true }) measures both objects in world space, and world space is '
+				+ 'something a scene has — add() them first.');
+		}
+		const mine = this.boundingBox();
+		const theirs = other.boundingBox();
+		if (mine === null) throw new Error(noBox('alignTo({ world: true })'));
+		if (theirs === null) {
+			throw new Error('alignTo({ world: true }): the object aligned to draws nothing, so it has no box');
+		}
+		// Every axis first, then one conversion. A parent's frame mixes the axes,
+		// so converting a step per axis and adding the results up would not be
+		// the same move — and for a turned parent it would not even be close.
+		const step = [0, 0, 0];
+		for (const s of specs) {
+			step[s.i] = theirs.edge(s.axis, s.theirs) + s.offset - mine.edge(s.axis, s.mine);
+		}
+		const inverse = invertMatrix3(worldMatrix3(this.parent));
+		if (inverse === null) {
+			throw new Error(
+				'alignTo({ world: true }): something above this object is scaled to nothing on an '
+				+ 'axis, so no local move produces the world one.');
+		}
+		const local = applyMatrix3(inverse, step);
+		const p = this.position;
+		p.set(p.x + local[0], p.y + local[1], p.z + local[2]);
+		return this;
+	}
+
+	// **A run: N pieces edge to edge along one axis.** A wall of panels, a floor
+	// of tiles, a fence line — the commonest thing a kit is asked for, and the
+	// one shape the two align verbs had no word for.
+	//
+	//   wall.row('x', panels, { at: -3 });      // butted, starting at x = -3
+	//   fence.row('z', posts, { gap: 1.4 });    // spaced, starting where the
+	//                                           // first post already stands
+	//
+	// On the parent because a run has a cursor, and the cursor belongs to
+	// whoever owns the sequence. The other half of it — "put me after that one"
+	// — is already one `alignTo` call and needs no verb of its own.
+	//
+	// **The step is measured from each piece, never assumed.** A run of pieces
+	// that are not all the same size closes up anyway, and a piece turned a
+	// quarter turn steps by the side it now presents, because `boundsInParent()`
+	// has the rotation in it. `gap` is that measured step plus a constant, so a
+	// negative one laps the pieces over each other — which is what a course of
+	// roof tiles is.
+	//
+	// Only the run axis moves: whatever the pieces were at on the other two is
+	// what they stay at. `at` is where the run's low face goes, and leaving it
+	// out starts the run at the first piece's own low face — "these follow that
+	// one". A piece that is not a child yet is added, since a run is built out
+	// of pieces going into this object anyway. For a run that grows the other
+	// way, reverse the list.
+	row(axis, pieces, { at, gap = 0 } = {}) {
+		const key = ['x', 'y', 'z'][axisIndex(axis, 'row()')];
+		const step = +gap;
+		if (!Number.isFinite(step)) throw new TypeError('row(axis, pieces, { gap }) wants a number for gap');
+		let cursor = at === undefined || at === null ? null : +at;
+		if (cursor !== null && !Number.isFinite(cursor)) {
+			throw new TypeError('row(axis, pieces, { at }) wants a number for at');
+		}
+		// Copied, so that `parent.row(axis, parent.children)` is not walking the
+		// same list `add` splices.
+		for (const piece of [...pieces]) {
+			if (!(piece instanceof Object3D)) {
+				throw new TypeError('row(axis, pieces) wants a list of objects to place');
+			}
+			if (piece.parent !== this) this.add(piece);
+			const box = piece.boundsInParent();
+			if (box === null) {
+				throw new Error(
+					`row(): ${piece.name ? `"${piece.name}"` : 'a piece'} draws nothing, so there is `
+					+ 'no step to take from it — a run is measured piece by piece.');
+			}
+			const lo = box.edge(axis, 'min'), hi = box.edge(axis, 'max');
+			if (cursor === null) cursor = lo;
+			piece.position[key] += cursor - lo;
+			cursor += (hi - lo) + step;
+		}
+		return this;
 	}
 
 	toJSON() {
@@ -523,6 +659,83 @@ export class Object3D {
 			children: this.children.length,
 		};
 	}
+}
+
+// -----------------------------------------------------------------------
+// Placing: the shapes `alignTo` reads, and the frame it converts between
+
+// What `align` and everything written on top of it says when there is no box
+// to read. One sentence rather than three, because it is one situation.
+function noBox(where) {
+	return `${where} needs a box, and this object draws nothing — it is a Group with no meshes `
+		+ 'under it, or its geometry is not resident. Align a Mesh, or add one first.';
+}
+
+const ALIGN_OPTIONS = ['axis', 'mine', 'theirs', 'offset', 'x', 'y', 'z', 'world'];
+
+// One axis of an alignment, out of whichever spelling the caller used:
+//
+//   'center'                   one word for both faces — centred on the other
+//   { mine, theirs, offset }   the long form, defaulting to min-against-max
+//
+// `i` and `key` come along because every caller wants them and `axisIndex` is
+// where a misspelt axis is refused by name.
+function alignSpec(axis, value, where) {
+	const i = axisIndex(axis, where);
+	const spec = { axis, i, key: ['x', 'y', 'z'][i] };
+	if (typeof value === 'string') return { ...spec, mine: value, theirs: value, offset: 0 };
+	if (value !== null && typeof value === 'object') {
+		const { mine = 'min', theirs = 'max', offset = 0 } = value;
+		return { ...spec, mine, theirs, offset: +offset };
+	}
+	throw new TypeError(
+		`${where}: ${axis} wants 'min', 'center', 'max' or { mine, theirs, offset }, `
+		+ `not ${JSON.stringify(value)}`);
+}
+
+// The axes one `alignTo` call was asked about, in the order they will be
+// applied. The four original keys are one spec between them; a named axis is a
+// spec each and wins over `axis` naming the same one, since it is the more
+// specific thing to have written. Nothing named at all is the original default:
+// `axis: 'y'`, my min against their max.
+function alignSpecs(options, where) {
+	for (const key of Object.keys(options)) {
+		if (!ALIGN_OPTIONS.includes(key)) {
+			throw new TypeError(
+				`${where}: no option named ${JSON.stringify(key)} — it takes ${ALIGN_OPTIONS.join(', ')}`);
+		}
+	}
+	const named = ['x', 'y', 'z'].filter(axis => axis in options);
+	const byAxis = new Map();
+	if (named.length === 0 || 'axis' in options || 'mine' in options
+		|| 'theirs' in options || 'offset' in options) {
+		const { axis = 'y', mine = 'min', theirs = 'max', offset = 0 } = options;
+		const spec = alignSpec(axis, { mine, theirs, offset }, where);
+		byAxis.set(spec.i, spec);
+	}
+	for (const axis of named) {
+		const spec = alignSpec(axis, options[axis], where);
+		byAxis.set(spec.i, spec);
+	}
+	return [...byAxis.values()];
+}
+
+// The 3x3 that carries an offset in `node`'s frame out to world: every
+// ancestor's rotation and scale, outermost first, and the identity for a null
+// node — which is the frame of something parented to nothing.
+//
+// The translations are left out because an offset does not see them, and the
+// scene root is in it like any other node: it has a transform and the host
+// applies it.
+function worldMatrix3(node) {
+	const chain = [];
+	for (let up = node; up; up = up.parent) chain.push(up);
+	let m = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+	for (let k = chain.length - 1; k >= 0; k--) {
+		const o = chain[k];
+		m = multiplyMatrix3(m, localMatrix3(o.rotation, o.scale, o._q));
+	}
+	return m;
 }
 
 // -----------------------------------------------------------------------

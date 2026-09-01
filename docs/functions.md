@@ -143,6 +143,40 @@ Read out of the JSON chunk, so it is cheap on a kit of any size — ask this bef
 find out what is worth loading. `path` is what `three.load` wants. Empty when three was not started
 with `--assets`.
 
+## three.readText(path)
+
+A text file out of the assets directory, as a string — and `three.readJSON(path)` is the same file
+parsed. The third thing that lives there beside the `.glb` and the `.png`: the level list that places
+a kit, a table of stats, a dialogue script. A file a person edits in the repo, beside the kit it
+names, that ships with the game.
+
+```js
+const kit = three.load('kit/buildings.glb');
+for (const [piece, x, y, z, turns] of three.readJSON('levels/lumbridge.json') ?? []) {
+  const m = kit.mesh(piece);
+  m.position.set(x, y, z);
+  m.rotation.y = turns * Math.PI / 2;
+  scene.add(m);
+}
+```
+
+This is `three.load`'s door with nothing loaded through it, so the sandbox is the same one: a path
+that climbs out of the assets directory throws, a leading `/` means that directory rather than the
+disk's root, and the paths `three.inventory()` hands back go straight in. Without `--assets` the path
+is used as written, exactly as `three.load`'s is.
+
+Read-only. `three.save` is where a script writes what a player did and `scene.export(path)` writes a
+`.glb`; there is no verb here that puts a text file into the game's own directory.
+
+A file that is not there answers null rather than throwing — `three.save.readText`'s answer and not
+`three.load`'s — because "no level here yet" is a question an editor asks rather than a failure. A
+file over 4 MB throws, and so does one whose bytes are not UTF-8: this reads text, and a `.glb`
+opened by mistake says which verb it wanted.
+
+Containment is by name and not by `realpath`, as it is for `three.load` and for `import`: a symlink
+inside the assets directory pointing out of it is followed. The boundary is against a script reaching
+out, which is the one that gets written by accident.
+
 ## scene.export(path)
 
 Write the scene to a `.glb`. Answers with `{ path, meshes, entries, materials, images, nodes,
@@ -157,8 +191,11 @@ copy's `mesh.color`, so a scene of many colours reloads as the one draw call it 
 counts the nodes written that way.
 
 - A copy with no sibling drawing the same shape keeps its name and its own material, and groups are
-  never collapsed. Node names are what survive — mesh names come from the geometry — so a kit written
-  this way is read back with `asset.node(name)`, one named Group per piece.
+  never collapsed. Node names survive, and a mesh takes the name of the node that draws it when exactly
+  one node does — a shape several nodes share keeps its geometry's name instead, since one name cannot
+  stand for all of them, and what the shape was is kept beside it either way in `extras.geometryName`.
+  So a kit written this way is read back with `asset.node(name)`, one named Group per piece, and with
+  `asset.mesh(name)` for the pieces that are a single mesh.
 - Siblings sharing a shape but not a material do not batch: a colour travels per copy in `_COLOR_0`,
   but a texture, a blend mode and a layer stack have no per-copy channel.
 - Copies made with `asset.instantiate()` are not siblings — each arrives in its own group — so they
@@ -365,6 +402,72 @@ still, preload the scene so the build runs outside the budget — launch the bac
 What `JSON.stringify` sees, and therefore what comes back in the `value` field when you return an
 object from a script. Objects report their name, transform and children; a Vector3 reports
 `[x, y, z]`; a ShaderMaterial reports its fragment and uniforms.
+
+# Measuring and placing
+
+## object.align(axis, edge, at)
+
+Move an object along one axis until one face of its box sits at a coordinate. The verb that replaces
+arithmetic on a hand-copied size table.
+
+```js
+piece.align('y', 'min', 0);       // stand it on the ground
+piece.align('z', 'max', 10);      // front face at z = 10
+```
+
+- `edge` is `'min'`, `'center'` or `'max'` — which of this object's faces to put there.
+- Everything is in the parent's frame, which is the frame a script writes positions in, and it works
+  before `add()`.
+- Only `position` moves. Rotation and scale are inputs to where the box is, so set them first — a
+  quarter-turned piece is measured turned.
+
+## object.alignTo(other, options)
+
+The same move said against another object instead of a number, and the verb a kit is placed with.
+**A placement is usually more than one axis, so one call can be** — name the axes:
+
+```js
+lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+```
+
+- One entry per axis, `x`, `y` or `z`, and **an axis nobody names does not move**. That is what makes
+  this safe to reach for after a piece is already standing on the floor.
+- An axis is either one word for both faces — `'min'`, `'center'`, `'max'` — or the long
+  `{ mine, theirs, offset }`, whose defaults are the `min`-against-`max` of the single-axis form.
+- `{ axis, mine, theirs, offset }` is that single-axis form and still means what it always meant.
+  Mixing the two spellings is allowed; a named axis wins over `axis` naming the same one.
+- Siblings by default, because a box is measured in the frame of the parent it hangs from and two
+  parents are two frames. An option it does not have is refused by name rather than quietly doing the
+  default.
+- `world: true` is the cross-parent form. It measures both objects with `boundingBox()`, works the
+  step out in world space and converts that one step back into the mover's own frame — which is exact
+  whatever the ancestors are, a non-uniform scale and a rotation that is not a quarter turn included,
+  because a translation goes through any invertible frame exactly. It needs both objects in a scene,
+  costs two host calls where the sibling form costs none, and the faces it puts together are the
+  world-axis faces of world-axis boxes: for a turned piece that is a looser box than the sibling form
+  reads, which is why it is opt-in. Two objects that share a parent after all are allowed, and agree
+  with the sibling form wherever nothing above them turns or squashes the frame.
+
+## object.row(axis, pieces, options)
+
+Place pieces edge to edge along one axis — a wall run, a floor, a fence line. The commonest thing a
+kit is asked for, and the one a script otherwise writes as a loop over a step it measured itself.
+
+```js
+wall.row('x', panels, { at: -3 });      // butted, from x = -3
+fence.row('z', posts, { gap: 1.4 });    // spaced, from where the first post already stands
+```
+
+- **The step is measured from each piece**, never assumed, so a run of pieces that are not all the
+  same size still closes up, and a piece turned a quarter turn steps by the side it now presents.
+- `at` is where the run's low face goes. Left out, the run starts at the first piece's own low face —
+  "these follow that one".
+- `gap` is added to each measured step: `0` butts the pieces, a negative one laps them over each
+  other (a course of roof tiles), a positive one spaces them (a fence).
+- Only the run axis moves, and a piece that is not a child of this object yet is added to it.
+- On the parent because a run has a cursor and the cursor belongs to whoever owns the sequence. The
+  other half — "put me after that one" — is already one `alignTo` call. For a run that grows the
+  other way, reverse the list.
 
 # Spatial queries
 
@@ -1342,6 +1445,31 @@ const v = three.camera.planarMove(fwd, strafe);
 player.position.x += v.x * speed * dt;
 player.position.z += v.z * speed * dt;
 ```
+
+## three.camera.ray(x, y)
+
+The world-space ray through a pixel of the rendered image, as `{ origin, direction }` — two Vector3s with the
+direction unit length, which is exactly what `scene.raycast(origin, direction)` takes.
+
+This is the question `scene.pick(x, y)` cannot be asked. A pick needs something already under the cursor, so
+dragging a piece across bare ground and dropping one where nothing is yet — the two things an editor does most
+— have nothing to pick. Both are this ray met with a plane you chose:
+
+```js
+const r = three.camera.ray(x, y);
+const t = -r.origin.y / r.direction.y;                  // where it crosses y = 0
+const on = r.origin.clone().addScaledVector(r.direction, t);
+piece.position.copy(on);
+```
+
+`x` and `y` are the rendered image's pixels from its top-left corner — the same ones `scene.pick(x, y)` takes,
+`three.input.pointer` answers in and `three.renderSize()` counts, so one cursor position feeds both without
+conversion. The ray goes through the pixel's centre, which is where the rasterizer decided its colour.
+
+It is the same ray a pick casts rather than a second derivation from `position()`, `forward()` and `fov`, so a
+`raycast` on it finds what `pick` finds at that pixel, at the same `distance`. The origin is therefore on the
+near plane and not at the eye: what sits in front of the near plane is invisible, and a ray taken from the
+picture does not hit it either.
 
 ## three.camera.near / three.camera.far
 

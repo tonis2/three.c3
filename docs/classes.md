@@ -63,6 +63,7 @@ topic. It is an Object3D, so moving it moves everything.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, { loop, speed, time, fade })`
 - `stop()`
 - `socket(bone)`
@@ -140,6 +141,7 @@ material is one draw call.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -606,6 +608,7 @@ clip outright is `play()` without a fade.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -838,11 +841,13 @@ wall.position.set(4, 0, -2);
 scene.add(wall);
 ```
 
-It is the only door that can pick a piece out of a shared file, and the reason is worth knowing before
-a kit is authored. `mesh(name)` matches a glTF *mesh*, and an exported mesh is named after its
-geometry — thirty pieces built out of boxes are thirty meshes all called `box` — while `instantiate()`
-builds the whole file however it is called. A node keeps the name the file gave it, so a node is what
-a piece can be: name the group, not the geometry.
+It is the door onto a piece of any shape, and the reason is worth knowing before a kit is authored.
+`mesh(name)` matches a glTF *mesh*, and an exported mesh takes the name of the node that draws it only
+when exactly one node does — a shape several pieces share keeps its geometry's name, `box`, because one
+name cannot stand for all of them — while `instantiate()` builds the whole file however it is called. A
+node keeps the name the file gave it whatever the piece is made of, so a piece that is four boxes is
+reachable this way and no other: name the group, and name the meshes under it too if you want the
+one-box pieces to answer to `mesh()` as well.
 
 The subtree arrives carrying its own transform and none of its ancestors', so a piece authored at the
 origin comes back at the origin whatever the file wrapped it in. Two nodes may share a name, and the
@@ -1691,6 +1696,7 @@ the times it is inside a wall.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -1744,6 +1750,7 @@ moving it.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -1788,6 +1795,7 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -1838,6 +1846,7 @@ live. Divisions are capped at 256.
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`
@@ -1893,6 +1902,7 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `alignTo(other, opts)`
+- `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
 - `socket(bone)`

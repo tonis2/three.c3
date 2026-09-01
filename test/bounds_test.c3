@@ -297,6 +297,361 @@ fn void a_bad_axis_is_refused_by_name() @test
 }
 
 // ============================================================================
+// Placing a kit: several axes at once, a run, and another frame
+// ============================================================================
+
+<*
+ One call for a whole placement, because a placement is not one axis.
+
+ "My back face on your front face, centred on you in x" is the sentence, and it
+ used to be two `alignTo` calls that each re-measured the hall. The axis nobody
+ named is the assertion that matters as much as the two that were: the lean-to
+ was standing at y = 5 before the call and is standing at y = 5 after it.
+*>
+fn void align_to_says_a_whole_placement_in_one_call() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6));
+			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3));
+			room.add(hall, lean);
+			lean.position.set(7, 5, 9);
+			lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			const a = lean.boundsInParent(), b = hall.boundsInParent();
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return { back: r(a.min.z - b.max.z), across: r(a.center.x - b.center.x), y: lean.position.y };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"back":0`),
+			"the lean-to's back face should be on the hall's front face, got '%s'", result.value);
+		test::@check(result.value.contains(`"across":0`),
+			"and it should be centred on the hall in x, got '%s'", result.value);
+		test::@check(result.value.contains(`"y":5`),
+			"y was not named, so it must not have moved: %s", result.value);
+	};
+}
+
+<*
+ A misspelt option is refused by name rather than quietly doing the default.
+
+ `{ axes: 'xz' }` would otherwise align y, min against max, and answer that it
+ had done what it was asked — which is the failure mode the whole measuring API
+ exists to remove.
+*>
+fn void an_option_align_to_does_not_have_is_refused_by_name() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			try { a.alignTo(b, { axes: 'xz' }); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("axes"), "the bad key is quoted back, got '%s'", result.value);
+		test::@check(result.value.contains("mine, theirs"), "and the good ones are listed, got '%s'", result.value);
+	};
+}
+
+<*
+ A run steps by each piece, not by one constant.
+
+ The three panels are 1, 2 and 0.5 wide, which is the case a script's own loop
+ gets wrong the moment a kit gains a piece of a different size: a single measured
+ step lays the second panel over the first and the third in mid-air.
+*>
+fn void a_run_steps_by_each_piece_rather_than_by_a_constant() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const wall = new three.Group();
+			const panels = [1, 2, 0.5].map(w => new three.Mesh(new three.BoxGeometry(w, 2, 0.3)));
+			wall.row('x', panels, { at: 0 });
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return panels.map(p => [r(p.boundsInParent().min.x), r(p.boundsInParent().max.x)]);
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[[0,1],[1,3],[3,3.5]]",
+			"three panels of different widths, edge to edge from 0, got '%s'", result.value);
+	};
+}
+
+<*
+ A quarter-turned piece steps by the side it now presents.
+
+ A 4 x 1 panel turned about y is 1 across, and a run that assumed the piece's
+ width would leave three units of daylight in the wall. `boundsInParent()` has
+ the rotation in it, which is why the run measures rather than asks the piece
+ how wide it was authored.
+*>
+fn void a_run_steps_by_the_side_a_turned_piece_presents() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const wall = new three.Group();
+			const panels = [0, 1, 0].map(turns => {
+				const p = new three.Mesh(new three.BoxGeometry(4, 2, 1));
+				if (turns) p.rotation.y = turns * Math.PI / 2;
+				return p;
+			});
+			wall.row('x', panels, { at: 0 });
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return panels.map(p => r(p.boundsInParent().max.x));
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[4,5,9]",
+			"the turned panel should have stepped by 1 and not by 4, got '%s'", result.value);
+	};
+}
+
+<*
+ `gap` is the measured step plus a constant, and a negative one laps the pieces
+ over each other — which is what a course of roof tiles is.
+*>
+fn void a_run_takes_the_gap_or_the_overlap_it_is_asked_for() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const r = v => Math.round(v * 1e6) / 1e6;
+			const run = (gap) => {
+				const g = new three.Group();
+				const p = [0, 1].map(() => new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+				g.row('x', p, { at: 0, gap });
+				return r(p[1].boundsInParent().min.x);
+			};
+			return [run(0), run(0.25), run(-0.4)];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[1,1.25,0.6]",
+			"butted, spaced and lapped, got '%s'", result.value);
+	};
+}
+
+<*
+ A run with no start follows the piece that is already standing there, and it
+ adopts the pieces it was handed.
+
+ Both halves of the loop it replaces: a script that has placed the corner and
+ wants the rest of the wall after it should not have to say where the corner was,
+ and should not have to `add` in a second pass.
+*>
+fn void a_run_with_no_start_follows_the_piece_already_there() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const wall = new three.Group();
+			const panels = [0, 1, 2].map(() => new three.Mesh(new three.BoxGeometry(2, 2, 0.3)));
+			panels[0].align('x', 'min', 10);
+			wall.row('x', panels);
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return {
+				at: panels.map(p => r(p.boundsInParent().min.x)),
+				adopted: wall.children.length,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("[10,12,14]"),
+			"the run should have started where the first panel already was, got '%s'", result.value);
+		test::@check(result.value.contains(`"adopted":3`),
+			"and the pieces should have been added, got '%s'", result.value);
+	};
+}
+
+<*
+ Across two frames, in world space, which is what the sibling form refuses.
+
+ A lean-to in one group against a hall in another — the arrangement `houses.js`
+ builds by hand. Both boxes come from the host, so the check is on world faces:
+ the lean-to's back is on the hall's front and the two are centred on each other
+ in x, whatever the groups' own offsets were.
+*>
+fn void align_to_reaches_into_another_frame_in_world_space() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const east = new three.Group(); east.position.set(6, 0, -2); scene.add(east);
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6)); east.add(hall);
+			const yard = new three.Group(); yard.position.set(-4, 0, 5); scene.add(yard);
+			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3)); yard.add(lean);
+
+			lean.alignTo(hall, { world: true, z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			const a = lean.boundingBox(), b = hall.boundingBox();
+			// Four places, not six: a world box comes back through the host as
+			// f32, so the last of six digits is the device's noise floor.
+			const r = v => Math.round(v * 1e4) / 1e4;
+			return { back: r(a.min.z - b.max.z), across: r(a.center.x - b.center.x), y: r(a.center.y) };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"back":0`),
+			"the lean-to's world back face should be on the hall's world front face, got '%s'", result.value);
+		test::@check(result.value.contains(`"across":0`),
+			"and centred on it in world x, got '%s'", result.value);
+		test::@check(result.value.contains(`"y":0`),
+			"y was not named, so nothing should have moved in it: %s", result.value);
+	};
+}
+
+<*
+ **The two frames that are not a translation, which is where this could be
+ quietly wrong.**
+
+ The mover hangs under a group turned 0.4 radians — not a quarter turn, so an
+ axis-aligned world box is not axis-aligned in its parent — and scaled 2 x 1 x
+ 0.5, which is not uniform either. A box carried into the parent's frame and
+ aligned there would land somewhere near and not on; converting the *step*
+ instead is exact, because a translation goes through any invertible frame
+ exactly. The faces have to meet to a millionth.
+
+ It is also the check that the ancestor chain is composed in the order the host
+ composes it: with the rotation applied on the wrong side, the piece moves off
+ along a different diagonal and the gap is metres.
+*>
+fn void a_world_align_is_exact_under_a_turned_and_squashed_ancestor() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const east = new three.Group(); east.position.set(6, 0, -2); scene.add(east);
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6)); east.add(hall);
+
+			const yard = new three.Group();
+			yard.position.set(-4, 1, 5);
+			yard.rotation.y = 0.4;
+			yard.scale.set(2, 1, 0.5);
+			scene.add(yard);
+			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3)); yard.add(lean);
+
+			lean.alignTo(hall, { world: true, z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			const a = lean.boundingBox(), b = hall.boundingBox();
+			// Four places, not six: a world box comes back through the host as
+			// f32, so the last of six digits is the device's noise floor.
+			const r = v => Math.round(v * 1e4) / 1e4;
+			return { back: r(a.min.z - b.max.z), across: r(a.center.x - b.center.x), y: r(a.center.y) };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"back":0`),
+			"a turned, non-uniformly scaled frame should still land the face exactly, got '%s'", result.value);
+		test::@check(result.value.contains(`"across":0`),
+			"and centre it exactly in world x, got '%s'", result.value);
+		test::@check(result.value.contains(`"y":1`),
+			"y was not named, so the piece should still ride at its parent's height: %s", result.value);
+	};
+}
+
+<*
+ Two objects that share a parent after all are allowed, not refused, and where
+ nothing above them turns or squashes the frame they get the sibling answer.
+
+ The shelf is aligned the sibling way, knocked off the wall, and aligned again
+ the world way. The same number twice is what says the world path is the same
+ move and not a second convention.
+*>
+fn void a_world_align_between_siblings_is_the_sibling_answer() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const room = new three.Group(); room.position.set(3, 0, -1); scene.add(room);
+			const wall = new three.Mesh(new three.BoxGeometry(10, 8, 0.5));
+			const shelf = new three.Mesh(new three.BoxGeometry(2, 0.2, 1));
+			room.add(wall, shelf);
+
+			const opts = { axis: 'z', mine: 'min', theirs: 'max', offset: -0.05 };
+			shelf.alignTo(wall, opts);
+			const sibling = shelf.position.z;
+			shelf.position.z = 9;
+			shelf.alignTo(wall, { ...opts, world: true });
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return [r(sibling), r(shelf.position.z)];
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[0.7,0.7]",
+			"the two forms should agree in a frame that only translates, got '%s'", result.value);
+	};
+}
+
+<*
+ The refusal names the door beside it rather than sending the caller back to
+ arithmetic. The old sentence said "measure with boundsInParent() and place with
+ align" — which is the loop the verbs exist to delete.
+*>
+fn void align_to_points_at_the_world_form_when_the_parents_differ() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const a = new three.Group();
+			const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const other = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			a.add(m);
+			try { m.alignTo(other, { axis: 'y' }); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("world: true"),
+			"the refusal should name the world form, got '%s'", result.value);
+	};
+}
+
+<*
+ A frame flattened to nothing on an axis is refused: no local move produces the
+ world one, and answering with a division by zero would put the piece at NaN and
+ keep it there.
+*>
+fn void a_frame_scaled_to_nothing_is_refused_rather_than_guessed() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6)); scene.add(hall);
+			const flat = new three.Group(); flat.scale.set(1, 0, 1); scene.add(flat);
+			const piece = new three.Mesh(new three.BoxGeometry(1, 1, 1)); flat.add(piece);
+			try { piece.alignTo(hall, { world: true, axis: 'x' }); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("scaled to nothing"),
+			"it says which way it is stuck, got '%s'", result.value);
+	};
+}
+
+// ============================================================================
 // Measuring a file
 // ============================================================================
 

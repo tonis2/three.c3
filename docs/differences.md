@@ -25,9 +25,20 @@ piece.align('y', 'min', 0);        // stand it on the ground
 piece.align('z', 'min', wallZ);    // back flush with a wall
 ```
 
-Both work in the parent's frame, because that is the frame a script writes positions in. `alignTo`
-refuses objects with different parents rather than being wrong by whatever the parents differ by.
-Set rotation and scale first — they are inputs to where the box is.
+A placement is usually more than one axis, so `alignTo` takes several in one call. Name them, and
+**an axis nobody names does not move**:
+
+```js
+lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+```
+
+An axis is either one word for both faces — `'min'`, `'center'`, `'max'` — or the long
+`{ mine, theirs, offset }`. The four original keys still mean what they meant.
+
+Both verbs work in the parent's frame, because that is the frame a script writes positions in, and
+`alignTo` aligns siblings for the same reason. `world: true` is the cross-parent form: it measures
+both objects in world space and moves this one by the step that comes to, converted back into its own
+parent's frame. Set rotation and scale first — they are inputs to where the box is.
 
 ## debug-draw
 
@@ -204,6 +215,8 @@ There is one camera and it is a turntable: `three.camera.orbit(yaw, pitch, dista
 - `camera.position()` / `.forward()` / `.right()` give the eye and the look and strafe directions in
   world space.
 - `camera.planarMove(fwd, strafe)` turns a W/A/S/D input into a world direction.
+- `camera.ray(x, y)` is the ray through a pixel, as `{ origin, direction }` — Three.js spells this
+  `Raycaster.setFromCamera`, and it takes NDC where this takes the pixels `scene.pick` takes.
 
 There is no `camera.position` to assign, and `yaw`/`pitch`/`distance` throw if assigned.
 
@@ -879,16 +892,47 @@ scene.add(kit.node('wall_stone'));       // one piece, at the origin
 scene.add(kit.instantiate());            // the whole file, as it was laid out
 ```
 
-The two other doors cannot do it, and a kit authored without knowing that comes back wrong rather than
-empty. `instantiate(name)` names the tree it answers with — it always builds the *whole* file, so a
-loop calling it once per placement stamps the entire kit at every one of them. `mesh(name)` matches a
-glTF mesh, and mesh names come from the geometry: thirty pieces built out of boxes export as thirty
-meshes all called `box`, so there is nothing there to match.
+One of the two other doors cannot do it at all, and a kit authored without knowing that comes back
+wrong rather than empty. `instantiate(name)` names the tree it answers with — it always builds the
+*whole* file, so a loop calling it once per placement stamps the entire kit at every one of them.
+`mesh(name)` matches a glTF mesh, and an exported mesh takes the name of the node that draws it when
+exactly one node does; a shape several pieces share keeps its geometry's name — `box` — because one
+name cannot stand for all of them. So it reaches a piece that is a single mesh and cannot reach a piece
+that is four boxes.
 
-Node names survive an export and mesh names are not yours to set, so name the Group. A piece authored
-at the origin comes back at the origin — `node()` keeps the subtree's own transform and drops its
-ancestors' — and copies of one piece share their upload and instance into one draw call exactly as
-`instantiate()`'s do.
+Node names survive an export whatever the piece is made of, so name the Group; naming the mesh inside it
+costs nothing and is what makes a one-box piece answer to `mesh()` too. A piece authored at the origin
+comes back at the origin — `node()` keeps the subtree's own transform and drops its ancestors' — and
+copies of one piece share their upload and instance into one draw call exactly as `instantiate()`'s do.
+
+## placing-a-kit
+
+Placing a kit means measuring it, not retyping the numbers it was built with. A script that opens
+`const WALL_H = 1.6, RISE = 0.7` is carrying the builder's constants a second time, and the second
+copy goes wrong the moment a piece is re-exported — the pieces still draw, they just sink into each
+other. Three verbs do the whole job and not one of them takes a size:
+
+- `piece.align(axis, edge, at)` — one face at one coordinate: the ground, a grid line, a plot edge.
+- `piece.alignTo(other, { z: { mine: 'min', theirs: 'max' }, x: 'center' })` — a whole placement
+  against another piece, one axis per name. Add `world: true` for a piece in a different group.
+- `parent.row(axis, pieces, { at, gap })` — a *run*: N pieces edge to edge along an axis, which is
+  the commonest thing a kit is asked for and the one a script otherwise writes as a loop over a step
+  it measured itself.
+
+```js
+const wall = new three.Group();
+scene.add(wall);
+wall.row('x', panels, { at: -3 });                            // the run measures its own step
+course.alignTo(wall, { y: { mine: 'min', theirs: 'max' } });  // the roof lands on top of it
+```
+
+`row` measures the step from each piece rather than assuming one, so a run of mixed sizes still
+closes up and a quarter-turned piece steps by the side it now presents. A negative `gap` laps the
+pieces over each other, which is what a course of tiles is; a positive one is a fence line.
+
+Write it in the order a builder works in: turn and scale a piece first — both are inputs to where its
+box is — then place it, then measure the thing you just placed to put the next one on. What comes out
+has no size table in it, which is what makes it survive the kit being re-exported.
 
 ## static-casters
 

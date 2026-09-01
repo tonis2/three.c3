@@ -257,6 +257,70 @@ export function transformBox(box, position, rotation, scale) {
 		position.x + out[0] + out[1], position.y + out[2] + out[3], position.z + out[4] + out[5]);
 }
 
+// A quaternion `[x, y, z, w]` as the same row-major 3x3 `eulerMatrix3` builds.
+function quaternionMatrix3(q) {
+	const [x, y, z, w] = q;
+	const xx = x * x, yy = y * y, zz = z * z;
+	const xy = x * y, xz = x * z, yz = y * z;
+	const wx = w * x, wy = w * y, wz = w * z;
+	return [
+		1 - 2 * (yy + zz), 2 * (xy - wz),     2 * (xz + wy),
+		2 * (xy + wz),     1 - 2 * (xx + zz), 2 * (yz - wx),
+		2 * (xz - wy),     2 * (yz + wx),     1 - 2 * (xx + yy),
+	];
+}
+
+// One node's rotation and scale as a 3x3 — the linear part of its local
+// transform, with the translation left out because what this gets composed for
+// is carrying an *offset* from one frame to another rather than a point.
+//
+// `q` is the exact rotation when the node has one (`Object3D._q`), and it wins
+// over the Euler triple: what this is composed against is a box the host
+// computed, and the quaternion is what the host was given.
+export function localMatrix3(rotation, scale, q) {
+	const m = q ? quaternionMatrix3(q) : eulerMatrix3(rotation.x, rotation.y, rotation.z);
+	const sx = scale.x, sy = scale.y, sz = scale.z;
+	return [
+		m[0] * sx, m[1] * sy, m[2] * sz,
+		m[3] * sx, m[4] * sy, m[5] * sz,
+		m[6] * sx, m[7] * sy, m[8] * sz,
+	];
+}
+
+export function multiplyMatrix3(a, b) {
+	const out = new Array(9);
+	for (let r = 0; r < 3; r++) {
+		for (let c = 0; c < 3; c++) {
+			out[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+		}
+	}
+	return out;
+}
+
+export function applyMatrix3(m, v) {
+	return [
+		m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+		m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+		m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+	];
+}
+
+// The inverse, or null when there is not one — an ancestor scaled to zero on
+// some axis, which is a frame no move can reach out of. Answered rather than
+// thrown, because the caller is what knows the sentence to say about it.
+export function invertMatrix3(m) {
+	const [a, b, c, d, e, f, g, h, i] = m;
+	const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g;
+	const det = a * A + b * B + c * C;
+	if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+	const k = 1 / det;
+	return [
+		A * k, (c * h - b * i) * k, (b * f - c * e) * k,
+		B * k, (a * i - c * g) * k, (c * d - a * f) * k,
+		C * k, (b * g - a * h) * k, (a * e - b * d) * k,
+	];
+}
+
 // What `scene.background = null` restores. Kept in step with `DEFAULT_CLEAR`
 // in gpu/frame.c3 by `the_default_background_is_the_renderer_clear` rather
 // than by a comment, because two spellings of one constant is exactly the

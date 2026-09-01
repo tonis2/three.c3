@@ -1688,3 +1688,236 @@ fn void an_euler_batch_writes_angles_and_leaves_the_object_behind() @test
 			"nine floats, written, and the object caught up; got %s", value);
 	};
 }
+
+// ============================================================================
+// The ray through a pixel
+// ============================================================================
+
+<*
+ `three.camera.ray(x, y)` finds what a pick at the same pixel finds.
+
+ **The whole contract, and the only one worth asserting.** An editor calls both
+ on one cursor position — `pick` while the pointer is over a piece, `ray` the
+ moment it leaves one — so the two disagreeing is the piece jumping as it is
+ dragged off an object onto bare ground.
+
+ Cross-checked rather than re-derived. Restating the unprojection here and
+ asserting the arithmetic back at itself would pass for every convention this
+ could get wrong: the vertical against the horizontal field of view, the aspect,
+ the Y flip. `pick` is the ground truth because a rendered frame already holds
+ it to the picture — see `a_pick_agrees_with_the_pixels_it_was_counted_in`.
+
+ The grid is a walk over the whole image rather than a handful of chosen pixels,
+ so silhouette edges and the gaps between boxes are all in it, and the second
+ pass is at a different render size because the extent is the one number a
+ second derivation would be most likely to take from somewhere stale.
+*>
+fn void a_pixel_ray_finds_what_a_pick_at_that_pixel_finds() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const g = new three.BoxGeometry(1, 1, 1);
+			// A grid with gaps in it, so a good share of the image is
+			// background and the ones that do hit are separable by name.
+			for (let i = 0; i < 4; i++) {
+				for (let j = 0; j < 4; j++) {
+					const m = new three.Mesh(g);
+					m.name = 'b' + i + j;
+					m.position.set((i - 1.5) * 1.7, (i % 2) * 0.9, (j - 1.5) * 1.7);
+					scene.add(m);
+				}
+			}
+			// Off every axis: a camera looking down -Z has a symmetry a
+			// mirrored column would survive.
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(37, 26, 11);
+
+			function sweep(step) {
+				const { width: W, height: H } = three.renderSize();
+				let picked = 0, sameMesh = 0, sameDistance = 0, samePoint = 0, missed = 0;
+				for (let y = 1; y < H; y += step) {
+					for (let x = 1; x < W; x += step) {
+						const hit = scene.pick(x, y);
+						const r = three.camera.ray(x, y);
+						const cast = scene.raycast(r.origin, r.direction);
+						if (hit === null) {
+							// The other half of the agreement: where a pick
+							// finds nothing, the ray must not invent a hit.
+							if (cast === null) missed++;
+							continue;
+						}
+						picked++;
+						if (cast === null) continue;
+						if (cast.name === hit.name) sameMesh++;
+						if (Math.abs(cast.distance - hit.distance) < 1e-4) sameDistance++;
+						if (cast.point.distanceTo(hit.point) < 1e-4) samePoint++;
+					}
+				}
+				return [picked, sameMesh, sameDistance, samePoint, missed];
+			}
+
+			const [picked, sameMesh, sameDistance, samePoint, missed] = sweep(3);
+
+			// Again at a different size and a portrait aspect, from an odd
+			// number of pixels so nothing divides evenly.
+			three.setRenderSize(97, 211);
+			const { width: w2, height: h2 } = three.renderSize();
+			const second = sweep(2);
+
+			return [
+				picked > 300,            // the fixture is actually on screen
+				missed > 300,            // and so is the background
+				sameMesh === picked,
+				sameDistance === picked,
+				samePoint === picked,
+				w2 === 97 && h2 === 211,
+				second[0] > 100,
+				second[1] === second[0],
+				second[2] === second[0],
+			];
+		`, "the pixel-ray script ran");
+
+		test::@check(value == "[true,true,true,true,true,true,true,true,true]",
+			"every pixel a pick answers, the ray answers the same way; got %s", value);
+	};
+}
+
+<*
+ The two questions a pick cannot be asked at all.
+
+ A pick needs something already under the cursor, so dragging a piece across
+ bare ground and dropping one where nothing is yet have nothing to ask. The ray
+ answers both by meeting a plane the script chose, and this is the check that it
+ answers them *correctly* rather than merely finitely — the analytic ground
+ point is compared against a floor put there afterwards, so the two ways of
+ finding the same spot have to agree.
+
+ The four corners are where a mirrored column or an unflipped row hides. Both
+ are invisible at the centre pixel and both survive a symmetric fixture, so the
+ assertions are about ORDER: with the camera on +Z pitched down at the origin,
+ the right of the image is +X and the top of it is farther away, which at a
+ forward of -Z means a smaller z.
+*>
+fn void a_corner_ray_answers_where_a_pick_has_nothing_to_answer_about() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			// Small and central: the corners are over nothing, which is the
+			// case being tested.
+			const marker = new three.Mesh(new three.BoxGeometry(0.6, 0.6, 0.6));
+			marker.name = 'marker';
+			scene.add(marker);
+
+			// Yaw 0 so "screen right" is exactly +X, and a pitch steep enough
+			// that all four corner rays still point at the ground.
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 45, 10);
+
+			const { width: W, height: H } = three.renderSize();
+			const corners = [[0, 0], [W - 1, 0], [0, H - 1], [W - 1, H - 1]];
+			const empty = corners.every(([x, y]) => scene.pick(x, y) === null);
+			const centred = scene.pick((W - 1) / 2, (H - 1) / 2);
+
+			// Where each corner ray meets y = 0 — the whole editor gesture, in
+			// the three lines a script would write.
+			const ground = corners.map(([x, y]) => {
+				const r = three.camera.ray(x, y);
+				const t = -r.origin.y / r.direction.y;
+				return { t, p: r.origin.clone().addScaledVector(r.direction, t) };
+			});
+			const ahead = ground.every(g => Number.isFinite(g.t) && g.t > 0);
+			const [tl, tr, bl, br] = ground;
+			const rightIsPlusX = tr.p.x > tl.p.x + 1 && br.p.x > bl.p.x + 1;
+			const topIsFarther = tl.p.z < bl.p.z - 1 && tr.p.z < br.p.z - 1;
+
+			// And now the floor the plane was standing in for. The analytic
+			// answer and the real intersection have to be the same place.
+			const floor = new three.Mesh(new three.BoxGeometry(400, 0.2, 400));
+			floor.name = 'floor';
+			floor.position.y = -0.1;
+			scene.add(floor);
+
+			let landed = 0;
+			corners.forEach(([x, y], i) => {
+				const hit = scene.pick(x, y);
+				if (hit === null || hit.name !== 'floor') return;
+				if (hit.point.distanceTo(ground[i].p) < 0.05) landed++;
+			});
+
+			return [
+				empty,
+				centred !== null && centred.name === 'marker',
+				ahead,
+				rightIsPlusX,
+				topIsFarther,
+				landed,
+			];
+		`, "the corner-ray script ran");
+
+		test::@check(value == "[true,true,true,true,true,4]",
+			"the corners answer, in the order the picture puts them; got %s", value);
+	};
+}
+
+<*
+ The centre pixel looks the way the camera looks.
+
+ The one pixel whose answer is already named elsewhere: its direction is
+ `camera.forward()`, exactly, whatever the field of view and the aspect are. A
+ ray built with the horizontal half-angle where the vertical belongs still
+ passes this — which is why it is the *cheap* check and not the only one — but a
+ ray that has lost the eye entirely fails nothing else so plainly.
+
+ The origin is asserted too, because it is the part of the shape a script could
+ reasonably guess wrong: it is on the near plane rather than at the eye, so that
+ the ray is the same ray a pick casts and `distance` means one thing for both.
+ It still lies on the line through the eye, which is what the cross product
+ checks.
+*>
+fn void the_centre_pixel_looks_the_way_the_camera_looks() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			new three.Scene();
+			// Nothing round about any of these, and a non-default fov so a ray
+			// that ignored it cannot pass.
+			three.camera.lookAt(1.5, -2, 3);
+			three.camera.orbit(63, 21, 7);
+			three.camera.fov = 72;
+
+			const { width: W, height: H } = three.renderSize();
+			const r = three.camera.ray((W - 1) / 2, (H - 1) / 2);
+			const f = three.camera.forward();
+			const eye = three.camera.position();
+
+			// Measured in pixels rather than against a bare epsilon. The ray
+			// comes out of a float32 matrix inversion and forward() out of
+			// JavaScript's double-precision trig, so the two agree to about a
+			// hundredth of a pixel and never exactly; a tenth of one is the
+			// bound that means "the same direction" for a picture.
+			const pixel = 2 * Math.tan(three.camera.fov * Math.PI / 360) / H;
+			const aimed = r.direction.distanceTo(f) < pixel / 10;
+			const unit = Math.abs(r.direction.length() - 1) < 1e-6;
+
+			// One near plane in front of the eye, and on the eye's own line.
+			const fromEye = r.origin.clone().sub(eye);
+			const atNear = Math.abs(fromEye.length() - three.camera.near) < 1e-3;
+			const onAxis = fromEye.clone().cross(f).length() < 1e-5;
+
+			// A pixel coordinate is a number, and anything else is refused by
+			// name rather than answering with a ray full of NaN.
+			let refused = false;
+			try { three.camera.ray('over there', 0); } catch (e) { refused = e instanceof TypeError; }
+
+			return [aimed, unit, atNear, onAxis, refused];
+		`, "the centre-pixel script ran");
+
+		test::@check(value == "[true,true,true,true,true]",
+			"the middle of the picture is where the camera is pointing; got %s", value);
+	};
+}

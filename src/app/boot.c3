@@ -430,6 +430,9 @@ fn void? run(Options opts)
  probe.js` runs the script against the world `main.js` built, which is what the
  same two things would do through the server.
 
+ A directory with no `main.js` in it is a root and not a failed boot when a
+ script was given — see `wants_entry_module`.
+
  A game that failed to boot is printed and carried on with rather than returned
  as a fault. That is exactly when someone wants to look at it — with `--mcp` that
  means attaching and asking, and with a window it means seeing an empty scene
@@ -441,18 +444,55 @@ fn void? boot_world(JsRuntime* runtime, String assets, String script)
 {
 	if (assets.len > 0)
 	{
+		// The root goes in either way: it is what makes a kit's own relative paths
+		// resolve and what confines them, and a directory with nothing to boot is
+		// still a directory to read from.
 		runtime.set_assets_root(assets);
-		RunResult booted = runtime.run_module(ENTRY_MODULE);
-		defer booted.free();
 
-		if (booted.log.len > 0) io::printn(booted.log);
-		if (!booted.ok)
+		if (wants_entry_module(assets, script))
 		{
-			io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
+			RunResult booted = runtime.run_module(ENTRY_MODULE);
+			defer booted.free();
+
+			if (booted.log.len > 0) io::printn(booted.log);
+			if (!booted.ok)
+			{
+				io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
+			}
 		}
 	}
 
 	if (script.len > 0) boot_script(runtime, script)!;
+}
+
+<*
+ Whether an `--assets` directory has an entry module this run should evaluate.
+
+ **A missing `main.js` is only a failure when nothing else was given to run.**
+
+ `--assets` is two jobs in one flag: the directory `main.js` boots from, and the
+ root that makes `three.load("kit/rocks.glb")` mean something and stops it
+ climbing out. `--assets kit --script probe.js` is asking for the second and has
+ already said what to run, so a kit that ships models and no entry module is a
+ perfectly good root rather than a run that opens by reporting a file it was
+ never going to have.
+
+ A `main.js` that is *there* is still booted with a script beside it — the script
+ then runs against the world it built, which is the composition `boot_world`
+ describes — and a `main.js` that is there and throws still says so. Only its
+ absence is quiet, and only when a `--script` made it optional.
+
+ @param assets : `The game directory. Never empty at the call site.`
+ @param script : `The --script path, or empty when there is none.`
+*>
+fn bool wants_entry_module(String assets, String script)
+{
+	if (script.len == 0) return true;
+
+	@pool()
+	{
+		return file::is_file(string::tformat("%s/%s", assets, ENTRY_MODULE));
+	};
 }
 
 <*
