@@ -461,7 +461,20 @@ fn void? live(
 		io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
 		io::printn("     run_script, screenshot, get_api_docs");
 	}
-	if (assets.len > 0) io::printfn("game: %s/%s", assets, ENTRY_MODULE);
+	// Named as a game only when there is an entry module to boot; otherwise the
+	// directory is the root a `--script` loads out of, and naming a `main.js` that
+	// is not there would be the startup line telling a small lie.
+	if (assets.len > 0)
+	{
+		if (wants_entry_module(assets, script))
+		{
+			io::printfn("game: %s/%s", assets, ENTRY_MODULE);
+		}
+		else
+		{
+			io::printfn("assets: %s", assets);
+		}
+	}
 	if (script.len > 0) io::printfn("script: %s", script);
 	if (window == null)
 	{

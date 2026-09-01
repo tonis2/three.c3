@@ -331,6 +331,38 @@ export class Asset {
 		this.images = H.assetImages(index, generation);
 	}
 
+	// The host's flattened node table, kept after the first walk.
+	//
+	// The three doors that read it — `instantiate`, `node` and `nodes` — asked
+	// the host for a fresh array every time, and a kit is where that bites:
+	// placing 1,557 pieces out of a 39-node file rebuilt 39 rows of 22 values
+	// per placement to read eight of them. The rows depend on the asset and the
+	// skeleton flag and on nothing else, and an asset does not change under its
+	// handle, so the second ask is the first ask's answer. `_nodeNames` already
+	// caches on this object for the same reason; `three.load` of a reloaded path
+	// hands back a *fresh* Asset, so a cache on the instance cannot outlive the
+	// file it describes.
+	//
+	// Two entries, because `skeleton` is two different walks: keeping the bone
+	// nodes and dropping them are not the same tree.
+	//
+	// **The liveness check stays on the fast path**, which is the whole reason
+	// this is not one line. Asking the host was also what made a handle from
+	// before an unload throw, and a cache that skipped the crossing would let a
+	// script quietly instantiate a freed asset. `checkAsset` is that same refusal
+	// with nothing else attached — one crossing, no allocation, the same
+	// sentence.
+	//
+	// The array never leaves this object: `_build` and `node` read it and nothing
+	// hands it to a caller, so there is nobody to mutate the cache from.
+	_rows(skeleton) {
+		H.checkAsset(this._a, this._g);
+		const at = skeleton ? 1 : 0;
+		if (!this._nodeRows) this._nodeRows = [null, null];
+		if (!this._nodeRows[at]) this._nodeRows[at] = H.assetNodes(this._a, this._g, skeleton);
+		return this._nodeRows[at];
+	}
+
 	// The names of the file's own nodes, in the order the loader walks them —
 	// what `node(name)` takes, and what tells you whether a `.glb` is a kit or a
 	// single prop.
@@ -347,7 +379,7 @@ export class Asset {
 			// name here is still one `node()` takes; a repeat would not have
 			// resolved to anything new, since the first in the walk is the answer.
 			const seen = new Set();
-			for (const row of H.assetNodes(this._a, this._g, false)) seen.add(row[0]);
+			for (const row of this._rows(false)) seen.add(row[0]);
 			this._nodeNames = [...seen];
 		}
 		return this._nodeNames;
@@ -525,7 +557,7 @@ export class Asset {
 	// than once a frame. Not a switch to flip on a crowd.
 	instantiate(name, options = undefined) {
 		const opt = this._instanceOptions(options);
-		const rows = H.assetNodes(this._a, this._g, opt.skeleton);
+		const rows = this._rows(opt.skeleton);
 		const root = new Object3D();
 		// The name is what the tree is *called*, not which part of the file it is.
 		// `node(name)` is the one that picks — see it for why the two are separate.
@@ -542,12 +574,14 @@ export class Asset {
 	//     wall.position.set(4, 0, -2);
 	//     scene.add(wall);
 	//
-	// **What makes a kit one file rather than ninety.** Neither other door can
-	// pick a piece out of a shared file: `mesh(name)` matches a glTF *mesh*, and
-	// an exported mesh is named after its geometry — thirty pieces built out of
-	// boxes are thirty meshes all called `box` — while `instantiate()` builds the
-	// whole file every time, which stamps the entire kit at every placement.
-	// A node keeps the name the file gave it, so a node is what a piece can be.
+	// **What makes a kit one file rather than ninety.** `instantiate()` builds the
+	// whole file every time, which stamps the entire kit at every placement, and
+	// `mesh(name)` reaches a piece only when the piece is a single mesh: an
+	// exported mesh takes the name of the node that draws it when exactly one node
+	// does, and keeps its geometry's name — `box` — when several nodes share the
+	// shape, because one name cannot stand for all of them. A node keeps the name
+	// the file gave it whatever the piece is made of, so a node is what a piece of
+	// any shape can be.
 	//
 	// Call it twice for two copies, exactly as `instantiate()` does, and the two
 	// share the upload: this is a second set of transforms over the same meshes.
@@ -565,7 +599,7 @@ export class Asset {
 	// outside the subtree drives nothing rather than failing.
 	node(name, options = undefined) {
 		const opt = this._instanceOptions(options);
-		const rows = H.assetNodes(this._a, this._g, opt.skeleton);
+		const rows = this._rows(opt.skeleton);
 		const at = rows.findIndex((row) => row[0] === name);
 		if (at < 0) {
 			throw new Error(`no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`);

@@ -241,6 +241,120 @@ repo.
 
 ---
 
+## 23. Authoring a kit
+
+A kit is a `.glb` of named pieces a scene script places on a grid, and
+`asset.node(name)` is the door onto it. None of the four below breaks the thesis:
+a script still describes shapes and never touches a vertex.
+
+- [ ] **`BoxGeometry` and `ConvexGeometry` disagree about uvs.** A hull maps one
+      uv unit per unit of local space; every parametric shape maps 0..1 per face.
+      Two pieces of one roof — a slope that is a box, a hip that is a hull — then
+      need different `material.repeat` to wear one texture at one size, which is
+      how a 34-piece kit came to ship 29 materials and a `mat(texture, u, v)`
+      cache to build them, with the thin edge of every wall panel stretched
+      anyway. A `{ uv: 'world' }` mode is two multiplications where
+      `primitive.c3:434` already holds the face's own `u_length` and `v_length`.
+      The mode has to travel in `parameters`: two geometries with the same numbers
+      are one asset, so a global would collide a face-mapped box with a
+      world-mapped one of the same size. `repeat` then means texels per world unit
+      and one material serves every piece. Keep `'face'` the default — it is
+      Three.js's layout and every existing script reads it.
+- [ ] **Snapping stops working where the mating surface is not a face of the box.**
+      Two roof slopes meeting along a pitch overlap by the slab's thickness, so
+      aligning their boxes is wrong by it, and the pitch cannot be recovered from
+      bounds either — a 0.7 rise reads back as 0.798 over 1.069 with the thickness
+      and the overhang mixed in. What a kit wants here is what a Blender kit
+      already ships: **empty marker nodes** for connection points. glTF carries
+      them as nodes with no mesh, `instantiate` already builds them as plain
+      `Object3D`s and `node(name)` already finds them, so this may be a convention
+      and a doc rather than a feature — which is worth establishing before a piece
+      is authored that needs one.
+- [ ] **A failed load names the path the script asked for, not the path it looked for.**
+      Under `--assets` a leading `/` roots into the assets directory, so
+      `three.load("/home/tonis/Documents/runescape/kit/buildings.glb")` searches
+      `<assets>/home/tonis/...` and then reports `could not load
+      /home/tonis/Documents/runescape/kit/buildings.glb: gltf::FILE_NOT_FOUND` — naming a
+      file that is on disk, readable, and exactly where the sentence says it is. Whoever
+      reads that error checks the file, finds it, and has learned nothing. Everything
+      needed to say the true thing is in hand at the throw site: the root, the path as
+      written, and the path as resolved. `three.texture` and `three.readText` resolve the
+      same way and will mislead the same way. The rooting rule is right; only the sentence
+      is wrong.
+
+- [ ] **There is no `merge`, only `split`.** A wall panel with a hole in it is
+      four boxes, because a script cannot describe one shape that has a hole — so
+      ten buildings out of one kit are 2,463 nodes, and every piece carries
+      coincident interior faces nothing will ever see. `MeshRef.split()` already
+      reads geometry back on the host and uploads an asset per piece;
+      `three.merge([...]) → Geometry` is that path in reverse and is what would
+      let a piece *be* a mesh rather than a hierarchy. The largest of these and
+      the one that most changes what a kit costs.
+
+---
+
+## 24. An editor
+
+**A script, not a C3 program.** Placing a kit by hand is picking, a panel and a
+file, and the JavaScript surface already has all three — a second editor written
+in C3 would be a second UI stack over a second copy of the scene model, to reach
+verbs a script can already call. It runs the way a game does, under `--assets`,
+and `three.reload()` is its edit loop.
+
+**What it already stands on**, so that none of it gets built twice: `scene.pick(x, y)`
+answers what is under a pixel and `scene.raycast(origin, direction)` what a ray
+hits; `three.ui.set` has `button`, `checkbox`, `slider`, `select`, `tree` and
+`textfield` with handlers, which is a properties panel and an asset browser
+already; `three.inventory()` lists the `.glb`s under the assets directory with
+their nodes and bounds, and `asset.nodes` plus `node(name)` open one of them
+piece by piece; `BoxHelper` and `GridHelper` draw a selection box and a ground
+grid over the frame; `three.save` reads and writes JSON; and `scene.export(path)`
+publishes what was placed. Undo is an array in the script.
+
+- [ ] **Placing without snapping is not worth building.** A kit dropped freehand
+      is wrong in a way that shows at every join — a gap where two walls meet, a
+      z-fighting overlap where they meet too well, a roof course half a tile off
+      its eave — and no amount of nudging by eye fixes a village of them. Three
+      snaps, in the order they earn their place. **Grid**: every piece's footprint
+      is a whole number of tiles, so a placement is an integer cell, a quarter turn
+      and a storey, and that alone covers a wall run, a floor and a fence line.
+      **Face**: my box's min onto your box's max along one axis — a roof course on
+      a wall top, a storey on a storey — which is `alignTo` once the neighbour has
+      been found, and `three.query.box` is what finds it. **Marker**: the joins a
+      box cannot express, which is the second snapping entry in §23 and what two
+      roof slopes meeting along a pitch need. All three want a *preview* before
+      they commit — a ghost where the drop would land — because a snap that has
+      already happened is one you have to undo to disagree with; and a held key to
+      place freehand anyway, because the exception always turns up. The scripts
+      that placed this kit by hand hit precisely the errors snapping removes: a
+      lean-to turned so its roof rose away from the wall it leaned on, a wall built
+      twice where two wings shared a tile edge, and a verge nudged 0.06 by hand to
+      stop it fighting the roof under it.
+- [ ] **A level can now be read beside its kit but not written there.** `three.readText`
+      answers text out of the assets directory, and `scene.export` already writes a `.glb`
+      into it through `resolve_write` — so what is missing between them is text going the
+      other way. Until it exists an editor reads its placement list from the repo and has
+      to save it to `<application data>/three.c3/<name>/`, which is precisely the split the
+      read door was opened to close, and a save button that lands somewhere the user cannot
+      commit is not a save button. A text twin of `scene.export`: one verb, the
+      `resolve_write` sandbox that is already there, no new rule.
+
+- [ ] **The editor itself.** Select, move on a grid, rotate in quarter turns,
+      delete, duplicate, an asset browser off `inventory()` and `asset.nodes`,
+      undo, and load/save of the placement list. Its accuracy is §23's: snapping
+      is what makes a placement exact, and the run and cross-parent forms are what
+      it will lean on hardest.
+
+**The level is a list of placements, not a `.glb`.** A `.glb` bakes the geometry
+in, so re-exporting the kit does not update a level made from it, and the link
+back to the piece a placement *is* is gone. A placement list — a name, a
+transform, per row — is diffable, greppable and writable by an agent, which is the
+point: the same file is what an agent generates and what a person then adjusts by
+hand, and it is the only place those two meet. `scene.export` stays what turns a
+finished one into a file anybody else can open.
+
+---
+
 ## Standing constraints
 
 Neither of these is a task. They are the two things a task is allowed to break

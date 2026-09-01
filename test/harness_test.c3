@@ -116,3 +116,32 @@ fn void a_shot_path_numbers_itself_only_when_asked() @test
 	// The directory part survives, which is the common shape of the flag.
 	test::@check(three::frame_path("/tmp/run/%04d.png", 9) == "/tmp/run/0009.png");
 }
+
+<*
+ `--assets` is a root before it is a boot.
+
+ The regression: `--assets kit --script probe.js` opened by printing
+ `kit/main.js did not run: MODULE_IS_NOT_A_FILE` and then ran the script
+ perfectly well. A kit is a directory of models — `--assets` is what makes
+ `three.load("buildings.glb")` inside it mean the kit's own file and stops it
+ climbing out — and a kit that ships no entry module was never asked to have
+ one. The rule is that a missing `main.js` is only a failure when nothing else
+ was given to run.
+
+ `test/fixtures` is the kit here: glTF and images, no `main.js`.
+ `test/fixtures/game` is the game, and still boots with a script beside it —
+ losing that would take `--assets ./game --script probe.js` with it, which is
+ how a running game gets probed.
+*>
+fn void a_kit_with_no_main_js_is_a_root_and_not_a_failure() @test
+{
+	test::@check(three::wants_entry_module("test/fixtures/game", ""),
+		"--assets alone boots main.js");
+	test::@check(three::wants_entry_module("test/fixtures", ""),
+		"and still asks for one that is missing, which is where the error comes from");
+
+	test::@check(three::wants_entry_module("test/fixtures/game", "probe.js"),
+		"a main.js that is there boots under --script too, and the script runs after it");
+	test::@check(!three::wants_entry_module("test/fixtures", "probe.js"),
+		"but a directory with none beside a --script is only an assets root");
+}

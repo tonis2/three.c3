@@ -81,6 +81,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "playAnimation", &js_play_animation, 7);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
+	self.bind(host, "assetText", &js_asset_text, 1);
 	self.bind(host, "exportScene", &js_export, 3);
 
 	// The graph
@@ -180,6 +181,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "cameraAttach", &js_camera_attach, 8);
 	self.bind(host, "cameraDetach", &js_camera_detach, 0);
 	self.bind(host, "cameraAttached", &js_camera_attached, 0);
+	self.bind(host, "cameraRay", &js_camera_ray, 2);
 	self.bind(host, "frameAll", &js_frame_all, 0);
 
 	self.js.set_property(global, "__three", host);
@@ -1522,6 +1524,67 @@ fn qjs::Value JsRuntime.pick_at(&self, qjs::Context* js, float x, float y)
 		self.renderer.target.extent.height,
 	);
 	return hit_value(self, js, self.pass.scene.raycast(&self.pass.assets, ray));
+}
+
+<*
+ `cameraRay(x, y)` — the world-space ray through a pixel, as
+ `[ox, oy, oz, dx, dy, dz]`.
+
+ The same `screen_ray` a pick casts, called the same way with the same extent,
+ because agreeing with `pick` is the whole job. Deriving it a second time from
+ the eye, the field of view and the aspect would agree at the centre pixel and
+ drift everywhere else — and an editor calls both on one cursor position, so a
+ drift between them reads as the piece landing next to where it was dropped.
+
+ It exists because `pick` can only answer about something already under the
+ cursor. Dragging a piece over bare ground and dropping one where nothing is yet
+ have nothing to pick, and both are answered by intersecting this ray with a
+ plane the script chose.
+
+ The origin is on the near plane rather than at the eye. That is what `pick`
+ uses, so the two rays are the same ray and `Hit.distance` means the same number
+ for both; it also means what is in front of the near plane — invisible — is not
+ hit here either, which is the honest answer for a ray derived from a picture.
+*>
+fn void js_camera_ray(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	// Same refusal as `renderSize`, and for the same reason: a pixel coordinate
+	// only means something against a target that has a size, and without a
+	// device there is none to count in.
+	if (self.renderer == null)
+	{
+		*out = js.raise("a ray through a pixel needs a render target and this context has none");
+		return;
+	}
+
+	collision::Ray ray = screen_ray(
+		&self.pass.camera,
+		arg_float(&js, argc, args, 0),
+		arg_float(&js, argc, args, 1),
+		self.renderer.target.extent.width,
+		self.renderer.target.extent.height,
+	);
+
+	// Flat, like `aabb_value`: one array of six where a nested pair would be
+	// three, and `api.js` builds the `{ origin, direction }` a script sees.
+	qjs::Value six = js.array();
+	js.set_index(six, 0, qjs::number_value(ray.origin.x));
+	js.set_index(six, 1, qjs::number_value(ray.origin.y));
+	js.set_index(six, 2, qjs::number_value(ray.origin.z));
+	js.set_index(six, 3, qjs::number_value(ray.direction.x));
+	js.set_index(six, 4, qjs::number_value(ray.direction.y));
+	js.set_index(six, 5, qjs::number_value(ray.direction.z));
+	*out = six;
 }
 
 <*

@@ -201,6 +201,14 @@
  node sits at identity under the shared parent and each copy's own local TRS goes
  in unchanged. Nothing is baked into world space.
 
+ ## What a mesh is called
+
+ A `mesh` entry drawn by exactly one node is named after that node; one drawn by
+ more than one keeps its geometry's name, and what the shape was goes to
+ `mesh.extras.geometryName` either way. `name_meshes` is the whole of it, and the
+ reasoning — why a shared mesh may not take one owner's name, and why naming
+ cannot be allowed to cost a `mesh` entry — is there.
+
  ## `flatten`, and the case the sibling rule cannot reach
 
  Copies placed with `asset.instantiate()` are not siblings. Each arrives wrapped
@@ -518,6 +526,11 @@ struct ExportEntry @local
 	uint geometry;
 	int material;
 	uint entry;
+	// Who draws it, for `name_meshes`. `owner` is the first node to reach this
+	// entry and `alone` says it is still the only one — cleared by a second
+	// node arriving and by the batch that stands for many at once.
+	NodeId owner;
+	bool alone;
 }
 
 // The device texture slot an exported image came from. `GpuMesh.texture` is
@@ -699,6 +712,10 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false,
 	builder.add_root((uint)root);
 
 	if (state.report.instances == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+
+	// After the walk, for the same reason the animations are: what a mesh should
+	// be called depends on how many nodes turned out to draw it.
+	state.name_meshes();
 
 	// After the walk, because a clip is written once and given a channel per copy
 	// wearing it — so it has to know every copy first.
@@ -1636,7 +1653,11 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 
 	foreach (&known : self.entries)
 	{
-		if (known.geometry == (uint)geometry && known.material == material) return (int)known.entry;
+		if (known.geometry != (uint)geometry || known.material != material) continue;
+		// A second node on an entry that had one: whatever either of them is
+		// called, the mesh is no longer either node's. See `name_meshes`.
+		known.alone = false;
+		return (int)known.entry;
 	}
 
 	uint written            = self.out.add_mesh(mesh.name);
@@ -1676,9 +1697,71 @@ fn int? Exporter.mesh_entry(&self, NodeId id, Node* node, float[4] tint, bool sh
 	// writing them back would put a number in the file that the frame was not
 	// drawn with. What each copy is actually wearing goes out on its own node,
 	// which is the channel that varies per copy anyway.
-	self.entries.push({ .geometry = (uint)geometry, .material = material, .entry = written });
+	self.entries.push({
+		.geometry = (uint)geometry,
+		.material = material,
+		.entry = written,
+		.owner = id,
+		// A batch stands for every copy in it, so it is never alone even on the
+		// first visit.
+		.alone = !shared,
+	});
 	self.report.entries++;
 	return (int)written;
+}
+
+<*
+ Gives every mesh drawn by exactly one node that node's name.
+
+ A `mesh` entry is created named after its *geometry* — "box", "convex", or
+ whatever a source file called the primitive — because that is the only name
+ `mesh_entry` has when it needs the index. It is also the wrong name to keep: a
+ kit of thirty pieces built out of boxes reads back as thirty meshes called
+ `box`, so `three.inventory()` cannot say what is in the file and
+ `asset.mesh(name)` cannot reach a piece at all. The node names survive already,
+ which is why `asset.node(name)` works and the other two doors do not.
+
+ **A mesh drawn by one node takes that node's name; a mesh drawn by more than
+ one keeps the geometry's.** The rule turns on how many nodes drew it and on
+ nothing else, so it does not depend on the order the walk happened to reach
+ them — two scenes built in different orders out of the same pieces export the
+ same names.
+
+ The second half is the one that matters. Naming is not allowed to cost a draw
+ call: a wall placed two hundred times is one `(geometry, material)` and so one
+ `mesh` entry, and it stays one however it is named. Giving that entry the name
+ of whichever of the two hundred the walk reached first would keep the count and
+ still be a lie — `mesh("wall.001")` would answer with the shape all two hundred
+ draw. It is the same judgement `instanced_node` already makes about the node it
+ writes: a mass-produced copy's name does not stand for the batch, so the batch
+ is named after the shape instead.
+
+ An unnamed node leaves the geometry name in place, which is what was there
+ before any of this. So does a node whose name is already the geometry's, which
+ is most of them — `new three.Mesh(new three.BoxGeometry(1, 1, 1))` is called
+ `box` because a Mesh takes its name from its geometry.
+
+ What the shape was does not go missing when a mesh is renamed: it moves to
+ `mesh.extras.geometryName`, which is the only slot glTF has for it — the format
+ names meshes and primitives and has no concept of a geometry inside one.
+*>
+fn void Exporter.name_meshes(&self)
+{
+	foreach (&known : self.entries)
+	{
+		if (!known.alone) continue;
+
+		Node* node = self.pass.scene.node(known.owner);
+		if (node == null || node.name.len == 0) continue;
+
+		ExportGeometry* streams = &self.geometry[(usz)known.geometry];
+		GpuMesh* shape          = self.pass.assets.mesh(streams.asset, streams.mesh);
+		String geometry_name    = shape == null ? "" : shape.name;
+		if (node.name == geometry_name) continue;
+
+		self.out.set_mesh_name(known.entry, node.name);
+		self.out.set_geometry_name(known.entry, geometry_name);
+	}
 }
 
 <*

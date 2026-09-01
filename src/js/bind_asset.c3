@@ -22,6 +22,8 @@ import std::math::vector;
 import qjs;
 import image;
 import std::collections::list;
+import std::io::file;
+import std::io::path;
 
 <*
  `load(path)` — the asset's index, for `add`.
@@ -83,6 +85,150 @@ fn void js_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value*
 		}
 
 		*out = asset_value(&js, asset);
+	};
+}
+
+<*
+ Whether these bytes are text at all.
+
+ Walked with the decoder rather than sniffed, because the cheap tests are the
+ wrong ones: a `.glb` is mostly bytes that are individually printable, and a
+ file with no NUL in it can still be a Latin-1 export that JavaScript would
+ receive as mojibake. What a `String` crossing to JavaScript has to be is valid
+ UTF-8, so that is what is asked.
+
+ Overlong forms, surrogates and truncated tails are all refused by
+ `utf8_to_char32` itself — this is only the loop over it.
+*>
+fn bool is_utf8_text(char[] bytes) @local
+{
+	usz at = 0;
+	while (at < bytes.len)
+	{
+		sz size = (sz)(bytes.len - at);
+		Char32? decoded = conv::utf8_to_char32(&bytes[at], &size);
+		if (catch decoded) return false;
+		if (size <= 0) return false;
+		at += (usz)size;
+	}
+	return true;
+}
+
+<*
+ `assetText(path)` — a text file from the assets directory, as a string.
+
+ `js_load`'s door with nothing loaded through it. A kit is a `.glb` and the
+ level that places it is a list of names and transforms somebody wrote, and
+ until this existed the second one had nowhere to live: `three.save` writes
+ into `<application data>/three.c3/<slug>`, which is not where the kit is, not
+ what a person edits in a repo and not what ships beside the game.
+
+ **The sandbox is `resolve_asset`'s and not a second one.** The same call
+ `three.load` and `three.texture` make, so `../../etc/passwd` is refused with
+ the same sentence, a leading `/` means the assets directory rather than the
+ disk's, and the paths `three.inventory()` hands back are paths this accepts.
+ Without an assets root the path is used as written — the `--script`/`--mcp`
+ case, where `three.load` reads from wherever the process was started and
+ confining to nothing would refuse every path there is.
+
+ **Read-only, deliberately.** `scene.export` is the write door and goes through
+ `resolve_write`; a game's own data files are its author's, not its script's.
+
+ Null for a file that is not there, which is `saveReadText`'s answer and not
+ `js_load`'s. An editor asking "is there a level here yet" is the ordinary case
+ rather than the failure, and a throw would put a `try` around every cold start.
+ A file that exists and will not read *does* throw — that is a disk saying
+ something.
+
+ Two refusals beyond the path. Anything over `MAX_MODULE_BYTES` is turned away
+ by its size before it is read, reusing the loader's own number because this is
+ the loader's own directory and a second limit would be a second thing to keep
+ in step. And bytes that are not UTF-8 are refused rather than handed over: a
+ `String` crossing into JavaScript has to be text, and a `.glb` read by mistake
+ should say what it is instead of arriving as a page of replacement characters.
+*>
+fn void js_asset_text(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 0, tmem);
+		if (asked.len == 0)
+		{
+			*out = js.raise("three.readText(path) wants a path to a file in the assets directory");
+			return;
+		}
+
+		String? opening = self.resolve_asset(asked, tmem);
+		if (catch err = opening)
+		{
+			if (err == qjs::MODULE_ESCAPES_ROOT)
+			{
+				*out = js.raise(
+					string::tformat(
+						"cannot read '%s': it climbs out of the assets directory, and a game may only read "
+							"what is inside its own",
+						asked
+					)
+				);
+				return;
+			}
+			*out = js.raise(string::tformat("cannot read '%s': %s", asked, err));
+			return;
+		}
+
+		if (!file::is_file(opening))
+		{
+			*out = qjs::null_value();
+			return;
+		}
+
+		// Asked before the read, so a file nobody meant to open costs a stat and
+		// not its own size in the host's heap.
+		long? size = path::file_size((Path)opening);
+		if (try size && (usz)size > qjs::MAX_MODULE_BYTES)
+		{
+			*out = js.raise(
+				string::tformat(
+					"'%s' is %d bytes, and three.readText stops at %d — that is a level list or a table, "
+						"and a file this big is a mistake or a binary",
+					asked,
+					size,
+					qjs::MAX_MODULE_BYTES
+				)
+			);
+			return;
+		}
+
+		char[]? bytes = file::load(tmem, opening);
+		if (catch err = bytes)
+		{
+			*out = js.raise(string::tformat("could not read '%s': %s", asked, err));
+			return;
+		}
+
+		if (!is_utf8_text(bytes))
+		{
+			*out = js.raise(
+				string::tformat(
+					"'%s' is not UTF-8 text — three.readText reads text, and a .glb goes through three.load "
+						"and an image through three.texture",
+					asked
+				)
+			);
+			return;
+		}
+
+		*out = js.string((String)bytes);
 	};
 }
 

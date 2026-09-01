@@ -20,6 +20,8 @@ import vk;
 import image;
 import std::core::test;
 import std::math;
+import std::io::file;
+import std::io::path;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -3822,6 +3824,190 @@ fn void two_pieces_of_one_kit_share_the_upload() @test
 }
 
 <*
+ A piece named in a script is a piece named in the file, by every door.
+
+ What a kit is for. `asset.node(name)` already worked, because a node's name
+ goes out as a node's name; the mesh under it went out named after its
+ *geometry*, so a kit of thirty box pieces was thirty meshes called `box`.
+ `three.inventory()` — the answer to "what is in this file and is it worth
+ loading" — read back as a column of `box`, and `asset.mesh("wall_stone")` threw
+ on a piece that was sitting right there.
+
+ So all three are asserted here off one round trip: build named pieces, write
+ them, and read the file back cold. `inventory` never loads anything — it is the
+ JSON chunk and nothing else — which is why it is the one worth checking against
+ a file rather than against a scene.
+
+ The counts ride along because naming must not have cost anything: three shapes
+ in, three `mesh` entries out, three draw calls when it comes back.
+*>
+fn void a_named_piece_comes_back_named_in_the_file() @test
+{
+	String root = "build/kit_names";
+	if (catch path::mkdir((Path)root, recursive: true))
+	{
+		// Already there from a previous run, which is fine — the .glb below is
+		// overwritten either way.
+	}
+	defer
+	{
+		(void)file::delete(string::tformat("%s/buildings.glb", root));
+		(void)path::rmdir((Path)root);
+	}
+
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		run.set_assets_root(root);
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+
+			const wall = new three.Mesh(new three.BoxGeometry(1, 1.6, 0.2));
+			wall.name = "wall_stone";
+			const floor = new three.Mesh(new three.BoxGeometry(1, 0.1, 1));
+			floor.name = "floor_stone";
+			const hip = new three.Mesh(new three.ConvexGeometry([
+				[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], [0.5, 0.7, 0.5],
+			]));
+			hip.name = "roof_hip";
+			scene.add(wall, floor, hip);
+
+			const report = scene.export("buildings.glb");
+
+			// Cold: a fresh scene, then the file read back as any script would
+			// read a kit it did not build.
+			new three.Scene();
+			const kit = three.load("buildings.glb");
+			const placed = new three.Scene();
+			for (const name of kit.meshes) placed.add(new three.Mesh(kit.mesh(name)));
+
+			const listed = three.inventory().find(entry => entry.path === "buildings.glb");
+
+			return {
+				meshes: kit.meshes,
+				inventory: listed ? listed.meshes.map(m => m.name) : null,
+				reached: kit.mesh("wall_stone").name,
+				byNode: kit.node("floor_stone").name,
+				wrote: [report.meshes, report.entries, report.instances],
+				draws: three.stats().drawCalls,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value.contains(`"meshes":["wall_stone","floor_stone","roof_hip"]`),
+			"the file's meshes carry the pieces' names, not box/box/convex: %s", result.value
+		);
+		test::@check(
+			result.value.contains(`"inventory":["wall_stone","floor_stone","roof_hip"]`),
+			"and `three.inventory()` says so without loading the file: %s", result.value
+		);
+		test::@check(result.value.contains(`"reached":"wall_stone"`),
+			"`mesh(name)` reaches a single-mesh piece: %s", result.value);
+		test::@check(result.value.contains(`"byNode":"floor_stone"`),
+			"and the door that already worked still does: %s", result.value);
+		test::@check(result.value.contains(`"wrote":[3,3,3]`),
+			"three shapes are three meshes and three copies: %s", result.value);
+		test::@check(result.value.contains(`"draws":3`),
+			"and three draw calls when it comes back: %s", result.value);
+	};
+}
+
+<*
+ A shape two hundred pieces draw keeps its own name, and the file keeps its size.
+
+ The trap in naming a mesh after a node. The same `(geometry, material)` is one
+ asset, one `mesh` entry and one draw call however many nodes stand on it — a
+ wall placed two hundred times is one shape and two hundred transforms — so a
+ rule that gave the entry a node's name would have to answer for two hundred
+ nodes wanting different ones. Answering "the first one the walk reached" keeps
+ the count and writes a falsehood: `mesh("wall.0")` would hand back the shape all
+ two hundred of them draw.
+
+ So the rule turns on how many drew it. Exactly one, and the mesh is that node's;
+ more than one, and it stays the shape's own name — which is the judgement
+ `instanced_node` already makes about the node it writes for a batch.
+
+ Asserted as a *difference of nothing*: the same scene is exported twice, once
+ with every piece named and once with none of them, and every count in the two
+ reports has to match. A file that grew a mesh because its pieces were named is
+ the failure this test exists for.
+*>
+fn void naming_two_hundred_copies_of_one_wall_writes_one_mesh() @test
+{
+	String plain = "build/export_names_plain.glb";
+	String named = "build/export_names_named.glb";
+	defer
+	{
+		(void)file::delete(plain);
+		(void)file::delete(named);
+	}
+
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			// One shape under a group, two hundred times, and a second shape
+			// standing alone beside it.
+			const build = (named) => {
+				const scene = new three.Scene();
+				const panel = new three.BoxGeometry(1, 1.6, 0.2);
+				const run = new three.Group();
+				for (let i = 0; i < 200; i++) {
+					const wall = new three.Mesh(panel);
+					if (named) wall.name = "wall." + i;
+					wall.position.x = i;
+					run.add(wall);
+				}
+				scene.add(run);
+				const slab = new three.Mesh(new three.BoxGeometry(2, 0.1, 2));
+				if (named) slab.name = "floor_stone";
+				scene.add(slab);
+				return scene;
+			};
+
+			const anonymous = build(false);
+			const anonymousDraws = anonymous.stats().drawCalls;
+			const before = anonymous.export("build/export_names_plain.glb");
+
+			const labelled = build(true);
+			const labelledDraws = labelled.stats().drawCalls;
+			const after = labelled.export("build/export_names_named.glb");
+
+			new three.Scene();
+			const back = three.load("build/export_names_named.glb");
+			const reloaded = new three.Scene();
+			reloaded.add(back.instantiate());
+
+			// Every count the report carries that naming could plausibly move.
+			// There are six nodes: the root, the group, the instanced node the
+			// two hundred collapsed into, the slab, and the camera and light
+			// every export writes.
+			const counts = r => [r.meshes, r.entries, r.materials, r.nodes, r.instances, r.batches];
+			return {
+				before: counts(before),
+				after: counts(after),
+				drew: [anonymousDraws, labelledDraws],
+				meshes: back.meshes,
+				backDraws: three.stats().drawCalls,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"before":[2,2,1,6,201,1]`),
+			"two shapes, two entries, one batch of two hundred: %s", result.value);
+		test::@check(result.value.contains(`"after":[2,2,1,6,201,1]`),
+			"and naming every piece changed none of it: %s", result.value);
+		test::@check(result.value.contains(`"drew":[2,2]`),
+			"the scene itself is two draw calls either way: %s", result.value);
+		test::@check(result.value.contains(`"meshes":["box","floor_stone"]`),
+			"the shared shape keeps its own name and the lone one takes its node's: %s", result.value);
+		test::@check(result.value.contains(`"backDraws":2`),
+			"and the named file reloads to the same two draw calls: %s", result.value);
+	};
+}
+
+<*
  `asset.nodes` is the list, and a name that is not on it is a sentence.
 
  A misspelled piece has to fail where it was written rather than as a null
@@ -3854,6 +4040,72 @@ fn void a_kits_node_names_are_listed_and_a_typo_is_refused() @test
 			"the refusal should name what was asked for: %s", result.value);
 		test::@check(result.value.contains(`hierarchy.glb — it has: `),
 			"and should name the file and list what it does have: %s", result.value);
+	};
+}
+
+<*
+ A kit whose rows are already cached still refuses a handle from before an
+ unload.
+
+ The trap in caching them at all. `instantiate()` and `node()` used to ask the
+ host for the flattened tree on every call, and that crossing was also what made
+ a stale handle throw — so keeping the rows on the Asset and skipping the host
+ would have turned "that asset is no longer loaded" into a tree quietly built out
+ of a freed file. The cache is warmed here first, on purpose: a run that never
+ filled it would pass whether or not the check survived.
+
+ Both walks are warmed, because they are two entries, and the message has to be
+ the one `arg_asset` writes rather than a second sentence living beside it.
+*>
+fn void a_cached_kit_still_refuses_a_handle_from_before_an_unload() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/hierarchy.glb");
+			const scene = new three.Scene();
+
+			// Every door that reads the rows, so nothing below is a first ask.
+			scene.add(kit.node("arm"));
+			kit.instantiate();
+			kit.instantiate(undefined, { skeleton: true });
+			const before = kit.nodes.length;
+
+			scene.unload();
+
+			let piece = "", tree = "", skinned = "";
+			try { kit.node("arm"); } catch (e) { piece = e.message; }
+			try { kit.instantiate(); } catch (e) { tree = e.message; }
+			try { kit.instantiate(undefined, { skeleton: true }); } catch (e) { skinned = e.message; }
+
+			// The recovery the message names, and the fresh Asset it hands back —
+			// which is what makes a cache on the instance safe.
+			const fresh = three.load("test/fixtures/hierarchy.glb");
+			scene.add(fresh.node("arm"));
+
+			return {
+				before,
+				piece,
+				tree,
+				skinned,
+				sameObject: fresh === kit,
+				instances: scene.stats().instances,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"before":5`), "the rows were read before the unload: %s", result.value);
+		test::@check(result.value.contains(`"piece":"that asset is no longer loaded`),
+			"node() on a freed asset should still throw: %s", result.value);
+		test::@check(result.value.contains(`"tree":"that asset is no longer loaded`),
+			"instantiate() on a freed asset should still throw: %s", result.value);
+		test::@check(result.value.contains(`"skinned":"that asset is no longer loaded`),
+			"and the skeleton walk too, whose rows were cached separately: %s", result.value);
+		test::@check(result.value.contains("unloadUnused"), "the message names what freed it: %s", result.value);
+		test::@check(result.value.contains(`"sameObject":false`),
+			"loading it again is a fresh Asset, so it carries no stale rows: %s", result.value);
+		test::@check(result.value.contains(`"instances":3`), "and the reloaded piece places: %s", result.value);
 	};
 }
 
