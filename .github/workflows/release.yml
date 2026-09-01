@@ -98,9 +98,8 @@ jobs:
           #     ./lib/slang.c3l/native/build-slang.sh
           #     ./lib/slang.c3l/native/publish-static.sh
           #
-          # Two steps below fire only for this leg: the apt install, because
-          # the runner has no graphics stack at all, and the quickjs PIC
-          # rebuild. `experimental` until it has one green build on this image.
+          # One step below fires only for this leg: the quickjs PIC rebuild.
+          # `experimental` until it has one green build on this image.
           #
           # **ubuntu-24.04 rather than 22.04, and the ARCHIVE is what decides
           # that.** libslang.a is compiled on whichever linux-x64 machine ran
@@ -170,19 +169,6 @@ jobs:
 
       - name: c3c version
         run: c3c --version
-
-      # ------------------------------------------------------ system packages --
-      # This is a property of the RUNNER, not a requirement of the bundle: a
-      # GitHub Linux image has no GPU and no graphics stack, so there is neither
-      # a `libvulkan.so.1` for `vk::init` to dlopen nor an ICD to render on.
-      # lavapipe is Mesa's software rasteriser and is what the smoke test draws
-      # with. An ordinary Linux desktop already has both and installs nothing —
-      # see packaging/bundle-README.md.
-      - name: Install Vulkan loader and a software driver (runner has no GPU)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools zip
 
       # ------------------------------------------------------------- staging --
       # `submodules; slang; driver`. The `slang` step fetches slang.c3l's
@@ -294,9 +280,6 @@ jobs:
       - name: Build
         run: c3c build --trust=full --safe=no -O3
 
-      - name: Show what was built
-        run: ls -la build/
-
       # -------------------------------------------------------------- assemble --
       - name: Assemble the bundle
         id: assemble
@@ -389,8 +372,8 @@ jobs:
           du -sh "$out"
 
       # ------------------------------------------------------------- verify --
-      # Two checks, neither of which needs a GPU. See the header for why there
-      # is no third one that draws.
+      # Three checks, none of which needs a GPU. See the header for why there
+      # is no fourth one that draws.
 
       # A library that is not beside the executable makes the process die
       # before `main` — 0xC0000135 on Windows, a dyld or ld.so line on the
@@ -459,7 +442,6 @@ jobs:
               command -v objdump >/dev/null 2>&1 || {
                 echo "no objdump on this image — dependency check skipped"; exit 0; }
               deps="$(objdump -p "$exe" | awk '/DLL Name:/ { print $3 }')" ;;
-            *)     echo "no dependency dump for ${{ runner.os }} — skipped"; exit 0 ;;
           esac
 
           echo "--- recorded dependencies ---"
@@ -535,7 +517,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
