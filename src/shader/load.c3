@@ -40,8 +40,8 @@ bool shader_override_allowed @local = true;
 <*
  Turns the on-disk override off, or back on.
 
- **A plugin is the reason this exists.** three is run from the plugin's own
- checkout — a plugin needs its working directory for its own assets, crig's font
+ **An application that links the engine is the reason this exists.** It runs from
+ its own checkout — it needs the working directory for its own assets, crig's font
  among them — and if that checkout happens to contain a `shaders/mesh.slang` of
  its own, three silently compiles *that* instead of its own. What comes out is a
  shader that does not match three's push contract, and the run dies at startup

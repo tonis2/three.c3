@@ -18,6 +18,7 @@ import three;
 import c3w;
 import qjs;
 import vk;
+import image;
 import std::core::test;
 import std::io;
 import std::time;
@@ -1671,6 +1672,365 @@ fn void pressing_a_key_that_does_not_exist_is_refused() @test
 		defer result.free();
 		test::@check(result.value.contains("no key called 'banana'"),
 			"a name that is not a key should say so: %s", result.value);
+	};
+}
+
+// ============================================================================
+// The pointer a script moves
+//
+// The same argument one section up, for the mouse, and it reaches further. A
+// headless boot has no pointer either, so the thing a pointer is mostly for — an
+// interface — could not be exercised at all: a panel's buttons, its menus and
+// its drags were reachable only by a person with a window open, which is to say
+// not reachable from a test.
+//
+// The checks below are in two halves, because there are two claims. That the
+// pointer arrives at all is the first, and it is the cheap one. That it arrives
+// through the HIT TEST — so a press under an open modal reaches nothing — is the
+// second, and it is the one worth writing: a scripted pointer that fired through
+// everything would be a global with a coordinate on it, which is what
+// `three.input.pointer` already was.
+// ============================================================================
+
+// A renderer with room for cui's application widgets to lay out in, and a
+// context bound to it. `ui_test.c3`'s `@with_panel` argues the size: a centred
+// `ConfirmDialog` is 380 wide before its insets, and measured against a HUD's
+// worth of frame it comes out clipped — the test would then be about the
+// clipping.
+macro @with_panel_js(; @body(three::Renderer* renderer, three::JsRuntime* run))
+{
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Renderer renderer;
+	renderer.init(instance, (vk::SurfaceKHR)null, 520, 400)!!;
+	defer renderer.free();
+
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, &renderer)!!;
+	defer runtime.close();
+
+	@body(&renderer, &runtime);
+}
+
+// One frame, so the emit pass writes the absolute origins every hit test reads.
+// `ui_test.c3` has the same three lines for the same reason.
+fn void laid_out(three::Renderer* renderer)
+{
+	image::Image shot = renderer.capture()!!;
+	shot.free();
+}
+
+<*
+ A pointer a script moves is where it was put, and the movement is differenced
+ for it.
+
+ The control is the first reading: with no window and nothing scripted the
+ pointer is at the origin and outside the picture, which is what makes the second
+ reading mean something. An assertion that (120, 80) came back would pass just as
+ well against a host that answered with whatever it was last asked about.
+
+ `dx` and `dy` are the interesting half. They are not the difference a script
+ could take for itself — the host differences the reading the frame is actually
+ using, and a scripted pointer goes through the same `MouseTracker` a real one
+ does rather than reporting the number it was handed.
+*>
+fn void a_pointer_a_script_moves_reads_back() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.tick(0.0);
+		String bare = @answer(run, `const p = three.input.pointer; return [p.x, p.y, p.inside].join(',');`);
+		defer bare.free(mem);
+		test::@check(bare == `"0,0,false"`,
+			"nothing scripted is a pointer nowhere, and that is the control: %s", bare);
+
+		@ok(run, `three.input.movePointer(120, 80);`);
+		run.tick(16.0);
+		String placed = @answer(run, `const p = three.input.pointer; return [p.x, p.y, p.inside].join(',');`);
+		defer placed.free(mem);
+		test::@check(placed == `"120,80,true"`,
+			"the pointer reads back where it was put: %s", placed);
+
+		// The first frame of a session has nothing to difference against, so the
+		// movement is asked for on the second.
+		@ok(run, `three.input.movePointer(140, 95);`);
+		run.tick(32.0);
+		String moved = @answer(run, `const p = three.input.pointer; return [p.x, p.y, p.dx, p.dy].join(',');`);
+		defer moved.free(mem);
+		test::@check(moved == `"140,95,20,15"`,
+			"the host differenced the move rather than reporting the numbers it was handed: %s", moved);
+	};
+}
+
+<*
+ A scripted pointer adds to the real mouse, and a hand on the mouse takes the
+ cursor back.
+
+ The half of the design a headless check cannot reach: every test above runs with
+ no window, where the real cursor is empty and the merge has nothing to add to.
+ With a window there is something on the other side of every field, and the rule
+ differs per field because the fields differ in kind — the buttons are a set and
+ union, the wheel is a total and adds, and the position is neither.
+
+ So the position stands in, and what hands it back is the person. Only a real
+ *movement* does it: the window reports a position every frame whether or not
+ anything moved, and reading that as a claim would make a placed pointer last
+ exactly one frame — which is the bug this asserts the absence of, twice, on
+ either side of the frame where the hand actually moves.
+
+ What a script is holding is not let go of by any of that. Taking the cursor back
+ is not the same as taking the button back, and a drag that ended because
+ somebody nudged the mouse would be the worst kind of flake.
+*>
+fn void a_scripted_pointer_adds_to_the_real_mouse() @test
+{
+	three::SyntheticPointer scripted;
+	three::Cursor real = { .inside = true, .x = 10, .y = 20, .right = true, .scroll = 1.0 };
+
+	scripted.place(100, 50);
+	scripted.hold(0, true);
+	scripted.turn(2.0, 0);
+
+	three::Cursor merged = scripted.merge(real, 200, 150);
+	test::@check(merged.x == 100.0 && merged.y == 50.0,
+		"the placed position stands in for the window's, got (%f, %f)", merged.x, merged.y);
+	test::@check(merged.down && merged.right, "the buttons are the union of both, not one or the other");
+	test::@check(merged.scroll == 3.0, "the wheel is the sum of both, got %f", merged.scroll);
+
+	// The window saying the same thing again is not the hand moving.
+	merged = scripted.merge(real, 200, 150);
+	test::@check(merged.x == 100.0, "a window repeating itself took the cursor back to %f", merged.x);
+	// The window's own notch and nothing else: the scripted two were spent by the
+	// frame that read them, because a notch turned between two frames belongs to
+	// one of them and a total that survived would be a scroll that never stopped.
+	test::@check(merged.scroll == 1.0, "the scripted wheel outlived its frame: %f", merged.scroll);
+
+	// And now it is. One pixel is a person's hand and the placement is gone.
+	real.x = 11;
+	merged = scripted.merge(real, 200, 150);
+	test::@check(merged.x == 11.0, "a real movement did not take the cursor back: %f", merged.x);
+	test::@check(merged.down, "taking the cursor back also let go of the button a script was holding");
+
+	// A placement outside the picture is outside it. The bound is what `inside`
+	// means, and `inside` is what stops `MouseTracker` resolving a click.
+	scripted.place(300, 50);
+	merged = scripted.merge(real, 200, 150);
+	test::@check(!merged.inside, "a pointer placed off the 200-wide image reported itself inside it");
+}
+
+<*
+ A `draw` node's own handler hears a scripted press, in the node's coordinates.
+
+ The claim that matters for testability, and it is `SyntheticKeys`' one moved
+ across: there is ONE pointer, not a second path that reports a position without
+ going through the hit test. A panel is only regression-testable if the thing
+ under test — the handler, the widget, the panel — cannot tell a scripted press
+ from a finger.
+
+ The node is under a `padding` on purpose. A local position that were secretly
+ the image's would agree with it at the origin and nowhere else, and a test at
+ the origin is a test that cannot fail.
+*>
+fn void a_draw_node_hears_a_scripted_press_in_its_own_coordinates() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `
+			globalThis.seen = [];
+			three.ui.set({ type: 'padding', insets: [40, 30, 0, 0], child: {
+				type: 'draw', width: 60, height: 40,
+				ops: [{ op: 'rect', at: [0, 0], size: [60, 40], color: 0x224466 }],
+				onPointer: e => { globalThis.seen.push(e); },
+			}});
+		`);
+		laid_out(renderer);
+
+		// Fifteen in and fifteen down from the node's own top-left corner.
+		@ok(run, `three.input.movePointer(55, 45); three.input.pressButton(0);`);
+		run.tick(16.0);
+		@ok(run, `three.input.releaseButton(0);`);
+		run.tick(32.0);
+
+		String read = @answer(run, `
+			const seen = globalThis.seen;
+			const down = seen.find(e => e.phase === 'down');
+			if (!down) return 'never went down: ' + seen.map(e => e.phase).join('/');
+			return [down.x, down.y, down.buttons, down.button,
+				seen.some(e => e.phase === 'up')].join(',');
+		`);
+		defer read.free(mem);
+		test::@check(read == `"15,15,1,0,true"`,
+			"the press came over as %s rather than the node's own (15, 15) with the left button", read);
+	};
+}
+
+<*
+ A scripted press under an open modal reaches nothing.
+
+ **This is the assertion the whole verb exists for.** A position was always
+ reachable — `three.input.pointer` is global and fires through an open menu,
+ through a modal, through whatever was drawn on top — so a scripted pointer that
+ merely carried coordinates would buy nothing a global did not. What is being
+ checked is not the coordinates but the RIGHT to them, and the only way to check
+ that is to put something over the panel and watch the panel go quiet.
+
+ The control is the first press, with the dialog closed and zero-sized: the
+ painting owns the frame and hears it. Without that, a test that passes because
+ the scripted pointer reaches nothing at all looks exactly like a test that
+ passes.
+
+ The script's own view is checked in the same breath. `Cursor.behind_ui` is the
+ other half of the arbitration — a press the interface answered for must not also
+ be a press the scene is told about — and it is applied to a scripted pointer by
+ the same line that applies it to a real one.
+*>
+fn void a_scripted_press_under_a_modal_reaches_nothing() @test
+{
+	@with_panel_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		@ok(run, `
+			globalThis.seen = 0;
+			three.ui.set({ type: 'stack', children: [
+				{ type: 'draw', ops: [], onPointer: () => { globalThis.seen++; } },
+				{ key: 'ask', type: 'confirmDialog', title: 'Delete', message: 'Delete it?',
+				  open: false, onConfirm: () => {} },
+			]});
+		`);
+		laid_out(renderer);
+
+		@ok(run, `three.input.movePointer(260, 200); three.input.pressButton(0);`);
+		run.tick(16.0);
+		@ok(run, `three.input.releaseButton(0);`);
+		run.tick(32.0);
+
+		String control = @answer(run, "return globalThis.seen;");
+		defer control.free(mem);
+		test::@check(control != "0", "the painting had no pointer to lose, so nothing below means anything");
+
+		@ok(run, `three.ui.patch('ask', { open: true }); globalThis.seen = 0;`);
+		laid_out(renderer);
+
+		@ok(run, `three.input.movePointer(260, 200); three.input.pressButton(0);`);
+		run.tick(48.0);
+		String behind = @answer(run, `const p = three.input.pointer; return [p.down, p.inside].join(',');`);
+		defer behind.free(mem);
+		@ok(run, `three.input.releaseButton(0);`);
+		run.tick(64.0);
+		// And a press somewhere the dialog itself is not, which is the case a
+		// modal that merely sat on top rather than consuming would let through.
+		@ok(run, `three.input.movePointer(40, 380); three.input.pressButton(0);`);
+		run.tick(80.0);
+		@ok(run, `three.input.releaseButton(0);`);
+		run.tick(96.0);
+
+		String quiet = @answer(run, "return globalThis.seen;");
+		defer quiet.free(mem);
+		test::@check(quiet == "0", "the painting under an open modal still took %s pointer events", quiet);
+		test::@check(renderer.ui.wants_pointer, "the modal did not take the pointer either");
+		test::@check(behind == `"false,false"`,
+			"a press the modal answered for was also reported to the script: %s", behind);
+	};
+}
+
+<*
+ A scripted drag survives leaving the node, because the press captured.
+
+ Four statements rather than one `drag(a, b)` verb, and this is what the four buy:
+ the move arrives at the node it started on with a coordinate OUTSIDE the node's
+ box, which is what a timeline or a curve editor needs and what a hit test alone
+ would never give — without the capture the move goes to whatever is under it
+ now.
+
+ A synthesised gesture could not produce this. The capture is a fact about the
+ frames between the press and the release, and a verb that invented those frames
+ would be inventing the very thing under test.
+*>
+fn void a_scripted_drag_survives_leaving_the_node() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `
+			globalThis.seen = [];
+			three.ui.set({ type: 'padding', insets: [40, 30, 0, 0], child: {
+				type: 'draw', width: 60, height: 40,
+				ops: [{ op: 'rect', at: [0, 0], size: [60, 40], color: 0x224466 }],
+				onPointer: e => { globalThis.seen.push(e); },
+			}});
+		`);
+		laid_out(renderer);
+
+		@ok(run, `three.input.movePointer(55, 45); three.input.pressButton(0);`);
+		run.tick(16.0);
+		// Dragged clean off the node, with the button still held.
+		@ok(run, `three.input.movePointer(150, 100);`);
+		run.tick(32.0);
+		@ok(run, `three.input.releaseButton(0);`);
+		run.tick(48.0);
+
+		String read = @answer(run, `
+			const seen = globalThis.seen;
+			const off = seen.filter(e => e.phase === 'move').pop();
+			if (!off) return 'the drag past the edge arrived as ' + seen.map(e => e.phase).join('/');
+			return [off.x, off.y, off.buttons, seen.some(e => e.phase === 'up')].join(',');
+		`);
+		defer read.free(mem);
+		test::@check(read == `"110,70,1,true"`,
+			"the drag off the node came over as %s rather than (110, 70) with the button still held", read);
+	};
+}
+
+<*
+ `releaseAll` lets go of a held button.
+
+ What a test calls between cases, and a leaked button is worse than a leaked key:
+ a held button captures, so the next case's first press lands inside a drag
+ somebody else started and the widget it was aimed at never hears about it.
+
+ The pointer stays where it was put, which is the other half of the contract —
+ letting go of a button is not moving the mouse.
+*>
+fn void release_all_lets_go_of_a_held_button() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `three.input.movePointer(60, 40); three.input.pressButton(0); three.input.pressButton(2);`);
+		run.tick(16.0);
+
+		String before = @answer(run, `const p = three.input.pointer; return [p.down, p.middle].join(',');`);
+		defer before.free(mem);
+		test::@check(before == `"true,true"`, "both buttons are held to begin with: %s", before);
+
+		@ok(run, "three.input.releaseAll();");
+		run.tick(32.0);
+
+		String after = @answer(run, `const p = three.input.pointer; return [p.down, p.middle, p.x, p.y].join(',');`);
+		defer after.free(mem);
+		test::@check(after == `"false,false,60,40"`,
+			"releaseAll let go of the buttons and left the cursor where it was: %s", after);
+	};
+}
+
+<*
+ A button nobody has is refused by name, the way a key name nobody has is.
+
+ The same failure it exists to prevent: a fourth button silently taken as the
+ left one is a press that lands somewhere nobody aimed, and it is
+ indistinguishable from every other reason a control might do the wrong thing.
+*>
+fn void pressing_a_button_that_does_not_exist_is_refused() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		three::RunResult result = run.run(`
+			try { three.input.pressButton(7); return "accepted"; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+		test::@check(result.value.contains("0 (left), 1 (right) or 2 (middle)"),
+			"a button that is not a button should say so: %s", result.value);
 	};
 }
 

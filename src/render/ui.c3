@@ -428,23 +428,27 @@ fn Vec2 UiWrap.layout(&self, cui::Element* elem, cui::Constraints constraints) @
 
  The first eight are layout and hold nothing but numbers; the next three paint;
  the six after those are the interactive built-ins, and the only thing they add
- is a function. The last three are cui's application widgets — a confirmation, a
- menu bar and a directory listing. `js/prelude/ui.js` maps the `type` string onto
- these and refuses anything else by name, so a typo is a message rather than a
- missing panel.
+ is a function. The last four are cui's application widgets — a confirmation, a
+ menu bar, a directory listing and a floating panel. `js/prelude/ui.js` maps the
+ `type` string onto these and refuses anything else by name, so a typo is a
+ message rather than a missing panel.
 
- Those last three were once absent under the note that cui's application widgets
- "are not snapshot-shaped: their contents are function pointers cui evaluates
- rather than subtrees it holds". That is true of `Dialog` and of the `AreaHost`
- family and was never true of these: a `ConfirmDialog` is four strings and two
- callbacks, a `MenuBar` is `Select`'s options one level deeper, and a
- `FileBrowser` is a path and a list of patterns.
+ Those four were once absent under the note that cui's application widgets "are
+ not snapshot-shaped: their contents are function pointers cui evaluates rather
+ than subtrees it holds". Of the three that hold no children it was never true:
+ a `ConfirmDialog` is four strings and two callbacks, a `MenuBar` is `Select`'s
+ options one level deeper, and a `FileBrowser` is a path and a list of patterns.
 
- `Dialog` and `AreaHost` are still absent, and stay absent until cui grows an
- `Element*` a dialog *borrows* in place of the `ViewBuilder` it calls: the
- subtree that builder returns is released wholesale on close, so handing a
- dialog the snapshot's children would have cui free elements this layer owns and
- then hand the freed pointers back on the next open.
+ Of `DIALOG` it *was* true, and it stopped being true when cui grew
+ `Dialog.content` — an element the dialog BORROWS in place of the `ViewBuilder`
+ it would otherwise call. The subtree that builder returns is released wholesale
+ on close, which a snapshot cannot survive: cui would free elements this layer
+ still keeps `UiNode` records for and hand the freed pointers back on the next
+ open. A borrowed one is detached instead, kept whole with its widget state and
+ its paint cache, and attached again unchanged. See `UiNode.content`.
+
+ `AreaHost` is still absent. It is the same shape with the same answer, and it
+ is item 9 rather than this one.
 
  Appended rather than inserted, and that is a rule rather than a preference:
  `js/prelude/ui.js`'s `KIND` table is these ordinals written out in JavaScript,
@@ -472,6 +476,7 @@ enum UiNodeKind : char
 	CONFIRM_DIALOG,
 	MENU,
 	FILE_BROWSER,
+	DIALOG,
 }
 
 <*
@@ -502,6 +507,7 @@ fn bool UiNodeKind.interactive(self)
 		case CONFIRM_DIALOG:
 		case MENU:
 		case FILE_BROWSER:
+		case DIALOG:
 			return true;
 		default:
 			return false;
@@ -553,6 +559,25 @@ struct UiNodeSpec
 	// A `stack` that sizes to its last child instead of filling — see `UiWrap`.
 	bool wrap;
 
+	// A `dialog`'s two behaviours, and they belong to that one kind.
+	//
+	// `modal` makes the element itself the backdrop: it fills what it is
+	// offered, dims it and swallows the presses that land on it.
+	// `close_outside` is modal-only, and makes a press on that backdrop the
+	// dismissal.
+	//
+	// **A `dialog` belongs in a `stack`**, and that is a rule rather than a
+	// preference — see the DIALOG arm of `push_node` for the two reasons, both
+	// of which are cui's rather than this file's.
+	//
+	// A modal inside the application's slot dims THE PANE and not the window, because
+	// cui places and scrims a dialog against `Element.media` — the nearest
+	// screen at or above it, which is the pane the application offered. That is the
+	// right answer for a panel drawn inside an editor, and it is a fact about
+	// cui rather than something to work around here.
+	bool modal;
+	bool close_outside;
+
 	// Paint. The common theme rather than every field of every style struct:
 	// a colour whose alpha is zero was not named, and the widget's own default
 	// stands. `UI.md` §8.2 has the full field lists, and a style nobody can
@@ -569,10 +594,11 @@ struct UiNodeSpec
 	// Text
 	String text;
 	String suffix;
-	// A `confirmDialog`'s heading and the words on its two answers. Fields of
-	// their own rather than three more meanings for `text`, which is already the
-	// question being asked: all four strings are present at once, and a snapshot
-	// that had to spell three of them positionally would be unreadable.
+	// A `confirmDialog`'s heading and the words on its two answers — and, for a
+	// `dialog`, the one line written across its bar. Fields of their own rather
+	// than three more meanings for `text`, which is already the question being
+	// asked: all four strings are present at once, and a snapshot that had to
+	// spell three of them positionally would be unreadable.
 	String title;
 	String confirm_label;
 	String decline_label;
@@ -654,6 +680,11 @@ enum UiEventKind : char
 	FILE_SELECT,
 	FILE_DIRECTORY,
 	POINTER,
+	// A `dialog` the USER put away — the close glyph, ESC, or a press on the
+	// backdrop of one that closes outside. Not the script's own
+	// `patch({ open: false })`, which is a thing the script already knows about;
+	// see `ui_dialog_close`.
+	DIALOG_DISMISS,
 }
 
 <*
@@ -754,6 +785,22 @@ struct UiNode
 	// are written back with. Empty on every other kind.
 	String root;
 	String scheme;
+
+	// A `dialog`'s body: the element its children hang from, built by this layer
+	// and BORROWED by cui through `Dialog.content`. Null on every other kind.
+	//
+	// It exists because a `Dialog` is the one kind here whose contents cui would
+	// otherwise own. Closing the panel detaches this element rather than
+	// releasing it and re-opening attaches the same one, so every `UiNode.element`
+	// underneath a dialog stays valid across a close — and with it the text in a
+	// field, the offset of a list and the paint cache of everything in between.
+	//
+	// cui never frees it; `release_borrowed` does, and it has to run after the
+	// subtree holding it has gone. `Ui.release` reaching a borrowed child through
+	// its parent detaches it and `Ui.release` called ON it frees it — one
+	// function told apart by which side of the recursion it is on, which is
+	// exactly how the owner gives a borrowed element back.
+	cui::Element* content;
 }
 
 fn void UiNode.free(&self)
@@ -864,14 +911,14 @@ struct UiLayer
 	List{UiNode} nodes;
 	cui::Element* tree;
 
-	// A native plugin's tree, grafted onto the same floor. Separate from `tree`
+	// The application's tree, grafted onto the same floor. Separate from `tree`
 	// because the two have different owners: this one has no `UiNode` records
 	// behind it and nothing here built it. Only one of the two is mounted at a
-	// time — see `set_plugin_root` — unless there is a `slot`, which is the
+	// time — see `set_root` — unless there is a `slot`, which is the
 	// arrangement where they compose instead.
 	cui::Element* foreign;
 
-	// Where a script's snapshot is grafted when a plugin has offered a place for
+	// Where a script's snapshot is grafted when the application has offered a place for
 	// it *inside* its own layout. Null is the original arrangement: the snapshot
 	// hangs from `content` and whichever of the two wrote last holds the floor.
 	// See `set_slot`.
@@ -902,6 +949,14 @@ struct UiLayer
 	// `three.ui.set` would otherwise restructure the tree cui is mid-dispatch on,
 	// which is the one thing cui's own docs say a handler must not do.
 	bool dispatching;
+
+	// True only while `patch` is closing a `dialog`. `Dialog.set_open` runs
+	// `on_close` for every dismissal — cui's own wording is "whoever asked for
+	// the close" — and a script that has just written `open: false` does not
+	// need to be told that the panel it closed is closed. cui guards
+	// `ConfirmDialog.withdraw` the same way with its `answering` flag; `Dialog`
+	// has no such guard, so the guard lives here. See `ui_dialog_close`.
+	bool closing_dialog;
 
 	// Whether the interface took this frame's pointer and keyboard. Recomputed
 	// by `feed`, read by the window loop — the click that presses a button must
@@ -1003,6 +1058,14 @@ fn void UiLayer.free(&self)
 {
 	if (self.ui == null) return;
 	self.pass.free();
+	// The dialog bodies first, and this is not tidiness. `Ui.free` releases from
+	// the root and then frees the element ALLOCATIONS, and a borrowed child is
+	// detached by that walk rather than recycled — so a body still hanging in an
+	// open panel would have its widgets, its children list and its paint cache
+	// freed by nobody. Handing them back here is the same handover `drop_tree`
+	// makes, and the last one this layer gets to make.
+	self.release_borrowed(&self.nodes);
+	self.release_borrowed(&self.building);
 	self.ui.free();
 	self.ui = null;
 	// Freed with every other element by `Ui.free` above, whichever image built it.
@@ -1132,6 +1195,10 @@ fn void UiLayer.abandon_tree(&self)
 {
 	if (self.ui == null) return;
 	if (self.pending) self.ui.release(self.pending);
+	// After the tree, never before: a dialog that reached a build has its body
+	// hanging inside the subtree above, and releasing it first would leave the
+	// panel holding a recycled element.
+	self.release_borrowed(&self.building);
 	foreach (i, node : self.building) self.building[i].free();
 	self.building.clear();
 	self.pending = null;
@@ -1154,7 +1221,7 @@ fn void UiLayer.commit_tree(&self)
 	self.open = false;
 
 	// A slot that went away since the last `set` — its pane was closed, or its
-	// tab switched, and the plugin did not withdraw. Falling back to the floor is
+	// tab switched, and the application did not withdraw. Falling back to the floor is
 	// the pre-slot arrangement rather than a panel that quietly fails to appear.
 	if (self.slot && !self.attached(self.slot))
 	{
@@ -1162,17 +1229,20 @@ fn void UiLayer.commit_tree(&self)
 		self.slot_generation++;
 	}
 
-	// A plugin's tree loses the floor to a script's, by the same last-writer rule
-	// `set_plugin_root` states from the other side. With a slot they compose
-	// instead: the plugin keeps the floor and the snapshot lands inside it.
+	// The application's tree loses the floor to a script's, by the same last-writer rule
+	// `set_root` states from the other side. With a slot they compose
+	// instead: the application keeps the floor and the snapshot lands inside it.
 	if (self.slot == null) self.drop_foreign();
 
 	// Conditional because in a slot the old snapshot can be gone already,
-	// recycled with the plugin's subtree that held it — see `drop_tree`.
+	// recycled with the application's subtree that held it — see `drop_tree`.
 	if (self.tree && self.attached(self.tree)) self.ui.unmount(self.tree);
 	self.tree = self.pending;
 	self.pending = null;
 
+	// The bodies the outgoing dialogs borrowed, now that the tree that held them
+	// has been unmounted and cui has detached rather than freed them.
+	self.release_borrowed(&self.nodes);
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.clear();
 	foreach (node : self.building) self.nodes.push(node);
@@ -1264,7 +1334,7 @@ fn void UiLayer.clear_tree(&self)
  On `content` the check never fails and this is the plain unmount it has always
  been: the layer put the snapshot there and nothing else can take it away. In a
  slot it can be gone already — cui releases a subtree children-first, so a pane
- that rebuilt recycled the snapshot before the plugin's own widget was told, and
+ that rebuilt recycled the snapshot before the application's own widget was told, and
  unmounting it a second time would corrupt the free-list.
 
  Reading a released element is defined rather than lucky: cui zeroes it and keeps
@@ -1280,16 +1350,43 @@ fn void UiLayer.drop_tree(&self)
 		if (self.attached(self.tree)) self.ui.unmount(self.tree);
 		self.tree = null;
 	}
+	self.release_borrowed(&self.nodes);
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.clear();
 	self.ui.request_frame();
 }
 
 <*
- Takes a plugin's tree off the floor, releasing it only if it is still on one.
+ Hands cui back every body a `dialog` in this table borrowed.
+
+ The counterpart of `Dialog.content`, and the whole of this layer's half of the
+ borrowing contract: cui detaches a borrowed child and never frees one, so the
+ element goes back to the free-list here or it does not go back at all.
+
+ It has to run AFTER whatever was holding the body has been released — and it is
+ safe either way round for a dialog that never opened, whose body has no parent
+ at all. `Ui.release` on a borrowed element frees it like any other; only the
+ recursion through a parent is filtered.
+
+ @param table : `The live nodes or the half-built ones, whichever is going away.`
+*>
+fn void UiLayer.release_borrowed(&self, List{UiNode}* table)
+{
+	if (self.ui == null) return;
+	for (sz i = 0; i < table.len(); i++)
+	{
+		cui::Element* body = (*table)[i].content;
+		if (body == null) continue;
+		self.ui.release(body);
+		(*table)[i].content = null;
+	}
+}
+
+<*
+ Takes the application's tree off the floor, releasing it only if it is still on one.
 
  Conditional for the same reason `drop_tree` is, and against a narrower mistake:
- a plugin that released its own root without saying so. That was always a
+ an application that released its own root without saying so. That was always a
  contract violation and is not one this can repair — the pointer is gone either
  way — but unmounting a recycled element would corrupt cui's free-list, and
  forgetting it merely loses a tree that is already lost.
@@ -1313,47 +1410,52 @@ fn bool UiLayer.attached(&self, cui::Element* element)
 }
 
 <*
- The `cui::Ui` a native plugin builds into, as an opaque pointer.
+ The `cui::Ui` an application builds its own interface into.
 
- The one verb that hands a plugin something of cui's rather than a value of this
- project's: `UiNodeSpec` exists so `js/bind_ui.c3` never names a cui type, and a
- plugin linked against the same cui has no such problem. It is `void*` at the
- boundary because `plugin/abi.c3` is compiled into images that have no cui at
- all — the plugin casts it back on its own side.
+ The one verb that hands the caller something of cui's rather than a value of
+ this project's: `UiNodeSpec` exists so `js/bind_ui.c3` never names a cui type,
+ and an application linked against the same cui has no such problem.
 
- Brings the layer up on the first call, so a plugin that wants an interface pays
- for one and a plugin that does not never allocates a buffer.
+ This was a `void*` for as long as three loaded applications as native plugins,
+ because `plugin/abi.c3` was compiled into images that had no cui at all and the
+ far side had to cast it back. Nothing is compiled twice any more, so the type
+ is the type.
+
+ Brings the layer up on the first call, so an application that wants an interface
+ pays for one and one that does not never allocates a buffer.
 
  @return `The Ui, or null if the layer could not be brought up.`
 *>
-fn void* UiLayer.context(&self, Gpu* gpu, Target* target)
+fn cui::Ui* UiLayer.context(&self, Gpu* gpu, Target* target)
 {
 	if (catch self.ensure(gpu, target)) return null;
 	return self.ui;
 }
 
 <*
- Grafts a plugin's widget tree onto the content floor.
+ Grafts the application's widget tree onto the content floor.
 
- The script's snapshot and a plugin's tree are exclusive rather than composited:
- both would claim the same floor and the same pointer, and a HUD half-owned by
- two writers is a question with no good answer. Whichever set last is the one
- mounted, and the debug overlay is above both either way.
+ The script's snapshot and the application's tree are exclusive rather than
+ composited: both would claim the same floor and the same pointer, and a HUD
+ half-owned by two writers is a question with no good answer. Whichever set last
+ is the one mounted, and the debug overlay is above both either way. `set_slot`
+ is the one way to have both, and says how.
 
- `root` is a `cui::Element*` built with the Ui `context` answered. Nothing here
- takes ownership of the widgets behind it — cui already owns every element it
- built, and unmounting returns them to its free-list whichever image called it.
+ `root` is built with the Ui `context` answered. Nothing here takes ownership of
+ the widgets behind it — cui already owns every element it built, and unmounting
+ returns them to its free-list.
 
  @param root : `The tree to mount, or null to clear.`
 *>
-fn void UiLayer.set_plugin_root(&self, void* root)
+fn void UiLayer.set_root(&self, cui::Element* root)
 {
 	if (self.ui == null) return;
 
 	// The slot is an element of the tree being replaced, so it goes with it. It
 	// goes *first* and by hand rather than through `set_slot`, so that the
 	// snapshot below is released while it is still attached to something — this
-	// is the withdrawal a plugin that rebuilds wholesale does not have to make.
+	// is the withdrawal an application that rebuilds wholesale does not have to
+	// make.
 	if (self.slot)
 	{
 		self.slot = null;
@@ -1367,39 +1469,39 @@ fn void UiLayer.set_plugin_root(&self, void* root)
 
 	self.drop_foreign();
 
-	self.foreign = (cui::Element*)root;
+	self.foreign = root;
 	if (self.foreign) self.content.append(self.foreign);
 	self.ui.request_frame();
 }
 
 <*
- Offers a place inside a plugin's own layout for a script's snapshot, or
+ Offers a place inside the application's own layout for a script's snapshot, or
  withdraws it.
 
- The one verb that gets past the last-writer rule above. Without it a plugin and
+ The one verb that gets past the last-writer rule above. Without it an application and
  a script are two writers arguing over one floor, so an editor written natively
  can host no scripted panel at all and every `three.ui.set` under it blanks the
- application. With it the two compose: the plugin keeps the floor, names an
+ application. With it the two compose: the application keeps the floor, names an
  element of its tree, and a snapshot lands there — laid out by the pane that
  holds it, clipped by it, hit-tested in its order.
 
  `element` is a `cui::Element*` built with the Ui `context` answered, already in
  the mounted tree. Nothing here takes ownership of it: cui owns every element it
- built, which is the same rule and the same reason as `set_plugin_root`.
+ built, which is the same rule and the same reason as `set_root`.
 
- ## What a plugin owes
+ ## What the application owes
 
  One thing: withdraw before the element goes. cui releases a subtree
  children-first, so a widget's own `unmount` fires *after* the snapshot beneath
  it has been recycled — too late to release it properly, though `drop_tree`
- makes it safe. `set_plugin_root` withdraws on the plugin's behalf, which covers
+ makes it safe. `set_root` withdraws on the application's behalf, which covers
  a rebuild of the whole tree; a pane that comes and goes has to say so itself.
 
  ## One slot, and the snapshot does not survive it
 
  One, because the layer keeps exactly one `nodes` table and one `tree`, and a
  second mount point would mean a second of each along with a way for `set` to
- say which it meant. It is the change to make when a plugin wants two panels,
+ say which it meant. It is the change to make when an application wants two panels,
  and not before.
 
  Withdrawing clears the snapshot rather than moving it back to the floor: cui has
@@ -1429,7 +1531,7 @@ fn void UiLayer.set_slot(&self, void* element)
  How big the offered mount point came out, in logical points.
 
  What a script needs to fit a panel to a pane it did not lay out. Zero until the
- element has been through a layout pass, which is one frame after the plugin
+ element has been through a layout pass, which is one frame after the application
  built it.
 *>
 fn Vec2 UiLayer.slot_size(&self)
@@ -1536,6 +1638,8 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	String browsing;
 	UiNode* prior = self.carry(spec.key, spec.kind);
 	bool keep_open;
+	Vec2 dragged_to;
+	bool dragged;
 	if (prior != null && prior.element != null)
 	{
 		switch (spec.kind)
@@ -1570,6 +1674,19 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				// state: without this, a panel that re-renders for any other
 				// reason snaps the listing back to wherever it opened.
 				browsing = prior.element.widget_as(cui::widgets::FileBrowser).directory.str_view();
+			case DIALOG:
+				cui::widgets::Dialog* shown = prior.element.widget_as(cui::widgets::Dialog);
+				// Whether the panel is up, carried for the reason a
+				// confirmation's is: a re-render provoked by something else
+				// entirely must not close a dialog the snapshot said nothing
+				// about, and the user is the one who decides it is finished with.
+				if (!spec.has_checked) spec.checked = shown.open;
+				// And where it was dragged to. There is no snapshot field for a
+				// dialog's position — cui centres it until somebody moves it —
+				// so this can contradict nothing the script said, and without it
+				// every rebuild snaps a moved panel back into the middle.
+				dragged_to = shown.at;
+				dragged = shown.placed;
 			default:
 				break;
 		}
@@ -1870,6 +1987,102 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 					},
 				}
 			);
+		case DIALOG:
+			// The body is built here and lent to cui, and that is the whole of
+			// what makes this kind snapshot-shaped. `Dialog.body` is a
+			// `ViewBuilder` cui calls on every open and whose subtree cui
+			// releases wholesale on close; handing it the snapshot's children
+			// would have cui free elements this layer still has `UiNode` records
+			// for, and hand the freed pointers back the next time the panel went
+			// up. `Dialog.content` is borrowed instead — see `UiNode.content`.
+			//
+			// A `Column` for the body rather than a `Stack`, because it is a
+			// panel's contents rather than a floor: a Stack fills what it is
+			// offered and the dialog frame offers it the whole screen less its
+			// margins, which would make every dialog window-sized. A Column hugs
+			// what is in it, so the panel comes out the size of its body — and
+			// the node's own `gap`, `size` and alignments are the body's, which
+			// is the only reading of them that means anything on this kind.
+			held.content = self.ui.@node(
+				(cui::widgets::Column){
+					.gap = spec.gap,
+					.size = spec.size,
+					.main_align = main,
+					.cross_align = cross,
+				}
+			);
+			// Transparent for the same reason a `column` node is: it is a
+			// container, and cui hit-tests the deepest rect containing the point
+			// whether or not the widget handles anything. Its children are still
+			// hit — `ignores_pointer` makes only this element see-through.
+			held.content.ignores_pointer = true;
+
+			element = self.ui.@node(
+				(cui::widgets::Dialog){
+					.title = title,
+					.content = held.content,
+					.modal = spec.modal,
+					.close_outside = spec.close_outside,
+					// Carried off the panel this one replaces, so a rebuild does
+					// not undo a drag. `placed` false is "centre it", which is
+					// what a dialog nobody has moved wants.
+					.at = dragged_to,
+					.placed = dragged,
+					// `on_close` is wired whether or not the script asked, the
+					// way a browser's `on_directory` is: it is one function per
+					// kind and `ui_dialog_close` drops the event when nobody is
+					// listening. Wiring it conditionally would buy nothing and
+					// cost the script the ability to attach a handler by patch.
+					.on_close = &ui_dialog_close,
+					.style = {
+						...cui::widgets::DEFAULT_DIALOG_STYLE,
+						.panel_color = ui_color(spec.color, cui::widgets::DEFAULT_DIALOG_STYLE.panel_color),
+						.panel_border = ui_color(spec.border_color, cui::widgets::DEFAULT_DIALOG_STYLE.panel_border),
+						.title_color = ui_color(spec.accent, cui::widgets::DEFAULT_DIALOG_STYLE.title_color),
+						.text_color = ui_color(spec.text_color, cui::widgets::DEFAULT_DIALOG_STYLE.text_color),
+						.hover_color = ui_color(spec.hover_color, cui::widgets::DEFAULT_DIALOG_STYLE.hover_color),
+						// The scrim rides on `press_color` because a dialog has
+						// no pressed state of its own and a modal's dim IS the
+						// colour a script wants to name; `js/prelude/ui.js`
+						// spells it `scrim`.
+						.scrim_color = ui_color(spec.press_color, cui::widgets::DEFAULT_DIALOG_STYLE.scrim_color),
+						.font = spec.font,
+						.text_size = spec.text_size > 0
+							? spec.text_size
+							: cui::widgets::DEFAULT_DIALOG_STYLE.text_size,
+					},
+				}
+			);
+
+			// **Where this node goes in the snapshot is not free: it belongs in a
+			// `stack`.** Two reasons, and neither is fixable from this side.
+			//
+			// The panel is placed against the element's `absolute`, which is the
+			// PREVIOUS emit's value — cui says as much and says to mount a dialog
+			// somewhere that does not move. A snapshot makes that sharper than it
+			// sounds: an element whose parent puts it at y=400 places its panel
+			// 400 short on the first layout, and the layout cache means there is
+			// no second one to correct it. The panel is simply off screen, for
+			// good. A `stack` puts every child at the same origin, so it does not
+			// move and there is nothing to lag behind.
+			//
+			// And a modal fills what it is offered, so in a `column` it takes a
+			// row of the column's whole height — or, if an earlier child already
+			// filled, is offered none of it. Overlapping children is what a stack
+			// is, which is the same answer twice.
+			//
+			// Raised only while modal, and the asymmetry is the point.
+			// `Ui.hit_test_element` walks raised children before plain ones, so
+			// a raise puts an element above every sibling under the same parent
+			// however early it was built — which is what "everything behind it
+			// is blocked" has to mean for a backdrop that would otherwise lose
+			// the pointer to any sibling mounted after it. A non-modal dialog
+			// keeps cui's own rule instead, where a later sibling paints over it
+			// on purpose: that is how an application's menu bar keeps its
+			// dropdowns above a panel built before it. Note the limit either
+			// way — a raise reorders one parent's children and never lifts a
+			// subtree above a whole floor mounted after it.
+			element.raised = spec.modal;
 		case FILE_BROWSER:
 			// `on_directory` is wired whether or not the script asked for it: it
 			// is what enforces the root, and a browser that only reported where it
@@ -1936,10 +2149,26 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 		if (!spec.checked) dialog.withdraw(element);
 	}
 
+	// A `dialog` goes up through `set_open` rather than through the field, and
+	// the difference is the keyboard: opening focuses the panel, which is what
+	// puts ESC within reach of somebody who has not clicked in it yet. Closed is
+	// the constructed state, so this runs on the way up only and never fires the
+	// close callback on the way past.
+	if (spec.kind == UiNodeKind.DIALOG && spec.checked)
+	{
+		element.widget_as(cui::widgets::Dialog).set_open(element, true);
+	}
+
 	self.building[index].element = element;
 	if (parent >= 0)
 	{
-		self.building[parent].element.append(element);
+		// Into the parent's BODY where it has one, which is a `dialog` and
+		// nothing else: a composite is built with exactly the one node its
+		// `build` returned, so a dialog's children cannot hang off its own
+		// element and hang off the element cui borrows instead.
+		UiNode* above = &self.building[parent];
+		cui::Element* into = above.content != null ? above.content : above.element;
+		into.append(element);
 	}
 	else
 	{
@@ -2273,6 +2502,38 @@ fn void UiLayer.patch(&self, uint node, UiPatch fields)
 			// asking politely for a repaint here would rebuild the panel `ask`
 			// has just opened, closed. Both verbs invalidate correctly already.
 			return;
+		case DIALOG:
+			// Up and down is a patch and not a rebuild, and on this kind that is
+			// not a convenience: a `set` builds a new element and a NEW BODY, so
+			// everything the panel was holding — the text in a field, where a
+			// list was scrolled — would go with it. The borrowed body is what
+			// makes closing cheap, and this is the verb that reaches it.
+			cui::widgets::Dialog* widget = elem.widget_as(cui::widgets::Dialog);
+			if (fields.has_checked)
+			{
+				// The flag is raised across the close and not the open, because
+				// only the close has a callback behind it — see
+				// `UiLayer.closing_dialog`.
+				self.closing_dialog = true;
+				widget.set_open(elem, fields.checked);
+				self.closing_dialog = false;
+			}
+			if (fields.has_text)
+			{
+				// The bar reads the title at BUILD time and holds a copy of the
+				// view, so a new one is a rebuild of the panel rather than a
+				// repaint of it — which costs the focus of anything in the body,
+				// since `Ui.release` hands the keyboard up on the way past. That
+				// is the price of renaming a panel while it is open, and it is
+				// cheaper than the alternative, which is doing nothing and saying
+				// nothing about it.
+				widget.title = live.retext(fields.text);
+				elem.request_build();
+			}
+			// `set_open` asks for its own build, and a dialog that was handed
+			// neither field wants no invalidation at all — the fall-through below
+			// would repaint the backdrop and leave the panel exactly as it was.
+			return;
 		default:
 			break;
 	}
@@ -2492,6 +2753,32 @@ fn void ui_confirm(cui::Ui* ui) @local
 fn void ui_decline(cui::Ui* ui) @local
 {
 	ui_signal(ui, UiNodeKind.CONFIRM_DIALOG, { .kind = UiEventKind.DISMISS });
+}
+
+<*
+ A `dialog` the user put away: the close glyph, ESC, or a press on a
+ close-outside backdrop.
+
+ `Dialog.set_open` runs `on_close` for every one of those AND for the script's
+ own `patch({ open: false })` — cui says as much: "whoever asked for the close".
+ That is the right contract for a widget, where "it went away" is the useful
+ fact, and the wrong one for a binding: a script that has just closed a panel
+ does not need to hear that the panel is closed, and a handler that answered by
+ writing its own state again would be a re-render provoked by itself. So the one
+ case that is not news is dropped, which is exactly what cui does one widget over
+ with `ConfirmDialog.answering`.
+
+ It reaches the node the same way a confirmation's dismissal does — cui defers
+ the release to the build pass, so the panel the click came from is still hanging
+ off this node's element while the callback runs, which is what `locate` walks.
+ ESC arrives through `focused` instead, which `set_open` put on the dialog when
+ it opened.
+*>
+fn void ui_dialog_close(cui::Ui* ui) @local
+{
+	UiLayer* layer = ui.inherit(UiLayer) ?? null;
+	if (layer != null && layer.closing_dialog) return;
+	ui_signal(ui, UiNodeKind.DIALOG, { .kind = UiEventKind.DIALOG_DISMISS });
 }
 
 <*

@@ -880,6 +880,219 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 }
 
 <*
+ What a script is allowed to see of a pointer the interface has taken.
+
+ The position is kept and everything that could act on it is dropped. `inside`
+ false is what stops `MouseTracker` resolving a click, and the buttons going with
+ it is what stops a press over a panel from ever starting one — so a click on a
+ button does not also fire the gun, while a script watching the pointer still
+ knows where it is.
+
+ A function rather than six lines at the call site because there are two call
+ sites — the loop that has a window and the one that has not — and the whole
+ claim of a scripted pointer is that those two arbitrate identically.
+
+ @param taken : `Whether cui hit-tested something under the pointer this frame — UiLayer.wants_pointer, minus a camera drag that began on the scene.`
+*>
+fn Cursor Cursor.behind_ui(&self, bool taken)
+{
+	if (!taken) return *self;
+
+	Cursor out   = *self;
+	out.inside   = false;
+	out.down     = false;
+	out.right    = false;
+	out.middle   = false;
+	out.scroll   = 0;
+	out.scroll_x = 0;
+	return out;
+}
+
+<*
+ The pointer a *script* is holding, folded into the frame beside the real one.
+
+ `SyntheticKeys`' argument, for the mouse. A headless boot has no pointer either,
+ so the thing a pointer is mostly for — an interface — could not be exercised at
+ all: a panel's buttons, its menus and its drags were reachable only by a person
+ with a window open, which is to say not reachable from a test. The keyboard made
+ a character testable; this is what makes the panel that drives the character
+ testable, and it is the same design because it is the same problem.
+
+ ## It is a held set, not a gesture
+
+ `press(0)` puts the button down and it *stays* down until `release(0)`, exactly
+ as a finger does. So a drag is `move(a)`, `press(0)`, `move(b)`, `release(0)` —
+ four statements that each say what happened — rather than a `drag(a, b)` verb,
+ which would have to invent the frames in between and would therefore be the one
+ thing in the file that a real gesture could be told apart from.
+
+ ## The position is the one thing that cannot be a union
+
+ The buttons are or-ed with the window's and the wheel is added to it, which is
+ what "beside the real one" means for a set and for a total. A position is
+ neither — two of them are not a third — so the scripted one *stands in* for the
+ window's from the moment a script places it.
+
+ What hands it back is the person. The placement is dropped the moment the real
+ pointer actually moves, so a hand on the mouse takes the cursor back in the same
+ breath, exactly as a hand on the keyboard was never taken away by a held key.
+ Only a real *movement* does it: the window reports a position every frame
+ whether or not anything moved, and reading that as a claim would make a placed
+ pointer last exactly one frame.
+
+ `release_all` deliberately does not un-place it. A pointer is always somewhere,
+ and a released button leaves the cursor where it was let go of.
+*>
+struct SyntheticPointer
+{
+	// Whether a script has ever touched this. A frame pays nothing until one has.
+	bool active;
+	// Whether the position below is standing in for the window's.
+	bool placed;
+	// Where the script put it, in the rendered image's pixels — the unit `Cursor`
+	// is already in, so nothing converts on the way through.
+	float x;
+	float y;
+
+	// The three latches, in `Cursor`'s own order.
+	bool left;
+	bool right;
+	bool middle;
+
+	// The wheel, in notches, waiting for a frame to spend it. A total rather than
+	// a latch, because that is what `Cursor.scroll` is: accumulated over one
+	// frame's events and gone at the end of it.
+	float scroll;
+	float scroll_x;
+
+	// The window's last reading, and whether there has been one — all the state
+	// "the real pointer moved" needs.
+	bool has_real;
+	float real_x;
+	float real_y;
+}
+
+<*
+ Puts the pointer somewhere, in the rendered image's pixels.
+
+ The same coordinates `three.input.pointer` answers in, `scene.pick` takes and
+ the PNG starts at, so a place read off a screenshot can be pressed without
+ conversion — and so the one unit runs the whole length of the path.
+*>
+fn void SyntheticPointer.place(&self, float x, float y)
+{
+	self.active = true;
+	self.placed = true;
+	self.x = x;
+	self.y = y;
+}
+
+<*
+ Holds a button down, or lets it go.
+
+ @param which : `0 left, 1 right, 2 middle — cui's order, and the order Cursor carries them in. The caller has already refused anything else by name; this takes an unknown one as the left button rather than inventing a fourth.`
+ @param down : `True to press, false to release. Pressing one already held is not an error and produces no second edge, exactly as a real button does.`
+*>
+fn void SyntheticPointer.hold(&self, uint which, bool down)
+{
+	self.active = true;
+	switch (which)
+	{
+		case 1: self.right = down;
+		case 2: self.middle = down;
+		default: self.left = down;
+	}
+}
+
+<*
+ Turns the wheel.
+
+ Added rather than assigned: two turns between two frames are one frame's worth
+ of scrolling, which is exactly what the window's own accumulation over
+ `getEvent` means.
+*>
+fn void SyntheticPointer.turn(&self, float dy, float dx)
+{
+	self.active = true;
+	self.scroll += dy;
+	self.scroll_x += dx;
+}
+
+<*
+ Lets go of every button and drops the wheel nothing has spent yet.
+
+ What a test calls between cases, and it matters more here than it does for a
+ key: a held button *captures*, so one leaked into the next case does not merely
+ read as held — the next case's first press lands inside somebody else's drag,
+ and the widget it was aimed at never hears about it.
+
+ The cursor stays where it was put, because that is what letting go of a button
+ does.
+*>
+fn void SyntheticPointer.release_all(&self)
+{
+	self.active = true;
+	self.left = false;
+	self.right = false;
+	self.middle = false;
+	self.scroll = 0;
+	self.scroll_x = 0;
+}
+
+<*
+ Folds what a script is holding into what the window said.
+
+ Called once per frame per host, before anything else reads the pointer: with a
+ window that is `drive_window`, immediately above cui's hit test, and with none
+ it is `JsRuntime.tick`, which is the only thing a windowless host has. One call
+ either way — so `three.input.pointer`, cui's hit test, `onClick` and a `draw`
+ node's `onPointer` are all told the same thing, and none of them can tell a
+ scripted pointer from a hand.
+
+ @param real : `What the window said this frame. Default-empty for a headless host, where it is the whole of the truth that there is no hand.`
+ @param image_width : `The rendered image's extent, for deciding whether a placed pointer is over the picture. Zero where there is no picture, and a placed pointer is then taken at its word — there is nothing to contradict it with.`
+*>
+fn Cursor SyntheticPointer.merge(&self, Cursor real, uint image_width = 0, uint image_height = 0)
+{
+	if (!self.active) return real;
+
+	// `nowhere` is skipped rather than differenced: its position is zero because
+	// the window could not say, not because the cursor went to the origin, and
+	// the trip there and back is not a hand moving.
+	if (!real.nowhere)
+	{
+		if (self.has_real && (real.x != self.real_x || real.y != self.real_y)) self.placed = false;
+		self.has_real = true;
+		self.real_x = real.x;
+		self.real_y = real.y;
+	}
+
+	Cursor out = real;
+	if (self.placed)
+	{
+		out.x = self.x;
+		out.y = self.y;
+		// It is somewhere now, whatever the window could or could not say.
+		out.nowhere = false;
+		out.inside = image_width == 0 || image_height == 0
+			|| (self.x >= 0 && self.x < (float)image_width && self.y >= 0 && self.y < (float)image_height);
+	}
+
+	out.down = out.down || self.left;
+	out.right = out.right || self.right;
+	out.middle = out.middle || self.middle;
+	out.scroll += self.scroll;
+	out.scroll_x += self.scroll_x;
+
+	// The wheel is spent here. A notch turned between two frames belongs to one of
+	// them, and a total that survived the frame would be a scroll that never
+	// stopped.
+	self.scroll = 0;
+	self.scroll_x = 0;
+	return out;
+}
+
+<*
  What the cursor should look like, given where it is and what it is over.
 
  Three states in order of how much they override each other. A closed hand

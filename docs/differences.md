@@ -772,6 +772,32 @@ mode ends: there is no gesture that undoes it.
 `three.input.pointer` and the click are in the rendered image's pixels, not the window's. `scene.pick(x, y)` and
 the PNG use the same pixels the click does, whatever size the window is.
 
+## script-can-move-the-pointer
+
+A script can move the pointer and press its buttons: `three.input.movePointer(x, y)`,
+`three.input.pressButton(button)`, `three.input.releaseButton(button)`, `three.input.scroll(dy, dx)` and
+`three.input.releaseAll()`. The coordinates are the rendered image's pixels — the same ones `three.input.pointer`
+answers in and `scene.pick(x, y)` takes — and `button` is 0 left, 1 right, 2 middle.
+
+A held button, not an event, exactly as `press(key)` is a held key. So a drag is four statements that each say
+what happened rather than one verb that invents the frames in between:
+
+```js
+three.input.movePointer(120, 80);
+three.input.pressButton(0);
+three.input.movePointer(180, 80);   // a frame apart, each of them
+three.input.releaseButton(0);
+```
+
+It goes in above the hit test, which is the whole claim: `three.input.pointer`, cui's hit test, `three.onClick`
+and a `draw` node's `onPointer` are all told the same thing, so a press under an open menu or a modal correctly
+reaches nothing and a press on a panel does not also click the scene behind it. It adds to the real mouse — the
+buttons are or-ed with the window's and the wheel added to it, and a placed position stands in for the window's
+only until the real pointer moves, because two positions are not a third.
+
+This is what makes an interface testable at all. A headless boot has no pointer, so a panel's buttons, its menus
+and its drags were reachable only by a person with a window open — which is to say not reachable from a test.
+
 ## physics-world
 
 There is a physics world per scene, which Three.js has no equivalent of at all: `object.body = { shape, mass }`

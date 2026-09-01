@@ -65,9 +65,10 @@ struct UiHandlers
 	qjs::Value toggle;
 	qjs::Value hover;
 	// The three cui's application widgets need and nothing else does. `confirm`
-	// and `dismiss` are a question's two answers, and `choose` is a file browser
-	// row being activated as opposed to merely selected — the distinction that
-	// makes a browser usable with single clicks.
+	// and `dismiss` are a question's two answers — and `dismiss` is a `dialog`
+	// being put away as well, since to a script that is the same event — and
+	// `choose` is a file browser row being activated as opposed to merely
+	// selected, the distinction that makes a browser usable with single clicks.
 	qjs::Value confirm;
 	qjs::Value dismiss;
 	qjs::Value choose;
@@ -350,10 +351,10 @@ fn void js_ui_measure(
 }
 
 <*
- `three.ui.slot` — whether a native plugin has offered a place to draw, and how
+ `three.ui.slot` — whether the application has offered a place to draw, and how
  big it is.
 
- The read half of `plugin/abi.c3`'s `ui_set_slot`. A snapshot does not survive
+ The read half of `UiLayer.set_slot`. A snapshot does not survive
  the slot it was grafted into, so a panel written against an editor watches
  `generation` and re-`set`s when it moves — a pane switched away from and back
  is a different element, and the number is how a script hears about it.
@@ -541,9 +542,9 @@ fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::V
  **A browser rooted anywhere is a script reading the whole disk**, one directory
  listing at a time, so it is confined by exactly the rule every other path a
  script names is confined by — `resolve_asset`'s. The start is resolved through
- that call, so `models` is the assets directory's `models`, `plugin:kits` is the
- plugin's, and `../..` is refused; the root that resolution landed in becomes the
- browser's own, and `render/ui.c3` sends any move outside it straight back.
+ that call, so `models` is the assets directory's `models` and `../..` is refused;
+ the root that resolution landed in becomes the browser's own, and
+ `render/ui.c3` sends any move outside it straight back.
 
  A refused start opens at the root rather than raising. A browser is how somebody
  recovers from a bad path — cui's own listing survives being pointed at one — and
@@ -554,7 +555,7 @@ fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::V
  accepts. That is the same promise `three.inventory` makes about the paths it
  hands back, and it is what makes the two verbs compose.
 
- **A process with no assets directory and no plugin is not confined**, and that
+ **A process with no assets directory is not confined**, and that
  is deliberate rather than a hole left open: it is the `--mcp` and CLI case,
  where `locate` already uses a path as written because there is no directory to
  be relative to and confining to nothing would refuse every path there is. A run
@@ -563,26 +564,21 @@ fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::V
 fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
 {
 	String asked = spec.text;
-	// The prefix decides which of the two roots this browser belongs to, before
-	// anything is resolved — the same first question `resolve_asset` asks.
-	bool schemed = asked.starts_with(PLUGIN_SCHEME);
-	String root = schemed ? self.modules.scheme_root : self.modules.root;
+	String root = self.modules.root;
 
 	spec.root = root;
-	spec.scheme = root.len > 0 && schemed ? PLUGIN_SCHEME : "";
+	spec.scheme = "";
 
 	if (root.len == 0)
 	{
-		// A `plugin:` start in a process with no plugin names no directory at
-		// all, and passing the prefix through as a path would open a folder with
-		// a colon in its name. Empty is cui's "wherever the process started".
-		spec.text = schemed ? "" : asked;
+		// Empty is cui's "wherever the process started".
+		spec.text = asked;
 		return;
 	}
 
-	// The bare scheme, or nothing said: the root itself, which is what "open the
-	// browser" means when nowhere in particular was asked for.
-	if (asked.len == 0 || asked == PLUGIN_SCHEME)
+	// Nothing said: the root itself, which is what "open the browser" means when
+	// nowhere in particular was asked for.
+	if (asked.len == 0)
 	{
 		spec.text = root;
 		return;
@@ -611,7 +607,7 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	UiLayer* layer = &self.renderer.ui;
 
 	int kind = (int)prop_number(js, value, "k", -1);
-	if (kind < 0 || kind > UiNodeKind.FILE_BROWSER.ordinal) return UI_BAD_PARENT~;
+	if (kind < 0 || kind > UiNodeKind.DIALOG.ordinal) return UI_BAD_PARENT~;
 
 	UiNodeSpec spec = {
 		.kind = UiNodeKind::from_ordinal((usz)kind),
@@ -630,6 +626,8 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 		.anchor_v = (uint)math::max(prop_number(js, value, "av"), 0.0),
 		.solid = prop_truth(js, value, "solid"),
 		.wrap = prop_truth(js, value, "wrap"),
+		.modal = prop_truth(js, value, "modal"),
+		.close_outside = prop_truth(js, value, "closeOutside"),
 
 		.color = prop_vec4(js, value, "color"),
 		.border_color = prop_vec4(js, value, "borderColor"),
@@ -994,6 +992,14 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			alive = &handlers.has_confirm;
 			what = "onConfirm";
 		case DISMISS:
+			callback = handlers.dismiss;
+			alive = &handlers.has_dismiss;
+			what = "onDismiss";
+		case DIALOG_DISMISS:
+			// The same handler name as a confirmation's, because it is the same
+			// event to a script: the panel is gone and nobody pressed anything
+			// that means yes. A second spelling would only make a panel that
+			// swapped one kind for the other rename its handler.
 			callback = handlers.dismiss;
 			alive = &handlers.has_dismiss;
 			what = "onDismiss";

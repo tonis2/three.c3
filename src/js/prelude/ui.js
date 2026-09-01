@@ -40,7 +40,7 @@ const KIND = {
 	column: 0, row: 1, stack: 2, padding: 3, grid: 4, clip: 5, anchored: 6, scroll: 7,
 	rect: 8, label: 9, draw: 10,
 	button: 11, checkbox: 12, slider: 13, select: 14, tree: 15, textfield: 16,
-	confirmDialog: 17, menu: 18, fileBrowser: 19,
+	confirmDialog: 17, menu: 18, fileBrowser: 19, dialog: 20,
 };
 
 // The seven Painter primitives, in the order `UiOpKind` declares them.
@@ -220,8 +220,10 @@ function normalise(node, path) {
 
 	// Layout, shared by everything that has it. A field a kind does not use is
 	// simply not read on the far side, which is why one reader serves all
-	// seventeen and there is no per-type table of allowed properties to keep in
-	// step with cui.
+	// twenty-one and there is no per-type table of allowed properties to keep in
+	// step with cui. A `dialog` is the one that reads them for its BODY rather
+	// than for itself: the panel is chrome cui sizes, and `gap`, `size` and the
+	// alignments are the only reading of them on that kind that means anything.
 	put(out, 'gap', node.gap === undefined ? undefined : num(node.gap, `${where} gap`));
 	put(out, 'gapY', node.gapY === undefined ? undefined : num(node.gapY, `${where} gapY`));
 	put(out, 'main', enumOf(MAIN, node.main ?? node.mainAlign, `${where} main`));
@@ -323,6 +325,35 @@ function normalise(node, path) {
 			// The mask rides on `options` for the reason a Select's do: it is a
 			// borrowed array of strings and the host fills it with one verb.
 			out.options = (node.mask ?? []).map(String);
+			break;
+		case 'dialog':
+			// A floating titled panel, and the ONE kind here whose children are
+			// its own subtree rather than a list the host copies: they are built
+			// as an element the host keeps and cui borrows, so closing the panel
+			// puts it away instead of throwing it out. Everything inside — the
+			// text in a field, the offset of a list — is still there on the next
+			// open.
+			out.title = String(node.title ?? node.text ?? node.label ?? '');
+			// `open` rides on `checked` for the same reason a confirmation's
+			// does: it is a value the user can change under you, and a snapshot
+			// that does not name it leaves the panel where they left it.
+			if (node.open !== undefined) out.checked = !!node.open;
+			// A modal covers, dims and blocks; `closeOutside` makes a press on
+			// that dim the dismissal, and `scrim` is the colour of it.
+			//
+			// **Put a dialog in a `stack`, beside whatever it floats over.** cui
+			// places the panel against where the node was last drawn, so a node
+			// its parent moves — the second child of a `column`, say — puts its
+			// panel exactly that far wrong and never corrects it. A stack's
+			// children all sit at the same origin. A modal wants the same thing
+			// for a second reason: it fills what it is offered, so in a column it
+			// would take a row of the column's whole height.
+			if (node.modal) out.modal = true;
+			if (node.closeOutside) out.closeOutside = true;
+			// The dim itself. It rides on `pressColor` because a dialog has no
+			// pressed state to spend that field on, and `scrim` is what the
+			// colour is called at the call site.
+			put(out, 'pressColor', colour(node.scrim, `${where} scrim`));
 			break;
 	}
 
@@ -554,9 +585,10 @@ export const ui = {
 		if ('text' in props) out.text = String(props.text);
 		if ('value' in props) out.value = num(props.value, `${where} value`);
 		if ('checked' in props) out.checked = !!props.checked;
-		// A confirmDialog going up and coming down is a patch and not a rebuild:
-		// a `set` would build a second dialog, and the answer somebody is halfway
-		// through giving would be to the one just thrown away.
+		// A confirmDialog or a dialog going up and coming down is a patch and not
+		// a rebuild: a `set` would build a second panel, and the answer somebody
+		// is halfway through giving — or the form they are halfway through
+		// filling in — would belong to the one just thrown away.
 		if ('open' in props) out.checked = !!props.open;
 		if ('selected' in props) out.selected = num(props.selected, `${where} selected`);
 		if ('offset' in props) out.offset = num(props.offset, `${where} offset`);

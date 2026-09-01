@@ -264,7 +264,25 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	// reads them — so `three.input.pressed`, `isDown` and every `onKeyDown`
 	// handler see one keyboard rather than two. A no-op until something has called
 	// `three.input.press`.
-	self.take_input(self.synthetic.merge(input));
+	InputState frame = self.synthetic.merge(input);
+
+	// And the pointer, on a host that has no window. With one, `drive_window` has
+	// already merged it — above cui's hit test, which is the only place it can go
+	// — and what arrives here is the answer. With none there is no `drive_window`,
+	// so the tick is the whole of the frame and the same three steps happen here
+	// in the same order: `JsRuntime.scripted_pointer_frame` says why that is one
+	// arbitration in two hosts rather than two paths.
+	//
+	// The delta is the *wall* one, read before `advance_frame` moves the clock:
+	// it is what the interface's own animations are worth, and a paused game is
+	// not a reason for its menu to stop animating.
+	if (self.window == null)
+	{
+		float wall_dt = self.pass.clock.started ? (float)(elapsed_ms - self.pass.clock.last_wall_ms) : 0.0f;
+		frame = self.scripted_pointer_frame(frame, elapsed_ms, wall_dt < 0 ? 0.0f : wall_dt);
+	}
+
+	self.take_input(frame);
 
 	// The clock first, before anything asks what a frame is worth. One conversion,
 	// one answer: the clip player, the solver, the fixed loop, the follow camera

@@ -964,8 +964,7 @@ fn void js_wireframe(
 
  `js_load`'s other half, through a narrower door: the path is resolved by
  `resolve_write`, so under `--assets` a script may write inside the game
- directory and nowhere else — a plugin's directory is readable by name and
- deliberately not writable by one.
+ directory and nowhere else.
 
  No device is needed and none is used. `scene/export.c3` reads a mesh out of the
  file it came from or tessellates it again from its description, so an export is

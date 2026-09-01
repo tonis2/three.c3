@@ -71,6 +71,7 @@
 module three;
 
 import std::io;
+import std::math;
 import c3w;
 import qjs;
 
@@ -97,6 +98,9 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "inputReleased", &js_input_released, 1);
 	self.bind(host, "inputText", &js_input_text, 0);
 	self.bind(host, "inputHold", &js_input_hold, 2);
+	self.bind(host, "inputMove", &js_input_move, 2);
+	self.bind(host, "inputButtonHold", &js_input_button_hold, 2);
+	self.bind(host, "inputScroll", &js_input_scroll, 2);
 	self.bind(host, "inputReleaseAll", &js_input_release_all, 0);
 	self.bind(host, "keyNames", &js_key_names, 0);
 	self.bind(host, "onKey", &js_on_key, 3);
@@ -165,12 +169,151 @@ fn void js_input_hold(
 }
 
 <*
+ `inputMove(x, y)` — put the pointer somewhere, in the rendered image's pixels.
+
+ `inputHold`'s argument, for the mouse, and the half of it that is worth stating
+ separately: a headless boot has no pointer either, so an interface — the thing a
+ pointer is mostly for — could not be exercised at all. A panel's buttons, its
+ menus and its drags were reachable only by a person with a window open, which is
+ to say not reachable from a test.
+
+ The coordinates are the ones `three.input.pointer` answers in, `scene.pick`
+ takes and the PNG starts at, so a place read off a screenshot can be pressed
+ without conversion.
+
+ It goes in above cui's hit test rather than beside it — `SyntheticPointer.merge`
+ is called once per frame per host, before anything reads the pointer — so
+ `three.input.pointer`, `onClick`, a widget's `onClick` and a `draw` node's
+ `onPointer` cannot tell this from a hand. That is the whole claim, and it is
+ what makes a press under an open menu correctly reach nothing.
+
+ It stands in for the window's position rather than adding to it, because two
+ positions are not a third; the buttons and the wheel below do add. A hand on the
+ real mouse takes the cursor straight back — `SyntheticPointer` says how.
+*>
+fn void js_input_move(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float x = arg_float(&js, argc, args, 0);
+	float y = arg_float(&js, argc, args, 1);
+	// A NaN would place the pointer nowhere at all: every comparison against it is
+	// false, so it is never inside, never over a widget and never the same place
+	// twice — a pointer that silently does nothing, which is the failure
+	// `named_key` refuses a typo for.
+	if (!math::is_finite(x) || !math::is_finite(y))
+	{
+		*out = js.raise("three.input.movePointer(x, y) wants two numbers in image pixels");
+		return;
+	}
+
+	self.pointer.place(x, y);
+}
+
+<*
+ `inputButtonHold(button, down)` — press or release a mouse button from a script.
+
+ A held button, not a click, for the reason `inputHold` holds a key: a drag is
+ `movePointer(a)`, `pressButton(0)`, `movePointer(b)`, `releaseButton(0)`, and
+ every frame in between sees a button that is down. A `click(x, y)` verb would
+ have to invent those frames, and inventing them is exactly how a synthesised
+ gesture stops being indistinguishable from a real one.
+
+ The edges fall out of the same `MouseTracker` a real button's do, so `clicked`,
+ `three.onClick` and cui's press-and-release are reached identically.
+
+ A number nobody has is refused by name rather than taken as the left button, for
+ `named_key`'s reason: a control that silently does nothing looks like every
+ other reason a control might do nothing.
+*>
+fn void js_input_button_hold(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int button = arg_int(&js, argc, args, 0);
+	if (button < 0 || button > 2)
+	{
+		@pool()
+		{
+			*out = js.raise(
+				string::tformat(
+					"three.input.pressButton(button) takes 0 (left), 1 (right) or 2 (middle); got %d",
+					button
+				)
+			);
+		};
+		return;
+	}
+
+	self.pointer.hold((uint)button, arg_truth(&js, argc, args, 1));
+}
+
+<*
+ `inputScroll(dy, dx)` — turn the wheel.
+
+ One frame's worth, added to whatever the window turned, and spent by the frame
+ that reads it. Not a latch: `Cursor.scroll` is a total accumulated over one
+ frame's events and gone at the end of it, and a scripted wheel that stayed would
+ be a scroll that never stopped.
+
+ `dy` is positive *away* from the user, which is `c3w`'s convention and the
+ camera zoom's, and the opposite of the browser's `deltaY` — see `Cursor.scroll`.
+*>
+fn void js_input_scroll(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float dy = arg_float(&js, argc, args, 0);
+	float dx = arg_float(&js, argc, args, 1);
+	if (!math::is_finite(dy) || !math::is_finite(dx))
+	{
+		*out = js.raise("three.input.scroll(dy, dx) wants numbers of wheel notches");
+		return;
+	}
+
+	self.pointer.turn(dy, dx);
+}
+
+<*
  `inputReleaseAll()` — let go of everything a script is holding.
 
  What a test calls between cases so one does not leak a held key into the next,
  and what a scripted sequence calls when it hands control back to a person. The
  releases are still reported as edges on the next frame, because that is what
  happened.
+
+ The mouse buttons go with the keys, and they are the half that matters more: a
+ held button *captures*, so one leaked into the next case does not merely read as
+ held — the next case's first press lands inside a drag somebody else started,
+ and the widget it was aimed at never hears about it. The unspent wheel goes too.
+
+ The pointer is not moved. A pointer is always somewhere, and letting go of a
+ button leaves the cursor where it was let go of; a case that wants it elsewhere
+ says so with `movePointer`.
 *>
 fn void js_input_release_all(
 	qjs::ContextRef ctx,
@@ -183,6 +326,63 @@ fn void js_input_release_all(
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	self.synthetic.release_all();
+	self.pointer.release_all();
+}
+
+<*
+ One frame of pointer, on a host that has no window.
+
+ ## Why there is a second place at all
+
+ There is one merge and two callers, and they are the two hosts rather than two
+ paths. A window's pointer is folded in by `drive_window`, which is where a
+ window's pointer is built and — crucially — where cui hit-tests it, above the
+ camera and above everything a script is told. A host with no window has no
+ `drive_window`; the tick is the whole of its frame, so the same three steps
+ happen here in the same order. What must never exist is a *second arbitration*,
+ which is why the hit test and `Cursor.behind_ui` are shared rather than
+ restated.
+
+ ## The interface first
+
+ cui sees the pointer before anything else does, so a press under an open menu or
+ a modal reaches the panel beneath it exactly as often here as it does with a
+ window open, which is never. `Cursor.behind_ui` is then what the script is told:
+ the position, and none of the buttons that a widget has already answered for.
+
+ The keys go with it. They are the frame's, `SyntheticKeys.merge` having already
+ folded in whatever a script is holding, so a scripted `press('a')` reaches a
+ focused text field on a host that has no keyboard either.
+
+ A no-op until a script has used the pointer at all — a headless run that never
+ touches it feeds cui nothing, which is what it did before this existed.
+
+ @param frame : `This frame's input, keys already merged. Its mouse is what this replaces.`
+ @param now_ms : `The host's clock, for telling a click from a hold.`
+ @param dt_ms : `What this frame is worth to the interface's own animations.`
+*>
+fn InputState JsRuntime.scripted_pointer_frame(&self, InputState frame, double now_ms, float dt_ms)
+{
+	if (!self.pointer.active) return frame;
+
+	uint image_wide = self.renderer != null ? self.renderer.target.extent.width : 0;
+	uint image_high = self.renderer != null ? self.renderer.target.extent.height : 0;
+
+	Cursor cursor = self.pointer.merge({ }, image_wide, image_high);
+
+	bool taken = false;
+	if (self.renderer != null)
+	{
+		self.renderer.ui.feed(cursor, frame.down, frame.text, dt_ms);
+		taken = self.renderer.ui.wants_pointer;
+		// A handler that asked for a new tree was held while cui was walking the
+		// old one, and this is the first moment it is not — the same call
+		// `main.c3`'s loop makes the instant `drive_window` returns.
+		self.flush_ui();
+	}
+
+	frame.mouse = self.scripted_mouse.step(cursor.behind_ui(taken), now_ms);
+	return frame;
 }
 
 <*

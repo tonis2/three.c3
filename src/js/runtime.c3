@@ -387,6 +387,18 @@ struct JsRuntime
 	// frame beside the window's own, which is what makes an input-driven scene
 	// testable without a keyboard — `SyntheticKeys` has the argument.
 	SyntheticKeys synthetic;
+	// The pointer a script is holding through `three.input.movePointer` and the
+	// buttons and wheel beside it. Merged into every frame the same way the keys
+	// are, and for the same reason — `SyntheticPointer` argues the whole design.
+	SyntheticPointer pointer;
+	// The press a windowless host is waiting to see the end of.
+	//
+	// There is never both this and the one `main.c3`'s loop owns: with a window
+	// open every pointer this process has, scripted or not, is stepped through
+	// that one, because it arrives through `drive_window`. This is the tracker
+	// for the host that has no `drive_window` to arrive through — see
+	// `JsRuntime.scripted_pointer_frame`.
+	MouseTracker scripted_mouse;
 	DString input_text;
 	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
 	usz key_handler_count;
@@ -524,11 +536,6 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.js = qjs::open(JS_MEMORY_LIMIT, JS_STACK_LIMIT)!;
 	self.pass = pass;
 	self.renderer = renderer;
-	// The bindings below call the engine through `engine_api`, so it has to be
-	// pointed at this pass before any of them can run — §5. Idempotent, and
-	// deliberately not only here: a plugin loads before any runtime opens, and
-	// `run` points it at the same engine for that window.
-	engine_open(pass, renderer);
 	self.controls = DEFAULT_CONTROLS;
 	// Started here as well as in `MeshPass.init`, because a `MeshPass` built by
 	// hand — every check in `test/` that needs no device — never runs that, and
@@ -610,9 +617,6 @@ fn void JsRuntime.close(&self)
 	// `Texture` objects own, which will never be disposed now that the context
 	// is going. See `release_script_textures`.
 	self.release_script_textures();
-	// And the last kind of reference this context holds: the `ArrayBuffer`s a
-	// native plugin published over its own memory. See `plugin/host_js.c3`.
-	self.release_plugin_buffers();
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
@@ -657,7 +661,7 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
  module named for it. See `js/modules.c3`.
 
  @param specifier : `Root-relative, and also what a stack trace calls it and what its own imports resolve against.`
- @require self.modules.root.len > 0 || specifier.starts_with(PLUGIN_SCHEME) : "a module needs a root to resolve against"
+ @require self.modules.root.len > 0 : "a module needs a root to resolve against"
 *>
 fn RunResult JsRuntime.run_module(&self, String specifier)
 {
