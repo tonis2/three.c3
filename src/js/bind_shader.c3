@@ -21,7 +21,6 @@
 module three;
 
 import std::collections::list;
-import std::io;
 import qjs;
 
 <*

@@ -33,7 +33,6 @@ import vk;
 import image;
 import slang;
 import std::core::test;
-import std::io;
 import std::math;
 import std::collections::list;
 

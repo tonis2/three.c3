@@ -55,11 +55,8 @@ module three_tests::export;
 
 import three;
 import vk;
-import qjs;
 import std::core::test;
-import std::io;
 import std::io::file;
-import std::math;
 import image;
 
 const String FIXTURE = "test/fixtures/textured.glb";

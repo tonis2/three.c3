@@ -18,7 +18,6 @@ module three_tests::mcp;
 
 import three;
 import vk;
-import image;
 import mcp;
 import qjs;
 import std::core::test;

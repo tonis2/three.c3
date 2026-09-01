@@ -22,10 +22,7 @@ module three_tests::shipping;
 
 import three;
 import vk;
-import qjs;
 import std::core::test;
-import std::io;
-import std::io::file;
 import std::io::path;
 import std::os::env;
 

@@ -31,7 +31,6 @@ import c3w;
 import image;
 import std::core::test;
 import std::math;
-import std::io;
 import std::io::path;
 
 const uint W = 200;

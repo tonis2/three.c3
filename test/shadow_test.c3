@@ -29,7 +29,6 @@ import three;
 import vk;
 import image;
 import std::core::test;
-import std::io;
 import std::math;
 import std::math::vector;
 import std::math::matrix;

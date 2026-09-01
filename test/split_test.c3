@@ -19,9 +19,7 @@ module three_tests::split;
 
 import three;
 import vk;
-import collision;
 import std::core::test;
-import std::io;
 import std::collections::list;
 import std::math;
 import std::math::vector;

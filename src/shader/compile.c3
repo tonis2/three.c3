@@ -30,7 +30,6 @@
 *>
 module three;
 
-import std::io;
 import std::collections::list;
 import slang;
 
@@ -218,18 +217,4 @@ fn ShaderModule? compile_slang(String source, String name, ShaderEntry[] entries
 
 	out.layout = reflect_layout(compiled.reflection, out.entries.array_view());
 	return out;
-}
-
-<*
- Compiles the source at `path`.
-
- @param name : `Overrides what diagnostics call the source; defaults to the path.`
-*>
-fn ShaderModule? compile_shader_file(String path, ShaderEntry[] entries, String name = "")
-{
-	@pool()
-	{
-		String source = load_source(path, tmem)!;
-		return compile_slang(source, name.len > 0 ? name : path, entries);
-	};
 }

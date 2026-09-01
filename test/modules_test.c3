@@ -8,7 +8,6 @@
 *>
 module three_tests::modules;
 
-import std::io;
 import three;
 import qjs;
 

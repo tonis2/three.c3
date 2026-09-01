@@ -22,7 +22,6 @@ import vk;
 import image;
 import collision;
 import std::core::test;
-import std::io;
 import std::io::file;
 import std::math;
 import std::math::vector;

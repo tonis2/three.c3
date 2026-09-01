@@ -70,7 +70,6 @@
 module three;
 
 import std::collections::list;
-import std::math;
 import std::math::vector;
 import std::math::matrix;
 import vk;

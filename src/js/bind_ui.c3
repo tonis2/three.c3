@@ -43,7 +43,6 @@
 module three;
 
 import std::collections::list;
-import std::io;
 import std::math;
 import qjs;
 

@@ -25,7 +25,6 @@
 *>
 module three;
 
-import std::io;
 import std::io::file;
 import std::encoding::json;
 import std::collections::object;

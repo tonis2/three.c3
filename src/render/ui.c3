@@ -61,7 +61,6 @@
 module three;
 
 import std::collections::list;
-import std::io;
 import std::math;
 import cui;
 import cui::vulkan;
@@ -1602,8 +1601,6 @@ const cui::Color UI_TEXT    = { 0.92, 0.93, 0.95, 1.0 };
 // A colour is "named" when its alpha is above zero. Fully transparent is not a
 // colour anybody draws with, and it saves a `has_` flag per colour on a struct
 // that already has five.
-fn bool ui_named(Vec4 color) @local => color.w > 0;
-
 fn cui::Color ui_color(Vec4 color, cui::Color fallback) @local
 {
 	return color.w > 0 ? (cui::Color)color : fallback;

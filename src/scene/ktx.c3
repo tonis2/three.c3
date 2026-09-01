@@ -47,7 +47,6 @@ import image;
 import ktx::container;
 import ktx::basis;
 import ktx::codec;
-import ktx::dfd;
 
 <*
  KTX2's twelve-byte identifier — `«KTX 20»` wrapped in the same escape bytes

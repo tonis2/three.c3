@@ -5,9 +5,7 @@ module three_tests::physics;
 
 import three;
 import vk;
-import qjs;
 import std::core::test;
-import std::io;
 import std::math;
 import image;
 

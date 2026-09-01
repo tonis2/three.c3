@@ -58,7 +58,6 @@ module three;
 
 import std::collections::list;
 import std::math;
-import collision;
 
 faultdef MESH_CANNOT_BE_SPLIT, MESH_HAS_LAYERS, TOO_MANY_SPLIT_PIECES;
 

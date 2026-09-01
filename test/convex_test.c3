@@ -34,7 +34,6 @@ module three_tests::convex;
 import three;
 import collision;
 import std::core::test;
-import std::io;
 import std::math;
 import std::math::vector;
 

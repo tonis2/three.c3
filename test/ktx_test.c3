@@ -29,7 +29,6 @@ import ktx::container;
 import ktx::basis;
 import ktx::codec;
 import std::core::test;
-import std::io;
 import std::io::file;
 import std::math;
 import std::collections::list;

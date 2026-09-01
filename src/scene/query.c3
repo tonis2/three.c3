@@ -1081,36 +1081,6 @@ struct IgnoreSet
 	usz count;
 }
 
-<*
- The set holding one node and its subtree, or an empty one for `NO_NODE`.
-*>
-fn IgnoreSet ignore_one(NodeId id)
-{
-	if (!id.is_set()) return { };
-	IgnoreSet set;
-	set.nodes[0] = id;
-	set.count = 1;
-	return set;
-}
-
-<*
- The set holding each of these nodes and its subtree.
-
- Ids past `MAX_IGNORED` are dropped rather than raising: this is called from the
- JS boundary with whatever a script passed, and the failure of dropping one is a
- sweep that collides with something it was asked to pass through — visible,
- local, and nothing like as bad as an exception out of the middle of a movement.
-*>
-fn IgnoreSet ignore_list(NodeId[] ids)
-{
-	IgnoreSet set;
-	foreach (id : ids)
-	{
-		if (!id.is_set() || set.count >= MAX_IGNORED) continue;
-		set.nodes[set.count++] = id;
-	}
-	return set;
-}
 
 <*
  Whether this node, or anything it hangs from, is in the set.
@@ -1376,14 +1346,4 @@ fn SweepHit Scene.sweep_capsule(
 		// Did not converge — see SWEEP_MAX_STEPS.
 		return miss;
 	};
-}
-
-<*
- The sphere case, which is what `three.query.sweep` asks for when no height was
- given. A capsule of zero half-height is a sphere; there is no second
- implementation.
-*>
-fn SweepHit Scene.sweep_sphere(&self, Assets* assets, Vec3 from, Vec3 to, float radius, IgnoreSet skip = { })
-{
-	return self.sweep_capsule(assets, from, to, radius, 0.0f, 0.0f, skip);
 }

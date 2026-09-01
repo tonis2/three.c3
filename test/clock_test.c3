@@ -19,10 +19,7 @@ module three_tests::clock;
 import three;
 import vk;
 import image;
-import qjs;
 import std::core::test;
-import std::io;
-import std::math;
 
 <*
  A runtime over a scene with no device behind it, and the scene itself.

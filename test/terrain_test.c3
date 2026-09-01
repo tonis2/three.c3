@@ -24,7 +24,6 @@ module three_tests::terrain;
 
 import three;
 import vk;
-import collision;
 import std::core::test;
 import std::math;
 import std::math::vector;

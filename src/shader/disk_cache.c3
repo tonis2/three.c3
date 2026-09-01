@@ -88,7 +88,6 @@
 *>
 module three;
 
-import std::io;
 import std::io::file;
 import std::io::path;
 import std::collections::list;
@@ -218,11 +217,6 @@ fn void shader_cache_set_read_dir(String dir)
  identity rules, one thing to delete.
 *>
 fn String shader_cache_dir() => cache_dir;
-
-<*
- The prebake, or empty when there is none.
-*>
-fn String shader_cache_read_dir() => read_dir;
 
 fn ShaderCacheStats shader_cache_stats() => cache_counters;
 

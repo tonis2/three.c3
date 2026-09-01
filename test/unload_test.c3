@@ -26,11 +26,8 @@ module three_tests::unload;
 import three;
 import vk;
 import image;
-import collision;
 import std::core::test;
-import std::io;
 import std::io::file;
-import std::math;
 import std::math::vector;
 
 const String FIXTURE = "test/fixtures/textured.glb";

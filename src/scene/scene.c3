@@ -35,7 +35,6 @@ module three;
 
 import std::collections::list;
 import std::sort;
-import std::math;
 import std::math::vector;
 import std::math::matrix;
 import std::math::quaternion;
@@ -1800,30 +1799,6 @@ fn void Scene.set_name(&self, NodeId id, String name)
 fn void Scene.touch(&self, NodeId id)
 {
 	self.mark_moved(id);
-}
-
-<*
- Runs `#body` for every alive node under `id`, depth first, with the node's id
- and a pointer to it.
-
- The pointer is invalid the moment anything is added, so a traversal that creates
- nodes has to collect ids first and add afterwards.
-*>
-macro Scene.@traverse(&self, NodeId id; @body(NodeId child_id, Node* node))
-{
-	NodeId[] stack_seed = { id };
-	List{NodeId} stack;
-	stack.tinit(32);
-	stack.push_all(stack_seed[..]);
-
-	while (stack.len() > 0)
-	{
-		NodeId current = stack.pop()!!;
-		Node* node     = self.node(current);
-		if (node == null) continue;
-		@body(current, node);
-		foreach (child : node.children) stack.push(child);
-	}
 }
 
 // ============================================================================

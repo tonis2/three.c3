@@ -21,10 +21,7 @@ module three_tests::sky;
 import three;
 import vk;
 import image;
-import collision;
 import std::core::test;
-import std::io;
-import std::math;
 import std::math::vector;
 
 const uint W = 160;

@@ -48,7 +48,6 @@ import std::math::quaternion;
 import std::collections::list;
 import collision;
 import gltf;
-import vk;
 
 <*
  Where one clip's frames sit in an asset's pose buffer.

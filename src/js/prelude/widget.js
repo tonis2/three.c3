@@ -193,11 +193,6 @@ function anchor(value, where) {
 	return out;
 }
 
-function isProps(value) {
-	return value !== null && typeof value === 'object' && !Array.isArray(value)
-		&& !(value instanceof Node) && !(value instanceof Widget);
-}
-
 // One node of the description. Everything below is this with a type and a
 // handful of argument slots; nothing here talks to the host, and a tree of
 // these is inert until a widget renders it.

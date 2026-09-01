@@ -11,9 +11,7 @@
 *>
 module three;
 
-import std::io;
 import vk;
-import image;
 
 <*
  FNV-1a, 64-bit. Not cryptographic and does not need to be: a collision here

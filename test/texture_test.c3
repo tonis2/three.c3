@@ -29,7 +29,6 @@ module three_tests::texture;
 import three;
 import vk;
 import image;
-import collision;
 import std::core::test;
 import std::io;
 import std::io::file;

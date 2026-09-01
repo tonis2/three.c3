@@ -43,7 +43,6 @@
 module three;
 
 import vk;
-import std::math;
 import std::math::matrix;
 
 <*

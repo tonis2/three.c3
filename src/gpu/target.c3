@@ -29,7 +29,6 @@
 *>
 module three;
 
-import std::io;
 import vk;
 import image;
 import image::png;

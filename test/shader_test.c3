@@ -19,10 +19,8 @@ module three_tests::shader;
 
 import three;
 import vk;
-import image;
 import slang;
 import std::core::test;
-import std::io;
 import std::io::file;
 import std::io::path;
 

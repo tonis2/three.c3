@@ -459,10 +459,9 @@ function normaliseRows(rows, where) {
 // -----------------------------------------------------------------------
 // The raw verbs
 
-// The three below without the guard, for `widget.js` — which IS the class layer
+// The two below without the guard, for `widget.js` — which IS the class layer
 // and therefore the one caller allowed to write while widgets are mounted.
 export function setTree(tree) { H.uiSet(normalise(tree, 'root')); }
-export function patchTree(key, props) { ui.patch(key, props); }
 export function clearTree() { H.uiClear(); }
 
 // What `widget.js` fills in on load. Behind an object rather than an import so

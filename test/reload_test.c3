@@ -19,10 +19,8 @@ module three_tests::reload;
 
 import three;
 import vk;
-import qjs;
 import c3w;
 import std::core::test;
-import std::io;
 
 <*
  A runtime over a scene with no device behind it, and the scene itself.
