@@ -534,8 +534,10 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
  build flag has since become `--debug` — so the layers are back on the command
  line under one name rather than two, and `--mcp` still does not imply it: an
  agent's server pays the 2x only when somebody asked for it. `--shader <path>`
- went the same way for a different reason, being able to name only one of the five
- templates `find_shader` looks up; `src/shader/load.c3` has that one.
+ went the same way for a different reason, being able to name only one of the six
+ templates `find_shader` looks up; `src/shader/load.c3` has that one. `--shader-dir`
+ is the newest: `--shader-dir ""` turned that search off for an application linking
+ the engine from its own checkout, and it went with the plugin host it was for.
 
  What is pinned here is not that they are absent, which nothing can observe, but
  that their absence is **loud**. A `.mcp.json`, a shell alias or a run script
@@ -548,10 +550,11 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
  as well against a `parse_args` that refuses everything.
 
  **Proved by injection**, once per flag, since one `default:` arm serves all
- three and only a per-flag check says all three reach it. `case "--validate":`
+ four and only a per-flag check says all four reach it. `case "--validate":`
  added back as a no-op: "--validate was accepted rather than refused". The same
  for `case "--no-validate":`: "--no-validate was accepted rather than refused".
  And `case "--shader":` restored with its value consumed: "--shader was accepted
+ rather than refused"; `case "--shader-dir":` likewise: "--shader-dir was accepted
  rather than refused".
 *>
 fn void the_flags_that_went_are_refused_rather_than_ignored() @test
@@ -574,6 +577,12 @@ fn void the_flags_that_went_are_refused_rather_than_ignored() @test
 	String[*] pointed = { "three", "--shader", "shaders/mesh.slang" };
 	three::Options? refused_shader = three::parse_args(pointed[..]);
 	test::@check(@catch(refused_shader), "--shader was accepted rather than refused");
+
+	// The empty value is the whole of what `--shader-dir` was, so it is the shape
+	// a run script written against the plugin host still carries.
+	String[*] dir = { "three", "--shader-dir", "" };
+	three::Options? refused_dir = three::parse_args(dir[..]);
+	test::@check(@catch(refused_dir), "--shader-dir was accepted rather than refused");
 }
 
 <*

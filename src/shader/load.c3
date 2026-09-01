@@ -23,12 +23,11 @@ module three;
 
 import std::io;
 import std::io::file;
-import std::io::path;
 
 faultdef SHADER_NOT_FOUND;
 
 <*
- Where a template is looked for: `mesh.slang` and the four beside it.
+ Where a template is looked for: `mesh.slang` and the five beside it.
 
  Both candidates are relative to the working directory, because `c3c run`, a
  shell at the project root and `c3c test` all start there.
@@ -68,6 +67,15 @@ struct EmbeddedShader
 	String source;
 }
 
+const EmbeddedShader[6] EMBEDDED = {
+	{ "mesh.slang", (String)EMBED_MESH[..] },
+	{ "material.slang", (String)EMBED_MATERIAL[..] },
+	{ "post.slang", (String)EMBED_POST[..] },
+	{ "shadow.slang", (String)EMBED_SHADOW[..] },
+	{ "skin.slang", (String)EMBED_SKIN[..] },
+	{ "sky.slang", (String)EMBED_SKY[..] },
+};
+
 <*
  A template by name — the disk first, then the copy in the binary.
 
@@ -94,15 +102,7 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem)
 		}
 	};
 
-	EmbeddedShader[6] embedded = {
-		{ "mesh.slang", (String)EMBED_MESH[..] },
-		{ "material.slang", (String)EMBED_MATERIAL[..] },
-		{ "post.slang", (String)EMBED_POST[..] },
-		{ "shadow.slang", (String)EMBED_SHADOW[..] },
-		{ "skin.slang", (String)EMBED_SKIN[..] },
-		{ "sky.slang", (String)EMBED_SKY[..] },
-	};
-	foreach (entry : embedded)
+	foreach (entry : EMBEDDED)
 	{
 		if (entry.name == name) return entry.source.copy(allocator);
 	}
