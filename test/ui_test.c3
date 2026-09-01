@@ -75,6 +75,26 @@ fn uint lit_pixels(image::Image* img)
 	return lit;
 }
 
+<*
+ How many pixels of two frames differ.
+
+ `lit_pixels` counts a band in the top-left corner, which is where the overlay
+ goes and is not where anything else does. This is the question to ask about a
+ panel that lands in the middle of the frame and whose colours nobody wants to
+ name: it drew, or the frame is the same frame.
+*>
+fn uint differing(image::Image* a, image::Image* b)
+{
+	sz bpp = a.bytes_per_pixel();
+	uint count = 0;
+	sz pixels = (sz)a.width * (sz)a.height;
+	for (sz i = 0; i < pixels; i++)
+	{
+		if (a.pixels[i * bpp] != b.pixels[i * bpp]) count++;
+	}
+	return count;
+}
+
 // Whether that pixel is the saturated red nothing else in a frame is — how a
 // test asks which of two overlapping things was drawn on top.
 fn bool red_at(image::Image* img, uint x, uint y)
@@ -1611,6 +1631,302 @@ fn void a_file_browser_hands_back_relative_paths_and_cannot_be_walked_out_of() @
 	};
 }
 
+
+<*
+ A `dialog`'s body is one subtree, built once and lent to cui — so closing the
+ panel puts it away rather than throwing it out.
+
+ This is the whole reason the kind was blocked until cui grew `Dialog.content`.
+ `Dialog.body` is a `ViewBuilder` cui calls on every open and whose subtree it
+ releases wholesale on close: a snapshot handed over that way would have cui free
+ elements this layer still keeps `UiNode` records for, and the next open would
+ hand the freed pointers back. So the claim under test is not "a dialog draws" —
+ it is that the SAME elements come back, with what was typed into them still
+ there.
+
+ Checked in both directions, because either half alone passes on the other's bug:
+ an interface where nothing ever opens keeps its pointers perfectly, and one
+ where nothing ever closes never has the chance to lose them.
+*>
+fn void a_dialogs_body_is_borrowed_and_comes_back_whole() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint panel = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.DIALOG,
+				.key = "panel",
+				.title = "Preferences",
+				.gap = 6,
+				.checked = true,
+				.has_checked = true,
+				// Not modal, deliberately: a modal's scrim covers the whole frame
+				// and would answer the pixel check below on its own, whether or
+				// not the panel it is standing in for ever drew.
+				.on_dismiss = true,
+			},
+			-1
+		)!!;
+		uint caption = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.LABEL, .key = "caption", .text = "Name" },
+			(int)panel
+		)!!;
+		uint field = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.TEXTFIELD, .key = "name", .size = { 160, 0 }, .on_change = true },
+			(int)panel
+		)!!;
+		renderer.ui.commit_tree();
+		frame(renderer);
+
+		cui::Element* body = renderer.ui.nodes[panel].content;
+		test::@check(body != null, "the dialog was built without a body to lend");
+
+		// Both children of the body are in the tree and have been laid out, which
+		// is the "it renders" half — a dialog whose children never reached cui
+		// would answer every pointer question below exactly as a working one does.
+		cui::Element* written = renderer.ui.nodes[caption].element;
+		cui::Element* typed = renderer.ui.nodes[field].element;
+		test::@check(renderer.ui.attached(written), "the body's label never reached the tree");
+		test::@check(renderer.ui.attached(typed), "the body's field never reached the tree");
+		test::@check(written.size.x > 0 && written.size.y > 0, "the body's label was never laid out");
+		// And it landed inside the window. cui places a dialog's panel against
+		// the element's absolute from the PREVIOUS emit, so a dialog whose parent
+		// moves it puts its panel exactly that far wrong and the layout cache
+		// means there is no second pass to correct it — which is why a `dialog`
+		// belongs in a `stack`, and why every check above passes on a panel
+		// nobody can see.
+		test::@check(
+			written.absolute.x >= 0 && written.absolute.y >= 0
+				&& written.absolute.x < 520 && written.absolute.y < 400,
+			"the body was placed at %f,%f, which is off the frame",
+			written.absolute.x,
+			written.absolute.y
+		);
+
+		// State the snapshot never named, so nothing about a rebuild could put it
+		// back: this is the thing that has to survive the close.
+		renderer.ui.patch(field, { .has_text = true, .text = "Ada" });
+		frame(renderer);
+		test::@check(
+			typed.widget_as(cui::widgets::TextField).value() == "Ada",
+			"the field would not take the text: '%s'",
+			typed.widget_as(cui::widgets::TextField).value()
+		);
+
+		// The pixels, which are the only check here that a panel actually drew:
+		// every pointer above is just as true of a dialog placed off the frame.
+		image::Image up = renderer.capture()!!;
+		defer up.free();
+
+		renderer.ui.patch(panel, { .has_checked = true, .checked = false });
+		frame(renderer);
+
+		image::Image down = renderer.capture()!!;
+		defer down.free();
+		test::@check(
+			differing(&up, &down) > 2000,
+			"the open panel and the closed one are the same frame to within %d pixels",
+			differing(&up, &down)
+		);
+
+		cui::widgets::Dialog* widget = renderer.ui.nodes[panel].element.widget_as(cui::widgets::Dialog);
+		test::@check(!widget.open, "patching `open` false left the panel up");
+		test::@check(!renderer.ui.attached(body), "closing the panel left its body hanging in the tree");
+		test::@check(renderer.ui.nodes[panel].content == body, "closing the panel swapped the body element");
+		test::@check(renderer.ui.nodes[field].element == typed, "closing the panel rebuilt the field");
+
+		// A patch aimed INTO the closed body, which is a script keeping a hidden
+		// panel up to date. It reaches a detached element and has to survive
+		// being re-attached, so it is checked after the re-open rather than here.
+		renderer.ui.patch(field, { .has_text = true, .text = "Grace" });
+
+		renderer.ui.patch(panel, { .has_checked = true, .checked = true });
+		frame(renderer);
+
+		test::@check(widget.open, "patching `open` true did not put the panel back");
+		test::@check(renderer.ui.attached(typed), "re-opening did not attach the body it had detached");
+		test::@check(renderer.ui.nodes[field].element == typed, "re-opening built a new field");
+		test::@check(
+			typed.widget_as(cui::widgets::TextField).value() == "Grace",
+			"the field came back holding '%s'",
+			typed.widget_as(cui::widgets::TextField).value()
+		);
+	};
+}
+
+<*
+ Every way the USER puts a dialog away is one event, and the script closing it
+ itself is not one.
+
+ The two halves are one test on purpose. `Dialog.set_open` runs `on_close` for
+ every dismissal there is — cui's wording is "whoever asked for the close" —
+ which is right for a widget and wrong for a binding, so this layer drops the one
+ case the script already knows about. A test for the drop alone would pass on a
+ binding that reported nothing at all, which is why the close glyph and the
+ backdrop are checked first: they are the control on the silence.
+*>
+fn void a_dialog_the_user_dismissed_is_an_event_and_one_the_script_closed_is_not() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint root = renderer.ui.push_node({ .kind = three::UiNodeKind.STACK }, -1)!!;
+		uint panel = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.DIALOG,
+				.key = "panel",
+				.title = "About",
+				.checked = true,
+				.has_checked = true,
+				.modal = true,
+				.close_outside = true,
+				.on_dismiss = true,
+			},
+			(int)root
+		)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "three.c3 0.1.0" }, (int)panel)!!;
+		// A full-frame `solid` rect built AFTER the modal, which is the whole
+		// case `Element.raised` exists for: the hit test runs in reverse paint
+		// order, so without the raise this sibling would take every press the
+		// backdrop is there to swallow — and a modal that a later sibling can
+		// steal the pointer from is not a modal.
+		renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.RECT, .solid = true, .color = { 0.1, 0.1, 0.1, 0.5 } },
+			(int)root
+		)!!;
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		cui::widgets::Dialog* widget = renderer.ui.nodes[panel].element.widget_as(cui::widgets::Dialog);
+		test::@check(widget.open, "the snapshot did not open the panel");
+
+		// The close glyph, which `Dialog` stamps with an id for exactly this.
+		test::@check(click_id(renderer, "dialog-close"), "the panel had no close glyph to click");
+		test::@check(heard.calls == 1, "the close glyph fired %d times", heard.calls);
+		test::@check(
+			heard.kind == three::UiEventKind.DIALOG_DISMISS,
+			"the close glyph reported %s",
+			heard.kind
+		);
+		test::@check(heard.node == panel, "the dismissal was attributed to node %d rather than %d", heard.node, panel);
+		frame(renderer);
+		test::@check(!widget.open, "the close glyph left the panel up");
+
+		// A press on the backdrop of a modal that closes outside. It also says the
+		// backdrop is there and takes the pointer: a press that had fallen through
+		// to whatever is behind would report nothing at all.
+		renderer.ui.patch(panel, { .has_checked = true, .checked = true });
+		frame(renderer);
+		heard = { };
+		point(renderer, 6, 6, true);
+		point(renderer, 6, 6, false);
+		frame(renderer);
+		test::@check(heard.calls == 1, "a press on the backdrop fired %d times", heard.calls);
+		test::@check(
+			heard.kind == three::UiEventKind.DIALOG_DISMISS,
+			"the backdrop reported %s",
+			heard.kind
+		);
+		test::@check(!widget.open, "the backdrop press left the panel up");
+
+		// And the script's own close, which is not news to the script.
+		renderer.ui.patch(panel, { .has_checked = true, .checked = true });
+		frame(renderer);
+		heard = { };
+		renderer.ui.patch(panel, { .has_checked = true, .checked = false });
+		frame(renderer);
+		test::@check(!widget.open, "the script's own patch did not close the panel");
+		test::@check(
+			heard.calls == 0,
+			"closing the panel from the script reported %s back to the script",
+			heard.kind
+		);
+	};
+}
+
+<*
+ A rebuild keeps a dialog up, and keeps it where it was dragged to.
+
+ The same carry a confirmation gets and for the same reason — a panel that
+ re-renders because a frame counter moved must not take a dialog off the screen
+ — with the panel's position beside it, because cui centres a dialog nobody has
+ moved and a rebuild that dropped `placed` would jump it back to the middle
+ under the pointer that was dragging it.
+
+ The element being a NEW one each time is what makes this a test of the carry
+ rather than of an element surviving; it is checked rather than assumed.
+*>
+fn void a_dialog_carries_its_state_across_a_rebuild() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		three::UiNodeSpec spec = {
+			.kind = three::UiNodeKind.DIALOG,
+			.key = "panel",
+			.title = "Preferences",
+			.checked = true,
+			.has_checked = true,
+			.on_dismiss = true,
+		};
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint panel = renderer.ui.push_node(spec, -1)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "Volume" }, (int)panel)!!;
+		renderer.ui.commit_tree();
+		frame(renderer);
+
+		cui::Element* first = renderer.ui.nodes[panel].element;
+		cui::Element* first_body = renderer.ui.nodes[panel].content;
+		// What a drag on the title bar leaves behind, without a drag: the bar
+		// writes exactly these two fields and nothing else about a move is state.
+		cui::widgets::Dialog* moved = first.widget_as(cui::widgets::Dialog);
+		moved.at = { 40, 30 };
+		moved.placed = true;
+
+		// The same tree again, saying nothing about `open`.
+		spec.checked = false;
+		spec.has_checked = false;
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		panel = renderer.ui.push_node(spec, -1)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "Volume" }, (int)panel)!!;
+		renderer.ui.commit_tree();
+		frame(renderer);
+
+		cui::Element* second = renderer.ui.nodes[panel].element;
+		test::@check(second != first, "the rebuild reused the element, so this proves nothing");
+		test::@check(
+			renderer.ui.nodes[panel].content != first_body,
+			"the rebuild reused the body, so this proves nothing"
+		);
+
+		cui::widgets::Dialog* again = second.widget_as(cui::widgets::Dialog);
+		test::@check(again.open, "a rebuild that said nothing about `open` closed the panel");
+		test::@check(again.placed, "the rebuild forgot that the panel had been moved");
+		test::@check(
+			again.at.x == 40 && again.at.y == 30,
+			"the panel came back at %f,%f rather than where it was left",
+			again.at.x,
+			again.at.y
+		);
+
+		// And a snapshot that DOES name `open` wins, which is the other half of
+		// the same rule.
+		spec.has_checked = true;
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		panel = renderer.ui.push_node(spec, -1)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "Volume" }, (int)panel)!!;
+		renderer.ui.commit_tree();
+		frame(renderer);
+		test::@check(
+			!renderer.ui.nodes[panel].element.widget_as(cui::widgets::Dialog).open,
+			"a snapshot that closed the panel was overruled by the carry"
+		);
+	};
+}
+
 // ============================================================================
 // The JavaScript binding
 // ============================================================================
@@ -1739,6 +2055,92 @@ fn void a_script_builds_cuis_application_widgets() @test
 			question.message.str_view()
 		);
 		test::@check(question.asking(dialog), "the positional boolean did not open the question");
+	};
+}
+
+<*
+ A `Dialog` written in JavaScript, and the one thing about it the class layer has
+ to get right.
+
+ The crossing itself is the easy half — a class, a normaliser and a kind, the
+ same three pieces the other application widgets needed. The half worth a test is
+ that `open` is a VALUE and not a shape: `widget.js` compares two renders and
+ sends either a `patch` per changed field or one `set` for the whole interface,
+ and a `set` here would build a second panel and throw the first one's body away.
+ So the check is that a field write closes the dialog and leaves the SAME element
+ standing — which is the borrowed body reached the only way a game would reach
+ it.
+*>
+fn void a_script_builds_a_dialog_and_closes_it_without_a_rebuild() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const { Column, Dialog, Label, TextField } = three.ui;
+			class Shell extends three.Widget {
+				constructor() { super(); this.open = true; }
+				render() {
+					return new Column({ gap: 0 },
+						new Label('behind the panel'),
+						new Dialog({ title: 'Preferences', open: this.open, modal: true,
+									 scrim: [0, 0, 0, 0.7],
+									 onDismiss: () => { this.open = false; } },
+							new TextField({ key: 'name', placeholder: 'name' }),
+						),
+					);
+				}
+			}
+			globalThis.shell = Shell.mount();
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		// stack (the widget layer's root) > column > label + dialog > textfield.
+		test::@check(renderer.ui.nodes.len() == 5, "the tree came over as %d nodes", renderer.ui.nodes.len());
+
+		int at = -1;
+		int typed = -1;
+		foreach (i, node : renderer.ui.nodes)
+		{
+			switch (node.kind)
+			{
+				case three::UiNodeKind.DIALOG: at = (int)i;
+				case three::UiNodeKind.TEXTFIELD: typed = (int)i;
+				default: break;
+			}
+		}
+		test::@check(at >= 0 && typed >= 0, "the dialog or its body did not cross");
+
+		cui::Element* element = renderer.ui.nodes[at].element;
+		cui::widgets::Dialog* panel = element.widget_as(cui::widgets::Dialog);
+		test::@check(panel.title == "Preferences", "the title came over as '%s'", panel.title);
+		test::@check(panel.open, "the panel did not come over open");
+		test::@check(panel.modal, "`modal` did not cross");
+		test::@check(panel.style.scrim_color.a > 0.6, "`scrim` did not cross: alpha %f", panel.style.scrim_color.a);
+		test::@check(
+			renderer.ui.nodes[at].content != null && renderer.ui.nodes[typed].element.parent == renderer.ui.nodes[at].content,
+			"the body's field did not land in the element the dialog borrows"
+		);
+
+		frame(renderer);
+		cui::Element* field = renderer.ui.nodes[typed].element;
+		test::@check(renderer.ui.attached(field), "the body never reached the tree");
+
+		three::RunResult closed = run.run(`
+			globalThis.shell.open = false;
+			three.ui.flush();
+		`);
+		defer closed.free();
+		test::@check(closed.ok, "the close ran: %s", closed.error);
+		frame(renderer);
+
+		test::@check(!panel.open, "writing the field did not close the panel");
+		test::@check(
+			renderer.ui.nodes[at].element == element,
+			"closing the panel rebuilt the interface — `open` is being read as shape rather than as a value"
+		);
+		test::@check(renderer.ui.nodes[typed].element == field, "closing the panel rebuilt the body");
+		test::@check(!renderer.ui.attached(field), "closing the panel left the body in the tree");
 	};
 }
 
@@ -2470,7 +2872,7 @@ fn void an_open_dropdown_paints_and_hits_over_what_is_under_it() @test
 
 // A plugin's tree: a full-frame stack with one element inside it that the
 // plugin means to hand over. The shape crig has — a workspace with a pane in it.
-fn cui::Element* plugin_tree(three::Renderer* renderer, cui::Element** inner)
+fn cui::Element* app_tree(three::Renderer* renderer, cui::Element** inner)
 {
 	cui::Ui* ui = (cui::Ui*)renderer.ui.context(&renderer.gpu, &renderer.target);
 	*inner = ui.@node((cui::widgets::Stack){ });
@@ -2491,8 +2893,8 @@ fn void a_slot_lets_a_plugin_and_a_script_share_the_interface() @test
 	@with_renderer(; three::Renderer* renderer)
 	{
 		cui::Element* inner;
-		cui::Element* root = plugin_tree(renderer, &inner);
-		renderer.ui.set_plugin_root(root);
+		cui::Element* root = app_tree(renderer, &inner);
+		renderer.ui.set_root(root);
 		renderer.ui.set_slot(inner);
 
 		one_node(
@@ -2513,7 +2915,7 @@ fn void a_slot_lets_a_plugin_and_a_script_share_the_interface() @test
  Without a slot they are exclusive, exactly as they were.
 
  The other half of the same change: `commit_tree` learned a branch, and the
- branch it did not take has to behave the way `set_plugin_root` has always
+ branch it did not take has to behave the way `set_root` has always
  documented — last writer holds the floor.
 *>
 fn void with_no_slot_the_plugin_still_loses_the_floor() @test
@@ -2521,7 +2923,7 @@ fn void with_no_slot_the_plugin_still_loses_the_floor() @test
 	@with_renderer(; three::Renderer* renderer)
 	{
 		cui::Element* inner;
-		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+		renderer.ui.set_root(app_tree(renderer, &inner));
 
 		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
 
@@ -2547,7 +2949,7 @@ fn void withdrawing_a_slot_clears_the_panel_and_moves_the_generation() @test
 	@with_renderer(; three::Renderer* renderer)
 	{
 		cui::Element* inner;
-		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+		renderer.ui.set_root(app_tree(renderer, &inner));
 		renderer.ui.set_slot(inner);
 		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
 
@@ -2582,8 +2984,8 @@ fn void a_recycled_slot_is_noticed_by_the_next_snapshot() @test
 	@with_renderer(; three::Renderer* renderer)
 	{
 		cui::Element* inner;
-		cui::Element* root = plugin_tree(renderer, &inner);
-		renderer.ui.set_plugin_root(root);
+		cui::Element* root = app_tree(renderer, &inner);
+		renderer.ui.set_root(root);
 		renderer.ui.set_slot(inner);
 		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
 
@@ -2620,12 +3022,12 @@ fn void a_new_plugin_root_withdraws_the_slot_in_the_old_one() @test
 	@with_renderer(; three::Renderer* renderer)
 	{
 		cui::Element* inner;
-		renderer.ui.set_plugin_root(plugin_tree(renderer, &inner));
+		renderer.ui.set_root(app_tree(renderer, &inner));
 		renderer.ui.set_slot(inner);
 		one_node(renderer, { .kind = three::UiNodeKind.RECT, .size = { 60, 20 } });
 
 		cui::Element* second;
-		renderer.ui.set_plugin_root(plugin_tree(renderer, &second));
+		renderer.ui.set_root(app_tree(renderer, &second));
 
 		test::@check(renderer.ui.slot == null, "the old tree's slot was still on offer");
 		test::@check(renderer.ui.tree == null, "the snapshot survived the tree it was grafted into");
@@ -2662,7 +3064,7 @@ fn void a_slot_reports_its_corner_and_not_just_its_size() @test
 			inner
 		);
 
-		renderer.ui.set_plugin_root(root);
+		renderer.ui.set_root(root);
 		renderer.ui.set_slot(inner);
 
 		one_node(

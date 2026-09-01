@@ -307,22 +307,6 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 
 	if (path.len > 0) return write_api_docs(host, path, detail);
 
-	// A plugin's section, answered before the runtime is asked: three's docs are
-	// built by `three.getApiDocs` in JavaScript and a plugin's are a `$embed`ed
-	// string in another image, so they are two sources rather than one. Kept
-	// addressable rather than merged — see plugin_abi.md §9.
-	if (section.len > 0)
-	{
-		foreach (docs : plugin_docs)
-		{
-			if (docs.namespace != section) continue;
-			DString answer;
-			answer.init(mem, docs.markdown.len + 32);
-			append_json_string(&answer, docs.markdown);
-			return answer.copy_str(mem);
-		}
-	}
-
 	// A JS object literal built by hand because JSON *is* one, and the escaping
 	// that makes an argument safe to splice into source is the escaping the answer
 	// already uses. An empty `search` or `section` is not a search for nothing:
@@ -341,58 +325,9 @@ fn String? tool_get_api_docs(Object* args, void* user_data, DString* detail)
 
 	String? answer = ask_the_runtime(host, source.str_view(), detail);
 	if (catch err = answer) return err~;
-
-	// A plugin's sections named in the index, so an agent finds them by reading
-	// rather than by being told. Only the index: a search is over three's own
-	// prose, and answering it with a list of names that did not match would be a
-	// second kind of result in one array.
-	if (plugin_docs.len() == 0 || search.len > 0 || section.len > 0) return answer;
-	return with_plugin_sections(answer);
+	return answer;
 }
 
-<*
- Adds `plugins` to the index: the sections `get_api_docs` will answer that three
- did not write.
-
- Written in front of the object's first member rather than parsed and
- re-serialised. `json::parse` round-trips fine, but `Object.to_format` is a
- *display* format and not a JSON writer — it emits string contents unescaped, so
- the first apostrophe or embedded quote in 30 KB of prose produces an answer no
- client can parse. Found by doing it the other way.
-
- The insertion point is one character in and the only thing being inserted is a
- name this file escaped itself, so the splice cannot malform what it is splicing
- into. Anything that does not start with `{` is left exactly as it was.
-*>
-fn String with_plugin_sections(String answer) @local
-{
-	usz at = 0;
-	while (at < answer.len && answer[at].is_space()) at++;
-	if (at >= answer.len || answer[at] != '{') return answer;
-
-	DString out;
-	out.init(mem, answer.len + 64);
-	defer out.free();
-
-	out.append_string(answer[:at + 1]);
-	out.append_string(`"plugins":[`);
-	foreach (i, docs : plugin_docs)
-	{
-		if (i > 0) out.append_char(',');
-		append_json_string(&out, docs.namespace);
-	}
-	out.append_char(']');
-	// A comma only when something follows: `{}` with a member appended would
-	// otherwise become `{"plugins":[],}`.
-	String rest = answer[at + 1..];
-	usz skip = 0;
-	while (skip < rest.len && rest[skip].is_space()) skip++;
-	if (skip < rest.len && rest[skip] != '}') out.append_char(',');
-	out.append_string(rest);
-
-	answer.free(mem);
-	return out.copy_str(mem);
-}
 
 <*
  Writes the whole surface to a file, and answers with the path rather than the

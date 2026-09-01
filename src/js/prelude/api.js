@@ -1063,8 +1063,60 @@ const input = {
 	press(key) { H.inputHold(String(key), true); },
 	release(key) { H.inputHold(String(key), false); },
 
+	// -------------------------------------------------------------------
+	// Moving the pointer from a script
+	//
+	// The same argument, for the mouse, and the half of it that reaches
+	// further: a headless boot has no pointer either, so the thing a
+	// pointer is mostly for — an interface — could not be exercised at
+	// all. A panel's buttons, its menus and its drags were reachable only
+	// by a person with a window open, which is to say not reachable from a
+	// test.
+	//
+	// **A held button, not an event.** `pressButton(0)` stays down until
+	// `releaseButton(0)`, so a drag is four statements that each say what
+	// happened:
+	//
+	//     three.input.movePointer(120, 80);
+	//     three.input.pressButton(0);
+	//     three.input.movePointer(180, 80);   // a frame apart, each of them
+	//     three.input.releaseButton(0);
+	//
+	// rather than a `drag(a, b)` verb, which would have to invent the
+	// frames in between — and inventing them is exactly how a synthesised
+	// gesture stops being indistinguishable from a real one. The press
+	// captures, so the drag survives leaving the widget.
+	//
+	// **It goes in above the hit test.** `three.input.pointer`, cui's hit
+	// test, `three.onClick` and a `draw` node's `onPointer` are all told
+	// the same thing, so a press under an open menu or a modal correctly
+	// reaches nothing, and a press on a panel does not also click the
+	// scene behind it.
+	//
+	// `x` and `y` are the rendered image's pixels — the same ones
+	// `three.input.pointer` answers in, `scene.pick(x, y)` takes and the
+	// PNG starts at, so a place read off a screenshot can be pressed
+	// without conversion.
+	//
+	// It adds to the real mouse: the buttons are or-ed with the window's
+	// and the wheel added to it. The position is the one thing that cannot
+	// be a union — two positions are not a third — so a placed one stands
+	// in for the window's until the real pointer actually moves, and a
+	// hand on the mouse takes the cursor straight back.
+	//
+	// `button` is 0 left, 1 right, 2 middle; anything else is refused by
+	// name. `scroll(dy, dx)` is in notches, positive away from the user.
+	movePointer(x, y) { H.inputMove(Number(x), Number(y)); },
+	pressButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), true); },
+	releaseButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), false); },
+	scroll(dy, dx) { H.inputScroll(Number(dy), dx === undefined ? 0 : Number(dx)); },
+
 	// Let go of everything. What a test calls between cases so one does not
-	// leak a held key into the next.
+	// leak a held key into the next — the mouse buttons included, and they
+	// are the half that matters more: a held button captures, so one leaked
+	// into the next case makes its first press land inside a drag somebody
+	// else started. The unspent wheel goes too; the pointer stays where it
+	// was put, because that is what letting go of a button does.
 	releaseAll() { H.inputReleaseAll(); },
 
 	// What was typed this frame, with modifier chords and the function-key

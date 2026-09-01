@@ -156,6 +156,11 @@ const SCHEMA = {
 	confirmDialog: { text: true, bool: 'open', fn: 'onConfirm' },
 	menu: { list: 'menus', fn: 'onSelect' },
 	fileBrowser: { text: 'start', list: 'mask', fn: 'onChoose' },
+	// The one application widget that holds children, so it is a container as
+	// well: its first string is the title on its bar and any string after that
+	// is a caption in its body, which is what somebody writing
+	// `new Dialog('About', 'three.c3 0.1.0')` meant.
+	dialog: { container: true, text: 'title', bool: 'open', fn: 'onDismiss' },
 };
 
 // The nine anchors, spelled the way a person says them. `'top-left'`,
@@ -288,9 +293,10 @@ export class Select extends Node { constructor(...args) { super('select', args);
 export class Tree extends Node { constructor(...args) { super('tree', args); } }
 export class TextField extends Node { constructor(...args) { super('textfield', args); } }
 
-// cui's application widgets, which are the three that are worth having a class
+// cui's application widgets, which are the four that are worth having a class
 // for and not worth writing again: a question with two answers, an application
-// menu bar, and a directory listing you can pick a file out of.
+// menu bar, a directory listing you can pick a file out of, and a floating
+// titled panel with whatever you like inside it.
 //
 //     new ConfirmDialog('Delete 17 dots?', this.asking, () => this.del(),
 //         { title: 'Delete', confirm: 'Delete', decline: 'Keep',
@@ -311,9 +317,41 @@ export class TextField extends Node { constructor(...args) { super('textfield', 
 // is the assets root or the plugin's, so a path out of `onChoose` is a path
 // `three.load` takes. It sizes itself to its content and wants a Scroll above
 // it, cui's shape for every list.
+//
+//     new Dialog({ title: 'Preferences', open: this.settings, modal: true,
+//                  onDismiss: () => { this.settings = false; } },
+//         new Slider('Volume', this.volume, v => { this.volume = v; }),
+//         new Checkbox('Wireframe', this.wire, v => { this.wire = v; }),
+//     );
+//
+// **A Dialog is the one node here whose children survive being closed.** Every
+// other kind is described again on the next render; a dialog's body is an
+// element the host keeps and cui borrows, so what somebody had typed into it,
+// how far they had scrolled and where they had dragged the panel are all still
+// there when it comes back up. Closing it is a value change (`open`) and not a
+// structural one, which is what makes that true through the diff as well.
+//
+// **Put one in a Stack**, beside whatever it floats over — `render()` returning
+// a Dialog on its own is a Stack too, since the mounted widgets are stacked. cui
+// places the panel against where the node was last drawn, so a Dialog its parent
+// moves (the second child of a Column, say) puts its panel exactly that far
+// wrong and, because the layout is cached, never corrects it. A Stack's children
+// all sit at the same origin. Modal wants the same thing for a second reason: a
+// backdrop that covered less than everything would not be one, so it fills what
+// it is offered, and in a Column that is a row of the column's full height.
+//
+// `width` bounds the body, and a dialog with a Slider or a TextField in it wants
+// one: those fill what they are offered, and what a panel offers them is the
+// screen less its margins.
+//
+// `scrim` is the colour of the dim and `closeOutside: true` makes a press on it
+// the dismissal. `onDismiss` fires for the close glyph, ESC and that press, and
+// NOT for the panel being closed from the script, which the script already knows
+// about.
 export class ConfirmDialog extends Node { constructor(...args) { super('confirmDialog', args); } }
 export class MenuBar extends Node { constructor(...args) { super('menu', args); } }
 export class FileBrowser extends Node { constructor(...args) { super('fileBrowser', args); } }
+export class Dialog extends Node { constructor(...args) { super('dialog', args); } }
 
 // What a card is made of, since every interface here is made of cards: a
 // background behind a padded column, sized to what is in it.
@@ -753,5 +791,5 @@ export const nodes = {
 	Column, Row, Stack, Padding, Grid, Clip, Anchored, Scroll, Panel,
 	Rect, Label, Drawing,
 	Button, Checkbox, Slider, Select, Tree, TextField,
-	ConfirmDialog, MenuBar, FileBrowser,
+	ConfirmDialog, MenuBar, FileBrowser, Dialog,
 };
