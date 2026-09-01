@@ -95,6 +95,6 @@ The API is written in [`docs/`](docs/) — start with
 Prebuilt binaries for macOS arm64, Linux x64 and Windows x64 are on the
 [releases page](https://github.com/tonis2/three.c3/releases).
 
-Website [here] (tonis2.github.io/three.c3/)
+Website [here](tonis2.github.io/three.c3/)
 
 MIT licensed.
