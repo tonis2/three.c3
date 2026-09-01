@@ -296,6 +296,18 @@ export class MeshRef {
 	toString() { return `MeshRef(${this.name})`; }
 }
 
+// The tail of a "no node named X" message. Every name for a small file, and a
+// prefix plus a count for a kit — a hundred and forty names is not an error
+// message anybody reads, and the first two dozen is enough to see the spelling
+// convention and find the typo.
+const NAMES_SHOWN = 24;
+
+function nameList(names) {
+	if (!names.length) return '(none)';
+	if (names.length <= NAMES_SHOWN) return names.join(', ');
+	return `${names.slice(0, NAMES_SHOWN).join(', ')} … and ${names.length - NAMES_SHOWN} more`;
+}
+
 export class Asset {
 	constructor([index, generation]) {
 		this._a = index;
@@ -317,6 +329,28 @@ export class Asset {
 		// How many pictures the file holds, for `imageAt`. Out of the JSON as
 		// well, so a file whose meshes have never been drawn still answers.
 		this.images = H.assetImages(index, generation);
+	}
+
+	// The names of the file's own nodes, in the order the loader walks them —
+	// what `node(name)` takes, and what tells you whether a `.glb` is a kit or a
+	// single prop.
+	//
+	// Read on demand rather than at load, because it is the flattened tree and a
+	// file placed for its meshes alone should not pay for one. Cached after the
+	// first ask: an Asset's file does not change under it.
+	get nodes() {
+		if (!this._nodeNames) {
+			// Each name once. The walk carries a row per *drawn* thing as well as
+			// per node — a group whose glTF mesh has three primitives is a group
+			// and three children named after the mesh — and listing `box` ninety
+			// times would bury the thirty names somebody is looking for. Every
+			// name here is still one `node()` takes; a repeat would not have
+			// resolved to anything new, since the first in the walk is the answer.
+			const seen = new Set();
+			for (const row of H.assetNodes(this._a, this._g, false)) seen.add(row[0]);
+			this._nodeNames = [...seen];
+		}
+		return this._nodeNames;
 	}
 
 	mesh(name) {
@@ -442,7 +476,12 @@ export class Asset {
 	// drawing throughout — a mesh a frame, `meshAsync`'s arrangement, over as
 	// many frames as the file has distinct meshes.
 	async instantiateAsync(name, options = undefined) {
-		const root = this.instantiate(name, options);
+		return this._uploaded(this.instantiate(name, options));
+	}
+
+	// Every mesh in a tree on the device, then the tree. Shared by the two async
+	// doors, which differ only in how much of the file they built.
+	async _uploaded(root) {
 		const wanted = new Set();
 		root.traverse((node) => {
 			const ref = node.geometry;
@@ -484,31 +523,106 @@ export class Asset {
 	// off into a draw call of its own and costs a posed copy of the mesh per
 	// instance, and it pays for itself only when the same character is drawn more
 	// than once a frame. Not a switch to flip on a crowd.
-	instantiate(name, { skeleton = false, skinning = 'vertex', materials = false } = {}) {
-		const compute = skinning === 'compute';
-		// One material per distinct description, keyed on the mesh index that
-		// produced it. Two primitives sharing a glTF material produce equal
-		// descriptions but not the same object, so this dedupes on the *shape*
-		// rather than on identity — which is what keeps a kit of ninety pieces
-		// from compiling ninety shaders that differ in nothing.
-		const materialCache = materials ? new Map() : null;
-		const rows = H.assetNodes(this._a, this._g, !!skeleton);
+	instantiate(name, options = undefined) {
+		const opt = this._instanceOptions(options);
+		const rows = H.assetNodes(this._a, this._g, opt.skeleton);
 		const root = new Object3D();
+		// The name is what the tree is *called*, not which part of the file it is.
+		// `node(name)` is the one that picks — see it for why the two are separate.
 		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
+		this._carry(root, opt);
+		this._build(rows, -1, root, opt);
+		return root;
+	}
+
+	// One named node of the file, and everything under it, as a tree of its own.
+	//
+	//     const kit  = three.load('buildings.glb');
+	//     const wall = kit.node('wall_stone');
+	//     wall.position.set(4, 0, -2);
+	//     scene.add(wall);
+	//
+	// **What makes a kit one file rather than ninety.** Neither other door can
+	// pick a piece out of a shared file: `mesh(name)` matches a glTF *mesh*, and
+	// an exported mesh is named after its geometry — thirty pieces built out of
+	// boxes are thirty meshes all called `box` — while `instantiate()` builds the
+	// whole file every time, which stamps the entire kit at every placement.
+	// A node keeps the name the file gave it, so a node is what a piece can be.
+	//
+	// Call it twice for two copies, exactly as `instantiate()` does, and the two
+	// share the upload: this is a second set of transforms over the same meshes.
+	//
+	// The subtree arrives carrying its *own* transform and none of its ancestors'
+	// — a piece authored at the origin comes back at the origin whatever the file
+	// wrapped it in — because what is being asked for is the piece and not where
+	// the kit happened to lay it out.
+	//
+	// `asset.nodes` is the list of names to pass. A file free to name two nodes
+	// the same answers with the first, in the order the file walks.
+	//
+	// Options are `instantiate()`'s and mean the same things. Animation does too:
+	// the subtree root carries the file's clips, and a channel naming a node
+	// outside the subtree drives nothing rather than failing.
+	node(name, options = undefined) {
+		const opt = this._instanceOptions(options);
+		const rows = H.assetNodes(this._a, this._g, opt.skeleton);
+		const at = rows.findIndex((row) => row[0] === name);
+		if (at < 0) {
+			throw new Error(`no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`);
+		}
+		const root = this._build(rows, at, null, opt);
+		this._carry(root, opt);
+		return root;
+	}
+
+	// `node`, with its meshes on the device before it resolves — `instantiateAsync`
+	// for one piece, and the shape a kit wants: await the wall, place the wall.
+	async nodeAsync(name, options = undefined) {
+		return this._uploaded(this.node(name, options));
+	}
+
+	// `{ skeleton, skinning, materials }` as the two instantiating doors read it.
+	// One place, so they cannot drift.
+	_instanceOptions(options) {
+		const { skeleton = false, skinning = 'vertex', materials = false } = options || {};
+		return { skeleton: !!skeleton, compute: skinning === 'compute', materials: !!materials };
+	}
+
+	// What a tree's root has to carry whether it is the whole file or one node of
+	// it: the clips, the asset it came from, and the bone names `socket()` needs.
+	_carry(root, opt) {
 		// The root is what carries the animations: a clip drives the whole
 		// subtree, so root.play('Walk') is the only sensible place to say it.
 		root._clips = this.animations;
 		root._asset = [this._a, this._g];
 		// Carried on the root because `_bindAnimation` is what tells the host, and
 		// that runs on the root.
-		root._liveSkin = !!skeleton;
+		root._liveSkin = opt.skeleton;
 		// For `socket()`, which needs them to say what a rig does have when it
 		// is asked for a bone it has not. A baked instantiation drops the bone
 		// nodes, so the tree itself cannot answer.
 		root._bones = this.bones;
+	}
 
-		const built = [];
-		for (const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] of rows) {
+	// The rows as objects. `from` is -1 for the whole file, parenting the roots
+	// under `into`, or the row to start at — which becomes the tree's own root and
+	// is what comes back.
+	//
+	// Membership needs no second pass and no set: parents always precede their
+	// children in the host's walk, so a row is in the subtree exactly when its
+	// parent was built, and `built[parent]` is the whole test.
+	_build(rows, from, into, opt) {
+		// One material per distinct description, keyed on the mesh index that
+		// produced it. Two primitives sharing a glTF material produce equal
+		// descriptions but not the same object, so this dedupes on the *shape*
+		// rather than on identity — which is what keeps a kit of ninety pieces
+		// from compiling ninety shaders that differ in nothing.
+		const materialCache = opt.materials ? new Map() : null;
+		const built = new Array(rows.length);
+		let root = into;
+		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
+			const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] = rows[i];
+			if (from >= 0 && i !== from && !(parent >= 0 && built[parent])) continue;
 			const node = mesh < 0
 				? new Object3D()
 				: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
@@ -529,20 +643,21 @@ export class Asset {
 			// host node does not exist yet and this is the only thing that will
 			// remember.
 			node._skin = skin;
-			node._preskinned = compute && skin >= 0;
+			node._preskinned = opt.compute && skin >= 0;
 			// Only a copy an instanced node placed has anything but white
 			// here, and only a Mesh has anywhere to put it — a group's row
 			// carries the identity and setting it would define a channel on
 			// an object that has none.
 			if (mesh >= 0 && !(r === 1 && g === 1 && b === 1 && a === 1)) node.color = [r, g, b, a];
-			if (materials && mesh >= 0) {
-				const built = this._importedMaterial(mesh, materialCache);
-				if (built) node.material = built;
+			if (opt.materials && mesh >= 0) {
+				const imported = this._importedMaterial(mesh, materialCache);
+				if (imported) node.material = imported;
 			}
-			// Parents always precede their children in the host's walk, so
-			// `built[parent]` is there by the time it is asked for.
-			(parent < 0 ? root : built[parent]).add(node);
-			built.push(node);
+			// The starting row is the tree; everything else hangs off whatever
+			// built its parent.
+			if (i === from) root = node;
+			else (parent < 0 ? into : built[parent]).add(node);
+			built[i] = node;
 		}
 		return root;
 	}

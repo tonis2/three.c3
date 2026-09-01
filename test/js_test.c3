@@ -3715,6 +3715,149 @@ fn void instantiating_a_prop_twice_shares_the_upload() @test
 }
 
 <*
+ `asset.node(name)` is one piece of a kit, and nothing else in the file.
+
+ The property that makes a kit one `.glb` instead of ninety. `instantiate()`
+ builds the whole file however it is called — its `name` argument names the tree
+ it answers with — so a kit placed through it stamps every piece at every
+ placement. This picks `arm` out of `hierarchy.glb` and the other two roots have
+ to be absent: `pivot`, which is `arm`'s parent, and `loose`, which is a root of
+ its own.
+
+ `tip` lands at (2, 0, 0) rather than the (2, 0, -2) it reaches through the whole
+ tree, and the difference is the point: the subtree carries `arm`'s own scale of
+ 2 and *not* `pivot`'s quarter turn, because what was asked for is the piece and
+ not where the file laid it out.
+*>
+fn void a_named_node_comes_back_without_the_rest_of_the_file() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/hierarchy.glb");
+			const arm = kit.node("arm");
+
+			const scene = new three.Scene();
+			scene.add(arm);
+
+			const names = [];
+			arm.traverse(o => names.push(o.name));
+			const find = (o, name) => {
+				if (o.name === name) return o;
+				for (const c of o.children) {
+					const hit = find(c, name);
+					if (hit) return hit;
+				}
+				return null;
+			};
+			const tip = find(arm, "tip");
+			const at = o => o.getWorldPosition().toArray().map(n => Math.round(n * 1e4) / 1e4);
+
+			return {
+				root: arm.name,
+				isGroup: !(arm instanceof three.Mesh),
+				children: arm.children.length,
+				hasPivot: names.includes("pivot"),
+				hasLoose: names.includes("loose"),
+				tip: tip ? at(tip) : null,
+				stats: scene.stats(),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"root":"arm"`),
+			"the tree's root should be the node that was asked for: %s", result.value);
+		test::@check(result.value.contains(`"isGroup":true`),
+			"`arm` draws two primitives, so it is a group over them: %s", result.value);
+		test::@check(result.value.contains(`"children":3`),
+			"two primitives and `tip` make three children: %s", result.value);
+		test::@check(result.value.contains(`"hasPivot":false`),
+			"`arm`'s parent is not in its subtree: %s", result.value);
+		test::@check(result.value.contains(`"hasLoose":false`),
+			"the file's other root is not in its subtree: %s", result.value);
+		test::@check(result.value.contains(`"tip":[2,0,0]`),
+			"`arm`'s scale applies and `pivot`'s rotation does not: %s", result.value);
+		// `arm`'s two primitives and `tip`'s one. The file has four.
+		test::@check(result.stats.unique_meshes == 3,
+			"one piece of a four-mesh file drew %d unique meshes", result.stats.unique_meshes);
+	};
+}
+
+<*
+ Two pieces out of one file are two trees over one upload.
+
+ The same property `instantiating_a_prop_twice_shares_the_upload` asserts for the
+ whole file, and the one a kit lives or dies by: a hundred walls out of one
+ `.glb` have to be a hundred transforms and no second copy of anything. Two
+ copies of `arm` is two meshes drawn twice, and `loose` beside them is a third —
+ four instances over three uploads, out of one asset.
+*>
+fn void two_pieces_of_one_kit_share_the_upload() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/hierarchy.glb");
+			const scene = new three.Scene();
+
+			const left = kit.node("arm");
+			const right = kit.node("arm");
+			left.position.x = -5;
+			right.position.x = 5;
+			scene.add(left, right, kit.node("loose"));
+
+			return scene.stats();
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.stats.assets == 1,
+			"three pieces of one file report %d assets", result.stats.assets);
+		test::@check(result.stats.unique_meshes == 4,
+			"`arm`'s subtree is three meshes and `loose` is a fourth, got %d", result.stats.unique_meshes);
+		test::@check(result.stats.instances == 7,
+			"two copies of `arm`'s three meshes and one `loose` is seven, got %d", result.stats.instances);
+	};
+}
+
+<*
+ `asset.nodes` is the list, and a name that is not on it is a sentence.
+
+ A misspelled piece has to fail where it was written rather than as a null
+ somewhere later, and the message has to carry the names — a kit's pieces are not
+ guessable, exactly as a rig's bones are not.
+*>
+fn void a_kits_node_names_are_listed_and_a_typo_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = three.load("test/fixtures/hierarchy.glb");
+			let refused = "";
+			try { kit.node("wall_stone"); } catch (e) { refused = e.message; }
+			return {
+				nodes: kit.nodes,
+				refused,
+				// The names are read on demand and cached; asking twice is the
+				// same list rather than a second flatten with different contents.
+				again: kit.nodes.join(","),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"pivot"`) && result.value.contains(`"arm"`)
+			&& result.value.contains(`"tip"`) && result.value.contains(`"loose"`),
+			"every node of the file should be named: %s", result.value);
+		test::@check(result.value.contains(`no node named \"wall_stone\"`),
+			"the refusal should name what was asked for: %s", result.value);
+		test::@check(result.value.contains(`hierarchy.glb — it has: `),
+			"and should name the file and list what it does have: %s", result.value);
+	};
+}
+
+<*
  An instantiated tree is ordinary objects, not a sealed handle.
 
  The whole reason the host answers `instantiate()` with a *description* rather

@@ -29,6 +29,10 @@ import std::os::env;
 // Under `build/`, which is gitignored, so a failed run leaves nothing that
 // becomes a diff and `rm -rf build` is the whole of the cleanup.
 const String TEST_HOME = "build/test-home";
+// The two XDG roots, under it. Written out rather than composed, because a
+// const here is what the macro below assigns without allocating.
+const String TEST_CONFIG_HOME = "build/test-home/.config";
+const String TEST_CACHE_HOME = "build/test-home/.cache";
 
 <*
  Runs the body with every "where does user data go" variable pointing at
@@ -41,6 +45,7 @@ const String TEST_HOME = "build/test-home";
 macro @with_home(; @body)
 {
 	String[3] names;
+	String[3] values = { TEST_HOME, TEST_HOME, TEST_HOME };
 	usz name_count;
 	$if env::WIN32:
 		names[0] = "AppData";
@@ -50,6 +55,12 @@ macro @with_home(; @body)
 		names[1] = "XDG_CONFIG_HOME";
 		names[2] = "XDG_CACHE_HOME";
 		name_count = 3;
+		// The two XDG roots have to differ, or `saves_and_shaders_do_not_share_a_root`
+		// is asking a question the environment already answered: pointing both at
+		// one directory *is* one directory, whatever `paths.c3` does. They stay
+		// under TEST_HOME, which is what the rmtree and the cache-root check want.
+		values[1] = TEST_CONFIG_HOME;
+		values[2] = TEST_CACHE_HOME;
 	$endif
 
 	String[3] saved;
@@ -62,7 +73,7 @@ macro @with_home(; @body)
 			saved[i] = was;
 			had[i] = true;
 		}
-		env::set_var(names[i], TEST_HOME);
+		env::set_var(names[i], values[i]);
 	}
 
 	defer
