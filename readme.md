@@ -2,8 +2,7 @@
 
 A Three.js-shaped scene API over direct Vulkan.
 
-Write scenes in JavaScript; they run on a modern Vulkan renderer with no build step for
-shaders and no scene-graph tax. Connectable to a coding agent over MCP, which can build,
+Write scenes in JavaScript; they run on a modern Vulkan renderer. Connectable to a coding agent over MCP, which can build,
 inspect and debug a scene without you in the loop.
 
 ### Features
