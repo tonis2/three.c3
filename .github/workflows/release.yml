@@ -318,8 +318,8 @@ jobs:
           # the five templates in the binary and the compiler is linked in, so
           # the only file that has to travel BESIDE the executable is, on
           # macOS, the driver. Everything else in the zip — SKILL.md, LICENSE,
-          # README.md and examples/ — is documentation, not linkage, and its
-          # absence costs a reader rather than breaking a run.
+          # README.md, docs/ and examples/ — is documentation, not linkage, and
+          # its absence costs a reader rather than breaking a run.
 
           # macOS arm64 is the only platform that bundles a driver; setup.sh
           # skips the fetch everywhere else and Linux/Windows use the system's.
@@ -360,6 +360,27 @@ jobs:
           mkdir -p "$out/examples"
           cp examples/*.js "$out/examples/"
           echo "examples: $count scripts"
+
+          # The API reference ships as well — the same Markdown the website is
+          # built from and the same text `three.getApiDocs()` answers out of,
+          # ~250 KB across seven files. The engine's copy is compiled into the
+          # binary by tools/docs.mjs and is reachable only from inside a run,
+          # so an agent handed this folder has nothing to read BEFORE it writes
+          # its first script; on disk it has the whole reference, and grep.
+          #
+          # Guarded rather than `|| true` for the reason the examples are:
+          # README.md in this bundle points a reader at these files by name, so
+          # an empty docs/ would zip, upload and publish looking exactly like a
+          # full one.
+          doc_count=$({ ls docs/*.md 2>/dev/null || true; } | wc -l | tr -d ' ')
+          [ "$doc_count" -gt 0 ] || {
+            echo "::error::docs/ holds no .md files. README.md in this bundle"
+            echo "::error::names them, and an agent pointed at the folder would"
+            echo "::error::find the reference missing rather than smaller."
+            exit 1; }
+          mkdir -p "$out/docs"
+          cp docs/*.md "$out/docs/"
+          echo "docs: $doc_count pages"
 
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "out=$out"   >> "$GITHUB_OUTPUT"
