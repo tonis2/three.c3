@@ -869,6 +869,27 @@ programs. Pass `{ bake: true }` to run each shader body over its mesh's uv layou
 a `baseColorTexture` or `baseColorFactor` — the difference between a file that is your scene and a file
 that is your scene in one grey.
 
+## a-kit-in-one-file
+
+A kit is one `.glb` with a named node per piece, and `asset.node(name)` is what takes one out:
+
+```js
+const kit = three.load('buildings.glb');
+scene.add(kit.node('wall_stone'));       // one piece, at the origin
+scene.add(kit.instantiate());            // the whole file, as it was laid out
+```
+
+The two other doors cannot do it, and a kit authored without knowing that comes back wrong rather than
+empty. `instantiate(name)` names the tree it answers with — it always builds the *whole* file, so a
+loop calling it once per placement stamps the entire kit at every one of them. `mesh(name)` matches a
+glTF mesh, and mesh names come from the geometry: thirty pieces built out of boxes export as thirty
+meshes all called `box`, so there is nothing there to match.
+
+Node names survive an export and mesh names are not yours to set, so name the Group. A piece authored
+at the origin comes back at the origin — `node()` keeps the subtree's own transform and drops its
+ancestors' — and copies of one piece share their upload and instance into one draw call exactly as
+`instantiate()`'s do.
+
 ## static-casters
 
 A shadow pass rasterises every caster every frame, which for a village is the largest thing in the frame. Say

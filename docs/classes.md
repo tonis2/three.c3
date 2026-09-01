@@ -819,13 +819,36 @@ generator's one short cycle. `int(low, high)` is inclusive at both ends, as Thre
 three.load(path)
 ```
 
-A parsed `.glb` or `.gltf`. Two doors onto it: `instantiate()` for the file's own node hierarchy, and
-`mesh(name)` for one piece you place yourself.
+A parsed `.glb` or `.gltf`. Three doors onto it: `instantiate()` for the file's own node hierarchy,
+`node(name)` for one named part of that hierarchy, and `mesh(name)` for one piece you place yourself.
 
 `instantiate()` is Three.js's `gltf.scene` — the file's nodes as Object3Ds, with the transforms the
 file gave them. Use it for anything whose pieces are positioned by nodes rather than baked into the
 vertices: a rig, a prop with parts, a level laid out in Blender. Instantiating twice gives two
-independent trees over one upload.
+independent trees over one upload. Its `name` argument names the tree it answers with and does not
+pick anything out of the file — `node(name)` is the one that picks.
+
+`node(name)` is a kit in one file: the node that name belongs to, and everything under it, as a tree
+of its own. `asset.nodes` is the list of names it takes.
+
+```js
+const kit = three.load('buildings.glb');
+const wall = kit.node('wall_stone');
+wall.position.set(4, 0, -2);
+scene.add(wall);
+```
+
+It is the only door that can pick a piece out of a shared file, and the reason is worth knowing before
+a kit is authored. `mesh(name)` matches a glTF *mesh*, and an exported mesh is named after its
+geometry — thirty pieces built out of boxes are thirty meshes all called `box` — while `instantiate()`
+builds the whole file however it is called. A node keeps the name the file gave it, so a node is what
+a piece can be: name the group, not the geometry.
+
+The subtree arrives carrying its own transform and none of its ancestors', so a piece authored at the
+origin comes back at the origin whatever the file wrapped it in. Two nodes may share a name, and the
+first one the file walks is the answer. Calling it twice gives two trees over one upload, as
+`instantiate()` does, and the options mean the same things. Animation does too: the tree's root carries
+the file's clips, and a channel naming a node outside the subtree drives nothing rather than failing.
 
 `{ materials: true }` builds a material per glTF material and puts it on the meshes that wear it, which
 is how a `.glb` authored with `alphaMode BLEND` renders blended and how a file's normal maps and
@@ -864,6 +887,7 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 
 - `path`
 - `meshes` — names, in load order
+- `nodes` — the file's node names, each once, in the order the loader walks them — what `node(name)` takes. Read on demand rather than at load
 - `animations` — clip names
 - `images` — how many pictures the file holds
 - `bones` — the rig's joint names — what `socket(name)` takes. Empty for a file with no skin
@@ -875,6 +899,8 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `imageAt(index, { colorSpace, generateMipmaps })`
 - `meshAsync(name)`
 - `meshAtAsync(index)`
+- `node(name, { skeleton, skinning, materials })`
+- `nodeAsync(name, { skeleton, skinning, materials })`
 - `instantiate(name?, { skeleton, skinning, materials })`
 - `instantiateAsync(name?, { skeleton, skinning, materials })`
 - `toJSON()`

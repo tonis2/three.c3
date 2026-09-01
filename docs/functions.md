@@ -157,7 +157,8 @@ copy's `mesh.color`, so a scene of many colours reloads as the one draw call it 
 counts the nodes written that way.
 
 - A copy with no sibling drawing the same shape keeps its name and its own material, and groups are
-  never collapsed.
+  never collapsed. Node names are what survive — mesh names come from the geometry — so a kit written
+  this way is read back with `asset.node(name)`, one named Group per piece.
 - Siblings sharing a shape but not a material do not batch: a colour travels per copy in `_COLOR_0`,
   but a texture, a blend mode and a layer stack have no per-copy channel.
 - Copies made with `asset.instantiate()` are not siblings — each arrives in its own group — so they
