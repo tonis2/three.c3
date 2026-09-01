@@ -28,44 +28,15 @@ import std::io::path;
 faultdef SHADER_NOT_FOUND;
 
 <*
- Whether a `shaders/` directory beside the working directory may override the
- templates in the binary.
-
- On by default, which is what makes editing a `.slang` and re-running pick it up.
- Off is for a run whose working directory belongs to somebody else — see
- `set_shader_override`.
-*>
-bool shader_override_allowed @local = true;
-
-<*
- Turns the on-disk override off, or back on.
-
- **An application that links the engine is the reason this exists.** It runs from
- its own checkout — it needs the working directory for its own assets, crig's font
- among them — and if that checkout happens to contain a `shaders/mesh.slang` of
- its own, three silently compiles *that* instead of its own. What comes out is a
- shader that does not match three's push contract, and the run dies at startup
- with a sentence about a push block, naming nothing that would lead anyone to the
- working directory.
-
- `--shader-dir ""` is how the command line says it.
-*>
-fn void set_shader_override(bool allowed)
-{
-	shader_override_allowed = allowed;
-}
-
-<*
  Where a template is looked for: `mesh.slang` and the four beside it.
 
  Both candidates are relative to the working directory, because `c3c run`, a
  shell at the project root and `c3c test` all start there.
 
- @return ? SHADER_NOT_FOUND : `No shader by that name on the search path, or the override is off.`
+ @return ? SHADER_NOT_FOUND : `No shader by that name on the search path.`
 *>
 fn String? find_shader(String name, alloc::Allocator allocator = mem)
 {
-	if (!shader_override_allowed) return SHADER_NOT_FOUND~;
 	@pool()
 	{
 		String[2] candidates = {
@@ -118,7 +89,7 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem)
 			// binary changes what the GPU runs, and when it is the wrong file the
 			// failure names a push block rather than a path — so the one line that
 			// would have explained it has to be printed before it can fail.
-			io::printfn("three: %s from %s (not the built-in — --shader-dir \"\" to ignore)", name, path);
+			io::printfn("three: %s from %s (not the built-in)", name, path);
 			return load_source(path, allocator);
 		}
 	};

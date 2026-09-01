@@ -127,14 +127,6 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
-			case "--shader-dir":
-				if (i + 1 >= args.len) return MISSING_VALUE~;
-				// Only the empty string is meaningful today: it turns the working
-				// directory's `shaders/` override off. A real directory would be the
-				// obvious next step and nothing here refuses one — it is simply not
-				// what the flag is for yet.
-				opts.shader_dir = args[++i];
-				opts.shader_dir_given = true;
 			case "--mcp-stdio":
 				// The same optional port, for the same reason — and a port already
 				// named by an earlier `--mcp` is kept, so the two flags compose in
@@ -212,7 +204,6 @@ fn void usage()
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
-	io::printn("  --shader-dir <dir>    override the built-in shaders (empty string: never)");
 	io::printn("  -h, --help            this");
 	io::printn("");
 	io::printn("  There is no file argument: a model is loaded from a script, with");

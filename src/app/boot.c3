@@ -104,11 +104,6 @@ struct Options
 	*>
 	String cache_dir;
 	bool cache_dir_set;
-	// `--shader-dir ""` turns off the working directory's shader override, which an
-	// application run from its own checkout usually wants — see
-	// `set_shader_override`.
-	String shader_dir;
-	bool shader_dir_given;
 	bool help;
 }
 
@@ -176,12 +171,6 @@ macro @debug_log(format, ...)
 *>
 fn void choose_caches(Options opts)
 {
-	// The shader *override* rather than the shader cache, and settled here because
-	// this is where every "where does a file come from" decision is made. An
-	// application that links the engine and runs from its own checkout is the case
-	// it exists for: a `shaders/` in there is not three's.
-	if (opts.shader_dir_given && opts.shader_dir.len == 0) set_shader_override(false);
-
 	@pool()
 	{
 		if (opts.cache_dir_set && opts.cache_dir.len == 0)
