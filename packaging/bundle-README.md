@@ -2,7 +2,8 @@
 
 A single binary that renders a scene described in JavaScript. The API is
 Three.js-shaped, but it is not Three.js — `SKILL.md` beside this file is the
-guide, and `three.getApiDocs()` inside the engine is the reference.
+guide, and the reference is `docs/` here on disk or `three.getApiDocs()` from
+inside a run; they are the same text.
 
 ## Run it
 
@@ -51,11 +52,29 @@ answers to. Add `--mcp` to any of them to attach an agent to the scene while
 it runs. Those headers spell the command `./build/three`, which is the path in
 a source checkout; from this folder it is `./three`.
 
+## The reference
+
+`docs/` is the whole scripting API as Markdown, and it is the same text the
+engine answers `three.getApiDocs()` out of — the compiled copy inside the
+binary is generated from these files:
+
+    docs/differences.md   where this is not Three.js — read this one first
+    docs/classes.md       the constructors, their properties and their methods
+    docs/functions.md     everything on `three` itself, keyed by the whole call
+    docs/stats.md         what each number from `scene.stats()` counts
+    docs/intersection.md  the record a raycast or a pick answers with
+    docs/examples.md      a complete scene, with the draw calls it ends on
+
+`docs/README.md` indexes them. On disk they are greppable before a run starts,
+which is why they travel with the binary: an agent writing its first script
+against this bundle can read the API without one.
+
 ## What is in here
 
     three            the engine, with the Slang shader compiler linked in
     libvulkan_*      the GPU driver (macOS only — see below)
     SKILL.md         the guide
+    docs/            the API reference — see above
     examples/        five scenes to run — see below
     LICENSE
 

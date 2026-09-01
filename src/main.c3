@@ -219,9 +219,10 @@ fn void usage()
 	io::printn("    escape to quit and shift+R to reload, in the window");
 	io::printn("");
 	io::printn("  The shader templates and the compiler that builds them are inside this");
-	io::printn("  executable, so it runs from any directory. Compiled shaders are cached");
-	io::printn("  under a checkout's build/, and otherwise in the platform's own cache");
-	io::printn("  directory — --cache-dir or THREE_CACHE_DIR move it.");
+	io::printn("  executable, so it runs from any directory. A shaders/ in the working");
+	io::printn("  directory is compiled instead of the built-in copy, and the run says so.");
+	io::printn("  Compiled shaders are cached under a checkout's build/, and otherwise in");
+	io::printn("  the platform's cache directory — --cache-dir or THREE_CACHE_DIR move it.");
 }
 
 
@@ -256,11 +257,9 @@ fn int main(String[] args)
 	if (catch err = run(opts))
 	{
 		io::printfn("three: %s", err);
-		// The one failure with an obvious next step, and the one most likely to be
-		// hit: the shaders are read from disk relative to the working directory, so
-		// running from anywhere but the project root finds nothing. There is no
-		// build step to suggest and no flag either — five templates are looked up
-		// this way, and a flag naming one of them fixed nothing.
+		// All six templates are in the binary, so this is never a missing
+		// shaders/ directory and there is no build step to suggest: it is a name
+		// that is on neither the search path nor in here, which is a typo.
 		if (err == SHADER_NOT_FOUND)
 		{
 			io::printn("  No template by that name, on the search path or in this binary. The six");
