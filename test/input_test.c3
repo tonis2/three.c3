@@ -16,11 +16,9 @@ module three_tests::input;
 
 import three;
 import c3w;
-import qjs;
 import vk;
 import image;
 import std::core::test;
-import std::io;
 import std::time;
 
 macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))

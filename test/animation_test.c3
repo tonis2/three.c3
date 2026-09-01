@@ -23,9 +23,7 @@ module three_tests::animation;
 
 import three;
 import vk;
-import collision;
 import std::core::test;
-import std::io;
 import std::io::file;
 import std::math;
 import std::math::vector;

@@ -27,7 +27,6 @@
 *>
 module three;
 
-import std::io;
 import vk;
 
 faultdef SURFACE_CANNOT_BLIT, NO_PRESENTABLE_SURFACE;

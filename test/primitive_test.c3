@@ -32,9 +32,7 @@
 module three_tests::primitive;
 
 import three;
-import collision;
 import std::core::test;
-import std::io;
 import std::math;
 import std::math::vector;
 

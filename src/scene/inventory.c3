@@ -20,8 +20,6 @@
 *>
 module three;
 
-import std::io;
-import std::io::file;
 import std::io::path;
 import std::collections::list;
 import std::math;

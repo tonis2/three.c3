@@ -36,11 +36,9 @@
 *>
 module three;
 
-import std::math;
 import std::math::vector;
 import std::collections::list;
 import std::sort;
-import collision;
 
 faultdef NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT, NO_SUCH_LINE_SHAPE;
 

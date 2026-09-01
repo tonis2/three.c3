@@ -18,8 +18,6 @@
 *>
 module three;
 
-import std::io;
-import qjs;
 
 <*
  The specifier space the prelude's own modules live in.

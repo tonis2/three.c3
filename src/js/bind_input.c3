@@ -70,7 +70,6 @@
 *>
 module three;
 
-import std::io;
 import std::math;
 import c3w;
 import qjs;

@@ -30,7 +30,6 @@
 *>
 module three;
 
-import std::io;
 
 faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
 faultdef POST_TAP_UNKNOWN;

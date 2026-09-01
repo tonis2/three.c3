@@ -225,7 +225,6 @@
 *>
 module three;
 
-import std::io;
 import std::io::file;
 import std::math;
 import std::math::vector;
@@ -233,7 +232,6 @@ import std::collections::list;
 import gltf;
 import image;
 import image::png;
-import collision;
 
 faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
 

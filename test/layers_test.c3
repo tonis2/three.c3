@@ -38,7 +38,6 @@ import three;
 import vk;
 import image;
 import std::core::test;
-import std::io;
 import std::math;
 
 const String FIXTURE = "test/fixtures/layered.glb";

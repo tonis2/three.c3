@@ -42,7 +42,6 @@
 *>
 module three;
 
-import std::io;
 import std::time;
 import std::math::vector;
 import qjs;

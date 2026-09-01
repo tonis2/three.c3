@@ -17,7 +17,6 @@
 *>
 module three;
 
-import std::io;
 import std::math;
 import std::math::vector;
 import qjs;

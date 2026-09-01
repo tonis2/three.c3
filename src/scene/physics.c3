@@ -6,7 +6,6 @@ import std::math;
 import std::math::vector;
 import std::math::quaternion;
 import collision;
-import std::io;
 
 faultdef
 	// The node draws nothing, so there is no size to take a collider from.
@@ -279,28 +278,6 @@ fn collision::Rigidbody* Physics.rigidbody_for(&self, NodeId node)
 	collision::Rigidbody*? rigid = self.world.find_body(body.id);
 	if (catch rigid) return null;
 	return rigid;
-}
-
-<*
- Whether a script may set this node's velocity or push it with an impulse.
-
- Dynamic only, and the two refusals are different mistakes. A static body has an
- inverse mass of zero, so an impulse is arithmetically a no-op and a velocity
- written onto it is overwritten by the next integration — the script sees nothing
- happen and has nothing to read. A kinematic body has its transform driven from
- the script every step by `set_kinematic_target`, so a velocity written here is
- discarded a fraction of a step later, which is worse because it *sometimes*
- appears to work.
-
- Both are refused by name at the binding rather than silently absorbed here — the
- same call `Scene.set_position` makes for a dynamic body's transform, pointing
- the other way: each kind of body has exactly one way to be moved, and the other
- one throws.
-*>
-fn bool Physics.can_be_pushed(&self, NodeId node)
-{
-	PhysicsBody* body = self.body_for(node);
-	return body != null && body.kind == BodyKind.DYNAMIC;
 }
 
 <*

@@ -31,7 +31,6 @@
 *>
 module three;
 
-import std::io;
 
 // The marker lines, matched after trimming so a template can indent them to read
 // naturally. A template that does not contain one never reaches its branch —

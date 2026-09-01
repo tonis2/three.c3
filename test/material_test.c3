@@ -26,7 +26,6 @@ import three;
 import vk;
 import slang;
 import std::core::test;
-import std::io;
 import std::io::path;
 import std::io::file;
 

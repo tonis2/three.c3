@@ -37,7 +37,6 @@
 module three;
 
 import std::collections::list;
-import std::math;
 
 <*
  One node's morph weights.

@@ -110,7 +110,6 @@
 *>
 module three;
 
-import std::io;
 import std::math;
 import std::math::matrix;
 import std::math::vector;

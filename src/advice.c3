@@ -150,9 +150,6 @@ fn void advise_quiet(bool quiet)
 	advice_quiet = quiet;
 }
 
-// How many messages the sink is holding.
-fn usz advice_count() => advice_held;
-
 // How many were refused for want of room. Reported rather than hidden: a count
 // that silently stopped rising would read as advice that stopped being given.
 fn usz advice_dropped() => advice_lost;

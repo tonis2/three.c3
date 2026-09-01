@@ -16,7 +16,6 @@
 *>
 module three_tests::inventory;
 
-import std::io;
 import three;
 
 const String FIXTURE_DIR = "test/fixtures";

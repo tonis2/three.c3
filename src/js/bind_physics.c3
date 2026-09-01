@@ -27,7 +27,6 @@
 *>
 module three;
 
-import std::io;
 import std::collections::object;
 import std::core::string;
 import collision;

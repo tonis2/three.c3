@@ -32,10 +32,7 @@ module three_tests::lines;
 
 import three;
 import vk;
-import qjs;
 import std::core::test;
-import std::io;
-import std::math;
 
 <*
  A runtime with a headless device.

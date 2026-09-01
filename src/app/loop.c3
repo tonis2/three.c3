@@ -27,16 +27,10 @@
 module three;
 
 import std::io;
-import std::io::file;
-import std::io::path;
-import std::math;
 import std::thread;
 import std::time;
 import c3w;
-import vk;
-import image;
 import mcp;
-import qjs;
 <*
  Hands the window's own size to the swapchain, in device pixels.
 

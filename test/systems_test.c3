@@ -21,9 +21,7 @@ module three_tests::systems;
 
 import three;
 import vk;
-import qjs;
 import std::core::test;
-import std::io;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {

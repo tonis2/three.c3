@@ -30,7 +30,6 @@ import std::io;
 import std::io::file;
 import std::io::path;
 import std::math;
-import std::thread;
 import std::time;
 import c3w;
 import vk;

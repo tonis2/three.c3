@@ -16,9 +16,7 @@
 module three_tests::frame;
 
 import three;
-import qjs;
 import std::core::test;
-import std::io;
 import std::math;
 import std::time;
 

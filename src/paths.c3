@@ -28,8 +28,6 @@
 *>
 module three;
 
-import std::io;
-import std::io::file;
 import std::io::path;
 import std::os::env;
 import libc;
