@@ -10,47 +10,7 @@
 // single frame, `t` shows the swatch board, `d` toggles the shadow map, `n`
 // re-rolls every texture from a new seed, and `s` prints what the frame costs.
 //
-// What it is here to show
-// -----------------------
-// **Nothing is loaded.** There is no .glb, no .png and no assets directory —
-// every shape is one of the six parametric ones and every image is a
-// `DataTexture` built by a loop in this file. The whole village is six
-// geometries: a box, a pyramid, a cone, a rod, a ball and a quad.
-//
-// **Variety is scale and colour, not more assets.** Ten houses of ten
-// different sizes are ten transforms of one unit box, so the walls are a
-// single draw call and the roofs are another; `mesh.color` tints each one and
-// costs nothing, because colour is a per-copy channel. `stats().assets` stays
-// at six however many houses the loop builds.
-//
-// **The people are made of the same parts as the lamp posts.** A person is a
-// ball, a rod for the body, four rods for the limbs and a cone for the hat —
-// and a lamp post is a rod with a ball on top, so adding the lamps costs no
-// new draw call at all. Limbs hang off Groups placed at the joint, which is
-// what lets a rotation be a swing rather than a spin: `rotation.x` on a hip.
-//
-// **A map lives on a material, so an image is a bucket.** That is the whole
-// reason the count sits where it does: nine textures over one quad is the
-// nine draw calls of the swatch board, while ten houses over one box is one.
-// Press `t` to put the board up and watch `drawCalls` move by nine.
-//
-// **Generated pixels are cheap to make and free to keep.** `n` throws the
-// seed away and rebuilds all nine images — the grain of the plaster, the
-// jitter of the cobbles, the tone of every brick and shingle. It is one
-// `new three.DataTexture` per image and one `material.map =` per material;
-// nothing is reloaded and no pipeline is rebuilt.
-//
-// The swatch board is the honest part of the demo: each panel shows one image
-// laid on flat with `repeat = [1, 1]`, so what the ground and the roofs are
-// tiling out of is visible next to them rather than only in a comment.
 
-// ---------------------------------------------------------------------------
-// Noise
-//
-// Everything below is a function of `seed`, so the same seed is the same
-// village down to the last brick — which is what makes `n` a comparison and
-// not just a shuffle.
-// ---------------------------------------------------------------------------
 
 const SIZE = 128;
 let seed = 20260823;

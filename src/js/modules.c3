@@ -50,11 +50,21 @@ fn void JsRuntime.install_module_hooks(&self)
 <*
  Points `import` at a directory, letting a game's own modules resolve.
 
+ A trailing separator is cut first, because `--assets kit/` is what a shell's
+ own tab completion types and everything downstream joins with a separator of
+ its own. The one that bit is `render/ui.c3`'s file browser: a listing is
+ written without the trailing slash, so `kit/` contained nothing — not even
+ itself — and the browser was sent home to a root it was already at, forever.
+ Root "/" keeps its slash: cutting that one leaves the empty string, which
+ means "no assets directory at all" and so no confinement.
+
  @param root : `The assets directory. Copied.`
 *>
 fn void JsRuntime.set_assets_root(&self, String root)
 {
-	self.modules.set_root(root);
+	String trimmed = root;
+	while (trimmed.len > 1 && trimmed[^1] == '/') trimmed = trimmed[..^2];
+	self.modules.set_root(trimmed);
 
 	// A directory that boots is a game, and a game's frames are warned about
 	// rather than killed. See `JsRuntime.play_frames`.

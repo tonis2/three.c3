@@ -974,6 +974,11 @@ struct UiLayer
 	// because `set_scale` has to re-size the Ui and is not handed a target.
 	Vec2 extent;
 
+	// True only while a file browser is being sent back inside its root. See
+	// `ui_file_directory`: the send lands in the same handler, and without this
+	// a root that cannot contain itself would recurse forever.
+	bool confining;
+
 	// Whether the interface took this frame's pointer and keyboard. Recomputed
 	// by `feed`, read by the window loop — the click that presses a button must
 	// not also orbit the camera or reach a script.
@@ -1787,7 +1792,13 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	// read from a widget callback on some later frame — see `ui_file_directory`.
 	if (spec.kind == UiNodeKind.FILE_BROWSER)
 	{
-		if (spec.root.len > 0) held.root = held.keep(spec.root);
+		// Trailing separators come off first: a listing is written without one
+		// (`FileBrowser.go_to` trims what it is given), so a root that kept its
+		// slash would contain nothing at all — see `ui_file_directory` and
+		// `JsRuntime.set_assets_root`, which trims the other way in.
+		String confined = spec.root;
+		while (confined.len > 1 && confined[^1] == '/') confined = confined[..^2];
+		if (confined.len > 0) held.root = held.keep(confined);
 		if (spec.scheme.len > 0) held.scheme = held.keep(spec.scheme);
 		// Where the browser opens: what the user was last looking at if this is a
 		// rebuild of one, and what the snapshot asked for otherwise. Confined
@@ -3011,6 +3022,16 @@ fn void ui_file_directory(cui::Ui* ui, String path) @local
 	UiNode* node = &layer.nodes[at];
 	if (!ui_inside(path, node.root))
 	{
+		// The bounce goes through `go_to`, which fires this handler again from
+		// wherever it lands — so a root that does not contain ITSELF recurses
+		// until the stack is gone. A trailing separator on `--assets` was
+		// exactly that root, and the crash was a stack overflow inside a string
+		// format rather than anything to do with browsing. The root is trimmed
+		// where it is set now; this is the guard that keeps the class of bug to
+		// a browser that will not move rather than a process that dies.
+		if (layer.confining) return;
+		layer.confining = true;
+		defer layer.confining = false;
 		node.element.widget_as(cui::widgets::FileBrowser).go_to(node.element, node.root);
 		return;
 	}

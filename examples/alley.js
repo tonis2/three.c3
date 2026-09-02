@@ -5,35 +5,7 @@
 //     ./build/three --script examples/alley.js
 //     ./build/three --script examples/alley.js --mcp   # and attach an agent to it
 //
-// or paste it into `run_script` against a `./build/three --mcp`.
-//
-// Once it is running, the keys are: space to roll, `r` to re-rack, `b` to
-// bomb the stack from underneath, `a` to stop and start the auto-cycle. Left
-// alone it rolls itself every ~7.7 seconds.
-//
-// What it is here to show
-// -----------------------
-// **One floor mesh, not four hundred.** The ground is a single
-// PlaneGeometry(40, 40) with `repeat = [20, 20]`, so it shows 400 tiles. The
-// tile image carries a border and an off-centre stud on purpose: a stretched
-// texture shows one stud, a tiled one shows as many studs as it repeats, so
-// the claim cannot be faked by an image that happens to look busy.
-//
-// **One brick image, two walls that disagree.** Textures are deduplicated by
-// content, so loading the bricks twice is one texture slot. The uv transform
-// lives on the *material* rather than on the texture, which is what lets the
-// side wall scroll its `offset` every frame while the back wall stands still.
-//
-// **setVelocity assigns, applyImpulse adds.** The ball is given a speed; the
-// capstone is given a push. An off-centre impulse is a shove and a tumble
-// from one call.
-//
-// **A dynamic body refuses a transform write** — the solver owns it. So
-// re-racking is not `position.set()`, it is remove the body, move the node,
-// give it a body back. See `A.rerack` below.
-//
-// The whole scene is 5 draw calls and 14 instances: the ten crates are ten
-// different tints and still one call, because colour is a per-copy channel.
+
 
 function tileTexture(size, border, ink, face, stud) {
 	const px = new Uint8Array(size * size * 4);

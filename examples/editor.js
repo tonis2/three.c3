@@ -23,57 +23,37 @@
 //
 // ## Controls
 //
-//   click            select · place the stamp · commit a grab
+//   click            select the piece under the cursor, or nothing · commit a grab
+//   shift+click      add the piece to the selection, or take it back out
+//   ctrl+click       place the asset browser's stamp here
 //   1 / 2 / 3        grid / face / marker snap mode
 //   g                grab the selection and move it live under the cursor
+//   s                scale the selection live — pull away to grow, in to shrink
+//   x / y / z         while grabbing or scaling: confine it to that axis, again frees it
 //   r / shift+r      rotate a quarter turn, the other way with shift
 //   arrows           nudge one unit on x/z · pageup/pagedown or [ / ]  y
 //   shift+d          duplicate (offset one unit on x) and start a grab
 //   delete / x       remove, after a confirm
 //   ctrl+z           undo · ctrl+shift+z or ctrl+y   redo
-//   escape           cancel a grab, or clear the asset-browser stamp
+//   escape           free a locked axis, then cancel the grab, then clear the stamp
 //   f / home         frame the selection / frame everything
 //   shift (held)     while placing or committing: skip the snap, freehand
 //
-// ## What already exists and is not rebuilt here
+// ## Grabbing and scaling on one axis
 //
-// The turntable (drag orbit, right-drag pan, wheel zoom) is the host's; this
-// script never touches the camera except to aim it, which is why nothing
-// below is a drag — every editor interaction is a click or a key, so nothing
-// ever fights the turntable for the mouse.
+// `g` then `x`, `y` or `z` is the Blender gesture and means the same thing: the
+// move is confined to that direction, measured along the line the piece started
+// on, and a line in that axis's own colour is drawn through it while it holds.
+// The same key again frees it, a different one switches, and escape steps back
+// out of the lock before it gives up on the move. The grid still applies to the
+// axis that moved, and shift still skips it.
 //
-// `three.onClick` and `three.input.pointer.clicked` turn out to share one
-// `MouseTracker` — both already drop a press that resolves into a camera
-// drag (a slop-and-hold test on release, not on press) and both already see
-// a blanked cursor while it is over a widget (`Cursor.behind_ui`, applied
-// before either one is fed). So there is no click here that needs telling
-// apart from a drag by hand. `three.onClick` is used anyway, for the single
-// reason it hands back `hit` — the same object `scene.pick` would have cost
-// a second BVH walk to ask for.
-//
-// ## The one thing this script works around
-//
-// `BoxHelper` must hang from the very parent of the object it outlines, so
-// the selection outline cannot live in the same Group the grid does — a
-// `Scene.bounds()` (what `frameAll` sees) does not check `visible` either,
-// only whether a node is drawable at all, so hiding the grid before framing
-// would not shrink the frame; it has to be unparented and reparented. See
-// `frameAllExcludingHelpers` and the comment on `helpers` below.
-//
-// ## The interface is a handful of widget classes
-//
-// Everything drawn — the dock, the properties panel, the status strip, the
-// menu bar, and the confirm/open/kit/save/export dialogs — is `three.Widget`
-// classes; `examples/pop.js` is the worked example of the pattern and its
-// header comment is worth reading first. `Chrome` is the one floor that owns
-// the dock, the properties panel, the status strip and the menu bar — the
-// menu bar is its LAST child, so an open dropdown paints over the panels
-// beside it rather than under them, which is the layering bug this rewrite
-// fixes. `Dialogs` is a second floor (`static layer = 1`) over the top, for
-// the modal panels. `Catalog`, `Browser`, `Card`, `Props` and `StatusBar` are
-// parts: constructed once, holding their own state, never rebuilt — a field
-// write on one marks its owning floor dirty, and only the values that
-// actually changed cross to the host.
+// `s` is the same shape, and takes the same axis keys for a non-uniform scale.
+// Its ruler is how far the cursor is from the piece on the piece's own ground
+// plane — pull away to grow, come in to shrink — because there is no
+// world-to-screen projection here to measure Blender's screen distance with.
+// The factor rounds to quarters unless shift is held, each piece scales about
+// its own pivot, and a click commits exactly as a grab's does.
 
 // ---------------------------------------------------------------------------
 // World
@@ -82,11 +62,11 @@
 const scene = new three.Scene();
 three.light.set([0.4, 0.85, 0.32], 0.35);
 
-// Grid and selection outline both want to sit apart from the level's own
+// Grid and selection outlines both want to sit apart from the level's own
 // pieces so a script can tell "the kit" from "the editor's own furniture" at
 // a glance — `level.objects` is exactly the first half. Only the grid lives
 // here, though: a BoxHelper is refused anywhere but the parent of what it
-// outlines, so the selection outline hangs directly off `scene`, beside the
+// outlines, so a selection outline hangs directly off `scene`, beside the
 // pieces, and `frameAllExcludingHelpers` only has the grid worth excluding —
 // a selection box roughly reads as the piece it wraps anyway.
 const helpers = new three.Group();
@@ -94,7 +74,42 @@ helpers.name = '__helpers__';
 scene.add(helpers);
 const gridHelper = new three.GridHelper(40, 40, 0x445566);
 helpers.add(gridHelper);
-let selectionHelper = null;
+// One per selected piece, in the selection's own order. The active piece — the
+// last one picked — is the bright one, because a grab and the properties panel
+// are both about that one and nothing else says which it is.
+let selectionHelpers = [];
+const ACTIVE_COLOR = 0xffff00;
+const ALSO_COLOR = 0xb08a20;
+const CLASH_COLOR = 0xff3333;
+
+// The line drawn along a locked axis while a grab is constrained to it, in the
+// colours an axis is always drawn in — x red, y green, z blue, the same three
+// `AxesHelper` uses. It lives in `helpers` rather than beside the pieces for
+// one reason worth naming: it is 200 units long, and `frameAll` measures what
+// is drawable rather than what is interesting, so anywhere else a `home` press
+// mid-grab would frame the guide instead of the level.
+const AXIS_COLOR = { x: 0xff4d4d, y: 0x4dff77, z: 0x4d9dff };
+const AXIS_REACH = 100;
+let axisGuide = null;
+
+function showAxisGuide(axis, at) {
+	hideAxisGuide();
+	if (!axis) return;
+	const min = { x: at.x, y: at.y, z: at.z };
+	const max = { x: at.x, y: at.y, z: at.z };
+	min[axis] -= AXIS_REACH;
+	max[axis] += AXIS_REACH;
+	// A box with two axes of zero size draws as the line along the third: the
+	// twelve edges collapse onto one segment, which is the picture wanted and
+	// one mesh rather than a new primitive.
+	axisGuide = new three.Box3Helper(new three.Box3(min.x, min.y, min.z, max.x, max.y, max.z), AXIS_COLOR[axis]);
+	helpers.add(axisGuide);
+}
+
+function hideAxisGuide() {
+	if (axisGuide && axisGuide.parent) axisGuide.parent.remove(axisGuide);
+	axisGuide = null;
+}
 
 function frameAllExcludingHelpers() {
 	const parent = helpers.parent;
@@ -124,6 +139,29 @@ function groundHit(px, py, planeY) {
 	const t = (planeY - r.origin.y) / r.direction.y;
 	if (t < 0) return null;
 	return r.origin.clone().addScaledVector(r.direction, t);
+}
+
+// How far along `axis` the cursor is, for a grab locked to one direction: the
+// point on the line `start + t * axis` closest to the ray through the pixel,
+// which is the only reading that works for y as well as for x and z — a
+// horizontal plane says nothing about height.
+//
+// The classic closest-approach of two lines. Answers the axis's new coordinate,
+// or null when the camera is looking straight down the axis and the answer is
+// a division by nearly zero rather than a position.
+function axisUnderCursor(start, axis, px, py) {
+	const ray = three.camera.ray(px, py);
+	const u = { x: axis === 'x' ? 1 : 0, y: axis === 'y' ? 1 : 0, z: axis === 'z' ? 1 : 0 };
+	const v = ray.direction;
+	const w = { x: start.x - ray.origin.x, y: start.y - ray.origin.y, z: start.z - ray.origin.z };
+	const b = u.x * v.x + u.y * v.y + u.z * v.z;
+	const c = v.x * v.x + v.y * v.y + v.z * v.z;
+	const uw = u.x * w.x + u.y * w.y + u.z * w.z;
+	const vw = v.x * w.x + v.y * w.y + v.z * w.z;
+	// a is u·u, and u is a unit axis, so it is 1.
+	const denom = c - b * b;
+	if (Math.abs(denom) < 1e-6) return null;
+	return start[axis] + (b * vw - c * uw) / denom;
 }
 
 // Walks up from whatever `scene.pick` handed back — often a Mesh several
@@ -275,9 +313,15 @@ function setCurrentAsset(asset) {
 
 const state = {
 	mode: three.persist.mode ?? 'grid',
-	selected: null,
+	// The selection, in the order it was picked. The last id is the active one
+	// — see the header comment; `activeId()` is the only reader of that rule.
+	selection: [],
 	stamp: null,
 	grab: null,
+	// The live scale gesture, `s`, shaped like `grab`: an original per piece to
+	// measure against, an optional axis, and the factor the cursor is asking
+	// for. Only ever one of the two is live — a modal verb at a time.
+	scaling: null,
 	path: null,
 	dirty: false,
 	showGrid: true,
@@ -286,7 +330,7 @@ const state = {
 	pieces: [],
 	pendingKit: null,
 	dockOpen: three.persist.dockOpen ?? true,
-	confirmDeleteId: null,
+	confirmDeleteIds: [],
 	confirmDeleteOpen: false,
 	confirmNewOpen: false,
 	openDialogOpen: false,
@@ -316,10 +360,19 @@ function markDirty() { state.dirty = true; }
 
 function syncPersist() {
 	three.persist.path = state.path;
-	three.persist.selected = state.selected;
+	three.persist.selected = state.selection;
 	three.persist.mode = state.mode;
 	three.persist.dockOpen = state.dockOpen;
 }
+
+// The active piece: the last one picked, and the one every "there is only room
+// to say this about one of them" reading is about — the properties panel, the
+// snap a grab makes, the marker choice.
+function activeId() {
+	return state.selection.length > 0 ? state.selection[state.selection.length - 1] : null;
+}
+
+function isSelected(id) { return state.selection.includes(id); }
 
 // ---------------------------------------------------------------------------
 // Undo / redo — snapshots of level.toJSON(), deep-cloned because toJSON()
@@ -355,7 +408,8 @@ function undo() {
 	if (undoStack.length === 0) return;
 	pushSnapshot(redoStack, snapshot());
 	restore(undoStack.pop());
-	select(state.selected && level.objects.has(state.selected) ? state.selected : null);
+	// The ids that survived the restore, in the order they were picked.
+	select(state.selection.filter(id => level.objects.has(id)));
 	markDirty();
 	syncUI();
 }
@@ -364,7 +418,8 @@ function redo() {
 	if (redoStack.length === 0) return;
 	pushSnapshot(undoStack, snapshot());
 	restore(redoStack.pop());
-	select(state.selected && level.objects.has(state.selected) ? state.selected : null);
+	// The ids that survived the restore, in the order they were picked.
+	select(state.selection.filter(id => level.objects.has(id)));
 	markDirty();
 	syncUI();
 }
@@ -424,12 +479,16 @@ function placeByMode(object, groundPoint, pickHit, opts = {}) {
 	return null;
 }
 
+// Whether `object` is inside anything that is not part of the selection —
+// what turns the outlines red while a grab is live. The whole selection is
+// excluded rather than just this one piece, because a row of walls moving
+// together is not a collision with itself.
 function overlapsAnother(object) {
 	const box = object.boundingBox().expandByScalar(-0.01);
 	const hits = three.query.box(box);
 	for (const hit of hits) {
 		const other = pieceOf(hit);
-		if (other && other !== object) return true;
+		if (other && other !== object && !isSelected(other.name)) return true;
 	}
 	return false;
 }
@@ -480,176 +539,428 @@ function placeNewPiece(piece, groundPoint, pickHit, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Selection and the outline that follows it
+// Selection and the outlines that follow it
 // ---------------------------------------------------------------------------
 
-function rebuildSelectionHelper() {
-	if (selectionHelper && selectionHelper.parent) selectionHelper.parent.remove(selectionHelper);
-	selectionHelper = null;
-	if (state.selected) {
-		const object = level.objects.get(state.selected);
-		if (object && object.parent) {
-			selectionHelper = new three.BoxHelper(object, 0xffff00);
-			object.parent.add(selectionHelper);
-		}
+function rebuildSelectionHelpers() {
+	for (const { helper } of selectionHelpers) if (helper.parent) helper.parent.remove(helper);
+	selectionHelpers = [];
+	const active = activeId();
+	for (const id of state.selection) {
+		const object = level.objects.get(id);
+		if (!object || !object.parent) continue;
+		const helper = new three.BoxHelper(object, id === active ? ACTIVE_COLOR : ALSO_COLOR);
+		object.parent.add(helper);
+		selectionHelpers.push({ id, helper });
 	}
 }
 
-function select(id) {
-	state.selected = id && level.objects.has(id) ? id : null;
+function updateSelectionHelpers() {
+	const active = activeId();
+	for (const { id, helper } of selectionHelpers) {
+		helper.update();
+		const object = level.objects.get(id);
+		const clash = object ? overlapsAnother(object) : false;
+		helper.color = clash ? CLASH_COLOR : id === active ? ACTIVE_COLOR : ALSO_COLOR;
+	}
+}
+
+// The one writer of `state.selection` — everything else goes through `select`
+// or `toggleSelected`, so the outlines, the panel and `three.persist` cannot
+// drift from the list.
+function setSelection(ids) {
+	// A Set keeps it deduplicated and an array keeps the order it was picked
+	// in, which is the order the last-is-active rule reads.
+	const seen = new Set();
+	const kept = [];
+	for (const id of ids) {
+		if (!id || seen.has(id) || !level.objects.has(id)) continue;
+		seen.add(id);
+		kept.push(id);
+	}
+	state.selection = kept;
 	state.markerChoice = null;
 	state.markerChoices = [];
-	rebuildSelectionHelper();
+	rebuildSelectionHelpers();
 	syncPersist();
 	syncUI();
+}
+
+// One id, a list of them, or null for nothing.
+function select(ids) {
+	if (ids === null || ids === undefined) { setSelection([]); return; }
+	setSelection(Array.isArray(ids) ? ids : [ids]);
+}
+
+// What shift+click does: out if it was in, and on the END if it was not, so
+// the piece just added is the active one.
+function toggleSelected(id) {
+	if (!id || !level.objects.has(id)) return;
+	setSelection(isSelected(id) ? state.selection.filter(other => other !== id) : [...state.selection, id]);
 }
 
 // ---------------------------------------------------------------------------
 // Grab — a live preview driven by the cursor every frame, committed or
 // cancelled on a click / escape.
+//
+// The active piece is the one the cursor and the snap rules are about; the
+// rest of the selection holds the offset it had when the grab began, which is
+// what makes moving a wall and its door move the pair rather than stack them.
 // ---------------------------------------------------------------------------
 
 function grab() {
-	if (!state.selected || state.grab) return;
-	const object = level.objects.get(state.selected);
-	if (!object) return;
-	const row = level.rows.find(r => r.id === state.selected);
+	if (state.selection.length === 0 || state.grab || state.scaling) return;
+	const id = activeId();
+	const lead = level.objects.get(id);
+	if (!lead) return;
+	const row = level.rows.find(r => r.id === id);
+	const followers = [];
+	const original = new Map();
+	for (const other of state.selection) {
+		const object = level.objects.get(other);
+		if (!object) continue;
+		const theirRow = level.rows.find(r => r.id === other);
+		original.set(other, {
+			position: object.position.toArray(),
+			rotation: object.rotation.toArray(),
+			snap: theirRow && theirRow.snap ? { ...theirRow.snap } : null,
+		});
+		if (other === id) continue;
+		followers.push({
+			id: other,
+			offset: [
+				object.position.x - lead.position.x,
+				object.position.y - lead.position.y,
+				object.position.z - lead.position.z,
+			],
+		});
+	}
 	state.grab = {
-		id: state.selected,
-		original: { position: object.position.toArray(), rotation: object.rotation.toArray() },
-		originalSnap: row && row.snap ? { ...row.snap } : null,
+		id,
+		followers,
+		original,
+		// Which single direction the move is confined to, or null for the
+		// cursor's own reading of the ground. `x` / `y` / `z` while grabbing.
+		axis: null,
 		before: snapshot(),
 		lastSnap: row ? (row.snap ?? null) : null,
 	};
 }
 
+// Lock the live gesture — a grab or a scale — to one direction, or free it
+// again with null. The line is drawn through the active piece as it stands,
+// and a move is measured from where the grab began, so switching from x to z
+// puts back the x it had rather than keeping a half-finished move on an axis
+// nobody chose. A scale recomputes from each piece's original either way.
+function setAxis(axis) {
+	const op = state.grab ?? state.scaling;
+	if (!op) return;
+	op.axis = axis;
+	const lead = level.objects.get(state.grab ? state.grab.id : activeId());
+	const box = lead ? lead.boundingBox() : null;
+	if (axis && box) showAxisGuide(axis, box.center); else hideAxisGuide();
+	if (state.grab) updateGrabPreview();
+	else if (state.scaling) updateScalePreview(); else updateScalePreview();
+	syncUI();
+}
+
 function updateGrabPreview() {
 	if (!state.grab) return;
-	const object = level.objects.get(state.grab.id);
-	if (!object) { state.grab = null; return; }
+	const lead = level.objects.get(state.grab.id);
+	if (!lead) { state.grab = null; return; }
 	const pointer = three.input.pointer;
-	const groundPoint = groundHit(pointer.x, pointer.y, object.position.y);
-	const hit = scene.pick(pointer.x, pointer.y);
-	if (groundPoint) {
-		state.grab.lastSnap = placeByMode(object, groundPoint, hit, { freehand: three.input.isDown('shift') });
+	const freehand = three.input.isDown('shift');
+	const axis = state.grab.axis;
+
+	if (axis) {
+		// One coordinate moves and the other two go back to where the grab
+		// began — which is what "on this axis only" has to mean, and why the
+		// start position is read from `original` rather than from the piece.
+		const start = state.grab.original.get(state.grab.id).position;
+		const from = { x: start[0], y: start[1], z: start[2] };
+		const along = axisUnderCursor(from, axis, pointer.x, pointer.y);
+		if (along !== null) {
+			lead.position.set(
+				axis === 'x' ? along : from.x,
+				axis === 'y' ? along : from.y,
+				axis === 'z' ? along : from.z,
+			);
+			// The grid still applies, on the one axis that moved; shift is the
+			// same "skip the snap" it is everywhere else here.
+			if (!freehand) snapAxisToGrid(lead, axis);
+		}
+		// A constrained move is a move and not a snap: whatever it used to
+		// hang off, it is where the axis put it now.
+		state.grab.lastSnap = null;
+	} else {
+		const groundPoint = groundHit(pointer.x, pointer.y, lead.position.y);
+		const hit = scene.pick(pointer.x, pointer.y);
+		if (groundPoint) {
+			state.grab.lastSnap = placeByMode(lead, groundPoint, hit, { freehand });
+		}
 	}
-	if (selectionHelper) {
-		selectionHelper.update();
-		selectionHelper.color = overlapsAnother(object) ? 0xff3333 : 0xffff00;
+
+	for (const follower of state.grab.followers) {
+		const object = level.objects.get(follower.id);
+		if (!object) continue;
+		object.position.set(
+			lead.position.x + follower.offset[0],
+			lead.position.y + follower.offset[1],
+			lead.position.z + follower.offset[2],
+		);
 	}
+	updateSelectionHelpers();
 }
 
 function commit() {
 	if (!state.grab) return;
 	updateGrabPreview();
-	const { id, before } = state.grab;
+	const { id, followers, before } = state.grab;
 	syncRowById(id, state.grab.lastSnap ?? null);
+	// A follower was carried rather than snapped, so whatever it used to be
+	// snapped to is no longer where it is — the row says freehand and means it.
+	for (const follower of followers) syncRowById(follower.id, null);
 	pushSnapshot(undoStack, before);
 	redoStack = [];
 	state.grab = null;
-	select(id);
+	hideAxisGuide();
+	select(state.selection);
 	markDirty();
 }
 
 function cancelGrab() {
-	const object = level.objects.get(state.grab.id);
-	if (object) {
-		const orig = state.grab.original;
+	for (const [id, orig] of state.grab.original) {
+		const object = level.objects.get(id);
+		if (!object) continue;
 		object.position.set(orig.position[0], orig.position[1], orig.position[2]);
 		object.rotation.set(orig.rotation[0], orig.rotation[1], orig.rotation[2]);
-		syncRowById(state.grab.id, state.grab.originalSnap);
+		syncRowById(id, orig.snap);
 	}
 	state.grab = null;
-	select(state.selected);
+	hideAxisGuide();
+	select(state.selection);
 }
 
+// Escape backs out one step at a time: the axis lock first, then the gesture,
+// then the stamp. Undoing a whole move because the axis was the wrong one is
+// the annoyance that made this two steps rather than one.
 function cancel() {
+	const op = state.grab ?? state.scaling;
+	if (op && op.axis) { setAxis(null); return; }
 	if (state.grab) cancelGrab();
+	else if (state.scaling) cancelScale();
 	else if (state.stamp) state.stamp = null;
 	syncUI();
+}
+
+// ---------------------------------------------------------------------------
+// Scale — `s`, the same modal shape as a grab: live under the cursor, locked
+// to an axis with x / y / z, committed with a click and cancelled with escape.
+//
+// The ruler is how far the cursor is from the piece, on the piece's own ground
+// plane: pull away to grow it, come back in to shrink it. That is the closest
+// thing to Blender's screen-space distance available here — there is no
+// world-to-screen projection in the API — and it reads the same way, because
+// the camera looks down at a ground plane the whole time anyway.
+//
+// Each piece scales about its own pivot and keeps its position, which is the
+// same choice `rotate` makes: a kit's pieces are placed by their own origins,
+// so scaling around a shared centre would slide four walls off their corners.
+// ---------------------------------------------------------------------------
+
+const SCALE_STEP = 0.25;   // what a factor rounds to unless shift is held
+const SCALE_MIN = 0.05;
+const SCALE_MAX = 20;
+const REACH_MIN = 0.5;     // a cursor on top of the pivot is not a ruler
+
+// How far the cursor is from `lead`, measured on the horizontal plane through
+// it. Null when the ray never meets that plane — at which point the gesture
+// holds the factor it had rather than jumping.
+function cursorReach(lead) {
+	const pointer = three.input.pointer;
+	const point = groundHit(pointer.x, pointer.y, lead.position.y);
+	if (!point) return null;
+	return Math.hypot(point.x - lead.position.x, point.z - lead.position.z);
+}
+
+function startScale() {
+	if (state.selection.length === 0 || state.grab || state.scaling) return;
+	const lead = level.objects.get(activeId());
+	if (!lead) return;
+	const original = new Map();
+	for (const id of state.selection) {
+		const object = level.objects.get(id);
+		if (object) original.set(id, object.scale.toArray());
+	}
+	if (original.size === 0) return;
+	state.scaling = {
+		axis: null,
+		original,
+		reach: Math.max(cursorReach(lead) ?? REACH_MIN, REACH_MIN),
+		factor: 1,
+		before: snapshot(),
+	};
+	syncUI();
+}
+
+function applyScale() {
+	if (!state.scaling) return;
+	const { original, axis, factor } = state.scaling;
+	for (const [id, base] of original) {
+		const object = level.objects.get(id);
+		if (!object) continue;
+		// Always from the ORIGINAL, never from what is on screen: a preview
+		// that multiplied what it drew last frame would compound sixty times a
+		// second, and locking an axis after a uniform pull could not put the
+		// other two back.
+		object.scale.set(
+			!axis || axis === 'x' ? base[0] * factor : base[0],
+			!axis || axis === 'y' ? base[1] * factor : base[1],
+			!axis || axis === 'z' ? base[2] * factor : base[2],
+		);
+	}
+}
+
+function updateScalePreview() {
+	if (!state.scaling) return;
+	const lead = level.objects.get(activeId());
+	if (!lead) { state.scaling = null; hideAxisGuide(); return; }
+	const reach = cursorReach(lead);
+	if (reach !== null) {
+		const raw = reach / state.scaling.reach;
+		const stepped = three.input.isDown('shift') ? raw : Math.round(raw / SCALE_STEP) * SCALE_STEP;
+		const floor = three.input.isDown('shift') ? SCALE_MIN : SCALE_STEP;
+		state.scaling.factor = Math.min(Math.max(stepped, floor), SCALE_MAX);
+	}
+	applyScale();
+	updateSelectionHelpers();
+}
+
+function commitScale() {
+	if (!state.scaling) return;
+	updateScalePreview();
+	const { before, original } = state.scaling;
+	// `snap` is left alone: it aligns edges, and a piece that grew still meets
+	// the face it was snapped to along the edge the loader will align again.
+	for (const id of original.keys()) syncRowById(id);
+	pushSnapshot(undoStack, before);
+	redoStack = [];
+	state.scaling = null;
+	hideAxisGuide();
+	select(state.selection);
+	markDirty();
+}
+
+function cancelScale() {
+	for (const [id, base] of state.scaling.original) {
+		const object = level.objects.get(id);
+		if (object) object.scale.set(base[0], base[1], base[2]);
+	}
+	state.scaling = null;
+	hideAxisGuide();
+	select(state.selection);
 }
 
 // ---------------------------------------------------------------------------
 // Rotate, nudge, duplicate, delete
 // ---------------------------------------------------------------------------
 
+// Every selected piece turns about its own centre rather than the group's,
+// which is what a kit wants: four walls each facing the way they were built,
+// turned a quarter each, still make a room.
 function rotate(dir) {
-	if (!state.selected) return;
-	const object = level.objects.get(state.selected);
-	if (!object) return;
+	if (state.selection.length === 0 || state.scaling) return;
 	if (!state.grab) pushUndo();
-	object.rotation.y = wrapTurn(object.rotation.y + dir * Math.PI / 2);
-	if (!state.grab) {
-		syncRowById(state.selected);
-		markDirty();
+	let turned = 0;
+	for (const id of state.selection) {
+		const object = level.objects.get(id);
+		if (!object) continue;
+		object.rotation.y = wrapTurn(object.rotation.y + dir * Math.PI / 2);
+		if (!state.grab) syncRowById(id);
+		turned++;
 	}
-	if (selectionHelper) selectionHelper.update();
+	if (turned === 0) return;
+	if (!state.grab) markDirty();
+	updateSelectionHelpers();
 	syncUI();
 }
 
 function nudge(dx, dy, dz) {
-	if (!state.selected || state.grab) return;
-	const object = level.objects.get(state.selected);
-	if (!object) return;
+	if (state.selection.length === 0 || state.grab || state.scaling) return;
 	pushUndo();
-	object.position.set(object.position.x + dx, object.position.y + dy, object.position.z + dz);
-	syncRowById(state.selected);
-	if (selectionHelper) selectionHelper.update();
+	let moved = 0;
+	for (const id of state.selection) {
+		const object = level.objects.get(id);
+		if (!object) continue;
+		object.position.set(object.position.x + dx, object.position.y + dy, object.position.z + dz);
+		syncRowById(id);
+		moved++;
+	}
+	if (moved === 0) { undoStack.pop(); return; }
+	updateSelectionHelpers();
 	markDirty();
 	syncUI();
 }
 
+// A copy of everything selected, one unit along x, selected in the order the
+// originals were — and then grabbed, so the copies land where the cursor says
+// rather than in the pile they were made in.
 function duplicate() {
-	if (!state.selected || state.grab) return;
-	const src = level.rows.find(r => r.id === state.selected);
-	const object = level.objects.get(state.selected);
-	if (!src || !object) return;
+	if (state.selection.length === 0 || state.grab || state.scaling) return;
 	pushUndo();
-	const id = freshId(src.piece);
-	const row = {
-		id,
-		piece: src.piece,
-		position: [object.position.x + 1, object.position.y, object.position.z],
-		rotation: object.rotation.toArray(),
-	};
-	level.add(row);
-	select(id);
-	state.grab = {
-		id,
-		original: { position: row.position.slice(), rotation: row.rotation.slice() },
-		originalSnap: null,
-		before: snapshot(),
-		lastSnap: null,
-	};
+	const copies = [];
+	for (const source of state.selection) {
+		const src = level.rows.find(r => r.id === source);
+		const object = level.objects.get(source);
+		if (!src || !object) continue;
+		const id = freshId(src.piece);
+		level.add({
+			id,
+			piece: src.piece,
+			position: [object.position.x + 1, object.position.y, object.position.z],
+			rotation: object.rotation.toArray(),
+		});
+		copies.push(id);
+	}
+	if (copies.length === 0) { undoStack.pop(); return; }
+	select(copies);
+	grab();
 	markDirty();
 }
 
 function requestRemove() {
-	if (!state.selected) return;
-	state.confirmDeleteId = state.selected;
+	if (state.selection.length === 0) return;
+	state.confirmDeleteIds = [...state.selection];
 	state.confirmDeleteOpen = true;
 	syncUI();
 }
 
 function confirmRemove() {
-	const id = state.confirmDeleteId;
-	state.confirmDeleteId = null;
+	const ids = state.confirmDeleteIds.filter(id => level.objects.has(id));
+	state.confirmDeleteIds = [];
 	state.confirmDeleteOpen = false;
-	if (!id || !level.objects.has(id)) { syncUI(); return; }
-	const blocking = level.rows.find(r => r.snap && r.snap.to === id);
-	if (blocking) {
-		setStatus(`cannot remove ${id} — ${blocking.id} snaps to it`);
-		return;
+	if (ids.length === 0) { syncUI(); return; }
+
+	// A piece snapped to one of these keeps it alive — unless it is going too,
+	// which is what makes "remove the wall and the door on it" work while
+	// "remove the wall out from under the door" still does not.
+	const going = new Set(ids);
+	for (const id of ids) {
+		const blocking = level.rows.find(r => r.snap && r.snap.to === id && !going.has(r.id));
+		if (blocking) {
+			setStatus(`cannot remove ${id} — ${blocking.id} snaps to it`);
+			return;
+		}
 	}
 	pushUndo();
-	level.remove(id);
-	if (state.selected === id) select(null);
+	for (const id of ids) level.remove(id);
+	select(state.selection.filter(id => !going.has(id)));
 	markDirty();
-	setStatus(`removed ${id}`);
+	setStatus(ids.length === 1 ? `removed ${ids[0]}` : `removed ${ids.length} pieces`);
 }
 
 function cancelRemove() {
-	state.confirmDeleteId = null;
+	state.confirmDeleteIds = [];
 	state.confirmDeleteOpen = false;
 	syncUI();
 }
@@ -978,10 +1289,12 @@ class Props extends three.Widget {
 		this.markerOptions = [];
 		this.markerIndex = -1;
 		this.hasSelection = false;
+		this.count = 0;
 		this.id = '';
 		this.piece = '';
 		this.position = '';
 		this.rotation = '';
+		this.scale = '';
 		this.snap = '';
 	}
 
@@ -999,10 +1312,15 @@ class Props extends three.Widget {
 			if (this.markerIndex !== idx) this.markerIndex = idx;
 		}
 
-		const row = state.selected ? level.rows.find(r => r.id === state.selected) : null;
-		const object = state.selected ? level.objects.get(state.selected) : null;
+		// The panel reads the ACTIVE piece and says how many others came with
+		// it — five sets of numbers in a card this size is a wall of digits
+		// nobody reads, and the active one is the piece every verb is aimed at.
+		const active = activeId();
+		const row = active ? level.rows.find(r => r.id === active) : null;
+		const object = active ? level.objects.get(active) : null;
 		const has = !!(row && object);
 		if (this.hasSelection !== has) this.hasSelection = has;
+		if (this.count !== state.selection.length) this.count = state.selection.length;
 		if (!has) return;
 
 		if (this.id !== row.id) this.id = row.id;
@@ -1012,6 +1330,13 @@ class Props extends three.Widget {
 		const turns = Math.round(wrapTurn(object.rotation.y) / (Math.PI / 2)) % 4;
 		const rot = `${turns} quarter turn${turns === 1 ? '' : 's'}`;
 		if (this.rotation !== rot) this.rotation = rot;
+		// Empty for a piece nobody has scaled, which is nearly all of them —
+		// a row saying "1, 1, 1" forever is a row nobody reads.
+		const s = object.scale;
+		const scaled = s.x !== 1 || s.y !== 1 || s.z !== 1
+			? `${s.x.toFixed(2)}, ${s.y.toFixed(2)}, ${s.z.toFixed(2)}`
+			: '';
+		if (this.scale !== scaled) this.scale = scaled;
 		const snap = row.snap ? `${row.snap.to} ${row.snap.side}` : '(freehand)';
 		if (this.snap !== snap) this.snap = snap;
 	}
@@ -1046,10 +1371,14 @@ class Props extends three.Widget {
 		if (!this.hasSelection) {
 			children.push(new Label('(no selection)', { color: THEME.dim, textSize: 12 }));
 		} else {
+			if (this.count > 1) children.push(two('selected', `${this.count} pieces`));
 			children.push(
-				two('id', this.id), two('piece', this.piece), two('position', this.position),
-				two('rotation', this.rotation), two('snap', this.snap),
+				two(this.count > 1 ? 'active' : 'id', this.id),
+				two('piece', this.piece), two('position', this.position),
+				two('rotation', this.rotation),
 			);
+			if (this.scale) children.push(two('scale', this.scale));
+			children.push(two('snap', this.snap));
 		}
 		return new Panel({
 			at: 'top-right', margin: [8, BAR_H + 8], width: PROPS_W, gap: 6, insets: 10,
@@ -1058,11 +1387,31 @@ class Props extends three.Widget {
 	}
 }
 
+// Pressing the axis already locked frees it, so the same key is on and off.
+function toggleAxis(axis) {
+	const op = state.grab ?? state.scaling;
+	if (!op) return;
+	setAxis(op.axis === axis ? null : axis);
+}
+
+// Whether a modal gesture owns the keyboard and the next click.
+function gesture() { return state.grab ?? state.scaling ?? null; }
+
 function hintText() {
-	if (state.grab) return 'click to commit · esc cancels';
-	if (state.stamp) return 'click to place · shift freehand · esc clears';
-	if (state.selected) return 'g grab · r rotate · x delete';
-	return '';
+	if (state.grab) {
+		return state.grab.axis
+			? `moving on ${state.grab.axis.toUpperCase()} · click commits · esc frees the axis`
+			: 'x / y / z locks an axis · click to commit · esc cancels';
+	}
+	if (state.scaling) {
+		const factor = `×${state.scaling.factor.toFixed(2)}`;
+		return state.scaling.axis
+			? `scaling ${state.scaling.axis.toUpperCase()} ${factor} · click commits · esc frees the axis`
+			: `scaling ${factor} · x / y / z locks an axis · click commits · esc cancels`;
+	}
+	if (state.stamp) return 'ctrl+click to place · +shift freehand · esc clears';
+	if (state.selection.length > 0) return 'g grab · s scale · r rotate · x delete';
+	return 'click selects · shift+click adds · ctrl+click places the stamp';
 }
 
 // The bottom status strip: the existing status text on the left, contextual
@@ -1176,7 +1525,10 @@ class Dialogs extends three.Widget {
 		return new Stack({},
 			new ConfirmDialog({
 				key: 'deleteConfirm', title: 'Remove piece',
-				message: `Remove ${state.confirmDeleteId ?? ''}?`, confirm: 'Remove', decline: 'Keep',
+				message: state.confirmDeleteIds.length === 1
+					? `Remove ${state.confirmDeleteIds[0]}?`
+					: `Remove ${state.confirmDeleteIds.length} pieces?`,
+				confirm: 'Remove', decline: 'Keep',
 				open: state.confirmDeleteOpen, onConfirm: safe(confirmRemove), onDismiss: safe(cancelRemove),
 			}),
 			new ConfirmDialog({
@@ -1255,7 +1607,9 @@ function positionText(object) {
 
 function statusText() {
 	const stats = scene.stats();
-	let text = `${state.mode} · ${state.selected ?? '(none)'} · ${level.rows.length} piece${level.rows.length === 1 ? '' : 's'}`
+	const extra = state.selection.length - 1;
+	const selected = `${activeId() ?? '(none)'}${extra > 0 ? ` +${extra}` : ''}`;
+	let text = `${state.mode} · ${selected} · ${level.rows.length} piece${level.rows.length === 1 ? '' : 's'}`
 		+ ` · ${stats.drawCalls} draws${state.dirty ? ' · *' : ''}`;
 	if (state.lastError) text += ` · ${state.lastError}`;
 	return text;
@@ -1305,7 +1659,10 @@ function boot() {
 			state.kitDialogOpen = true;
 		}
 	}
-	if (three.persist.selected) select(three.persist.selected);
+	// One id is what older runs of this editor remembered; a list is what it
+	// remembers now, and both have to open the same way.
+	const remembered = three.persist.selected;
+	if (remembered) select(Array.isArray(remembered) ? remembered : [remembered]);
 	frameAllExcludingHelpers();
 }
 
@@ -1321,15 +1678,30 @@ dialogs.mount();
 // Input
 // ---------------------------------------------------------------------------
 
+// Three clicks, and which one it is decided before anything else happens: a
+// grab is modal and eats the click, then ctrl places, then shift adds, then a
+// plain click selects the one piece under the cursor. Holding a stamp changes
+// none of it — see the header comment on why placing is not the plain click.
 three.onClick(safe((hit, x, y) => {
 	if (state.grab) { commit(); return; }
-	if (state.stamp) {
+	if (state.scaling) { commitScale(); return; }
+	const piece = hit && hit.object ? pieceOf(hit.object) : null;
+
+	if (three.input.isDown('ctrl')) {
+		if (!state.stamp) { setStatus('nothing to place — pick a piece in the asset browser first'); return; }
 		const groundPoint = groundHit(x, y, 0);
 		if (!groundPoint) { setStatus('nothing to place on'); return; }
 		placeNewPiece(state.stamp, groundPoint, hit, { freehand: three.input.isDown('shift') });
 		return;
 	}
-	const piece = hit && hit.object ? pieceOf(hit.object) : null;
+
+	if (three.input.isDown('shift')) {
+		// A shift+click on nothing keeps what is selected: the gesture is
+		// "and this one too", and a miss should not undo the four before it.
+		if (piece) toggleSelected(piece.name);
+		return;
+	}
+
 	select(piece ? piece.name : null);
 }));
 
@@ -1337,24 +1709,42 @@ three.onKeyDown('1', safe(() => editor.setMode('grid')));
 three.onKeyDown('2', safe(() => editor.setMode('face')));
 three.onKeyDown('3', safe(() => editor.setMode('marker')));
 three.onKeyDown('g', safe(() => grab()));
+three.onKeyDown('s', safe(() => startScale()));
 three.onKeyDown('r', safe(() => rotate(three.input.isDown('shift') ? -1 : 1)));
+// The whole selection, not just the active piece — framing one wall of four
+// that were picked together is a camera move nobody asked for.
 three.onKeyDown('f', safe(() => {
-	if (!state.selected) return;
-	const object = level.objects.get(state.selected);
-	if (!object) return;
-	const box = object.boundingBox();
+	let box = null;
+	for (const id of state.selection) {
+		const object = level.objects.get(id);
+		if (!object) continue;
+		const theirs = object.boundingBox();
+		if (!theirs) continue;
+		box = box ? box.union(theirs) : theirs;
+	}
+	if (!box) return;
 	three.camera.lookAt(box.center.x, box.center.y, box.center.z);
 }));
 three.onKeyDown('home', safe(() => frameAllExcludingHelpers()));
 three.onKeyDown('escape', safe(() => cancel()));
 three.onKeyDown('delete', safe(() => requestRemove()));
-three.onKeyDown('x', safe(() => requestRemove()));
+// x / y / z belong to the grab while one is live, and to what they always did
+// otherwise. The modifier is the tell: a bare press during a grab is an axis,
+// and a ctrl press is still undo or redo, because those never meant an axis.
+three.onKeyDown('x', safe(() => {
+	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('x'); return; }
+	requestRemove();
+}));
 three.onKeyDown('d', safe(() => { if (three.input.isDown('shift')) duplicate(); }));
 three.onKeyDown('z', safe(() => {
+	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('z'); return; }
 	if (!three.input.isDown('ctrl')) return;
 	if (three.input.isDown('shift')) redo(); else undo();
 }));
-three.onKeyDown('y', safe(() => { if (three.input.isDown('ctrl')) redo(); }));
+three.onKeyDown('y', safe(() => {
+	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('y'); return; }
+	if (three.input.isDown('ctrl')) redo();
+}));
 three.onKeyDown('arrowleft', safe(() => nudge(-1, 0, 0)));
 three.onKeyDown('arrowright', safe(() => nudge(1, 0, 0)));
 three.onKeyDown('arrowup', safe(() => nudge(0, 0, -1)));
@@ -1376,7 +1766,12 @@ three.setAnimationLoop(safe(() => {
 // ---------------------------------------------------------------------------
 
 const editor = {
-	select(id) { select(id); },
+	// One id, a list of them, or null — the plain click and the whole
+	// selection in one verb, so a script says what it means either way.
+	select(ids) { select(ids); },
+	// What shift+click does: in if it was out, out if it was in.
+	toggle(id) { toggleSelected(id); },
+	selection() { return [...state.selection]; },
 	setMode(mode) {
 		if (!['grid', 'face', 'marker'].includes(mode)) return;
 		state.mode = mode;
@@ -1388,7 +1783,30 @@ const editor = {
 		return placeNewPiece(state.stamp, { x: +x, y: 0, z: +z }, null, { freehand: !!opts.freehand });
 	},
 	grab() { grab(); },
-	commit() { commit(); },
+	// The keyboard's x / y / z during a grab, for a script with no keyboard.
+	// Null frees it; anything that is not an axis is ignored rather than
+	// silently taken as "free", which would look like the lock never held.
+	axis(which) {
+		if (which === null || which === undefined) { setAxis(null); return; }
+		if (['x', 'y', 'z'].includes(which)) setAxis(which);
+	},
+	// No factor starts the interactive gesture, the way `s` does; a factor is
+	// the whole thing at once — start, scale, commit — which is what a script
+	// with no cursor to pull actually wants.
+	scale(factor) {
+		if (factor === undefined) { startScale(); return; }
+		const wanted = +factor;
+		if (!(wanted > 0)) return;
+		const live = !!state.scaling;
+		if (!live) startScale();
+		if (!state.scaling) return;
+		state.scaling.factor = Math.min(Math.max(wanted, SCALE_MIN), SCALE_MAX);
+		applyScale();
+		if (!live) commitScale();
+	},
+	commit() {
+		if (state.scaling) commitScale(); else commit();
+	},
 	cancel() { cancel(); },
 	rotate(dir) { rotate(dir); },
 	nudge(dx, dy, dz) { nudge(dx, dy, dz); },
@@ -1402,8 +1820,13 @@ const editor = {
 	state() {
 		return {
 			path: state.path,
-			selected: state.selected,
+			// The active piece, and the whole list beside it — a driver that
+			// only ever selects one still reads the field it always read.
+			selected: activeId(),
+			selection: [...state.selection],
 			mode: state.mode,
+			axis: (state.grab ?? state.scaling)?.axis ?? null,
+			scaling: state.scaling ? state.scaling.factor : null,
 			stamp: state.stamp,
 			dirty: state.dirty,
 			rows: JSON.parse(JSON.stringify(level.toJSON().rows)),
@@ -1423,12 +1846,15 @@ globalThis.editor = editor;
 
 three.debug.write({
 	keys: {
-		click: 'select · place the stamp · commit a grab',
+		click: 'select one · commit a grab',
+		'shift+click': 'add to / take out of the selection',
+		'ctrl+click': 'place the stamp',
 		'1/2/3': 'grid / face / marker mode',
-		g: 'grab', 'r': 'rotate (shift: the other way)',
+		g: 'grab', s: 'scale', 'x/y/z': 'while grabbing or scaling: lock that axis',
+		'r': 'rotate (shift: the other way)',
 		delete: 'remove', 'shift+d': 'duplicate',
 		'ctrl+z': 'undo', 'ctrl+shift+z / ctrl+y': 'redo',
-		escape: 'cancel a grab / clear the stamp',
+		escape: 'free the axis / cancel a grab / clear the stamp',
 		f: 'frame selection', home: 'frame all',
 	},
 	state: editor.state(),
