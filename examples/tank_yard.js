@@ -11,42 +11,7 @@
 // What it is here to show
 // -----------------------
 // This is meant to be read start to finish by somebody who has not written a
-// `three` script before. Four things carry the game, in this order:
-//
-// **1. A LayeredMaterial is a stack, not a texture.** The ground is ONE mesh
-// with ONE mask image: the mask's red channel says where gravel is, green says
-// where grass is, blue says where the yard is scorched, and each layer tiles its
-// own detail map with `uvScale` while the mask stays stretched across the whole
-// arena. That is the trick — the mask describes this specific yard, the detail
-// repeats across it. The bricks are the same idea with the damage baked in:
-// three materials off one stack description, differing only in how opaque its
-// crack and soot layers are, and a brick that takes a hit is
-// `mesh.material = next stage`.
-// The eagle's stack has an `animated: true` layer instead, so its scorch is a
-// uniform the script writes per frame rather than a literal in the shader.
-//
-// **2. An entity is a class.** `class Brick extends three.Entity` with no
-// registration call beside it: the statics ARE the declaration. `static body`
-// gives every brick a collider, `static volume` gives every tank an invisible
-// box for bullets to hit, `static collides = false` keeps bullets and fire out
-// of everybody's movement sweeps. `Brick.spawn(col, row)` is the way in and
-// `brick.remove()` is the whole removal — body, node and lookup, on this tick.
-//
-// **3. A rule is a pair, subject first.** Every interesting thing in this game
-// is five lines near the bottom of the file: bullet-brick, bullet-steel,
-// bullet-tank, bullet-eagle, bullet-bullet. There is no `if (other.type === ...)`
-// chain anywhere, because the class the rule hangs on IS the type test, and the
-// handler is handed its two arguments in the order the rule was written.
-//
-// **4. The VFX is one draw call.** Every fireball in the air shares one
-// ShaderMaterial, and each one is at its own moment of its own life because the
-// age rides in `mesh.color`'s alpha — `s.color` in the body is this copy's own
-// colour, raw and untinted, which makes it the per-instance parameter channel.
-// Twenty blasts, one pipeline, one draw.
-//
-// The whole scene is about ten draw calls: the ground, the steel, three stages
-// of brick, the eagle, every part of every tank (one unit box, tinted per copy),
-// the bullets and the fire.
+// `three` script before.
 
 // ---------------------------------------------------------------------------
 // The level, as a picture

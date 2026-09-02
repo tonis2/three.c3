@@ -1160,6 +1160,90 @@ fn void an_open_dropdown_paints_over_the_rows_below_it() @test
 }
 
 <*
+ A root written with a trailing separator confines exactly as one without.
+
+ The crash it stands for: a listing is written WITHOUT the trailing slash —
+ `FileBrowser.go_to` trims what it is handed — so `kit/` as a root contained
+ nothing, not even itself. `ui_file_directory` sent the browser home, the send
+ landed back in `ui_file_directory`, and the two called each other until the
+ stack was gone. `--assets kit/` is what a shell's tab completion types, so this
+ was one keystroke away for anybody.
+
+ A test that reaches the old code overflows the stack rather than failing, which
+ is worth knowing before running it: the assertion is really "this returns at
+ all", and the confinement checks after it are what say the trimming did not
+ quietly turn into "no root".
+*>
+fn void a_root_written_with_a_trailing_slash_still_confines() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		Path here = path::cwd(mem)!!;
+		defer here.free(mem);
+		String root = string::tformat("%s/test/fixtures", (String)here);
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint at = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.FILE_BROWSER,
+				.key = "files",
+				// The whole point: as typed, separator and all.
+				.root = string::tformat("%s/", root),
+				.on_choose = true,
+				.on_select = true,
+				.on_change = true,
+			},
+			-1
+		)!!;
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		cui::Element* elem = renderer.ui.nodes[at].element;
+		cui::widgets::FileBrowser* browser = elem.widget_as(cui::widgets::FileBrowser);
+		test::@check(
+			browser.directory.str_view() == root,
+			"the browser opened at '%s' rather than at its root",
+			browser.directory.str_view()
+		);
+
+		// And it is a root rather than nothing: `..` still bounces.
+		float step = cui::widgets::DEFAULT_FILE_BROWSER_STYLE.row_height;
+		float x = elem.absolute.x + 20.0f;
+		float up = elem.absolute.y + step * 0.5f;
+		test::@check(browser.has_parent, "the listing offered no way up to refuse");
+		point(renderer, x, up, true);
+		point(renderer, x, up, false);
+		point(renderer, x, up, true);
+		point(renderer, x, up, false);
+
+		test::@check(
+			browser.directory.str_view() == root,
+			"the browser walked out of a slash-terminated root to '%s'",
+			browser.directory.str_view()
+		);
+
+		// And the quieter half of the same bug: `UiNode.written` cuts the root
+		// off a path with `root.len`, so a root one character too long answered
+		// every choice with the empty string — a browser that looked like it
+		// worked and reported nothing whatever was clicked.
+		heard = { };
+		int model = browser.entry_at_name("hierarchy.glb");
+		test::@check(model >= 0, "the listing hid the models");
+		float y = elem.absolute.y + (float)model * step + step * 0.5f;
+		point(renderer, x, y, true);
+		point(renderer, x, y, false);
+		test::@check(
+			heard.said() == "hierarchy.glb",
+			"the selection under a slash-terminated root came back as '%s'",
+			heard.said()
+		);
+	};
+}
+
+<*
  A patched op list replaces the old one rather than appending to it.
 
  The verb a crosshair and a health bar use every time a value moves, so it must

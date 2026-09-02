@@ -12,45 +12,6 @@
 //   space        play / play again           p       pause
 //   m            back to the menu            wheel   zoom
 //
-// ## What it is here to show
-//
-// This is the `three.Widget` example, and `examples/range.js` is the same game
-// written against `three.ui.set` and `three.ui.patch` directly. Reading the two
-// side by side is the point.
-//
-// **One method describes the interface.** `render()` says what the panel looks
-// like NOW, out of the node classes on `three.ui`. There is no second place
-// where a value is written into an existing tree, and no key invented by hand to
-// address it. Assign a field and the widget re-renders; what crosses to the
-// engine is the DIFFERENCE — a `patch` per changed value, and a rebuild only
-// when the shape actually changed. So the clock below is `this.left = seconds`
-// once a frame, and the cost of that is one number crossing.
-//
-// **Four screens are four classes, and they stack.** Pausing MOUNTS the pause
-// screen over the HUD; it does not restate it. `static layer = 1` is what puts
-// it on top, and unmounting it leaves the HUD exactly as it was — no rebuild, no
-// keys to remember to carry, which is the bug this design removes. (Written by
-// hand, the pause tree has to contain every key the loop patches, or the first
-// patch after pausing throws and the animation loop stops for good.)
-//
-// **A `Panel` is sized by what is in it.** A background behind a padded column
-// that hugs its content, so a card grows a row without anybody working out how
-// tall it now is. `{ at: 'top-left', margin: 16 }` anchors it and `width` fixes
-// the one axis that should not hug.
-//
-// **Arguments are read by type.** A string is the text, a function is the
-// handler, a boolean is `checked`, a number is the value, an array is the
-// options, a plain object is the rest of the properties, and anything else is a
-// child. `new Button('Play', () => start())` needs no property names.
-//
-// **A widget is a class, so a piece of interface is reusable.** `Stat` below is
-// constructed twice, holds its own state, and marks the HUD that owns it dirty
-// when it changes. Only a mounted widget is a screen; the rest are parts.
-//
-// **Clicking a button is not a shot.** No flag arranges that: the host
-// hit-tests the interface first, and a pointer over a widget never reaches
-// `three.onClick`. The scrim behind a menu says `solid: true` to opt back in,
-// which is why you cannot play through a paused game.
 
 const { Panel, Stack, Row, Column, Label, Button, Select, TextField, Tree, Rect } = three.ui;
 
