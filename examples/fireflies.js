@@ -25,9 +25,9 @@ const HALF = 20;          // the walls sit at ±HALF
 const NEED = 14;          // fireflies to catch
 const TIME = 90;          // seconds of night
 const FLEE_R = 3.4, FLEE_SPD = 4.5, DRIFT_SPD = 1.1;
-// The flight band. A `near` rule is a strict 3-D distance from the player's
-// capsule centre at y 0.8, so a fly that rides too high is one nobody can
-// catch — keep the worst bob plus flee-lift inside the catch radius.
+// The flight band. A fly's catch trigger is a sphere around its core and the
+// player's capsule tops out at y 1.6, so a fly that rides too high is one
+// nobody can catch — keep the worst bob plus flee-lift inside its reach.
 const FLY_LOW = 0.7, FLY_BAND = 0.6, FLY_BOB = 0.18, FLEE_LIFT = 0.4;
 
 const scene = new three.Scene();
@@ -77,7 +77,9 @@ const leaf = new three.DataTexture((() => {
 
 // A star dome: 1024x512 equirect, row 0 is the BOTTOM row. The dome is 110
 // units across, so a star is one texel — at 256 wide a texel covers a hedge,
-// which is why this texture is the one big one in the file.
+// which is why this texture is the one big one in the file. Nearest keeps it
+// that way on the device: one texel is one square of light, not a soft blob,
+// and the moon's gradient loses nothing at this sample scale.
 const stars = new three.DataTexture((() => {
 	const W2 = 1024, H2 = 512, px = new Uint8Array(W2 * H2 * 4);
 	const mx = W2 * 0.76, my = H2 * 0.30, mr = 36;
@@ -95,7 +97,7 @@ const stars = new three.DataTexture((() => {
 		px[k + 2] = clamp(b, 0, 255); px[k + 3] = 255;
 	}
 	return px;
-})(), 1024, 512);
+})(), 1024, 512, { filter: three.NearestFilter });
 
 // -- materials ----------------------------------------------------------------
 const mat = {
@@ -208,6 +210,8 @@ function part(parent, size, pos, look) {
 
 class Player extends three.Entity {
 	static parent = groups.player;
+	// The body a fly's trigger fires against: moveAndSlide carries no contact
+	// of its own, so this kinematic capsule is what the catch overlap is with.
 	static volume = { shape: 'capsule', radius: 0.42, height: 1.6, offset: [0, 0.8, 0] };
 	static collides = false;
 
@@ -307,17 +311,13 @@ class Player extends three.Entity {
 }
 
 // ---------------------------------------------------------------------------
-// The fireflies.
-//
-// **A trigger volume cannot carry a catch.** In the solver a trigger's AABB is
-// baked where it was added and never follows the node, so a trigger that moves
-// — and a firefly is nothing but movement — fires against nothing. A `near`
-// rule is the engine's answer to exactly this: the engine runs the distance
-// test against where the things ARE, every tick, and physics never has to hear
-// about the flies at all.
+// The fireflies. Each one carries its catch reach as a trigger — a sensor that
+// rides its node the way a moving platform's body does — and the catch itself
+// is the `enter` it fires against the player's capsule.
 // ---------------------------------------------------------------------------
 class Firefly extends three.Entity {
 	static parent = groups.flies;
+	static trigger = { shape: 'sphere', radius: 1.0 };
 	static collides = false;
 
 	constructor(i) {
@@ -332,10 +332,6 @@ class Firefly extends three.Entity {
 		this.object = new three.Group();
 		this.object.add(this.core, this.halo);
 		this.baseY = FLY_LOW + hash(i, 2, 37) * FLY_BAND;
-		// glow() is a frame system and can run before the first fixed step; an
-		// undefined y here becomes a NaN position, and a NaN position makes every
-		// distance test compare against NaN — which is a match to nothing, or
-		// worse, a match to everything downstream.
 		this.x = this.homeX; this.z = this.homeZ; this.y = this.baseY;
 		this.vx = 0; this.vz = 0; this.lift = 0;
 		this.dir = hash(i, 3, 41) * Math.PI * 2;
@@ -385,7 +381,7 @@ class Firefly extends three.Entity {
 
 		this.lift = damp(this.lift, this.far * FLEE_LIFT, 3, dt);
 		const bob = Math.sin(three.clock.time * 1.3 + this.phase) * FLY_BOB;
-		this.y = damp(this.y ?? this.baseY, this.baseY + bob + this.lift, 4, dt);
+		this.y = damp(this.y, this.baseY + bob + this.lift, 4, dt);
 	}
 
 	glow(dt) {
@@ -431,14 +427,15 @@ function finish(won) {
 }
 function win() { if (G.mode === 'playing') finish(true); }
 function lose() { if (G.mode === 'playing') finish(false); }
-// A catch: the engine's distance pass, subject first. Removing the fly here is
-// safe — the list waits for the frame boundary — and the guard keeps a fly the
-// menu removed from being caught a second time in the same tick.
-Firefly.on('near', Player, (f, p) => {
+// A catch: the fly's trigger enters the player's capsule, subject first.
+// Removing the fly here is safe — engine events queue and drain at the frame
+// boundary — and the guard keeps a fly drifting into the standing player on
+// the menu from being caught before the night began.
+Firefly.on('enter', Player, (f, p) => {
 	if (G.mode !== 'playing') return;
 	f.remove();
 	p.caught();
-}, { within: 1.35 });
+});
 
 Player.step('move', dt => { if (G.mode === 'playing' && !three.clock.paused) player.step(dt); });
 Player.frame('latch', () => {
@@ -503,6 +500,7 @@ class Pause extends three.Widget {
 				new Label('Paused', { size: 26 }),
 				new Button('Resume', () => show('playing')),
 				new Button('Give up', () => finish(false)),
+				new Button('Quit', () => three.quit()),
 			),
 		);
 	}
