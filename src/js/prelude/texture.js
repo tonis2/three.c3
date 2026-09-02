@@ -14,6 +14,14 @@ export const NoColorSpace = '';
 export const SRGBColorSpace = 'srgb';
 export const LinearSRGBColorSpace = 'srgb-linear';
 
+// The one filter choice a texture can make, spelled the way Three.js spells it.
+// Linear is the default and the right one for a picture of something; Nearest
+// is for pixels meant to be read as squares — pixel art, a palette a shader
+// indexes, anything authored on a grid. One bright texel in a table magnified
+// under linear is a soft square the size of everything beside it.
+export const LinearFilter = 'linear';
+export const NearestFilter = 'nearest';
+
 // **Which one to reach for.** SRGB for a picture of something: a base colour
 // map, an albedo, anything an artist looked at while making it. Linear for a
 // map whose channels are numbers rather than colours — a normal map's xyz, a
@@ -29,17 +37,24 @@ const SPACES = new Map([
 	[NoColorSpace, 1],
 ]);
 
+const FILTERS = new Map([
+	[LinearFilter, false],
+	[NearestFilter, true],
+]);
+
 // The options both texture verbs take, checked here so the message can name
 // the key that was wrong.
 //
 // **Unknown keys are refused rather than ignored**, which is the opposite of
 // what Three.js does and is deliberate. Three.js's Texture has two dozen
-// settable fields and this has two; a script that writes
-// `{ magFilter: THREE.NearestFilter }` and is quietly given linear filtering
-// has no way to find that out, and the symptom — a blurry sprite — looks like
-// the wrong asset rather than an unsupported option.
+// settable fields and this has three; a script that writes
+// `{ wrapS: THREE.RepeatWrapping }` and is quietly given repeat wrapping
+// anyway has no way to find that out, and a missing option would look like
+// the wrong asset rather than an unsupported one.
 export function uploadOptions(options, what) {
-	if (options === null || options === undefined) return { space: SRGBColorSpace, code: 0, mips: true };
+	if (options === null || options === undefined) {
+		return { space: SRGBColorSpace, code: 0, mips: true, nearest: false };
+	}
 	if (typeof options !== 'object') {
 		throw new TypeError(
 			`${what} wants an options object like { colorSpace: three.LinearSRGBColorSpace }, `
@@ -47,13 +62,13 @@ export function uploadOptions(options, what) {
 	}
 
 	for (const key of Object.keys(options)) {
-		if (key !== 'colorSpace' && key !== 'generateMipmaps') {
+		if (key !== 'colorSpace' && key !== 'generateMipmaps' && key !== 'filter') {
 			throw new TypeError(
-				`${what} has no option called '${key}' — it takes colorSpace and generateMipmaps`);
+				`${what} has no option called '${key}' — it takes colorSpace, generateMipmaps and filter`);
 		}
 	}
 
-	const { colorSpace = SRGBColorSpace, generateMipmaps = true } = options;
+	const { colorSpace = SRGBColorSpace, generateMipmaps = true, filter = LinearFilter } = options;
 	if (!SPACES.has(colorSpace)) {
 		throw new TypeError(
 			`colorSpace '${colorSpace}' is not one this reads — use three.SRGBColorSpace for a colour map `
@@ -62,8 +77,13 @@ export function uploadOptions(options, what) {
 	if (typeof generateMipmaps !== 'boolean') {
 		throw new TypeError(`generateMipmaps wants true or false, not ${typeof generateMipmaps}`);
 	}
+	if (!FILTERS.has(filter)) {
+		throw new TypeError(
+			`filter '${filter}' is not one this reads — use three.NearestFilter for pixel art and `
+			+ 'shader-indexed tables, or three.LinearFilter (the default) for a picture');
+	}
 
-	return { space: colorSpace, code: SPACES.get(colorSpace), mips: generateMipmaps };
+	return { space: colorSpace, code: SPACES.get(colorSpace), mips: generateMipmaps, nearest: FILTERS.get(filter) };
 }
 
 // An image on the device, and the handle a script holds it by.
@@ -275,6 +295,6 @@ export class DataTexture extends Texture {
 			);
 		}
 		const chosen = uploadOptions(options, 'new three.DataTexture(data, width, height, options)');
-		super(H.dataTexture(bytes, width, height, chosen.code, chosen.mips), null, chosen.space);
+		super(H.dataTexture(bytes, width, height, chosen.code, chosen.mips, chosen.nearest), null, chosen.space);
 	}
 }

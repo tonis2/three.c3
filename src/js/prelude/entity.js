@@ -1177,7 +1177,10 @@ function nearPass(t) {
 				if (b === null || other === subject) continue;
 				const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
 				const d2 = dx * dx + dy * dy + dz * dz;
-				if (d2 > r2) continue;
+				// Not `d2 > r2`: a NaN position makes d2 NaN and NaN > r2 is
+				// false, so the test falls THROUGH and something at no position
+				// at all is inside every radius. The negated form sends NaN away.
+				if (!(d2 <= r2)) continue;
 				fire(rule, subject, other, { distance: Math.sqrt(d2) });
 				fired++;
 				if (subject[DEAD] === true) break;

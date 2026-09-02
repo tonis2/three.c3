@@ -76,6 +76,11 @@ struct Texture
 	// only the first is safe to build a `maxLod` from.
 	uint levels;
 	ColorSpace space;
+	// Part of the texture's identity for the same reason the colourspace is: the
+	// same pixels asked for nearest and for linear are two images in two samplers,
+	// and sharing a slot between them would hand whichever caller came second the
+	// other one's filtering.
+	bool nearest;
 	ulong hash;
 }
 
@@ -168,9 +173,17 @@ fn uint Gpu.levels_for(&self, uint width, uint height, ColorSpace space, bool mi
  script generated to be indexed exactly, where a blurred level is not a cheaper
  approximation of anything.
 
+ `nearest` is the sampler, not the chain: mag and min filter both `NEAREST` and
+ no mipmap mode, for pixels meant to be read as squares — pixel art, a palette
+ indexed by a shader, anything authored on a grid. Linear filtering is the
+ default and the right one for a picture of something; one bright texel in a
+ table magnified under linear is a soft square the size of everything beside it,
+ which is the symptom that sent a game looking at its star field.
+
  @param rgba : `Exactly width*height*4 bytes.`
  @param space : `SRGB for a colour map, LINEAR for a map whose channels are numbers.`
  @param mips : `False to upload the one level. A device that cannot blit the format gives one anyway.`
+ @param nearest : `True for a nearest-filtered sampler. The default linear is right for a picture.`
  @require rgba.len == (sz)width * height * 4
 *>
 fn Texture? Gpu.create_texture(
@@ -179,7 +192,8 @@ fn Texture? Gpu.create_texture(
 	uint width,
 	uint height,
 	ColorSpace space = ColorSpace.SRGB,
-	bool mips = true
+	bool mips = true,
+	bool nearest = false
 )
 {
 	vk::Format format = space.format();
@@ -190,6 +204,7 @@ fn Texture? Gpu.create_texture(
 		.height = height,
 		.levels = levels,
 		.space = space,
+		.nearest = nearest,
 		.hash = content_hash(rgba),
 	};
 
@@ -365,15 +380,34 @@ fn Texture? Gpu.create_texture(
 	// screen. It is `levels` rather than `LOD_CLAMP_NONE` because this image
 	// really has that many, and a clamp stating the truth about its own image is
 	// one fewer thing to keep in step if a chain is ever declined.
-	texture.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-		.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
-		.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
-		.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
-		.setMipmapMode(SAMPLER_MIPMAP_MODE_LINEAR)
-		.setMinLod(0.0)
-		.setMaxLod((float)levels)
-		.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
-		.build(self.handle)!;
+	//
+	// Nearest is a whole different sampler, decided here rather than patched on:
+	// no mipmap mode, because a nearest-filtered image that blends levels is
+	// neither one thing nor the other.
+	if (nearest)
+	{
+		texture.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
+			.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
+			.setMinLod(0.0)
+			.setMaxLod((float)levels)
+			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
+			.build(self.handle)!;
+	}
+	else
+	{
+		texture.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
+			.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
+			.setMipmapMode(SAMPLER_MIPMAP_MODE_LINEAR)
+			.setMinLod(0.0)
+			.setMaxLod((float)levels)
+			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
+			.build(self.handle)!;
+	}
 
 	return texture;
 }

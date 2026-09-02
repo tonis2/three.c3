@@ -651,4 +651,24 @@ export const ui = {
 	get slot() {
 		return H.uiSlot();
 	},
+
+	// How big the whole interface is drawn — 1 is the size every number in this
+	// file is written against, 1.25 makes everything a quarter bigger.
+	//
+	//   three.ui.scale = 1.25;
+	//
+	// It is a scale on the COORDINATE SPACE, not a font setting: the tree is
+	// laid out in a space that much smaller and stretched back over the frame,
+	// so the built-in chrome no script can reach — a menu bar's height, a
+	// dialog's title, a file browser's rows — grows with everything else. Text
+	// is rasterised at the frame's own density, so it gets bigger, not blurrier.
+	//
+	// The one thing it moves: `three.ui.draw` and a `draw` node's own
+	// coordinates are the interface's, and `three.input.pointer` is the
+	// window's. At a scale other than 1 a reticle at the cursor divides:
+	//
+	//   const p = three.input.pointer, s = three.ui.scale;
+	//   three.ui.draw([{ op: 'circle', center: [p.x / s, p.y / s], radius: 8 }]);
+	get scale() { return H.uiScale(); },
+	set scale(value) { H.uiScale(value); },
 };

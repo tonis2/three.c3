@@ -238,7 +238,6 @@ repo.
       would want. Leave it until somebody asks; the shape would be a path
       argument, and a path argument is the thing this whole file refuses.
 
----
 
 ## Standing constraints
 

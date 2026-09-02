@@ -477,7 +477,9 @@ may refuse outright. Read it back on a later frame.
 
 The picture follows the window: the offscreen target moves to the new drawable, so resizing or going
 fullscreen renders more pixels rather than stretching the ones there were, and `three.renderSize()`,
-the PNG a screenshot returns and the coordinates `scene.pick(x, y)` counts in all move with it.
+the PNG a screenshot returns and the coordinates `scene.pick(x, y)` counts in all move with it. The
+interface is laid out in those same pixels and is re-laid-out along with them, so a maximised window
+gets a full-size menu bar and panels rather than ones sized for whatever the window opened at.
 `three.setRenderSize` pins it when a game wants a render scale of its own, and resizing past a pinned
 size says so in the run's warnings.
 
@@ -1895,8 +1897,8 @@ format comes from the file's first bytes rather than its name.
 Deduplicated by the decoded image, so the same picture reached by two paths — or by a path and a `.glb` — is one
 upload, and `three.stats().textures` counts it once.
 
-`options` is `{ colorSpace, generateMipmaps }` and nothing else; an unknown key throws rather than being ignored,
-so a Three.js line carrying `magFilter` or `wrapS` is told so instead of quietly doing something different.
+`options` is `{ colorSpace, generateMipmaps, filter }` and nothing else; an unknown key throws rather than being
+ignored, so a Three.js line carrying `magFilter` or `wrapS` is told so instead of quietly doing something different.
 
 ## three.SRGBColorSpace / three.LinearSRGBColorSpace / three.NoColorSpace
 
@@ -1914,6 +1916,20 @@ normal map loaded sRGB goes soft and reads as a bad bake.
 
 The colourspace is part of a texture's identity, so the same file loaded both ways is two uploads on purpose.
 
+## three.LinearFilter / three.NearestFilter
+
+Which sampler a texture is read through, passed as `three.texture(path, { filter })` or
+`new three.DataTexture(data, w, h, { filter })`. It is one knob, decided at upload.
+
+- `LinearFilter` is the default and is right for a picture of something: it blends neighbouring texels, which
+  is what a photograph wants and what stops a textured floor shimmering.
+- `NearestFilter` reads each texel as a square, which is what pixel art, a sprite sheet and a shader-indexed
+  table want. One bright texel in a lookup table magnified under linear is a soft square the size of everything
+  beside it — the symptom this exists to prevent.
+
+Like the colourspace it is part of a texture's identity: the same pixels asked for both ways are two uploads,
+because sharing a slot would hand whichever caller came second the other one's sampler.
+
 ## new three.DataTexture(data, width, height, options)
 
 Upload pixels a script generated. Rows run bottom-to-top, four bytes per pixel.
@@ -1922,7 +1938,8 @@ The bytes are read and copied inside the call, so the array is yours again immed
 refused with the arithmetic in the message rather than uploaded skewed.
 
 `options` is `three.texture`'s; a generated lookup table wants
-`{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false }`.
+`{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false, filter: three.NearestFilter }` — the mips
+off so the table is not blurred, the filter nearest so one texel is one texel.
 
 ## texture.levels and texture.generateMipmaps
 
@@ -2319,6 +2336,31 @@ const local = { x: p.x - slot.x, y: p.y - slot.y };
 Widgets in a snapshot never need this — the interface lays them out and hit-tests them. The pointer reading is
 global, so it is true through a menu the host has painted over the pane; a `draw` node does not own the pointer
 yet.
+
+## three.ui.scale
+
+How big the whole interface is drawn. 1 is the size every other number in this section is written against, and
+1.25 makes everything a quarter bigger.
+
+```js
+three.ui.scale = 1.25;
+```
+
+It scales the coordinate space rather than a font: the tree is laid out in a space that much smaller and stretched
+back over the frame, so the chrome a script cannot put a number on — a menu bar's height, a dialog's title, a file
+browser's rows — grows with the panels around it. Glyphs are rasterised at the frame's own density, so text comes
+out bigger rather than blurrier.
+
+Reading it answers the scale in force. A value that is not positive throws, and anything outside 0.25 to 4 is
+clamped to it.
+
+The one thing it moves: `three.ui.draw` and a `draw` node's coordinates are the interface's, and
+`three.input.pointer` is the window's. At a scale other than 1 a drawing placed at the cursor divides.
+
+```js
+const p = three.input.pointer, s = three.ui.scale;
+three.ui.draw([{ op: 'circle', center: [p.x / s, p.y / s], radius: 8, color: 0xffffff }]);
+```
 
 ## three.ui.clear()
 

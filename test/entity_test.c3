@@ -343,6 +343,69 @@ fn void a_trigger_reaches_a_rule_subject_first_and_the_script_handler_too() @tes
 }
 
 <*
+ A trigger MOVED after it was added still fires.
+
+ The solver bakes a trigger's AABB where it was added, and only the kinematic
+ ride — `drive_kinematic` feeding `set_kinematic_target` — ever updates it. A
+ trigger that follows a moving node was therefore baked where it spawned and
+ overlapped nothing ever again, which is the failure that reads as "the pickup
+ never fires" and cost a whole game to find. Spawn-at-rest fired; move-later
+ did not, and that asymmetry is the trap: a test that only spawns overlapping
+ passes on the broken engine.
+
+ So the overlap here is created AFTER the spawn, by writing the trigger node's
+ position — and the exit side is half of the contract too, because a trigger
+ that can only ever be "in" is as wrong as one that can never be.
+*>
+fn void a_trigger_moved_after_spawn_still_fires() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(30, 1, 30));
+			floor.position.y = -2;
+			scene.add(floor);
+			three.physics.add(floor, { shape: 'box', mass: 0 });
+
+			globalThis.Vol = three.track(class Vol {
+				constructor() {
+					this.object = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+					this.object.position.set(5, 0, 0);   // far from the fly
+				}
+			}, { collides: false, volume: { shape: 'sphere', radius: 0.85, offset: [0, 0.8, 0] } });
+
+			globalThis.Fly = three.track(class Fly {
+				constructor() {
+					this.object = new three.Group();
+					this.object.position.set(0, 0, 0);
+				}
+			}, { collides: false, trigger: { shape: 'sphere', radius: 0.85 } });
+
+			const v = Vol.spawn();
+			const f = Fly.spawn();
+
+			globalThis.enters = 0;
+			globalThis.exits = 0;
+			Fly.on('enter', Vol, () => { enters++; });
+			Fly.on('exit', Vol, () => { exits++; });
+
+			// The volume's kinematic body rides its node every frame already; the
+			// question is the trigger, moved by hand at frame 4 and away at 8.
+			globalThis.moved = 0;
+			three.systems.frame('mover', () => {
+				moved++;
+				if (moved === 4) f.object.position.set(4.8, 0, 0.1);   // onto the volume
+				if (moved === 8) f.object.position.set(9, 0, 0);       // and away again
+			});
+		`, 12, "return [enters > 0, exits > 0];", "the moving-trigger script ran");
+
+		test::@check(value == "[true,true]",
+			"a trigger moved onto a volume fires enter, and moved away fires exit; got %s", value);
+	};
+}
+
+<*
  A rule replaces by name, and a rule that throws is contained.
 
  Replacement is what makes a hot reload survivable: §8 re-evaluates `main.js` on
@@ -446,6 +509,61 @@ fn void a_near_rule_reads_the_column_rather_than_the_node() @test
 
 		test::@check(value == "[true,0,true,0,true]",
 			"near fires inside the radius, off it does not, and it follows the column; got %s", value);
+	};
+}
+
+<*
+ A NaN position is outside every `near` radius, not inside all of them.
+
+ The gate was `if (d2 > r2) continue;` and NaN defeats every comparison: a
+ position holding NaN made d2 NaN, `NaN > r2` read false, and the test fell
+ THROUGH into firing. One firefly whose `y` was read before it was written
+ caught all fourteen of its siblings in one tick — the failure reads as "the
+ rule fires for everything", which is the last direction a person looks in.
+
+ The spelling is `if (!(d2 <= r2)) continue;`, which sends NaN away with the
+ ones outside the radius. This test holds the broken spelling's hand: an entity
+ at NaN distance must not fire, while one genuinely inside must.
+*>
+fn void a_nan_position_is_outside_every_near_radius() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			const scene = new three.Scene();
+			globalThis.Critter = three.track(class Critter {
+				constructor(x) {
+					this.position[0] = x;
+					this.object = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+					scene.add(this.object);
+					this.touched = 0;
+				}
+			}, { columns: { position: 3 }, capacity: 8 });
+
+			globalThis.Player = three.track(class Player {
+				constructor() {
+					this.object = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+					this.object.position.set(0, 0, 0);
+					this.hurt = 0;
+				}
+			});
+
+			globalThis.p = Player.spawn();
+			globalThis.good = Critter.spawn(0.5);      // genuinely inside
+			globalThis.bad = Critter.spawn(9);
+			// The undefined write that started the game bug: a component the
+			// constructor never wrote, read back as NaN by the distance test.
+			bad.position[1] = undefined;
+
+			Critter.on('near', Player, (c, who) => { c.touched++; who.hurt++; }, { within: 1.0 });
+		`, 4, "return [good.touched, bad.touched, p.hurt];",
+			"the NaN near script ran");
+
+		// A 'near' rule fires every tick while inside, so four frames is four
+		// fires from `good` and NOTHING from `bad` — on the broken gate, p.hurt
+		// reads 8, because the NaN position fired too.
+		test::@check(value == "[4,0,4]",
+			"the in-radius entity fires once a tick and the NaN one never; got %s", value);
 	};
 }
 

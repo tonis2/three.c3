@@ -514,8 +514,9 @@ fn void js_texture(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
 
 		ColorSpace space = color_space_of(arg_int(&js, argc, args, 1));
 		bool mips        = arg_truth_or(&js, argc, args, 2, true);
+		bool nearest     = arg_truth_or(&js, argc, args, 3, false);
 
-		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips);
+		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips, nearest);
 		if (catch err = index)
 		{
 			*out = js.raise(self.texture_failure(err, path, opening));
@@ -637,8 +638,12 @@ fn void js_data_texture(
 	// noise field indexed exactly — and a blurred level of a table is not a cheaper
 	// approximation of anything.
 	bool mips        = arg_truth_or(&js, argc, args, 4, true);
+	// The other half of "a table rather than a picture": a table wants its texels
+	// read as squares, and one bright texel under linear magnification is a soft
+	// square the size of everything beside it.
+	bool nearest     = arg_truth_or(&js, argc, args, 5, false);
 
-	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips);
+	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips, nearest);
 	if (catch err = index)
 	{
 		*out = js.raise(string::tformat("could not upload the texture: %s", err));
