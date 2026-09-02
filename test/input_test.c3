@@ -15,6 +15,7 @@
 module three_tests::input;
 
 import three;
+import three_tests::device;
 import c3w;
 import vk;
 import image;
@@ -47,20 +48,14 @@ macro @with_js(; @body(three::JsRuntime* run, three::MeshPass* pass))
 *>
 macro @with_gpu_js(; @body(three::JsRuntime* run, three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	@body(&runtime, &renderer);
+	@body(&runtime, renderer);
 }
 
 macro @ok(three::JsRuntime* run, String source)
@@ -1697,20 +1692,14 @@ fn void pressing_a_key_that_does_not_exist_is_refused() @test
 // clipping.
 macro @with_panel_js(; @body(three::Renderer* renderer, three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 520, 400)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(520, 400);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	@body(&renderer, &runtime);
+	@body(renderer, &runtime);
 }
 
 // One frame, so the emit pass writes the absolute origins every hit test reads.

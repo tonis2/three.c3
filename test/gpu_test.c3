@@ -20,6 +20,7 @@
 module three_tests::gpu;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import std::core::test;
@@ -41,26 +42,19 @@ const uint H = 48;
 *>
 macro @with_gpu(; @body(three::Gpu* gpu))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(with_pass: false);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
 
-	three::Gpu gpu;
-	gpu.init(instance, (vk::SurfaceKHR)null)!!;
-	defer gpu.free();
-
-	@body(&gpu);
+	@body(gpu);
 }
 
 macro @with_renderer(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H, with_pass: false);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 <*
@@ -76,14 +70,11 @@ macro @with_renderer(; @body(three::Renderer* renderer))
 *>
 macro @with_validating_gpu(; @body(three::Gpu* gpu))
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(validate: true, with_pass: false);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
 
-	three::Gpu gpu;
-	gpu.init(instance, (vk::SurfaceKHR)null, validate: true)!!;
-	defer gpu.free();
-
-	@body(&gpu);
+	@body(gpu);
 }
 <*
  Bring a device up and take it down again.
@@ -96,7 +87,20 @@ macro @with_validating_gpu(; @body(three::Gpu* gpu))
 *>
 fn void device_comes_up_headless() @test
 {
-	@with_gpu(; three::Gpu* gpu)
+	// The one check that still builds a device of its own, because taking one
+	// down again is half of what it says — and the device the rest of the suite
+	// shares is never taken down. Registered first so it runs last, after both
+	// frees have moved the dispatch tables.
+	defer device::dispatch_moved();
+
+	vk::Instance instance = three::create_instance(false, headless: true)!!;
+	defer instance.free();
+
+	three::Gpu bare;
+	bare.init(instance, (vk::SurfaceKHR)null)!!;
+	defer bare.free();
+
+	three::Gpu* gpu = &bare;
 	{
 		test::@check(gpu.handle != null, "no logical device");
 		test::@check(gpu.graphics.handle != null, "no graphics queue");
@@ -114,7 +118,7 @@ fn void device_comes_up_headless() @test
 			gpu.limits.push_descriptor,
 			"pushDescriptor is off; since M5 there are no descriptor sets to fall back to"
 		);
-	};
+	}
 }
 
 // ============================================================================

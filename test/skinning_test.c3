@@ -20,6 +20,7 @@
 module three_tests::skinning;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import gltf;
@@ -35,16 +36,10 @@ const uint H = 150;
 
 macro @with_pass(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 <*
@@ -1047,17 +1042,11 @@ fn void the_compute_pipeline_is_not_built_unless_asked() @test
 
 macro @with_js(; @body(three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	@body(&runtime);

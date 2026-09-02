@@ -17,6 +17,7 @@
 module three_tests::clock;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import std::core::test;
@@ -546,17 +547,11 @@ fn void a_throwing_fixed_loop_is_stopped_and_says_which_loop_it_was() @test
 *>
 fn void a_paused_world_does_not_fall() @test
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
 
 	three::JsRuntime run;
-	run.open(&renderer.pass, &renderer)!!;
+	run.open(&renderer.pass, renderer)!!;
 	defer run.close();
 
 	three::RunResult built = run.run(`
@@ -621,14 +616,8 @@ fn void a_paused_world_does_not_fall() @test
 *>
 fn void the_post_clock_is_the_game_clock() @test
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 64, 64)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(64, 64);
+	defer device::release();
 
 	// The whole frame is `p.time`, so the picture *is* the reading.
 	renderer.post.set(
