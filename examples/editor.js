@@ -1,13 +1,17 @@
 // editor.js — a kit editor: select, move, rotate, delete, duplicate, undo,
-// an asset browser over a kit's own node hierarchy, and placing with three
-// snaps in the order they earn their place — grid, face, marker.
+// a Blender-style asset browser over a kit's own pieces, and placing with
+// three snaps in the order they earn their place — grid, face, marker.
 //
-// The browser is a `tree` of every named node in the kit's file, exactly as
-// authored — root empties, cameras and markers included, nested under their
-// real parents rather than flattened to "top-level pieces". A kit that
-// wraps its walls and roofs in one outer "root" (as an exported Blender
-// scene usually does) still opens straight onto them: the first level
-// starts expanded, so `root` is one click from `wall_stone`.
+// The browser is a dock along the bottom: a catalog column on the left (the
+// open kit's file, and a category list built from each piece name's own
+// `category_rest` convention — `wall_stone` catalogs under `wall`), and a
+// search field over a scrollable grid of thumbnail cards on the right, one
+// per piece, each an isometric wireframe of its own bounding box. A kit that
+// wraps its pieces in one outer "root" empty (as an exported Blender scene
+// usually does) still opens straight onto them — see `buildPieceList` for
+// the one rule that decides what counts as a piece. `View > Asset browser`
+// toggles the dock; the choice is remembered in `three.persist`, next to
+// the others.
 //
 // Run it against a kit folder (a directory holding one or more .glb files):
 //
@@ -55,6 +59,21 @@
 // only whether a node is drawable at all, so hiding the grid before framing
 // would not shrink the frame; it has to be unparented and reparented. See
 // `frameAllExcludingHelpers` and the comment on `helpers` below.
+//
+// ## The interface is a handful of widget classes
+//
+// Everything drawn — the dock, the properties panel, the status strip, the
+// menu bar, and the confirm/open/kit/save/export dialogs — is `three.Widget`
+// classes; `examples/pop.js` is the worked example of the pattern and its
+// header comment is worth reading first. `Chrome` is the one floor that owns
+// the dock, the properties panel, the status strip and the menu bar — the
+// menu bar is its LAST child, so an open dropdown paints over the panels
+// beside it rather than under them, which is the layering bug this rewrite
+// fixes. `Dialogs` is a second floor (`static layer = 1`) over the top, for
+// the modal panels. `Catalog`, `Browser`, `Card`, `Props` and `StatusBar` are
+// parts: constructed once, holding their own state, never rebuilt — a field
+// write on one marks its owning floor dirty, and only the values that
+// actually changed cross to the host.
 
 // ---------------------------------------------------------------------------
 // World
@@ -150,14 +169,24 @@ function freshId(piece) {
 	return `${piece}_${n}`;
 }
 
-// The kit's own node hierarchy, for the asset browser — read straight off
-// `asset._rows(false)` (the same flattened, parent-indexed table
-// `instantiate()` builds objects from; see `js_asset_nodes` in
-// src/js/bind_asset.c3 and `Asset._rows` in src/js/prelude/asset.js for the
-// row shape: `[name, parent, mesh, ...]`, parents always before children).
-// This needs no heuristic for a kit that wraps its pieces in an extra
-// "root" empty beside `camera`/`sun` siblings (real kits do) — the parent
-// index already says where every node sits.
+// Wraps a key or click handler so one throw reports on the status line
+// instead of unbinding the handler for the rest of the run — onKeyDown,
+// onClick, a widget handler and the animation loop are all "stopped for
+// good if it throws".
+function safe(fn) {
+	return (...args) => {
+		try { fn(...args); } catch (e) { setStatus(String(e && e.message ? e.message : e)); }
+	};
+}
+
+// ---------------------------------------------------------------------------
+// The kit's own node hierarchy — read straight off `asset._rows(false)` (the
+// same flattened, parent-indexed table `instantiate()` builds objects from;
+// see `js_asset_nodes` in src/js/bind_asset.c3 and `Asset._rows` in
+// src/js/prelude/asset.js for the row shape: `[name, parent, mesh, ...]`,
+// parents always before children).
+// ---------------------------------------------------------------------------
+
 function buildAssetTree(asset) {
 	if (!asset) return null;
 	const rows = asset._rows(false);
@@ -181,79 +210,63 @@ function buildAssetTree(asset) {
 	return { rows, hasMesh, depth, childCount };
 }
 
-// Depth-0 rows open by default — enough for a `root`-wrapped kit to show its
-// pieces right away — everything deeper starts collapsed.
-function resetTreeExpansion(tree) {
-	const expanded = new Set();
-	if (tree) for (let i = 0; i < tree.rows.length; i++) if (tree.depth[i] === 0) expanded.add(i);
-	return expanded;
+// The category a piece catalogs under: the text before its first `_`, or the
+// whole name when it has none — `wall_stone` catalogs under `wall`, `convex`
+// stays `convex`.
+function categoryOf(name) {
+	const i = name.indexOf('_');
+	return i > 0 ? name.slice(0, i) : name;
 }
 
-// The tree widget's own rule: "nothing is hidden by `expanded`; it only
-// points the disclosure mark" — cui draws whatever `rows` it is handed, so
-// which rows are visible (an ancestor collapsed or not) is this script's
-// job, recomputed against `state.treeExpanded` on every `syncUI()`.
-// Answers the widget's own `rows` plus a parallel array back to the raw
-// table, since `onSelect`/`onToggle` hand back an index into what was sent.
-function visibleTreeRows() {
-	if (!assetTree) return { widgetRows: [], indices: [] };
-	const { rows, depth, childCount } = assetTree;
-	const widgetRows = [];
-	const indices = [];
-	const visible = new Array(rows.length).fill(false);
+// The shallowest drawable nodes — what the asset browser calls "pieces".
+//
+// Start with the file's own top-level nodes that have a mesh somewhere in
+// their subtree (a bare `camera` or `sun` sibling has none and drops out
+// here for free). While there is EXACTLY ONE such node and it has no mesh of
+// its own, descend into its drawable children instead — that is the one
+// rule that opens a Blender `root`-wrapped kit straight onto its own pieces
+// while leaving an already-flat kit flat, and it treats a multi-part piece
+// (a door with a frame and a leaf) as one card, because a flat kit's door
+// is never the ONLY top-level candidate.
+function buildPieceList(tree) {
+	if (!tree) return [];
+	const { rows, hasMesh } = tree;
+	const childrenOf = new Map();
 	for (let i = 0; i < rows.length; i++) {
 		const parent = rows[i][1];
-		visible[i] = parent < 0 || (visible[parent] && state.treeExpanded.has(parent));
-		if (!visible[i]) continue;
-		widgetRows.push({
-			label: rows[i][0],
-			depth: depth[i],
-			expandable: childCount[i] > 0,
-			expanded: state.treeExpanded.has(i),
-		});
-		indices.push(i);
+		if (parent < 0) continue;
+		if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+		childrenOf.get(parent).push(i);
 	}
-	return { widgetRows, indices };
-}
-
-function onTreeToggle(rawIndex) {
-	if (state.treeExpanded.has(rawIndex)) state.treeExpanded.delete(rawIndex);
-	else state.treeExpanded.add(rawIndex);
-	syncUI();
-}
-
-// A node whose subtree draws nothing (an empty like `camera`, a marker) is
-// not a piece — say so on the status line and clear the stamp instead of
-// letting a later `align()` throw on a box that does not exist. Two named
-// nodes can share a name in a file; stamping is by name either way and
-// `asset.node(name)` picks the first one the loader walked, same as always.
-function onTreeSelect(rawIndex) {
-	const name = assetTree.rows[rawIndex][0];
-	if (!assetTree.hasMesh[rawIndex]) {
-		setStatus(`${name} has nothing to draw`);
-		state.stamp = null;
-		syncUI();
-		return;
+	let candidates = [];
+	for (let i = 0; i < rows.length; i++) if (rows[i][1] < 0 && hasMesh[i]) candidates.push(i);
+	while (candidates.length === 1 && rows[candidates[0]][2] === -1) {
+		const kids = (childrenOf.get(candidates[0]) ?? []).filter(i => hasMesh[i]);
+		if (kids.length === 0) break;
+		candidates = kids;
 	}
-	editor.stamp(name);
+	return candidates.map(i => rows[i][0]);
 }
 
-// Swaps in a freshly loaded kit and rebuilds the browser's tree model with
-// it — every place `currentAsset` changes goes through this rather than
-// assigning it directly, so the two never drift apart.
+// Swaps in a freshly loaded kit and rebuilds the browser's models with it —
+// every place `currentAsset` changes goes through this rather than assigning
+// it directly, so the asset, the piece list and the catalog never drift
+// apart.
 function setCurrentAsset(asset) {
 	currentAsset = asset;
 	assetTree = buildAssetTree(asset);
-	state.treeExpanded = resetTreeExpansion(assetTree);
-}
-
-// Wraps a key or click handler so one throw reports on the status line
-// instead of unbinding the handler for the rest of the run — onKeyDown,
-// onClick and the animation loop are all "stopped for good if it throws".
-function safe(fn) {
-	return (...args) => {
-		try { fn(...args); } catch (e) { setStatus(String(e && e.message ? e.message : e)); }
-	};
+	const names = buildPieceList(assetTree);
+	state.pieces = names.map(name => ({ name, category: categoryOf(name) }));
+	const cards = new Map();
+	for (const p of state.pieces) {
+		let box = null;
+		try { box = asset.node(p.name).boundsInParent(); } catch (e) { box = null; }
+		cards.set(p.name, new Card(p.name, p.category, box));
+	}
+	pieceCards = cards;
+	if (state.stamp && !pieceCards.has(state.stamp)) state.stamp = null;
+	catalog.refresh();
+	browser.update();
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +283,9 @@ const state = {
 	showGrid: true,
 	markerChoice: null,
 	markerChoices: [],
-	treeExpanded: new Set(),
+	pieces: [],
+	pendingKit: null,
+	dockOpen: three.persist.dockOpen ?? true,
 	confirmDeleteId: null,
 	confirmDeleteOpen: false,
 	confirmNewOpen: false,
@@ -287,9 +302,10 @@ let undoStack = [];
 let redoStack = [];
 const UNDO_CAP = 100;
 
-let level;          // the live three.level.Level — reassigned by undo/open/new
+let level;                 // the live three.level.Level — reassigned by undo/open/new
 let currentAsset = null;   // three.load(level.kit), kept for the asset browser
 let assetTree = null;      // buildAssetTree(currentAsset) — the browser's own model
+let pieceCards = new Map(); // piece name -> its Card widget, rebuilt with the asset
 
 function setStatus(message) {
 	state.lastError = message;
@@ -302,6 +318,7 @@ function syncPersist() {
 	three.persist.path = state.path;
 	three.persist.selected = state.selected;
 	three.persist.mode = state.mode;
+	three.persist.dockOpen = state.dockOpen;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +451,9 @@ function placeNewPiece(piece, groundPoint, pickHit, opts = {}) {
 		setStatus(`no piece named '${piece}' in the current kit`);
 		return null;
 	}
-	// The same "nothing to draw" refusal the tree's onSelect makes, kept
-	// here too: a stamp set straight through editor.stamp() (a script
-	// driving this headlessly, say) never saw that check.
+	// The same "nothing to draw" refusal the browser's own pieces already
+	// exclude, kept here too: a stamp set straight through editor.stamp() (a
+	// script driving this headlessly, say) never saw that filter.
 	if (currentAsset.node(piece).boundsInParent() === null) {
 		setStatus(`${piece} has nothing to draw`);
 		state.stamp = null;
@@ -683,6 +700,11 @@ function doNewLevel(kit) {
 	setCurrentAsset(kit ? three.load(kit) : null);
 	state.path = null;
 	state.dirty = false;
+	// A kit is now chosen, so whatever asked for one closes — the dialog's
+	// own onChoose already does this before calling in on the normal path,
+	// but `editor.newLevel()` (a script driving this headlessly, with no
+	// dialog to click through) is a second way in that needs it done here.
+	state.kitDialogOpen = false;
 	undoStack = [];
 	redoStack = [];
 	select(null);
@@ -692,8 +714,571 @@ function doNewLevel(kit) {
 }
 
 function requestNew() {
+	state.pendingKit = null;
 	if (state.dirty) { state.confirmNewOpen = true; syncUI(); }
 	else { state.kitDialogOpen = true; syncUI(); }
+}
+
+// Picking a different kit straight off the catalog's library dropdown runs
+// the same discard flow as File > New, just already knowing which kit it is
+// headed for — `state.pendingKit` is what the confirm dialog's onConfirm
+// reads instead of falling back to the file browser.
+function requestKitChange(path) {
+	if (!path || (level && level.kit === path)) return;
+	if (state.dirty) { state.pendingKit = path; state.confirmNewOpen = true; syncUI(); }
+	else { doNewLevel(path); }
+}
+
+// ---------------------------------------------------------------------------
+// The interface — a handful of widget classes; see the header comment.
+// ---------------------------------------------------------------------------
+
+const {
+	Panel, Stack, Row, Column, Padding, Grid, Anchored, Scroll,
+	Rect, Label, Drawing, Select, TextField, Tree, Button,
+	ConfirmDialog, MenuBar, FileBrowser, Dialog,
+} = three.ui;
+
+const THEME = {
+	panel: [0.19, 0.19, 0.19],
+	header: [0.16, 0.16, 0.16],
+	body: [0.11, 0.11, 0.11],
+	accent: [0.28, 0.45, 0.70],
+	text: [0.90, 0.90, 0.90],
+	dim: [0.62, 0.62, 0.62],
+	border: [1, 1, 1, 0.08],
+	hover: [0.24, 0.24, 0.24],
+	wireHidden: [0.85, 0.85, 0.85, 0.25],
+	radius: 4,
+};
+
+const BAR_H = 28;    // cui's own default menu bar height (DEFAULT_MENU_STYLE.bar_height)
+const STATUS_H = 24;
+const DOCK_H = 240;
+const HEADER_H = 30;
+const CATALOG_W = 200;
+const PROPS_W = 260;
+const CARD_W = 108;
+const CARD_H = 128;
+const THUMB = 92;
+
+// Every number above is in interface points, and this is how many pixels one of
+// them is worth. It scales the whole interface rather than this file's own
+// constants, so the parts nobody here can put a number on — a menu bar's height,
+// a dialog's title, a file browser's rows — grow with the rest. Turn it down to
+// 1 for the original size.
+three.ui.scale = 1.25;
+
+// ---------------------------------------------------------------------------
+// Card thumbnails — an isometric wireframe of the piece's own bounding box.
+// ---------------------------------------------------------------------------
+
+const CATEGORY_PALETTE = [
+	[0.62, 0.78, 0.62], [0.80, 0.62, 0.58], [0.58, 0.68, 0.82], [0.82, 0.72, 0.52],
+	[0.74, 0.62, 0.82], [0.56, 0.76, 0.76], [0.82, 0.62, 0.74], [0.68, 0.78, 0.52],
+];
+function categoryColor(category) {
+	let h = 0;
+	for (let i = 0; i < category.length; i++) h = (h * 31 + category.charCodeAt(i)) >>> 0;
+	return CATEGORY_PALETTE[h % CATEGORY_PALETTE.length];
+}
+
+const ISO_COS = Math.cos(Math.PI / 6);
+const ISO_SIN = Math.sin(Math.PI / 6);
+
+// `sx = (x - z) * cos30`, `sy = y + (x + z) * sin30`, flipped for screen
+// (world up is negative screen y).
+function isoProject(x, y, z) {
+	return [(x - z) * ISO_COS, -(y + (x + z) * ISO_SIN)];
+}
+
+// The 8 corners of a unit box (bit i = the max side of axis i) and its 12
+// edges; the 3 touching corner 0 (all-min) are the ones an isometric view
+// from the all-max corner hides.
+const BOX_CORNERS = [0, 1, 2, 3, 4, 5, 6, 7].map(i => [i & 1, (i >> 1) & 1, (i >> 2) & 1]);
+const BOX_EDGES = (() => {
+	const edges = [];
+	for (let i = 0; i < 8; i++) for (const bit of [1, 2, 4]) { const j = i ^ bit; if (i < j) edges.push([i, j, i === 0]); }
+	return edges;
+})();
+
+// Draws `box` as a wireframe inside the `size`-square at `at` (both in the
+// card's own draw-op coordinates), scaled and centred to fit.
+function wireframeOps(box, at, size, visibleColor, hiddenColor) {
+	const corners = BOX_CORNERS.map(([bx, by, bz]) => isoProject(
+		bx ? box.max.x : box.min.x, by ? box.max.y : box.min.y, bz ? box.max.z : box.min.z,
+	));
+	let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+	for (const [x, y] of corners) {
+		if (x < minX) minX = x; if (x > maxX) maxX = x;
+		if (y < minY) minY = y; if (y > maxY) maxY = y;
+	}
+	const w = Math.max(maxX - minX, 1e-4), h = Math.max(maxY - minY, 1e-4);
+	const scale = 0.86 * Math.min(size / w, size / h);
+	const ox = at[0] + (size - w * scale) / 2 - minX * scale;
+	const oy = at[1] + (size - h * scale) / 2 - minY * scale;
+	const screen = corners.map(([x, y]) => [ox + x * scale, oy + y * scale]);
+	const ops = [];
+	for (const [a, b, hidden] of BOX_EDGES) if (hidden) ops.push({ op: 'line', from: screen[a], to: screen[b], thickness: 1, color: hiddenColor });
+	for (const [a, b, hidden] of BOX_EDGES) if (!hidden) ops.push({ op: 'line', from: screen[a], to: screen[b], thickness: 1.4, color: visibleColor });
+	return ops;
+}
+
+function formatSize(box) {
+	if (!box) return '';
+	const dx = box.max.x - box.min.x, dy = box.max.y - box.min.y, dz = box.max.z - box.min.z;
+	return `${dx.toFixed(1)} × ${dy.toFixed(1)} × ${dz.toFixed(1)}`;
+}
+
+function ellipsise(text, maxWidth, size) {
+	if (three.ui.measure(text, { size })[0] <= maxWidth) return text;
+	let out = text;
+	while (out.length > 1 && three.ui.measure(out + '…', { size })[0] > maxWidth) out = out.slice(0, -1);
+	return out.length > 1 ? out + '…' : out;
+}
+
+// A reusable card: one Drawing, one piece, its own hover state. The
+// wireframe's screen-space line list, the ellipsised name and the size
+// caption are all fixed by the box and the name at construction, so they are
+// computed once, here, and kept on the instance — re-rendering it after a
+// hover or a stamp change is just the background and text colours changing,
+// with `three.ui.measure` (through `ellipsise`) never touched again.
+class Card extends three.Widget {
+	constructor(name, category, box) {
+		super();
+		this.name = name;
+		this.category = category;
+		this.box = box;
+		this.hovered = false;
+		this.wireOps = box ? wireframeOps(box, [8, 8], THUMB, categoryColor(category), THEME.wireHidden) : [];
+		this.displayName = ellipsise(name, CARD_W - 16, 12);
+		this.sizeCaption = formatSize(box);
+	}
+
+	render() {
+		const stamped = state.stamp === this.name;
+		const bg = stamped ? THEME.accent : this.hovered ? THEME.hover : THEME.panel;
+		const ops = [
+			{ op: 'rect', at: [0, 0], size: [CARD_W, CARD_H], radius: THEME.radius, color: bg, borderColor: THEME.border, borderWidth: 1 },
+			...this.wireOps,
+			{ op: 'text', at: [8, THUMB + 12], text: this.displayName, size: 12, color: stamped ? [1, 1, 1] : THEME.text },
+			{ op: 'text', at: [8, THUMB + 28], text: this.sizeCaption, size: 10, color: stamped ? [0.92, 0.95, 1] : THEME.dim },
+		];
+		return new Drawing({
+			key: this.name, size: [CARD_W, CARD_H], ops,
+			onClick: safe(() => editor.stamp(state.stamp === this.name ? null : this.name)),
+			onHover: entered => { this.hovered = entered; },
+		});
+	}
+}
+
+function kitLabel(path) {
+	const parts = path.split('/');
+	return parts[parts.length - 1];
+}
+
+// The dock's left column: the kit library dropdown and the category list
+// that filters the grid.
+class Catalog extends three.Widget {
+	constructor() {
+		super();
+		this.kitOptions = [];
+		this.kitSelected = -1;
+		this.rows = [{ label: 'All', trailing: '0' }];
+		this.activeIndex = 0; // index into `rows`; 0 is 'All'
+	}
+
+	get activeCategory() {
+		return this.activeIndex > 0 && this.rows[this.activeIndex] ? this.rows[this.activeIndex].label : null;
+	}
+
+	// Called by setCurrentAsset() whenever the kit (and so the piece list)
+	// changes — recomputes the library options and the category counts,
+	// keeping whatever category was active if it still exists.
+	refresh() {
+		this.kitOptions = three.inventory().filter(e => /\.glb$|\.gltf$/i.test(e.path)).map(e => e.path);
+		this.kitSelected = level && level.kit ? this.kitOptions.indexOf(level.kit) : -1;
+
+		const counts = new Map();
+		for (const p of state.pieces) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+		const names = [...counts.keys()].sort();
+		const activeLabel = this.activeIndex > 0 && this.rows[this.activeIndex] ? this.rows[this.activeIndex].label : null;
+		this.rows = [
+			{ label: 'All', trailing: String(state.pieces.length) },
+			...names.map(name => ({ label: name, trailing: String(counts.get(name)) })),
+		];
+		this.activeIndex = activeLabel ? Math.max(0, this.rows.findIndex(r => r.label === activeLabel)) : 0;
+	}
+
+	render() {
+		return new Padding({ insets: 8 },
+			new Column({ gap: 10 },
+				new Label('Kit', { color: THEME.dim, textSize: 11 }),
+				new Select(this.kitOptions.map(kitLabel), this.kitSelected,
+					safe(i => requestKitChange(this.kitOptions[i])), { key: 'kitSelect' }),
+				new Scroll({ key: 'catalogScroll' },
+					new Tree(this.rows, this.activeIndex,
+						safe(i => { this.activeIndex = i; browser.update(); }), { key: 'categoryTree' })),
+			),
+		);
+	}
+}
+
+// Every piece currently passing the catalog's category filter and the
+// browser's own search text — the grid's contents, and what `editor._tree`
+// reports.
+function visiblePieces() {
+	const q = browser.search.trim().toLowerCase();
+	const category = catalog.activeCategory;
+	return state.pieces.filter(p => (!category || p.category === category) && (!q || p.name.toLowerCase().includes(q)));
+}
+
+// The dock's right column: a search header over a scrolling grid of cards.
+class Browser extends three.Widget {
+	constructor() {
+		super();
+		this.search = '';
+	}
+
+	render() {
+		const visible = visiblePieces();
+		const cards = visible.map(p => pieceCards.get(p.name)).filter(Boolean);
+		const stampText = state.stamp ? `stamp: ${state.stamp} · esc clears` : 'click a piece to stamp it';
+
+		return new Column({},
+			new Stack({ size: [0, HEADER_H] },
+				new Rect({ color: THEME.header, solid: true }),
+				new Anchored({ h: 'start', v: 'center', margin: [10, 0] },
+					new Row({ gap: 12, cross: 'center' },
+						new TextField({
+							key: 'search', text: this.search, placeholder: 'Search', size: [180, 0],
+							onChange: safe(t => { this.search = t; }),
+						}),
+						new Label(`${visible.length} of ${state.pieces.length}`, { color: THEME.dim, textSize: 12 }),
+					),
+				),
+				new Anchored({ h: 'end', v: 'center', margin: [10, 0] },
+					new Label(stampText, { color: state.stamp ? THEME.accent : THEME.dim, textSize: 12 }),
+				),
+			),
+			new Scroll({ key: 'browserScroll' },
+				cards.length > 0
+					? new Padding({ insets: 8 }, new Grid({ cell: [CARD_W, CARD_H], gap: 6 }, ...cards))
+					: new Padding({ insets: 16 }, new Label('no pieces match', { color: THEME.dim, textSize: 12 }))),
+		);
+	}
+}
+
+// The N-panel-style properties card, top-right under the menu bar.
+class Props extends three.Widget {
+	constructor() {
+		super();
+		this.mode = state.mode;
+		this.hasMarker = false;
+		this.markerOptions = [];
+		this.markerIndex = -1;
+		this.hasSelection = false;
+		this.id = '';
+		this.piece = '';
+		this.position = '';
+		this.rotation = '';
+		this.snap = '';
+	}
+
+	// Pulls this frame's numbers off `state`/`level` and writes only the
+	// fields that actually changed — the animation loop calls this every
+	// frame, so an unchanged value must not touch the proxy.
+	sync() {
+		if (this.mode !== state.mode) this.mode = state.mode;
+
+		const showMarker = state.mode === 'marker' && !!state.grab && state.markerChoices.length > 0;
+		if (this.hasMarker !== showMarker) this.hasMarker = showMarker;
+		if (showMarker) {
+			if (this.markerOptions.join(' ') !== state.markerChoices.join(' ')) this.markerOptions = state.markerChoices;
+			const idx = state.markerChoices.indexOf(state.markerChoice);
+			if (this.markerIndex !== idx) this.markerIndex = idx;
+		}
+
+		const row = state.selected ? level.rows.find(r => r.id === state.selected) : null;
+		const object = state.selected ? level.objects.get(state.selected) : null;
+		const has = !!(row && object);
+		if (this.hasSelection !== has) this.hasSelection = has;
+		if (!has) return;
+
+		if (this.id !== row.id) this.id = row.id;
+		if (this.piece !== row.piece) this.piece = row.piece;
+		const pos = positionText(object);
+		if (this.position !== pos) this.position = pos;
+		const turns = Math.round(wrapTurn(object.rotation.y) / (Math.PI / 2)) % 4;
+		const rot = `${turns} quarter turn${turns === 1 ? '' : 's'}`;
+		if (this.rotation !== rot) this.rotation = rot;
+		const snap = row.snap ? `${row.snap.to} ${row.snap.side}` : '(freehand)';
+		if (this.snap !== snap) this.snap = snap;
+	}
+
+	render() {
+		const modes = ['grid', 'face', 'marker'];
+		// A Row with no size hugs its content, so `main: 'space-between'` has
+		// no slack to spend — the caption instead gets a fixed-size column (a
+		// Stack, which has a box size to give it) so the value lands at a
+		// consistent indent instead of jammed against it. Both axes are fixed
+		// — a zero axis fills whatever it is offered, and inside the Panel's
+		// own hug-to-content column that offer is unbounded while the Panel
+		// is measuring its own size, which would blow this up to fill it.
+		const two = (caption, value) => new Row({ gap: 6 },
+			new Stack({ size: [64, 16] }, new Label(caption, { color: THEME.dim, textSize: 11 })),
+			new Label(value, { textSize: 12 }),
+		);
+		const children = [
+			new Label('Item', { textSize: 13 }),
+			new Row({ gap: 8 },
+				new Label('mode', { color: THEME.dim, textSize: 11 }),
+				new Select(modes, modes.indexOf(this.mode), safe(i => editor.setMode(modes[i])), { key: 'modeSelect' }),
+			),
+		];
+		if (this.hasMarker) {
+			children.push(new Row({ gap: 8 },
+				new Label('marker', { color: THEME.dim, textSize: 11 }),
+				new Select(this.markerOptions, this.markerIndex,
+					safe(i => { state.markerChoice = this.markerOptions[i]; }), { key: 'markerSelect' }),
+			));
+		}
+		if (!this.hasSelection) {
+			children.push(new Label('(no selection)', { color: THEME.dim, textSize: 12 }));
+		} else {
+			children.push(
+				two('id', this.id), two('piece', this.piece), two('position', this.position),
+				two('rotation', this.rotation), two('snap', this.snap),
+			);
+		}
+		return new Panel({
+			at: 'top-right', margin: [8, BAR_H + 8], width: PROPS_W, gap: 6, insets: 10,
+			color: THEME.panel, radius: THEME.radius, borderColor: THEME.border, borderWidth: 1, solid: true,
+		}, ...children);
+	}
+}
+
+function hintText() {
+	if (state.grab) return 'click to commit · esc cancels';
+	if (state.stamp) return 'click to place · shift freehand · esc clears';
+	if (state.selected) return 'g grab · r rotate · x delete';
+	return '';
+}
+
+// The bottom status strip: the existing status text on the left, contextual
+// key hints on the right.
+class StatusBar extends three.Widget {
+	constructor() {
+		super();
+		this.text = '';
+		this.hint = '';
+	}
+
+	sync() {
+		const t = statusText();
+		if (this.text !== t) this.text = t;
+		const h = hintText();
+		if (this.hint !== h) this.hint = h;
+	}
+
+	render() {
+		return new Anchored({ h: 'start', v: 'end' },
+			new Stack({ size: [0, STATUS_H] },
+				new Rect({ color: THEME.header, solid: true }),
+				new Anchored({ h: 'start', v: 'center', margin: [10, 0] },
+					new Label(this.text, { color: THEME.text, textSize: 12 })),
+				new Anchored({ h: 'end', v: 'center', margin: [10, 0] },
+					new Label(this.hint, { color: THEME.dim, textSize: 11 })),
+			),
+		);
+	}
+}
+
+function menuSpec() {
+	return [
+		{ title: 'File', items: ['New', 'Open…', 'Save', 'Save as…', 'Export .glb…', '-', 'Quit'] },
+		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
+		{
+			title: 'View',
+			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: state.dockOpen }],
+		},
+	];
+}
+
+// The picked item's own label, rather than its index — so dispatch reads
+// against what the menu actually says instead of a position that would
+// silently go stale the next time an item is added or reordered.
+function menuLabel(menu, item) {
+	const spec = menuSpec()[menu];
+	const entry = spec && spec.items[item];
+	if (entry === undefined || entry === null || entry === '-') return null;
+	return typeof entry === 'string' ? entry : entry.label;
+}
+
+function toggleDock() {
+	state.dockOpen = !state.dockOpen;
+	syncUI();
+}
+
+function onMenuSelect(menu, item) {
+	switch (menuLabel(menu, item)) {
+		case 'New': requestNew(); break;
+		case 'Open…': state.openDialogOpen = true; syncUI(); break;
+		case 'Save': doSave(); break;
+		case 'Save as…': state.saveAsText = state.path ?? 'levels/level.json'; state.saveAsOpen = true; syncUI(); break;
+		case 'Export .glb…': state.exportText = 'levels/level.glb'; state.exportOpen = true; syncUI(); break;
+		case 'Quit': three.quit(); break;
+		case 'Undo': undo(); break;
+		case 'Redo': redo(); break;
+		case 'Duplicate': duplicate(); break;
+		case 'Delete': requestRemove(); break;
+		case 'Frame all': frameAllExcludingHelpers(); break;
+		case 'Toggle grid': state.showGrid = !state.showGrid; gridHelper.visible = state.showGrid; break;
+		case 'Refit': pushUndo(); level.refit(); markDirty(); syncUI(); break;
+		case 'Asset browser': toggleDock(); break;
+	}
+}
+
+let chromeRenderCount = 0;
+
+// Floor 0: the dock, the properties panel, the status strip and the menu
+// bar, in that order — the menu bar LAST, so its open dropdown paints over
+// the panels beside it in this same Stack rather than under them.
+class Chrome extends three.Widget {
+	render() {
+		chromeRenderCount++;
+		return new Stack({},
+			state.dockOpen && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
+				new Stack({ size: [0, DOCK_H] },
+					new Rect({ color: THEME.header, solid: true }),
+					new Row({},
+						new Stack({ size: [CATALOG_W, 0] },
+							new Rect({ color: THEME.panel, solid: true }),
+							new Anchored({ h: 'end', v: 'start' }, new Rect({ size: [1, 0], color: THEME.border })),
+							catalog,
+						),
+						browser,
+					),
+				),
+			),
+			props,
+			statusBar,
+			new Anchored({ h: 'start', v: 'start' }, new MenuBar(menuSpec(), safe(onMenuSelect))),
+		);
+	}
+}
+
+// Floor 1: the modal panels, over everything on floor 0.
+class Dialogs extends three.Widget {
+	static layer = 1;
+
+	render() {
+		return new Stack({},
+			new ConfirmDialog({
+				key: 'deleteConfirm', title: 'Remove piece',
+				message: `Remove ${state.confirmDeleteId ?? ''}?`, confirm: 'Remove', decline: 'Keep',
+				open: state.confirmDeleteOpen, onConfirm: safe(confirmRemove), onDismiss: safe(cancelRemove),
+			}),
+			new ConfirmDialog({
+				key: 'newConfirm', title: 'Discard changes',
+				message: 'This level has unsaved changes — discard them and start a new one?',
+				confirm: 'Discard', decline: 'Cancel', open: state.confirmNewOpen,
+				onConfirm: safe(() => {
+					state.confirmNewOpen = false;
+					if (state.pendingKit) { const kit = state.pendingKit; state.pendingKit = null; doNewLevel(kit); }
+					else state.kitDialogOpen = true;
+					syncUI();
+				}),
+				onDismiss: safe(() => { state.confirmNewOpen = false; state.pendingKit = null; syncUI(); }),
+			}),
+			new Dialog({
+				key: 'openDialog', title: 'Open level', open: state.openDialogOpen,
+				modal: true, closeOutside: true, size: [360, 320],
+				onDismiss: safe(() => { state.openDialogOpen = false; syncUI(); }),
+			},
+				// A FileBrowser sizes itself to its listing and has no scrollbar
+				// of its own — the Scroll is what keeps a long directory inside
+				// the panel instead of painting down over the scene.
+				new Scroll({ key: 'openScroll' },
+					new FileBrowser({ key: 'openBrowser', start: 'levels/', mask: ['*.json'], onChoose: safe(path => { state.openDialogOpen = false; doOpen(path); }) })),
+			),
+			new Dialog({
+				key: 'kitDialog', title: 'Choose a kit', open: state.kitDialogOpen,
+				modal: true, closeOutside: false, size: [360, 320],
+			},
+				new Scroll({ key: 'kitScroll' },
+					new FileBrowser({ key: 'kitBrowser', mask: ['*.glb', '*.gltf'], onChoose: safe(path => { state.kitDialogOpen = false; doNewLevel(path); }) })),
+			),
+			new Dialog({
+				key: 'saveAsDialog', title: 'Save level as', open: state.saveAsOpen,
+				modal: true, closeOutside: true, size: [340, 0],
+				onDismiss: safe(() => { state.saveAsOpen = false; syncUI(); }),
+			},
+				new Column({ gap: 8 },
+					new TextField({ key: 'saveAsField', text: state.saveAsText, onChange: t => { state.saveAsText = t; } }),
+					new Row({ gap: 8 },
+						new Button('Cancel', safe(() => { state.saveAsOpen = false; syncUI(); })),
+						new Button('Save', safe(() => { state.saveAsOpen = false; doSave(state.saveAsText); })),
+					),
+				),
+			),
+			new Dialog({
+				key: 'exportDialog', title: 'Export .glb', open: state.exportOpen,
+				modal: true, closeOutside: true, size: [340, 0],
+				onDismiss: safe(() => { state.exportOpen = false; syncUI(); }),
+			},
+				new Column({ gap: 8 },
+					new TextField({ key: 'exportField', text: state.exportText, onChange: t => { state.exportText = t; } }),
+					new Row({ gap: 8 },
+						new Button('Cancel', safe(() => { state.exportOpen = false; syncUI(); })),
+						new Button('Export', safe(() => {
+							state.exportOpen = false;
+							const parent = helpers.parent;
+							if (parent) parent.remove(helpers);
+							try {
+								const result = scene.export(state.exportText || 'levels/level.glb');
+								setStatus(`exported ${result.path}`);
+							} finally {
+								if (parent) parent.add(helpers);
+							}
+						})),
+					),
+				),
+			),
+		);
+	}
+}
+
+function positionText(object) {
+	return `${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)}`;
+}
+
+function statusText() {
+	const stats = scene.stats();
+	let text = `${state.mode} · ${state.selected ?? '(none)'} · ${level.rows.length} piece${level.rows.length === 1 ? '' : 's'}`
+		+ ` · ${stats.drawCalls} draws${state.dirty ? ' · *' : ''}`;
+	if (state.lastError) text += ` · ${state.lastError}`;
+	return text;
+}
+
+const catalog = new Catalog();
+const browser = new Browser();
+const props = new Props();
+const statusBar = new StatusBar();
+const chrome = new Chrome();
+const dialogs = new Dialogs();
+
+// The `three.ui.set`/`patch` era's one entry point, kept as the seam every
+// action handler still writes through: it re-syncs the parts that cache
+// their own text (so the very next flush is already correct, not one frame
+// stale) and marks both floors dirty so whatever structural state changed
+// — a dialog opening, a filter, a new kit — is picked up too.
+function syncUI() {
+	props.sync();
+	statusBar.sync();
+	chrome.update();
+	dialogs.update();
+	syncPersist();
 }
 
 // ---------------------------------------------------------------------------
@@ -701,7 +1286,7 @@ function requestNew() {
 // prompt through the kit file browser.
 // ---------------------------------------------------------------------------
 
-(function boot() {
+function boot() {
 	const bootPath = three.persist.path ?? 'levels/level.json';
 	const loaded = three.level.load(bootPath, scene);
 	if (loaded) {
@@ -722,210 +1307,15 @@ function requestNew() {
 	}
 	if (three.persist.selected) select(three.persist.selected);
 	frameAllExcludingHelpers();
-})();
-
-// ---------------------------------------------------------------------------
-// The interface
-// ---------------------------------------------------------------------------
-
-function menuSpec() {
-	return [
-		{ title: 'File', items: ['New', 'Open…', 'Save', 'Save as…', 'Export .glb…', '-', 'Quit'] },
-		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
-		{ title: 'View', items: ['Frame all', 'Toggle grid', 'Refit'] },
-	];
 }
 
-function onMenuSelect(menu, item) {
-	if (menu === 0) {
-		if (item === 0) requestNew();
-		else if (item === 1) { state.openDialogOpen = true; syncUI(); }
-		else if (item === 2) doSave();
-		else if (item === 3) { state.saveAsText = state.path ?? 'levels/level.json'; state.saveAsOpen = true; syncUI(); }
-		else if (item === 4) { state.exportText = 'levels/level.glb'; state.exportOpen = true; syncUI(); }
-		else if (item === 6) three.quit();
-	} else if (menu === 1) {
-		if (item === 0) undo();
-		else if (item === 1) redo();
-		else if (item === 3) duplicate();
-		else if (item === 4) requestRemove();
-	} else if (menu === 2) {
-		if (item === 0) frameAllExcludingHelpers();
-		else if (item === 1) { state.showGrid = !state.showGrid; gridHelper.visible = state.showGrid; }
-		else if (item === 2) { pushUndo(); level.refit(); markDirty(); syncUI(); }
-	}
-}
-
-function assetPanelChildren() {
-	const { widgetRows, indices } = visibleTreeRows();
-	const selectedWidgetIdx = state.stamp ? widgetRows.findIndex(r => r.label === state.stamp) : -1;
-	return [
-		{ type: 'label', text: currentAsset ? currentAsset.path : '(no kit)' },
-		{
-			type: 'tree', key: 'pieceTree',
-			rows: widgetRows,
-			selected: selectedWidgetIdx,
-			onSelect: safe(i => onTreeSelect(indices[i])),
-			onToggle: safe(i => onTreeToggle(indices[i])),
-		},
-		{ type: 'label', text: state.stamp ? `stamp: ${state.stamp} (esc to clear)` : 'pick a piece to place it' },
-	];
-}
-
-function propsPanelChildren() {
-	const row = state.selected ? level.rows.find(r => r.id === state.selected) : null;
-	const object = state.selected ? level.objects.get(state.selected) : null;
-	const modes = ['grid', 'face', 'marker'];
-	const children = [
-		{
-			type: 'row', gap: 4, children: [
-				{ type: 'label', text: 'mode' },
-				{
-					type: 'select', key: 'modeSelect', options: modes, selected: modes.indexOf(state.mode),
-					onChange: i => editor.setMode(modes[i]),
-				},
-			],
-		},
-	];
-	if (state.mode === 'marker' && state.grab && state.markerChoices.length > 0) {
-		children.push({
-			type: 'row', gap: 4, children: [
-				{ type: 'label', text: 'marker' },
-				{
-					type: 'select', key: 'markerSelect', options: state.markerChoices,
-					selected: state.markerChoices.indexOf(state.markerChoice),
-					onChange: i => { state.markerChoice = state.markerChoices[i]; },
-				},
-			],
-		});
-	}
-	if (!row || !object) {
-		children.push({ type: 'label', text: '(no selection)' });
-		return children;
-	}
-	const turns = Math.round(wrapTurn(object.rotation.y) / (Math.PI / 2)) % 4;
-	children.push(
-		{ type: 'label', text: `id: ${row.id}` },
-		{ type: 'label', text: `piece: ${row.piece}` },
-		{ type: 'label', key: 'propsPos', text: positionText(object) },
-		{ type: 'label', key: 'propsRot', text: `rotation: ${turns} quarter turn${turns === 1 ? '' : 's'}` },
-		{ type: 'label', text: row.snap ? `snap: ${row.snap.to} ${row.snap.side}` : 'snap: (freehand)' },
-	);
-	return children;
-}
-
-function positionText(object) {
-	return `position: ${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)}`;
-}
-
-function statusText() {
-	const stats = scene.stats();
-	let text = `${state.mode} · ${state.selected ?? '(none)'} · ${level.rows.length} piece${level.rows.length === 1 ? '' : 's'}`
-		+ ` · ${stats.drawCalls} draws${state.dirty ? ' · *' : ''}`;
-	if (state.lastError) text += ` · ${state.lastError}`;
-	return text;
-}
-
-function buildUI() {
-	return {
-		type: 'stack',
-		children: [
-			{ type: 'anchored', h: 'start', v: 'start', child: { type: 'menu', key: 'menu', menus: menuSpec(), onSelect: safe(onMenuSelect) } },
-			{
-				type: 'anchored', h: 'start', v: 'start', margin: [8, 36],
-				child: { type: 'column', key: 'assetPanel', gap: 4, size: [190, 0], insets: 6, children: assetPanelChildren() },
-			},
-			{
-				type: 'anchored', h: 'end', v: 'start', margin: [8, 36],
-				child: { type: 'column', key: 'propsPanel', gap: 4, size: [220, 0], insets: 6, children: propsPanelChildren() },
-			},
-			{
-				type: 'anchored', h: 'start', v: 'end', margin: [8, 8],
-				child: { type: 'label', key: 'status', text: statusText() },
-			},
-			{
-				type: 'confirmDialog', key: 'deleteConfirm', title: 'Remove piece',
-				message: `Remove ${state.confirmDeleteId ?? ''}?`, confirm: 'Remove', decline: 'Keep',
-				open: state.confirmDeleteOpen, onConfirm: safe(confirmRemove), onDismiss: safe(cancelRemove),
-			},
-			{
-				type: 'confirmDialog', key: 'newConfirm', title: 'Discard changes',
-				message: 'This level has unsaved changes — discard them and start a new one?',
-				confirm: 'Discard', decline: 'Cancel', open: state.confirmNewOpen,
-				onConfirm: safe(() => { state.confirmNewOpen = false; state.kitDialogOpen = true; syncUI(); }),
-				onDismiss: safe(() => { state.confirmNewOpen = false; syncUI(); }),
-			},
-			{
-				type: 'dialog', key: 'openDialog', title: 'Open level', open: state.openDialogOpen,
-				modal: true, closeOutside: true, size: [360, 320],
-				child: {
-					type: 'fileBrowser', key: 'openBrowser', start: 'levels/', mask: ['*.json'],
-					onChoose: safe(path => { state.openDialogOpen = false; doOpen(path); }),
-				},
-				onDismiss: safe(() => { state.openDialogOpen = false; syncUI(); }),
-			},
-			{
-				type: 'dialog', key: 'kitDialog', title: 'Choose a kit', open: state.kitDialogOpen,
-				modal: true, closeOutside: false, size: [360, 320],
-				child: {
-					type: 'fileBrowser', key: 'kitBrowser', mask: ['*.glb', '*.gltf'],
-					onChoose: safe(path => { state.kitDialogOpen = false; doNewLevel(path); }),
-				},
-			},
-			{
-				type: 'dialog', key: 'saveAsDialog', title: 'Save level as', open: state.saveAsOpen,
-				modal: true, closeOutside: true, size: [340, 0],
-				child: {
-					type: 'column', gap: 8, children: [
-						{ type: 'textfield', key: 'saveAsField', text: state.saveAsText, onChange: t => { state.saveAsText = t; } },
-						{
-							type: 'row', gap: 8, children: [
-								{ type: 'button', text: 'Cancel', onClick: safe(() => { state.saveAsOpen = false; syncUI(); }) },
-								{ type: 'button', text: 'Save', onClick: safe(() => { state.saveAsOpen = false; doSave(state.saveAsText); }) },
-							],
-						},
-					],
-				},
-				onDismiss: safe(() => { state.saveAsOpen = false; syncUI(); }),
-			},
-			{
-				type: 'dialog', key: 'exportDialog', title: 'Export .glb', open: state.exportOpen,
-				modal: true, closeOutside: true, size: [340, 0],
-				child: {
-					type: 'column', gap: 8, children: [
-						{ type: 'textfield', key: 'exportField', text: state.exportText, onChange: t => { state.exportText = t; } },
-						{
-							type: 'row', gap: 8, children: [
-								{ type: 'button', text: 'Cancel', onClick: safe(() => { state.exportOpen = false; syncUI(); }) },
-								{
-									type: 'button', text: 'Export', onClick: safe(() => {
-										state.exportOpen = false;
-										const parent = helpers.parent;
-										if (parent) parent.remove(helpers);
-										try {
-											const result = scene.export(state.exportText || 'levels/level.glb');
-											setStatus(`exported ${result.path}`);
-										} finally {
-											if (parent) parent.add(helpers);
-										}
-									}),
-								},
-							],
-						},
-					],
-				},
-				onDismiss: safe(() => { state.exportOpen = false; syncUI(); }),
-			},
-		],
-	};
-}
-
-function syncUI() {
-	three.ui.set(buildUI());
-	syncPersist();
-}
-
-syncUI();
+boot();
+// Make sure the very first frame is already correct rather than waiting for
+// the animation loop's first tick.
+props.sync();
+statusBar.sync();
+chrome.mount();
+dialogs.mount();
 
 // ---------------------------------------------------------------------------
 // Input
@@ -976,19 +1366,8 @@ three.onKeyDown(']', safe(() => nudge(0, 1, 0)));
 
 three.setAnimationLoop(safe(() => {
 	if (state.grab) updateGrabPreview();
-	three.ui.patch('status', { text: statusText() });
-	if (state.selected && level.objects.has(state.selected)) {
-		const object = level.objects.get(state.selected);
-		try { three.ui.patch('propsPos', { text: positionText(object) }); } catch (e) { /* shape changed this frame */ }
-		if (state.grab && state.mode === 'marker') {
-			try {
-				three.ui.patch('markerSelect', {
-					options: state.markerChoices,
-					selected: state.markerChoices.indexOf(state.markerChoice),
-				});
-			} catch (e) { /* the row is not in the tree until the next syncUI */ }
-		}
-	}
+	statusBar.sync();
+	props.sync();
 }));
 
 // ---------------------------------------------------------------------------
@@ -1025,6 +1404,7 @@ const editor = {
 			path: state.path,
 			selected: state.selected,
 			mode: state.mode,
+			stamp: state.stamp,
 			dirty: state.dirty,
 			rows: JSON.parse(JSON.stringify(level.toJSON().rows)),
 		};
@@ -1036,7 +1416,8 @@ const editor = {
 	_objectOf(id) { return level.objects.get(id) ?? null; },
 	_placeByMode(object, groundPoint, pickHit, opts) { return placeByMode(object, groundPoint, pickHit, opts); },
 	_level() { return level; },
-	_tree() { return visibleTreeRows().widgetRows.map(r => r.label); },
+	_tree() { return visiblePieces().map(p => p.name); },
+	_renderCount() { return chromeRenderCount; },
 };
 globalThis.editor = editor;
 
