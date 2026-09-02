@@ -49,9 +49,10 @@
 // axis that moved, and shift still skips it.
 //
 // `s` is the same shape, and takes the same axis keys for a non-uniform scale.
-// Its ruler is how far the cursor is from the piece on the piece's own ground
-// plane — pull away to grow, come in to shrink — because there is no
-// world-to-screen projection here to measure Blender's screen distance with.
+// Its ruler is how far the cursor is from the piece on a plane through it
+// facing the camera — pull away to grow, come in to shrink — which is the
+// depth-corrected reading of Blender's screen distance, and the only one there
+// is here: the API has no world-to-screen projection to measure with.
 // The factor rounds to quarters unless shift is held, each piece scales about
 // its own pivot, and a click commits exactly as a grab's does.
 
@@ -659,8 +660,7 @@ function setAxis(axis) {
 	const lead = level.objects.get(state.grab ? state.grab.id : activeId());
 	const box = lead ? lead.boundingBox() : null;
 	if (axis && box) showAxisGuide(axis, box.center); else hideAxisGuide();
-	if (state.grab) updateGrabPreview();
-	else if (state.scaling) updateScalePreview(); else updateScalePreview();
+	if (state.grab) updateGrabPreview(); else updateScalePreview();
 	syncUI();
 }
 
@@ -757,11 +757,11 @@ function cancel() {
 // Scale — `s`, the same modal shape as a grab: live under the cursor, locked
 // to an axis with x / y / z, committed with a click and cancelled with escape.
 //
-// The ruler is how far the cursor is from the piece, on the piece's own ground
-// plane: pull away to grow it, come back in to shrink it. That is the closest
-// thing to Blender's screen-space distance available here — there is no
-// world-to-screen projection in the API — and it reads the same way, because
-// the camera looks down at a ground plane the whole time anyway.
+// The ruler is how far the cursor is from the piece on a camera-facing plane
+// through it: pull away to grow it, come back in to shrink it. That is the
+// closest thing to Blender's screen-space distance available here — there is
+// no world-to-screen projection in the API — and it reads the same way at any
+// camera angle, including one tilted up at the horizon.
 //
 // Each piece scales about its own pivot and keeps its position, which is the
 // same choice `rotate` makes: a kit's pieces are placed by their own origins,
@@ -773,14 +773,41 @@ const SCALE_MIN = 0.05;
 const SCALE_MAX = 20;
 const REACH_MIN = 0.5;     // a cursor on top of the pivot is not a ruler
 
-// How far the cursor is from `lead`, measured on the horizontal plane through
-// it. Null when the ray never meets that plane — at which point the gesture
-// holds the factor it had rather than jumping.
-function cursorReach(lead) {
+// How far the cursor is from `anchor`, measured on the plane through it that
+// faces the camera.
+//
+// Not the ground plane, which was the first try and is wrong in a way that is
+// invisible until it bites: a ray through a cursor above the horizon never
+// meets y = 0, so the gesture silently froze whenever the camera was tilted up.
+// A camera-facing plane is hit by every ray through the viewport, and the
+// distance on it is the depth-corrected version of "how far the cursor is from
+// the thing on screen", which is the reading Blender's own scale has.
+//
+// The anchor is a POINT captured once and not the piece's live centre: a piece
+// grows about its pivot, so its centre moves as it is scaled, and measuring to
+// something the gesture is itself moving is a feedback loop — the factor
+// crept away from what the cursor was asking for, frame after frame.
+function cursorReach(anchor) {
 	const pointer = three.input.pointer;
-	const point = groundHit(pointer.x, pointer.y, lead.position.y);
-	if (!point) return null;
-	return Math.hypot(point.x - lead.position.x, point.z - lead.position.z);
+	const ray = three.camera.ray(pointer.x, pointer.y);
+	const n = three.camera.forward();
+	const denom = ray.direction.x * n.x + ray.direction.y * n.y + ray.direction.z * n.z;
+	if (Math.abs(denom) < 1e-8) return null;
+	const t = ((anchor.x - ray.origin.x) * n.x + (anchor.y - ray.origin.y) * n.y + (anchor.z - ray.origin.z) * n.z) / denom;
+	if (!(t > 0)) return null;
+	return Math.hypot(
+		ray.origin.x + ray.direction.x * t - anchor.x,
+		ray.origin.y + ray.direction.y * t - anchor.y,
+		ray.origin.z + ray.direction.z * t - anchor.z,
+	);
+}
+
+// Where the piece is, as three plain numbers that will not move under the
+// gesture: its box centre if it has one, its pivot if it does not.
+function anchorOf(object) {
+	const box = object.boundingBox();
+	const at = box ? box.center : object.position;
+	return { x: at.x, y: at.y, z: at.z };
 }
 
 function startScale() {
@@ -793,10 +820,14 @@ function startScale() {
 		if (object) original.set(id, object.scale.toArray());
 	}
 	if (original.size === 0) return;
+	const anchor = anchorOf(lead);
 	state.scaling = {
 		axis: null,
 		original,
-		reach: Math.max(cursorReach(lead) ?? REACH_MIN, REACH_MIN),
+		anchor,
+		// Set only by `editor.scale(factor)` — see `updateScalePreview`.
+		pinned: false,
+		reach: Math.max(cursorReach(anchor) ?? REACH_MIN, REACH_MIN),
 		factor: 1,
 		before: snapshot(),
 	};
@@ -823,9 +854,12 @@ function applyScale() {
 
 function updateScalePreview() {
 	if (!state.scaling) return;
-	const lead = level.objects.get(activeId());
-	if (!lead) { state.scaling = null; hideAxisGuide(); return; }
-	const reach = cursorReach(lead);
+	if (!level.objects.has(activeId())) { state.scaling = null; hideAxisGuide(); return; }
+	// A factor a script named is the factor, and the cursor does not get a
+	// vote: without this the next frame — or the read `commitScale` does —
+	// would quietly put the pointer's own reading back over it.
+	if (state.scaling.pinned) { applyScale(); updateSelectionHelpers(); return; }
+	const reach = cursorReach(state.scaling.anchor);
 	if (reach !== null) {
 		const raw = reach / state.scaling.reach;
 		const stepped = three.input.isDown('shift') ? raw : Math.round(raw / SCALE_STEP) * SCALE_STEP;
@@ -1755,7 +1789,11 @@ three.onKeyDown('[', safe(() => nudge(0, -1, 0)));
 three.onKeyDown(']', safe(() => nudge(0, 1, 0)));
 
 three.setAnimationLoop(safe(() => {
+	// Whichever modal gesture is live reads the cursor here — this is the only
+	// thing driving either of them, so a branch missing from this line is a key
+	// that appears to do nothing at all.
 	if (state.grab) updateGrabPreview();
+	else if (state.scaling) updateScalePreview();
 	statusBar.sync();
 	props.sync();
 }));
@@ -1801,6 +1839,7 @@ const editor = {
 		if (!live) startScale();
 		if (!state.scaling) return;
 		state.scaling.factor = Math.min(Math.max(wanted, SCALE_MIN), SCALE_MAX);
+		state.scaling.pinned = true;
 		applyScale();
 		if (!live) commitScale();
 	},
