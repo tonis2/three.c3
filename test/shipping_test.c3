@@ -121,7 +121,7 @@ const String LEVEL_JSON = `[["wall", 0, 0, 0, 1], ["door", 4, 0, 0, 2]]`;
 // POSIX's own, because `std::io::path` makes directories and deletes files and
 // has nothing that makes a link. One check needs one, and it is the check that
 // says what this sandbox does and does not promise.
-extern fn CInt symlink(ZString target, ZString linkpath) @if(!env::WIN32);
+extern fn CInt symlink(ZString target, ZString linkpath) @feat(!WIN32);
 
 <*
  Builds a game directory, runs the body against it, and takes it away after.
