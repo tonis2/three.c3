@@ -620,17 +620,22 @@ fn void a_level_that_was_never_written_reads_as_null() @test
 }
 
 <*
- A read cannot climb out of the game, and is refused by name rather than by
- failing to find anything.
+ Neither door can climb out of the game, and each is refused by name rather
+ than by failing to find anything.
 
- The sandbox is `resolve_asset`'s — the same call `three.load` and
- `three.texture` make — so this is a check that the door was not given rules of
- its own, and the sentence is `three.load`'s sentence.
+ The read sandbox is `resolve_asset`'s — the same call `three.load` and
+ `three.texture` make — and the write sandbox is `resolve_write`'s — the same
+ call `scene.export` makes — so this is a check that neither door was given
+ rules of its own: the read sentence is `three.load`'s and the write sentence
+ is `scene.export`'s.
 
- The file next door is real and holds known text, so "refused" is checked as
- *the text did not arrive* and not merely as a throw.
+ The file next door is real and holds known text, so a read's "refused" is
+ checked as *the text did not arrive* and not merely as a throw. A write's
+ "refused" is checked the same way `three.load`'s escape is — the sentence
+ fires before anything opens — since a write that actually reached the file
+ next door would corrupt a fixture every other test in this file depends on.
 *>
-fn void a_read_cannot_climb_out_of_the_assets_directory() @test
+fn void neither_door_can_climb_out_of_the_assets_directory() @test
 {
 	@with_assets()
 	{
@@ -638,13 +643,13 @@ fn void a_read_cannot_climb_out_of_the_assets_directory() @test
 		{
 			run.set_assets_root(TEST_ASSETS);
 
-			String[*] attempts = {
+			String[*] reads = {
 				`three.readText('../test-outside.txt');`,
 				`three.readText('../../etc/passwd');`,
 				`three.readJSON('levels/../../test-outside.txt');`,
 				`three.readText('a/../../out.txt');`,
 			};
-			foreach (attempt : attempts)
+			foreach (attempt : reads)
 			{
 				three::RunResult result = run.run(attempt);
 				defer result.free();
@@ -655,13 +660,57 @@ fn void a_read_cannot_climb_out_of_the_assets_directory() @test
 					"'%s' came back with the file next door", attempt);
 			}
 
-			// And nothing writes. The assets directory is read-only from a script:
-			// `three.save` is where a player's progress goes and `scene.export` is
-			// the one verb that puts a file in the game's own directory.
-			test::@check(@answer(run, `return typeof three.writeText;`) == `"undefined"`,
-				"a write door appeared beside the read one");
-			test::@check(@answer(run, `return typeof three.writeJSON;`) == `"undefined"`,
-				"a write door appeared beside the read one");
+			String[*] writes = {
+				`three.writeText('../test-outside.txt', 'mine now');`,
+				`three.writeText('../../etc/passwd', 'mine now');`,
+				`three.writeJSON('levels/../../test-outside.txt', 'mine now');`,
+				`three.writeText('a/../../out.txt', 'mine now');`,
+			};
+			foreach (attempt : writes)
+			{
+				three::RunResult result = run.run(attempt);
+				defer result.free();
+				test::@check(!result.ok, "'%s' was allowed", attempt);
+				test::@check(result.error.contains("climbs out of the assets directory"),
+					"'%s' was refused without saying why: %s", attempt, result.error);
+			}
+
+			// Refused before anything opened, so the file next door is exactly
+			// what @with_assets wrote and none of the four attempts above landed.
+			test::@check(file::load_temp(TEST_OUTSIDE)!! == OUTSIDE_TEXT,
+				"a write attempt reached the file next door");
+		};
+	};
+}
+
+<*
+ The first save into a folder that is not there yet is the ordinary case.
+
+ An editor's save-as lands in `levels/` or somewhere under it, and a level
+ written on the first run is written into a folder nobody has made. `three.save`
+ makes its own folder; this proves the assets door does too, and that what it
+ made is inside the sandbox rather than somewhere a relative path could reach.
+*>
+fn void a_first_write_makes_its_own_folder() @test
+{
+	@with_assets()
+	{
+		@with_js(; three::JsRuntime* run)
+		{
+			run.set_assets_root(TEST_ASSETS);
+
+			@ok(run, `three.writeText('levels/fresh/deeper/first.json', '[1]');`);
+			test::@check(@answer(run, `return three.readText('levels/fresh/deeper/first.json');`) == `"[1]"`,
+				"the file written into a new folder did not read back");
+			test::@check(path::is_dir((Path)string::tformat("%s/levels/fresh/deeper", TEST_ASSETS)),
+				"the folder was not made under the assets directory");
+
+			// Refused before any folder is made: the escape check runs first, so
+			// nothing next door is created either.
+			three::RunResult out = run.run(`three.writeText('../made/outside.txt', 'x');`);
+			defer out.free();
+			test::@check(!out.ok, "a write outside the sandbox made its folder");
+			test::@check(!path::is_dir((Path)"build/made"), "a folder was made outside the assets directory");
 		};
 	};
 }

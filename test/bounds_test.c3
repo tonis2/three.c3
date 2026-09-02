@@ -523,12 +523,18 @@ fn void the_sides_own_axis_is_not_one_of_the_axes_to_name() @test
 <*
  A side that is not one of the six is refused, and the six are listed.
 
- `'z'` is the mistake that will actually be made — an axis where a direction was
- wanted — and a number or a missing argument is the same slip from further away.
- There is no default worth guessing here: a piece put on the wrong side of a wall
- still draws, and looks like a piece somebody meant to put there.
+ A number, `undefined`, `null` or a boolean is refused outright: `snapTo`'s
+ second argument is a string one way or the other — one of the six faces or a
+ marker name — and none of these is even that, so there is no default worth
+ guessing here.
+
+ A string that is neither, like `'up'`, is not refused at this check — it is
+ tried as a marker name instead, per the rule the faces don't cover the rest
+ of, and refused by that check with the marker names each piece actually
+ has. `a_missing_marker_names_what_each_piece_has` is the one that reads that
+ message closely; this one only has to show the door is not left open.
 *>
-fn void a_side_that_is_not_one_of_the_six_is_refused() @test
+fn void a_side_that_is_not_a_face_or_a_marker_name_is_refused() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -538,21 +544,22 @@ fn void a_side_that_is_not_one_of_the_six_is_refused() @test
 			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
 			room.add(a, b);
 			const said = [];
-			for (const bad of ['z', 'up', 3, undefined]) {
+			for (const bad of [3, undefined, null, true]) {
 				try { a.snapTo(b, bad); said.push('no throw'); }
-				catch (e) { said.push(e.constructor.name); }
+				catch (e) { said.push(e.message); }
 			}
-			try { a.snapTo(b, 'z'); } catch (e) { said.push(e.message); }
+			try { a.snapTo(b, 'up'); said.push('no throw'); } catch (e) { said.push(e.message); }
 			return said;
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(!result.value.contains("no throw"),
-			"none of the four should have been accepted, got '%s'", result.value);
-		test::@check(result.value.contains(`not \"z\"`), "the bad side is quoted back, got '%s'", result.value);
+			"none of the five should have been accepted, got '%s'", result.value);
 		test::@check(result.value.contains("'+x', '-x', '+y', '-y', '+z', '-z'"),
-			"and the six are listed, got '%s'", result.value);
+			"the six faces are listed for the non-string arguments, got '%s'", result.value);
+		test::@check(result.value.contains(`no marker named \"up\"`),
+			"and a string that names neither is refused as a marker instead, got '%s'", result.value);
 	};
 }
 
@@ -995,6 +1002,162 @@ fn void a_frame_scaled_to_nothing_is_refused_rather_than_guessed() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("scaled to nothing"),
 			"it says which way it is stuck, got '%s'", result.value);
+	};
+}
+
+// ============================================================================
+// Marker snapping: a mating surface that is not a face
+// ============================================================================
+
+<*
+ Two roof slopes meet along a pitch, not a face: the boxes overlap by the
+ slab's thickness and there is no face on either piece for the other to
+ touch. A marker names the point instead — `a.snapTo(b, 'ridge')` finds the
+ descendant called `ridge` in each and moves `a`, the whole piece, so the two
+ coincide on all three axes.
+
+ **Nothing rotates.** A marker snap has no axis argument to leave alone the
+ way a box snap does — every axis is decided by the two markers coinciding —
+ so the one thing left to prove is that rotation is untouched: the script
+ sets it first, exactly as it does before a box snap.
+*>
+fn void a_marker_snap_moves_and_never_rotates() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			// In a scene so world positions — the host's own composition —
+			// are what the check reads, rather than this script re-deriving
+			// what a's rotation does to a marker underneath it.
+			const scene = new three.Scene();
+			const a = new three.Group(); scene.add(a);
+			a.position.set(5, -2, 3);
+			a.rotation.set(0.3, 0.1, -0.2);
+			const ridgeA = new three.Group();
+			ridgeA.name = 'ridge';
+			ridgeA.position.set(1, 0.5, -0.5);
+			a.add(ridgeA, new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			const b = new three.Group(); scene.add(b);
+			b.position.set(-3, 4, 2);
+			const ridgeB = new three.Group();
+			ridgeB.name = 'ridge';
+			ridgeB.position.set(-0.5, 1, 2);
+			b.add(ridgeB, new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			const beforeRotation = JSON.stringify(a.rotation.toArray());
+			a.snapTo(b, 'ridge');
+
+			const wa = ridgeA.getWorldPosition(), wb = ridgeB.getWorldPosition();
+			// Four places, not six: a world position comes back through the
+			// host as f32, so the last of six digits is the device's noise floor.
+			const r = v => Math.round(v * 1e4) / 1e4;
+			return {
+				dx: r(wa.x - wb.x), dy: r(wa.y - wb.y), dz: r(wa.z - wb.z),
+				rotationChanged: JSON.stringify(a.rotation.toArray()) !== beforeRotation,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"dx":0,"dy":0,"dz":0,"rotationChanged":false}`,
+			"the two markers should coincide and rotation should be untouched, got '%s'", result.value);
+	};
+}
+
+<*
+ The same frame rule the box snap uses: two pieces under different parents are
+ placed in world space, the step converted back into `a`'s own frame — proven
+ here the same way `a_snap_is_exact_under_a_turned_and_squashed_ancestor` is,
+ with a parent that is merely translated, since a marker's own orientation is
+ not part of the placement.
+*>
+fn void a_marker_snap_crosses_frames_like_a_box_snap() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const east = new three.Group(); east.position.set(6, 0, -2); scene.add(east);
+			const ridgeA = new three.Group(); ridgeA.name = 'ridge'; ridgeA.position.set(1, 0, 0);
+			east.add(ridgeA);
+
+			const yard = new three.Group(); yard.position.set(-4, 1, 5); scene.add(yard);
+			const ridgeB = new three.Group(); ridgeB.name = 'ridge'; ridgeB.position.set(0, 2, 0);
+			yard.add(ridgeB);
+
+			east.snapTo(yard, 'ridge');
+			const wa = ridgeA.getWorldPosition(), wb = ridgeB.getWorldPosition();
+			const r = v => Math.round(v * 1e4) / 1e4;
+			return { dx: r(wa.x - wb.x), dy: r(wa.y - wb.y), dz: r(wa.z - wb.z) };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"dx":0,"dy":0,"dz":0}`,
+			"the two markers' world positions should coincide, got '%s'", result.value);
+	};
+}
+
+<*
+ A marker not found on both pieces is refused with the marker names each
+ piece actually has, so the fix is visible in the error rather than a second
+ trip through the file to look.
+*>
+fn void a_missing_marker_names_what_each_piece_has() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const a = new three.Group();
+			const ridgeA = new three.Group(); ridgeA.name = 'ridge'; a.add(ridgeA);
+			const eaveA = new three.Group(); eaveA.name = 'eave'; a.add(eaveA);
+
+			const b = new three.Group();
+			const hipB = new three.Group(); hipB.name = 'hip'; b.add(hipB);
+
+			try { a.snapTo(b, 'ridge'); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("the other piece"),
+			"it says which piece is missing the marker, got '%s'", result.value);
+		test::@check(result.value.contains("'ridge', 'eave'"),
+			"and lists this piece's own markers, got '%s'", result.value);
+		test::@check(result.value.contains("'hip'"),
+			"and the other piece's, got '%s'", result.value);
+	};
+}
+
+<*
+ `axes` and `gap` have nothing left to say once both markers coincide — all
+ three axes are decided by that — so both are refused rather than silently
+ ignored.
+*>
+fn void axes_and_gap_are_refused_on_a_marker_snap() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const a = new three.Group();
+			const ridgeA = new three.Group(); ridgeA.name = 'ridge'; a.add(ridgeA);
+			const b = new three.Group();
+			const ridgeB = new three.Group(); ridgeB.name = 'ridge'; b.add(ridgeB);
+
+			const said = (fn) => { try { fn(); return 'no throw'; } catch (e) { return e.message; } };
+			return {
+				axes: said(() => a.snapTo(b, 'ridge', { x: 'center' })),
+				gap: said(() => a.snapTo(b, 'ridge', { gap: 0.1 })),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"), "neither call should have gone through: %s", result.value);
+		test::@check(result.value.contains("axes or gap"),
+			"the refusal names what a marker snap has no room left for, got '%s'", result.value);
 	};
 }
 

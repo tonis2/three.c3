@@ -58,7 +58,10 @@ three.debug.write(scene.stats());   // { drawCalls: 2, uniqueMeshes: 2, instance
 
 Use `--debug` flag for debug info and hot-reload (Shift+R)
 
-There are complete scenes in [`examples/`](examples/) to start from.
+There are complete scenes in [`examples/`](examples/) to start from — including
+[`examples/editor.js`](examples/editor.js), a kit editor to run against any `--assets` folder of `.glb`
+files (`./build/three --assets your-kit --script examples/editor.js`, or copy it in as that folder's
+own `main.js`).
 
 ### Agents
 

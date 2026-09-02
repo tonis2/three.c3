@@ -384,6 +384,100 @@ fn void texture_coordinates_stay_in_the_unit_square() @test
 }
 
 <*
+ `LOCAL` maps one uv unit per unit of a face's own axes; `FACE` stays the unit
+ square regardless of size. A 3 x 1.6 x 0.2 panel is the motivating case: under
+ `FACE` its thin 0.2-deep edge gets the same 0..1 span as its 3 x 1.6 face and a
+ texture on it is stretched fifteenfold; under `LOCAL` the edge's own uv span is
+ 0..0.2 and the wide face's is 0..3 by 0..1.6, so one `material.repeat` (texels
+ per unit) covers both without stretching either.
+
+ Grouped by each face's normal rather than by emission order, so this does not
+ depend on which of the six `build_face` calls in `build_box` runs first.
+*>
+fn void local_uv_mode_scales_by_the_faces_own_length_and_face_mode_does_not() @test
+{
+	// FACE (the default): every face is still the unit square, at any size.
+	@built(three::box_shape(3, 1.6f, 0.2f); three::GeometryBuilder* geometry)
+	{
+		foreach (uv : geometry.uvs)
+		{
+			test::@check(
+				uv.x >= -1e-5f && uv.x <= 1 + 1e-5f && uv.y >= -1e-5f && uv.y <= 1 + 1e-5f,
+				"FACE: every uv lies in the unit square, got %s", uv
+			);
+		}
+	};
+
+	// LOCAL: each face's uv spans 0..its own length on each axis.
+	@built(three::box_shape(3, 1.6f, 0.2f, 1, 1, 1, three::UvMode.LOCAL); three::GeometryBuilder* geometry)
+	{
+		Vec3[6] face_normals = {
+			{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 },
+		};
+
+		foreach (normal : face_normals)
+		{
+			float low_u = 1e30f;
+			float high_u = -1e30f;
+			float low_v = 1e30f;
+			float high_v = -1e30f;
+			usz seen = 0;
+			foreach (i, n : geometry.normals)
+			{
+				if (!near(n.x, normal.x) || !near(n.y, normal.y) || !near(n.z, normal.z)) continue;
+				Vec2 uv = geometry.uvs[i];
+				low_u = math::min(low_u, uv.x);
+				high_u = math::max(high_u, uv.x);
+				low_v = math::min(low_v, uv.y);
+				high_v = math::max(high_v, uv.y);
+				seen++;
+			}
+			test::@check(seen == 4, "face %s has 4 vertices at these segment counts, saw %d", normal, seen);
+
+			if (near(math::abs(normal.z), 1))
+			{
+				// +-Z: the 3 x 1.6 face.
+				test::@check(near(low_u, 0) && near(high_u, 3), "the wide face spans u 0..3, got %s..%s", low_u, high_u);
+				test::@check(near(low_v, 0) && near(high_v, 1.6f), "the wide face spans v 0..1.6, got %s..%s", low_v, high_v);
+			}
+			else if (near(math::abs(normal.x), 1))
+			{
+				// +-X: the 0.2-thick edge, thin along its own u axis (the depth).
+				test::@check(near(low_u, 0) && near(high_u, 0.2f), "the thin edge spans u 0..0.2, got %s..%s", low_u, high_u);
+				test::@check(near(low_v, 0) && near(high_v, 1.6f), "the edge's height still spans 0..1.6, got %s..%s", low_v, high_v);
+			}
+			else
+			{
+				// +-Y: the top/bottom, thin along its own v axis (also the depth).
+				test::@check(near(low_u, 0) && near(high_u, 3), "the top/bottom spans u 0..3, got %s..%s", low_u, high_u);
+				test::@check(near(low_v, 0) && near(high_v, 0.2f), "the top/bottom's thin axis spans 0..0.2, got %s..%s", low_v, high_v);
+			}
+		}
+	};
+}
+
+<*
+ Two boxes with the same numbers and different uv modes are two different
+ assets, because they are two different sets of texture coordinates — a global
+ default would collide a face-mapped box with a local-mapped one of the same
+ size, which is exactly the bug `Primitive.key` exists to make impossible.
+*>
+fn void the_uv_mode_is_part_of_the_dedup_key() @test
+{
+	String face = three::box_shape(3, 1.6f, 0.2f).key(tmem);
+	String local = three::box_shape(3, 1.6f, 0.2f, 1, 1, 1, three::UvMode.LOCAL).key(tmem);
+	test::@check(face != local, "a FACE box and a LOCAL box of the same size share a key: <%s>", face);
+	test::@check(
+		three::box_shape(3, 1.6f, 0.2f, 1, 1, 1, three::UvMode.LOCAL).key(tmem) == local,
+		"the same numbers and the same mode make the same key"
+	);
+
+	String plane_face = three::plane_shape(2, 1).key(tmem);
+	String plane_local = three::plane_shape(2, 1, 1, 1, three::UvMode.LOCAL).key(tmem);
+	test::@check(plane_face != plane_local, "a FACE plane and a LOCAL plane of the same size share a key: <%s>", plane_face);
+}
+
+<*
  Every stream covers every vertex.
 
  `upload_primitive` sets `has_normals` from exactly this comparison — a stream

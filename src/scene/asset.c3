@@ -499,6 +499,16 @@ struct Asset
 	Heightfield terrain;
 	bool has_terrain;
 
+	// The concatenated streams behind a `MergedGeometry`, kept where `terrain`
+	// is kept: both are a generated asset holding more than `upload_built`'s
+	// picking tree can give back to the exporter. `read_geometry` copies it out
+	// exactly rather than falling back to the hull path's averaged normals and
+	// projected uvs, which is the whole reason a merge is worth doing rather
+	// than a script tessellating the same triangles by hand. Owned, and freed
+	// by `free_slot` with the meshes. See `scene/merge.c3`.
+	GeometryBuilder merged;
+	bool has_merged;
+
 	// The file, still open. `Assets.load` parses the JSON and stops, so the document
 	// and its mmapped buffer have to stay until the last mesh in them is uploaded
 	// or the asset is freed. `has_stream` is false for a generated shape.
@@ -1088,6 +1098,9 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	if (asset.has_terrain) asset.terrain.heights.free();
 	asset.terrain = { };
 	asset.has_terrain = false;
+	if (asset.has_merged) asset.merged.free();
+	asset.merged = { };
+	asset.has_merged = false;
 	// Zeroed rather than left dangling: `claim_slot` overwrites the whole struct
 	// and `Assets.free` walks every slot, so a freed `List` must not look
 	// initialised to either of them.
@@ -3635,6 +3648,7 @@ fn void Assets.free(&self, Gpu* gpu)
 		// one; they are separate because this walk deliberately skips the
 		// reference counting and the texture releases that path does.
 		if (asset.has_terrain) asset.terrain.heights.free();
+		if (asset.has_merged) asset.merged.free();
 		if (asset.path.len > 0) asset.path.free(mem);
 	}
 	self.assets.free();

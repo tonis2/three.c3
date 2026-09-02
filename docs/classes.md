@@ -62,7 +62,8 @@ topic. It is an Object3D, so moving it moves everything.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, { loop, speed, time, fade })`
@@ -141,7 +142,8 @@ material is one draw call.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -609,7 +611,8 @@ clip outright is `play()` without a fade.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -913,6 +916,28 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `instantiateAsync(name?, { skeleton, skinning, materials })`
 - `toJSON()`
 
+## Level
+
+```js
+not constructible — three.level.load(path, parent, options) and three.level.create(kit) answer with these
+```
+
+A placement list, loaded: `kit`, the rows that describe it, the `Object3D` each one built, and the parent they hang from. `add(row, options)` places one row exactly as `load` does for each of the file's — validating the row's `id` is unique and its `snap.to`, if it has one, names a row already placed — and `refit()` replays every row that carries a `snap` against the objects as they stand now, leaving a freehand row exactly where it is. See `three.level` for the file this loads and saves.
+
+### Properties
+
+- `kit`
+- `rows` — the file's rows, in file order, mutated in place by `toJSON()`
+- `objects` — a Map from a row's `id` to the `Object3D` it built
+- `parent` — where the rows are added; null until `three.level.load` sets it, or a script sets it directly after `three.level.create()`
+
+### Methods
+
+- `add(row, options)`
+- `remove(id)` — throws if a later row's `snap.to` still points at it
+- `refit()`
+- `toJSON()` — what `three.level.save` writes
+
 ## Sockets
 
 ```js
@@ -977,10 +1002,20 @@ is centred on its own origin.
 ## BoxGeometry
 
 ```js
-new three.BoxGeometry(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1)
+new three.BoxGeometry(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1, { uv } = {})
 ```
 
 A box centred on the origin. The segment counts subdivide it and change nothing about its size.
+
+`uv` is `'face'` (the default, Three.js's own layout) or `'local'`. Under `'face'` every face gets
+the unit square, 0..1, whatever size the face is — right for a shape used at one size, wrong for a
+kit: a roof built from a slope (a scaled box) and a hip (a hull) needs two different
+`material.repeat` to wear one texture at the same texel density, and a wall panel's thin 0.2-deep
+edge gets the same 0..1 span as its wide face and stretches. Under `'local'` a face's uv spans
+0..its own length on each axis instead — a 3 x 1.6 wall face spans u 0..3 by v 0..1.6, and the
+0.2-thick edge spans 0..0.2 on its thin axis — so `material.repeat` means texels per unit and one
+material serves every piece of the kit, however it is cut. An unrecognised `uv` throws, naming
+`'face'` and `'local'`.
 
 ### Properties
 
@@ -1011,11 +1046,16 @@ A UV sphere with its poles on the Y axis.
 ## PlaneGeometry
 
 ```js
-new three.PlaneGeometry(width = 1, height = 1, widthSegments = 1, heightSegments = 1)
+new three.PlaneGeometry(width = 1, height = 1, widthSegments = 1, heightSegments = 1, { uv } = {})
 ```
 
 A one-sided rectangle in the XY plane, facing +Z — Three.js's orientation, which is vertical. A floor
 is this with `rotation.x = -Math.PI / 2`. From behind it is invisible, because back faces are culled.
+
+`uv` is `'face'` (the default) or `'local'`, the same option and the same tradeoff `BoxGeometry`
+takes — see its entry above. A plane is one face, so `'local'` here means the whole rectangle's uv
+spans 0..width by 0..height instead of the unit square, which is the same "texels per unit" reading
+of `material.repeat` a box's faces get under `'local'`.
 
 ### Properties
 
@@ -1082,7 +1122,7 @@ A ring in the XY plane. `radius` is measured to the centre of the tube, so the s
 ## ConvexGeometry
 
 ```js
-new three.ConvexGeometry(points)
+new three.ConvexGeometry(points, { uv } = {})
 ```
 
 The convex hull of a cloud of points, and the way to make a shape that is not one of the six parametric
@@ -1097,9 +1137,112 @@ so a texture is never stretched and is the same size everywhere on the hull and 
 The only artefact is that two facets meeting at a crease do not line up along the shared edge, which
 reads as nothing on the noise and grain a rock wants and as a break on a regular pattern.
 
+That per-facet mapping is what `BoxGeometry`'s and `PlaneGeometry`'s `{ uv: 'local' }` also does —
+a hull has always been local, there being no whole-shape unit square to fall back to. `uv` is accepted
+here only as `'local'`, a no-op kept for symmetry with those two constructors; `'face'` is refused,
+naming the reason, rather than quietly building a hull it cannot describe.
+
 The points describe the shape, they are not its vertices — most are discarded and none can be read back.
 `parameters.points` is the count you handed over. Two identical arrays are one asset; two runs of
 `Math.random()` are two, because the key is bit-exact.
+
+### Properties
+
+- `bounds`
+
+### Methods
+
+- `toJSON()`
+- `toString()`
+
+## Path
+
+```js
+new three.Path(points)
+```
+
+A 2D outline built from straight segments and one curve — `moveTo`, `lineTo`, `closePath` and `absarc`,
+chained, each returning `this`. `points` is an optional shortcut: an array of `[x, y]` pairs or
+`{x, y}` objects, the whole outline handed over at once instead of built with `lineTo`.
+
+`closePath()` is a no-op that returns `this` — the outline is always implicitly closed back to its first
+point wherever it ends up, an `ExtrudeGeometry`'s outline or one of its holes — kept so a script ported
+from Three.js does not have to drop the call. `moveTo` only makes sense as the first call on an empty
+path; after that, use `lineTo`.
+
+`absarc(x, y, radius, startAngle, endAngle, clockwise)` samples a circular arc into straight segments
+immediately, at up to 12 segments per full turn scaled by how much of a turn the arc actually sweeps —
+there is no deferred curve object here, `points` is the whole representation. There is no bezier,
+quadratic or spline curve; see `ExtrudeGeometry`'s entry and `differences.md`.
+
+### Properties
+
+- `points` — the flattened outline so far, as `[x, y]` pairs
+
+### Methods
+
+- `moveTo(x, y)`
+- `lineTo(x, y)`
+- `closePath()`
+- `absarc(x, y, radius, startAngle, endAngle, clockwise = false)`
+
+## Shape
+
+```js
+new three.Shape(points)
+```
+
+A `Path` with holes cut out of it: `shape.holes` is a plain array a script pushes `Path`s onto, one per
+hole. What `ExtrudeGeometry` sweeps — the outline is `shape`'s own points, from the `Path` it extends.
+
+### Properties
+
+- `points`
+- `holes` — an array of `Path`, empty by default
+
+### Methods
+
+- `moveTo(x, y)`
+- `lineTo(x, y)`
+- `closePath()`
+- `absarc(x, y, radius, startAngle, endAngle, clockwise = false)`
+
+## ExtrudeGeometry
+
+```js
+new three.ExtrudeGeometry(shape, { depth, curveSegments, uv, bevelEnabled } = {})
+```
+
+A `Shape` swept along +Z into one closed mesh with no interior faces — the answer to "a shape cannot
+have a hole in it", and the piece a kit is mostly made of: a wall with a window is this shape once,
+instead of four boxes with coincident faces nothing will ever see.
+
+Extrusion runs from z = 0 to z = `depth` (default 1, must be positive). A 3 x 1.6 wall with a 0.8 x 1
+window cut at (1.1, 0.4), extruded 0.2 deep:
+
+```js
+const wall = new three.Shape();
+wall.moveTo(0, 0).lineTo(3, 0).lineTo(3, 1.6).lineTo(0, 1.6).closePath();
+const window = new three.Path();
+window.moveTo(1.1, 0.4).lineTo(1.9, 0.4).lineTo(1.9, 1.4).lineTo(1.1, 1.4).closePath();
+wall.holes.push(window);
+const geometry = new three.ExtrudeGeometry(wall, { depth: 0.2 });
+```
+
+uvs are local by construction, not projected: a cap's uv is its own (x, y), and a side's is (distance
+travelled along its ring since its own first point, z) — so `material.repeat` means texels per unit,
+the same reading it has on a hull and on a `{ uv: 'local' }` box. `uv` takes only `'local'`; `'face'`
+is refused, naming the reason, the same no-op `ConvexGeometry` accepts it as.
+
+There is no bevel: `bevelEnabled` is refused rather than silently ignored, so a script ported from
+Three.js finds out instead of getting a shape it did not expect — Three.js defaults `bevelEnabled` to
+true, so a script that never mentions it gets the flat extrude it would have gotten from
+`{ bevelEnabled: false }`. `curveSegments` (default 12) is accepted for the same signature Three.js
+has, but does nothing here: the one curve this API has, `Path.absarc`, already flattened itself before
+the shape reached this constructor.
+
+Two shapes with the same outline points, the same hole points (in the same order) and the same depth
+are one asset, the same rule every other shape here follows.
 
 ### Properties
 
@@ -1173,6 +1316,27 @@ One asset, one draw call — the strip is one mesh, not a row of re-edged boxes.
 
 ### Properties
 
+- `bounds`
+
+### Methods
+
+- `toJSON()`
+- `toString()`
+
+## MergedGeometry
+
+```js
+not constructible — three.merge(root) or three.merge([mesh, ...]) answers with these
+```
+
+`three.merge`'s answer: every Mesh in a subtree, or an explicit array of them, concatenated into one
+asset with each one's transform baked into its vertices — see `three.merge` in the functions
+reference for the frame, the material and colour rules, and the round trip through `scene.export`
+and `MeshRef.split()`.
+
+### Properties
+
+- `parameters` — `{ meshes, triangles }`: how many meshes went in, how many triangles came out
 - `bounds`
 
 ### Methods
@@ -1698,7 +1862,8 @@ the times it is inside a wall.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -1753,7 +1918,8 @@ moving it.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -1799,7 +1965,8 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -1851,7 +2018,8 @@ live. Divisions are capped at 256.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
@@ -1908,7 +2076,8 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
+  both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`

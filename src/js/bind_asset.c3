@@ -80,7 +80,7 @@ fn void js_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value*
 			// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
 			// each a different thing to do about it, and flattening them into
 			// "could not load" would cost the agent the one word that says which.
-			*out = js.raise(string::tformat("could not load %s: %s", path, err));
+			*out = js.raise(string::tformat("could not load %s: %s", self.blame(path, opening), err));
 			return;
 		}
 
@@ -131,8 +131,10 @@ fn bool is_utf8_text(char[] bytes) @local
  case, where `three.load` reads from wherever the process was started and
  confining to nothing would refuse every path there is.
 
- **Read-only, deliberately.** `scene.export` is the write door and goes through
- `resolve_write`; a game's own data files are its author's, not its script's.
+ **The write door is `js_asset_write_text`, right below.** It goes through
+ `resolve_write` rather than `resolve_asset` — the same narrower rule
+ `scene.export` writes a `.glb` through — so a script can put a level list back
+ where this reads it from without the sandbox growing a second shape.
 
  Null for a file that is not there, which is `saveReadText`'s answer and not
  `js_load`'s. An editor asking "is there a level here yet" is the ordinary case
@@ -212,7 +214,7 @@ fn void js_asset_text(
 		char[]? bytes = file::load(tmem, opening);
 		if (catch err = bytes)
 		{
-			*out = js.raise(string::tformat("could not read '%s': %s", asked, err));
+			*out = js.raise(string::tformat("could not read %s: %s", self.blame(asked, opening), err));
 			return;
 		}
 
@@ -229,6 +231,123 @@ fn void js_asset_text(
 		}
 
 		*out = js.string((String)bytes);
+	};
+}
+
+<*
+ Makes the folder a path is about to be written into, if it is not there yet.
+
+ The one thing `three.writeText` and `scene.export` do before opening the file,
+ and shared so that the two doors cannot drift: `path_tdirname` is the folder,
+ an empty one is the assets root itself and needs nothing, and `mkdir` with
+ `recursive` answers false rather than failing when the folder already exists.
+
+ @param writing : `The resolved path, already inside the sandbox.`
+*>
+fn void? make_way_for(String writing) @local
+{
+	if (try dir = writing.path_tdirname())
+	{
+		if (dir.len == 0) return;
+		path::mkdir((Path)dir, recursive: true)!;
+	}
+}
+
+<*
+ `assetWriteText(path, text)` — a text file into the assets directory, and the
+ path it landed at.
+
+ `js_asset_text`'s write twin and `js_export`'s text-shaped sibling: the level
+ list `three.readText` reads has to come from somewhere, and until this existed
+ the only place a script could put it was `<application data>/three.c3/<slug>`
+ — precisely the split `js_asset_text`'s doc comment opened this door to close.
+
+ **The sandbox is `resolve_write`'s and not a second one.** The same call
+ `scene.export` makes, so `../../etc/passwd` is refused with the same sentence
+ (adapted to say write rather than read), a leading `/` means the assets
+ directory rather than the disk's, and nothing outside it is ever written.
+ Without an assets root the path is used as written, exactly as `scene.export`'s
+ is — the `--script`/`--mcp` case, where there is no directory to be relative
+ to.
+
+ A missing folder on the way is made, as `three.save` makes its own: the
+ first save of a level into a fresh `levels/` is the ordinary case and not a
+ mistake, and the sandbox has already said the path is inside the assets
+ directory before anything is created. `scene.export` does the same, so the two
+ doors agree about who owns that.
+
+ The same `MAX_MODULE_BYTES` `three.readText` stops at bounds the string here,
+ checked before the write rather than after: a file this writes is a file
+ `three.readText` can read back, and a second, larger limit would make that
+ false.
+*>
+fn void js_asset_write_text(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 0, tmem);
+		if (asked.len == 0)
+		{
+			*out = js.raise("three.writeText(path, text) wants a path to a file in the assets directory");
+			return;
+		}
+
+		String text = arg_text(&js, argc, args, 1, tmem);
+		if (text.len > qjs::MAX_MODULE_BYTES)
+		{
+			*out = js.raise(
+				string::tformat(
+					"'%s' is %d bytes, and three.writeText stops at %d — that is a level list or a table, "
+						"and a file this big is a mistake or a binary",
+					asked,
+					text.len,
+					qjs::MAX_MODULE_BYTES
+				)
+			);
+			return;
+		}
+
+		String? writing = self.resolve_write(asked, tmem);
+		if (catch err = writing)
+		{
+			if (err == qjs::MODULE_ESCAPES_ROOT)
+			{
+				*out = js.raise(
+					string::tformat(
+						"cannot write to '%s': it climbs out of the assets directory, and a game may only "
+							"write inside its own",
+						asked
+					)
+				);
+				return;
+			}
+			*out = js.raise(string::tformat("cannot write to '%s': %s", asked, err));
+			return;
+		}
+
+		if (catch err = make_way_for(writing))
+		{
+			*out = js.raise(string::tformat("could not make the folder for %s: %s", self.blame(asked, writing), err));
+			return;
+		}
+
+		if (catch err = file::save(writing, (char[])text))
+		{
+			*out = js.raise(string::tformat("could not write %s: %s", self.blame(asked, writing), err));
+			return;
+		}
+
+		*out = js.string(writing);
 	};
 }
 
@@ -399,7 +518,7 @@ fn void js_texture(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
 		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips);
 		if (catch err = index)
 		{
-			*out = js.raise(texture_failure(err, path));
+			*out = js.raise(self.texture_failure(err, path, opening));
 			return;
 		}
 
@@ -552,23 +671,26 @@ const int MAX_TEXTURE_SIDE = 8192;
 
  Each of the three is a different next move — check the path, convert the file,
  re-export it at 8 bits — and "could not load" would cost the agent all of that.
+
+ @param path : `As the script wrote it.`
+ @param opening : `What resolve_asset returned for it: the file load_texture_file actually opened.`
 *>
-fn String texture_failure(fault err, String path) @local
+fn String JsRuntime.texture_failure(&self, fault err, String path, String opening)
 {
 	switch (err)
 	{
 		case TEXTURE_UNREADABLE:
-			return string::tformat("there is no readable file at '%s'", path);
+			return string::tformat("there is no readable file at %s", self.blame(path, opening));
 		case TEXTURE_FORMAT_UNKNOWN:
 			return string::tformat(
-				"'%s' is not a PNG or a JPEG — those are the two three.texture reads, and the check is on the "
+				"%s is not a PNG or a JPEG — those are the two three.texture reads, and the check is on the "
 					"file's own first bytes rather than its name",
-				path
+				self.blame(path, opening)
 			);
 		case TEXTURE_BIT_DEPTH:
-			return string::tformat("'%s' is a 16-bit PNG; save it as 8-bit and it will load", path);
+			return string::tformat("%s is a 16-bit PNG; save it as 8-bit and it will load", self.blame(path, opening));
 		default:
-			return string::tformat("could not load '%s': %s", path, err);
+			return string::tformat("could not load %s: %s", self.blame(path, opening), err);
 	}
 }
 
@@ -683,14 +805,20 @@ fn void js_texture_read(
 }
 
 <*
- `primitive(kind, a, b, c, u, v, w, capped)` — build a parametric shape, or hand
- back the asset already built for exactly these numbers.
+ `primitive(kind, a, b, c, u, v, w, capped, uv)` — build a parametric shape, or
+ hand back the asset already built for exactly these numbers.
 
  One verb for all five kinds rather than one each, because the layer below is
  already a switch on the kind and a per-shape verb here would be five copies of
  this function differing only in which arguments they ignore. What the numbers
  mean is `Primitive`'s business; `prelude.js`'s `BoxGeometry` and friends are
  where they get their Three.js names, defaults and range checks.
+
+ `uv` is the ordinal of a `UvMode` — 0 for `FACE`, 1 for `LOCAL` — the same
+ pattern `ui.js`'s `KIND` numbers use for `UiNodeKind`. It is meaningful only for
+ `box` and `plane`; the other three kinds have their own uv layout and ignore
+ it. Omitted, it reads as 0 (`FACE`), which is why every caller written before
+ this argument existed still builds Three.js's own layout.
 
  The device is required and says so: a shape has to be uploaded to be drawn.
 *>
@@ -731,6 +859,11 @@ fn void js_primitive(
 		// of range with a better sentence, and this is what a script that called
 		// `__three.primitive` itself gets instead of an allocation the size of the
 		// device.
+		//
+		// `uv` likewise: the prelude has already refused any string but 'face' and
+		// 'local' before it ever became an ordinal, so anything but exactly 1 here
+		// reads as `FACE` — a script driving `__three.primitive` directly gets
+		// Three.js's own layout rather than a fault over a stray number.
 		Primitive shape = {
 			.kind = kind,
 			.a = arg_float(&js, argc, args, 1),
@@ -740,6 +873,7 @@ fn void js_primitive(
 			.v = primitive_segments((uint)math::max(arg_int(&js, argc, args, 5), 0), 1),
 			.w = primitive_segments((uint)math::max(arg_int(&js, argc, args, 6), 0), 1),
 			.capped = arg_truth(&js, argc, args, 7),
+			.uv = arg_int(&js, argc, args, 8) == UvMode.LOCAL.ordinal ? UvMode.LOCAL : UvMode.FACE,
 		};
 
 		AssetId? asset = self.pass.assets.primitive(&self.renderer.gpu, shape);
@@ -835,6 +969,130 @@ fn void js_convex(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 				return;
 			}
 			*out = js.raise(string::tformat("could not build a convex hull from %d points: %s", count, err));
+			return;
+		}
+
+		*out = asset_value(&js, asset);
+	};
+}
+
+<*
+ `extrude(outline, holes, holeCounts, depth)` — a 2D outline, with holes cut out
+ of it, swept along +z, as an asset. Three.js's `ExtrudeGeometry` over a `Shape`.
+
+ `outline` and `holes` are flat JavaScript arrays of numbers, `x, y` per point —
+ the 2D analogue of `convex`'s flat `x, y, z`. `holes` concatenates every hole's
+ points end to end; `holeCounts` says how many of them belong to each hole, in
+ order, so the host can re-slice the one array back into however many rings
+ `prelude.js` was handed. `scene/extrude.c3` carries the triangulation; this is
+ only the crossing and the same finite-component backstop `convex` uses.
+*>
+fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("building a shape needs a GPU device and this context has none");
+		return;
+	}
+
+	long outline_len = argc > 0 ? js.length(args[0]) : -1;
+	if (outline_len < 0 || outline_len % 2 != 0)
+	{
+		*out = js.raise(
+			"three.ExtrudeGeometry wants its outline as a flat array of x, y numbers — its length must be a multiple of two"
+		);
+		return;
+	}
+	long holes_len = argc > 1 ? js.length(args[1]) : -1;
+	if (holes_len < 0 || holes_len % 2 != 0)
+	{
+		*out = js.raise(
+			"three.ExtrudeGeometry wants its holes as a flat array of x, y numbers — its length must be a multiple of two"
+		);
+		return;
+	}
+	long hole_ring_count = argc > 2 ? js.length(args[2]) : -1;
+	if (hole_ring_count < 0)
+	{
+		*out = js.raise("three.ExtrudeGeometry wants a holeCounts array, one entry per hole");
+		return;
+	}
+
+	usz outline_points = (usz)(outline_len / 2);
+	usz hole_points     = (usz)(holes_len / 2);
+
+	@pool()
+	{
+		Vec2[] outline = alloc::new_array(tmem, Vec2, (sz)outline_points);
+		for (usz i = 0; i < outline_points; i++)
+		{
+			for (usz axis = 0; axis < 2; axis++)
+			{
+				qjs::Value component = js.index(args[0], (uint)(i * 2 + axis));
+				double value         = js.number(component);
+				js.release(component);
+				// The same backstop `convex` reads points with: `prelude.js` has
+				// already refused a non-finite component by name, this is what a
+				// forged call gets instead.
+				outline[i][axis] = math::is_finite(value) ? (float)value : 0.0f;
+			}
+		}
+
+		Vec2[] holes = alloc::new_array(tmem, Vec2, (sz)hole_points);
+		for (usz i = 0; i < hole_points; i++)
+		{
+			for (usz axis = 0; axis < 2; axis++)
+			{
+				qjs::Value component = js.index(args[1], (uint)(i * 2 + axis));
+				double value         = js.number(component);
+				js.release(component);
+				holes[i][axis] = math::is_finite(value) ? (float)value : 0.0f;
+			}
+		}
+
+		uint[] hole_counts = alloc::new_array(tmem, uint, (sz)hole_ring_count);
+		usz counted = 0;
+		for (usz i = 0; i < (usz)hole_ring_count; i++)
+		{
+			qjs::Value component = js.index(args[2], (uint)i);
+			double value         = js.number(component);
+			js.release(component);
+			uint n = value > 0 ? (uint)value : 0;
+			hole_counts[i] = n;
+			counted += n;
+		}
+		if (counted != hole_points)
+		{
+			*out = js.raise(
+				string::tformat(
+					"three.ExtrudeGeometry: holeCounts adds up to %d points but holes has %d",
+					counted, hole_points
+				)
+			);
+			return;
+		}
+
+		double depth_arg = argc > 3 ? js.number(args[3]) : 1.0;
+		float depth       = math::is_finite(depth_arg) && depth_arg > 0 ? (float)depth_arg : 0.001f;
+
+		AssetId? asset = self.pass.assets.extrude(&self.renderer.gpu, outline, holes, hole_counts, depth);
+		if (catch err = asset)
+		{
+			// Said rather than named, `convex`'s reason: the fault name does not
+			// carry which of the three ways an outline collapses, and there is
+			// exactly one thing here that is about the caller's shape.
+			if (err == EXTRUDE_SHAPE_IS_DEGENERATE)
+			{
+				*out = js.raise(
+					"that outline has no area to extrude — it needs at least 3 points that are not all on one "
+						"line, and every hole needs at least 3 points of its own"
+				);
+				return;
+			}
+			*out = js.raise(string::tformat("could not extrude that shape: %s", err));
 			return;
 		}
 
@@ -1176,6 +1434,12 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 				return;
 			}
 			*out = js.raise(string::tformat("cannot export to '%s': %s", path, err));
+			return;
+		}
+
+		if (catch err = make_way_for(writing))
+		{
+			*out = js.raise(string::tformat("cannot export to '%s': could not make its folder: %s", path, err));
 			return;
 		}
 
@@ -1628,6 +1892,161 @@ fn void js_split_mesh(
 }
 
 <*
+ `merge(assetIndices, generations, meshes, matrices, colors)` — every named
+ mesh concatenated into one asset, each one's vertices baked through its own
+ matrix — `splitMesh` in reverse.
+
+ Five flat arrays rather than an array of objects, `js_terrain`'s reason:
+ `prelude.js` has already walked the subtree and built every one of these, so
+ crossing five typed arrays is one length check apiece instead of one property
+ read per mesh per field. `assetIndices`, `generations` and `meshes` are one
+ integer per input mesh; `matrices` is sixteen floats per mesh, column-major —
+ `Matrix4f.m`'s own layout, translation in `m[12..14]`; `colors` is four,
+ `mesh.color` exactly as JavaScript last wrote it, not yet srgb-decoded.
+ `scene/merge.c3` decodes it there, the way the shader decodes `mesh.color`,
+ and folds it into the merged mesh's vertex colours rather than its own
+ instance colour, because a merge only has one instance afterwards.
+
+ Every length disagreeing with `assetIndices`' is a forged call — `prelude.js`
+ built these five together — and is refused as one rather than trusted to mean
+ something.
+
+ @return `[index, generation, triangles] — the third number is what MergedGeometry.parameters.triangles reads.`
+*>
+fn void js_merge(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("merging meshes uploads the result, and this context has no GPU device");
+		return;
+	}
+
+	long count = argc > 0 ? js.length(args[0]) : -1;
+	if (count <= 0)
+	{
+		*out = js.raise("three.merge(...) wants at least one mesh");
+		return;
+	}
+
+	long generations_len = argc > 1 ? js.length(args[1]) : -1;
+	long meshes_len       = argc > 2 ? js.length(args[2]) : -1;
+	long matrices_len     = argc > 3 ? js.length(args[3]) : -1;
+	long colors_len       = argc > 4 ? js.length(args[4]) : -1;
+	if (generations_len != count || meshes_len != count || matrices_len != count * 16 || colors_len != count * 4)
+	{
+		*out = js.raise("three.merge(...): the crossing arrays do not agree on how many meshes there are");
+		return;
+	}
+
+	@pool()
+	{
+		MergeInput[] inputs = alloc::new_array(tmem, MergeInput, (sz)count);
+		for (long i = 0; i < count; i++)
+		{
+			qjs::Value idx_v  = js.index(args[0], (uint)i);
+			qjs::Value gen_v  = js.index(args[1], (uint)i);
+			qjs::Value mesh_v = js.index(args[2], (uint)i);
+			uint asset_index      = (uint)js.number(idx_v);
+			uint asset_generation = (uint)js.number(gen_v);
+			uint mesh_index       = (uint)js.number(mesh_v);
+			js.release(idx_v);
+			js.release(gen_v);
+			js.release(mesh_v);
+
+			AssetId asset_id = { .index = asset_index, .generation = asset_generation };
+			if (self.pass.assets.slot(asset_id) == null)
+			{
+				*out = js.raise(
+					"three.merge(...): one of the meshes named there is no longer loaded — "
+						"three.unloadUnused() or scene.unload() freed it since the subtree was walked"
+				);
+				return;
+			}
+
+			Matrix4f matrix;
+			for (long k = 0; k < 16; k++)
+			{
+				qjs::Value mv = js.index(args[3], (uint)(i * 16 + k));
+				double v      = js.number(mv);
+				js.release(mv);
+				matrix.m[(usz)k] = math::is_finite(v) ? (float)v : 0.0f;
+			}
+
+			float[4] color;
+			for (long k = 0; k < 4; k++)
+			{
+				qjs::Value cv = js.index(args[4], (uint)(i * 4 + k));
+				double v      = js.number(cv);
+				js.release(cv);
+				color[(usz)k] = math::is_finite(v) ? (float)v : 1.0f;
+			}
+
+			inputs[i] = { .asset = asset_id, .mesh = mesh_index, .matrix = matrix, .color = color };
+		}
+
+		uint failed_at = 0;
+		AssetId? asset = self.pass.assets.merge(&self.renderer.gpu, inputs, &failed_at);
+		if (catch err = asset)
+		{
+			String named = "that mesh";
+			if (failed_at < inputs.len)
+			{
+				GpuMesh* mesh = self.pass.assets.mesh(inputs[failed_at].asset, inputs[failed_at].mesh);
+				named = mesh != null && mesh.name.len > 0
+					? string::tformat("'%s'", mesh.name)
+					: string::tformat("mesh %d of the subtree", failed_at);
+			}
+			switch (err)
+			{
+				case MESH_HAS_LAYERS:
+					*out = js.raise(
+						string::tformat(
+							"%s carries a layer stack, and a merged mesh cannot inherit one — read it with "
+								"ref.layers, build a LayeredMaterial from it, and put that on the merged mesh "
+								"yourself",
+							named
+						)
+					);
+				case MESH_CANNOT_BE_MERGED:
+					*out = js.raise(
+						string::tformat(
+							"%s has no triangles to merge — its asset is no longer loaded, or it is a line "
+								"mesh, whose indices are pairs",
+							named
+						)
+					);
+				case NOTHING_TO_MERGE:
+					*out = js.raise("three.merge(...) wants at least one mesh");
+				case TOO_MANY_MERGE_MESHES:
+					*out = js.raise(
+						string::tformat(
+							"that merges %d meshes, more than the %d this refuses as a mistake rather than a "
+								"kit — a wide scatter of identical instances wants to stay instanced",
+							inputs.len,
+							MAX_MERGE_MESHES
+						)
+					);
+				default:
+					*out = js.raise(string::tformat("%s could not be merged: %s", named, err));
+			}
+			return;
+		}
+
+		GpuMesh* built = self.pass.assets.mesh(asset, 0);
+		uint triangles = built != null ? built.index_count / 3 : 0;
+
+		qjs::Value triple = js.array();
+		js.set_index(triple, 0, qjs::int_value((int)asset.index));
+		js.set_index(triple, 1, qjs::int_value((int)asset.generation));
+		js.set_index(triple, 2, qjs::int_value((int)triangles));
+		*out = triple;
+	};
+}
+
+<*
  `meshLayers(index, generation, mesh)` — one mesh's `CUSTOM_materials_layers`
  stack, or `null` when its material never carried the extension.
 
@@ -2007,6 +2426,17 @@ fn void js_inventory(
 			js.set_index(animations, (uint)a, js.string(name));
 		}
 		js.set_property(described, "animations", animations);
+
+		qjs::Value markers = js.array();
+		foreach (k, &marker : entry.markers)
+		{
+			qjs::Value described_marker = js.object();
+			js.set_property(described_marker, "name", js.string(marker.name));
+			js.set_property(described_marker, "piece", js.string(marker.piece));
+			js.set_property(described_marker, "position", vec3_value(&js, marker.position));
+			js.set_index(markers, (uint)k, described_marker);
+		}
+		js.set_property(described, "markers", markers);
 
 		// Omitted rather than zeroed when the file had no position accessor to read
 		// them from: a box at the origin and "we could not tell" are different

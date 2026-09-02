@@ -520,15 +520,33 @@ export class Object3D {
 	// other, which is what a course of roof tiles is:
 	//
 	//   tiles.snapTo(lower, '+y', { gap: -0.05 });
+	//
+	// **Or the name of a marker both pieces carry**, for the mating surface
+	// that is not one of the six faces — two roof slopes meeting along a
+	// pitch, where the boxes overlap by the slab's thickness and there is no
+	// face on either piece for the other to touch:
+	//
+	//   slope.snapTo(other, 'ridge');
+	//
+	// A marker is a named empty — the leaf node a `.glb` carries with no mesh,
+	// the same way a Blender kit ships a connection point, and equally an
+	// `Object3D` a script added by hand. `getObjectByName` finds it on each
+	// piece and the two markers' world positions are made to coincide.
+	// **This never rotates**: set `rotation` first, exactly as for a box
+	// snap. Since the marker decides all three axes, `axes` and `gap` are
+	// refused rather than silently ignored — an offset afterwards is
+	// `position.x += ...`, which a script can already do.
 	snapTo(other, side, axes = {}) {
 		if (!(other instanceof Object3D)) {
 			throw new TypeError('snapTo(other) wants another object as its first argument');
 		}
-		if (typeof side !== 'string' || !SIDES.includes(side)) {
+		if (typeof side !== 'string') {
 			throw new TypeError(
 				'snapTo(other, side) wants the side of the other object to go on — one of '
-				+ `${SIDES.map(s => `'${s}'`).join(', ')} — not ${JSON.stringify(side)}`);
+				+ `${SIDES.map(s => `'${s}'`).join(', ')} — or the name of a marker both pieces `
+				+ `carry — not ${JSON.stringify(side)}`);
 		}
+		if (!SIDES.includes(side)) return this._snapToMarker(other, side, axes);
 		if (axes === null || typeof axes !== 'object') {
 			throw new TypeError('snapTo(other, side, axes) wants an object of axes as its third argument');
 		}
@@ -551,6 +569,58 @@ export class Object3D {
 			? { mine: 'min', theirs: 'max', offset: gap }
 			: { mine: 'max', theirs: 'min', offset: -gap }, 'snapTo()'));
 		return this._place(other, specs, 'snapTo()');
+	}
+
+	// The marker branch of `snapTo`: two named leaf nodes are moved to
+	// coincide. See the long comment above `snapTo` for what a marker is and
+	// why this never rotates.
+	_snapToMarker(other, name, axes) {
+		if (axes === null || typeof axes !== 'object') {
+			throw new TypeError(
+				`snapTo(other, ${JSON.stringify(name)}, axes) wants an object of axes as its third argument`);
+		}
+		if (Object.keys(axes).length > 0) {
+			throw new TypeError(
+				`snapTo(other, ${JSON.stringify(name)}, axes): a marker snap moves all three axes to `
+				+ 'make the two markers coincide, so there is nothing left for axes or gap to say — '
+				+ 'offset afterwards with position.x += ... instead.');
+		}
+		const mine = this.getObjectByName(name);
+		const theirs = other.getObjectByName(name);
+		if (mine === null || theirs === null) {
+			throw new TypeError(
+				`snapTo(other, ${JSON.stringify(name)}): no marker named ${JSON.stringify(name)} on `
+				+ `${mine === null ? 'this piece' : 'the other piece'} — this piece's markers are `
+				+ `${markerList(this)}, the other's are ${markerList(other)}.`);
+		}
+		if (other.parent !== this.parent) return this._snapMarkerInWorld(other, mine, theirs, name);
+		const a = localPoint(this.parent, mine);
+		const b = localPoint(other.parent, theirs);
+		const p = this.position;
+		p.set(p.x + (b[0] - a[0]), p.y + (b[1] - a[1]), p.z + (b[2] - a[2]));
+		return this;
+	}
+
+	// The marker snap's world path, for two pieces under different parents —
+	// `_placeInWorld`'s frame rule, applied to a point instead of a box.
+	_snapMarkerInWorld(other, mine, theirs, name) {
+		if (this._i < 0 || other._i < 0) {
+			throw new Error(
+				`snapTo(other, ${JSON.stringify(name)}): these two hang from different parents, so they `
+				+ 'are placed in world space — and world space is something a scene has. add() them first.');
+		}
+		const a = mine.getWorldPosition();
+		const b = theirs.getWorldPosition();
+		const inverse = invertMatrix3(worldMatrix3(this.parent));
+		if (inverse === null) {
+			throw new Error(
+				`snapTo(other, ${JSON.stringify(name)}): something above this object is scaled to `
+				+ 'nothing on an axis, so no local move produces the world one.');
+		}
+		const local = applyMatrix3(inverse, [b.x - a.x, b.y - a.y, b.z - a.z]);
+		const p = this.position;
+		p.set(p.x + local[0], p.y + local[1], p.z + local[2]);
+		return this;
 	}
 
 	// **Flush with another object, without touching it** — the other half of
@@ -827,6 +897,37 @@ function worldMatrix3(node) {
 		m = multiplyMatrix3(m, localMatrix3(o.rotation, o.scale, o._q));
 	}
 	return m;
+}
+
+// `node`'s position in `ancestor`'s frame: every node's own translation, plus
+// its rotation-and-scale applied to what was already carried, walking from
+// `node` up to (not including) `ancestor` — `null` for the frame of a node
+// parented to nothing. The point version of `boundsInParent()`'s walk, and
+// what a marker snap measures with: no host call, so a marker on a detached
+// tree is found exactly as a box is.
+function localPoint(ancestor, node) {
+	let p = [0, 0, 0];
+	for (let n = node; n !== ancestor; n = n.parent) {
+		const r = applyMatrix3(localMatrix3(n.rotation, n.scale, n._q), p);
+		p = [r[0] + n.position.x, r[1] + n.position.y, r[2] + n.position.z];
+	}
+	return p;
+}
+
+// Every leaf `Object3D` under `object` with no mesh, for a marker snap's
+// refusal — the vocabulary a script guessed a name wrong from, read back at
+// it rather than left to be discovered by trial.
+function markerNames(object) {
+	const names = [];
+	object.traverse(o => {
+		if (o !== object && o.children.length === 0 && o._ref() === null && o.name) names.push(o.name);
+	});
+	return names;
+}
+
+function markerList(object) {
+	const names = markerNames(object);
+	return names.length ? names.map(n => `'${n}'`).join(', ') : '(none)';
 }
 
 // -----------------------------------------------------------------------

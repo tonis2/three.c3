@@ -35,6 +35,12 @@ The other two axes take one word for both faces — `'min'`, `'center'`, `'max'`
 distance along the side, with `row`'s sign: positive spaces the pieces, negative laps them over each
 other. Naming the side's own axis is refused, because the side already said what it does.
 
+`side` can also be the name of a marker both pieces carry — a leaf node with no mesh, the empty a
+kit ships for a connection point that is not a face, the way two roof slopes meet along a pitch.
+`slope.snapTo(other, 'ridge')` moves `slope` so the two markers' world positions coincide. This never
+rotates, and `axes`/`gap` are refused rather than ignored, since the two markers already decide every
+axis.
+
 `object.align(axis, edge, at)` is the same move against a coordinate rather than an object.
 
 ```js
@@ -90,8 +96,8 @@ rather than fail, so it throws instead. `helper.color` is the knob a helper has.
 ## geometry-kinds
 
 Geometry is BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry,
-TorusGeometry and ConvexGeometry, built for you with Three.js's signatures, defaults and
-orientations.
+TorusGeometry, ConvexGeometry and ExtrudeGeometry, built for you with Three.js's signatures,
+defaults and orientations.
 
 There is no BufferGeometry, no attribute access and no way to read or write a vertex. That refusal
 is what makes every scene one instanced draw per unique shape.
@@ -107,6 +113,50 @@ at 65536. It is flat shaded, because a hull's faces meet at hard creases, and te
 each facet gets its own planar projection at one uv unit per unit of local space, so a map is the
 same size on a hull as on a box beside it. The points are a description the hull is computed from,
 not the mesh's vertices — most are discarded and none can be read back.
+
+## uv-mode
+
+`BoxGeometry` and `PlaneGeometry` take a `{ uv }` option Three.js has nothing like: `'face'` (the
+default, and Three.js's own layout — every face the unit square, 0..1, whatever size the face is) or
+`'local'` (one uv unit per unit of the face's own axes, the same mapping `ConvexGeometry` already
+uses per facet). `material.repeat` means something different under each: a multiple of the whole
+face under `'face'`, texels per unit under `'local'`. Mixing a scaled box and a hull in one kit is
+the case this exists for — give both `'local'` and one material wears both at the same texel density
+without a `material.repeat` per piece.
+
+The mode is part of `parameters`, not a property set after construction: two `BoxGeometry`s with the
+same numbers and different `uv` are two different assets, the same way two different sizes are.
+
+`ConvexGeometry` accepts `{ uv: 'local' }` as a no-op — a hull has always been local — and refuses
+`'face'`, naming the reason, since a hull has no per-face unit square to map it onto.
+
+## extrude-geometry
+
+`new three.ExtrudeGeometry(shape, options)` sweeps a `three.Shape` — a `Path` with holes — along +Z
+into one closed mesh, Three.js's `ExtrudeGeometry` cut down to what a kit's outlines actually need.
+
+- **No bevel.** `bevelEnabled` is refused rather than defaulting to `true` the way Three.js's does, so
+  a script ported over finds out rather than getting a shape it did not expect — Three.js defaults it
+  on, so a script that never mentions it there gets a beveled edge it would not get at all here.
+- **One curve.** `Path` keeps `moveTo`, `lineTo`, `closePath` and `absarc`; there is no bezier,
+  quadratic or spline curve, because those are the whole surface of Three.js's `CurvePath` and a
+  straight line plus a circular arc are what a kit's outlines are actually drawn from. `curveSegments`
+  is still accepted, for the same signature Three.js has, but does nothing: the one curve here already
+  flattened itself, at its own fixed resolution, before the shape ever reached this constructor.
+- **uvs are local by construction**, not an option: a cap's uv is its own (x, y) and a side's is
+  (distance travelled along its ring, z), the same "texels per unit" reading `{ uv: 'local' }` gives a
+  box and a hull already has. `uv` takes only `'local'`; `'face'` is refused, naming the reason.
+
+## merge-geometry
+
+Three.js's `BufferGeometryUtils.mergeGeometries` takes geometries and concatenates their attribute
+arrays — it can be handed anything with the right buffers, because a script there can read and build
+one. `three.merge` takes meshes instead, and merges them in a frame — `three.merge(root)`, every Mesh
+under `root` in `root`'s own frame, or `three.merge([a, b, ...])`, an explicit array in their shared
+parent's frame — because a script here never touches a vertex, and merging is the one operation whose
+whole point is baking a transform into vertices that nothing else exposes. Reaching it through the
+node a mesh already sits at, rather than through a buffer a script assembled, is the one door this
+API has for it.
 
 ## geometry-identity
 
@@ -951,6 +1001,21 @@ pieces over each other, which is what a course of tiles is; a positive one is a 
 Write it in the order a builder works in: turn and scale a piece first — both are inputs to where its
 box is — then place it, then measure the thing you just placed to put the next one on. What comes out
 has no size table in it, which is what makes it survive the kit being re-exported.
+
+## level-format
+
+Three.js has no level format. `ObjectLoader`'s JSON is a serialized scene graph — one entry per
+object, a `matrix` baked into each — and reads back exactly the objects it wrote. `three.level`'s
+file is not that: a row names a *piece* of a kit rather than embedding one, so re-exporting the kit
+moves what the row places, and a row a person hand-edits loads the same way one `three.level.save`
+wrote.
+
+A row placed by `object.snapTo` carries the snap along with the transform it produced — the target
+row, the side, the axes — because a transform alone is exactly what `ObjectLoader` would have baked:
+right until the kit it names changes underneath it. `three.level.load(path, parent, { refit: true })`
+replays every snap in file order instead of trusting the written numbers, which is a step Three.js's
+loader has no reason to have, since nothing it loads was ever placed against another loaded object in
+the first place.
 
 ## static-casters
 

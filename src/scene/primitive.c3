@@ -66,6 +66,34 @@ enum PrimitiveKind
 	TORUS,
 }
 
+<*
+ How a face-built shape's texture coordinates are laid out. Only `build_box`
+ and `build_plane` read this — the other three kinds have their own uv layout
+ and are unaffected by it.
+
+ `FACE` is Three.js's own layout: every face gets the unit square, 0..1, however
+ big the face is. That is right for a parametric shape used at one size and
+ wrong for a kit — a slope and a hip of one roof, at two different sizes, need
+ two different `material.repeat` to wear the same texture at the same texel
+ density, and the thin edge of a panel gets the same 0..1 span as its wide face
+ and stretches.
+
+ `LOCAL` maps one uv unit per unit of the face's own axes instead — the same
+ thing `ConvexGeometry` already does per facet, extended to a box's flat faces.
+ A 3x1.6 wall face then spans uv 0..3 by 0..1.6, and `material.repeat` means
+ texels per unit for every piece built this way, so one material serves a
+ 34-piece kit instead of a cache of one material per size.
+
+ Ordinals, not names, cross the JS boundary — `geometry.js`'s `UV_MODE` table is
+ this order written out in JavaScript, the same pattern `ui.js`'s `KIND` uses
+ for `UiNodeKind`.
+*>
+enum UvMode : char
+{
+	FACE,
+	LOCAL,
+}
+
 fn String PrimitiveKind.label(self)
 {
 	switch (self)
@@ -148,6 +176,9 @@ struct Primitive
 	// field that is false by default and means "has caps" is a trap for whoever
 	// fills the struct in without reading this.
 	bool capped;
+	// Box and plane only: `FACE` (the zero value, and Three.js's own layout) or
+	// `LOCAL`. See `UvMode`.
+	UvMode uv;
 }
 
 <*
@@ -159,7 +190,8 @@ fn Primitive box_shape(
 	float depth,
 	uint width_segments = 1,
 	uint height_segments = 1,
-	uint depth_segments = 1
+	uint depth_segments = 1,
+	UvMode uv = UvMode.FACE
 )
 {
 	return {
@@ -170,6 +202,7 @@ fn Primitive box_shape(
 		.u = primitive_segments(width_segments, 1),
 		.v = primitive_segments(height_segments, 1),
 		.w = primitive_segments(depth_segments, 1),
+		.uv = uv,
 	};
 }
 
@@ -191,7 +224,13 @@ fn Primitive sphere_shape(float radius, uint width_segments = 32, uint height_se
  A flat rectangle in the XY plane, facing +Z — Three.js's orientation, which is
  vertical. A floor is this rotated -90 degrees about X.
 *>
-fn Primitive plane_shape(float width, float height, uint width_segments = 1, uint height_segments = 1)
+fn Primitive plane_shape(
+	float width,
+	float height,
+	uint width_segments = 1,
+	uint height_segments = 1,
+	UvMode uv = UvMode.FACE
+)
 {
 	return {
 		.kind = PrimitiveKind.PLANE,
@@ -200,6 +239,7 @@ fn Primitive plane_shape(float width, float height, uint width_segments = 1, uin
 		.u = primitive_segments(width_segments, 1),
 		.v = primitive_segments(height_segments, 1),
 		.w = 1,
+		.uv = uv,
 	};
 }
 
@@ -277,11 +317,26 @@ fn String Primitive.key(&self, Allocator allocator)
 	switch (self.kind)
 	{
 		case PrimitiveKind.BOX:
-			return string::format(allocator, "<box %fx%fx%f %dx%dx%d>", self.a, self.b, self.c, self.u, self.v, self.w);
+			// `%s` is empty for `FACE`, so this is byte-identical to the key a box
+			// keyed the same way before `uv` existed — the default draws no new
+			// asset. `LOCAL` differs in the one place that matters: a face-mapped
+			// box and a local-mapped box of the same size are two different sets of
+			// texture coordinates and must not share an upload.
+			return string::format(
+				allocator,
+				"<box %fx%fx%f %dx%dx%d%s>",
+				self.a, self.b, self.c, self.u, self.v, self.w,
+				self.uv == UvMode.LOCAL ? " local" : ""
+			);
 		case PrimitiveKind.SPHERE:
 			return string::format(allocator, "<sphere r%f %dx%d>", self.a, self.u, self.v);
 		case PrimitiveKind.PLANE:
-			return string::format(allocator, "<plane %fx%f %dx%d>", self.a, self.b, self.u, self.v);
+			return string::format(
+				allocator,
+				"<plane %fx%f %dx%d%s>",
+				self.a, self.b, self.u, self.v,
+				self.uv == UvMode.LOCAL ? " local" : ""
+			);
 		case PrimitiveKind.CYLINDER:
 			return string::format(
 				allocator,
@@ -410,6 +465,7 @@ fn void Primitive.build(&self, GeometryBuilder* out)
  in a screenshot.
 
  @param offset : `How far along the normal the face sits — half the box's depth, or zero for a lone plane.`
+ @param uv_mode : `FACE bounds every face to the unit square; LOCAL scales the same layout by u_length/v_length.`
 *>
 fn void build_face(
 	GeometryBuilder* out,
@@ -420,7 +476,8 @@ fn void build_face(
 	float v_length,
 	float offset,
 	uint u_segments,
-	uint v_segments
+	uint v_segments,
+	UvMode uv_mode
 ) @local
 {
 	uint first = (uint)out.positions.len();
@@ -433,8 +490,22 @@ fn void build_face(
 			float fu      = (float)iu / (float)u_segments;
 			Vec3 position = u_axis * ((fu - 0.5f) * u_length) + v_axis * ((0.5f - fv) * v_length) + normal * offset;
 			// v counts down the face and the texture coordinate counts up, which is
-			// Three.js's layout: uv (0, 0) is the bottom-left corner.
-			out.vertex(position, normal, { fu, 1.0f - fv });
+			// Three.js's layout: uv (0, 0) is the bottom-left corner. LOCAL keeps that
+			// same corner and that same direction, and only changes the scale: instead
+			// of the unit square, u runs 0..u_length and v runs 0..v_length — one uv
+			// unit per unit of the face's own axes, which is what stops a thin edge
+			// (u_length or v_length small) from stretching a texel meant for the wide
+			// face beside it across the same 0..1 span.
+			Vec2 texel;
+			if (uv_mode == UvMode.LOCAL)
+			{
+				texel = { fu * u_length, (1.0f - fv) * v_length };
+			}
+			else
+			{
+				texel = { fu, 1.0f - fv };
+			}
+			out.vertex(position, normal, texel);
 		}
 	}
 
@@ -466,17 +537,17 @@ fn void build_box(GeometryBuilder* out, Primitive shape) @local
 	float half_height = shape.b * 0.5f;
 	float half_depth  = shape.c * 0.5f;
 
-	build_face(out, { 0, 0, -1 }, { 0, 1, 0 }, { 1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v);
-	build_face(out, { 0, 0, 1 }, { 0, 1, 0 }, { -1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v);
-	build_face(out, { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, shape.a, shape.c, half_height, shape.u, shape.w);
-	build_face(out, { 1, 0, 0 }, { 0, 0, 1 }, { 0, -1, 0 }, shape.a, shape.c, half_height, shape.u, shape.w);
-	build_face(out, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, shape.a, shape.b, half_depth, shape.u, shape.v);
-	build_face(out, { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, shape.a, shape.b, half_depth, shape.u, shape.v);
+	build_face(out, { 0, 0, -1 }, { 0, 1, 0 }, { 1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v, shape.uv);
+	build_face(out, { 0, 0, 1 }, { 0, 1, 0 }, { -1, 0, 0 }, shape.c, shape.b, half_width, shape.w, shape.v, shape.uv);
+	build_face(out, { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, shape.a, shape.c, half_height, shape.u, shape.w, shape.uv);
+	build_face(out, { 1, 0, 0 }, { 0, 0, 1 }, { 0, -1, 0 }, shape.a, shape.c, half_height, shape.u, shape.w, shape.uv);
+	build_face(out, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, shape.a, shape.b, half_depth, shape.u, shape.v, shape.uv);
+	build_face(out, { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, shape.a, shape.b, half_depth, shape.u, shape.v, shape.uv);
 }
 
 fn void build_plane(GeometryBuilder* out, Primitive shape) @local
 {
-	build_face(out, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, shape.a, shape.b, 0, shape.u, shape.v);
+	build_face(out, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, shape.a, shape.b, 0, shape.u, shape.v, shape.uv);
 }
 
 <*

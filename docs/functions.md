@@ -15,6 +15,69 @@ Loading the same path twice returns the same asset — unless it was unloaded in
 a fresh one and makes the old handle throw. Use `asset.instantiate()` for the file's own hierarchy
 and `asset.mesh(name)` for one piece of it.
 
+## three.merge(root)
+
+`MeshRef.split()` in reverse: every Mesh in a subtree, concatenated into one asset with each one's
+transform baked into its vertices. Ten buildings out of a kit are 2,463 nodes because every piece is
+a hierarchy of boxes rather than a mesh — merging turns a piece that draws correctly as forty nodes
+into the same picture as one.
+
+Two spellings:
+
+```js
+three.merge(root)          // every Mesh under root, in root's own frame
+three.merge([a, b, ...])   // exactly these meshes, in their shared parent's frame
+```
+
+A mesh's transform relative to the frame is the product of the local matrices from the mesh up to,
+but excluding, `root` (or the array form's shared parent) — a mesh whose parent is null carries no
+ancestor transform to exclude, so it merges in world. That is what makes
+`new three.Mesh(three.merge(piece), material)` placed where `piece` was draw the same picture `piece`
+did, as one instance instead of however many meshes `piece` was:
+
+```js
+const kit = three.load('kit/buildings.glb');
+const piece = kit.node('wall_stone');
+const material = new three.MeshLambertMaterial();
+const wall = new three.Mesh(three.merge(piece), material);
+wall.position.copy(piece.position);
+scene.add(wall);
+```
+
+Skipped, silently: a helper (anything drawing with the line material — `Box3Helper`, `BoxHelper`,
+`AxesHelper`, `GridHelper`, `WireframeHelper`) has index pairs rather than triangles, and an
+invisible node draws nothing to bake, so `visible = false` prunes the whole subtree under it the
+same way rendering does. A subtree with nothing left after that throws — "nothing to merge" — rather
+than answering with an asset that draws nothing.
+
+Refused: every mesh must share one material by identity (`mesh.material === mesh.material`, with the
+shared default `null` counting as one) and one `variant`. A material is a pipeline and a variant a
+row of its table, both chosen once per draw call, and a merge is one draw call — two materials cannot
+become one asset, so this throws naming the first two that disagree rather than keeping one and
+silently dropping the paint job on the meshes that named the other. `mesh.color` has nowhere else to
+disagree from and is not refused: the built-in shading already multiplies a vertex colour attribute
+into albedo beside the per-instance one, so each input's `color` bakes into the merged mesh's own
+vertex colours instead — a wall merged with a differently tinted door keeps the door's tint.
+
+Interior faces are still there. A wall merged with the window frame sitting inside it is one mesh
+with the coincident inside-the-wall faces intact, because a merge is concatenation and nothing
+cleverer. `ExtrudeGeometry` is the tool that removes a hole's interior faces by construction, and
+stays the answer for a shape that should never have had them; this is the tool for turning a hundred
+nodes that already draw correctly into one.
+
+The result is one asset and one draw call per copy, like every other geometry — merging trades
+instancing for node count, not the other way round. A piece used a hundred times across a level is a
+hundred instances and one draw call whether or not it is merged, because it was already one asset;
+what merging removes is the *node*, forty transforms and forty scene-graph entries for forty boxes
+that make up one wall, down to one of each. Two different pieces merged into one asset are one asset,
+not two — reuse across a level is a question about node count, and merging answers it, never about
+which pieces happen to look alike.
+
+`scene.export` writes a merged mesh exactly — real normals and real uvs, not a hull's averaged and
+projected ones — and `MeshRef.split()` on it gives the pieces back, cut the same way any merged kit
+is: two triangles are in the same piece when they share a vertex, which a merge's own concatenation
+never does across two different inputs.
+
 ## three.render(scene, camera)
 
 Draw one frame. `camera` is optional and must be `three.camera`.
@@ -137,11 +200,18 @@ under `--debug`. The only way a script can tell the two apart, and what decides 
 ## three.inventory()
 
 Every `.glb` and `.gltf` under the assets directory, described without loading any of it:
-`[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name], bounds: { min, max } }]`.
+`[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name],
+markers: [{ name, piece, position }], bounds: { min, max } }]`.
 
 Read out of the JSON chunk, so it is cheap on a kit of any size — ask this before `three.load` to
 find out what is worth loading. `path` is what `three.load` wants. Empty when three was not started
 with `--assets`.
+
+A marker is a leaf node with no mesh — the empty a kit author drops where two pieces are meant to
+meet, the same way a Blender kit ships a connection point. `piece` is the top-level node the marker
+sits under (empty when the marker is itself top-level) and `position` is in that piece's own frame —
+the same one `asset.node(piece)` hands back — so an agent can read where a kit's pieces are meant to
+join before it loads anything.
 
 ## three.readText(path)
 
@@ -165,8 +235,7 @@ that climbs out of the assets directory throws, a leading `/` means that directo
 disk's root, and the paths `three.inventory()` hands back go straight in. Without `--assets` the path
 is used as written, exactly as `three.load`'s is.
 
-Read-only. `three.save` is where a script writes what a player did and `scene.export(path)` writes a
-`.glb`; there is no verb here that puts a text file into the game's own directory.
+`three.writeText(path, text)` is this door the other way — see below.
 
 A file that is not there answers null rather than throwing — `three.save.readText`'s answer and not
 `three.load`'s — because "no level here yet" is a question an editor asks rather than a failure. A
@@ -177,10 +246,87 @@ Containment is by name and not by `realpath`, as it is for `three.load` and for 
 inside the assets directory pointing out of it is followed. The boundary is against a script reaching
 out, which is the one that gets written by accident.
 
+## three.writeText(path, text)
+
+A text file into the assets directory, and `three.writeJSON(path, value)` is the same file
+stringified — `JSON.stringify(value, null, '\t')`, so a level list saved this way is a diff worth
+reading. `three.readText`'s door the other way: the level list a script builds has to land somewhere
+that ships with the game, and until this existed the only somewhere was
+`<application data>/three.c3/<slug>`, which is not where the kit is and not what a person commits.
+
+```js
+three.writeJSON('levels/lumbridge.json', rows);
+const rows2 = three.readJSON('levels/lumbridge.json');
+```
+
+The sandbox is `scene.export(path)`'s and not a second one: a path that climbs out of the assets
+directory throws, a leading `/` means that directory rather than the disk's root, and nothing outside
+it is ever written. Without `--assets` the path is used as written, exactly as `scene.export`'s is.
+
+Answers the path it actually wrote to, the same way `scene.export` answers with `path` — useful when
+a caller built the path and wants to show a player, or a log, where it landed.
+
+A folder on the way that is not there yet is made, as `three.save` makes its own: the first save into
+a fresh `levels/` is the ordinary case rather than a mistake, and the sandbox has already said the path
+is inside the assets directory before anything is created. `scene.export` does the same.
+
+The same 4 MB `three.readText` stops at bounds this too: a file this writes has to be a file that
+reads back, and a second, larger limit would make that false.
+
+## three.level
+
+A placement list over a kit — a piece and a transform per row, read with `three.readJSON` and
+written with `three.writeJSON`:
+
+```json
+{
+  "kit": "kit/buildings.glb",
+  "rows": [
+    { "id": "wall_1", "piece": "wall_stone", "position": [0, 0, 0], "rotation": [0, 0, 0] },
+    { "id": "wall_2", "piece": "wall_stone", "position": [3, 0, 0], "rotation": [0, 1.5707963, 0],
+      "snap": { "to": "wall_1", "side": "+x", "axes": { "z": "min" } } }
+  ]
+}
+```
+
+`kit` is the default asset path, in the form `three.load` takes; a row may carry its own `"asset"`
+to place a piece from another file. `piece` is a node name the way `asset.node(name)` takes it, and
+`id` is a string unique within the file — a duplicate, or a `snap.to` naming no earlier row, throws.
+`position` and `rotation` are what the object's own properties read back as after placement, always
+present; `scale` defaults to `[1, 1, 1]`. `snap` is optional: `{ to, side, axes }`, exactly what
+`object.snapTo`'s three arguments take, and a freehand row — no `snap` — never moves on its own.
+
+A `.glb` bakes geometry in, so re-exporting a kit does not move a level built from it — and a
+transform alone bakes the *placement* the same way, one level up: re-export the kit with a taller
+wall and the storey snapped on top of it stays where it was. So a row placed by a snap carries the
+snap, not just where it landed. `three.level.load(path, parent)` takes the written transforms as
+they are and asks nothing, which is what makes a saved level exactly reproducible. Pass
+`{ refit: true }` to replay every snapped row's `snapTo` instead, in file order, against the kit as
+it is now — the wall regrows, the storey lifts with it — while a freehand row is left exactly where
+the file says either way.
+
+- `three.level.load(path, parent, options = {})` — reads the file, places every row under `parent`,
+  and returns a `Level`. `null` for a file that is not there, like `three.readJSON`.
+- `three.level.save(path, level)` — writes `level` back, each row's transform read fresh off its
+  object. Answers the path it actually wrote to.
+- `three.level.create(kit)` — an empty `Level`, for an editor that starts from nothing.
+
+```js
+const scene = new three.Scene();
+const level = three.level.load('levels/lumbridge.json', scene);
+const wall = level.objects.get('wall_2');
+wall.position.x += 0.3;
+three.level.save('levels/lumbridge.json', level);
+```
+
+`scene.export(path)` is still how a finished level becomes a `.glb` — `three.level` is the file that
+placed it there in the first place, and the one an agent or a person keeps editing afterwards.
+
 ## scene.export(path)
 
 Write the scene to a `.glb`. Answers with `{ path, meshes, entries, materials, images, nodes,
-instances, batches, skipped, shaded, bakedImages, bakedColors, layers, bytes }`.
+instances, batches, skipped, shaded, bakedImages, bakedColors, layers, bytes }`. A folder on the way
+that is not there yet is made, as `three.writeText` makes one.
 
 One mesh per unique (asset, mesh), so a thousand walls from one kit are one mesh in the file exactly
 as they are one draw call in the frame.
@@ -436,7 +582,18 @@ tiles.snapTo(course, '+y', { gap: -0.05 });
 - `side` is exactly one of `'+x'`, `'-x'`, `'+y'`, `'-y'`, `'+z'`, `'-z'`: which side of the other
   object this piece goes on. `'+z'` puts this box's min face on that box's max face, `'-z'` the
   mirror of it. One direction names both faces, which is why the verb reads as a placement rather
-  than a puzzle. Anything else is refused with the six listed.
+  than a puzzle. Anything else that is a string is tried as a marker name instead — see below — and
+  anything that is not even a string is refused with the six faces listed.
+- **Or the name of a marker both pieces carry**, for a mating surface that is not one of the six
+  faces — two roof slopes meeting along a pitch, where the boxes overlap by the slab's thickness and
+  neither piece has a face for the other to touch. A marker is a leaf node with no mesh: the empty a
+  `.glb` kit ships for a connection point, the same way a Blender kit does, or a plain `Object3D` a
+  script named by hand. `slope.snapTo(other, 'ridge')` finds the descendant named `ridge` in each
+  piece and moves this object so the two markers' world positions coincide. **This never rotates** —
+  set `rotation` first, exactly as before a box snap — and since the two markers decide all three
+  axes, `axes` and `gap` are refused rather than silently ignored; offset afterwards with
+  `position.x += ...`. A marker missing from either piece is refused with the marker names each piece
+  actually has.
 - The other two axes take one word for both faces — `'min'`, `'center'`, `'max'` — or the long
   `{ mine, theirs, offset }`, whose defaults are `min` against `max`. A post centred on a corner is
   `{ x: { mine: 'center', theirs: 'max' } }`.
@@ -1921,7 +2078,8 @@ The interface, as one description: a tree of plain objects, each with a `type`.
 
 - Layout — `column`, `row`, `stack`, `padding`, `grid`, `clip`, `anchored`, `scroll`.
 - Painted — `rect`, `label`, `draw`.
-- Interactive — `button`, `checkbox`, `slider`, `select`, `tree`, `textfield`.
+- Interactive — `button`, `checkbox`, `slider`, `select`, `tree`, `textfield`, `menu`, `dialog`, `confirmDialog`,
+  `fileBrowser`.
 
 Children go in `children: [...]` or `child: {...}`, and a falsy child is skipped, so `cond && {...}` is how a row
 is conditional.
@@ -1930,8 +2088,9 @@ Colours take a hex number, an `[r, g, b]` or an `[r, g, b, a]`; `radius` and ins
 in cui's order — insets `{left, top, right, bottom}` and radius `{TL, TR, BR, BL}`. `size` is per axis and 0 means
 take what you are offered.
 
-Handlers are `onClick`, `onChange`, `onCommit`, `onSubmit`, `onSelect` and `onToggle`, and they must be
-synchronous, because a handler runs inside the frame and the frame does not wait.
+Handlers are `onClick`, `onChange`, `onCommit`, `onSubmit`, `onSelect`, `onToggle`, `onHover`, `onConfirm`,
+`onDismiss`, `onChoose` and `onPointer`, and they must be synchronous, because a handler runs inside the frame and
+the frame does not wait.
 
 It is drawn over the finished frame into the same image a screenshot reads, so an agent sees the interface a
 person sees. `three.ui.set(null)` takes it down.
@@ -1942,6 +2101,141 @@ not change costs nothing to redraw, so rebuilding it every frame is the one thin
 The other door is `three.Widget`, which does that bookkeeping for you: `render()` describes the interface as it is
 now and what reaches the host is the difference. The two are exclusive — this verb throws while a widget is
 mounted — because the last one through would win every frame.
+
+## menu
+
+A menu bar: one or more top-level titles, each opening a dropdown when clicked.
+
+- `menus` — `[{ title, items }]` (`title` also takes `label`). Default `[]`.
+  - An item is a string (its label), `'-'` or nothing (a divider), or `{ label, shortcut, checked, disabled }`.
+
+`onSelect(menu, item)` fires when an entry is picked — the index of the title on the bar, then the index of the
+entry beneath it, both from zero. `item` counts every row of the dropdown in order, dividers included, because
+that is the order cui built them in.
+
+`three.ui.patch` can replace `menus` wholesale; nothing else about a menu is a value.
+
+```js
+three.ui.set({
+  type: 'menu',
+  key: 'mainMenu',
+  menus: [
+    { title: 'File', items: [
+      'New', 'Open…', '-',
+      { label: 'Save As…', shortcut: 'Ctrl+Shift+S' },
+      { label: 'Quit', shortcut: 'Ctrl+Q' },
+    ] },
+  ],
+  onSelect: (menu, item) => { if (menu === 0 && item === 3) saveAs(); },
+});
+```
+
+## confirmDialog
+
+A yes/no question the interface owns: a title, a message and two buttons.
+
+- `message` (or `text`) — the question. Read after the general caption, so `message` wins if both are given.
+- `title` — defaults to `''`.
+- `confirm` — the confirm button's label. Empty is `'OK'`.
+- `decline` — the decline button's label. Empty is `'Cancel'`.
+- `open` — rides on `checked`: whether the question is showing. Default `false`.
+
+`onConfirm()` fires for the confirm button, with no arguments. `onDismiss()` fires for every other way out — the
+decline button, the close glyph, ESC — also with no arguments, because to a script "no" and "went away" are the
+same event.
+
+`open` is the value a snapshot must name: a `three.ui.set` that leaves it out is a question that defaults closed,
+which is why a HUD toggles it with `three.ui.patch(key, { open })` instead of rebuilding. `text` (the message) is
+patchable too, and can be changed while the question is still open.
+
+```js
+three.ui.set({
+  type: 'confirmDialog', key: 'deleteConfirm', title: 'Delete file',
+  message: `Delete ${name}? This cannot be undone.`,
+  confirm: 'Delete', decline: 'Keep', open: confirming,
+  onConfirm: () => { del(name); confirming = false; },
+  onDismiss: () => { confirming = false; },
+});
+```
+
+## fileBrowser
+
+A directory listing a script can pick a file out of.
+
+- `start` (or `path`) — where it opens. Defaults to the root it is confined to.
+- `mask` — rides on `options`: a list of `path::ls`-style patterns (literal text with at most one `*`, e.g.
+  `'*.glb'`), any one of which a file must match to be listed. Directories are never filtered. Empty (the default)
+  shows everything.
+
+It can only look inside the assets directory a `--assets` boot was given — the same confinement `three.load` and
+`three.inventory` use — so a bad start opens at that root instead of failing, and `'../..'` cannot walk out of it.
+A process with no assets directory (`--mcp`, or the bare CLI) is not confined at all. The paths it hands back are
+relative to that root, which is exactly the path form `three.load` accepts.
+
+`onChoose(path)` fires when a row is activated (double-click, Enter) — the string path. `onSelect(path)` fires for
+a single click, highlighting a row without opening it. `onChange(path)` fires when the listing itself moves to a
+new directory, which is what a breadcrumb reads.
+
+`three.ui.patch` can replace `options` (the mask) wholesale — it re-reads the current directory under the new
+filter. `start` is not patchable; open somewhere else with `three.ui.set`.
+
+```js
+three.ui.set({
+  type: 'fileBrowser', key: 'kitPicker',
+  start: 'kit/', mask: ['*.glb'],
+  onChoose: path => three.load(path),
+});
+```
+
+## dialog
+
+A floating titled panel holding whatever tree you like — the one interactive kind whose body survives being
+closed.
+
+- `title` (or `text` or `label`) — defaults to `''`.
+- `open` — rides on `checked`: whether the panel is showing. Default `false`.
+- `modal` — dims and blocks the rest of the interface while open.
+- `closeOutside` — a press on that dim also dismisses.
+- `scrim` — the dim's colour. Rides on `pressColor`, since a dialog has no pressed state of its own to spend that
+  field on.
+- `children` / `child` — the body. Layout fields (`gap`, `size`, `main`, `cross`, …) describe this body, not the
+  panel chrome, which cui sizes itself.
+
+`onDismiss()` fires with no arguments for the close glyph, ESC, or a press on a close-outside backdrop. It does
+**not** fire for a script's own `three.ui.patch(key, { open: false })` — a script that just closed its own panel
+does not need telling.
+
+Closing does not rebuild the body: a `dialog`'s children are an element the host keeps and cui borrows rather than
+a list rebuilt from the snapshot, so text typed into a field, a scroll offset, a dragged position are exactly where
+they were left when it opens again. `open` is the value a snapshot must name, for the reason a confirmation's is.
+`three.ui.patch` can change `open` and `text` (the title — renaming it while open costs the keyboard focus anything
+in the body was holding, since the panel rebuilds); nothing else here is a value.
+
+**Put a dialog in a `stack`.** cui places the panel against where the node was last drawn, so a node its parent
+moves — the second child of a column, say — puts the panel that far wrong and never corrects it. A stack's
+children all share one origin, and a modal wants that for a second reason: it fills what it is offered, so in a
+column it would claim a row the column's whole height.
+
+```js
+three.ui.set({
+  type: 'stack',
+  children: [
+    { type: 'rect', size: [960, 540], color: 0x101010 },
+    {
+      type: 'dialog', key: 'saveAs', title: 'Save As', open: showSaveAs,
+      modal: true, closeOutside: true, size: [320, 0],
+      children: [{ type: 'column', gap: 8, children: [
+        { type: 'textfield', key: 'saveName', text: name, onChange: t => name = t },
+        { type: 'row', gap: 8, children: [
+          { type: 'button', text: 'Cancel', onClick: () => showSaveAs = false },
+          { type: 'button', text: 'Save', onClick: () => save(name) },
+        ] },
+      ] }],
+      onDismiss: () => { showSaveAs = false; },
+    },
+  ],
+});
+```
 
 ## three.ui.patch(key, props)
 
@@ -1955,9 +2249,9 @@ A node carries a `key` in the snapshot that named it, and the key lives until th
 one that names nothing throws rather than doing nothing, because a HUD that silently froze is the failure that
 costs an afternoon.
 
-The fields are the ones that are values rather than structure: `text`, `value`, `checked`, `selected`, `offset`,
-`disabled`, `color`, `min`, `max`, `size`, plus `ops`, `options` and `rows`, which replace a list wholesale.
-Anything that would change the shape of the tree is a `set`.
+The fields are the ones that are values rather than structure: `text`, `value`, `checked`, `open`, `selected`,
+`offset`, `disabled`, `color`, `min`, `max`, `size`, plus `ops`, `options`, `rows` and `menus`, which replace a list
+wholesale. Anything that would change the shape of the tree is a `set`.
 
 ## three.ui.draw(ops)
 

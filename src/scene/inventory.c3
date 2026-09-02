@@ -24,6 +24,7 @@ import std::io::path;
 import std::collections::list;
 import std::math;
 import std::math::vector;
+import std::math::matrix;
 import gltf;
 import collision;
 
@@ -39,6 +40,22 @@ struct InventoryMesh
 }
 
 <*
+ One connection point, as the file describes it.
+
+ A marker is a leaf node with no mesh — the empty a kit author drops where two
+ pieces are meant to meet, the same way a Blender kit ships them. `position` is
+ composed through the TRS of every node between `piece` and the marker, but not
+ `piece`'s own transform — the frame `asset.node(piece)` hands a script, since
+ that is the piece a marker's position is useful relative to.
+*>
+struct InventoryMarker
+{
+	String name;  // owned
+	String piece; // owned; empty when the marker is itself a top-level node
+	Vec3 position;
+}
+
+<*
  One `.glb` or `.gltf`, described.
 
  `path` is root-relative and is exactly what `three.load` wants, so an agent
@@ -49,6 +66,7 @@ struct InventoryEntry
 	String path; // owned, root-relative
 	List{InventoryMesh} meshes;
 	List{String} animations; // owned strings
+	List{InventoryMarker} markers;
 	uint skins;
 	uint nodes;
 	uint triangles;
@@ -69,6 +87,15 @@ fn void InventoryEntry.free(&self)
 		if (name.len > 0) name.free(mem);
 	}
 	self.animations.free();
+	// Always freed, unlike the guards above: `push_marker` always copies both
+	// strings, even the empty `piece` a top-level marker gets, and `.copy(mem)`
+	// on an empty string still allocates — skip it on `.len == 0` and it leaks.
+	foreach (&marker : self.markers)
+	{
+		marker.name.free(mem);
+		marker.piece.free(mem);
+	}
+	self.markers.free();
 	*self = { };
 }
 
@@ -202,6 +229,7 @@ fn InventoryEntry? describe_gltf(String root, String relative) @local
 		InventoryEntry entry = { .path = relative.copy(mem) };
 		entry.meshes.init(mem, stream.gltf.meshes.len());
 		entry.animations.init(mem, stream.gltf.animations.len());
+		entry.markers.init(mem, 4);
 		entry.nodes = (uint)stream.gltf.nodes.len();
 		entry.skins = (uint)stream.gltf.skins.len();
 
@@ -221,6 +249,8 @@ fn InventoryEntry? describe_gltf(String root, String relative) @local
 		{
 			entry.animations.push(animation.name.copy(mem));
 		}
+
+		find_markers(&entry, &stream.gltf);
 
 		return entry;
 	};
@@ -269,4 +299,90 @@ fn void widen(InventoryEntry* entry, gltf::Gltf* doc, gltf::Primitive primitive)
 	}
 	entry.bounds.min = math::min(entry.bounds.min, low);
 	entry.bounds.max = math::max(entry.bounds.max, high);
+}
+
+<*
+ Whether a node is a marker: a leaf with no mesh and nothing else already
+ claiming it. The piece root itself is usually an empty too, but it has
+ children, so it never matches this — and `scene.export()` writes a `camera`
+ node and a `sun` node beside every kit, both leaves with no mesh, which are
+ not connection points either. A node already spoken for by one of those
+ roles is excluded on the same grounds a mesh is.
+*>
+fn bool is_marker(gltf::Node* node) @local
+{
+	return node.mesh == -1 && node.camera == -1 && node.light == -1
+		&& node.skin == -1 && node.collider == -1 && node.motion == -1 && node.joint == -1
+		&& node.children.len() == 0;
+}
+
+<*
+ Fills `entry.markers`, one entry per leaf node with no mesh.
+
+ A top-level node — nothing else in the file lists it as a child — is a piece
+ in its own right; `gltf` already resolves that into `Node.parent` while
+ parsing, so this reads it rather than re-deriving it from a scene's own node
+ list. A top-level node that is itself a marker (no mesh, no children) reports
+ with an empty `piece`, since it is not sitting under one.
+*>
+fn void find_markers(InventoryEntry* entry, gltf::Gltf* doc) @local
+{
+	foreach (uint i, node : doc.nodes)
+	{
+		gltf::Node* top = doc.nodes.get_ref(i);
+		if (top.parent != null) continue;
+		if (is_marker(top))
+		{
+			push_marker(entry, top, "", marker_matrix(top, null));
+			continue;
+		}
+		foreach (child : top.children)
+		{
+			collect_markers(entry, doc, doc.nodes.get_ref(child), top);
+		}
+	}
+}
+
+<*
+ Walks one piece's subtree for markers, `piece` staying the same top-level
+ node however deep the recursion goes.
+*>
+fn void collect_markers(InventoryEntry* entry, gltf::Gltf* doc, gltf::Node* node, gltf::Node* piece) @local
+{
+	if (is_marker(node))
+	{
+		push_marker(entry, node, piece.name, marker_matrix(node, piece));
+		return;
+	}
+	foreach (child : node.children)
+	{
+		collect_markers(entry, doc, doc.nodes.get_ref(child), piece);
+	}
+}
+
+<*
+ `node`'s local matrix, composed with every ancestor's up to but not including
+ `piece` (or all the way to the file's root, for `piece == null`) — the frame
+ `asset.node(piece)` hands a script, which is why the piece's own transform is
+ left out.
+*>
+fn Matrix4f marker_matrix(gltf::Node* node, gltf::Node* piece) @local
+{
+	Matrix4f composed = node.local_matrix();
+	gltf::Node* up = node;
+	while (up.parent != null && up.parent != piece)
+	{
+		composed = up.parent.local_matrix().mul(composed);
+		up = up.parent;
+	}
+	return composed;
+}
+
+fn void push_marker(InventoryEntry* entry, gltf::Node* node, String piece, Matrix4f local) @local
+{
+	entry.markers.push({
+		.name = node.name.copy(mem),
+		.piece = piece.copy(mem),
+		.position = { local.m[12], local.m[13], local.m[14] },
+	});
 }

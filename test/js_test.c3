@@ -1168,7 +1168,9 @@ fn void a_shape_says_what_it_is_and_what_it_was_asked_for() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains(`"type":"BoxGeometry"`), "it knows its type: %s", result.value);
 		test::@check(
-			result.value.contains(`"parameters":{"width":2,"height":1,"depth":3,"widthSegments":1,"heightSegments":1,"depthSegments":1}`),
+			result.value.contains(
+				`"parameters":{"width":2,"height":1,"depth":3,"widthSegments":1,"heightSegments":1,"depthSegments":1,"uv":"face"}`
+			),
 			"and what it was asked for, defaults filled in: %s", result.value
 		);
 		test::@check(result.value.contains(`"geometryIsTheOnePassed":true`), "mesh.geometry is it: %s", result.value);

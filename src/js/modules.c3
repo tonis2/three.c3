@@ -82,6 +82,37 @@ fn String? JsRuntime.resolve_asset(&self, String path, Allocator allocator)
 }
 
 <*
+ The path a failed load, read or decode should be blamed on — what the script
+ wrote, quoted, and, when an assets directory actually rewrote it, where that
+ rewrite pointed and why.
+
+ Built here rather than at each throw site because every caller has the same
+ three things in hand — the root, the path as written, the path `resolve_asset`
+ handed back — and naming only the first of the three is how "could not load
+ /a/b/c.glb" ends up pointing at a file that is on disk, readable, and exactly
+ where the sentence says: the file that is actually missing is
+ `<assets>/a/b/c.glb`, one directory the sentence never mentioned.
+
+ Without an assets root nothing was rewritten — `resolve_asset` used `path`
+ exactly as written — so the short form is the honest one: claiming a rewrite
+ that did not happen would be a new lie in place of the old one.
+
+ @param path : `As the script wrote it.`
+ @param opening : `What resolve_asset returned for it: the path actually opened.`
+ @return `A quoted, self-contained phrase — drop it wherever the bare path used to go.`
+*>
+fn String JsRuntime.blame(&self, String path, String opening)
+{
+	if (self.modules.root.len == 0) return string::tformat("\"%s\"", path);
+	return string::tformat(
+		"\"%s\" (paths are relative to the assets directory %s, so this looked for \"%s\")",
+		path,
+		self.modules.root,
+		opening
+	);
+}
+
+<*
  Where a script may *write*, which is a shorter list than where it may read.
 
  The assets directory and nowhere else.
