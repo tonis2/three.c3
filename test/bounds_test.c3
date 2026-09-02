@@ -216,7 +216,14 @@ fn void align_respects_a_scale_set_before_it() @test
 	};
 }
 
-fn void align_to_places_one_sibling_against_another() @test
+<*
+ One piece on one side of another, which is the placement a kit is made of.
+
+ The shelf's back face on the wall's front face, lapped 0.05 into it. The call
+ names a direction and a distance and no size at all, and `gap` is negative for
+ the same reason it is negative in `row`: the two are meant to overlap.
+*>
+fn void snap_to_places_one_piece_against_another() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -225,8 +232,7 @@ fn void align_to_places_one_sibling_against_another() @test
 			const wall = new three.Mesh(new three.BoxGeometry(10, 8, 0.5));
 			const shelf = new three.Mesh(new three.BoxGeometry(2, 0.2, 1));
 			room.add(wall); room.add(shelf);
-			// shelf's back face against the wall's front face, 0.05 proud
-			shelf.alignTo(wall, { axis: 'z', mine: 'min', theirs: 'max', offset: -0.05 });
+			shelf.snapTo(wall, '+z', { gap: -0.05 });
 			const r = v => Math.round(v * 1e6) / 1e6;
 			return [r(shelf.boundsInParent().min.z), r(wall.boundsInParent().max.z)];
 		`);
@@ -234,30 +240,6 @@ fn void align_to_places_one_sibling_against_another() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == "[0.2,0.25]", "back face 0.05 inside the wall face, got '%s'", result.value);
-	};
-}
-
-<*
- Two parents are two frames, and a box measured in one means nothing in the
- other. Refused with a sentence naming the alternative rather than answered with
- a number that is wrong by whatever the parents differ by.
-*>
-fn void align_to_refuses_objects_that_are_not_siblings() @test
-{
-	@with_js(; three::JsRuntime* run)
-	{
-		three::RunResult result = run.run(`
-			const a = new three.Group();
-			const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
-			const other = new three.Mesh(new three.BoxGeometry(1, 1, 1));
-			a.add(m);
-			try { m.alignTo(other, { axis: 'y' }); return 'no throw'; }
-			catch (e) { return e.message; }
-		`);
-		defer result.free();
-
-		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value.contains("share a parent"), "it says why, got '%s'", result.value);
 	};
 }
 
@@ -292,18 +274,18 @@ fn void a_bad_axis_is_refused_by_name() @test
 }
 
 // ============================================================================
-// Placing a kit: several axes at once, a run, and another frame
+// Placing a kit: a side, the axes it says nothing about, a run, another frame
 // ============================================================================
 
 <*
  One call for a whole placement, because a placement is not one axis.
 
- "My back face on your front face, centred on you in x" is the sentence, and it
- used to be two `alignTo` calls that each re-measured the hall. The axis nobody
- named is the assertion that matters as much as the two that were: the lean-to
- was standing at y = 5 before the call and is standing at y = 5 after it.
+ "On your front side, centred on you in x" is the sentence, and it used to be two
+ calls that each re-measured the hall. The axis nobody named is the assertion
+ that matters as much as the two that were: the lean-to was standing at y = 5
+ before the call and is standing at y = 5 after it.
 *>
-fn void align_to_says_a_whole_placement_in_one_call() @test
+fn void a_snap_says_a_whole_placement_in_one_call() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -313,7 +295,7 @@ fn void align_to_says_a_whole_placement_in_one_call() @test
 			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3));
 			room.add(hall, lean);
 			lean.position.set(7, 5, 9);
-			lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			lean.snapTo(hall, '+z', { x: 'center' });
 			const a = lean.boundsInParent(), b = hall.boundsInParent();
 			const r = v => Math.round(v * 1e6) / 1e6;
 			return { back: r(a.min.z - b.max.z), across: r(a.center.x - b.center.x), y: lean.position.y };
@@ -331,11 +313,399 @@ fn void align_to_says_a_whole_placement_in_one_call() @test
 }
 
 <*
- A misspelt option is refused by name rather than quietly doing the default.
+ Six sides, six pairs of faces, and a sign is the whole of the vocabulary.
 
- `{ axes: 'xz' }` would otherwise align y, min against max, and answer that it
- had done what it was asked — which is the failure mode the whole measuring API
- exists to remove.
+ `'+z'` means "on your +z side", which is my min face against your max face.
+ That is the trade the verb exists to make: one direction the writer can see,
+ instead of two face names the reader has to solve. All six are checked in the
+ one script, because the mistake this guards against — a sign read the wrong way
+ round, or a pair transposed — is right on three of them and wrong on the other
+ three, and a single-sided check passes it.
+*>
+fn void each_of_the_six_sides_puts_the_right_faces_together() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6));
+			room.add(hall);
+			const r = v => Math.round(v * 1e6) / 1e6;
+			const gaps = {};
+			for (const [side, mine, theirs] of [
+				['+x', 'min', 'max'], ['-x', 'max', 'min'],
+				['+y', 'min', 'max'], ['-y', 'max', 'min'],
+				['+z', 'min', 'max'], ['-z', 'max', 'min'],
+			]) {
+				const piece = new three.Mesh(new three.BoxGeometry(1, 2, 3));
+				room.add(piece);
+				piece.position.set(9, 9, 9);
+				piece.snapTo(hall, side);
+				const axis = side[1];
+				gaps[side] = r(piece.boundsInParent().edge(axis, mine)
+					- hall.boundsInParent().edge(axis, theirs));
+			}
+			return gaps;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"+x":0,"-x":0,"+y":0,"-y":0,"+z":0,"-z":0}`,
+			"every side should have put its own two faces together, got '%s'", result.value);
+	};
+}
+
+<*
+ **An axis nobody names does not move**, which is the rule to know before any
+ other one here.
+
+ A piece straight off the loader stands at the origin, so a snap that says only
+ which side to go on is a sentence about that axis and nothing else. The wing
+ was at x = 7, y = 5 before the call and is there after it — it did not centre
+ itself on the hall, and it did not drop to the hall's floor. Naming the other
+ two axes is how either of those is asked for.
+*>
+fn void an_axis_a_snap_does_not_name_does_not_move() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6));
+			const wing = new three.Mesh(new three.BoxGeometry(2, 2, 3));
+			room.add(hall, wing);
+			wing.position.set(7, 5, 9);
+			wing.snapTo(hall, '+z');
+			const a = wing.boundsInParent(), b = hall.boundsInParent();
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return { front: r(a.min.z - b.max.z), x: wing.position.x, y: wing.position.y };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"front":0,"x":7,"y":5}`,
+			"the side should have moved z alone, got '%s'", result.value);
+	};
+}
+
+<*
+ A cross axis named with one word puts the same face of both boxes at the same
+ place — flush, which is not the same thing as touching.
+
+ A gable on top of a wall and flush with its right-hand end: `'+y'` is the side
+ it sits on and `x: 'max'` is one word standing for both maxes. On y the two
+ boxes meet; on x they are level. Keeping those two ideas in different arguments
+ is the point of the split.
+*>
+fn void a_cross_axis_named_with_one_word_goes_flush() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const wall = new three.Mesh(new three.BoxGeometry(6, 3, 0.4));
+			const gable = new three.Mesh(new three.BoxGeometry(2, 1, 0.4));
+			room.add(wall, gable);
+			gable.position.set(-9, -9, 0);
+			gable.snapTo(wall, '+y', { x: 'max' });
+			const a = gable.boundsInParent(), b = wall.boundsInParent();
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return { on: r(a.min.y - b.max.y), right: r(a.max.x - b.max.x), z: gable.position.z };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"on":0,"right":0,"z":0}`,
+			"on top of the wall and flush with its end, got '%s'", result.value);
+	};
+}
+
+<*
+ `gap` is a distance along the side, and the side's sign says which way that is.
+
+ On a `+` side a positive gap pushes the piece further along the axis and a
+ negative one laps it back over the target; on a `-` side both are mirrored, so
+ that "a gap of 0.5" means the same thing whichever way the piece was put. All
+ four combinations are measured in the one script, because a sign that is right
+ in one direction and inverted in the other passes any check that only looks one
+ way — and a lapped course of tiles is the case that would be silently doubled.
+*>
+fn void a_gap_takes_its_sign_from_the_side() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6));
+			room.add(hall);
+			const r = v => Math.round(v * 1e6) / 1e6;
+			const clearance = (side, gap) => {
+				const piece = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				room.add(piece);
+				piece.snapTo(hall, side, { gap });
+				const a = piece.boundsInParent(), b = hall.boundsInParent();
+				return side[0] === '+' ? r(a.min.z - b.max.z) : r(b.min.z - a.max.z);
+			};
+			return {
+				plusApart: clearance('+z', 0.5), plusLapped: clearance('+z', -0.5),
+				minusApart: clearance('-z', 0.5), minusLapped: clearance('-z', -0.5),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"plusApart":0.5,"plusLapped":-0.5,"minusApart":0.5,"minusLapped":-0.5}`,
+			"a gap should be the same distance on either side, got '%s'", result.value);
+	};
+}
+
+<*
+ The long form is still there for the placement one word will not say.
+
+ A post standing on the corner of a plinth: it is on top (`'+y'`), and on x and z
+ its own *centre* goes to the plinth's *max*, which is a `mine` and a `theirs`
+ that are different faces. `offset` pulls it 0.2 back along z at the same time,
+ so the escape hatch is checked whole rather than in halves.
+*>
+fn void the_long_form_still_says_what_one_word_cannot() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const yard = new three.Group();
+			const plinth = new three.Mesh(new three.BoxGeometry(4, 1, 4));
+			const post = new three.Mesh(new three.BoxGeometry(0.4, 3, 0.4));
+			yard.add(plinth, post);
+			post.snapTo(plinth, '+y', {
+				x: { mine: 'center', theirs: 'max' },
+				z: { mine: 'center', theirs: 'max', offset: -0.2 },
+			});
+			const a = post.boundsInParent(), b = plinth.boundsInParent();
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return { on: r(a.min.y - b.max.y), x: r(a.center.x - b.max.x), z: r(a.center.z - b.max.z) };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"on":0,"x":0,"z":-0.2}`,
+			"the post should stand on the plinth's corner, got '%s'", result.value);
+	};
+}
+
+<*
+ The side already said what its own axis does, so naming that axis too is a
+ contradiction rather than an override.
+
+ `snapTo(hall, '+z', { z: 'center' })` is two different answers for z in one
+ call. Either silent resolution — the side winning, or the axis winning — is a
+ placement that did not do what it reads as, so neither is taken.
+*>
+fn void the_sides_own_axis_is_not_one_of_the_axes_to_name() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			try { a.snapTo(b, '+z', { z: 'center' }); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("already says what z does"),
+			"it says why z is not one to name, got '%s'", result.value);
+	};
+}
+
+<*
+ A side that is not one of the six is refused, and the six are listed.
+
+ `'z'` is the mistake that will actually be made — an axis where a direction was
+ wanted — and a number or a missing argument is the same slip from further away.
+ There is no default worth guessing here: a piece put on the wrong side of a wall
+ still draws, and looks like a piece somebody meant to put there.
+*>
+fn void a_side_that_is_not_one_of_the_six_is_refused() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			const said = [];
+			for (const bad of ['z', 'up', 3, undefined]) {
+				try { a.snapTo(b, bad); said.push('no throw'); }
+				catch (e) { said.push(e.constructor.name); }
+			}
+			try { a.snapTo(b, 'z'); } catch (e) { said.push(e.message); }
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"),
+			"none of the four should have been accepted, got '%s'", result.value);
+		test::@check(result.value.contains(`not \"z\"`), "the bad side is quoted back, got '%s'", result.value);
+		test::@check(result.value.contains("'+x', '-x', '+y', '-y', '+z', '-z'"),
+			"and the six are listed, got '%s'", result.value);
+	};
+}
+
+<*
+ A face that is not one of the three is refused by the verb, not by the box.
+
+ `'centre'` is the spelling half the world writes, and it used to reach
+ `box.edge`, which refused it in the name of a function the script never called.
+ The verb knows which axis it was reading and the three words it takes, so its
+ message says both — the same for the one-word form and the long one.
+*>
+fn void a_face_that_is_not_one_of_the_three_is_refused_by_the_verb() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			const said = [];
+			for (const go of [
+				() => a.alignTo(b, { x: 'centre' }),
+				() => a.snapTo(b, '+z', { y: 'top' }),
+				() => a.snapTo(b, '+z', { x: { mine: 'centre', theirs: 'max' } }),
+			]) {
+				try { go(); said.push('no throw'); } catch (e) { said.push(e.message); }
+			}
+			return said;
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(!result.value.contains("no throw"),
+			"none of the three should have been accepted, got '%s'", result.value);
+		test::@check(!result.value.contains("box.edge"),
+			"the box is not the one refusing, got '%s'", result.value);
+		test::@check(result.value.contains("alignTo(): x wants"),
+			"alignTo names its verb and axis, got '%s'", result.value);
+		test::@check(result.value.contains("snapTo(): y wants"),
+			"snapTo names its verb and axis, got '%s'", result.value);
+		test::@check(result.value.contains("x.mine wants"),
+			"and the long form names the face that was wrong, got '%s'", result.value);
+	};
+}
+
+<*
+ A key `snapTo` does not have is refused with the four it does.
+
+ `{ gaps: 0.1 }` is a plural typo, which is the kind that reads as correct — and
+ ignoring it would be a snap that quietly touched. This is the same rule the
+ measuring API exists for: no quiet default where a number was meant.
+*>
+fn void a_key_snap_to_does_not_have_is_refused_by_name() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			try { a.snapTo(b, '+y', { gaps: 0.1 }); return 'no throw'; }
+			catch (e) { return e.message; }
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("gaps"), "the bad key is quoted back, got '%s'", result.value);
+		test::@check(result.value.contains("x, y, z, gap"), "and the good ones are listed, got '%s'", result.value);
+	};
+}
+
+<*
+ `alignTo` is flush without touching, which is the half of placing that a side
+ would be a lie about.
+
+ A chimney is centred on a ridge; it is not on the ridge's +x side, and there is
+ no direction that says what it is. Only the axes named move, so the chimney
+ keeps the height it was already set to.
+*>
+fn void align_to_is_flush_without_touching() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const roof = new three.Group();
+			const ridge = new three.Mesh(new three.BoxGeometry(8, 0.4, 0.4));
+			const chimney = new three.Mesh(new three.BoxGeometry(0.6, 2, 0.6));
+			roof.add(ridge, chimney);
+			ridge.position.set(-1, 4, 0);
+			chimney.position.set(3, 5, 1);
+			chimney.alignTo(ridge, { x: 'center', z: 'center' });
+			const a = chimney.boundsInParent(), b = ridge.boundsInParent();
+			const r = v => Math.round(v * 1e6) / 1e6;
+			return { x: r(a.center.x - b.center.x), z: r(a.center.z - b.center.z), y: chimney.position.y };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"x":0,"z":0,"y":5}`,
+			"centred on the ridge in x and z and left alone in y, got '%s'", result.value);
+	};
+}
+
+<*
+ The two spellings `alignTo` used to take are gone, and the refusal says what
+ replaced each of them.
+
+ A script written against the older API said `{ axis: 'z', mine: 'min', theirs:
+ 'max' }` for a placement that touches, and added `world: true` for two objects
+ under different parents. The first of those is `snapTo`; the second is what both
+ verbs now do without being asked. "No option named axis" would be true and no
+ help, so neither refusal stops there.
+
+ The third case is a call that names no axis at all. It is refused rather than
+ obeyed for the same reason the other two are: an axis nobody names does not
+ move, so it would be a placement that did nothing and said it had.
+*>
+fn void the_old_align_to_spellings_are_refused_with_what_replaced_them() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const room = new three.Group();
+			const a = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			room.add(a, b);
+			const said = call => { try { call(); return 'no throw'; } catch (e) { return e.message; } };
+			return {
+				flat: said(() => a.alignTo(b, { axis: 'z', mine: 'min', theirs: 'max', offset: -0.05 })),
+				world: said(() => a.alignTo(b, { world: true, x: 'center' })),
+				empty: said(() => a.alignTo(b, {})),
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains("snapTo"),
+			"the flat form should be sent to snapTo, got '%s'", result.value);
+		test::@check(result.value.contains("no 'world' option any more"),
+			"the world flag should say it is gone, got '%s'", result.value);
+		test::@check(result.value.contains("wants the axes named"),
+			"and naming nothing should be refused, got '%s'", result.value);
+	};
+}
+
+<*
+ A misspelt option is refused by name rather than quietly doing nothing.
+
+ `{ axes: 'xz' }` names no axis this verb knows, so it would otherwise be a call
+ that moved nothing and answered that it had placed the piece — which is the
+ failure mode the whole measuring API exists to remove.
 *>
 fn void an_option_align_to_does_not_have_is_refused_by_name() @test
 {
@@ -353,7 +723,7 @@ fn void an_option_align_to_does_not_have_is_refused_by_name() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("axes"), "the bad key is quoted back, got '%s'", result.value);
-		test::@check(result.value.contains("mine, theirs"), "and the good ones are listed, got '%s'", result.value);
+		test::@check(result.value.contains("x, y, z"), "and the good ones are listed, got '%s'", result.value);
 	};
 }
 
@@ -474,14 +844,17 @@ fn void a_run_with_no_start_follows_the_piece_already_there() @test
 }
 
 <*
- Across two frames, in world space, which is what the sibling form refuses.
+ Two objects under different parents are placed in world space, and nothing has
+ to be said for that to happen.
 
  A lean-to in one group against a hall in another — the arrangement `houses.js`
- builds by hand. Both boxes come from the host, so the check is on world faces:
- the lean-to's back is on the hall's front and the two are centred on each other
- in x, whatever the groups' own offsets were.
+ builds by hand. There was never anything for the caller to choose here: two
+ parents are two frames, and world space is the only frame they share. Both boxes
+ come from the host, so the check is on world faces: the lean-to's back is on the
+ hall's front and the two are centred on each other in x, whatever the groups'
+ own offsets were.
 *>
-fn void align_to_reaches_into_another_frame_in_world_space() @test
+fn void a_snap_reaches_into_another_frame_without_being_told_to() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -492,7 +865,7 @@ fn void align_to_reaches_into_another_frame_in_world_space() @test
 			const yard = new three.Group(); yard.position.set(-4, 0, 5); scene.add(yard);
 			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3)); yard.add(lean);
 
-			lean.alignTo(hall, { world: true, z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			lean.snapTo(hall, '+z', { x: 'center' });
 			const a = lean.boundingBox(), b = hall.boundingBox();
 			// Four places, not six: a world box comes back through the host as
 			// f32, so the last of six digits is the device's noise floor.
@@ -518,7 +891,7 @@ fn void align_to_reaches_into_another_frame_in_world_space() @test
  The mover hangs under a group turned 0.4 radians — not a quarter turn, so an
  axis-aligned world box is not axis-aligned in its parent — and scaled 2 x 1 x
  0.5, which is not uniform either. A box carried into the parent's frame and
- aligned there would land somewhere near and not on; converting the *step*
+ placed there would land somewhere near and not on; converting the *step*
  instead is exact, because a translation goes through any invertible frame
  exactly. The faces have to meet to a millionth.
 
@@ -526,7 +899,7 @@ fn void align_to_reaches_into_another_frame_in_world_space() @test
  composes it: with the rotation applied on the wrong side, the piece moves off
  along a different diagonal and the gap is metres.
 *>
-fn void a_world_align_is_exact_under_a_turned_and_squashed_ancestor() @test
+fn void a_snap_is_exact_under_a_turned_and_squashed_ancestor() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -542,7 +915,7 @@ fn void a_world_align_is_exact_under_a_turned_and_squashed_ancestor() @test
 			scene.add(yard);
 			const lean = new three.Mesh(new three.BoxGeometry(2, 2, 3)); yard.add(lean);
 
-			lean.alignTo(hall, { world: true, z: { mine: 'min', theirs: 'max' }, x: 'center' });
+			lean.snapTo(hall, '+z', { x: 'center' });
 			const a = lean.boundingBox(), b = hall.boundingBox();
 			// Four places, not six: a world box comes back through the host as
 			// f32, so the last of six digits is the device's noise floor.
@@ -562,14 +935,18 @@ fn void a_world_align_is_exact_under_a_turned_and_squashed_ancestor() @test
 }
 
 <*
- Two objects that share a parent after all are allowed, not refused, and where
- nothing above them turns or squashes the frame they get the sibling answer.
+ The world path is the same move as the sibling path, not a second convention.
 
- The shelf is aligned the sibling way, knocked off the wall, and aligned again
- the world way. The same number twice is what says the world path is the same
- move and not a second convention.
+ The same shelf snapped to the same wall twice: once as its sibling, measured in
+ the room's frame with no host call, and once from a group beside the room, which
+ goes out through world space and converts the step back. Nothing above either
+ one turns or squashes the frame, so the two answers must be the same answer.
+
+ They are compared in world space because that is the only frame both are in —
+ the two `position.z` values are numbers in different frames and would differ by
+ the groups' own offsets while meaning the same thing.
 *>
-fn void a_world_align_between_siblings_is_the_sibling_answer() @test
+fn void a_snap_across_frames_lands_where_the_sibling_snap_lands() @test
 {
 	@with_js(; three::JsRuntime* run)
 	{
@@ -577,47 +954,22 @@ fn void a_world_align_between_siblings_is_the_sibling_answer() @test
 			const scene = new three.Scene();
 			const room = new three.Group(); room.position.set(3, 0, -1); scene.add(room);
 			const wall = new three.Mesh(new three.BoxGeometry(10, 8, 0.5));
-			const shelf = new three.Mesh(new three.BoxGeometry(2, 0.2, 1));
-			room.add(wall, shelf);
+			const sibling = new three.Mesh(new three.BoxGeometry(2, 0.2, 1));
+			room.add(wall, sibling);
+			sibling.snapTo(wall, '+z', { gap: -0.05 });
 
-			const opts = { axis: 'z', mine: 'min', theirs: 'max', offset: -0.05 };
-			shelf.alignTo(wall, opts);
-			const sibling = shelf.position.z;
-			shelf.position.z = 9;
-			shelf.alignTo(wall, { ...opts, world: true });
-			const r = v => Math.round(v * 1e6) / 1e6;
-			return [r(sibling), r(shelf.position.z)];
+			const yard = new three.Group(); yard.position.set(-2, 1, 4); scene.add(yard);
+			const stranger = new three.Mesh(new three.BoxGeometry(2, 0.2, 1)); yard.add(stranger);
+			stranger.snapTo(wall, '+z', { gap: -0.05 });
+
+			const r = v => Math.round(v * 1e4) / 1e4;
+			return [r(sibling.boundingBox().min.z), r(stranger.boundingBox().min.z)];
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value == "[0.7,0.7]",
-			"the two forms should agree in a frame that only translates, got '%s'", result.value);
-	};
-}
-
-<*
- The refusal names the door beside it rather than sending the caller back to
- arithmetic. The old sentence said "measure with boundsInParent() and place with
- align" — which is the loop the verbs exist to delete.
-*>
-fn void align_to_points_at_the_world_form_when_the_parents_differ() @test
-{
-	@with_js(; three::JsRuntime* run)
-	{
-		three::RunResult result = run.run(`
-			const a = new three.Group();
-			const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
-			const other = new three.Mesh(new three.BoxGeometry(1, 1, 1));
-			a.add(m);
-			try { m.alignTo(other, { axis: 'y' }); return 'no throw'; }
-			catch (e) { return e.message; }
-		`);
-		defer result.free();
-
-		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value.contains("world: true"),
-			"the refusal should name the world form, got '%s'", result.value);
+		test::@check(result.value == "[-0.8,-0.8]",
+			"the two frames should agree where nothing between them turns, got '%s'", result.value);
 	};
 }
 
@@ -635,7 +987,7 @@ fn void a_frame_scaled_to_nothing_is_refused_rather_than_guessed() @test
 			const hall = new three.Mesh(new three.BoxGeometry(6, 4, 6)); scene.add(hall);
 			const flat = new three.Group(); flat.scale.set(1, 0, 1); scene.add(flat);
 			const piece = new three.Mesh(new three.BoxGeometry(1, 1, 1)); flat.add(piece);
-			try { piece.alignTo(hall, { world: true, axis: 'x' }); return 'no throw'; }
+			try { piece.snapTo(hall, '+x'); return 'no throw'; }
 			catch (e) { return e.message; }
 		`);
 		defer result.free();

@@ -244,32 +244,9 @@ repo.
 ## 23. Authoring a kit
 
 A kit is a `.glb` of named pieces a scene script places on a grid, and
-`asset.node(name)` is the door onto it. None of the four below breaks the thesis:
-a script still describes shapes and never touches a vertex.
+`asset.node(name)` is the door onto it. None of the five below breaks the thesis:
+a script still describes shapes and never touches a vertex. Smallest first.
 
-- [ ] **`BoxGeometry` and `ConvexGeometry` disagree about uvs.** A hull maps one
-      uv unit per unit of local space; every parametric shape maps 0..1 per face.
-      Two pieces of one roof — a slope that is a box, a hip that is a hull — then
-      need different `material.repeat` to wear one texture at one size, which is
-      how a 34-piece kit came to ship 29 materials and a `mat(texture, u, v)`
-      cache to build them, with the thin edge of every wall panel stretched
-      anyway. A `{ uv: 'world' }` mode is two multiplications where
-      `primitive.c3:434` already holds the face's own `u_length` and `v_length`.
-      The mode has to travel in `parameters`: two geometries with the same numbers
-      are one asset, so a global would collide a face-mapped box with a
-      world-mapped one of the same size. `repeat` then means texels per world unit
-      and one material serves every piece. Keep `'face'` the default — it is
-      Three.js's layout and every existing script reads it.
-- [ ] **Snapping stops working where the mating surface is not a face of the box.**
-      Two roof slopes meeting along a pitch overlap by the slab's thickness, so
-      aligning their boxes is wrong by it, and the pitch cannot be recovered from
-      bounds either — a 0.7 rise reads back as 0.798 over 1.069 with the thickness
-      and the overhang mixed in. What a kit wants here is what a Blender kit
-      already ships: **empty marker nodes** for connection points. glTF carries
-      them as nodes with no mesh, `instantiate` already builds them as plain
-      `Object3D`s and `node(name)` already finds them, so this may be a convention
-      and a doc rather than a feature — which is worth establishing before a piece
-      is authored that needs one.
 - [ ] **A failed load names the path the script asked for, not the path it looked for.**
       Under `--assets` a leading `/` roots into the assets directory, so
       `three.load("/home/tonis/Documents/runescape/kit/buildings.glb")` searches
@@ -278,18 +255,64 @@ a script still describes shapes and never touches a vertex.
       file that is on disk, readable, and exactly where the sentence says it is. Whoever
       reads that error checks the file, finds it, and has learned nothing. Everything
       needed to say the true thing is in hand at the throw site: the root, the path as
-      written, and the path as resolved. `three.texture` and `three.readText` resolve the
-      same way and will mislead the same way. The rooting rule is right; only the sentence
-      is wrong.
-
-- [ ] **There is no `merge`, only `split`.** A wall panel with a hole in it is
-      four boxes, because a script cannot describe one shape that has a hole — so
-      ten buildings out of one kit are 2,463 nodes, and every piece carries
-      coincident interior faces nothing will ever see. `MeshRef.split()` already
-      reads geometry back on the host and uploads an asset per piece;
-      `three.merge([...]) → Geometry` is that path in reverse and is what would
-      let a piece *be* a mesh rather than a hierarchy. The largest of these and
-      the one that most changes what a kit costs.
+      written, and the path as resolved. Four doors resolve this way, not one —
+      `three.load`, `three.readText`, `three.texture` and a `fileBrowser`'s start
+      folder — so the sentence is built once, beside `resolve_asset`, and the four
+      say the same thing rather than each drifting on its own. The rooting rule is
+      right; only the sentence is wrong.
+- [ ] **`BoxGeometry` and `ConvexGeometry` disagree about uvs.** A hull maps one
+      uv unit per unit of local space; every parametric shape maps 0..1 per face.
+      Two pieces of one roof — a slope that is a box, a hip that is a hull — then
+      need different `material.repeat` to wear one texture at one size, which is
+      how a 34-piece kit came to ship 29 materials and a `mat(texture, u, v)`
+      cache to build them, with the thin edge of every wall panel stretched
+      anyway. A `{ uv: 'local' }` mode is two multiplications where
+      `primitive.c3:434` already holds the face's own `u_length` and `v_length`.
+      Not `'world'`: a geometry cannot see the scale of the mesh that draws it,
+      so the unit is the geometry's own, and the name says so before a scaled
+      piece proves it. On a hull the mode is what a hull already does, and the
+      doc says that too, so nobody waits for a change that is not coming. The
+      mode has to travel in `parameters`: two geometries with the same numbers
+      are one asset, so a global would collide a face-mapped box with a
+      local-mapped one of the same size. `repeat` then means texels per unit
+      and one material serves every piece. Keep `'face'` the default — it is
+      Three.js's layout and every existing script reads it.
+- [ ] **Snapping stops working where the mating surface is not a face of the box.**
+      Two roof slopes meeting along a pitch overlap by the slab's thickness, so
+      snapping their boxes is wrong by it, and the pitch cannot be recovered from
+      bounds either — a 0.7 rise reads back as 0.798 over 1.069 with the thickness
+      and the overhang mixed in. What a kit wants here is what a Blender kit
+      already ships: **empty marker nodes** for connection points. glTF carries
+      them as nodes with no mesh, `instantiate` already builds them as plain
+      `Object3D`s and `node(name)` already finds them. `snapTo` has the slot for
+      one — the side argument — so `slope.snapTo(other, 'ridge')`, both pieces
+      carrying a node of that name, reads the way the six faces do. What decides
+      whether this is a doc or a feature: a marker carries an orientation, a
+      pitch is a rotation problem, and `snapTo` never rotates. Either a marker
+      snap turns the piece until the two markers' frames coincide, or it moves
+      only and the script sets the rotation first, as it does today. Decide
+      before a piece is authored that needs one. And `inventory()` lists the
+      markers with their positions, so the agent placing a kit sees them before
+      it loads anything.
+- [ ] **A shape cannot have a hole in it.** A wall with a window is four boxes,
+      with coincident faces where they meet that nothing will ever see, and a
+      `merge` only glues those into one mesh. Three.js's answer is
+      `ExtrudeGeometry` over a `Shape` with `holes`: a 2D outline, the holes
+      cut out of it, swept to a depth — one closed mesh with no interior faces.
+      It is the piece a kit is mostly made of. The outline is data rather than
+      numbers, which is what a hull's points already are, so `parameters`
+      carries a count and the shape travels beside it as the hull's does.
+- [ ] **There is no `merge`, only `split`.** Ten buildings out of one kit are
+      2,463 nodes, because every piece is a hierarchy of boxes rather than a
+      mesh. `MeshRef.split()` already reads geometry back on the host and
+      uploads an asset per piece; `three.merge([...]) → Geometry` is that path
+      in reverse and is what lets a piece *be* a mesh. Merge is concatenation
+      and nothing cleverer: transforms are baked into the vertices, the result
+      carries data rather than parameters the way `TerrainGeometry` already
+      does, and pieces of differing materials are refused rather than flattened
+      onto one — the interior faces the entry above removes are still there
+      after a merge, only in one mesh. The largest of these and the one that
+      most changes what a kit costs.
 
 ---
 
@@ -302,34 +325,20 @@ verbs a script can already call. It runs the way a game does, under `--assets`,
 and `three.reload()` is its edit loop.
 
 **What it already stands on**, so that none of it gets built twice: `scene.pick(x, y)`
-answers what is under a pixel and `scene.raycast(origin, direction)` what a ray
-hits; `three.ui.set` has `button`, `checkbox`, `slider`, `select`, `tree` and
-`textfield` with handlers, which is a properties panel and an asset browser
-already; `three.inventory()` lists the `.glb`s under the assets directory with
-their nodes and bounds, and `asset.nodes` plus `node(name)` open one of them
-piece by piece; `BoxHelper` and `GridHelper` draw a selection box and a ground
-grid over the frame; `three.save` reads and writes JSON; and `scene.export(path)`
-publishes what was placed. Undo is an array in the script.
+answers what is under a pixel — the object and the world normal of the face under
+the cursor — and `scene.raycast(origin, direction)` what a ray hits;
+`three.input.pointer` is the mouse for the frame, position, click edge, held
+buttons, deltas and wheel, and `three.input.isDown(key)` is the held key; `snapTo`,
+`alignTo`, `row` and `boundsInParent` are the placement verbs; `three.ui.set` has
+`button`, `checkbox`, `slider`, `select`, `tree`, `textfield`, `menu`, `dialog`,
+`confirmDialog` and `fileBrowser` with handlers, which is a properties panel, a
+file menu and an asset browser already; `three.inventory()` lists the `.glb`s
+under the assets directory with their nodes and bounds, and `asset.nodes` plus
+`node(name)` open one of them piece by piece; `BoxHelper` and `GridHelper` draw a
+selection box and a ground grid over the frame; `three.save` reads and writes
+JSON; and `scene.export(path)` publishes what was placed. Undo is an array in the
+script.
 
-- [ ] **Placing without snapping is not worth building.** A kit dropped freehand
-      is wrong in a way that shows at every join — a gap where two walls meet, a
-      z-fighting overlap where they meet too well, a roof course half a tile off
-      its eave — and no amount of nudging by eye fixes a village of them. Three
-      snaps, in the order they earn their place. **Grid**: every piece's footprint
-      is a whole number of tiles, so a placement is an integer cell, a quarter turn
-      and a storey, and that alone covers a wall run, a floor and a fence line.
-      **Face**: my box's min onto your box's max along one axis — a roof course on
-      a wall top, a storey on a storey — which is `alignTo` once the neighbour has
-      been found, and `three.query.box` is what finds it. **Marker**: the joins a
-      box cannot express, which is the second snapping entry in §23 and what two
-      roof slopes meeting along a pitch need. All three want a *preview* before
-      they commit — a ghost where the drop would land — because a snap that has
-      already happened is one you have to undo to disagree with; and a held key to
-      place freehand anyway, because the exception always turns up. The scripts
-      that placed this kit by hand hit precisely the errors snapping removes: a
-      lean-to turned so its roof rose away from the wall it leaned on, a wall built
-      twice where two wings shared a tile edge, and a verge nudged 0.06 by hand to
-      stop it fighting the roof under it.
 - [ ] **A level can now be read beside its kit but not written there.** `three.readText`
       answers text out of the assets directory, and `scene.export` already writes a `.glb`
       into it through `resolve_write` — so what is missing between them is text going the
@@ -338,20 +347,58 @@ publishes what was placed. Undo is an array in the script.
       read door was opened to close, and a save button that lands somewhere the user cannot
       commit is not a save button. A text twin of `scene.export`: one verb, the
       `resolve_write` sandbox that is already there, no new rule.
-
-- [ ] **The editor itself.** Select, move on a grid, rotate in quarter turns,
-      delete, duplicate, an asset browser off `inventory()` and `asset.nodes`,
-      undo, and load/save of the placement list. Its accuracy is §23's: snapping
-      is what makes a placement exact, and the run and cross-parent forms are what
-      it will lean on hardest.
-
-**The level is a list of placements, not a `.glb`.** A `.glb` bakes the geometry
-in, so re-exporting the kit does not update a level made from it, and the link
-back to the piece a placement *is* is gone. A placement list — a name, a
-transform, per row — is diffable, greppable and writable by an agent, which is the
-point: the same file is what an agent generates and what a person then adjusts by
-hand, and it is the only place those two meet. `scene.export` stays what turns a
-finished one into a file anybody else can open.
+- [ ] **Four widgets the editor needs are not in the docs.** The prelude and the
+      host know `menu`, `dialog`, `confirmDialog` and `fileBrowser`; the entry for
+      `three.ui.set` lists six interactive kinds and stops. An agent building the
+      editor from `get_api_docs` never finds the file menu, the save-as dialog,
+      the delete confirmation or the kit chooser, and builds worse ones out of
+      `button`s. Four entries in `functions.md`, each saying what its handler is
+      told, before the first consumer of them is written.
+- [ ] **The level is a list of placements, and a row remembers how it was placed.**
+      A `.glb` bakes the geometry in, so re-exporting the kit does not update a
+      level made from it, and the link back to the piece a placement *is* is
+      gone. A list — a piece and a transform per row — is diffable, greppable
+      and writable by an agent, which is the point: the same file is what an
+      agent generates and what a person then adjusts by hand, and it is the
+      only place those two meet. But a transform alone bakes the placement the
+      way the `.glb` baked the geometry, one level up: re-export the kit with a
+      taller wall and the storey above it stays where it was. So a row placed by
+      a snap also carries the snap — the target row, the side, the axes — and a
+      re-fit replays those rows in order against the kit as it is now, while a
+      plain load takes the transforms as written and asks nothing. A freehand
+      row carries no snap and never moves. JSON, read through `three.readText`
+      and written through the door above; and the loader that replays a list
+      into a scene is part of this entry, since a list exists only once
+      something reads it. `scene.export` stays what turns a finished one into a
+      file anybody else can open.
+- [ ] **The editor itself.** Select, move, rotate in quarter turns, delete,
+      duplicate, an asset browser off `inventory()` and `asset.nodes`, undo,
+      load and save of the list above, and a camera — `camera.orbit` is a
+      setter, so orbit, pan and zoom out of the pointer's deltas and wheel are
+      built here. Placing is where its accuracy comes from, and a kit dropped
+      freehand is wrong in a way that shows at every join — a gap where two
+      walls meet, a z-fighting overlap where they meet too well, a roof course
+      half a tile off its eave — so three snaps, in the order they earn their
+      place. **Grid**: every piece's footprint is a whole number of tiles, so a
+      placement is an integer cell, a quarter turn and a storey, and that alone
+      covers a wall run, a floor and a fence line; `three.query.box` tells the
+      dropped piece what it touches. **Face**: the pick already holds the
+      neighbour and the world normal of the face under the cursor, the normal's
+      dominant axis is the side, and `snapTo(hit.object, side)` is the whole
+      snap — the two axes it does not name stay where the cursor put them, which
+      is what that rule is for. **Marker**: the joins a box cannot express, which
+      is §23's marker entry and what two roof slopes meeting along a pitch need.
+      All three want a *preview* before they commit — a ghost where the drop
+      would land, because a snap that has already happened is one you have to
+      undo to disagree with. A `BoxHelper` at the drop point is the cheap ghost:
+      free, drawn on top, not pickable. A translucent copy of the piece is the
+      dear one and wants a material built transparent up front, since `opacity`
+      does nothing on an opaque pipeline. And a held key places freehand anyway,
+      because the exception always turns up. The scripts that placed this kit
+      by hand hit precisely the errors snapping removes: a lean-to turned so its
+      roof rose away from the wall it leaned on, a wall built twice where two
+      wings shared a tile edge, and a verge nudged 0.06 by hand to stop it
+      fighting the roof under it.
 
 ---
 

@@ -503,8 +503,9 @@ fn void a_box_helper_follows_the_piece_when_updated() @test
 
  `boundsInParent` measures in the parent's frame, so a helper under a different
  parent is drawn wherever those two frames happen to differ. Refused rather than
- answered with a box in the wrong place, which is `alignTo`'s rule and `alignTo`'s
- reason.
+ answered with a box in the wrong place. `snapTo` and `alignTo` get out of the
+ same bind by measuring in world space and converting the step back; a helper has
+ no step to convert, because it *is* the box.
 *>
 fn void a_box_helper_refuses_a_parent_that_is_not_the_objects() @test
 {

@@ -421,32 +421,55 @@ piece.align('z', 'max', 10);      // front face at z = 10
 - Only `position` moves. Rotation and scale are inputs to where the box is, so set them first — a
   quarter-turned piece is measured turned.
 
-## object.alignTo(other, options)
+## object.snapTo(other, side, axes)
 
-The same move said against another object instead of a number, and the verb a kit is placed with.
-**A placement is usually more than one axis, so one call can be** — name the axes:
+Put this piece on one side of another one, touching. The verb a kit is built with, and the one that
+replaces a size table.
 
 ```js
-lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+lean.snapTo(hall, '+z', { x: 'center', y: 'min' });
+tiles.snapTo(course, '+y', { gap: -0.05 });
 ```
 
-- One entry per axis, `x`, `y` or `z`, and **an axis nobody names does not move**. That is what makes
-  this safe to reach for after a piece is already standing on the floor.
-- An axis is either one word for both faces — `'min'`, `'center'`, `'max'` — or the long
-  `{ mine, theirs, offset }`, whose defaults are the `min`-against-`max` of the single-axis form.
-- `{ axis, mine, theirs, offset }` is that single-axis form and still means what it always meant.
-  Mixing the two spellings is allowed; a named axis wins over `axis` naming the same one.
-- Siblings by default, because a box is measured in the frame of the parent it hangs from and two
-  parents are two frames. An option it does not have is refused by name rather than quietly doing the
-  default.
-- `world: true` is the cross-parent form. It measures both objects with `boundingBox()`, works the
-  step out in world space and converts that one step back into the mover's own frame — which is exact
-  whatever the ancestors are, a non-uniform scale and a rotation that is not a quarter turn included,
-  because a translation goes through any invertible frame exactly. It needs both objects in a scene,
-  costs two host calls where the sibling form costs none, and the faces it puts together are the
-  world-axis faces of world-axis boxes: for a turned piece that is a looser box than the sibling form
-  reads, which is why it is opt-in. Two objects that share a parent after all are allowed, and agree
-  with the sibling form wherever nothing above them turns or squashes the frame.
+- **An axis nobody names does not move.** A piece straight off the loader stands at the origin, so
+  `lean.snapTo(hall, '+z')` on its own lands it at x = 0 — name the other two axes, or know why not.
+- `side` is exactly one of `'+x'`, `'-x'`, `'+y'`, `'-y'`, `'+z'`, `'-z'`: which side of the other
+  object this piece goes on. `'+z'` puts this box's min face on that box's max face, `'-z'` the
+  mirror of it. One direction names both faces, which is why the verb reads as a placement rather
+  than a puzzle. Anything else is refused with the six listed.
+- The other two axes take one word for both faces — `'min'`, `'center'`, `'max'` — or the long
+  `{ mine, theirs, offset }`, whose defaults are `min` against `max`. A post centred on a corner is
+  `{ x: { mine: 'center', theirs: 'max' } }`.
+- `gap` is a distance along the side, with `row`'s sign: positive leaves a gap, negative laps the
+  pieces over each other, which is what a course of roof tiles is. It defaults to `0`, touching.
+- Naming the side's own axis is refused — the side already said what that axis does — and so is a
+  key that is not `x`, `y`, `z` or `gap`.
+- The frame is not a choice. Siblings are measured with `boundsInParent()` in the frame they share;
+  two objects under different parents are measured with `boundingBox()` in world space and the step
+  is converted back into this object's own frame, which is exact whatever the ancestors are — a
+  non-uniform scale and a rotation that is not a quarter turn included, because a translation goes
+  through any invertible frame exactly. The world path needs both objects in a scene, costs two host
+  calls where the sibling path costs none, and puts world-axis faces of world-axis boxes together:
+  for a turned piece that is a looser box than the sibling path reads.
+- Returns this object, so placements chain.
+
+## object.alignTo(other, axes)
+
+Flush with another object without touching it — a chimney on a ridge, a sign centred on a door. The
+half of placing that a side would be a lie about.
+
+```js
+chimney.alignTo(ridge, { x: 'center' });
+```
+
+- One entry per axis, `x`, `y` or `z`, spelled exactly as `snapTo`'s: one word for both faces, or the
+  long `{ mine, theirs, offset }`.
+- **An axis nobody names does not move**, which is what makes this safe to reach for after a piece is
+  already standing on the floor. A call that names no axis at all is refused rather than obeyed.
+- There is no `axis`/`mine`/`theirs`/`offset` at the top level and no `world`: name the axes, and the
+  frame is chosen the same way `snapTo` chooses it. A key it does not have is refused by name rather
+  than quietly doing a default.
+- For a placement that touches, this is the wrong verb — `snapTo(other, '+y')` says it in one word.
 
 ## object.row(axis, pieces, options)
 
@@ -466,7 +489,7 @@ fence.row('z', posts, { gap: 1.4 });    // spaced, from where the first post alr
   other (a course of roof tiles), a positive one spaces them (a fence).
 - Only the run axis moves, and a piece that is not a child of this object yet is added to it.
 - On the parent because a run has a cursor and the cursor belongs to whoever owns the sequence. The
-  other half — "put me after that one" — is already one `alignTo` call. For a run that grows the
+  other half — "put me after that one" — is already one `snapTo` call. For a run that grows the
   other way, reverse the list.
 
 # Spatial queries

@@ -1971,10 +1971,10 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
  Doubled. A church full of that shape at that angle reported a minimum z of -49
  for a spire that stops at -45.8.
 
- That number is not merely reported: `align`, `alignTo`, `frameAll` and
- `BoxHelper` all place things with it, so `align('y', 'min', 0)` on a rotated
- pyramid floats the piece half a unit off the ground — and the helper drawn to
- check it agrees, because it is reading the same wrong box.
+ That number is not merely reported: `align`, `snapTo`, `alignTo`, `frameAll`
+ and `BoxHelper` all place things with it, so `align('y', 'min', 0)` on a
+ rotated pyramid floats the piece half a unit off the ground — and the helper
+ drawn to check it agrees, because it is reading the same wrong box.
 
  So this bounds the transformed *vertices*. `hull_positions` is every position
  the mesh has, kept on the CPU for picking, so the pass is exact and needs

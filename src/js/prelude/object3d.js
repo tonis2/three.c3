@@ -487,47 +487,122 @@ export class Object3D {
 		return this;
 	}
 
-	// The same move, expressed against another object instead of a number.
+	// **Put this piece on one side of another one, touching.** The verb a kit
+	// is built with: a wing on the front of a hall, a course on the wall under
+	// it, a storey on a storey.
 	//
-	//   window.alignTo(wall, { axis: 'z', mine: 'min', theirs: 'max', offset: -0.28 })
+	//   wing.snapTo(hall, '+z');                            // on the hall's +z side
+	//   lean.snapTo(hall, '+z', { x: 'center', y: 'min' });
 	//
-	// **A placement is usually more than one axis, so a call can be.** Name the
-	// axes and the whole sentence is one call — "my back face on your front
-	// face, centred on you in x, standing on you in y":
+	// `side` is one of `'+x' '-x' '+y' '-y' '+z' '-z'` and says which side of
+	// `other` this piece goes on. `'+z'` puts my min face on your max face,
+	// `'-z'` my max face on your min face, and x and y the same way. **One
+	// direction names both faces**, which is the whole reason for the verb:
+	// "my min meets your max on z" is a sentence a reader has to solve, and
+	// "on your +z side" is one they can see. Anything else is refused with the
+	// six listed, because a guessed side is a piece inside a wall.
 	//
-	//   lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center', y: 'min' })
+	// **An axis nobody names does not move.** A piece straight off the loader
+	// stands at the origin, so `wing.snapTo(hall, '+z')` alone lands it at
+	// x = 0 — say what the other two axes do:
 	//
-	// An axis is either a string — one word for both faces, so `'center'` is
-	// centred on it and `'min'` is flush with its low side — or the long
-	// `{ mine, theirs, offset }`, whose defaults are the `min`-against-`max` of
-	// the single-axis form. **An axis nobody named does not move**, which is what
-	// makes this safe to reach for after a piece is already standing on the floor.
-	// The old four keys still mean what they meant, and mixing the two spellings
-	// is allowed: a named axis wins over `axis` naming the same one.
+	//   'min' | 'center' | 'max'    one word, the same face on both boxes
+	//   { mine, theirs, offset }    the long form, for the placement a word
+	//                               will not say — a post centred on a corner
+	//                               is `{ x: { mine: 'center', theirs: 'max' } }`
 	//
-	// Siblings by default, because each box is measured in its own parent's
-	// frame and two different parents are two different frames. `world: true`
-	// is the cross-parent form — see `_alignInWorld`.
-	alignTo(other, options = {}) {
+	// The side's own axis is not among them: the side already said what that
+	// axis does, so naming it is a contradiction and is refused rather than
+	// silently won by one of the two.
+	//
+	// `gap` is a distance along the side, with `row`'s sign convention — a
+	// positive one leaves a gap, a negative one laps the pieces over each
+	// other, which is what a course of roof tiles is:
+	//
+	//   tiles.snapTo(lower, '+y', { gap: -0.05 });
+	snapTo(other, side, axes = {}) {
+		if (!(other instanceof Object3D)) {
+			throw new TypeError('snapTo(other) wants another object as its first argument');
+		}
+		if (typeof side !== 'string' || !SIDES.includes(side)) {
+			throw new TypeError(
+				'snapTo(other, side) wants the side of the other object to go on — one of '
+				+ `${SIDES.map(s => `'${s}'`).join(', ')} — not ${JSON.stringify(side)}`);
+		}
+		if (axes === null || typeof axes !== 'object') {
+			throw new TypeError('snapTo(other, side, axes) wants an object of axes as its third argument');
+		}
+		const axis = side[1];
+		if (axis in axes) {
+			throw new TypeError(
+				`snapTo(other, '${side}', axes): '${side}' already says what ${axis} does, so ${axis} `
+				+ 'is not one of the axes to name — the other two are. For a different face on this '
+				+ 'axis, snap to the side that is that face, or use alignTo.');
+		}
+		const specs = alignSpecs(axes, 'snapTo()', SNAP_KEYS);
+		const gap = axes.gap === undefined ? 0 : +axes.gap;
+		if (!Number.isFinite(gap)) {
+			throw new TypeError('snapTo(other, side, { gap }) wants a number for gap');
+		}
+		// The side, as the one axis the caller did not have to spell: a '+'
+		// puts my low face on their high one and a positive gap pushes further
+		// that way, and a '-' is the mirror of both.
+		specs.push(alignSpec(axis, side[0] === '+'
+			? { mine: 'min', theirs: 'max', offset: gap }
+			: { mine: 'max', theirs: 'min', offset: -gap }, 'snapTo()'));
+		return this._place(other, specs, 'snapTo()');
+	}
+
+	// **Flush with another object, without touching it** — the other half of
+	// placing, and the one a side would be a lie about:
+	//
+	//   chimney.alignTo(ridge, { x: 'center' });
+	//   sign.alignTo(door, { x: 'center', y: 'max' });
+	//
+	// The axes are the ones `snapTo` takes, spelled the same way: one word for
+	// both faces, or the long `{ mine, theirs, offset }` whose defaults are a
+	// min against a max. **An axis nobody names does not move**, which is what
+	// makes this safe to reach for after a piece is already standing on the
+	// floor — and why an empty options bag is refused rather than obeyed.
+	//
+	// A placement that *touches* is `snapTo`, so the faces are not named at the
+	// top level here: `{ axis, mine, theirs, offset }` as four loose keys is
+	// gone, and so is `world`.
+	alignTo(other, axes = {}) {
 		if (!(other instanceof Object3D)) {
 			throw new TypeError('alignTo(other) wants another object as its first argument');
 		}
-		if (options === null || typeof options !== 'object') {
-			throw new TypeError('alignTo(other, options) wants an options object as its second argument');
+		if (axes === null || typeof axes !== 'object') {
+			throw new TypeError('alignTo(other, axes) wants an object of axes as its second argument');
 		}
-		const specs = alignSpecs(options, 'alignTo()');
-		if (options.world) return this._alignInWorld(other, specs);
-		if (other.parent !== this.parent) {
-			throw new Error(
-				'alignTo() aligns siblings: both objects must share a parent, because a box is '
-				+ 'measured in the frame of the parent it hangs from. For two objects in different '
-				+ 'frames, pass `world: true` — that measures both in world space and moves this one '
-				+ 'by the step that comes to, in its own parent\'s frame.');
+		const specs = alignSpecs(axes, 'alignTo()', AXIS_KEYS);
+		if (specs.length === 0) {
+			throw new TypeError(
+				'alignTo(other, axes) wants the axes named — alignTo(other, { x: \'center\' }). '
+				+ 'An axis nobody names does not move, so a call that names none is a call that '
+				+ 'does nothing.');
 		}
+		return this._place(other, specs, 'alignTo()');
+	}
+
+	// The frame both verbs place in, chosen rather than asked for.
+	//
+	// Siblings are measured with `boundsInParent()` in the frame they share:
+	// exact, no host call, and tight around a turned piece because the box was
+	// built with that rotation in it. Anything else — a lean-to against a hall
+	// in another group, a sign on a building, a lid on a crate someone else
+	// parented — goes through world space, which is the only frame two parents
+	// have in common.
+	//
+	// The caller never picks, because there is nothing to pick: the two paths
+	// are the same move, and where both are available they agree. What differs
+	// is only what is *possible*, and that is a fact about the objects.
+	_place(other, specs, where) {
+		if (other.parent !== this.parent) return this._placeInWorld(other, specs, where);
 		const box = other.boundsInParent();
-		if (box === null) throw new Error('alignTo(): the object aligned to draws nothing, so it has no box');
+		if (box === null) throw new Error(`${where}: the object placed against draws nothing, so it has no box`);
 		const mine = this.boundsInParent();
-		if (mine === null) throw new Error(noBox('alignTo()'));
+		if (mine === null) throw new Error(noBox(where));
 		// One measurement for however many axes: a move along x cannot change
 		// where this box's y faces are, so the steps are independent and there
 		// is nothing to re-measure between them.
@@ -537,9 +612,7 @@ export class Object3D {
 		return this;
 	}
 
-	// `alignTo(other, { world: true, ... })`: the same sentence about two
-	// objects that do NOT share a parent — a lean-to against a hall in another
-	// group, a sign on a building, a lid on a crate someone else parented.
+	// The same sentence about two objects that do NOT share a parent.
 	//
 	// **The faces are world faces and the axes are world axes.** Both boxes come
 	// from the host, in world space, and the step that closes the gap is worked
@@ -554,24 +627,19 @@ export class Object3D {
 	// The approximation is the one every box here has: a world box is
 	// axis-aligned in *world*, so a piece turned 30 degrees is measured by the
 	// upright box around it and touches by that box. `boundsInParent()` is the
-	// tighter answer whenever the two objects really are siblings, and staying
-	// with the sibling form is why this is opt-in rather than the default.
-	//
-	// Two objects that share a parent after all are allowed rather than refused:
-	// the answer is then the sibling answer whenever nothing above them turns or
-	// squashes the frame, and the world-axis answer when something does. It
-	// costs two host calls where the sibling form costs none.
-	_alignInWorld(other, specs) {
+	// tighter answer, which is why `_place` prefers it whenever the two objects
+	// really are siblings. It costs two host calls where that form costs none.
+	_placeInWorld(other, specs, where) {
 		if (this._i < 0 || other._i < 0) {
 			throw new Error(
-				'alignTo({ world: true }) measures both objects in world space, and world space is '
-				+ 'something a scene has — add() them first.');
+				`${where}: these two hang from different parents, so they are placed in world space — `
+				+ 'and world space is something a scene has. add() them first.');
 		}
 		const mine = this.boundingBox();
 		const theirs = other.boundingBox();
-		if (mine === null) throw new Error(noBox('alignTo({ world: true })'));
+		if (mine === null) throw new Error(noBox(where));
 		if (theirs === null) {
-			throw new Error('alignTo({ world: true }): the object aligned to draws nothing, so it has no box');
+			throw new Error(`${where}: the object placed against draws nothing, so it has no box`);
 		}
 		// Every axis first, then one conversion. A parent's frame mixes the axes,
 		// so converting a step per axis and adding the results up would not be
@@ -583,8 +651,8 @@ export class Object3D {
 		const inverse = invertMatrix3(worldMatrix3(this.parent));
 		if (inverse === null) {
 			throw new Error(
-				'alignTo({ world: true }): something above this object is scaled to nothing on an '
-				+ 'axis, so no local move produces the world one.');
+				`${where}: something above this object is scaled to nothing on an axis, so no local `
+				+ 'move produces the world one.');
 		}
 		const local = applyMatrix3(inverse, step);
 		const p = this.position;
@@ -602,7 +670,7 @@ export class Object3D {
 	//
 	// On the parent because a run has a cursor, and the cursor belongs to
 	// whoever owns the sequence. The other half of it — "put me after that one"
-	// — is already one `alignTo` call and needs no verb of its own.
+	// — is already one `snapTo` call and needs no verb of its own.
 	//
 	// **The step is measured from each piece, never assumed.** A run of pieces
 	// that are not all the same size closes up anyway, and a piece turned a
@@ -662,7 +730,7 @@ export class Object3D {
 }
 
 // -----------------------------------------------------------------------
-// Placing: the shapes `alignTo` reads, and the frame it converts between
+// Placing: the shapes both verbs read, and the frame they choose between
 
 // What `align` and everything written on top of it says when there is no box
 // to read. One sentence rather than three, because it is one situation.
@@ -671,9 +739,21 @@ function noBox(where) {
 		+ 'under it, or its geometry is not resident. Align a Mesh, or add one first.';
 }
 
-const ALIGN_OPTIONS = ['axis', 'mine', 'theirs', 'offset', 'x', 'y', 'z', 'world'];
+// The six sides `snapTo` takes, in the order its refusal lists them.
+const SIDES = ['+x', '-x', '+y', '-y', '+z', '-z'];
+const FACES = ['min', 'center', 'max'];
 
-// One axis of an alignment, out of whichever spelling the caller used:
+// What each verb reads out of the bag of axes. `gap` is `snapTo`'s alone,
+// because a gap is a distance along a side and `alignTo` has no side.
+const AXIS_KEYS = ['x', 'y', 'z'];
+const SNAP_KEYS = ['x', 'y', 'z', 'gap'];
+
+// The four loose keys `alignTo` used to take at the top level. Kept as a list
+// so a script written the old way is told what replaced them instead of only
+// that `axis` is not an option — true, and no help at all.
+const FLAT_KEYS = ['axis', 'mine', 'theirs', 'offset'];
+
+// One axis of a placement, out of either spelling:
 //
 //   'center'                   one word for both faces — centred on the other
 //   { mine, theirs, offset }   the long form, defaulting to min-against-max
@@ -683,9 +763,20 @@ const ALIGN_OPTIONS = ['axis', 'mine', 'theirs', 'offset', 'x', 'y', 'z', 'world
 function alignSpec(axis, value, where) {
 	const i = axisIndex(axis, where);
 	const spec = { axis, i, key: ['x', 'y', 'z'][i] };
-	if (typeof value === 'string') return { ...spec, mine: value, theirs: value, offset: 0 };
+	if (typeof value === 'string' && FACES.includes(value)) {
+		return { ...spec, mine: value, theirs: value, offset: 0 };
+	}
 	if (value !== null && typeof value === 'object') {
 		const { mine = 'min', theirs = 'max', offset = 0 } = value;
+		// Refused here, by the verb, so the message names the axis and the
+		// three words — `box.edge` would refuse it too, in the name of a
+		// function the script never called.
+		for (const [name, face] of [['mine', mine], ['theirs', theirs]]) {
+			if (!FACES.includes(face)) {
+				throw new TypeError(
+					`${where}: ${axis}.${name} wants 'min', 'center' or 'max', not ${JSON.stringify(face)}`);
+			}
+		}
 		return { ...spec, mine, theirs, offset: +offset };
 	}
 	throw new TypeError(
@@ -693,31 +784,31 @@ function alignSpec(axis, value, where) {
 		+ `not ${JSON.stringify(value)}`);
 }
 
-// The axes one `alignTo` call was asked about, in the order they will be
-// applied. The four original keys are one spec between them; a named axis is a
-// spec each and wins over `axis` naming the same one, since it is the more
-// specific thing to have written. Nothing named at all is the original default:
-// `axis: 'y'`, my min against their max.
-function alignSpecs(options, where) {
-	for (const key of Object.keys(options)) {
-		if (!ALIGN_OPTIONS.includes(key)) {
+// The axes one call named, in the order they will be applied. Both verbs come
+// through here, and `snapTo` adds its one touching axis afterwards — which is
+// the whole difference between them.
+//
+// A key that is not an axis is refused rather than ignored, because a misspelt
+// one would otherwise be a placement that quietly did less than it said.
+function alignSpecs(axes, where, allowed) {
+	for (const key of Object.keys(axes)) {
+		if (allowed.includes(key)) continue;
+		if (key === 'world') {
 			throw new TypeError(
-				`${where}: no option named ${JSON.stringify(key)} — it takes ${ALIGN_OPTIONS.join(', ')}`);
+				`${where}: there is no 'world' option any more — the frame comes from the two `
+				+ "objects. Siblings are placed in the parent's frame and anything else in world "
+				+ 'space, which is the only frame two parents share.');
 		}
+		if (FLAT_KEYS.includes(key)) {
+			throw new TypeError(
+				`${where}: '${key}' is not an option — name the axis it was about, as `
+				+ "{ z: { mine: 'min', theirs: 'max', offset: 0 } }. For a placement that touches, "
+				+ "that is snapTo(other, '+z').");
+		}
+		throw new TypeError(
+			`${where}: no option named ${JSON.stringify(key)} — it takes ${allowed.join(', ')}`);
 	}
-	const named = ['x', 'y', 'z'].filter(axis => axis in options);
-	const byAxis = new Map();
-	if (named.length === 0 || 'axis' in options || 'mine' in options
-		|| 'theirs' in options || 'offset' in options) {
-		const { axis = 'y', mine = 'min', theirs = 'max', offset = 0 } = options;
-		const spec = alignSpec(axis, { mine, theirs, offset }, where);
-		byAxis.set(spec.i, spec);
-	}
-	for (const axis of named) {
-		const spec = alignSpec(axis, options[axis], where);
-		byAxis.set(spec.i, spec);
-	}
-	return [...byAxis.values()];
+	return AXIS_KEYS.filter(axis => axis in axes).map(axis => alignSpec(axis, axes[axis], where));
 }
 
 // The 3x3 that carries an offset in `node`'s frame out to world: every

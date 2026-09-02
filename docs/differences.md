@@ -15,30 +15,47 @@ into walls.
 - `object.boundingBox()` — the world-space box of a subtree.
 - `object.boundsInParent()` — the same box in the parent's frame, and it works before `add()`.
 
-## align
+## snap
 
-`object.align(axis, edge, at)` moves an object until one face of its box sits at a coordinate.
-`object.alignTo(other, { axis, mine, theirs, offset })` says the same against a sibling.
+`object.snapTo(other, side, axes)` puts a piece on one side of another one, touching, and **an axis
+nobody names does not move** — a piece straight off the loader stands at the origin, so a snap that
+names only the side lands it at x = 0 on the other two.
+
+`side` is one of `'+x' '-x' '+y' '-y' '+z' '-z'`: which side of the other object this piece goes on.
+One direction names both faces, which is the point — `'+z'` is my min face on your max face.
+
+```js
+lean.snapTo(hall, '+z', { x: 'center', y: 'min' });   // against the front, centred, on the floor
+course.snapTo(wall, '+y');                            // on top of the wall
+tri.snapTo(wall, '+y', { x: 'max' });                 // on top, flush with its right end
+tiles.snapTo(lower, '+y', { gap: -0.05 });            // lapped over the course below
+```
+
+The other two axes take one word for both faces — `'min'`, `'center'`, `'max'` — and `gap` is a
+distance along the side, with `row`'s sign: positive spaces the pieces, negative laps them over each
+other. Naming the side's own axis is refused, because the side already said what it does.
+
+`object.align(axis, edge, at)` is the same move against a coordinate rather than an object.
 
 ```js
 piece.align('y', 'min', 0);        // stand it on the ground
 piece.align('z', 'min', wallZ);    // back flush with a wall
 ```
 
-A placement is usually more than one axis, so `alignTo` takes several in one call. Name them, and
-**an axis nobody names does not move**:
+`object.alignTo(other, axes)` is for flush without touching — a chimney on a ridge, a sign on a door.
+Same axes, no side, and it never moves an axis nobody named.
 
 ```js
-lean.alignTo(hall, { z: { mine: 'min', theirs: 'max' }, x: 'center' });
+chimney.alignTo(ridge, { x: 'center' });
 ```
 
-An axis is either one word for both faces — `'min'`, `'center'`, `'max'` — or the long
-`{ mine, theirs, offset }`. The four original keys still mean what they meant.
+Neither verb asks which frame to work in. Siblings are measured in the parent's frame, which is the
+frame a script writes positions in; two objects under different parents are measured in world space
+and the step is converted back, which is exact whatever the ancestors do.
 
-Both verbs work in the parent's frame, because that is the frame a script writes positions in, and
-`alignTo` aligns siblings for the same reason. `world: true` is the cross-parent form: it measures
-both objects in world space and moves this one by the step that comes to, converted back into its own
-parent's frame. Set rotation and scale first — they are inputs to where the box is.
+The escape hatch, on any axis of either verb, is the long `{ mine, theirs, offset }` — a post centred
+on a corner is `{ x: { mine: 'center', theirs: 'max' } }`. Set rotation and scale first: they are
+inputs to where the box is.
 
 ## debug-draw
 
@@ -910,11 +927,12 @@ copies of one piece share their upload and instance into one draw call exactly a
 Placing a kit means measuring it, not retyping the numbers it was built with. A script that opens
 `const WALL_H = 1.6, RISE = 0.7` is carrying the builder's constants a second time, and the second
 copy goes wrong the moment a piece is re-exported — the pieces still draw, they just sink into each
-other. Three verbs do the whole job and not one of them takes a size:
+other. Four verbs do the whole job and not one of them takes a size:
 
+- `piece.snapTo(other, side, axes)` — a whole placement against another piece, touching: which side
+  of it to go on, and what the other two axes do. **An axis nobody names does not move.**
 - `piece.align(axis, edge, at)` — one face at one coordinate: the ground, a grid line, a plot edge.
-- `piece.alignTo(other, { z: { mine: 'min', theirs: 'max' }, x: 'center' })` — a whole placement
-  against another piece, one axis per name. Add `world: true` for a piece in a different group.
+- `piece.alignTo(other, axes)` — flush without touching, for the axes a side would be a lie about.
 - `parent.row(axis, pieces, { at, gap })` — a *run*: N pieces edge to edge along an axis, which is
   the commonest thing a kit is asked for and the one a script otherwise writes as a loop over a step
   it measured itself.
@@ -922,8 +940,8 @@ other. Three verbs do the whole job and not one of them takes a size:
 ```js
 const wall = new three.Group();
 scene.add(wall);
-wall.row('x', panels, { at: -3 });                            // the run measures its own step
-course.alignTo(wall, { y: { mine: 'min', theirs: 'max' } });  // the roof lands on top of it
+wall.row('x', panels, { at: -3 });          // the run measures its own step
+course.snapTo(wall, '+y', { x: 'min' });    // the roof lands on top of it
 ```
 
 `row` measures the step from each piece rather than assuming one, so a run of mixed sizes still
