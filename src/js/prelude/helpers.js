@@ -86,8 +86,10 @@ export class Box3Helper extends LineMesh {
 // **It hangs from the object's own parent, and is refused anywhere else.**
 // The box comes from `boundsInParent()`, which is measured in that frame, so
 // a helper parented elsewhere would be drawn wherever the two frames happen
-// to differ — a box in the wrong place, which is worse than no box. This is
-// `alignTo`'s rule and it is refused for `alignTo`'s reason.
+// to differ — a box in the wrong place, which is worse than no box. `snapTo`
+// and `alignTo` get out of the same bind by measuring in world space when the
+// frames differ and converting the step back; a helper has no step to convert,
+// because it *is* the box.
 //
 // The usual spelling is therefore the Three.js one, because a piece is
 // usually a child of the scene:

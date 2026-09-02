@@ -62,7 +62,8 @@ topic. It is an Object3D, so moving it moves everything.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, { loop, speed, time, fade })`
 - `stop()`
@@ -140,7 +141,8 @@ material is one draw call.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -607,7 +609,8 @@ clip outright is `play()` without a fade.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -1695,7 +1698,8 @@ the times it is inside a wall.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -1749,7 +1753,8 @@ moving it.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -1794,7 +1799,8 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -1845,7 +1851,8 @@ live. Divisions are capped at 256.
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`
@@ -1901,7 +1908,8 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `boundingBox()`
 - `boundsInParent()`
 - `align(axis, edge, at)`
-- `alignTo(other, opts)`
+- `snapTo(other, side, axes)` — this piece on one side of that one, touching
+- `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
 - `stop()`

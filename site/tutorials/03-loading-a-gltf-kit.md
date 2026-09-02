@@ -91,9 +91,11 @@ should measure it:
 - `object.boundsInParent()` — the same box in the parent's coordinate frame.
   It works *before* `add()`.
 
-Then place with `align` instead of arithmetic. `align(axis, edge, at)` moves an
-object until one face of its box sits at a coordinate, and `alignTo` does the
-same relative to a sibling.
+Then place with the placement verbs instead of arithmetic. `align(axis, edge,
+at)` moves an object until one face of its box sits at a coordinate.
+`snapTo(other, side, axes)` puts a piece on one side of another piece, touching
+— `side` is one of `'+x' '-x' '+y' '-y' '+z' '-z'`, and it says which side of
+the other object this one goes on.
 
 ```js
 const row = new three.Group();
@@ -101,7 +103,7 @@ scene.add(row);
 
 if (kit) {
 	const names = kit.meshes.slice(0, 6);
-	let cursor = 0;
+	let previous = null;
 
 	for (let i = 0; i < 12; i++) {
 		const piece = new three.Mesh(kit.mesh(names[i % names.length]));
@@ -110,18 +112,33 @@ if (kit) {
 		// Stand it on the ground and butt it against the piece before it —
 		// whatever this piece happens to be, and wherever its origin sits.
 		piece.align('y', 'min', 0);
-		piece.align('x', 'min', cursor);
-		cursor = piece.boundsInParent().max.x + 0.05;
+		if (previous) piece.snapTo(previous, '+x', { gap: 0.05 });
+		else piece.align('x', 'min', 0);
+		previous = piece;
 	}
 
-	three.debug.write({ placed: row.children.length, width: cursor.toFixed(2) });
+	three.debug.write({ placed: row.children.length });
 }
 ```
 
 Twelve pieces placed edge to edge, and not one number in that loop came from a
-size table. Both `align` verbs work in the **parent's** frame, because that is
-the frame a script writes positions in. Set rotation and scale first, since
-they affect where the box ends up.
+size table. `gap` is the sign convention everywhere: positive spaces the pieces,
+negative laps them over each other, which is what a course of roof tiles is. The
+whole loop is also one call — `row.row('x', pieces, { gap: 0.05 })` — once you
+have the pieces in a list.
+
+**An axis nobody names does not move.** A freshly loaded piece sits at the
+origin, so a snap that names only the side leaves the other two axes exactly
+where they were; that is what makes it safe to reach for after the piece is
+already standing on the floor. When a placement should be flush *without*
+touching — a chimney centred on a ridge — that is `alignTo(other, axes)`, the
+same axes with no side.
+
+Neither verb asks which frame to work in. Two pieces under the same parent are
+measured in that parent's frame, which is the frame a script writes positions
+in; two under different parents are measured in world space and the step is
+converted back. Set rotation and scale first, since they affect where the box
+ends up.
 
 ## When a piece is somewhere you did not expect
 
