@@ -2885,6 +2885,23 @@ fn bool Assets.read_geometry(&self, AssetId id, uint mesh, GeometryBuilder* out)
 		return out.positions.len() > 0;
 	}
 
+	// Before the hull for the same reason: a merged asset carries a picking
+	// tree like every other shape `upload_built` filed, so without this branch
+	// it fell through to the fallback below and came back with normals
+	// averaged from scratch and uvs projected face by face — exactly the
+	// approximation a merge's flat normals and real uvs were baked to avoid.
+	// `Assets.merge` copies the concatenated streams onto the slot for exactly
+	// this read.
+	if (asset.has_merged)
+	{
+		out.positions.add_all(&asset.merged.positions);
+		out.normals.add_all(&asset.merged.normals);
+		out.uvs.add_all(&asset.merged.uvs);
+		out.colors.add_all(&asset.merged.colors);
+		out.indices.add_all(&asset.merged.indices);
+		return out.positions.len() > 0;
+	}
+
 	// A hull, and anything else built through `upload_built` that kept a picking
 	// tree. Not a line mesh: `upload_built` skips the tree for those, which is
 	// exactly why the arrays being empty is the test.

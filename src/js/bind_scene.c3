@@ -52,8 +52,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "dataTexture", &js_data_texture, 5);
 	self.bind(host, "textureDispose", &js_texture_dispose, 1);
 	self.bind(host, "textureRead", &js_texture_read, 2);
-	self.bind(host, "primitive", &js_primitive, 8);
+	self.bind(host, "primitive", &js_primitive, 9);
 	self.bind(host, "convex", &js_convex, 1);
+	self.bind(host, "extrude", &js_extrude, 4);
 	self.bind(host, "ribbon", &js_ribbon, 5);
 	self.bind(host, "terrain", &js_terrain, 5);
 	self.bind(host, "terrainAt", &js_terrain_at, 4);
@@ -69,6 +70,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "meshLayers", &js_mesh_layers, 3);
 	self.bind(host, "meshMaterial", &js_mesh_material, 3);
 	self.bind(host, "splitMesh", &js_split_mesh, 3);
+	self.bind(host, "merge", &js_merge, 5);
 	self.bind(host, "assetNodes", &js_asset_nodes, 3);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
 	self.bind(host, "assetBones", &js_asset_bones, 2);
@@ -82,6 +84,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "assetText", &js_asset_text, 1);
+	self.bind(host, "assetWriteText", &js_asset_write_text, 2);
 	self.bind(host, "exportScene", &js_export, 3);
 
 	// The graph

@@ -26,7 +26,8 @@ import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
 import { liveScene, Scene, liveObject, objectForHandle, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
-import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, TerrainGeometry, RibbonGeometry } from './geometry.js';
+import { level, Level } from './level.js';
+import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, Path, Shape, ExtrudeGeometry, TerrainGeometry, RibbonGeometry, MergedGeometry, merge } from './geometry.js';
 import { Field, scatter, catmullRom } from './field.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
 import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, TransformBatch, QueryResult } from './query.js';
@@ -1443,6 +1444,8 @@ export const three = {
 	// plot to fill, a gap to check. Neither is constructed by the host.
 	Box3,
 	MeshRef,
+	// A loaded placement list, not constructed by hand — see `level` below.
+	Level,
 
 	// The shapes. `Geometry` is exported for `instanceof`, not to be
 	// constructed: there is no BufferGeometry and no attribute access, which
@@ -1459,6 +1462,13 @@ export const three = {
 	ConeGeometry,
 	TorusGeometry,
 	ConvexGeometry,
+	// A 2D outline with holes, swept along +Z into one closed mesh — the
+	// answer to "a shape cannot have a hole in it". Path is the outline
+	// (moveTo/lineTo/closePath/absarc); Shape is a Path plus the holes cut
+	// out of it; ExtrudeGeometry is what sweeps one. See scene/extrude.c3.
+	Path,
+	Shape,
+	ExtrudeGeometry,
 	// The one shape that carries data instead of parameters, and the one that
 	// answers questions afterwards — heightAt and normalAt read the grid the
 	// mesh was built from. See scene/terrain.c3.
@@ -1469,6 +1479,15 @@ export const three = {
 	// draped over a terrain when you hand it one, or a flat sheet at `y` when
 	// you do not. One asset, one draw call, like every other shape.
 	RibbonGeometry,
+	// What `three.merge` answers with — carrying data instead of only
+	// parameters, `TerrainGeometry`'s own shape. Exported for `instanceof`,
+	// like `Geometry`; not constructed by hand.
+	MergedGeometry,
+	// MeshRef.split()'s reverse: every Mesh in a subtree, or an explicit array
+	// of them, concatenated into one asset with each one's transform baked
+	// into its vertices. See scene/merge.c3 and geometry.js for the frame, the
+	// material and colour rules, and what is skipped.
+	merge,
 	// A scalar grid in world coordinates, and the authoring half of the shape
 	// above: fill it with noise, flatten a building pad into it, carve a river
 	// channel, hand it to a TerrainGeometry. The SAME object is a splat mask —
@@ -1800,9 +1819,9 @@ export const three = {
 	// paths three.inventory() hands back are paths this accepts. Without
 	// --assets the path is used as written, exactly as three.load's is.
 	//
-	// READ-ONLY. three.save is where a script writes what a player did, and
-	// scene.export(path) is where it writes a .glb; there is no door here that
-	// puts a file into the game's own directory.
+	// three.writeText(path, text) is this door the other way — the same
+	// resolve_write sandbox scene.export(path) writes a .glb through, so a
+	// level list saves back to exactly where this reads it from.
 	//
 	// null for a file that is not there — three.save.readText's answer, not
 	// three.load's throw, because "no level here yet" is a question an editor
@@ -1837,6 +1856,41 @@ export const three = {
 		const text = H.assetText(path);
 		return text === null ? null : JSON.parse(text);
 	},
+
+	// readText's door the other way — a string into the assets directory,
+	// through the same sandbox scene.export(path) writes a .glb through
+	// rather than a second one: a path that climbs out throws, a leading '/'
+	// means the assets directory and not the disk's, and nothing outside it
+	// is ever written. Without --assets the path is used as written, exactly
+	// as scene.export's is.
+	//
+	// Answers the path it actually wrote to, so a caller can print where a
+	// level landed. Over 4 MB throws, the same limit three.readText stops
+	// at — a file this writes is a file that reads back.
+	writeText(path, text) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.writeText(path, text) wants a path to a file in the assets directory');
+		}
+		return H.assetWriteText(path, String(text));
+	},
+
+	// The same file, stringified. What three.save.write is to
+	// three.save.writeText.
+	//
+	//   const path = three.writeJSON('levels/lumbridge.json', rows);
+	//   const rows2 = three.readJSON('levels/lumbridge.json');
+	writeJSON(path, value) {
+		return this.writeText(path, JSON.stringify(value, null, '\t') + '\n');
+	},
+
+	// A placement list over a kit: `{ kit, rows: [{ id, piece, position, rotation, snap? }] }`,
+	// read with `three.readJSON` and written with `three.writeJSON` — see
+	// `docs/functions.md`'s `three.level` for the file and `load`'s `options.refit`.
+	//
+	//   const level = three.level.load('levels/lumbridge.json', scene);
+	//   level.objects.get('wall_2').position.x += 0.3;
+	//   three.level.save('levels/lumbridge.json', level);
+	level,
 
 	// Draws one frame into the offscreen target. The PNG that `run_script`
 	// returns is a render of the final state whether or not this was called,

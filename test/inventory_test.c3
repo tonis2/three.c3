@@ -42,7 +42,7 @@ fn void a_directory_is_described_without_being_loaded() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 6, "every glTF in test/fixtures (%d)", found.len());
+	test::@check(found.len() == 7, "every glTF in test/fixtures (%d)", found.len());
 
 	three::InventoryEntry* entry = named(&found, "textured.glb");
 	if (entry == null) return;
@@ -153,5 +153,39 @@ fn void only_gltf_files_are_listed() @test
 	{
 		missing.free_entries();
 		test::@check(false, "a directory that is not there answered with a list");
+	}
+}
+
+<*
+ A marker is a leaf node with no mesh — `markers.glb`'s `ridge`, sitting under
+ the piece `piece`, which is itself an empty with two children and so is not a
+ marker of its own. `position` is composed in `piece`'s own frame: `ridge` is
+ a direct child of it here, so that frame excludes nothing but `piece`'s own
+ transform and the position is `ridge`'s own translation, unchanged.
+*>
+fn void a_marker_is_read_with_its_piece_and_position() @test
+{
+	three::Inventory? found = three::take_inventory(FIXTURE_DIR);
+	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
+	defer found.free_entries();
+
+	three::InventoryEntry* entry = named(&found, "markers.glb");
+	if (entry == null) return;
+
+	test::@check(entry.markers.len() == 1, "the fixture's one marker (%d)", entry.markers.len());
+	if (entry.markers.len() != 1) return;
+
+	three::InventoryMarker marker = entry.markers[0];
+	test::@check(marker.name == "ridge", "it is named 'ridge' (%s)", marker.name);
+	test::@check(marker.piece == "piece", "sitting under the piece node 'piece' (%s)", marker.piece);
+	test::@check(
+		marker.position.x == 0.5f && marker.position.y == 1.25f && marker.position.z == -0.75f,
+		"at the position the fixture put it, in the piece's own frame (%s)", marker.position);
+
+	// `piece_mesh` draws and has no children, but it has a mesh, so it must not
+	// be reported as a marker of its own piece.
+	foreach (&other : entry.markers)
+	{
+		test::@check(other.name != "piece_mesh", "a node with a mesh is never a marker");
 	}
 }

@@ -27,6 +27,11 @@ class LineMesh extends Mesh {
 	constructor(geometry, color) {
 		super(geometry);
 		if (color !== undefined && color !== null) this.color = color;
+		// The `_isScene` marker's own reason: `geometry.js`'s `merge` needs to
+		// skip a helper wherever it turns up in a subtree, and the class that
+		// says so lives in a module `geometry.js` cannot import without a
+		// cycle — helpers.js already imports geometry.js the other way round.
+		this._isHelper = true;
 	}
 
 	_hostMaterial() { return LINE_MATERIAL; }

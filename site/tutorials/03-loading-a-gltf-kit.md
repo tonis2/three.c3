@@ -97,6 +97,16 @@ at)` moves an object until one face of its box sits at a coordinate.
 — `side` is one of `'+x' '-x' '+y' '-y' '+z' '-z'`, and it says which side of
 the other object this one goes on.
 
+Not every mating surface is a face. Two roof slopes meeting along a pitch
+overlap by the slab's thickness, so their boxes are the wrong shape to snap
+against — there is no face for either to touch. `side` can also be the name
+of a marker both pieces carry: a leaf node with no mesh, the empty a kit
+author drops where two pieces are meant to meet, the same way a Blender kit
+ships a connection point. `slope.snapTo(other, 'ridge')` finds the descendant
+named `ridge` in each piece and moves `slope` so the two coincide — on all
+three axes, and never rotating, so set `rotation` first exactly as you would
+before a box snap.
+
 ```js
 const row = new three.Group();
 scene.add(row);

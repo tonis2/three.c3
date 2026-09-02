@@ -253,4 +253,66 @@ fn void a_script_writes_only_inside_its_own_directory() @test
 	String? ordinary = runtime.resolve_write("out.glb", tmem);
 	test::@check(!@catch(ordinary) && ordinary!! == "game/out.glb",
 		"a game writes inside its own directory");
+
+	String? rooted = runtime.resolve_write("/levels/lumbridge.json", tmem);
+	test::@check(!@catch(rooted) && rooted!! == "game/levels/lumbridge.json",
+		"a leading '/' is the assets directory, not the filesystem's");
+
+	fault escaping = @catch(runtime.resolve_write("../secrets.glb", tmem));
+	test::@check(escaping == qjs::MODULE_ESCAPES_ROOT,
+		"climbing out is refused, the same as a read (%s)", escaping);
+}
+
+// ============================================================================
+// A failed load names the path it actually looked for
+// ============================================================================
+
+<*
+ `JsRuntime.blame` is what `three.load`, `three.readText` and `three.texture`
+ build their failure sentences from, so a script whose leading `/` got rooted
+ sees where its file was actually sought and not just the name it typed —
+ which is on disk, readable, and nowhere near the path the old message named.
+*>
+fn void a_failure_names_both_the_written_and_the_looked_for_path() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("game");
+
+	// The surprising case: a leading '/' reads as the filesystem's root to
+	// anyone who has not read this file, and is rooted at the assets
+	// directory instead — this is the rewrite the sentence has to own up to.
+	String? opening = runtime.resolve_asset("/kit/buildings.glb", tmem);
+	test::@check(!@catch(opening), "the rooted path still resolves");
+	String located = opening!!;
+	test::@check(located == "game/kit/buildings.glb", "landing inside the game (%s)", located);
+
+	String blamed = runtime.blame("/kit/buildings.glb", located);
+	test::@check(blamed.contains("/kit/buildings.glb"),
+		"the path as the script wrote it is named (%s)", blamed);
+	test::@check(blamed.contains("game/kit/buildings.glb"),
+		"the path actually opened is named too (%s)", blamed);
+	test::@check(blamed.contains("game"), "and the assets directory that did the rooting (%s)", blamed);
+}
+
+<*
+ Without an assets root, `resolve_asset` never rewrites anything, so the
+ sentence must not claim it did — a shorter, honest form instead.
+*>
+fn void without_a_root_the_sentence_does_not_claim_a_rewrite() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+
+	String? opening = runtime.resolve_asset("does-not-exist.glb", tmem);
+	test::@check(!@catch(opening), "a plain relative path resolves as written");
+	String located = opening!!;
+	test::@check(located == "does-not-exist.glb", "and is left alone (%s)", located);
+
+	String blamed = runtime.blame("does-not-exist.glb", located);
+	test::@check(blamed.contains("does-not-exist.glb"), "the path is still named (%s)", blamed);
+	test::@check(!blamed.contains("assets directory"),
+		"but nothing claims a rewrite that never happened (%s)", blamed);
 }

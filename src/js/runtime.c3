@@ -138,6 +138,7 @@ const char[*] PRELUDE_POST     = $embed("prelude/post.js");
 const char[*] PRELUDE_MESH     = $embed("prelude/mesh.js");
 const char[*] PRELUDE_SCENE    = $embed("prelude/scene.js");
 const char[*] PRELUDE_ASSET    = $embed("prelude/asset.js");
+const char[*] PRELUDE_LEVEL    = $embed("prelude/level.js");
 const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
 const char[*] PRELUDE_FIELD    = $embed("prelude/field.js");
 const char[*] PRELUDE_HELPERS  = $embed("prelude/helpers.js");
@@ -165,7 +166,7 @@ const char[*] PRELUDE_DOCS_DATA = $embed("prelude/docs.data.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[24] parts;
+	static qjs::EmbeddedModule[25] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -177,6 +178,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:mesh.js", (char[])PRELUDE_MESH[..] },
 		{ "three:scene.js", (char[])PRELUDE_SCENE[..] },
 		{ "three:asset.js", (char[])PRELUDE_ASSET[..] },
+		{ "three:level.js", (char[])PRELUDE_LEVEL[..] },
 		{ "three:geometry.js", (char[])PRELUDE_GEOMETRY[..] },
 		{ "three:field.js", (char[])PRELUDE_FIELD[..] },
 		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },

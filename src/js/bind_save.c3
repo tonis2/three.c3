@@ -1,13 +1,13 @@
 <*
  `three.save` — the one place a script may write outside its own directory.
 
- Everything else a game touches is read-only and under the assets root:
- `js/modules.c3` resolves `import` and `three.load` inside it and refuses to
- leave, which is what makes a game directory relocatable and what keeps an
- agent's `run_script` from being an arbitrary file writer. A save game cannot
- live there. An install directory is not writable on every platform, a Steam
- depot is replaced wholesale by an update, and a player expects their progress
- to survive both.
+ Everything else a game touches is confined to the assets root, in or out:
+ `js/modules.c3` resolves `import`, `three.load` and `three.writeText` inside it
+ and refuses to leave, which is what makes a game directory relocatable and
+ what keeps an agent's `run_script` from being an arbitrary file writer. A
+ save game cannot live there. An install directory is not writable on every
+ platform, a Steam depot is replaced wholesale by an update, and a player
+ expects their progress to survive both.
 
  So the sandbox widens, once, and as narrowly as it can:
 
