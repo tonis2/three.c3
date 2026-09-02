@@ -27,6 +27,7 @@
 module three_tests::texture;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import std::core::test;
@@ -55,17 +56,11 @@ const uint H = 150;
 *>
 macro @with_js_gpu(; @body(three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	@body(&runtime);
@@ -73,16 +68,10 @@ macro @with_js_gpu(; @body(three::JsRuntime* run))
 
 macro @with_pass(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 <*
@@ -936,12 +925,8 @@ fn void a_texture_from_a_file_reads_back_its_own_pixels() @test
 *>
 fn void reading_a_texture_leaves_it_in_the_layout_it_was_found_in() @test
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(W, H, validate: true, with_pass: false);
+	defer device::release();
 
 	if (!renderer.gpu.validation) return;
 
@@ -1715,12 +1700,8 @@ fn void a_normal_map_tilts_the_lighting_and_a_flat_one_does_not() @test
 *>
 fn void building_a_mip_chain_leaves_no_level_in_the_wrong_layout() @test
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(W, H, validate: true, with_pass: false);
+	defer device::release();
 
 	if (!renderer.gpu.validation)
 	{
@@ -1736,8 +1717,8 @@ fn void building_a_mip_chain_leaves_no_level_in_the_wrong_layout() @test
 	renderer.gpu.begin_capture();
 
 	int checker = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
-	upload_solid(&renderer, 16, 2, 40, 200, 40);
-	upload_solid(&renderer, 8, 8, 40, 40, 200, three::ColorSpace.LINEAR);
+	upload_solid(renderer, 16, 2, 40, 200, 40);
+	upload_solid(renderer, 8, 8, 40, 40, 200, three::ColorSpace.LINEAR);
 
 	uint material = renderer.pass.create_texture_material(checker)!!;
 	three::AssetId plane = assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;

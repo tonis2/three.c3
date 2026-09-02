@@ -29,6 +29,7 @@
 module three_tests::post;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import slang;
@@ -106,16 +107,10 @@ fn String line_at(String source, uint n)
 
 macro @with_pass(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 <*
@@ -124,16 +119,10 @@ macro @with_pass(; @body(three::Renderer* renderer))
 *>
 macro @with_validating_pass(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H, validate: true);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 <*

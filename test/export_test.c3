@@ -54,6 +54,7 @@
 module three_tests::export;
 
 import three;
+import three_tests::device;
 import vk;
 import std::core::test;
 import std::io::file;
@@ -63,17 +64,11 @@ const String FIXTURE = "test/fixtures/textured.glb";
 
 macro @with_js(; @body(three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	@body(&runtime);
@@ -1277,12 +1272,8 @@ fn void a_generated_texture_survives_the_round_trip_byte_for_byte() @test
 	String path = "build/export_generated.glb";
 	defer (void)file::delete(path);
 
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
 	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
 
 	const uint W = 8;
@@ -2425,12 +2416,8 @@ fn void a_baked_texture_lands_the_right_way_up() @test
 	String path = "build/export_baked_uv.glb";
 	defer (void)file::delete(path);
 
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
 	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
 
 	String diagnostic;
@@ -2506,12 +2493,8 @@ fn void a_baked_image_is_opaque_unless_the_body_cuts() @test
 	String path = "build/export_baked_opaque.glb";
 	defer (void)file::delete(path);
 
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
 	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
 
 	String diagnostic;

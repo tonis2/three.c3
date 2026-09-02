@@ -20,22 +20,17 @@
 module three_tests::systems;
 
 import three;
+import three_tests::device;
 import vk;
 import std::core::test;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	@body(&runtime);

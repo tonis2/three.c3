@@ -4,6 +4,7 @@
 module three_tests::physics;
 
 import three;
+import three_tests::device;
 import vk;
 import std::core::test;
 import std::math;
@@ -11,17 +12,11 @@ import image;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 200, 150)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	@body(&runtime);
@@ -32,20 +27,14 @@ macro @with_gpu_js(; @body(three::JsRuntime* run))
 // that are about the picture rather than about the numbers.
 macro @with_gpu_frames(; @body(three::JsRuntime* run, three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 240, 180)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(240, 180);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	@body(&runtime, &renderer);
+	@body(&runtime, renderer);
 }
 
 // How many bytes two frames of the same size disagree about.

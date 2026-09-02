@@ -18,6 +18,7 @@
 module three_tests::scene;
 
 import three;
+import three_tests::device;
 import vk;
 import image;
 import collision;
@@ -47,16 +48,10 @@ const three::AssetId TRIANGLE = { 0, 0 };
 
 macro @with_pass(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 fn bool close(float a, float b, float tolerance = 0.001) => math::abs(a - b) < tolerance;

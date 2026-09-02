@@ -18,6 +18,7 @@
 module three_tests::shader;
 
 import three;
+import three_tests::device;
 import vk;
 import slang;
 import std::core::test;
@@ -691,12 +692,8 @@ fn String declaration_of(String source, String header)
 
 macro @with_gpu(; @body(three::Gpu* gpu, three::Target* target))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 64, 48)!!;
-	defer renderer.free();
+	three::Renderer* renderer = device::borrow(64, 48, with_pass: false);
+	defer device::release();
 
 	@body(&renderer.gpu, &renderer.target);
 }

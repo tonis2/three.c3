@@ -17,6 +17,7 @@
 module three_tests::mcp;
 
 import three;
+import three_tests::device;
 import vk;
 import mcp;
 import qjs;
@@ -35,20 +36,14 @@ const String FIXTURE = "test/fixtures/textured.glb";
 *>
 macro @with_server(; @body(mcp::Server* server))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 160, 120)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(160, 120);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	three::ToolHost host = { .runtime = &runtime, .renderer = &renderer };
+	three::ToolHost host = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = three::new_mcp_server(&host);
 
 	@body(&server);
@@ -72,33 +67,27 @@ macro @with_server(; @body(mcp::Server* server))
 *>
 macro @with_validating_server(; @body(mcp::Server* server, three::JsRuntime* runtime))
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 160, 120, validate: true)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(160, 120, validate: true);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
 	qjs::Value global = runtime.js.global();
 	runtime.js.set_property(
 		global,
 		"provokeValidationError",
-		runtime.js.function(&js_provoke_error, "provokeValidationError", 0, &renderer)
+		runtime.js.function(&js_provoke_error, "provokeValidationError", 0, renderer)
 	);
 	runtime.js.set_property(
 		global,
 		"provokeValidationWarning",
-		runtime.js.function(&js_provoke_warning, "provokeValidationWarning", 0, &renderer)
+		runtime.js.function(&js_provoke_warning, "provokeValidationWarning", 0, renderer)
 	);
 	runtime.js.release(global);
 
-	three::ToolHost host = { .runtime = &runtime, .renderer = &renderer };
+	three::ToolHost host = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = three::new_mcp_server(&host);
 
 	@body(&server, &runtime);

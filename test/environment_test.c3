@@ -23,6 +23,7 @@
 module three_tests::environment;
 
 import three;
+import three_tests::device;
 import vk;
 import std::core::test;
 import std::math;
@@ -37,20 +38,14 @@ import image;
 *>
 macro @with_render(; @body(three::JsRuntime* run, three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 120, 90)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(120, 90);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	@body(&runtime, &renderer);
+	@body(&runtime, renderer);
 }
 
 <*

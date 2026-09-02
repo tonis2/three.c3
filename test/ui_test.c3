@@ -24,6 +24,7 @@
 module three_tests::ui;
 
 import three;
+import three_tests::device;
 import cui;
 import cui::widgets;
 import vk;
@@ -38,16 +39,10 @@ const uint H = 120;
 
 macro @with_renderer(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(W, H, validate: true);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H, validate: true)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 // A line, through the same entry point `three.debug.overlay` reaches.
@@ -442,16 +437,10 @@ fn void listen(void* host, uint node, three::UiEvent event)
 *>
 macro @with_panel(; @body(three::Renderer* renderer))
 {
-	vk::Instance instance = three::create_instance(true, headless: true)!!;
-	defer instance.free();
+	three::Renderer* renderer = device::borrow(520, 400, validate: true);
+	defer device::release();
 
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, 520, 400, validate: true)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
-
-	@body(&renderer);
+	@body(renderer);
 }
 
 // One frame, so the emit pass writes the absolute origins every hit test reads.
@@ -1932,20 +1921,14 @@ fn void a_dialog_carries_its_state_across_a_rebuild() @test
 
 macro @with_ui_js(; @body(three::Renderer* renderer, three::JsRuntime* run))
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
 	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, &renderer)!!;
+	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	@body(&renderer, &runtime);
+	@body(renderer, &runtime);
 }
 
 <*
@@ -2386,17 +2369,11 @@ fn void a_click_reaches_the_scripts_handler() @test
 *>
 fn void a_closed_context_leaves_no_interface_behind_it() @test
 {
-	vk::Instance instance = three::create_instance(false, headless: true)!!;
-	defer instance.free();
-
-	three::Renderer renderer;
-	renderer.init(instance, (vk::SurfaceKHR)null, W, H)!!;
-	defer renderer.free();
-
-	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
 
 	three::JsRuntime first;
-	first.open(&renderer.pass, &renderer)!!;
+	first.open(&renderer.pass, renderer)!!;
 	three::RunResult built = first.run(`
 		three.ui.set({ type: 'button', size: [60, 24], onClick: () => {} });
 	`);
@@ -2409,15 +2386,15 @@ fn void a_closed_context_leaves_no_interface_behind_it() @test
 	test::@check(renderer.ui.nodes.len() == 0, "the interface outlived the context that built it");
 
 	three::JsRuntime second;
-	second.open(&renderer.pass, &renderer)!!;
+	second.open(&renderer.pass, renderer)!!;
 	defer second.close();
 
 	image::Image shot = renderer.capture()!!;
 	shot.free();
 
 	// Straight at where the button was. Nothing should be listening.
-	point(&renderer, 30, 12, true);
-	point(&renderer, 30, 12, false);
+	point(renderer, 30, 12, true);
+	point(renderer, 30, 12, false);
 
 	three::RunResult after = second.run(`return 1;`);
 	defer after.free();
