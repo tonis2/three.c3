@@ -450,6 +450,20 @@ fn void frame(three::Renderer* renderer)
 	shot.free();
 }
 
+// Where a subtree ends in the paint order: emit appends each element's drawings
+// in the order it walks, so the largest index under here is how late the whole
+// thing was drawn.
+fn sz last_drawing(cui::Element* element)
+{
+	sz last = element.first_drawing + element.drawing_count;
+	foreach (child : element.children)
+	{
+		sz theirs = last_drawing(child);
+		if (theirs > last) last = theirs;
+	}
+	return last;
+}
+
 // A press and a release in the middle of an element cui has stamped with a name.
 // `MenuBar` stamps every title and item, and `Dialog` stamps its close glyph,
 // which is what lets these tests click what a person would click rather than a
@@ -1035,6 +1049,113 @@ fn void every_drawing_op_reaches_the_painter() @test
 			renderer.gpu.end_capture();
 			test::@check(errors.len == 0, "the drawing ops produced validation errors: %s", errors);
 		}
+	};
+}
+
+<*
+ `three.ui.scale` draws the same description bigger.
+
+ The scale is a coordinate space and not a redraw: the tree is laid out in a
+ space that much smaller and stretched back over the target, which is what makes
+ it reach cui's own chrome — a menu bar's height, a file browser's rows — that no
+ script can put a number on. A square is the cheapest thing to count: four times
+ the area at twice the scale, and exactly the picture it started as on the way
+ back.
+*>
+fn void the_scale_stretches_the_whole_interface() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		renderer.clear = { 0.02, 0.02, 0.02, 1.0 };
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint node = renderer.ui.push_node({ .kind = three::UiNodeKind.DRAW }, -1)!!;
+		renderer.ui.push_op(
+			node,
+			{ .kind = three::UiOpKind.RECT, .at = { 0, 0 }, .to = { 20, 20 }, .color = { 1.0, 1.0, 1.0, 1.0 } }
+		);
+		renderer.ui.commit_tree();
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		uint before = lit_pixels(&plain);
+		test::@check(before > 300, "the square did not draw at all (%d pixels)", before);
+
+		renderer.ui.set_scale(2.0);
+		image::Image bigger = renderer.capture()!!;
+		defer bigger.free();
+		uint after = lit_pixels(&bigger);
+
+		// Four times the area, with room for the edge either way — an exact
+		// count would be a claim about the rasteriser's coverage rule.
+		test::@check(
+			after > before * 3 && after < before * 5,
+			"20 x 20 covered %d pixels at scale 2 against %d at 1",
+			after,
+			before
+		);
+
+		renderer.ui.set_scale(1.0);
+		image::Image restored = renderer.capture()!!;
+		defer restored.free();
+		test::eq(lit_pixels(&restored), before);
+	};
+}
+
+<*
+ An open dropdown covers the fields under it, however deep in the panel it sits.
+
+ The shape every properties panel has: a chooser in a row near the top and more
+ of the form below it. A raise is a change to the paint order among SIBLINGS, so
+ without it climbing to the row and the column above, the rows built after the
+ chooser paint over its open list — the list is still there and still takes the
+ click, which is a control that reads as broken while behaving perfectly. Asserted
+ as paint order rather than as pixels: which pixel a popup's border lands on is a
+ fact about the style, and the bug was never about where it was drawn.
+*>
+fn void an_open_dropdown_paints_over_the_rows_below_it() @test
+{
+	@with_panel(; three::Renderer* renderer)
+	{
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint column = renderer.ui.push_node({ .kind = three::UiNodeKind.COLUMN, .gap = 6 }, -1)!!;
+		uint row = renderer.ui.push_node({ .kind = three::UiNodeKind.ROW, .gap = 8 }, (int)column)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "mode" }, (int)row)!!;
+		uint select = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.SELECT, .key = "mode", .selected = 0, .has_selected = true },
+			(int)row
+		)!!;
+		renderer.ui.push_option(select, "grid");
+		renderer.ui.push_option(select, "face");
+		renderer.ui.push_option(select, "marker");
+		// The rest of the form: the rows a properties panel puts under its
+		// chooser, and the ones that used to paint over the open list.
+		uint under = renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "id" }, (int)column)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "position" }, (int)column)!!;
+		renderer.ui.push_node({ .kind = three::UiNodeKind.LABEL, .text = "rotation" }, (int)column)!!;
+		renderer.ui.commit_tree();
+		frame(renderer);
+
+		cui::Element* head = renderer.ui.nodes[select].element;
+		cui::Element* rest = renderer.ui.nodes[under].element;
+		cui::Element* form = renderer.ui.nodes[row].element;
+		test::@check(!form.raise_path, "something was raised before the list was opened");
+
+		float x = head.absolute.x + 10.0f;
+		float y = head.absolute.y + 8.0f;
+		point(renderer, x, y, true);
+		point(renderer, x, y, false);
+		frame(renderer);
+
+		cui::widgets::Select* chooser = head.widget_as(cui::widgets::Select);
+		test::@check(chooser.open, "the click did not open the list");
+		test::@check(form.raise_path, "the raise did not reach the row the chooser is in");
+		test::@check(
+			last_drawing(head) > rest.first_drawing,
+			"the open list paints at %d, under the form's own rows at %d",
+			(int)last_drawing(head),
+			(int)rest.first_drawing
+		);
 	};
 }
 
@@ -3079,6 +3200,67 @@ fn void no_slot_reports_no_corner() @test
 		Vec2 origin = renderer.ui.slot_origin();
 		test::@check(origin.x == 0.0 && origin.y == 0.0,
 			"an unoffered slot answered %f, %f", origin.x, origin.y);
+	};
+}
+
+<*
+ The interface follows the target when it is resized, not just the picture.
+
+ `ensure` lays the tree out once, against whatever extent the target had the
+ first time something asked for an interface — the bug this guards against is
+ `resize_target` moving the target's images and the post chain and leaving that
+ layout behind, so a maximised window drew its menu bar and its panels for the
+ window it used to be. An anchored corner is the plainest way to see it: it has
+ to be at the new corner after a resize and gone from the old one.
+*>
+fn void the_interface_follows_the_target_when_it_is_resized() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint anchored = renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.ANCHORED,
+				// CrossAlign ordinals — 2 is END on both axes, the bottom-right corner.
+				.anchor_h = 2,
+				.anchor_v = 2,
+			},
+			-1
+		)!!;
+		renderer.ui.push_node(
+			{
+				.kind = three::UiNodeKind.RECT,
+				.size = { 40, 40 },
+				.color = { 1.0, 0.0, 0.0, 1.0 },
+			},
+			(int)anchored
+		)!!;
+		renderer.ui.commit_tree();
+
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+		test::@check(before.width == W, "the frame came back the wrong size before any resize");
+		test::@check(
+			red_at(&before, W - 10, H - 10),
+			"the anchored rect was not in the old target's bottom-right corner"
+		);
+
+		renderer.resize_target(W + 200, H + 120)!!;
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+		test::@check(after.width == W + 200, "the picture did not follow the target's new width");
+		test::@check(
+			red_at(&after, W + 200 - 10, H + 120 - 10),
+			"the interface stayed laid out for the old extent after a resize"
+		);
+		test::@check(
+			!red_at(&after, W - 10, H - 10),
+			"the anchored rect was still at the old corner instead of the new one"
+		);
+
+		renderer.ui.clear_tree();
+		renderer.resize_target(W, H)!!;
 	};
 }
 

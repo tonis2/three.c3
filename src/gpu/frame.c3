@@ -262,12 +262,14 @@ fn Renderer? Renderer.init(
 
  ## Everything that has to hear about it
 
- The target's own two images, and the post chain's. Nothing else: the scene's
- pipelines take their viewport and scissor dynamically, so no pipeline is
- rebuilt; the swapchain reads `target.extent` when it records the blit, so the
- destination rect follows on the next frame; the interface is laid out per frame
- against the attachment it is drawn into; the composite is the window's size and
- not this one; and the shadow map has a size of its own.
+ The target's own two images, the post chain's, and the interface's root
+ constraints — `UiLayer.resize` re-lays the tree out against the new extent, or
+ the menu bar and every anchored widget would stay sized for the old one while
+ the picture around them grew. Nothing else: the scene's pipelines take their
+ viewport and scissor dynamically, so no pipeline is rebuilt; the swapchain
+ reads `target.extent` when it records the blit, so the destination rect
+ follows on the next frame; the composite is the window's size and not this
+ one; and the shadow map has a size of its own.
 
  The chain is told through `ensure_images`, which already compares its own
  extent against the target's and rebuilds when they differ — the path a window
@@ -300,6 +302,7 @@ fn void? Renderer.resize_target(&self, uint width, uint height)
 	self.gpu.handle.waitIdle();
 	self.target.free(&self.gpu);
 	self.target = next;
+	self.ui.resize(&self.target);
 
 	if (self.post.active()) self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
 }

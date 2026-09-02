@@ -118,6 +118,7 @@ fn void JsRuntime.bind_ui_verbs(&self, qjs::Value host)
 	self.bind(host, "uiClear", &js_ui_clear, 0);
 	self.bind(host, "uiMeasure", &js_ui_measure, 3);
 	self.bind(host, "uiSlot", &js_ui_slot, 0);
+	self.bind(host, "uiScale", &js_ui_scale, 1);
 }
 
 // ============================================================================
@@ -391,6 +392,53 @@ fn void js_ui_slot(
 	js.set_property(answer, "width", qjs::number_value((double)size.x));
 	js.set_property(answer, "height", qjs::number_value((double)size.y));
 	*out = answer;
+}
+
+<*
+ `three.ui.scale` — how big the interface is drawn, read with no argument and
+ written with one.
+
+ The layout runs in a space that much smaller and the pass stretches it back
+ over the target, so a 1.25 makes every widget, glyph and margin a quarter
+ bigger — the built-in chrome a script cannot reach with its own numbers
+ included. Glyphs stay sharp; they are rasterised at the target's density
+ whatever the interface was laid out in.
+
+ Deliberately not routed through `ui_layer`, for `js_ui_slot`'s reason: asking
+ how big the interface is drawn must not bring a GPU device up. A context with
+ no renderer answers 1 and remembers nothing, because it has nothing to draw.
+*>
+fn void js_ui_scale(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = qjs::number_value(1.0);
+		return;
+	}
+
+	if (argc > 0)
+	{
+		float wanted = arg_float(&js, argc, args, 0);
+		if (!(wanted > 0))
+		{
+			*out = js.raise("three.ui.scale wants a positive number — 1 is the size everything else is written against");
+			return;
+		}
+		self.renderer.ui.set_scale(wanted);
+	}
+
+	float now = self.renderer.ui.scale;
+	*out = qjs::number_value((double)(now > 0 ? now : 1.0));
 }
 
 <*

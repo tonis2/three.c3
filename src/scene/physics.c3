@@ -727,17 +727,21 @@ fn bool Physics.is_moving(&self)
 }
 
 <*
- Pushes whatever a script wrote onto the kinematic bodies, before the step.
+ Pushes whatever a script wrote onto the kinematic bodies and the triggers,
+ before the step.
 
  `set_kinematic_target` derives a velocity from the delta, which is what lets a
  dynamic body bounce off a moving platform correctly instead of being teleported
- through by it.
+ through by it. A trigger gets the same ride without the velocity: nothing
+ integrates it and nothing bounces off it, but its overlap test reads the
+ transform the solver was last handed — so a trigger whose node moves and is
+ not driven here overlaps whatever it overlapped when it was added, forever.
 *>
 fn void Physics.drive_kinematic(&self, Scene* scene)
 {
 	foreach (&body : self.bodies)
 	{
-		if (body.kind != BodyKind.KINEMATIC) continue;
+		if (body.kind != BodyKind.KINEMATIC && body.kind != BodyKind.TRIGGER) continue;
 		Node* node = scene.node(body.node);
 		if (node == null) continue;
 		self.world.set_kinematic_target(body.id, node.position, node.rotation, (float)(PHYSICS_STEP_MS / 1000.0));

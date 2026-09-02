@@ -18,6 +18,8 @@ import {
 	NoColorSpace,
 	SRGBColorSpace,
 	LinearSRGBColorSpace,
+	LinearFilter,
+	NearestFilter,
 } from './texture.js';
 import { FrontSide, BackSide, DoubleSide, NoBlending, NormalBlending, AdditiveBlending, Material, MeshLambertMaterial } from './material.js';
 import { ShaderMaterial } from './shader.js';
@@ -1439,6 +1441,13 @@ export const three = {
 	SRGBColorSpace,
 	LinearSRGBColorSpace,
 
+	// The sampler a texture is read through, spelled the way Three.js spells
+	// it. LinearFilter is the default and is right for a picture;
+	// NearestFilter is for pixels meant to be read as squares — pixel art,
+	// a palette a shader indexes, anything authored on a grid.
+	LinearFilter,
+	NearestFilter,
+
 	// Exported for `instanceof` and for building one by hand, which a script
 	// wants when it is describing a volume the scene does not hold yet — a
 	// plot to fill, a gap to check. Neither is constructed by the host.
@@ -1792,20 +1801,25 @@ export const three = {
 	// extension, so a JPEG somebody named .png loads correctly instead of
 	// being reported as corrupt.
 	//
-	// The second argument is `{ colorSpace, generateMipmaps }`, and the one
-	// worth knowing about is colorSpace. It defaults to sRGB, which is right
-	// for a picture of something and wrong for a map whose channels are
-	// numbers:
+	// The second argument is `{ colorSpace, generateMipmaps, filter }`, and the
+	// two worth knowing about are colorSpace and filter. colorSpace defaults to
+	// sRGB, which is right for a picture of something and wrong for a map whose
+	// channels are numbers:
 	//
 	//     const bricks = three.texture('brick.png');
 	//     const bumps  = three.texture('brick_normal.png',
 	//                                  { colorSpace: three.LinearSRGBColorSpace });
+	//
+	// filter defaults to linear, which is right for a picture, and Nearest is
+	// what pixel art and a shader-indexed table want:
+	//
+	//     const sprites = three.texture('sprites.png', { filter: three.NearestFilter });
 	texture(path, options = null) {
 		if (typeof path !== 'string' || path.length === 0) {
 			throw new TypeError('three.texture(path) wants a path to a .png, .jpg or .ktx2');
 		}
 		const chosen = uploadOptions(options, 'three.texture(path, options)');
-		return new Texture(H.texture(path, chosen.code, chosen.mips), path, chosen.space);
+		return new Texture(H.texture(path, chosen.code, chosen.mips, chosen.nearest), path, chosen.space);
 	},
 
 	// A text file out of the assets directory. The third thing that lives

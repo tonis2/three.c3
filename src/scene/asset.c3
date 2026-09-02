@@ -3270,6 +3270,7 @@ fn uint Assets.asset_image_count(&self, AssetId id)
  @param decoded : `8-bit. A 16-bit source must be refused before here, since to_rgba cannot narrow one.`
  @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
  @param mips : `False for pixels meant to be indexed exactly rather than sampled at a distance.`
+ @param nearest : `True for a nearest-filtered sampler — pixel art and shader-indexed tables.`
  @require decoded.bit_depth != 16
  @return `An index into Assets.textures.`
 *>
@@ -3278,7 +3279,8 @@ fn int? Assets.claim_texture(
 	Gpu* gpu,
 	image::Image decoded,
 	ColorSpace space = ColorSpace.SRGB,
-	bool mips = true
+	bool mips = true,
+	bool nearest = false
 )
 {
 	char[] rgba = decoded.to_rgba();
@@ -3287,7 +3289,8 @@ fn int? Assets.claim_texture(
 	ulong hash  = content_hash(rgba);
 	// Asked once, before the loop, and compared as a number: a chain the caller
 	// declined and one it asked for are different images too, and the difference
-	// is invisible in every other field.
+	// is invisible in every other field. The filter is in the key for the same
+	// reason — the sampler it decides is part of what "the same texture" means.
 	uint levels = gpu.levels_for(decoded.width, decoded.height, space, mips);
 	foreach (i, &existing : self.textures)
 	{
@@ -3295,14 +3298,15 @@ fn int? Assets.claim_texture(
 		if (existing.texture.hash == hash && existing.texture.width == decoded.width
 			&& existing.texture.height == decoded.height
 			&& existing.texture.space == space
-			&& existing.texture.levels == levels)
+			&& existing.texture.levels == levels
+			&& existing.texture.nearest == nearest)
 		{
 			existing.refs++;
 			return (int)i;
 		}
 	}
 
-	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips)!;
+	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips, nearest)!;
 
 	// A freed slot before a fresh one, for `Assets`'s reason: the table should
 	// be as large as the largest level, not as large as every level added up.
@@ -3382,12 +3386,13 @@ fn image::Image? decode_by_signature(char[] encoded)
 
  @param space : `SRGB for a colour map, LINEAR for a normal, roughness, height or lookup map.`
  @param mips : `False for pixels meant to be indexed exactly. A full chain otherwise.`
+ @param nearest : `True for a nearest-filtered sampler — pixel art and shader-indexed tables.`
  @return `An index into Assets.textures, at one reference.`
  @return ? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
  @return ? TEXTURE_FORMAT_UNKNOWN : `Not a PNG, a JPEG or a KTX2, by its first bytes.`
  @return ? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
 *>
-fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true)
+fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true, bool nearest = false)
 {
 	if (!file::is_file(path)) return TEXTURE_UNREADABLE~;
 
@@ -3403,7 +3408,7 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	defer decoded.free();
 
 	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
-	return self.claim_texture(gpu, decoded, space, mips);
+	return self.claim_texture(gpu, decoded, space, mips, nearest);
 }
 
 <*

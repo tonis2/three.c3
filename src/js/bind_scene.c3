@@ -48,8 +48,8 @@ fn void JsRuntime.install_bindings(&self)
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
-	self.bind(host, "texture", &js_texture, 3);
-	self.bind(host, "dataTexture", &js_data_texture, 5);
+	self.bind(host, "texture", &js_texture, 4);
+	self.bind(host, "dataTexture", &js_data_texture, 6);
 	self.bind(host, "textureDispose", &js_texture_dispose, 1);
 	self.bind(host, "textureRead", &js_texture_read, 2);
 	self.bind(host, "primitive", &js_primitive, 9);
@@ -858,9 +858,41 @@ fn void js_set_transform(
 	target.scale = {
 		arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10)
 	};
+	say_nan_transform(ref.scene, ref.id, target, argc, args);
 	// Not `dirty = true`: the world-matrix walk gained the right to skip itself,
 	// so the flag alone stopped being enough. See `Scene.mark_moved`.
 	ref.scene.mark_moved(ref.id);
+}
+
+<*
+ The advice a transform holding a non-finite component is owed.
+
+ Accepted rather than refused — the write happens — because a game that runs one
+ frame behind an exception is worse than one that runs with one mesh adrift, and
+ because the ordinary source of this is an arithmetic slip (`undefined` in a
+ `set`, a degenerate `normalize`) that the script will notice the moment it
+ looks. What it cannot do without a sentence is find it: a NaN position rides
+ `follow()` into a physics body and out the other side of every distance test,
+ which is how it costs an afternoon instead of a minute.
+
+ Deduplicated upstream by the advice sink, so a loop that writes NaN sixty times
+ a second is one line in the log.
+*>
+fn void say_nan_transform(Scene* scene, NodeId id, Node* node, int argc, qjs::Value* args) @local
+{
+	if (math::is_finite(node.position.x) && math::is_finite(node.position.y)
+		&& math::is_finite(node.position.z)
+		&& math::is_finite(node.scale.x) && math::is_finite(node.scale.y)
+		&& math::is_finite(node.scale.z))
+	{
+		return;
+	}
+	String what = node.name.len > 0 ? node.name.copy(tmem) : string::tformat("node %d", (int)id.index);
+	@advise(
+		"three: a NaN or infinite transform was written to '%s' — an undefined or non-numeric "
+			"component in a position.set(), scale or rotation? It draws nowhere and every distance "
+			"test against it answers NaN.",
+		what);
 }
 
 <*

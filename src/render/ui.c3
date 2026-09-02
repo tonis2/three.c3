@@ -957,6 +957,23 @@ struct UiLayer
 	// has no such guard, so the guard lives here. See `ui_dialog_close`.
 	bool closing_dialog;
 
+	// How many target pixels one interface point is worth. 1.0 is "the pixels
+	// the target is in", which is where this started and what every existing
+	// script is written against; 1.25 lays the whole interface out in a space
+	// that much smaller and stretches it back over the same target, so every
+	// widget, glyph and margin — cui's own chrome included, which no script can
+	// reach — comes out that much bigger. Text stays sharp: the atlas is signed
+	// distance fields and the pass rasterises at the target's own density.
+	//
+	// The one contract it bends is `three.ui.draw`: those coordinates are the
+	// interface's, so a HUD positioned from `three.input.pointer` divides by
+	// this. `set_scale` is the only writer, and it re-lays the tree out.
+	float scale;
+
+	// The target's extent in pixels, as `ensure` and `resize` last saw it. Kept
+	// because `set_scale` has to re-size the Ui and is not handed a target.
+	Vec2 extent;
+
 	// Whether the interface took this frame's pointer and keyboard. Recomputed
 	// by `feed`, read by the window loop — the click that presses a button must
 	// not also orbit the camera or reach a script.
@@ -986,7 +1003,8 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 {
 	if (self.ui != null) return;
 
-	Vec2 size = { (float)target.extent.width, (float)target.extent.height };
+	self.extent = { (float)target.extent.width, (float)target.extent.height };
+	Vec2 size = self.points(self.extent);
 
 	self.ui = cui::new_ui(size);
 	// From here on a failure has to take the Ui down with it, or the next
@@ -1051,6 +1069,57 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 	);
 	root.ignores_pointer = true;
 	self.ui.build(root);
+}
+
+<*
+ The target the layer draws into changed extent: re-lay the tree out against
+ the new pixels instead of the ones `ensure` first saw.
+
+ A no-op before `ensure` beyond remembering the extent — there is no `Ui` yet to
+ tell, and the layer's first `ensure` after the resize will build against the
+ current extent anyway. `Ui.resize` itself is already a no-op when the size did
+ not move, so this is safe to call on every `resize_target`, not just the ones
+ that touch the UI.
+
+ @param target : `The interface's new coordinate space — the same target ensure sized the layer to.`
+*>
+fn void UiLayer.resize(&self, Target* target)
+{
+	self.extent = { (float)target.extent.width, (float)target.extent.height };
+	if (self.ui == null) return;
+	self.ui.resize(self.points(self.extent));
+}
+
+<*
+ Interface points from target pixels — the whole of what `scale` does, in one
+ place so nothing divides by a zero `scale` on a layer nobody has scaled.
+
+ @param pixels : `A size or a position in the target's pixels.`
+ @return `The same thing in the coordinates the interface is laid out in.`
+*>
+fn Vec2 UiLayer.points(&self, Vec2 pixels)
+{
+	return self.scale > 0 ? pixels / self.scale : pixels;
+}
+
+<*
+ Lays the whole interface out in a space `scale` times smaller and lets the pass
+ stretch it back over the target: everything drawn comes out that much bigger,
+ cui's own chrome — a menu bar's height, a dialog's title, a file browser's rows
+ — included, which is the half a script cannot reach by writing its own numbers.
+
+ Takes effect on the next frame; the tree is re-laid out here rather than
+ rebuilt, so nothing anybody typed or scrolled is lost.
+
+ @param scale : `Target pixels per interface point, clamped to a sane range. 1 is the original coordinate space.`
+*>
+fn void UiLayer.set_scale(&self, float scale)
+{
+	float wanted = math::clamp(scale, 0.25f, 4.0f);
+	if (wanted == self.scale) return;
+	self.scale = wanted;
+	if (self.ui == null) return;
+	self.ui.resize(self.points(self.extent));
 }
 
 fn void UiLayer.free(&self)
@@ -2076,9 +2145,10 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 			// the pointer to any sibling mounted after it. A non-modal dialog
 			// keeps cui's own rule instead, where a later sibling paints over it
 			// on purpose: that is how an application's menu bar keeps its
-			// dropdowns above a panel built before it. Note the limit either
-			// way — a raise reorders one parent's children and never lifts a
-			// subtree above a whole floor mounted after it.
+			// dropdowns above a panel built before it. A raise carries up its
+			// ancestors, so this lifts the whole floor the panel is on — and
+			// the floors keep their own order, because each raised branch stays
+			// where it was among the other raised ones.
 			element.raised = spec.modal;
 		case FILE_BROWSER:
 			// `on_directory` is wired whether or not the script asked for it: it
@@ -2994,7 +3064,9 @@ fn void UiLayer.feed(&self, Cursor cursor, KeyBits keys, String text, float dt_m
 	}
 
 	cui::InputFrame frame = {
-		.mouse = { cursor.x, cursor.y },
+		// Into the interface's own coordinates, which are the target's pixels
+		// until something sets `scale`.
+		.mouse = self.points({ cursor.x, cursor.y }),
 		.buttons = { cursor.down, cursor.right, cursor.middle },
 		.scroll = cursor.scroll,
 		.scroll_x = cursor.scroll_x,
@@ -3068,7 +3140,7 @@ fn bool UiLayer.idle(&self)
 fn void? UiLayer.upload(&self, Target* target)
 {
 	if (self.ui == null) return;
-	self.pass.upload(self.ui, { (float)target.extent.width, (float)target.extent.height })!;
+	self.pass.upload(self.ui, self.points({ (float)target.extent.width, (float)target.extent.height }))!;
 }
 
 <*

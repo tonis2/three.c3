@@ -721,6 +721,18 @@ fn void? play_frames(
 		runtime.take_frame_output(&said);
 		if (said.len() > 0) io::print(said.str_view());
 
+		// `three.quit()` is honoured here as anywhere: the request was made from
+		// JavaScript and the tick that carried it is over, so nothing of the
+		// engine's is on the stack. The run says it ended early rather than
+		// pretending the frames asked for were the frames that ran — a probe that
+		// asks to quit and then keeps seeing output for another nine hundred
+		// frames reads as the verb doing nothing.
+		if (runtime.quit_wanted)
+		{
+			io::eprintfn("three: three.quit() ended this --frames run at frame %d of %d", i + 1, frames);
+			return;
+		}
+
 		bool last = i + 1 == frames;
 		bool due  = every > 0 && (i + 1) % every == 0;
 		bool shot = screenshot.len > 0 && (last || due);
