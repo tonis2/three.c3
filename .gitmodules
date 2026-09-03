@@ -1,33 +1,44 @@
 [submodule "lib/vulkan.c3l"]
 	path = lib/vulkan.c3l
 	url = https://github.com/tonis2/Vulkan.c3.git
+	branch = main
 [submodule "lib/quickjs.c3l"]
 	path = lib/quickjs.c3l
 	url = https://github.com/tonis2/quickjs.c3.git
+	branch = main
 [submodule "lib/gltf.c3l"]
 	path = lib/gltf.c3l
 	url = https://github.com/tonis2/gltf.c3.git
+	branch = main
 [submodule "lib/window.c3l"]
 	path = lib/window.c3l
 	url = https://github.com/tonis2/Window.c3.git
+	branch = main
 [submodule "lib/image.c3l"]
 	path = lib/image.c3l
 	url = https://github.com/tonis2/image.c3.git
+	branch = main
 [submodule "lib/collision.c3l"]
 	path = lib/collision.c3l
 	url = https://github.com/tonis2/collision.c3.git
+	branch = main
 [submodule "lib/mcp.c3l"]
 	path = lib/mcp.c3l
 	url = https://github.com/tonis2/mcp.c3l.git
+	branch = main
 [submodule "lib/slang.c3l"]
 	path = lib/slang.c3l
 	url = https://github.com/tonis2/slang.c3.git
+	branch = main
 [submodule "lib/ktx.c3l"]
 	path = lib/ktx.c3l
 	url = https://github.com/tonis2/ktx.c3.git
+	branch = main
 [submodule "lib/cui.c3l"]
 	path = lib/cui.c3l
 	url = https://github.com/tonis2/cui.git
+	branch = main
 [submodule "lib/font.c3l"]
 	path = lib/font.c3l
 	url = https://github.com/tonis2/font.c3.git
+	branch = main
