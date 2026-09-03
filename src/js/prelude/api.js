@@ -1921,6 +1921,36 @@ export const three = {
 		H.render();
 	},
 
+	// Draw one frame and write it to a .png, answering
+	// `{ path, width, height, bytes }`.
+	//
+	//   three.screenshot('build/sheet.png');
+	//
+	// The --screenshot flag as a verb, and the difference is that a script can
+	// take more than one picture of one run: set something up, call this, set
+	// up the next thing, call it again. Without it a script wanting six images
+	// had to arrange for the state of each to land on the frame
+	// `--frames n --every 1` would capture, which is a script written around
+	// the harness rather than around what it is doing.
+	//
+	// This draws the frame itself — a three.render() on the line before is a
+	// wasted frame, not a required one — and what it writes is what the window
+	// would show: post-processing, the interface and three.debug.overlay
+	// included, at three.renderSize().
+	//
+	// The path is the one scene.export writes through: under --assets it is
+	// inside the game directory and cannot climb out, a folder that is not
+	// there yet is made, and with no assets directory it is used as written.
+	//
+	// Needs a GPU device. Reading one back is three.texture(path), which is
+	// how a sheet baked through a post pass becomes a map on a material.
+	screenshot(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.screenshot(path) wants a path to write a .png to');
+		}
+		return H.screenshot(path);
+	},
+
 	// The shaders that run over the finished frame.
 	//
 	// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`

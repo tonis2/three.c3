@@ -82,6 +82,39 @@ never does across two different inputs.
 
 Draw one frame. `camera` is optional and must be `three.camera`.
 
+## three.screenshot(path)
+
+Draw one frame and write it to a `.png`. Answers `{ path, width, height, bytes }` — where it landed,
+the image, and the size of the file.
+
+```js
+pass.uniforms.channel = 0;
+three.screenshot('build/trim_0.png');
+pass.uniforms.channel = 1;
+three.screenshot('build/trim_1.png');
+```
+
+This is the `--screenshot` flag as a verb, and the difference is that a script can take more than one
+picture of one run. The flag writes the frame it was told to write on a schedule made of `--frames`
+and `--every`, so a script wanting six different images had to arrange for the state of each one to
+fall on the frame the flag would capture — a script written around the harness rather than around
+what it is doing.
+
+- **It draws the frame itself.** A `three.render()` on the line before is a wasted frame, not a
+  required one.
+- **What it writes is what the window would show**: the post chain, the interface and
+  `three.debug.overlay` are all in the file, at `three.renderSize()`.
+- **The path is `scene.export`'s sandbox.** Under `--assets` it is inside the game directory and
+  cannot climb out; a folder that is not there yet is made; with no assets directory it is used as
+  written, which is the `--script` and `--mcp` case.
+- Called from inside the animation callback it still happens now, submitting and waiting on its own
+  command buffer the way `three.render()` does. That is a device round trip in the middle of a tick.
+- Needs a GPU device.
+
+`three.texture(path)` reads one back, which is how a sheet baked through a post pass becomes a map on
+a material in the same run. `texture.save(path)` is the other direction for an image that is already
+a texture.
+
 ## three.stats()
 
 The numbers in the stats section, for the whole scene, with culling off.

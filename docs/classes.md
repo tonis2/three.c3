@@ -301,6 +301,7 @@ numbers and a blurred mip level of a lookup approximates nothing.
 ### Methods
 
 - `read(into)`
+- `save(path)`
 - `dispose()`
 - `toJSON()`
 - `toString()`
@@ -345,9 +346,33 @@ angles. An option this does not have is refused rather than ignored — there is
 ### Methods
 
 - `read(into)`
+- `save(path)` — write the pixels to a `.png`, without them passing through JavaScript
 - `dispose()`
 - `toJSON()`
 - `toString()`
+
+### Details
+
+#### save
+
+Write this texture's pixels to a `.png`, answering `{ path, width, height, bytes }`.
+
+```js
+const sheet = three.texture('build/trim_0.png');
+sheet.save('build/copy.png');
+```
+
+Not `read()` plus an encoder: the bytes never enter JavaScript, so a 2048² sheet costs no 16MB array.
+Reach for it when the file is the point — a generated `DataTexture` kept as an asset, an atlas pulled
+out of a `.glb` with `asset.image(...)`, a bake looked at outside the run.
+
+**What goes in the file is what was uploaded.** Nothing is converted here any more than in `read()`,
+so a normal map or an ORM sheet round trips through a file unchanged and `colorSpace` makes no
+difference — that is the sampler's decode, and this is upstream of it.
+
+Level 0, like `read()`. A KTX2 texture holding compressed blocks is refused by name: there are no
+pixels behind a block without a decoder. The path is the sandbox `scene.export` writes through, and a
+device is needed, because the image is on it.
 
 ## MeshLambertMaterial
 
