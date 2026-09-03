@@ -2291,7 +2291,15 @@ fn int? Exporter.texture_for(&self, Node* node)
 	if (encoded.len == 0)
 	{
 		char[]? made = self.encode_from_device(slot);
-		if (catch made) return -1;
+		// Counted rather than dropped. A block-compressed texture with no source
+		// file behind it cannot be read back as pixels, and a glTF written
+		// without it is a material that lost its picture — which the report has
+		// to say, because the file itself cannot.
+		if (catch made)
+		{
+			self.report.skipped++;
+			return -1;
+		}
 		encoded = made;
 		own = true;
 	}
@@ -2634,7 +2642,11 @@ fn int Exporter.device_texture_for(&self, int slot)
 	}
 
 	char[]? encoded = self.encode_from_device(slot);
-	if (catch encoded) return -1;
+	if (catch encoded)
+	{
+		self.report.skipped++;
+		return -1;
+	}
 	defer free(encoded);
 
 	uint image   = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);

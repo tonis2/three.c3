@@ -7,6 +7,7 @@
 *.obj
 *.elf
 .claude
+.vscode
 
 node_modules
 

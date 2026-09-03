@@ -912,13 +912,18 @@ fn usz Assets.texture_bytes(&self)
 	foreach (&shared : self.textures)
 	{
 		if (!shared.alive) continue;
-		uint width  = shared.texture.width;
-		uint height = shared.texture.height;
+		TextureFormat format = shared.texture.format;
 		for (uint level = 0; level < shared.texture.levels; level++)
 		{
-			total += (usz)width * height * 4;
-			if (width > 1) width /= 2;
-			if (height > 1) height /= 2;
+			// Through the format rather than as `width * height * 4`, which was
+			// right while RGBA8 was the only possibility and over-reports a BC7
+			// texture fourfold. `image_size` also rounds up to whole blocks, so
+			// the small levels — where a block costs the same 16 bytes however
+			// few texels are left in it — are counted as the device holds them.
+			total += (usz)format.image_size(
+				level_extent(shared.texture.width, level),
+				level_extent(shared.texture.height, level)
+			);
 		}
 	}
 	return total;
@@ -3119,6 +3124,16 @@ fn int? Assets.decode_material_texture(
 	char[]? encoded = stream.get_image_data((uint)image_index);
 	if (catch encoded) return -1;
 
+	// The same fast path a script's own `.ktx2` takes, asked in the same order.
+	// A `.glb` carrying engine-ready BCn images gets them on the device as
+	// blocks; `KHR_texture_basisu` is ETC1S or UASTC, which falls through here
+	// and is transcoded to RGBA8 below exactly as before.
+	//
+	// No `nearest`: a glTF sampler's filter is the material's business and this
+	// door has never taken one.
+	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, false);
+	if (try claimed) return claimed;
+
 	// A texture that will not decode costs that material its texture and
 	// nothing else. Failing the whole load instead would mean one KTX2 image in
 	// a ninety-mesh file renders nothing at all, which is strictly less useful
@@ -3291,13 +3306,16 @@ fn int? Assets.claim_texture(
 	// declined and one it asked for are different images too, and the difference
 	// is invisible in every other field. The filter is in the key for the same
 	// reason — the sampler it decides is part of what "the same texture" means.
-	uint levels = gpu.levels_for(decoded.width, decoded.height, space, mips);
+	// The format joins them both: this path decodes to RGBA8, and the same
+	// picture uploaded as blocks is a different image on the device.
+	TextureFormat layout = rgba8(space);
+	uint levels = gpu.levels_for(decoded.width, decoded.height, layout, mips);
 	foreach (i, &existing : self.textures)
 	{
 		if (!existing.alive) continue;
 		if (existing.texture.hash == hash && existing.texture.width == decoded.width
 			&& existing.texture.height == decoded.height
-			&& existing.texture.space == space
+			&& existing.texture.format.equals(layout)
 			&& existing.texture.levels == levels
 			&& existing.texture.nearest == nearest)
 		{
@@ -3307,9 +3325,19 @@ fn int? Assets.claim_texture(
 	}
 
 	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips, nearest)!;
+	return self.install_texture(uploaded);
+}
 
-	// A freed slot before a fresh one, for `Assets`'s reason: the table should
-	// be as large as the largest level, not as large as every level added up.
+<*
+ Puts an uploaded texture in a slot and hands back the index.
+
+ A freed slot before a fresh one, for `Assets`'s reason: the table should be as
+ large as the largest level, not as large as every level added up. Shared by both
+ claim paths, because where a texture lands has nothing to do with how it was
+ encoded.
+*>
+fn int Assets.install_texture(&self, Texture uploaded)
+{
 	if (self.free_textures.len() > 0)
 	{
 		uint index = self.free_textures.pop()!!;
@@ -3319,6 +3347,49 @@ fn int? Assets.claim_texture(
 
 	self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
 	return (int)self.textures.len() - 1;
+}
+
+<*
+ The same claim for an image that arrives already encoded.
+
+ `claim_texture`'s twin, and it dedupes against the same table by the same key —
+ hash, extents, format, levels, filter. The hash is over every level's blocks
+ rather than over decoded pixels, which has one consequence worth stating: a
+ picture loaded as a `.png` and the same picture loaded as a `.ktx2` no longer
+ share a slot. They are two different images on the device, in two formats, and
+ sharing one would hand whichever caller came second the other one's format.
+
+ There is no `mips` argument because there is no choice to make. The chain is
+ whatever the file shipped; a caller who wants one level out of a four-level file
+ wants a different file.
+*>
+fn int? Assets.claim_texture_levels(&self, Gpu* gpu, BlockImage blocks, bool nearest = false)
+{
+	ulong hash  = content_hash_levels(blocks.levels);
+	uint levels = (uint)blocks.levels.len;
+
+	foreach (i, &existing : self.textures)
+	{
+		if (!existing.alive) continue;
+		if (existing.texture.hash == hash && existing.texture.width == blocks.width
+			&& existing.texture.height == blocks.height
+			&& existing.texture.format.equals(blocks.format)
+			&& existing.texture.levels == levels
+			&& existing.texture.nearest == nearest)
+		{
+			existing.refs++;
+			return (int)i;
+		}
+	}
+
+	Texture uploaded = gpu.create_texture_levels(
+		blocks.levels,
+		blocks.width,
+		blocks.height,
+		blocks.format,
+		nearest
+	)!;
+	return self.install_texture(uploaded);
 }
 
 <*
@@ -3400,6 +3471,19 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	if (catch encoded) return TEXTURE_UNREADABLE~;
 	defer free(encoded);
 
+	// Blocks first, and only for a file that actually holds them. Everything
+	// about this is a fast path rather than a different feature: the same
+	// picture arrives either way, and what changes is whether it is decoded to
+	// RGBA8 on the way — 86% of a texture's load time by `notes.md` §23's
+	// measurement, and four times its memory.
+	//
+	// Three ways to fall through, all of them ordinary: not a KTX2, a KTX2 whose
+	// contents are Basis or uncompressed, or a device that cannot sample the
+	// family the file is in. The last is why `supports` is asked here rather
+	// than left to the upload — here there is still a decode to fall back on.
+	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, nearest);
+	if (try claimed) return claimed;
+
 	// Counted with the glTF decodes rather than separately: `decodes` answers
 	// "how much decoding has this table paid for", and a script that reloads the
 	// same PNG in a loop is exactly the case that number exists to expose.
@@ -3409,6 +3493,41 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 
 	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
 	return self.claim_texture(gpu, decoded, space, mips, nearest);
+}
+
+<*
+ The block route, or a fault meaning "use the decoder".
+
+ Split out so both doors — a path a script named and an image inside a `.glb` —
+ ask the same question in the same order, and so the answer "no, decode it" is a
+ fault rather than a flag every caller has to remember to check.
+
+ Every fault here means exactly one thing: fall through. None of them is a
+ failure worth reporting, because the RGBA8 path that follows renders the same
+ picture.
+*>
+fn int? Assets.claim_blocks_if_possible(
+	&self,
+	Gpu* gpu,
+	char[] encoded,
+	ColorSpace space,
+	bool mips,
+	bool nearest
+)
+{
+	// A caller that asked for no chain is obeyed by decoding, because a block
+	// file's levels are not this side's to decline — they are in the file, and
+	// handing back four of them to somebody who asked for one would be ignoring
+	// the argument rather than honouring the format. `mips: false` means pixels
+	// meant to be indexed exactly, and that caller wants the decoder.
+	if (!mips) return UNSUPPORTED_IMAGE~;
+	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
+
+	BlockImage blocks = decode_ktx2_blocks(encoded, space)!;
+	defer blocks.free();
+
+	if (!gpu.supports(blocks.format)) return UNSUPPORTED_IMAGE~;
+	return self.claim_texture_levels(gpu, blocks, nearest);
 }
 
 <*

@@ -33,6 +33,7 @@ import image;
 import std::core::test;
 import std::io;
 import std::io::file;
+import ktx::container;
 import std::math;
 import std::math::vector;
 
@@ -41,6 +42,8 @@ const String GREEN = "test/fixtures/green.jpg";
 const String MISLABELLED = "test/fixtures/mislabelled.png";
 const String NOT_AN_IMAGE = "test/fixtures/not_an_image.png";
 const String DEEP = "test/fixtures/deep.png";
+const String OBLONG_BC7 = "test/fixtures/oblong_bc7.ktx2";
+const String TEXTURED_BC7 = "test/fixtures/textured_bc7.glb";
 
 <*
  The glTF whose two embedded images hold the checkerboard `checker.png` holds.
@@ -1243,8 +1246,9 @@ fn int upload_solid(
  because the two features it needs are **required** of `R8G8B8A8_SRGB` and
  `R8G8B8A8_UNORM` in optimal tiling: blit source, blit destination and linear
  filtering are all in the mandatory format table. The runtime check exists for
- the compressed formats KTX2 will bring, where it is a real question and the
- answer is no — a BC7 image carries its own levels and must never be blitted.
+ the compressed formats KTX2 brings, where it is a real question and the answer
+ is no — a BC7 image carries its own levels and is never blitted, which is why
+ `levels_for` short-circuits for a block family before it asks.
 *>
 fn void a_texture_uploads_a_full_mip_chain() @test
 {
@@ -1252,7 +1256,7 @@ fn void a_texture_uploads_a_full_mip_chain() @test
 	{
 		three::Assets* assets = &renderer.pass.assets;
 
-		test::@check(renderer.gpu.can_generate_mips(three::ColorSpace.SRGB.format()),
+		test::@check(renderer.gpu.can_generate_mips(three::rgba8(three::ColorSpace.SRGB).vk()),
 			"this device reports it cannot blit RGBA8, which the Vulkan mandatory format table requires");
 
 		int checker = assets.load_texture_file(&renderer.gpu, CHECKER)!!;
@@ -1380,9 +1384,9 @@ fn void the_colourspace_is_part_of_a_textures_identity() @test
 			"the same file in two colourspaces shared slot %d, so one of them is being decoded wrong", picture);
 		test::@check(assets.texture_count() == 2,
 			"%d textures resident for two colourspaces of one file", assets.texture_count());
-		test::@check(assets.texture_at(picture).space == three::ColorSpace.SRGB,
+		test::@check(assets.texture_at(picture).format.space == three::ColorSpace.SRGB,
 			"the default load is not sRGB, so every texture that predates this argument changed meaning");
-		test::@check(assets.texture_at(numbers).space == three::ColorSpace.LINEAR,
+		test::@check(assets.texture_at(numbers).format.space == three::ColorSpace.LINEAR,
 			"the linear load did not get a linear format");
 
 		int again = assets.load_texture_file(&renderer.gpu, CHECKER, three::ColorSpace.LINEAR)!!;
@@ -1887,5 +1891,272 @@ fn void an_index_past_the_end_says_how_many_there_are() @test
 			"the message names the range: %s", result.value);
 		test::@check(result.value.contains(`"typed":"TypeError"`),
 			"a string index is a TypeError rather than a silent coercion: %s", result.value);
+	};
+}
+
+<*
+ A block format's level is measured in whole blocks, not in texels.
+
+ The arithmetic `width * height * 4` was right for as long as RGBA8 was the only
+ thing a texture could be, and it is wrong for every BC family in a way that gets
+ quieter as the level gets smaller: a 2x2 level of a BC7 image is one entire 4x4
+ block and costs 16 bytes, not 4. Under-counting there does not fail loudly — it
+ hands a copy a short source and reads whatever follows it.
+
+ 12x6 is `oblong_bc7.ktx2`'s shape, chosen so three of its four levels round up.
+ No device is needed: this is arithmetic about a format, and asserting it here
+ rather than through an upload is what makes a failure name the sum rather than
+ the frame it corrupted.
+*>
+fn void a_block_level_is_measured_in_whole_blocks() @test
+{
+	three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+	three::TextureFormat rgba = three::rgba8(three::ColorSpace.SRGB);
+
+	test::@check(!rgba.is_block(), "RGBA8 reported itself as block compressed");
+	test::@check(bc7.is_block(), "BC7 did not report itself as block compressed");
+
+	// RGBA8 keeps answering exactly what every caller before this assumed.
+	test::@check(rgba.image_size(8, 8) == 256, "8x8 RGBA8 is %d bytes, not 256", (int)rgba.image_size(8, 8));
+	test::@check(rgba.image_size(1, 1) == 4, "1x1 RGBA8 is %d bytes, not 4", (int)rgba.image_size(1, 1));
+
+	// The four levels of the 12x6 fixture: 3x2, 2x1, 1x1 and 1x1 blocks.
+	test::@check(bc7.image_size(12, 6) == 96, "12x6 BC7 is %d bytes, not 96", (int)bc7.image_size(12, 6));
+	test::@check(bc7.image_size(6, 3) == 32, "6x3 BC7 is %d bytes, not 32", (int)bc7.image_size(6, 3));
+	test::@check(bc7.image_size(3, 1) == 16, "3x1 BC7 is %d bytes, not 16", (int)bc7.image_size(3, 1));
+	test::@check(bc7.image_size(1, 1) == 16, "1x1 BC7 is %d bytes, not one whole block", (int)bc7.image_size(1, 1));
+
+	// The level that would be 4 bytes if texels were counted instead of blocks.
+	test::@check(bc7.image_size(2, 2) == 16, "2x2 BC7 is %d bytes, not one whole block", (int)bc7.image_size(2, 2));
+
+	// BC1 is the half-rate family and the only one that is not 16 bytes a block.
+	three::TextureFormat bc1 = { three::TextureFamily.BC1, three::ColorSpace.SRGB };
+	test::@check(bc1.image_size(4, 4) == 8, "4x4 BC1 is %d bytes, not 8", (int)bc1.image_size(4, 4));
+}
+
+<*
+ The space picks between two forms of a family, and BC5 has only one.
+
+ A two-channel format has no sRGB encoding at all, so `LINEAR` and `SRGB` have to
+ resolve to the same thing there. Answering an sRGB BC5 would be answering with a
+ format that does not exist, and the failure would arrive as a device error at
+ image creation rather than as anything about a normal map.
+*>
+fn void a_format_resolves_from_family_and_space() @test
+{
+	test::@check(three::rgba8(three::ColorSpace.SRGB).vk() == FORMAT_R8G8B8A8_SRGB,
+		"RGBA8 sRGB did not resolve to the format every existing texture uploads as");
+	test::@check(three::rgba8(three::ColorSpace.LINEAR).vk() == FORMAT_R8G8B8A8_UNORM,
+		"RGBA8 linear did not resolve to UNORM");
+
+	three::TextureFormat bc7_srgb = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+	three::TextureFormat bc7_lin = { three::TextureFamily.BC7, three::ColorSpace.LINEAR };
+	test::@check(bc7_srgb.vk() == FORMAT_BC7_SRGB_BLOCK, "BC7 sRGB did not resolve to the sRGB block format");
+	test::@check(bc7_lin.vk() == FORMAT_BC7_UNORM_BLOCK, "BC7 linear did not resolve to the UNORM block format");
+	test::@check(!bc7_srgb.equals(bc7_lin), "two colourspaces of BC7 compared equal, so they would share a slot");
+
+	three::TextureFormat bc5_srgb = { three::TextureFamily.BC5, three::ColorSpace.SRGB };
+	three::TextureFormat bc5_lin = { three::TextureFamily.BC5, three::ColorSpace.LINEAR };
+	test::@check(bc5_srgb.vk() == FORMAT_BC5_UNORM_BLOCK && bc5_lin.vk() == FORMAT_BC5_UNORM_BLOCK,
+		"BC5 obeyed the colourspace, and there is no sRGB BC5 to obey it with");
+}
+
+<*
+ A BC7 file's own levels reach the device as blocks.
+
+ The upload path `create_texture` cannot take: `oblong_bc7.ktx2` is 12x6 with
+ four levels of 96, 32, 16 and 16 bytes, and every one of those numbers is a
+ block count rather than a texel count. Read straight out of the container so
+ that what is asserted is the file's bytes and not a re-encode this test did.
+
+ The extents are the load-bearing half. 12x6 is neither square nor a power of
+ two, so a width and a height swapped anywhere between the level index and the
+ copy region survives every other fixture in this file and fails here.
+*>
+fn void a_block_compressed_file_uploads_its_own_levels() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		char[] encoded = (char[])file::load_temp(OBLONG_BC7)!!;
+		container::Texture ktx = container::read(tmem, encoded)!!;
+		defer ktx.free();
+
+		test::@check(ktx.vk_format == 146, "the fixture is not BC7_SRGB but format %d", ktx.vk_format);
+		test::@check(ktx.level_count() == 4, "the fixture has %d levels, not 4", ktx.level_count());
+
+		char[][] levels = mem::new_array(char[], ktx.level_count());
+		defer free(levels);
+		for (uint i = 0; i < ktx.level_count(); i++) levels[i] = ktx.image(i, 0, 0)!!;
+
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		three::Texture uploaded = renderer.gpu.create_texture_levels(levels, 12, 6, bc7)!!;
+		defer uploaded.free(&renderer.gpu);
+
+		test::@check(uploaded.width == 12 && uploaded.height == 6,
+			"uploaded as %dx%d, not 12x6", uploaded.width, uploaded.height);
+		test::@check(uploaded.levels == 4, "uploaded %d levels, not the file's 4", uploaded.levels);
+		test::@check(uploaded.format.equals(bc7), "the texture did not keep the format it was uploaded as");
+		test::@check(uploaded.image != null && uploaded.view != null && uploaded.sampler != null,
+			"a level array produced an incomplete texture");
+
+		// What the file actually costs on the device, which is what §23 is for:
+		// 160 bytes of blocks against the 376 the same picture costs as RGBA8.
+		sz resident = 0;
+		for (uint i = 0; i < uploaded.levels; i++)
+		{
+			resident += bc7.image_size(three::level_extent(12, i), three::level_extent(6, i));
+		}
+		test::@check(resident == 160, "the four levels are %d bytes, not 160", (int)resident);
+	};
+}
+
+<*
+ A level handed over short is refused rather than copied.
+
+ The failure it stands for is silent: `vkCmdCopyBufferToImage` given a region
+ larger than the buffer behind it reads past the end, and the validation layer
+ catches it only when it happens to be running. Checked before the image exists,
+ so a malformed file costs no device object either.
+*>
+fn void a_short_level_is_refused() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+
+		// 8x8 BC7 is four blocks, 64 bytes. Hand over 48 and say so.
+		char[] short_level = mem::new_array(char, 48);
+		defer free(short_level);
+		char[][] one = { short_level };
+
+		three::Texture? refused = renderer.gpu.create_texture_levels(one, 8, 8, bc7);
+		test::@check(@catch(refused) == three::TEXTURE_LEVEL_WRONG_SIZE,
+			"a 48-byte level for a 64-byte 8x8 BC7 image was not refused");
+
+		// More levels than the extents can have is the other malformed file.
+		// A 4x4 image has exactly three (4, 2, 1), so four is one too many.
+		char[] block = mem::new_array(char, 16);
+		defer free(block);
+		char[][] too_many = { block, block, block, block };
+		three::Texture? overrun = renderer.gpu.create_texture_levels(too_many, 4, 4, bc7);
+		test::@check(@catch(overrun) == three::TEXTURE_TOO_MANY_LEVELS,
+			"four levels for a 4x4 image, which can have three, was not refused");
+	};
+}
+
+<*
+ The device is asked before a block format is uploaded, and the guard agrees
+ with the answer.
+
+ What is asserted here is the *contract*, not a verdict: whether this machine
+ samples BC7 is a fact about this machine, and a test that hard-coded either
+ answer would be a test of the development laptop. So RGBA8 is asserted
+ supported — it is in Vulkan's mandatory format table and a device failing that
+ could not draw anything — and BC7 is asserted only to agree with itself: if the
+ query says no, the upload must refuse rather than create an image the device
+ cannot sample.
+
+ That refusal is the safety net and not the mechanism. Choosing to decode to
+ RGBA8 instead belongs where the bytes are still encoded, which is a task away;
+ by the time `create_texture_levels` has the blocks, refusing is all that is
+ left to do correctly.
+*>
+fn void a_device_is_asked_before_a_block_upload() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat srgb8 = three::rgba8(three::ColorSpace.SRGB);
+		three::TextureFormat lin8 = three::rgba8(three::ColorSpace.LINEAR);
+		test::@check(renderer.gpu.supports(srgb8) && renderer.gpu.supports(lin8),
+			"this device reports it cannot sample RGBA8, which the mandatory format table requires");
+
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		bool available = renderer.gpu.supports(bc7);
+
+		// One 4x4 block, which is a whole valid BC7 image of one level.
+		char[] block = mem::new_array(char, 16);
+		defer free(block);
+		char[][] one = { block };
+		three::Texture? made = renderer.gpu.create_texture_levels(one, 4, 4, bc7);
+
+		if (available)
+		{
+			test::@check(@ok(made), "the device samples BC7 and the upload refused anyway");
+			three::Texture built = made!!;
+			built.free(&renderer.gpu);
+		}
+		else
+		{
+			test::@check(@catch(made) == three::TEXTURE_FORMAT_UNSUPPORTED,
+				"the device cannot sample BC7 and the upload did not refuse");
+		}
+	};
+}
+
+<*
+ A `.glb` carrying a BC7 image gets it on the device as blocks.
+
+ The other door. `three.texture(path)` and an image inside a glTF are two
+ separate load paths that have to make the same decision, and a fast path wired
+ into only one of them is the bug this asserts against — a kit that loads its
+ textures through its `.glb` would keep paying the decode while a script naming
+ the same file by hand did not.
+
+ `textured_bc7.glb` is `textured.glb` with image 0 replaced by
+ `checker_bc7.ktx2`, so the file holds one of each: a BC7 KTX2 and the PNG it
+ was encoded from. That pairing is what makes the byte count an assertion rather
+ than a number — 112 for the blocks against 340 for the same 8x8 picture as
+ RGBA8, in one file, at the same moment.
+*>
+fn void a_glb_image_can_be_block_compressed() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::AssetId id = assets.load(&renderer.gpu, TEXTURED_BC7)!!;
+
+		int blocks = assets.load_asset_image(&renderer.gpu, id, 0)!!;
+		int pixels = assets.load_asset_image(&renderer.gpu, id, 1)!!;
+		test::@check(blocks >= 0 && pixels >= 0, "one of the two images did not load");
+
+		three::Texture* bc7 = assets.texture_at(blocks);
+		three::Texture* png = assets.texture_at(pixels);
+
+		test::@check(bc7.format.family == three::TextureFamily.BC7,
+			"the KTX2 inside the .glb was decoded to RGBA8 rather than kept as blocks");
+		test::@check(png.format.family == three::TextureFamily.RGBA8,
+			"the PNG beside it did not stay RGBA8");
+		test::@check(bc7.levels == 4 && png.levels == 4,
+			"the two images have %d and %d levels", bc7.levels, png.levels);
+
+		// The same picture, both ways, in one file: 112 bytes against 340.
+		test::@check(assets.texture_bytes() == 452,
+			"the pair costs %d bytes, not the 112 + 340 they should",
+			(int)assets.texture_bytes());
+	};
+}
+
+<*
+ A compressed texture refuses a readback rather than answering with blocks.
+
+ `read_pixels` promises `width * height * 4` bytes of pixels. A BC7 image has a
+ quarter that many bytes and they are not pixels, so the copy would succeed and
+ hand back a corrupt image with the tail of the destination left as it was —
+ a failure that looks like a decoder bug and names nothing.
+*>
+fn void a_compressed_texture_refuses_a_readback() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		int slot = assets.load_texture_file(&renderer.gpu, OBLONG_BC7)!!;
+		three::Texture* texture = assets.texture_at(slot);
+
+		test::@check(texture.format.is_block(), "the fixture did not take the block path at all");
+
+		char[] into = mem::new_array(char, 12 * 6 * 4);
+		defer free(into);
+		test::@check(@catch(texture.read_pixels(&renderer.gpu, into)) == three::TEXTURE_IS_COMPRESSED,
+			"a BC7 texture answered a pixel readback instead of refusing it");
 	};
 }

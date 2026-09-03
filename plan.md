@@ -242,81 +242,34 @@ repo.
 
 ## 23. Compressed textures
 
-A KTX2 arrives, its blocks are expanded to RGBA8 and its authored mip levels are
-thrown away. `src/scene/ktx.c3:26` says why and the reason is honest: the GPU side
-has one definition of a texture and it is `width * height * 4`. The cost is four
-times the VRAM of every texture that shipped as BC7, and a chain box-filtered
-pairwise on the device when a better one was already in the file.
-`src/gpu/texture.c3:117` has been describing the fix for a while — "a BC7 image
-arriving with KTX2 carries its own chain and must never be blitted at all".
+**Done.** A plain BCn KTX2 now reaches the device as blocks, with the mip levels
+its author wrote, through both doors — `three.texture(path)` and an image inside
+a `.glb`. `notes.md` §23 has the design and the measurements; the short version
+is 2048x2048 going from 397 ms and 21.3 MiB to **23 ms and 5.3 MiB**, which is
+17x the load speed and a quarter of the memory.
 
-**The baseline is measured** — `notes.md` §23 has it. The headline is that the
-memory was the smaller half: decode is 86% of what a texture costs to load, and
-a plain BCn file skips it entirely. 2048² is 366 ms and 21.3 MiB today, and
-`truck.glb` turns a 296 KB JPEG into 21.3 MiB of VRAM.
+What is left is not this section's work, and none of it is blocking:
 
-- [ ] **`Texture` carries a format, and `ColorSpace` stops being one.**
-      `ColorSpace.format()` (`src/gpu/texture.c3:55`) *is* the format today, so a
-      block-compressed image has nowhere to say what it is. `space` stays the
-      request — it chooses `BC7_SRGB` against `BC7_UNORM` the same way it already
-      chooses between the two RGBA8s — and the resolved `vk::Format` becomes a
-      field beside `levels` and `nearest`.
+- [ ] **Nothing produces a `.ktx2` in this repo's own pipeline.** The engine
+      reads them and `lib/ktx.c3l`'s CLI writes them, and in between there is no
+      step that says "these are the textures this game ships". Until there is,
+      the fast path only helps somebody who already ran `ktx create` by hand.
 
-- [ ] **`create_texture` takes levels rather than a level.** Its contract is
-      `@require rgba.len == (sz)width * height * 4` (`src/gpu/texture.c3:187`),
-      one `cmdCopyBufferToImage` and then the blit loop. The block path is
-      *simpler* than the one that exists: one copy region per level out of one
-      staging buffer, sizes from `ktx::vk::image_size`
-      (`lib/ktx.c3l/src/ktx/vkformat.c3:189`, which rounds up to whole blocks),
-      and no `TRANSFER_SRC` round trip at all, because nothing is read back to
-      build anything. `can_generate_mips` is never asked.
+- [ ] **The BC7 fallback has never run.** `Gpu.supports` decides it and a test
+      asserts it agrees with itself, but this machine samples BC7, so the branch
+      that decodes to RGBA8 instead has only ever been reached by files that were
+      not blocks to begin with. It wants a device that actually refuses BC7.
 
-- [ ] **The dedup key gains the format.** `claim_texture` compares six things —
-      hash, width, height, space, levels, nearest (`src/scene/asset.c3:3298`) —
-      over a hash of the *decoded* RGBA (`:3289`). A block texture hashes its
-      blocks instead, so the same picture as a `.png` and as a `.ktx2` stop
-      sharing a slot. That is right, because they are two different images on the
-      device, and it is a behaviour change worth saying out loud rather than
-      leaving to be discovered.
+- [ ] **A compressed texture cannot be exported.** `encode_from_device` reads
+      pixels back and a block texture has none, so a `.ktx2` a script loaded by
+      path is counted in `report.skipped` and left out of the glTF. An image that
+      came out of a `.glb` still round-trips, because that path copies the source
+      bytes and never asks the device.
 
-- [ ] **A device that cannot sample BC7 falls back.** Ask
-      `getPhysicalDeviceFormatProperties` for `SAMPLED_IMAGE_BIT` and decode to
-      RGBA8 the way it happens today when the answer is no. The fallback is what
-      makes the rest of this section safe to land, and it is the same shape as
-      `can_generate_mips` — a per-format question asked once at upload.
-
-- [ ] **Four places count four bytes per texel.** `texture_bytes`
-      (`src/scene/asset.c3:919`) over-reports a BC7 texture fourfold and is a
-      straight fix — `image_size` per level. The other three read pixels back and
-      cannot be fixed that way: `Texture.read_pixels`, `textureRead`
-      (`src/js/bind_asset.c3:786`) and the exporter's `encode_from_device`
-      (`src/scene/export.c3:2325`). **Refuse honestly** rather than decode:
-      `texture.read()` on a compressed texture should name the format it found,
-      because handing back a quarter of an image is the failure that reads as a
-      corrupt asset.
-
-- [ ] **The `.glb` path is two paths and only one of them is cheap.** A plain BCn
-      KTX2 already holds its blocks, so keeping them is work *removed* — the
-      expansion at `src/scene/ktx.c3:142` simply stops happening.
-      `KHR_texture_basisu` means ETC1S or UASTC, and `transcode_bcn` decodes to
-      RGBA and re-encodes on the CPU (`lib/ktx.c3l/src/ktx/basis.c3:441`) rather
-      than shuffling bits, which is a build step wearing a loader's clothes. Take
-      the fast path for plain BCn, keep today's RGBA8 transcode for Basis, and
-      measure the re-encode before deciding it is ever allowed at load time.
-
-- [ ] **Two tests assert the behaviour this section changes.**
-      `test/ktx_test.c3:237` — `a_block_compressed_texture_decodes` — says a BC7
-      payload is narrowed rather than handed over, and becomes a test of the
-      fallback path rather than of the only path. `test/texture_test.c3:1242`
-      already anticipates the rest and needs its reasoning re-pointed.
-
-**What this argues for**: convert to plain BC7/BC5 KTX2 with authored mips
-offline, and let the engine upload the blocks untouched. Four times the VRAM
-back, a better chain than the device's pairwise box filter, and one decode step
-removed from load — none of which needs a residency policy, an eviction rule, or
-a budget nobody has measured.
-
----
+- [ ] **`three.texture` cannot ask for a family.** The space is a caller's
+      choice and the family is the file's, which is right for loading and wrong
+      for `DataTexture` — a script with BC7 blocks in hand has no way to hand
+      them over. Wants a real use before it gets an argument.
 
 ## Standing constraints
 

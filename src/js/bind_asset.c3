@@ -783,7 +783,24 @@ fn void js_texture_read(
 	}
 
 	Texture* texture = self.pass.assets.texture_at(index);
-	sz need          = (sz)texture.width * (sz)texture.height * 4;
+
+	// Named before the size check, because the size is not what is wrong. A
+	// block-compressed texture holds blocks and there are no pixels to hand
+	// back without decoding them, so the message says which format was found
+	// rather than leaving a script to infer it from a wrong-looking image.
+	if (texture.format.is_block())
+	{
+		*out = js.raise(
+			string::tformat(
+				"texture.read() cannot read a %s texture: it holds compressed blocks, not pixels. "
+				"Load it from a .png or .jpg if the pixels are what you need",
+				block_family_name(texture.format.family)
+			)
+		);
+		return;
+	}
+
+	sz need = (sz)texture.width * (sz)texture.height * 4;
 
 	char[] dst = argc > 1 ? js.bytes(args[1]) : (char[]) { };
 	if (dst.len < need)
@@ -2171,7 +2188,7 @@ fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) 
 	if (uploaded == null) return qjs::null_value();
 	assets.retain_texture(index);
 	qjs::Value fields = texture_value(self, js, index, uploaded);
-	js.set_index(fields, 4, qjs::int_value(uploaded.space == ColorSpace.LINEAR ? 1 : 0));
+	js.set_index(fields, 4, qjs::int_value(uploaded.format.space == ColorSpace.LINEAR ? 1 : 0));
 	return fields;
 }
 

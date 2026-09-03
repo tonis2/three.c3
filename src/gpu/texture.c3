@@ -30,14 +30,45 @@ fn ulong content_hash(char[] bytes)
 }
 
 <*
- Which space a texture's bytes are in, and therefore which format it uploads as.
+ The same hash over a run of slices, as though they were one.
 
- Not a note attached to the image — it *is* the image's format, decided at upload
- and unchangeable afterwards. `SRGB` makes the hardware decode to linear on every
- sample, which is right for a picture of something and wrong for anything whose
- channels are numbers: a normal map's xyz, a roughness or metalness or occlusion
- map's scalar, a height field, a flow map, a lookup table a shader indexes. Those
- want `LINEAR` — the same bytes, read back as themselves.
+ FNV-1a is a fold, so hashing level 0 then level 1 gives exactly what hashing
+ their concatenation would. That equality is the point: the upload packs the
+ levels into one staging buffer and the dedup key is computed before any buffer
+ exists, and the two have to agree without either one being able to see the
+ other's bytes.
+
+ Every level and not just the base, because two files that agree at level 0 and
+ differ below are two different images — sharing a slot between them would hand
+ one of them the other's appearance at distance.
+*>
+fn ulong content_hash_levels(char[][] levels)
+{
+	ulong hash = 0xcbf29ce484222325;
+	foreach (level : levels)
+	{
+		foreach (byte : level)
+		{
+			hash ^= (ulong)byte;
+			hash *= 0x100000001b3;
+		}
+	}
+	return hash;
+}
+
+<*
+ Which space a texture's bytes are read in.
+
+ Half of what an image is on the device; `TextureFormat` is the pair, and the
+ family beside this is the other half. This was the whole of it once — it
+ answered `R8G8B8A8_SRGB` or `R8G8B8A8_UNORM` directly — and a block-compressed
+ image is what it had no way to describe.
+
+ `SRGB` makes the hardware decode to linear on every sample, which is right for
+ a picture of something and wrong for anything whose channels are numbers: a
+ normal map's xyz, a roughness or metalness or occlusion map's scalar, a height
+ field, a flow map, a lookup table a shader indexes. Those want `LINEAR` — the
+ same bytes, read back as themselves.
 
  Neither mistake announces itself as a colourspace. A colour map uploaded
  `LINEAR` is washed out and reads as a lighting bug. A normal map uploaded `SRGB`
@@ -52,12 +83,131 @@ enum ColorSpace : char
 	LINEAR,
 }
 
-fn vk::Format ColorSpace.format(self)
+<*
+ Which block layout a texture's bytes are in.
+
+ `RGBA8` is what every decode path here produces and what `create_texture` has
+ always taken: one texel is four bytes and the block is 1x1, which is why the
+ arithmetic everywhere could be `width * height * 4` and be right.
+
+ The BC families arrive already encoded, out of a KTX2 whose blocks are the
+ file's own. They are never blitted — a block-compressed image carries the
+ levels its author wrote rather than growing them on the device, which is what
+ `Gpu.can_generate_mips` has been saying about BC7 since before one could exist.
+*>
+enum TextureFamily : char
 {
-	switch (self)
+	RGBA8,
+	BC1,
+	BC3,
+	BC5,
+	BC7,
+}
+
+<*
+ What a texture *is* on the device: a family, and the space its bytes are read in.
+
+ `ColorSpace` used to be this by itself — it answered `R8G8B8A8_SRGB` or
+ `R8G8B8A8_UNORM` and there was nothing else a texture could be, so a
+ block-compressed image had nowhere to say what it was. The space still means
+ exactly what it meant and is still the caller's request; the family is what was
+ missing, and pairing them is what lets `BC7_SRGB` and `BC7_UNORM` be the same
+ choice for blocks that `R8G8B8A8_SRGB` and `R8G8B8A8_UNORM` are for texels.
+*>
+struct TextureFormat
+{
+	TextureFamily family;
+	ColorSpace space;
+}
+
+<*
+ The RGBA8 format for a space — what every decode path in this engine produces.
+*>
+fn TextureFormat rgba8(ColorSpace space) => { TextureFamily.RGBA8, space };
+
+<*
+ The Vulkan format this pair resolves to.
+
+ The one table. `BC5` ignores the space rather than obeying it: it is a
+ two-channel format with no sRGB form at all, so a normal map's xy is `UNORM`
+ whatever the caller asked for, and answering `SRGB` here would be answering
+ with a format that does not exist.
+*>
+fn vk::Format TextureFormat.vk(self)
+{
+	bool srgb = self.space == ColorSpace.SRGB;
+	switch (self.family)
 	{
-		case LINEAR: return FORMAT_R8G8B8A8_UNORM;
-		default: return FORMAT_R8G8B8A8_SRGB;
+		case BC1: return srgb ? FORMAT_BC1_RGB_SRGB_BLOCK : FORMAT_BC1_RGB_UNORM_BLOCK;
+		case BC3: return srgb ? FORMAT_BC3_SRGB_BLOCK : FORMAT_BC3_UNORM_BLOCK;
+		case BC5: return FORMAT_BC5_UNORM_BLOCK;
+		case BC7: return srgb ? FORMAT_BC7_SRGB_BLOCK : FORMAT_BC7_UNORM_BLOCK;
+		default:  return srgb ? FORMAT_R8G8B8A8_SRGB : FORMAT_R8G8B8A8_UNORM;
+	}
+}
+
+fn bool TextureFormat.is_block(self) => self.family != TextureFamily.RGBA8;
+
+<*
+ The side of one block in texels: 4 for every BC family, 1 for RGBA8.
+
+ RGBA8 answering 1 rather than being a special case is what lets `image_size`
+ be one calculation instead of two.
+*>
+fn uint TextureFormat.block_side(self) => self.family == TextureFamily.RGBA8 ? 1 : 4;
+
+fn uint TextureFormat.block_bytes(self)
+{
+	switch (self.family)
+	{
+		case RGBA8: return 4;
+		case BC1: return 8;
+		default: return 16;
+	}
+}
+
+<*
+ Bytes one level of this format occupies, rounded up to whole blocks.
+
+ The rounding is the whole point, and it is exactly where `width * height * 4`
+ stops being right: a 2x2 level of a BC7 image is still one entire 4x4 block and
+ costs 16 bytes rather than 4. `test/fixtures/oblong_bc7.ktx2` is 12x6 so that
+ three of its four levels round up, which is what makes a wrong answer here
+ visible instead of merely latent.
+
+ This is `ktx::vk::image_size`'s calculation, kept here rather than imported
+ because the GPU side should not have to reach into a decoder library to know
+ how big its own images are.
+*>
+fn sz TextureFormat.image_size(self, uint width, uint height)
+{
+	uint side = self.block_side();
+	sz across = (sz)((width + side - 1) / side);
+	sz down   = (sz)((height + side - 1) / side);
+	return across * down * (sz)self.block_bytes();
+}
+
+<*
+ Whether two textures are the same format — the dedup key's question.
+*>
+fn bool TextureFormat.equals(self, TextureFormat other)
+	=> self.family == other.family && self.space == other.space;
+
+<*
+ A family's name, for a message a person reads.
+
+ Worth the switch: "texture.read() cannot read a BC7 texture" names something a
+ script's author can act on, and a number would not.
+*>
+fn String block_family_name(TextureFamily family)
+{
+	switch (family)
+	{
+		case BC1: return "BC1";
+		case BC3: return "BC3";
+		case BC5: return "BC5";
+		case BC7: return "BC7";
+		default: return "RGBA8";
 	}
 }
 
@@ -75,7 +225,9 @@ struct Texture
 	// has" and "what an image this size would get" are different questions and
 	// only the first is safe to build a `maxLod` from.
 	uint levels;
-	ColorSpace space;
+	// What this image is on the device. Was a bare `ColorSpace` back when that
+	// was the only thing a texture could differ by.
+	TextureFormat format;
 	// Part of the texture's identity for the same reason the colourspace is: the
 	// same pixels asked for nearest and for linear are two images in two samplers,
 	// and sharing a slot between them would hand whichever caller came second the
@@ -104,6 +256,29 @@ fn uint mip_levels(uint width, uint height)
 }
 
 <*
+ One side of a mip level, floored at 1.
+
+ The halving that `mip_levels` counts, done for one level rather than counted to
+ the end. Floored rather than halved because the short side reaches 1 while the
+ long one is still shrinking, and a zero extent is not a small image but an
+ invalid one.
+*>
+fn uint level_extent(uint size, uint level) => (size >> level) > 0 ? (size >> level) : 1;
+
+<*
+ As many levels as any image this can address could have.
+
+ `mip_levels` reaches 32 at 2^31, which no device admits and no file carries;
+ KTX2's own container reader bounds itself at the same number. Fixed so that the
+ copy regions can be a stack array — one upload should not allocate to describe
+ itself.
+*>
+const uint MAX_UPLOAD_LEVELS = 32;
+
+faultdef TEXTURE_TOO_MANY_LEVELS, TEXTURE_LEVEL_WRONG_SIZE, TEXTURE_FORMAT_UNSUPPORTED,
+	TEXTURE_IS_COMPRESSED;
+
+<*
  Whether this device can build a mip chain for this format by blitting.
 
  Three features, all needed: the image is the blit's source and its destination
@@ -128,6 +303,47 @@ fn bool Gpu.can_generate_mips(&self, vk::Format format)
 }
 
 <*
+ Whether this device can sample an image in this format at all.
+
+ The question `can_generate_mips` does not ask. RGBA8 is in Vulkan's mandatory
+ format table and every device sampling anything samples that, so nothing needed
+ to ask until a format arrived that a device is entitled to refuse. BC7 is
+ exactly that: universal on desktop and absent on a good deal of mobile, and
+ ASTC-only hardware is the common case rather than an exotic one.
+
+ `SAMPLED_IMAGE_BIT` and not the filter bit beside it, because these two are
+ different refusals. A format that can be sampled but not linearly filtered is a
+ usable image with a blocky sampler; a format that cannot be sampled is not an
+ image this device can have, and creating one is not a soft failure — it is
+ `VK_ERROR_FORMAT_NOT_SUPPORTED` at `vkCreateImage` if the driver is honest and
+ undefined behaviour if it is not.
+
+ The answer decides which format to *decode to*, which is why it is asked before
+ a decode rather than after one: a device without BC7 wants the KTX2 narrowed to
+ RGBA8 the way it always was, and that costs the decode this section exists to
+ avoid — correct everywhere, fast where the hardware allows it.
+
+ Per format and uncached for `can_generate_mips`'s reason, and it costs the same
+ one call.
+*>
+fn bool Gpu.can_sample(&self, vk::Format format)
+{
+	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+
+	vk::FormatProperties props;
+	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
+	return (props.optimalTilingFeatures & NEEDED) == NEEDED;
+}
+
+<*
+ Whether an image of this family and space can exist on this device.
+
+ The pair's form of `can_sample`, and the one a decode path should ask: it is
+ answering "may I hand you BC7" rather than "is 146 a number you know".
+*>
+fn bool Gpu.supports(&self, TextureFormat format) => self.can_sample(format.vk());
+
+<*
  How many levels an upload of this description would end up with.
 
  Split out of `create_texture` so `Assets.claim_texture` can ask the same question
@@ -136,9 +352,13 @@ fn bool Gpu.can_generate_mips(&self, vk::Format format)
  say a chain was wanted on a device that cannot make one and upload a duplicate
  for ever after.
 *>
-fn uint Gpu.levels_for(&self, uint width, uint height, ColorSpace space, bool mips)
+fn uint Gpu.levels_for(&self, uint width, uint height, TextureFormat format, bool mips)
 {
-	return mips && self.can_generate_mips(space.format()) ? mip_levels(width, height) : 1;
+	// Only the *generated* chain is in question here. A block-compressed image
+	// carries the levels its file shipped and is never blitted, so it does not
+	// ask the device whether it could be.
+	if (format.is_block()) return mips ? mip_levels(width, height) : 1;
+	return mips && self.can_generate_mips(format.vk()) ? mip_levels(width, height) : 1;
 }
 
 <*
@@ -196,14 +416,15 @@ fn Texture? Gpu.create_texture(
 	bool nearest = false
 )
 {
-	vk::Format format = space.format();
-	uint levels       = self.levels_for(width, height, space, mips);
+	TextureFormat layout = rgba8(space);
+	vk::Format format    = layout.vk();
+	uint levels          = self.levels_for(width, height, layout, mips);
 
 	Texture texture = {
 		.width = width,
 		.height = height,
 		.levels = levels,
-		.space = space,
+		.format = layout,
 		.nearest = nearest,
 		.hash = content_hash(rgba),
 	};
@@ -357,11 +578,37 @@ fn Texture? Gpu.create_texture(
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(to_shader[:used]));
 	}!;
 
-	// `levelCount = levels`, and this is the half that is easy to leave behind:
-	// the image can have a full chain while the view exposes one level, and the
-	// result is not an error anywhere — it is a sampler whose `maxLod` clamps
-	// against levels the view does not have, which reads as a texture that never
-	// blurs however far away it gets.
+	self.finish_texture(&texture, format, nearest)!;
+	return texture;
+}
+
+<*
+ The view and the sampler, which are the same question whatever wrote the levels.
+
+ Split out when the block path arrived: a BC7 image and an RGBA8 one differ in
+ how their levels get there and in nothing after, so having two copies of this
+ would have been two places for `levelCount` and `maxLod` to drift apart.
+
+ `levelCount = texture.levels`, and this is the half that is easy to leave
+ behind: the image can have a full chain while the view exposes one level, and
+ the result is not an error anywhere — it is a sampler whose `maxLod` clamps
+ against levels the view does not have, which reads as a texture that never blurs
+ however far away it gets.
+
+ `maxLod` is what "no mips" actually was, not the missing levels: a sampler
+ clamped to lod 0 samples the top level however small the surface is on screen.
+ It is `levels` rather than `LOD_CLAMP_NONE` because this image really has that
+ many, and a clamp stating the truth about its own image is one fewer thing to
+ keep in step if a chain is ever declined.
+
+ Nearest is a whole different sampler, decided here rather than patched on: no
+ mipmap mode, because a nearest-filtered image that blends levels is neither one
+ thing nor the other.
+*>
+fn void? Gpu.finish_texture(&self, Texture* texture, vk::Format format, bool nearest)
+{
+	uint levels = texture.levels;
+
 	texture.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(format)
 		.setSubresourceRange(
 			{
@@ -375,40 +622,195 @@ fn Texture? Gpu.create_texture(
 		.setImage(texture.image)
 		.build(self.handle)!;
 
-	// `maxLod` is what "no mips" actually was, not the missing levels: a sampler
-	// clamped to lod 0 samples the top level however small the surface is on
-	// screen. It is `levels` rather than `LOD_CLAMP_NONE` because this image
-	// really has that many, and a clamp stating the truth about its own image is
-	// one fewer thing to keep in step if a chain is ever declined.
-	//
-	// Nearest is a whole different sampler, decided here rather than patched on:
-	// no mipmap mode, because a nearest-filtered image that blends levels is
-	// neither one thing nor the other.
-	if (nearest)
+	vk::Filter filter        = nearest ? FILTER_NEAREST : FILTER_LINEAR;
+	vk::SamplerMipmapMode mode = nearest ? SAMPLER_MIPMAP_MODE_NEAREST : SAMPLER_MIPMAP_MODE_LINEAR;
+
+	texture.sampler = vk::samplerCreateInfo().setMagFilter(filter).setMinFilter(filter)
+		.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
+		.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
+		.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
+		.setMipmapMode(mode)
+		.setMinLod(0.0)
+		.setMaxLod((float)levels)
+		.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
+		.build(self.handle)!;
+}
+
+<*
+ Uploads an image whose levels are already encoded — one copy region per level,
+ out of one staging buffer.
+
+ ## Why this is shorter than the path beside it
+
+ `create_texture` copies level 0 and then *builds* the rest, so every level after
+ the first is a blit whose source is the level above it: a real dependency, hence
+ a barrier inside the loop and a `TRANSFER_SRC` round trip for every level but
+ the last. Here the levels arrive already written. Nothing reads anything back,
+ so there is no dependency between the copies at all, and the whole upload is one
+ barrier in, one `cmdCopyBufferToImage` with N regions, one barrier out.
+
+ `can_generate_mips` is never asked, which is what `Gpu.can_generate_mips`'s own
+ note has been saying since before a BC7 image could exist here: a block format
+ is not blittable on most devices and does not need to be, because it carries the
+ levels its author wrote.
+
+ ## Sizes come from the format, not from the extents
+
+ Every level's byte count is `TextureFormat.image_size`, which rounds up to whole
+ blocks. That is checked rather than trusted — a level handed over short is not a
+ small image, it is a copy that reads past the end of what the caller allocated,
+ and `VUID-vkCmdCopyBufferToImage-pRegions-00171` catches it only if the layer is
+ running.
+
+ ## The hash covers every level
+
+ `create_texture` hashes the decoded RGBA it was given. There is no decoded RGBA
+ here, so the hash is over the packed blocks — all of them, because two files
+ that agree at level 0 and differ further down are two different images and
+ sharing a slot between them would hand one of them the other's distance.
+
+ @param levels : `Level 0 first. Each exactly image_size bytes for its own extents.`
+ @param format : `The family and space these blocks are in. RGBA8 is allowed and behaves.`
+ @require levels.len > 0 : `An image with no levels is not an image.`
+ @require levels.len <= MAX_UPLOAD_LEVELS
+*>
+fn Texture? Gpu.create_texture_levels(
+	&self,
+	char[][] levels,
+	uint width,
+	uint height,
+	TextureFormat format,
+	bool nearest = false
+)
+{
+	uint count = (uint)levels.len;
+	if (count > mip_levels(width, height)) return TEXTURE_TOO_MANY_LEVELS~;
+
+	// The guard rather than the choice. Deciding to decode to RGBA8 instead
+	// belongs where the bytes are still encoded and a different decode is still
+	// possible; by here the caller has already committed, so all this can do is
+	// refuse — and refusing is much better than the alternative, which is
+	// `VK_ERROR_FORMAT_NOT_SUPPORTED` from an honest driver and a wrongly
+	// sampled image from a lenient one.
+	if (!self.supports(format)) return TEXTURE_FORMAT_UNSUPPORTED~;
+
+	// Sized and checked before anything is created, so a bad file costs no
+	// device object and the error names the level rather than the image.
+	sz total = 0;
+	for (uint level = 0; level < count; level++)
 	{
-		texture.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-			.setMinLod(0.0)
-			.setMaxLod((float)levels)
-			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
-			.build(self.handle)!;
-	}
-	else
-	{
-		texture.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setAddressModeV(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setAddressModeW(SAMPLER_ADDRESS_MODE_REPEAT)
-			.setMipmapMode(SAMPLER_MIPMAP_MODE_LINEAR)
-			.setMinLod(0.0)
-			.setMaxLod((float)levels)
-			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
-			.build(self.handle)!;
+		sz want = format.image_size(level_extent(width, level), level_extent(height, level));
+		if ((sz)levels[level].len != want) return TEXTURE_LEVEL_WRONG_SIZE~;
+		total += want;
 	}
 
+	vk::Format vkformat = format.vk();
+
+	Texture texture = {
+		.width = width,
+		.height = height,
+		.levels = count,
+		.format = format,
+		.nearest = nearest,
+	};
+
+	texture.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(vkformat)
+		.setExtent({ .width = width, .height = height, .depth = 1 })
+		.setMipLevels(count)
+		.setArrayLayers(1)
+		.setSamples(SAMPLE_COUNT_1_BIT)
+		.setTiling(IMAGE_TILING_OPTIMAL)
+		// `TRANSFER_SRC` is here for the same reason as on the RGBA8 path and not
+		// for the blit: an image may only enter a layout its usage admits, so
+		// without it a later readback is invalid rather than merely refused.
+		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
+		.build(self.handle)!;
+
+	texture.memory = vk::create_image_buffer(texture.image, &self.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+
+	vk::Memory stage = vk::new_buffer(
+		&self.allocator,
+		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
+		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data: null,
+		data_size: total,
+	)!;
+	defer stage.free();
+
+	// Packed straight into the mapped staging memory rather than into a host
+	// array first, so the levels are copied once instead of twice.
+	char* packed = (char*)stage.data();
+	vk::BufferImageCopy[MAX_UPLOAD_LEVELS] regions;
+	sz offset = 0;
+	for (uint level = 0; level < count; level++)
+	{
+		mem::copy(packed + offset, levels[level].ptr, levels[level].len);
+		regions[level] = {
+			// A whole number of blocks, so this satisfies the alignment the copy
+			// wants without any padding between levels.
+			.bufferOffset = (ulong)offset,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = {
+				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = level,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+			.imageOffset = { 0, 0, 0 },
+			// The level's own extents in texels, not in blocks — Vulkan does the
+			// block arithmetic itself and wants the picture's size.
+			.imageExtent = { level_extent(width, level), level_extent(height, level), 1 },
+		};
+		offset += levels[level].len;
+	}
+
+	texture.hash = content_hash_levels(levels);
+
+	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)
+	{
+		vk::ImageMemoryBarrier2 to_transfer = {
+			...IMAGE_BARRIER,
+			.image = texture.image,
+			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+			.srcAccessMask = (vk::AccessFlags2)0,
+			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+			.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.subresourceRange = { ...COLOR_LEVEL, .levelCount = count },
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_transfer }));
+
+		// Every level in one call. They are independent writes to disjoint
+		// subresources, so there is nothing to order between them.
+		vk::cmdCopyBufferToImage(
+			cmd,
+			stage.buffer,
+			texture.image,
+			IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			count,
+			&regions[0]
+		);
+
+		// One barrier for the whole chain, because every level is in the same
+		// layout — which is the part the generated path cannot do.
+		vk::ImageMemoryBarrier2 to_shader = {
+			...IMAGE_BARRIER,
+			.image = texture.image,
+			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+			.dstAccessMask = ACCESS_2_SHADER_READ_BIT,
+			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.subresourceRange = { ...COLOR_LEVEL, .levelCount = count },
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
+	}!;
+
+	self.finish_texture(&texture, vkformat, nearest)!;
 	return texture;
 }
 
@@ -452,10 +854,20 @@ fn Texture? Gpu.create_texture(
  takes a destination rather than allocating.
 
  @param dst : `Filled with width*height*4 bytes. The caller owns it; nothing is retained.`
+ @return ? TEXTURE_IS_COMPRESSED : `A block-compressed texture. Its bytes are blocks, not pixels.`
  @require dst.len >= (sz)self.width * self.height * 4
 *>
 fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 {
+	// Refused rather than attempted, and named rather than approximated. The
+	// copy would succeed: `vkCmdCopyImageToBuffer` moves stored bytes, so a BC7
+	// image hands back a quarter as many of them as the contract promises and
+	// the rest of `dst` keeps whatever it held. That reads as a corrupt texture
+	// downstream and says nothing about the format that caused it. Decoding the
+	// blocks here instead would be a decoder living in the GPU layer to serve a
+	// verb that exists for tests and exports.
+	if (self.format.is_block()) return TEXTURE_IS_COMPRESSED~;
+
 	sz bytes = (sz)self.width * (sz)self.height * 4;
 
 	vk::Memory readback = vk::new_buffer(
