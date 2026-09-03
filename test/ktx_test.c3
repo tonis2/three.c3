@@ -235,11 +235,17 @@ fn void a_supercompressed_texture_is_inflated() @test
 }
 
 <*
- A block-compressed format is decoded rather than handed over as blocks.
+ A block-compressed format still narrows to RGBA8 when it is asked to.
 
- `create_texture` takes RGBA8 and nothing else, so a BC7 payload that reached it
- unconverted would be read as a picture a sixteenth of the size with garbage
- after it. Narrowing here is what keeps that from being possible.
+ This was once the only thing that could happen to a BC7 payload, because
+ `create_texture` took RGBA8 and nothing else. It is now the *fallback*: a device
+ that cannot sample BC7, a Basis file, or a caller that asked for no mip chain
+ all end up here, and the picture they get is the right one.
+
+ `decode_ktx2` is the function that narrows and `decode_ktx2_blocks` is the one
+ that does not, so which of them is called is the whole difference — asserted
+ both ways below, against one blob, so the boundary between the two paths cannot
+ quietly move.
 *>
 fn void a_block_compressed_texture_decodes() @test
 {
@@ -265,6 +271,20 @@ fn void a_block_compressed_texture_decodes() @test
 		"decoded %dx%d", decoded.width, decoded.height);
 	uint worst = worst_channel(source, decoded.pixels);
 	test::@check(worst <= 16, "the picture came back, worst channel off by %d", worst);
+
+	// The same bytes down the other path: blocks, in the family the file names,
+	// and no decode at all.
+	three::BlockImage kept = three::decode_ktx2_blocks(blob, three::ColorSpace.SRGB)!!;
+	defer kept.free();
+
+	test::@check(kept.format.family == three::TextureFamily.BC7,
+		"the blocks path did not report BC7");
+	test::@check(kept.width == SIZE && kept.height == SIZE,
+		"the blocks path reports %dx%d", kept.width, kept.height);
+	test::@check(kept.levels.len == 1, "a one-level file gave %d levels", (int)kept.levels.len);
+	test::@check(kept.levels[0].len == blocks.len,
+		"level 0 is %d bytes of blocks, not the %d that were encoded",
+		(int)kept.levels[0].len, (int)blocks.len);
 }
 
 // ============================================================================

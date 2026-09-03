@@ -48,6 +48,32 @@ import ktx::container;
 import ktx::basis;
 import ktx::codec;
 
+
+<*
+ A block-compressed image on its way to the device: every level, still encoded.
+
+ The counterpart to `image::Image` for the path that does not decode. It holds
+ views into the container it came out of rather than copies, so `source` is
+ owned here and `free` is not optional — dropping one leaks the whole file.
+*>
+struct BlockImage
+{
+	uint width;
+	uint height;
+	TextureFormat format;
+	// Level 0 first. Views into `source`, not allocations of their own.
+	char[][] levels;
+	container::Texture source;
+	Allocator allocator;
+}
+
+fn void BlockImage.free(&self)
+{
+	if (self.levels.len) alloc::free(self.allocator, self.levels.ptr);
+	self.source.free();
+	self.levels = {};
+}
+
 <*
  KTX2's twelve-byte identifier — `«KTX 20»` wrapped in the same escape bytes
  PNG uses, and for the same reason: a file mangled by a text-mode transfer stops
@@ -150,4 +176,104 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
 		.pixels = rgba,
 		.allocator = allocator,
 	};
+}
+
+<*
+ A KTX2's blocks, kept rather than narrowed — every level, in the file's format.
+
+ The fast path this whole section exists for. `decode_ktx2` above expands blocks
+ to RGBA8, which costs four times the memory and, by `notes.md` §23's
+ measurement, 86% of what a texture takes to load. Here nothing is decoded at
+ all: `container::read` undoes the supercompression and the blocks go to the
+ device as they are.
+
+ The levels are views into the container, which is why `BlockImage` owns it. The
+ alternative is copying several megabytes out so the container can be freed
+ early, which would be paying a memcpy to avoid a lifetime.
+
+ @param space : `What the caller wants these bytes read as. The file supplies only the family.`
+ @return ? UNSUPPORTED_IMAGE : `Not a KTX2, a Basis one, or a format with no block family here.`
+*>
+fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator allocator = mem)
+{
+	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
+
+	// A Basis file states `vkFormat` 0 and its payload is ETC1S or UASTC, which
+	// is not a family any device samples. Turning one into BC7 means decoding it
+	// and re-encoding on the CPU — a build step, not a load — so it goes the
+	// RGBA8 way and `notes.md` §23 has why.
+	if (try basis::info(encoded)) return UNSUPPORTED_IMAGE~;
+
+	container::Texture? maybe = container::read(allocator, encoded);
+	if (catch maybe) return UNSUPPORTED_IMAGE~;
+	container::Texture tex = maybe;
+
+	TextureFamily? family = block_family_of(tex.vk_format);
+	if (catch family)
+	{
+		// Uncompressed, 16-bit, float — real KTX2 contents this cannot pass
+		// through, and the RGBA8 path narrows all of them.
+		tex.free();
+		return UNSUPPORTED_IMAGE~;
+	}
+
+	uint count = tex.level_count();
+	if (count == 0 || count > MAX_UPLOAD_LEVELS)
+	{
+		tex.free();
+		return UNSUPPORTED_IMAGE~;
+	}
+
+	char[][] levels = alloc::new_array(allocator, char[], count);
+	for (uint i = 0; i < count; i++)
+	{
+		char[]? face = tex.image(i, 0, 0);
+		if (catch face)
+		{
+			alloc::free(allocator, levels.ptr);
+			tex.free();
+			return UNSUPPORTED_IMAGE~;
+		}
+		levels[i] = face;
+	}
+
+	return {
+		.width = tex.level_width(0),
+		.height = tex.level_height(0),
+		.format = { family, space },
+		.levels = levels,
+		.source = tex,
+		.allocator = allocator,
+	};
+}
+
+<*
+ Which block family a Vulkan format number is, if it is one this can upload.
+
+ `ktx::vk`'s constants are numerically the Vulkan ones — 131 to 146 across the BC
+ range — so the file's `vkFormat` is compared directly rather than translated.
+
+ The sRGB and UNORM members of a pair map to the same family on purpose. Their
+ blocks are bit-identical and the difference is only how a sample is decoded, so
+ the space is the caller's to choose exactly as it is for a PNG: a file is not
+ entitled to insist a normal map be read as colour.
+*>
+fn TextureFamily? block_family_of(uint vk_format) @local
+{
+	switch (vk_format)
+	{
+		case 131:
+		case 132:
+			return TextureFamily.BC1;
+		case 137:
+		case 138:
+			return TextureFamily.BC3;
+		case 141:
+			return TextureFamily.BC5;
+		case 145:
+		case 146:
+			return TextureFamily.BC7;
+		default:
+			return UNSUPPORTED_IMAGE~;
+	}
 }
