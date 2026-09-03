@@ -20,6 +20,20 @@
 // whose output is exactly the frame, so a texel of the PNG is a texel of the sheet
 // with no camera, no mesh and no uv layout in between.
 //
+// ## Wearing it without the repeat showing
+//
+// The scene at the end uses `material.uvVariants` — up to eight uv transforms per
+// material, picked by `mesh.variant`, applied to the face's own uv before
+// `repeat` maps it into a strip. Four crates and six column segments come out of
+// one mesh and one material each and no two of them are the same picture, at no
+// cost in draw calls. A row is the eight symmetries of a square and a slide, and
+// that is not a restriction here but the reason it works: those are the
+// transforms that leave a unit square a unit square, so a strip survives one.
+//
+// `material.stochastic` is the other half of `plan.md` §27 and is deliberately
+// *not* used here: it samples anywhere in the image, which is right for a ground
+// tiling one picture and wrong for a material windowed into one strip of eight.
+//
 // ## The two colour spaces
 //
 // The offscreen target is R8G8B8A8_SRGB and the readback is a memcpy, so a PNG
@@ -397,6 +411,137 @@ float3 post(Post p)
 }`;
 
 // ---------------------------------------------------------------------------
+// The decal
+//
+// A trim sheet gives a level its surfaces and takes its variety away in the same
+// stroke: every wall is the same eight strips. A decal is what puts the variety
+// back where the eye actually looks — a crack, a leak, a poster, a scorch — and
+// it is the one thing on a wall that is allowed not to tile.
+//
+// **This is the flat-receiver half of it, and it needs nothing the engine did
+// not already have**: a quad a few millimetres proud of the wall, a body that
+// draws a crack and `discard`s everywhere else. `plan.md` §27's decal item is the
+// other half — `three.DecalGeometry`, which clips the receiver's own triangles
+// so a decal can lie across a corner or a curve — and it is not this.
+//
+// Two things worth reading it for:
+//
+// - **`s.origin` earns its place.** Every one of these is the same mesh and the
+//   same material, so they are one draw call; the body seeds itself from the
+//   copy's world origin, so no two of them are the same crack. There is nothing
+//   to author and no per-copy channel spent — `color` and `variant` are both
+//   still free for something else.
+// - **`discard` is the only alpha there is.** A body returns rgb, and how much
+//   of the surface shows is the material's opacity times the copy's, both of
+//   which are per copy and not per pixel. So the crack's *shape* is a cut and
+//   its edge is hard. That is what an alpha-tested decal has always been, and it
+//   is why the taper below is in the shape rather than in an alpha ramp.
+// ---------------------------------------------------------------------------
+
+const CRACK = `
+float hash11(float n)
+{
+    return frac(sin(n * 78.233) * 43758.5453);
+}
+
+float hash21(float2 p)
+{
+    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float vnoise(float2 p)
+{
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 w = f * f * (3.0 - 2.0 * f);
+    return lerp(
+        lerp(hash21(i), hash21(i + float2(1.0, 0.0)), w.x),
+        lerp(hash21(i + float2(0.0, 1.0)), hash21(i + float2(1.0, 1.0)), w.x),
+        w.y
+    );
+}
+
+float fbm(float2 p)
+{
+    float sum = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; i++)
+    {
+        sum += amp * vnoise(p);
+        p *= 2.0;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
+// The scalar field whose level set is the crack, warped so the level set
+// branches the way a fracture front does instead of meandering like a river.
+float field(float2 p)
+{
+    p += 0.45 * float2(fbm(p * 1.4 + 3.1), fbm(p * 1.4 - 1.4));
+    return fbm(p);
+}
+
+// How much of a crack is at this point of the quad, 1 on the fracture and 0 off
+// it.
+//
+// A **level set** and not a drawn line: the crack is where the field crosses its
+// own middle, which is what gives it branching, varying width and tapered ends
+// without any of the three being authored. Fracture propagates along a front,
+// and this is what a front looks like.
+//
+// **The divide by the gradient is the whole difference between a crack and a
+// stain.** Thresholding |field - 0.5| directly makes a line wherever the field
+// is steep and a *blob* wherever it is flat, and a warped noise field is flat in
+// plenty of places — the first version of this read as splatter. Dividing by the
+// local slope turns the value into a distance to the level set, so the line is
+// the same width along its whole length however the field is behaving under it.
+float crack(float2 uv, float seed, float taper)
+{
+    float2 p = uv * 2.2 + seed * 31.7;
+
+    const float e = 0.0035;
+    float n = field(p);
+    float gx = field(p + float2(e, 0.0)) - field(p - float2(e, 0.0));
+    float gy = field(p + float2(0.0, e)) - field(p - float2(0.0, e));
+    float slope = max(length(float2(gx, gy)) / (2.0 * e), 1e-4);
+    float dist = abs(n - 0.5) / slope;
+
+    // Opening and closing along its length, and closing to nothing at the edge
+    // of the quad — the taper is in the *width* rather than in the mask, so the
+    // crack narrows away instead of being cut off square. That straight cut is
+    // the tell that gives away every badly placed decal.
+    float width = (0.010 + 0.026 * fbm(p * 2.5 + 11.0)) * taper;
+    return 1.0 - smoothstep(width, width * 2.6, dist);
+}
+
+float3 shade(Surface s)
+{
+    // Where this copy stands, hashed — one number, and it is the whole of why
+    // these are all different. See plan.md section 27.
+    float seed = hash11(s.origin.x * 12.9898 + s.origin.y * 78.233 + s.origin.z * 37.719);
+
+    float2 d = abs(s.uv - 0.5) * 2.0;
+    float taper = 1.0 - smoothstep(0.35, 1.0, max(d.x, d.y));
+    if (taper <= 0.0) discard;
+
+    float core = crack(s.uv, seed, taper);
+    if (core < 0.5) discard;
+
+    // Dark, and lit rather than flat black: a crack is a hole in a surface that
+    // is standing in this scene's light, and one that ignored the sun would read
+    // as a sticker.
+    //
+    // The rim is lighter than the core, off the same number the cut was made
+    // with — a break in brick has a chipped edge catching the light and a void
+    // behind it, and one flat value has neither.
+    float depth = smoothstep(0.5, 1.0, core);
+    float3 rim = float3(0.16, 0.13, 0.11);
+    float3 void_ = float3(0.030, 0.026, 0.024);
+    return lerp(rim, void_, depth) * (0.45 + 0.55 * lambert(s.normal));
+}`;
+
+// ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
 
@@ -537,14 +682,25 @@ function dress() {
 	// tall gets the strip stretched up it. A column is therefore *built* out of
 	// bands the way the wall is — base, shaft, cap — rather than mapped in one
 	// go, which is how a kit made against a sheet is cut in the first place.
+	//
+	// The shaft segments take a slide each as well, so a column is not three
+	// copies of one patch of concrete stacked on itself — which is exactly the
+	// seam a stacked kit piece shows and the reason this feature exists.
 	const shaftGeometry = new three.BoxGeometry(0.7, 1.05, 0.7);
 	const shaftMaterial = trimMaterial(maps, strip('concrete'), 0.7, 1.05);
+	// Whole faces of slide rather than fractions: the concrete strip is eight
+	// faces long at this density, so a slide of three faces is a different part
+	// of it and a slide of a tenth is the same part very slightly moved. No
+	// turns here — a shaft face is 0.083 by 0.125 of the sheet and not square,
+	// so a quarter turn would stretch the grain.
+	shaftMaterial.uvVariants = [[0, 0, 0, 0], [3.1, 0, 0, 1], [6.7, 0, 0, 2]];
 	const capGeometry = new three.BoxGeometry(0.95, 0.3, 0.95);
 	const capMaterial = trimMaterial(maps, strip('molding'), 0.95, 0.3);
 	for (const x of [-5.6, 5.6]) {
 		for (let i = 0; i < 3; i++) {
 			const shaft = new three.Mesh(shaftGeometry);
 			shaft.material = shaftMaterial;
+			shaft.variant = i;
 			shaft.position.set(x, 0.3 + 0.525 + i * 1.05, -1.2);
 			scene.add(shaft);
 		}
@@ -556,15 +712,65 @@ function dress() {
 		}
 	}
 
-	// Crates: one shape, one strip, four copies — still one draw call.
+	// Crates: one shape, one strip, four copies — still one draw call, and no two
+	// of them wearing the same part of the strip.
+	//
+	// `uvVariants` is the whole of that. A row slides and turns the face's own uv
+	// *before* `repeat` maps it into the band, so every one of these is still
+	// inside the rivet strip and none of them is the same picture.
+	//
+	// **A quarter turn, and not just a slide, because of what the strip is.** A
+	// cube face here maps to a square of the sheet — `wearStrip` gives it
+	// `repeat` 0.125 by 0.125 — so a turn is aspect-preserving and the rivets
+	// run a different way on every crate. A slide alone was the first thing
+	// written here and it was invisible: the rivets repeat every sixteenth of
+	// the sheet, and slides of 0.5 and 0.75 of a face are exactly one and
+	// one-and-a-half of those, so two of the four crates were pixel-identical to
+	// the other two. The lesson generalises — a slide has to be measured against
+	// the *pattern's* period, not against the face.
 	const crateGeometry = new three.BoxGeometry(1, 1, 1);
 	const crateMaterial = trimMaterial(maps, strip('rivets'), 1, 1);
-	for (const [x, z, r] of [[-2.4, 0.9, 0.2], [-1.5, 1.7, -0.5], [2.2, 1.1, 0.8], [3.1, 2.0, 0.1]]) {
+	crateMaterial.uvVariants = [
+		[0, 0, 0, 0],
+		[0.03, 0, 1, 0],
+		[0.06, 0, 2, 1],
+		[0.09, 0, 3, 0],
+	];
+	for (const [i, [x, z, r]] of [[-2.4, 0.9, 0.2], [-1.5, 1.7, -0.5], [2.2, 1.1, 0.8], [3.1, 2.0, 0.1]].entries()) {
 		const crate = new three.Mesh(crateGeometry);
 		crate.material = crateMaterial;
+		crate.variant = i;
 		crate.position.set(x, 0.5, z);
 		crate.rotation.y = r;
 		scene.add(crate);
+	}
+
+	// The decals: one plane, one material, five copies, five different cracks —
+	// and the wall behind them is still the same brick strip it was.
+	//
+	// A few millimetres proud of the wall's front face, which is what a decal on
+	// a flat receiver costs: a coplanar quad z-fights, and there is no depth bias
+	// on a pipeline here to lift one without moving it. At a grazing angle a
+	// large offset would visibly float, so it is kept to two millimetres over a
+	// two-metre band.
+	//
+	// `scale` and not a second geometry: two sizes of one shape are one asset and
+	// one draw call, and a new `PlaneGeometry(w, h)` for each would be five.
+	const crackGeometry = new three.PlaneGeometry(1, 1);
+	const crackMaterial = new three.ShaderMaterial({ fragment: CRACK });
+	const WALL_FACE = -3 + 0.25 + 0.002;
+	for (const [x, y, w, h, spin] of [
+		[-4.7, 0.80, 2.4, 1.6, 0.05],
+		[-1.4, 0.70, 2.0, 1.4, -0.6],
+		[1.9, 0.95, 2.6, 1.5, 0.3],
+		[4.6, 0.60, 2.2, 1.2, -0.2],
+	]) {
+		const decal = new three.Mesh(crackGeometry);
+		decal.material = crackMaterial;
+		decal.position.set(x, y, WALL_FACE);
+		decal.scale.set(w, h, 1);
+		decal.rotation.z = spin;
+		scene.add(decal);
 	}
 
 	// A tiled plinth, and the sheet itself standing on it: an authoring tool has

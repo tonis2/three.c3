@@ -151,6 +151,18 @@ struct Draw
     uint morph_targets;
     float4 uv_transform;
     float4 surface;
+    // How many rows of `uv_variants` this material declared, and **zero is the
+    // whole test** — a material nobody asked for one, and every material written
+    // before there were any, arrives here as zero and neither template looks at
+    // the table.
+    uint uv_variant_count;
+    // One uv transform per copy, picked by `Instance.variant` and applied to the
+    // mesh's own uv before `uv_transform` scales it — `variant_uv` in
+    // `surface.slang` is the whole of what a row means. Eight rows because a
+    // wall wants more than four and a record that is mostly table stops being a
+    // record; a script that wants a thousand variations wants a different
+    // feature.
+    float4 uv_variants[8];
 };
 
 // The mesh contract exactly, and nothing appended: there are no material

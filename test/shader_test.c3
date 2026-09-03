@@ -539,7 +539,7 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	test::@check(three::DrawRecord::size == 136, "and the record is 136 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 264, "and the record is 264 bytes, got %d", three::DrawRecord::size);
 }
 
 <*

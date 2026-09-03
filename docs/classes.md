@@ -211,6 +211,8 @@ pipeline you can build draws triangles.
   the specular term on at all
 - `repeat` — `[u, v]`, or one number for both: how many times the map is laid across the surface
 - `offset` — `[u, v]`: where the map starts, in whole repeats
+- `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
+- `stochastic` — sample this material's maps so a tiled surface stops having a period; for a texture with no structure in it
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -387,6 +389,8 @@ sRGB view every value in them arrives bent and the result reads as a bad file.
 - `reflectance` — 0 to 1, 0 by default — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
 - `offset` — `[u, v]`: where the map starts, in whole repeats
+- `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
+- `stochastic` — sample this material's maps so a tiled surface stops having a period; for a texture with no structure in it
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -472,6 +476,13 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
   0.5 everywhere today: nothing writes relief into it yet, and a body with a height map of its own
   samples it directly.
 - `variant` — its row of the table, clamped.
+- `origin` — where this **copy** is: the instance's own world origin, one value for the whole copy.
+  It is the seed a per-copy trick wants and the one thing a body cannot work out for itself —
+  `position` varies per pixel, and there is no instance index here on purpose, because culling and
+  re-bucketing renumber one between frames and a pattern keyed on that swims as the scene changes. A
+  tint that drifts per copy, a macro noise that does not restart at every piece of a kit, a wave whose
+  phase is the tree rather than the leaf. A merged mesh is one copy, so it is per merge and not per
+  piece.
 
 Each uniform is readable in the body by its own name; a uniform written as an array of arrays is a
 table column, read as `name[s.variant]`.
@@ -494,6 +505,9 @@ Five helpers are already in scope in a body:
 - `srgb_to_linear(c)` decodes a colour you wrote down yourself.
 - `mapped_normal(s, texel)` applies a tangent-space normal map: hand it the map's rgb exactly as
   sampled and it answers with a world-space normal to give `lambert`.
+- `stochastic_sample(image, uv)` samples one of your textures so that it stops repeating — the same
+  thing `material.stochastic` does to the built-in maps, available here for a texture the body
+  declared. Three taps, so use it on the map that tiles and not on all of them.
 
 ```slang
 float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb);
@@ -516,8 +530,9 @@ deliberately. `discard` works in a body and is how a dissolve or a cutout is don
 `vertex` is the other half: a Slang function `void displace(inout Vertex v)` that runs per vertex,
 before anything is projected. `Vertex` is the varyings — write `v.position` (world space, after the
 mesh's own transform) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
-`v.variant` to change what the fragment stage receives; `v.local` (object space) and `v.index` (the
-vertex number, a per-vertex seed) are inputs only.
+`v.variant` to change what the fragment stage receives; `v.local` (object space), `v.index` (the
+vertex number, a per-vertex seed) and `v.origin` (this copy's world origin, a per-copy one) are inputs
+only.
 
 Waves, flags, breathing, jitter, explosions, a mesh that inflates on a hit — all of them are one line
 here and none costs a draw call, because the geometry never changes. The normal is not recomputed from
@@ -551,6 +566,9 @@ have been skipped; too small drops geometry you can see.
 - `reflectance` — 0 to 1, 0 by default — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
 - `offset` — `[u, v]`: where the map starts, in whole repeats
+- `uvVariants` — one uv transform per copy, picked by `mesh.variant` — see Material
+- `stochastic` — scatters this material's own `map`; a body's declared textures go through
+  `stochastic_sample(image, uv)` instead — see Material
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -632,7 +650,7 @@ renderer does not have, and a material property that provably changes no pixel i
 - `fragment` — the generated Slang — read-only, and the thing to look at first
 - `uniforms, textures` — the ShaderMaterial proxies, under the generated names
 - `map, side, transparent, blending, opacity, roughness, metalness, reflectance, repeat, offset,
-  alive` — as ShaderMaterial
+  uvVariants, stochastic, alive` — as ShaderMaterial
 
 ### Methods
 

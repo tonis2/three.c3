@@ -45,6 +45,13 @@ export const NoTexture = -1;
 // `MATERIAL_SLOT_*` in scene/material.c3, which is where they become sampler
 // bindings. Not exported: a script names a property, never a slot.
 const SLOT_NORMAL = 0;
+// How many rows `material.uvVariants` takes — `UV_VARIANTS` in
+// `gpu/pipeline.c3`, where the number is argued for. Repeated rather than asked
+// for because the host has no verb that answers it and a wrong number here is a
+// message that names the wrong limit, not a bad write: `add_material_uv_variant`
+// refuses the ninth row on its own.
+const UV_VARIANTS = 8;
+
 const SLOT_METALNESS_ROUGHNESS = 1;
 const SLOT_OCCLUSION = 2;
 
@@ -310,6 +317,103 @@ export class Material {
 		const index = this._index();
 		const uv = H.getMaterialUv(index);
 		H.setMaterialUv(index, uv[0], uv[1], u, v);
+	}
+
+	// One uv transform per copy, picked by `mesh.variant` — up to eight rows of
+	// `[offsetU, offsetV, turns, flip]`.
+	//
+	// **The cheapest way to stop a row of one shape reading as a row of one
+	// picture.** Copies of a mesh sharing a material are one draw call, and the
+	// two things they may disagree about are `color` and `variant`; this gives
+	// the second one a meaning on every material rather than only inside a
+	// ShaderMaterial body. Ten crates out of one kit wearing one sheet are still
+	// ten instances and one draw call, and no two of them alike.
+	//
+	// A row is the eight symmetries of a square and a slide, and deliberately
+	// not a free rotation: `turns` is quarter turns about the middle of the
+	// face, 0 to 3, and `flip` is 1 to mirror u, 2 to mirror v, 3 for both.
+	// Those are the transforms that leave a unit square a unit square, so
+	// whatever band `repeat` then maps into is still that band — which is what
+	// lets a trim sheet's strip survive one. `offsetU` and `offsetV` are in the
+	// mesh's own uv, before `repeat` scales them, so 1 is one whole face.
+	//
+	// Applied before `repeat` and `offset` rather than instead of them, and a
+	// row of all zeroes is the identity — which is what a copy you want left
+	// alone gets.
+	//
+	// `null` or `[]` clears the table, and a variant past the last row is the
+	// last row, exactly as it is for a ShaderMaterial's uniform table.
+	get uvVariants() {
+		const flat = H.getUvVariants(this._index());
+		const rows = [];
+		for (let i = 0; i < flat.length; i += 4) rows.push(flat.slice(i, i + 4));
+		return rows;
+	}
+
+	set uvVariants(value) {
+		const rows = value === null || value === undefined ? [] : value;
+		if (!Array.isArray(rows)) {
+			throw new TypeError(
+				'material.uvVariants wants an array of [offsetU, offsetV, turns, flip] rows, or null for none'
+			);
+		}
+		if (rows.length > UV_VARIANTS) {
+			throw new RangeError(
+				`material.uvVariants takes at most ${UV_VARIANTS} rows, not ${rows.length} — `
+				+ 'the table travels in every draw record, and a script wanting more variation than that '
+				+ 'wants a ShaderMaterial body and a table of its own'
+			);
+		}
+		const index = this._index();
+		H.beginUvVariants(index);
+		for (const row of rows) {
+			if (!Array.isArray(row) || row.length < 2 || row.length > 4 || row.some((n) => typeof n !== 'number' || !isFinite(n))) {
+				throw new TypeError(
+					'each material.uvVariants row is [offsetU, offsetV] with an optional turns (0-3) '
+					+ 'and flip (1 mirrors u, 2 mirrors v, 3 both), all finite numbers'
+				);
+			}
+			H.addUvVariant(index, row[0], row[1], row[2] ?? 0, row[3] ?? 0);
+		}
+	}
+
+	// Sample this material's maps so they stop repeating.
+	//
+	// Three taps of each image at three per-cell random offsets, blended over a
+	// triangular lattice, so two neighbouring repeats read different parts of
+	// the picture and there is no period for the eye to find. It needs no second
+	// image and no authoring, and it is the other half of the answer to a tiled
+	// surface — `uvVariants` breaks up a row of copies, this breaks up one
+	// surface.
+	//
+	// **Two things it is not for**, and both follow from the same sentence: it
+	// samples somewhere else in the image and blends the answer in.
+	//
+	// - A texture with structure in it. Concrete, plaster, dirt, rust and noise
+	//   are what it is for; over brick or tile the courses cross each other.
+	// - A material that windows into an atlas or a trim sheet. `repeat` and
+	//   `offset` are what keep such a material inside its strip, and the offsets
+	//   here are added after those — so a strip an eighth of a sheet tall is
+	//   left several strips behind. Measured, not reasoned: a brick band came
+	//   back showing the tile band. It assumes the whole image tiles over this
+	//   surface, which is the case it exists for.
+	//
+	// All four maps or none: albedo scattered one way and the normal another is
+	// a surface whose colour and whose relief disagree about where they are. A
+	// ShaderMaterial's own `map` obeys it too, and a body sampling its own
+	// declared textures calls `stochastic_sample(image, uv)` for the same thing.
+	//
+	// It costs three taps instead of one and it flattens contrast a little
+	// where three cells overlap, which is the linear blend — a variance-
+	// preserving one wants a histogram built ahead of time and is a build step
+	// rather than a sampler.
+	get stochastic() { return H.getStochastic(this._index()); }
+
+	set stochastic(v) {
+		if (typeof v !== 'boolean') {
+			throw new TypeError('material.stochastic is true or false — there is no strength to it');
+		}
+		H.setStochastic(this._index(), v ? 1 : 0);
 	}
 
 	// `{ roughness, metalness, reflectance }` off a constructor's options, for

@@ -326,6 +326,18 @@ struct Draw
     // surface this renderer had before there was a specular term. See
     // `scene/material.c3`, which has why 0 rather than glTF's own defaults.
     float4 surface;
+    // How many rows of `uv_variants` this material declared, and **zero is the
+    // whole test** — a material nobody asked for one, and every material written
+    // before there were any, arrives here as zero and neither template looks at
+    // the table.
+    uint uv_variant_count;
+    // One uv transform per copy, picked by `Instance.variant` and applied to the
+    // mesh's own uv before `uv_transform` scales it — `variant_uv` in
+    // `surface.slang` is the whole of what a row means. Eight rows because a
+    // wall wants more than four and a record that is mostly table stops being a
+    // record; a script that wants a thousand variations wants a different
+    // feature.
+    float4 uv_variants[8];
 };
 
 struct PushData
@@ -371,6 +383,15 @@ static const uint FLAG_PRESKINNED  = 16u;
 static const uint FLAG_HAS_NORMAL_MAP              = 32u;
 static const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64u;
 static const uint FLAG_HAS_OCCLUSION_MAP           = 128u;
+
+// `material.stochastic` — sample this material's maps through `stochastic_sample`
+// instead of straight, so a tiled surface stops having a period. `plan.md` §27.
+//
+// **One bit for all four maps and not one per map**, because they describe one
+// surface: albedo jittered one way and the normal another is a surface whose
+// colour and whose relief disagree about where they are, and that reads as a
+// broken material rather than as a broken option.
+static const uint FLAG_STOCHASTIC                  = 256u;
 
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
 // means this frame's live palette, clear means the asset's baked table.
@@ -513,6 +534,18 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
     return pose + (from - pose) * instance.blend;
 }
 
+// The surface maths this file and `material.slang` would otherwise carry twice —
+// `shaders/surface.slang`, spliced in here by `shader_source`. `mapped_normal_frame`
+// is what makes binding 3 mean anything, and `variant_uv` is what the vertex
+// stage below lays a per-copy uv with.
+//
+// **Above both entry points and not beside the lighting it is mostly used by**,
+// which is where it sat until a vertex stage needed one of its functions: Slang
+// wants a declaration before its use, and a marker that has to move whenever a
+// shared function finds a second caller is a marker in the wrong place.
+//@shared
+
+
 struct VertexOutput
 {
     float3 normal : NORMAL;
@@ -640,6 +673,22 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 
     output.uv = float2(0.0, 0.0);
     if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[vid];
+    // This copy's own uv, before the fragment stage's repeat and offset —
+    // `variant_uv` in `surface.slang`, and `plan.md` §27 for why a per-copy uv is
+    // what a row of one shape needs to stop reading as a row of one picture.
+    //
+    // **Here rather than in the fragment stage**, unlike `uv_transform`, which is
+    // exact and not a shortcut: every operation in `variant_uv` is affine in uv,
+    // and an affine map commutes with the linear interpolation between here and
+    // there. So this is the same picture for three vertices' worth of work
+    // instead of a screen's, and it needs no varying of its own.
+    //
+    // Clamped against this table's own length and not against `MATERIAL_ROWS`:
+    // one channel indexes two tables that have no reason to be the same size.
+    if (draw.uv_variant_count != 0u)
+    {
+        output.uv = variant_uv(output.uv, draw.uv_variants[min(instance.variant, draw.uv_variant_count - 1u)]);
+    }
 
     output.color = instance.color;
 
@@ -967,11 +1016,6 @@ float3 environment_light(float3 normal, float3 position, float3 albedo, float ro
     return sky * fresnel * intensity;
 }
 
-// The surface maths this file and `material.slang` would otherwise carry twice —
-// `shaders/surface.slang`, spliced in here by `shader_source`. `mapped_normal_frame`
-// is what makes binding 3 mean anything.
-//@shared
-
 
 
 // **The debug views, and the whole of `plan.md` §20.2's first two items.**
@@ -1078,11 +1122,21 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // `mapped_normal_frame` are as well defined as the ones `Sample` takes here.
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
-        albedo *= base_color_map.Sample(uv).rgb;
+        // The one branch, read once: every map below goes through the same
+        // sampler as the albedo or none of them does. Uniform across the draw —
+        // it is a bit off the bucket's record — so this costs no divergence and
+        // the derivatives inside `stochastic_sample` are as well defined as the
+        // ones a plain `Sample` takes.
+        bool scattered = (draw.flags & FLAG_STOCHASTIC) != 0;
+
+        albedo *= scattered ? stochastic_sample(base_color_map, uv).rgb : base_color_map.Sample(uv).rgb;
 
         if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
         {
-            normal = mapped_normal_frame(geometric, input.world, uv, normal_map.Sample(uv).rgb);
+            float3 texel = scattered
+                ? stochastic_sample(normal_map, uv).rgb
+                : normal_map.Sample(uv).rgb;
+            normal = mapped_normal_frame(geometric, input.world, uv, texel);
         }
 
         // glTF's channels: green is roughness, blue is metalness. **Multiplied
@@ -1098,12 +1152,19 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         // says.
         if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
         {
-            float2 pair = metalness_roughness_map.Sample(uv).gb;
+            float2 pair = scattered
+                ? stochastic_sample(metalness_roughness_map, uv).gb
+                : metalness_roughness_map.Sample(uv).gb;
             surface.x *= pair.x;
             surface.y *= pair.y;
         }
 
-        if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0) occlusion = occlusion_map.Sample(uv).r;
+        if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
+        {
+            occlusion = scattered
+                ? stochastic_sample(occlusion_map, uv).r
+                : occlusion_map.Sample(uv).r;
+        }
     }
 
     // Once, here, and then left in `g_shadow` for `lambert` to fold into the

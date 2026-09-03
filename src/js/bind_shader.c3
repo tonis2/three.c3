@@ -45,6 +45,11 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "getMaterialSlot", &js_get_material_slot, 2);
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
+	self.bind(host, "beginUvVariants", &js_begin_uv_variants, 1);
+	self.bind(host, "addUvVariant", &js_add_uv_variant, 5);
+	self.bind(host, "getUvVariants", &js_get_uv_variants, 1);
+	self.bind(host, "setStochastic", &js_set_stochastic, 2);
+	self.bind(host, "getStochastic", &js_get_stochastic, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
 	self.bind(host, "disposeMaterial", &js_dispose_material, 1);
 	self.bind(host, "beginMaterialLayers", &js_begin_material_layers, 6);
@@ -717,6 +722,132 @@ fn void js_get_material_uv(
 	qjs::Value four = js.array();
 	for (uint i = 0; i < 4; i++) js.set_index(four, i, qjs::number_value((double)uv[i]));
 	*out = four;
+}
+
+<*
+ `material.uvVariants = [...]` — start the table over.
+
+ Two verbs and not one, which is `beginMaterialLayers` and `addMaterialLayer`'s
+ shape and for its reason: eight rows of four numbers is thirty-two arguments,
+ and a host verb takes scalars. Clearing first is what makes assigning a shorter
+ list actually shorter rather than a shorter list with somebody else's tail on
+ the end of it.
+*>
+fn void js_begin_uv_variants(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (catch self.pass.begin_material_uv_variants((uint)arg_int(&js, argc, args, 0)))
+	{
+		*out = js.raise("that material is not in this context");
+	}
+}
+
+<*
+ One row of it: `[offsetU, offsetV, turns, flip]`.
+
+ @param [in] args : `(material, offsetU, offsetV, turns, flip).`
+*>
+fn void js_add_uv_variant(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (catch self.pass.add_material_uv_variant(
+		(uint)arg_int(&js, argc, args, 0),
+		arg_float(&js, argc, args, 1),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
+	))
+	{
+		*out = js.raise("that material is not in this context");
+	}
+}
+
+<*
+ The table back, flat: four numbers a row, and an empty array for a material with
+ no table. The prelude cuts it back into rows.
+*>
+fn void js_get_uv_variants(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		float[] rows   = self.pass.material_uv_variants((uint)arg_int(&js, argc, args, 0));
+		qjs::Value list = js.array();
+		foreach (i, value : rows) js.set_index(list, (uint)i, qjs::number_value((double)value));
+		*out = list;
+	};
+}
+
+<*
+ `material.stochastic = true` — sample this material's maps so they stop
+ repeating.
+
+ @param [in] args : `(material, on).`
+*>
+fn void js_set_stochastic(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (catch self.pass.set_material_stochastic(
+		(uint)arg_int(&js, argc, args, 0),
+		arg_int(&js, argc, args, 1) != 0
+	))
+	{
+		*out = js.raise("that material is not in this context");
+	}
+}
+
+<*
+ What it reads back as.
+*>
+fn void js_get_stochastic(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	*out = qjs::bool_value(self.pass.material_stochastic((uint)arg_int(&js, argc, args, 0)));
 }
 
 <*
