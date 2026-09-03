@@ -1,13 +1,6 @@
 # three.c3 — what is left
 
-**A task list, and nothing else.** How a mechanism works, why a decision went the
-way it did, and what has already cost somebody a session are all in `notes.md`.
-
-**An entry leaves this file the moment it stops being work somebody has to do** —
-into `notes.md` if it explains something, into `git log -p -- plan.md` if it does
-not. That deletion is a habit, not a one-off event, and it is the only thing
-keeping this file short enough to read in one sitting.
-
+**A task list, and nothing else.** 
 ---
 
 ## 1. Platform defects
@@ -329,9 +322,9 @@ vocabulary to write a pattern with. Substance Designer is the shape to copy —
 procedural, no high-poly, no cage, no transfer bake.
 
 `examples/trimsheet.js` is the whole feature done *around* the bake — a post pass
-writes one channel per frame, `--every 1` saves each, and a later frame in the
-same run loads them back with `three.texture` — so the sheet, the maps and the
-scene wearing them exist and the items below are about moving that inside.
+draws one channel, `three.screenshot` writes it, and the next lines load them
+back with `three.texture` — so the sheet, the maps and the scene wearing them
+exist and the items below are about moving that inside.
 
 - [ ] **The bake emits one channel and there are four.** `Surface.height`, a
       channel index in the bake push, and a switch under `THREE_BAKE`. One
@@ -557,6 +550,103 @@ the surface it finds wants a G-buffer or a depth prepass this renderer does not
 have, and it buys curved receivers that the mesh decal already gets by clipping.
 The mesh decal is what covers cracks, leaks, posters and edge grime, and it is
 the one that composes with instancing and with the exporter.
+
+## 28. Wearing a sheet on somebody else's mesh
+
+§25 baked a trim sheet and §27 stopped it repeating, and both were measured
+against geometry this repo built. These came out of the other case: an imported
+Blender blockout — nineteen meshes, two materials, no uvs on half of them —
+dressed with two sheets, a layered ground and a fire. Everything below either
+cost a workaround or has one written down somewhere it should not be.
+
+- [ ] **A layer cannot window into a strip.** `layerUv` in
+      `js/prelude/layers.js` emits `s.uv * uvScale + uvOffset` and no `frac`, so
+      a layer that tiles more than once walks straight out of whatever band the
+      offset put it in — windowing into a sheet and tiling are the same axis and
+      cannot both happen. One `frac` behind a layer flag would let a terrain's
+      four materials come out of one sheet; without it they are four images, and
+      the ground half of a nature sheet has to be baked a second time as whole
+      tiling pictures. Six extra bakes for the scene that found it.
+
+- [ ] **The splat mask follows `material.repeat`.** The mask is sampled at
+      `s.uv`, and the fragment stage applies `repeat` and `offset` before the
+      body runs, so a stack whose base map wants tiling gets its mask tiled with
+      it. The consequence is not obvious from the docs and is the first thing a
+      terrain hits: it has to leave `repeat` at 1, own no base map at all, and
+      make its base material layer zero with no mask. Either the mask reads the
+      untransformed uv, or the class says this out loud.
+
+- [ ] **`standard()` has nowhere to put an occlusion.** `lambert(normal, ao)`
+      takes one and skips the specular and environment terms; `standard(s,
+      albedo, normal)` has both and takes no ao. A body reading a packed ORM —
+      which is every body wearing a sheet — therefore folds the red channel into
+      the albedo and darkens the direct light along with the ambient. It is a
+      fourth parameter.
+
+- [ ] **Per-texel roughness is undocumented and may be accidental.** A body sets
+      `s.roughness` and `s.metalness` before calling `standard(s, albedo,
+      normal)` and it works, because `Surface` is a by-value parameter. That is
+      the only way to shade an ORM map correctly today and nothing says it is
+      supported. Either document it or add
+      `standard(s, albedo, normal, roughness, metalness)`.
+
+- [ ] **A body brings its own noise.** `three.hash`, `noise2` and `fbm2` are
+      JavaScript; a fragment body gets `standard`, `lambert`, `specular`,
+      `srgb_to_linear`, `mapped_normal` and `stochastic_sample`, and no noise at
+      all. So every generated material in `examples/` and every one outside it
+      carries the same hash, the same tiling value noise, the same fbm and its
+      own worley — 120 lines before the first material. `surface.slang` already
+      holds `hash_cell` for exactly this reason and is the home for the rest:
+      the tiling ones especially, since a period that does not divide the image
+      is a seam nothing reports.
+
+- [ ] **Alpha-tested shadows.** `shadow.slang` has one entry point and no
+      fragment stage, and says so — a leaf card casts the shadow of its quad.
+      That is the honest statement and it is also a ceiling: grass, foliage,
+      chain, rope and every cut-out decal cast a rectangle. It costs a fragment
+      stage and one sampler on that pipeline, which is real, so the entry is to
+      decide rather than to build.
+
+- [ ] **Nothing is lit from a point.** Four lights, all directional. A campfire
+      cannot light the ground it stands on, so the light pool under one is an
+      additive quad and the warm light on the props around it is a global
+      directional that tints the whole level if it is pushed past about half
+      intensity. This is the largest visible gap between what a scene like that
+      should look like and what it does.
+
+- [ ] **`--assets` boots `main.js` even when `--script` is given.** A two-stage
+      pipeline — bake to disk, then load the bake — cannot put its baker in the
+      game directory: the boot builds the game first, and on a clean checkout it
+      throws, because the scene is waiting on the file the baker has not written
+      yet. The workaround is to root the bake at a subdirectory with no
+      `main.js` in it, which works and reads as a trick. `--no-boot`, or
+      `--script` suppressing the boot, is the honest spelling.
+
+- [ ] **`--script` does not evaluate a module.** `--assets <dir>/main.js` does,
+      so `import` works there and is a `SyntaxError` in the file beside it. Any
+      pipeline with two entry points is therefore one self-contained file plus a
+      module set that cannot share a line with it.
+
+- [ ] **`scatter`'s `accept` signature is not written down.** It is
+      `(x, y, z, normal)`; `scatter` answers with `{ x, y, z, normal, index }`,
+      and passing the callback the record it returns is the obvious guess and
+      the wrong one. One line in `functions.md`.
+
+- [ ] **A post uniform and a local of one name is an error.** `float d` beside a
+      `d` in the uniform block is `error[E40011]: ambiguous reference`, where a
+      local shadowing an outer name is what every language the author came from
+      does. Nothing to fix in the compiler; it belongs in `differences.md`
+      beside the other things that fail at the first run.
+
+- [ ] **Triplanar wants the mip fix in it.** §27 already asks for triplanar as a
+      shared function. What that entry should carry when it is written: the
+      window into a band has to sample with `SampleGrad` and the *unwrapped*
+      gradients, exactly as `stochastic_sample` does, or the `frac` puts a
+      blurred line along every tile boundary on every surface in the scene; and
+      three tangent-space normals have to be blended Whiteout rather than
+      averaged, or anything facing two ways at once comes out flat. Both are
+      written out in `~/Documents/FF9/sheets.js` and neither is guessable from
+      the naive version.
 
 ## Standing constraints
 
