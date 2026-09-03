@@ -1261,6 +1261,12 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.morph_targets = morphing ? mesh.morph_targets : 0,
 			.uv_transform = material.uv_transform_or_identity(),
 			.surface = material.surface(),
+			// Copied rather than pointed at, for the reason the record itself
+			// exists: it is written once per bucket per frame from a material that
+			// a script may have rewritten since the last one, and a pointer into
+			// the material list would be a pointer into a list that grows.
+			.uv_variant_count = material.uv_variant_count,
+			.uv_variants = material.uv_variants,
 		};
 
 		self.draw_indices.push(recorded);
@@ -2493,6 +2499,107 @@ fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float
 }
 
 <*
+ `material.stochastic` — sample this material's maps so they stop repeating.
+
+ A bool and not a strength, because there is nothing continuous to turn down:
+ the blend is a partition of unity over a lattice, and a half-applied one is
+ three taps to arrive at a picture between two answers. Turning it off is the
+ way to have less of it.
+
+ Free to change between frames, like the opacity and unlike the side: it is one
+ bit of the draw record, so nothing is rebuilt and nothing is recompiled.
+
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+*>
+fn void? MeshPass.set_material_stochastic(&self, uint index, bool on)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	self.materials[index].stochastic = on;
+}
+
+<*
+ What that reads back as. False for an index that names nothing, which is
+ `material_uv`'s rule: a getter answers what a material nobody asked anything of
+ would answer.
+*>
+fn bool MeshPass.material_stochastic(&self, uint index)
+{
+	if (index >= self.materials.len()) return false;
+	return self.materials[index].stochastic;
+}
+
+<*
+ `material.uvVariants` — a uv transform per copy, on the channel that already
+ varies per copy.
+
+ One row at a time, which is `add_material_layer`'s crossing shape and for the
+ same reason: eight rows of four numbers is thirty-two arguments, and the host
+ verbs take scalars. `begin_material_uv_variants` clears the table and every
+ `add_material_uv_variant` after it appends one row, so a script assigning a
+ shorter list cannot leave the tail of a longer one behind it.
+
+ ## Why the table is not checked for sense
+
+ A row of all zeroes is the identity and is a perfectly reasonable first entry —
+ it is what "leave this copy alone" looks like — so there is nothing here to
+ refuse the way `set_material_uv` refuses a zero repeat. `turns` and `flip` are
+ masked in the shader rather than clamped here, so a fourth quarter turn is the
+ identity instead of an error, which is what makes arithmetic in a script safe.
+
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+*>
+fn void? MeshPass.begin_material_uv_variants(&self, uint index)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	self.materials[index].uv_variant_count = 0;
+}
+
+<*
+ One more row, or nothing when the table is already full.
+
+ Silent about the ninth row rather than throwing, because the prelude has already
+ refused a longer list by name and with the limit in the message — this is the
+ second line of defence and its job is to not write past the array.
+
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+*>
+fn void? MeshPass.add_material_uv_variant(&self, uint index, float offset_u, float offset_v, float turns, float flip)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	Material* material = &self.materials[index];
+	if (material.uv_variant_count >= UV_VARIANTS) return;
+
+	material.uv_variants[material.uv_variant_count] = { offset_u, offset_v, turns, flip };
+	material.uv_variant_count++;
+}
+
+<*
+ What that table reads back as, flattened four numbers to a row.
+
+ The temp arena, like every other list-shaped answer here: the binding copies it
+ into a JavaScript array before the pool closes.
+*>
+fn float[] MeshPass.material_uv_variants(&self, uint index)
+{
+	if (index >= self.materials.len()) return {};
+
+	Material* material = &self.materials[index];
+	float[] out = alloc::new_array(tmem, float, (sz)material.uv_variant_count * 4);
+	for (uint i = 0; i < material.uv_variant_count; i++)
+	{
+		UvVariant row = material.uv_variants[i];
+		out[i * 4] = row.offset_u;
+		out[i * 4 + 1] = row.offset_v;
+		out[i * 4 + 2] = row.turns;
+		out[i * 4 + 3] = row.flip;
+	}
+	return out;
+}
+
+<*
  What those three read back as.
 
  An index that names nothing answers the default surface rather than throwing,
@@ -2690,9 +2797,15 @@ fn bool MeshPass.shades_built_in(&self, Material* material)
 *>
 fn uint MeshPass.map_flags(&self, Material* material)
 {
-	if (!self.shades_built_in(material)) return 0;
+	// **Above the guard**, unlike the three below it: `material.stochastic` is a
+	// property of every material and not only of the ones drawn by the built-in
+	// shader — `material.slang` reads the same bit for a body's base map — and a
+	// setting that silently did nothing on a `ShaderMaterial` would be worse than
+	// one that is not offered.
+	uint stochastic = material.stochastic ? FLAG_STOCHASTIC : 0;
+	if (!self.shades_built_in(material)) return stochastic;
 
-	uint flags = 0;
+	uint flags = stochastic;
 	if (material.textures.at(NORMAL_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_NORMAL_MAP;
 	if (material.textures.at(METALNESS_ROUGHNESS_MAP_BINDING) != NO_TEXTURE)
 	{

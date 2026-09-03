@@ -1779,6 +1779,72 @@ one image is two materials, which is what they already had to be.
 
 A repeat of zero throws — it maps the whole surface onto one texel.
 
+## material.uvVariants
+
+One uv transform per copy, picked by `mesh.variant` — up to eight rows of `[offsetU, offsetV, turns,
+flip]`, and the cheapest way to stop a row of one shape reading as a row of one picture.
+
+Copies of a mesh sharing a material are one draw call, and the two things they may disagree about are
+`color` and `variant`. This gives the second one a meaning on every material rather than only inside a
+ShaderMaterial body: ten crates out of one kit wearing one sheet are still ten instances and one draw
+call, and no two of them alike.
+
+```js
+const material = new three.MeshLambertMaterial({ map: sheet });
+material.repeat = [1, 1 / 8];            // one strip of a trim sheet
+material.offset = [0, 2 / 8];
+material.uvVariants = [[0, 0], [1, 0], [2, 0, 0, 1], [3, 0, 0, 1]];
+crate.variant = i % 4;                   // four crates, four windows of the strip
+```
+
+A row is the eight symmetries of a square and a slide, and deliberately not a free rotation. `turns`
+is quarter turns about the middle of the face, 0 to 3; `flip` is 1 to mirror u, 2 to mirror v, 3 for
+both. Those are the transforms that leave a unit square a unit square, so whatever band `repeat` then
+maps into is still that band — which is what lets a trim sheet's strip survive one, and what a
+rotation of 37 degrees would walk straight out of. A body that wants a free rotation has `s.variant`
+and a table of its own.
+
+`offsetU` and `offsetV` are in the mesh's own uv, **before** `repeat` scales them, so 1 is one whole
+face however many times the image tiles across it. The whole row is applied before `repeat` and
+`offset` rather than instead of them, and a row of all zeroes is the identity — which is what a copy
+you want left alone gets.
+
+A variant past the last row is the last row, exactly as it is for a ShaderMaterial's uniform table;
+the two are one channel indexing two tables and they need not be the same length. `null` or `[]`
+clears it. Eight is the ceiling because the table travels in every draw record.
+
+## material.stochastic
+
+Sample this material's maps so that they stop repeating.
+
+Three taps of each image at three per-cell random offsets, blended over a triangular lattice, so two
+neighbouring repeats read different parts of the picture and there is no period for the eye to find.
+No second image, no mask, no authoring — `material.stochastic = true` is the whole of it.
+
+Where `uvVariants` breaks up a row of copies, this breaks up one surface, and a ground plane at
+`repeat = [20, 20]` is what it is for.
+
+**Two things it is not for**, and both follow from the same sentence — it samples somewhere else in
+the image and blends the answer in.
+
+- A texture with structure in it. Concrete, plaster, dirt, rust, gravel and noise are what it is for;
+  over brick or tile the courses cross each other.
+- A material that windows into an atlas or a trim sheet. `repeat` and `offset` are what keep such a
+  material inside its strip, and these offsets are added after those, so a strip an eighth of a sheet
+  tall is left several strips behind — a brick band comes back showing the tile band. It assumes the
+  whole image tiles over this surface, which is the case it exists for. `uvVariants` is the one that
+  is safe on a sheet, because every transform in a row is a symmetry of the unit square and lands back
+  in the same band.
+
+All four maps or none: albedo scattered one way and the normal another is a surface whose colour and
+whose relief disagree about where they are. A ShaderMaterial's own `map` obeys it too, and a body
+sampling its own declared textures calls `stochastic_sample(image, uv)` for the same thing.
+
+It costs three taps instead of one, and it flattens contrast a little where three cells overlap — and
+a distinctive mark in the image turns up about three times as often, at a third of the strength,
+which is the same fact seen from the other side. The version that does not do that wants a histogram
+of the image built ahead of time, which is a build step rather than a sampler.
+
 ## mapped_normal(s, texel) — normal maps in a ShaderMaterial
 
 A tangent-space normal map applied to a surface that carries no tangents. In a fragment body:

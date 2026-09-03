@@ -206,6 +206,18 @@ struct Draw
     // surface this renderer had before there was a specular term. See
     // `scene/material.c3`, which has why 0 rather than glTF's own defaults.
     float4 surface;
+    // How many rows of `uv_variants` this material declared, and **zero is the
+    // whole test** — a material nobody asked for one, and every material written
+    // before there were any, arrives here as zero and neither template looks at
+    // the table.
+    uint uv_variant_count;
+    // One uv transform per copy, picked by `Instance.variant` and applied to the
+    // mesh's own uv before `uv_transform` scales it — `variant_uv` in
+    // `surface.slang` is the whole of what a row means. Eight rows because a
+    // wall wants more than four and a record that is mostly table stops being a
+    // record; a script that wants a thousand variations wants a different
+    // feature.
+    float4 uv_variants[8];
 };
 
 // **The three mesh fields come first, in this order, and material uniforms only
@@ -248,6 +260,15 @@ static const uint FLAG_HAS_SKIN    = 8u;
 // This bucket was skinned by the compute pass before the render pass began, so
 // the streams are already posed. Mutually exclusive with FLAG_HAS_SKIN.
 static const uint FLAG_PRESKINNED  = 16u;
+// `material.stochastic` — sample the base map through `stochastic_sample` so a
+// tiled surface stops having a period. `plan.md` §27, and `mesh.slang` carries
+// the same bit at the same value with the three maps this shader does not have.
+//
+// The three map bits between this and `FLAG_PRESKINNED` are `mesh.slang`'s and
+// are never set on a material that compiled a body: a `ShaderMaterial` samples
+// whatever its own `textures` declared, and `stochastic_sample` is in scope in a
+// body for exactly that.
+static const uint FLAG_STOCHASTIC  = 256u;
 
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
 // means this frame's live palette, clear means the asset's baked table.
@@ -397,6 +418,27 @@ struct Surface
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
     uint variant;
+    // Where this **copy** is: the instance's world origin, one value for the whole
+    // copy, and the seed every per-copy trick wants.
+    //
+    // **The thing a body cannot work out for itself.** `position` varies per
+    // pixel, so hashing it gives noise across a surface and never a number that
+    // stands for the object; `variant` is a row index a script has to set and
+    // keep; and `SV_InstanceID` — which is not here — is a slot in a bucket that
+    // culling and re-bucketing renumber between frames, so a pattern keyed on one
+    // swims as the scene changes around it. An origin is none of those: it is
+    // stable, it is free, and two copies of one shape in two places disagree
+    // about it by construction.
+    //
+    // What it is for is `plan.md` §27: a tint that drifts per copy, a macro noise
+    // that does not restart at every piece of a kit, a uv rotation chosen by
+    // where a thing stands. A merged mesh is one copy, so this is per merge and
+    // not per piece — the same trade `three.merge` makes about everything else.
+    //
+    // Read off the model matrix rather than stored: `mul(model, (0,0,0,1))` is
+    // the origin however the matrix is laid out, and it costs the instance
+    // nothing.
+    float3 origin;
     // How far this point stands out of the surface the mesh has, and **0.5 is
     // that surface**: half the range stands proud of it and half sinks in, which
     // is the convention `parallax_uv` already reads a height map by and the one a
@@ -471,6 +513,11 @@ struct Vertex
     // `SV_VertexID`. A per-vertex seed, which is what a hash-driven jitter or a
     // scatter needs and nothing else in here provides.
     uint index;
+    // Where this **copy** is: the instance's own world origin, the same value for
+    // every vertex of it. `Surface.origin` has the whole argument for it; here it
+    // is what a displacement keys on when the effect should differ per copy and
+    // not per vertex — a wave whose phase is the tree, not the leaf.
+    float3 origin;
     // Game clock seconds. An input, like `local` and `index` — a body that
     // writes it does not change `Surface.time`.
     float time;
@@ -501,6 +548,16 @@ struct VertexOutput
     // interpolation costs. Here a body reads it and may do anything with it;
     // there it is a plain glTF factor.
     float4 vertex_color : COLOR1;
+    // `Surface.origin` and `Vertex.origin`. **`nointerpolation`, like `variant`
+    // and for the same reason**: it is one value for the copy, and interpolating
+    // a constant is three multiplies a frame per pixel to arrive back at it.
+    //
+    // `mesh.slang` carries no varying here, unlike the ones above it — that
+    // shader has no body to read one and the origin is not part of the wire
+    // format `Instance` is. A varying is per *stage pair*, so the two shaders
+    // are free to differ about this where they are not free to differ about a
+    // struct the CPU also writes.
+    nointerpolation float3 origin : TEXCOORD3;
     float4 sv_position : SV_Position;
 };
 
@@ -955,7 +1012,12 @@ float3 base_albedo(Surface s, float2 uv)
 {
     Draw draw = push.draw[0];
     float3 albedo = draw.base_color.rgb * s.color.rgb;
-    if ((draw.flags & FLAG_HAS_UVS) != 0) albedo *= base_color_map.Sample(uv).rgb;
+    if ((draw.flags & FLAG_HAS_UVS) != 0)
+    {
+        albedo *= (draw.flags & FLAG_STOCHASTIC) != 0
+            ? stochastic_sample(base_color_map, uv).rgb
+            : base_color_map.Sample(uv).rgb;
+    }
     return albedo;
 }
 
@@ -1149,6 +1211,11 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     v.local = local;
     v.index = vid;
     v.time = push.frame[0].lighting.z;
+    // The model matrix applied to the local origin, which is the copy's world
+    // origin whichever way the matrix is stored — and one the compiler folds to a
+    // column read. Before `displace`, so a body that moves the vertex still knows
+    // where the copy it belongs to stands.
+    v.origin = mul(instance.model, float4(0.0, 0.0, 0.0, 1.0)).xyz;
 
 #ifdef THREE_BAKE
     // **The mesh's own TEXCOORD_0, kept before `displace` can rewrite it.**
@@ -1187,9 +1254,23 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 #endif
     output.normal = v.normal;
     output.uv = v.uv;
+    // After `displace` and not before it, which is the same rule
+    // `material.repeat` follows: a per-copy uv and a tiling density are both
+    // answers to "how is the map laid across this surface", and a body that
+    // computes its own uv should compose with the two rather than take one of
+    // them away. `mesh.slang` lays the same row in the same stage.
+    if (draw.uv_variant_count != 0u)
+    {
+        output.uv = variant_uv(output.uv, draw.uv_variants[min(instance.variant, draw.uv_variant_count - 1u)]);
+    }
     output.color = v.color;
     output.variant = v.variant;
     output.vertex_color = v.vertex_color;
+    // Straight from the gather and not recomputed: a body may write `v.origin`,
+    // and a value that could be changed in the vertex stage and silently was not
+    // in the fragment one is the kind of disagreement this file spends its
+    // comments on.
+    output.origin = v.origin;
 
     return output;
 }
@@ -1225,7 +1306,9 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
-        s.albedo *= base_color_map.Sample(uv).rgb;
+        s.albedo *= (draw.flags & FLAG_STOCHASTIC) != 0
+            ? stochastic_sample(base_color_map, uv).rgb
+            : base_color_map.Sample(uv).rgb;
     }
     s.normal = normalize(input.normal);
     s.uv = uv;
@@ -1240,6 +1323,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // the block — a wrong colour with no error anywhere, which is precisely the
     // class of failure this project spends its comments on.
     s.variant = min(input.variant, MATERIAL_ROWS - 1u);
+    s.origin = input.origin;
     // Once, here, and then left in two places: on the surface for a body that
     // wants it by name, and in `g_shadow` for `lambert` to fold into the direct
     // term. Nine texture taps, so once is the number that matters — a body

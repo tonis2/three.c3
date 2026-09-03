@@ -328,6 +328,11 @@ things are missing: it emits albedo and nothing else, and a body has no
 vocabulary to write a pattern with. Substance Designer is the shape to copy —
 procedural, no high-poly, no cage, no transfer bake.
 
+`examples/trimsheet.js` is the whole feature done *around* the bake — a post pass
+writes one channel per frame, `--every 1` saves each, and a later frame in the
+same run loads them back with `three.texture` — so the sheet, the maps and the
+scene wearing them exist and the items below are about moving that inside.
+
 - [ ] **The bake emits one channel and there are four.** `Surface.height`, a
       channel index in the bake push, and a switch under `THREE_BAKE`. One
       pipeline and N submissions: MRT (§13) buys nothing here and costs a
@@ -356,16 +361,24 @@ procedural, no high-poly, no cage, no transfer bake.
 - [ ] **A sheet is a layout, not a texture.** Strips at known v ranges, and
       geometry that uvs into them. Without a descriptor both sides agree on this
       produces materials and never trim sheets. The piece most likely to be
-      skipped and then missed.
+      skipped and then missed. `examples/trimsheet.js` has the shape of one —
+      a strip table spliced into the generator and read by the scene, and a
+      `wearStrip` that derives the tiling from the piece — so what is left is
+      deciding whether the engine owns it or the script does.
 - [ ] **Export writes one image per material.** glTF wants `normalTexture` and
       `occlusionTexture` beside the base colour.
 - [ ] **The agent cannot see its own work.** `screenshot` returns the frame;
       authoring wants the sheet flat *and* on a lit test mesh. This is the half
       that decides whether an agent's iteration converges or wanders.
 
-**Verification:** bake a function whose derivative is known and compare the
-normal against the closed form. It is the one part of this whose correctness is
-a number rather than an opinion.
+**Verification: done, and the number is 0.** `examples/trimsheet.js` bakes
+`h = 0.5 + 0.5 sin(2pi k u)`, whose slope is closed-form, and compares every
+texel of the resulting normal against it: worst error 0/255 across 1024. It bakes
+through a post pass and a screenshot rather than through `render/bake.c3`, so it
+proves the *arithmetic* — central differences at float precision, scaled by a
+relief in texels, pre-encoded past the target's sRGB write — and not the channel
+index above. When the bake grows the other three channels, that comparison is
+what it has to reproduce.
 
 **Not doing:** matching a reference image automatically. An agent looking at a
 reference and writing the function is the whole of the feature; sampling the
@@ -416,6 +429,134 @@ What is left, and none of it is blocking:
       is a `ShaderMaterial`'s and a `LayeredMaterial`'s; a fourth slot would be a
       sixth binding and a fourth flag, and it waits for §25 to have something to
       put in it.
+
+## 27. Hiding the repeat
+
+**Done, for the first of the three families below and most of the second.** A
+tiled texture reads as tiled, and the fix is three separate tricks rather than
+one:
+
+- **break the grid** — vary per *copy*: turn, flip or slide the uv, drift the
+  tint, so a row of one shape stops being a row of one picture;
+- **break the tile** — vary per *texel* inside one draw: stochastic sampling,
+  triplanar, a macro noise at a tenth of the scale;
+- **break the uniformity** — put things on top that do not repeat at all:
+  decals, painted grime, edge wear.
+
+§25's trim sheet is what made this urgent rather than nice: one sheet dressing a
+whole level is exactly the arrangement whose repeat is most visible, and a strip
+is a band of v, which is what decides the order things apply in.
+
+`s.origin` is where a copy *is*, on `Surface` and `Vertex` — the seed every
+per-copy trick wants, and the one thing a body could not work out for itself:
+`s.position` varies per pixel, and an instance index is not stable across culling
+and re-bucketing, so a pattern keyed on one swims as the scene changes. It costs
+no instance field and no new per-copy channel, being
+`mul(instance.model, float4(0,0,0,1))` and one `nointerpolation float3`. A merged
+mesh is one copy, so the seed is per merge and not per piece.
+`test/origin_test.c3`.
+
+`material.uvVariants` is up to eight `[offsetU, offsetV, turns, flip]` rows in
+the `DrawRecord`, picked by `mesh.variant` — the channel that already varied per
+copy, now meaningful on every material and not only inside a body. **Applied to
+the mesh's own uv before `material.repeat`**, and that order is the design rather
+than a detail: a row is one of the eight symmetries of the square, so whatever
+band the repeat then maps into is still the band it was, and a trim sheet's strip
+survives a quarter turn that would otherwise walk straight out of it. Explicit
+rows and not a count to hash, because a distribution is a default invented from
+one scene. `test/variant_test.c3`.
+
+`material.stochastic` is Heitz and Neyret's tile blend in
+`shaders/surface.slang` — three taps at three per-cell offsets over a triangular
+lattice — and a body reaches the same function as `stochastic_sample(image, uv)`.
+`SampleGrad` with the *un-jittered* derivatives is not optional: without it every
+cell boundary picks its own mip and the cure is more visible than the disease.
+`test/stochastic_test.c3` measures it the only way it can be measured without
+knowing where anything is on screen — a repeat *is* a period, so shifting the map
+by one whole repeat has to draw the identical frame back straight and a different
+one scattered.
+
+**And it settled one guess this entry had made in the other direction.**
+Stochastic sampling cannot be used on a trim sheet strip: the offsets go on
+*after* `uv_transform`, so a band an eighth of a sheet tall is left several
+strips behind, and a brick band comes back showing the tile band. It assumes the
+whole image tiles over the surface, which is the case it exists for.
+`uvVariants` is the one that is safe on a sheet.
+
+`examples/trimsheet.js` wears both, and is also where the cost of getting a slide
+wrong is written down: the rivet strip repeats every sixteenth of the sheet, so
+the first four crate rows there were slides of exactly one and one-and-a-half of
+those and two of the four crates were pixel-identical to the other two. A slide
+is measured against the *pattern's* period, not against the face.
+
+What is left, and none of it is blocking:
+
+- [ ] **A strip-safe scatter.** The gap the paragraph above opens. Inside a strip
+      there is nowhere to move but along it, so the offset would have to be one
+      axis rather than two — and which axis is a statement about what the
+      material *means*, not something to derive from a repeat below 1, which is
+      also what a material showing half of one picture looks like. It wants a
+      use and a spelling before it wants an implementation.
+
+- [ ] **Decals.** `three.DecalGeometry(target, { position, normal, size,
+      rotation })`, which is `ConvexGeometry`'s shape of API and its precedent: a
+      script hands over a description and the engine makes the vertices, so the
+      thesis holds. Clip the receiver's triangles against the six planes of the
+      decal box, take the uv from the projection, and lift the result along the
+      normal.
+
+      **The renderer half is small and it is the only real gap.**
+      `PipelineDescription` has no depth bias — `gpu/pipeline.c3` builds
+      `defaultRasterizationState` and never touches it — so a decal either
+      z-fights with its receiver or wants a normal offset large enough to peel
+      away from it at a grazing angle. One field on the description, one bit in
+      the cache key.
+
+      Batching is already solved: `three.merge` takes a chunk's decals into one
+      asset, they share one material by construction, and each one's
+      `mesh.color` bakes into the merged vertex colours, so they can still
+      differ.
+
+      `examples/trimsheet.js` has the flat-receiver half of this today and needed
+      nothing from the engine for it — a quad two millimetres proud of the wall,
+      a body that draws a crack and discards elsewhere, seeded per copy from
+      `s.origin` so four of them are one draw call and four different cracks.
+      What that cannot do is lie across a corner, which is the whole of what the
+      clipping buys.
+
+- [ ] **Per-pixel alpha in a body.** The limit the crack decal ran into: `shade`
+      returns rgb, and how much of a surface shows is the material's opacity
+      times the copy's, both per copy. So a decal's shape is a `discard` and its
+      edge is hard. That is what an alpha-tested decal has always been and it is
+      not urgent, but a soft-edged decal, a fading scorch and a dissolve that
+      does not stipple all want the same missing channel.
+
+- [ ] **`uvSource: 'world' | 'object'` on a LayeredMaterial layer.** Macro
+      variation works today — a layer with no mask covers everything and
+      `uvScale` tiles it independently of the base, so
+      `{ map: noise, blend: 'multiply', uvScale: 0.05 }` is the classic
+      low-frequency break-up with no engine change. But it is sampled in the
+      *mesh's* uv, so every piece of a kit resets the macro pattern at its own
+      origin, which is the repetition it was supposed to hide, one level up. The
+      generated body already has `s.position`; this is a couple of lines in
+      `js/prelude/layers.js`.
+
+- [ ] **Triplanar as a shared function.** `scene/convex.c3` already says a
+      hull's projected uv is "the same thing in the shader". Same home as the
+      stochastic sample, and the same argument for it: a rock, a cliff and a
+      merged terrain all have uvs that are a projection rather than an unwrap.
+
+- [ ] **Nothing paints a vertex colour.** `maskSource: 'vertexColor'` is half of
+      painted grime and the other half only ever arrives from a `.glb`. The
+      in-keeping version is generated rather than painted — the engine
+      evaluating a function per vertex — because a script that writes a vertex
+      is the one thing the standing constraint forbids.
+
+**Not doing: projected decals.** A decal that reads the depth buffer and paints
+the surface it finds wants a G-buffer or a depth prepass this renderer does not
+have, and it buys curved receivers that the mesh decal already gets by clipping.
+The mesh decal is what covers cracks, leaks, posters and edge grime, and it is
+the one that composes with instancing and with the exporter.
 
 ## Standing constraints
 

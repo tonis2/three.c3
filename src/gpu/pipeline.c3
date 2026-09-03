@@ -95,6 +95,16 @@ const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64;
 const uint FLAG_HAS_OCCLUSION_MAP           = 128;
 
 <*
+ `material.stochastic` — sample this material's maps through `stochastic_sample`
+ rather than straight, so a tiled surface stops having a period. `plan.md` §27.
+
+ The one bit above that is *not* only `mesh.slang`'s: `material.slang` reads it
+ too, for a body's base map, which is why `map_flags` sets it before its own test
+ for whether the built-in shader is drawing.
+*>
+const uint FLAG_STOCHASTIC                  = 256;
+
+<*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so
@@ -311,6 +321,35 @@ struct MorphDelta
 }
 
 <*
+ One row of a material's per-copy uv table, as `variant_uv` in
+ `shaders/surface.slang` reads it.
+
+ A `float4` on the wire because that is what a table of anything is on this side
+ of it, and the last two are small integers carried as floats rather than a
+ second array of a second type for four bits' worth of meaning.
+*>
+struct UvVariant
+{
+	// Slides the map, in the mesh's own uv units — one whole face per unit, which
+	// `uv_transform` then scales into however many tiles that is.
+	float offset_u;
+	float offset_v;
+	// Quarter turns about the middle of the face, 0 to 3, masked in the shader so
+	// a fourth turn is the identity rather than a read off the end of anything.
+	float turns;
+	// 1 mirrors u, 2 mirrors v, 3 both.
+	float flip;
+}
+
+// How many rows a material's uv variant table may have.
+//
+// Eight because a wall wants more than four and a record that is mostly table has
+// stopped being a record — the whole table is 128 bytes per bucket per frame,
+// which is what the number is really trading. A script wanting a thousand
+// variations wants `s.variant` and a body, or a different feature.
+const uint UV_VARIANTS = 8;
+
+<*
  One bucket's geometry and surface, as `shaders/mesh.slang`'s `Draw` declares it.
 
  Written per bucket per frame into a host-visible buffer, which is the difference
@@ -335,8 +374,11 @@ struct MorphDelta
  skin_stride    92     4
  morph_targets  96     4
  uv_transform  100    16
- surface       116    16    = 132, and four bytes of tail padding to the
- struct's own eight-byte alignment
+ surface       116    16
+ uv_variant_count
+               132     4
+ uv_variants   136   128    = 264, which is already the struct's own eight-byte
+ alignment and so has no tail padding left to spend
 
  The stride between records is this struct's size, decided on the C3 side alone:
  the shader is handed a pointer to one record and never indexes past it, so
@@ -392,6 +434,20 @@ struct DrawRecord
 	// ShaderMaterial has uniforms, and the surface most likely to want a highlight
 	// is a `MeshLambertMaterial` on a floor.
 	float[4] surface;
+	// How many of `uv_variants` this material declared. **Zero is the whole test**:
+	// a material nobody asked for one, and every material written before there were
+	// any, arrives here as zero and neither shader looks at the table.
+	uint uv_variant_count;
+	// `material.uvVariants` — one uv transform per copy, picked by
+	// `Instance.variant`, applied to the mesh's own uv before `uv_transform`
+	// scales it. `plan.md` §27 is why, and `variant_uv` in
+	// `shaders/surface.slang` is what a row means.
+	// 
+	// Here for `uv_transform`'s reason once more, and the reason has not worn out:
+	// the surface most likely to be a row of one shape wearing one picture is a
+	// kit piece on the built-in pipeline, and only a ShaderMaterial has uniforms
+	// to put a table in.
+	UvVariant[UV_VARIANTS] uv_variants;
 }
 
 struct MeshPush
@@ -470,7 +526,7 @@ $assert @layout_matches(
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert DrawRecord::size == 136 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert DrawRecord::size == 264 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 352 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
@@ -593,6 +649,8 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "morph_targets", 96, 4 },
 	{ "uv_transform", 100, 16 },
 	{ "surface", 116, 16 },
+	{ "uv_variant_count", 132, 4 },
+	{ "uv_variants", 136, 128 },
 };
 
 <*

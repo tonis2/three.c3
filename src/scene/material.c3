@@ -439,6 +439,27 @@ struct Material
 	// What a `three.LayeredMaterial` *is*, beside what it compiled to. Empty for
 	// every other material, including a hand-written `ShaderMaterial`.
 	ScriptLayers script_layers;
+	// `material.uvVariants` — one uv transform per copy, picked by
+	// `mesh.variant`. `plan.md` §27 is the entry, `gpu/pipeline.c3`'s `UvVariant`
+	// is a row, and `DrawRecord.uv_variants` is where these are copied to.
+	// 
+	// Held here rather than in `block` because a built-in material has no block to
+	// hold it in: this is a property of every material and not only of the ones
+	// that compiled something.
+	// 
+	// Zero rows is the quiet default, and the zero fill is already the right
+	// answer — which is what lets every material that predates the feature carry
+	// the field and change nothing.
+	uint uv_variant_count;
+	UvVariant[UV_VARIANTS] uv_variants;
+	// `material.stochastic` — sample this material's maps through
+	// `stochastic_sample` rather than straight, so a tiled surface stops having a
+	// period. `plan.md` §27, and `shaders/surface.slang` is what it does.
+	// 
+	// False by default and the zero fill is the right answer, which matters more
+	// here than usual: it is three taps instead of one on every map, so a
+	// material that never asked for it must never pay for it.
+	bool stochastic;
 }
 
 <*
