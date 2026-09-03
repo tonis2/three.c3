@@ -428,9 +428,28 @@ export class Scene extends Object3D {
 	// transform and one for a colour, and none for a pose or a
 	// weight.
 	//
-	// Answers with { path, meshes, entries, materials, images, nodes,
-	// instances, batches, skipped, shaded, bakedImages, bakedColors,
-	// layers, skins, bones, clips, morphed, bytes }.
+	// Answers with { path, meshes, entries, materials, images,
+	// compressedImages, nodes, instances, batches, skipped, shaded,
+	// bakedImages, bakedColors, layers, skins, bones, clips, morphed,
+	// bytes }.
+	//
+	// `textures` says what the pictures the scene *made* are encoded
+	// as — a bake, a DataTexture, anything read back off the device.
+	// One that came out of a file is copied byte for byte whichever is
+	// asked for, so this never re-encodes an artist's own compression.
+	//
+	// 'png' is the default and is exact and universal. 'ktx2' is BC7
+	// blocks with a mip chain, which this engine uploads without
+	// decoding — fast to load and a quarter of the VRAM, under our own
+	// CUSTOM_texture_ktx2. 'basis' is ETC1S under KHR_texture_basisu,
+	// which every other glTF toolchain reads: a fifth of BC7's size,
+	// visibly lossy, and slow to load back here. compressedImages
+	// counts what either of them managed, which can be fewer than
+	// images — an encode that refuses falls back to PNG rather than
+	// failing the export.
+	//
+	// Both are build steps: BC7 saturates every core and still takes
+	// around half a minute for a 2048 square.
 	//
 	// `bake` is the option that gets a ShaderMaterial's shading into
 	// the file. glTF describes surfaces and a ShaderMaterial is a
@@ -465,6 +484,7 @@ export class Scene extends Object3D {
 		}
 		let flatten = false;
 		let bake = 0;
+		let textures = 0;
 		if (options !== undefined && options !== null) {
 			if (typeof options !== 'object') {
 				throw new TypeError('scene.export(path, options) wants an object for its options, like { flatten: true }');
@@ -491,8 +511,21 @@ export class Scene extends Object3D {
 					);
 				}
 			}
+			if (options.textures !== undefined) {
+				// The host takes a number and not the word, so the three
+				// spellings are settled here — one place that knows the
+				// order, rather than a string parsed on the other side.
+				const formats = { png: 0, ktx2: 1, basis: 2 };
+				if (!Object.prototype.hasOwnProperty.call(formats, options.textures)) {
+					throw new TypeError(
+						"scene.export options.textures is 'png', 'ktx2' or 'basis'; got " +
+							JSON.stringify(options.textures)
+					);
+				}
+				textures = formats[options.textures];
+			}
 		}
-		return H.exportScene(path, flatten, bake);
+		return H.exportScene(path, flatten, bake, textures);
 	}
 
 	// -------------------------------------------------------------------

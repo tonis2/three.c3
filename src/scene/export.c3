@@ -243,6 +243,35 @@ import image::png;
 
 faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
 
+<*
+ What an export encodes its *generated* pictures as.
+
+ Only the generated ones. A texture that came out of a source file is copied
+ byte for byte whichever of these is asked for — re-encoding what an artist
+ already compressed is the one thing this option must never do — so what this
+ chooses between is what happens to a bake, a `DataTexture` and a device
+ readback.
+
+ The three are a real trade and not three qualities of the same thing:
+
+ - `PNG` is exact, universal and large, and it is the default because a file
+ written by a game is a file that game reloads. Nothing about it can surprise
+ a reader.
+ - `KTX2_BC7` is what *this* engine wants back: `decode_ktx2_blocks` hands those
+ blocks to the device untouched, which is `notes.md` §23's whole saving. Nobody
+ else reads them, because `CUSTOM_texture_ktx2` is our own name.
+ - `KTX2_BASIS` is what a stranger reads. ETC1S under `KHR_texture_basisu`,
+ which every glTF toolchain implements, at a fifth of BC7's size — and visibly
+ lossy, and slow to load back here, since there is no GPU-side transcode. For a
+ file leaving the engine rather than one returning to it.
+*>
+enum ExportTextureFormat
+{
+	PNG,
+	KTX2_BC7,
+	KTX2_BASIS,
+}
+
 
 <*
  What one export wrote.
@@ -309,6 +338,14 @@ struct ExportReport
 	// Copies whose morph weights went into the file on their own node. Not how many
 	// meshes carry blend shapes — how many copies were wearing one.
 	uint morphed;
+	// Images written as a compressed KTX2 rather than PNG — BC7 blocks or Basis,
+	// whichever the export asked for, because the question it answers is the same
+	// for both: how many pictures cost the encode. Which family they are is not in
+	// doubt, since one export asks for one of them. Only ever non-zero for an
+	// export that asked. Counted apart from `images` because the two answer
+	// different questions: how many pictures the file holds, and how many of them
+	// were compressed.
+	uint compressed_images;
 	usz bytes;
 }
 
@@ -632,6 +669,10 @@ struct Exporter @local
 	// One bake's pixels, allocated once and reused: they are `size * size * 4`
 	// bytes and every bake fills all of them.
 	char[] texels;
+	// What to encode generated textures as. A source file's own bytes are copied
+	// whatever this says — re-encoding what an artist already compressed is the
+	// one thing this option must not do.
+	ExportTextureFormat textures;
 	ExportReport report;
 }
 
@@ -641,10 +682,17 @@ struct Exporter @local
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
  @param bake : `Texels a side to run each ShaderMaterial's body into, or 0 to write the file the way it always was. Needs a device; without one the export still happens and the report says so through shaded. See render/bake.c3.`
+ @param textures : `What to encode generated textures as. Minutes rather than seconds for a large scene either way it compresses — a build step. Source files are copied unchanged whichever is chosen. See ExportTextureFormat.`
  @return ? EXPORT_PATH_IS_EMPTY : `No path was given.`
  @return ? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
 *>
-fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false, uint bake = 0)
+fn ExportReport? MeshPass.export_scene(
+	&self,
+	String path,
+	bool flatten = false,
+	uint bake = 0,
+	ExportTextureFormat textures = ExportTextureFormat.PNG
+)
 {
 	if (path.len == 0) return EXPORT_PATH_IS_EMPTY~;
 
@@ -652,7 +700,7 @@ fn ExportReport? MeshPass.export_scene(&self, String path, bool flatten = false,
 	defer builder.free();
 	builder.generator = "three.c3";
 
-	Exporter state = { .pass = self, .out = &builder };
+	Exporter state = { .pass = self, .out = &builder, .textures = textures };
 	state.geometry.init(mem, 16);
 	state.materials.init(mem, 8);
 	state.entries.init(mem, 16);
@@ -2142,7 +2190,8 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 		.pixels = self.texels,
 		.allocator = mem,
 	};
-	char[]? encoded = png::save_bytes(&decoded);
+	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
+	char[]? encoded = self.encode_pixels(&decoded, &mime);
 	// An encode that failed leaves the colour standing, which is still a better
 	// file than the one grey it replaces.
 	if (catch encoded) return key;
@@ -2151,7 +2200,8 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	// No memo entry: `ExportImage` is keyed on a device slot and a bake has none.
 	// Two keys that baked the same picture write it twice, which is the honest
 	// answer — they are two surfaces that agreed, not one image shared.
-	uint image = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
+	uint image = self.out.add_image("", encoded, mime);
+	self.declare_image(encoded, mime);
 	key.texture = (int)self.out.add_texture(image);
 	self.report.images++;
 	return key;
@@ -2290,7 +2340,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 
 	if (encoded.len == 0)
 	{
-		char[]? made = self.encode_from_device(slot);
+		char[]? made = self.encode_from_device(slot, &mime);
 		// Counted rather than dropped. A block-compressed texture with no source
 		// file behind it cannot be read back as pixels, and a glTF written
 		// without it is a material that lost its picture — which the report has
@@ -2306,6 +2356,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 	defer if (own) free(encoded);
 
 	uint image   = self.out.add_image("", encoded, mime);
+	self.declare_image(encoded, mime);
 	// No sampler: a texture that names none takes the viewer's default, which is
 	// repeat with mipmapped linear filtering — what `Assets` uploads with.
 	uint texture = self.out.add_texture(image);
@@ -2315,7 +2366,65 @@ fn int? Exporter.texture_for(&self, Node* node)
 }
 
 <*
- A texture with no file behind it, read off the device and encoded as a PNG.
+ Generated pixels to a file, in whichever format this export was asked for.
+
+ The one place the `textures` option turns into bytes. Three call sites hand it
+ pixels they made rather than pixels they read — a bake, a script-layer texture
+ and a device readback — and none of them should be deciding a format alone.
+
+ **PNG is the fallback rather than an error.** An encode that refuses leaves the
+ picture standing in the format that always worked, which is a better file than
+ no texture and a better outcome than failing a whole export over a codec.
+
+ @param mime : `Set to what was written, which is not always what was asked for.`
+ @return `The encoded bytes, owned by the caller.`
+*>
+fn char[]? Exporter.encode_pixels(&self, image::Image* decoded, gltf::ImageType* mime)
+{
+	if (self.textures != ExportTextureFormat.PNG)
+	{
+		char[]? compressed = self.textures == ExportTextureFormat.KTX2_BC7
+			? encode_ktx2_bc7(decoded)
+			: encode_ktx2_basis(decoded);
+		if (try compressed)
+		{
+			*mime = gltf::ImageType.IMAGE_KTX2;
+			self.report.compressed_images++;
+			return compressed;
+		}
+	}
+
+	*mime = gltf::ImageType.IMAGE_PNG;
+	return png::save_bytes(decoded);
+}
+
+<*
+ Declares whichever extension these image bytes actually need.
+
+ **By the payload and never by the mime type**, which is the distinction that
+ makes this a function rather than a line in the writer. `image/ktx2` covers two
+ unrelated things — BCn blocks, which are ours, and Basis ETC1S or UASTC, which
+ is `KHR_texture_basisu` — and only the bytes say which. A KTX2 copied verbatim
+ out of an input `.glb` arrives here as often as one this export encoded, and
+ declaring it by format would relabel a stranger's correct file as ours.
+
+ Required rather than merely used, for both: a reader that skips the declaration
+ gets an image it cannot decode and renders the material untextured with no
+ indication why. Required makes it refuse the file instead.
+
+ Called at every `add_image`, including the copy-through path, so there is no
+ door an image can arrive by without being declared.
+*>
+fn void Exporter.declare_image(&self, char[] encoded, gltf::ImageType mime)
+{
+	if (mime != gltf::ImageType.IMAGE_KTX2 && !is_ktx2(encoded)) return;
+	self.out.require_extension(
+		is_basis_ktx2(encoded) ? gltf::TEXTURE_BASISU_EXTENSION : gltf::TEXTURE_KTX2_EXTENSION
+	);
+}
+
+<*
+ A texture with no file behind it, read off the device and encoded.
 
  PNG rather than JPEG because the pixels are exact and should stay exact: a
  generated texture is often a pattern with hard edges — a checker, a brick
@@ -2323,7 +2432,7 @@ fn int? Exporter.texture_for(&self, Node* node)
 
  @return `The encoded bytes, owned by the caller.`
 *>
-fn char[]? Exporter.encode_from_device(&self, int slot)
+fn char[]? Exporter.encode_from_device(&self, int slot, gltf::ImageType* mime)
 {
 	Gpu* gpu = self.pass.assets.gpu;
 	if (gpu == null) return EXPORT_HAS_NOTHING_TO_WRITE~;
@@ -2344,7 +2453,7 @@ fn char[]? Exporter.encode_from_device(&self, int slot)
 		.pixels = pixels,
 		.allocator = mem,
 	};
-	return png::save_bytes(&decoded);
+	return self.encode_pixels(&decoded, mime);
 }
 
 <*
@@ -2445,6 +2554,7 @@ fn int Exporter.layer_texture_for(&self, AssetId id, int image)
 	if (encoded.len == 0) return -1;
 
 	uint written = self.out.add_image("", encoded, asset.stream.gltf.images[image].mimeType);
+	self.declare_image(encoded, asset.stream.gltf.images[image].mimeType);
 	// No sampler, for the reason `texture_for` gives: a texture that names none
 	// takes the viewer's default, which is what `Assets` uploads with.
 	uint texture = self.out.add_texture(written);
@@ -2641,7 +2751,8 @@ fn int Exporter.device_texture_for(&self, int slot)
 		if (known.device == slot) return (int)known.texture;
 	}
 
-	char[]? encoded = self.encode_from_device(slot);
+	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
+	char[]? encoded = self.encode_from_device(slot, &mime);
 	if (catch encoded)
 	{
 		self.report.skipped++;
@@ -2649,7 +2760,8 @@ fn int Exporter.device_texture_for(&self, int slot)
 	}
 	defer free(encoded);
 
-	uint image   = self.out.add_image("", encoded, gltf::ImageType.IMAGE_PNG);
+	uint image   = self.out.add_image("", encoded, mime);
+	self.declare_image(encoded, mime);
 	uint texture = self.out.add_texture(image);
 	self.images.push({ .device = slot, .texture = texture });
 	self.report.images++;

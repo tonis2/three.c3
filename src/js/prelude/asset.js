@@ -105,12 +105,22 @@ export class MeshRef {
 	// `asset.instantiate({ materials: true })` does exactly that for a whole
 	// file, and is the shorter door.
 	//
-	// **What nothing shades yet.** `aoMap` has no built-in term — one line in a
-	// `shade` body multiplies by it — and `metalnessRoughnessMap` has none for the
-	// *base* material either: the pair this renderer reads per material is two
-	// numbers, and a map of them varies per texel. A `LayeredMaterial` layer is
-	// where a map of them does something (`metallicRoughness` on a layer), so a
-	// base map is a layer away rather than unreachable.
+	// **Where each of these goes.** All three maps are properties of a plain
+	// `MeshLambertMaterial` now, so a description crosses onto one that compiles
+	// nothing:
+	//
+	//     const m = new three.MeshLambertMaterial({
+	//         normalMap: d.normalMap,
+	//         metalnessRoughnessMap: d.metalnessRoughnessMap,
+	//         aoMap: d.aoMap,
+	//         metalness: d.metalness,
+	//         roughness: d.roughness,
+	//     });
+	//
+	// The pair the map varies is per material *and* per texel: the numbers are
+	// the file's factors and the map multiplies them, which is what glTF says
+	// both mean. A `LayeredMaterial` layer takes its own `metallicRoughness`
+	// beside these, for a stack that wants one per layer.
 	//
 	// `metalness` and `roughness` themselves are applied now.
 	// `instantiate({ materials: true })` puts them on the material it builds, and
@@ -720,8 +730,12 @@ export class Asset {
 	//    them are 1 and 1 — so a file that never wrote a `pbrMetallicRoughness`
 	//    block imports as a fully metallic surface and looks like one. It is dark
 	//    without a `scene.environment`, correctly: a metal is what it reflects.
-	//  - Occlusion and the metallic-roughness *map* are not applied. Nothing
-	//    shades either — `ref.material` has both and the reason.
+	//  - Occlusion and the metallic-roughness *map* are not applied. Both shade
+	//    on a `MeshLambertMaterial` now, so this is a gap in the importer rather
+	//    than in the renderer: applying them here would change what every
+	//    existing `{ materials: true }` import looks like, and it wants its own
+	//    change with its own before-and-after. `ref.material` hands both over
+	//    for a script that wants them today.
 	//
 	// **Two materials come out of this, and which one is the whole economy of it.**
 	// A normal map or a glow needs a generated shading body and so a
@@ -731,6 +745,11 @@ export class Asset {
 	// nothing at all: the pipeline is the one the renderer built at startup. Going
 	// through the layered path for two floats would have been a shader per glTF
 	// material for a body identical to the built-in one.
+	//
+	// The normal map no longer *needs* the layered path either — `material.normalMap`
+	// is one binding on that same startup pipeline — so a file with a normal map
+	// and no glow could stop compiling a shader as well. That is the same
+	// deliberate change as the line above and is not this one.
 	//
 	// A description with none of that in it builds nothing: an opaque,
 	// single-sided material with no maps and this renderer's own surface defaults

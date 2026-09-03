@@ -1385,6 +1385,25 @@ fn void js_wireframe(
 }
 
 <*
+ `scene.export`'s texture format argument, as the enum.
+
+ A number across the boundary rather than the word, which is the rule the rest of
+ this file follows: the prelude has already refused anything that is not one of
+ the three spellings, by name, so what arrives here is an index. Anything else is
+ PNG — the default, and the only answer that cannot make a file worse than it
+ was.
+*>
+fn ExportTextureFormat export_textures(int asked) @local
+{
+	switch (asked)
+	{
+		case 1: return ExportTextureFormat.KTX2_BC7;
+		case 2: return ExportTextureFormat.KTX2_BASIS;
+		default: return ExportTextureFormat.PNG;
+	}
+}
+
+<*
  `exportScene(path)` — write the scene to a `.glb`, and say what went into it.
 
  `js_load`'s other half, through a narrower door: the path is resolved by
@@ -1420,6 +1439,10 @@ fn void js_wireframe(
  `baseColorFactor` instead of being lost. `render/bake.c3` is the whole of it, and
  `bakedImages` and `bakedColors` are what it did — both of them copies that would
  have been counted in `shaded` without it.
+
+ The fourth is what generated textures are encoded as, as the number
+ `export_textures` names. A source file's images are copied unchanged whatever it
+ says.
 *>
 fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
 {
@@ -1465,7 +1488,7 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 			return;
 		}
 
-		// The prelude has already reduced the options object to this one flag, so
+		// The prelude has already reduced the options object to these scalars, so
 		// nothing here reads a property off a JavaScript value — an argument list
 		// this side stays a list of scalars, which keeps the two sides from
 		// disagreeing about defaults.
@@ -1475,7 +1498,8 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 		ExportReport? report = self.pass.export_scene(
 			writing,
 			arg_truth(&js, argc, args, 1),
-			bake > 0 ? (uint)bake : 0
+			bake > 0 ? (uint)bake : 0,
+			export_textures(arg_int(&js, argc, args, 3))
 		);
 		if (catch err = report)
 		{
@@ -1497,6 +1521,10 @@ fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 		js.set_property(described, "entries", qjs::int_value((int)report.entries));
 		js.set_property(described, "materials", qjs::int_value((int)report.materials));
 		js.set_property(described, "images", qjs::int_value((int)report.images));
+		// Beside `images` and not folded into it: a script that asked for a
+		// compressed texture wants to know how many it actually got, because an
+		// encode that refused falls back to PNG rather than failing the export.
+		js.set_property(described, "compressedImages", qjs::int_value((int)report.compressed_images));
 		js.set_property(described, "nodes", qjs::int_value((int)report.nodes));
 		js.set_property(described, "instances", qjs::int_value((int)report.instances));
 		js.set_property(described, "batches", qjs::int_value((int)report.batches));

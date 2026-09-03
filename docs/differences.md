@@ -213,12 +213,14 @@ helpers in `vertex`, which comes first, and call them from `fragment`.
 
 ## material-samplers
 
-A ShaderMaterial or a post pass may declare up to four samplers of its own:
+A ShaderMaterial may declare up to eight samplers of its own and a post pass up to four:
 `{ textures: { noise_map: tex } }` makes `noise_map.Sample(uv)` work in the body.
 
 You never write a binding number — the shader is generated with the bindings in it and the host
 resolves each name through the compiled module's reflection, so adding one at the front of the list
-renumbers nothing. `material.map` is separate and is still the base colour image. A sampler declared
+renumbers nothing. `material.map` is separate and is still the base colour image, as are
+`normalMap`, `metalnessRoughnessMap` and `aoMap` on a MeshLambertMaterial — those are the built-in
+shader's own bindings and a ShaderMaterial fills its equivalents itself. A sampler declared
 and left null reads 1x1 white rather than reading nothing, and both objects are live:
 `mat.textures.noise_map = other` swaps the image with no compile.
 

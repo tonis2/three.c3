@@ -356,6 +356,22 @@ static const uint FLAG_HAS_SKIN    = 8u;
 // mutually exclusive by construction — `render/pass.c3` sets one or the other.
 static const uint FLAG_PRESKINNED  = 16u;
 
+// The three maps the built-in material carries past its base colour, one bit
+// each, set by `build_draw_records` from the material's own texture slots.
+//
+// **A bit rather than a comparison against white**, because white is not the
+// identity for two of the three. Every declared binding is written every draw —
+// leaving one unwritten is undefined behaviour, see `render/bind.c3` — and what
+// goes in an empty one is the same 1x1 opaque white image `base_color_map` falls
+// back to. Through `mapped_normal_frame` that texel is a direction of (1,1,1),
+// which leans every fragment of every untextured surface the same way; through
+// the metallic-roughness decode it is a fully metallic mirror. So the flag says
+// whether to sample at all, and it costs three bits of a field that had
+// twenty-seven free.
+static const uint FLAG_HAS_NORMAL_MAP              = 32u;
+static const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64u;
+static const uint FLAG_HAS_OCCLUSION_MAP           = 128u;
+
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
 // means this frame's live palette, clear means the asset's baked table.
 static const uint POSE_LIVE = 0x80000000u;
@@ -397,6 +413,40 @@ static const uint POSE_MASK = 0x7fffffffu;
 // is an ordinary `Sampler2D` and there is no cube view anywhere in the project.
 // `shaders/sky.slang`'s header has the argument.
 [vk::binding(2, 0)] Sampler2D environment_map;
+
+// **Bindings 3, 4 and 5 are the built-in material's other three maps**, and they
+// are this shader's alone: `material.slang` reserves three bindings and numbers
+// an agent's first sampler at `MATERIAL_BINDING_FIRST`, which is also 3. Two
+// templates, two meanings for one number, and nothing is confused by it because
+// a binding is only ever resolved against the pipeline that declared it — see
+// `render/bind.c3`, where the write site walks the *reflected* layout.
+//
+// They are reached by index rather than by name, exactly as the shadow map and
+// the environment map above are, and for the same reason: only the pass knows
+// what each image is. `MeshPass.set_material_slot` is the door, and no script
+// ever spells `normal_map`.
+//
+// All three are always bound and always valid, and all three are white when the
+// material named nothing — which is why the flags above exist rather than a
+// comparison against the texel.
+//
+// **`normal_map` and `metalness_roughness_map` are data and not pictures.** Both
+// have to be uploaded `LinearSRGBColorSpace` or the sRGB decode in the sampler
+// bends every value: a normal that means "no tilt" arrives leaning, and a
+// roughness of 0.5 arrives at 0.21. `js/prelude/texture.js` is where a script
+// says so, and the glTF importer already does.
+[vk::binding(3, 0)] Sampler2D normal_map;
+// glTF's packing, and the reason this is one image rather than two: **green is
+// roughness and blue is metalness**, which is what `pbrMetallicRoughness` in
+// glTF 2.0 defines and what every exporter writes. Red is unused here and is
+// where the specification allows an occlusion map to be packed alongside; this
+// renderer keeps occlusion in its own binding so the two can come from different
+// files.
+[vk::binding(4, 0)] Sampler2D metalness_roughness_map;
+// Ambient occlusion, red channel, glTF's `occlusionTexture`. What it multiplies
+// is in `fragmentMain` and is the whole of why it is worth having a term rather
+// than folding it into albedo.
+[vk::binding(5, 0)] Sampler2D occlusion_map;
 
 // The four influences of one vertex against one palette, summed into the matrix
 // that poses it.
@@ -759,7 +809,17 @@ static float g_shadow = 1.0;
 //
 // **Only light zero is shadowed**, because only light zero was fitted — see
 // `struct Light`.
-float3 lambert(float3 normal)
+//
+// **`occlusion` multiplies the ambient floor and nothing else**, which is the
+// one thing about an occlusion map that is easy to get wrong and looks plausible
+// either way. An AO map records how much of the *sky* a crevice can see; it says
+// nothing about a lamp, and a lamp shining straight into that crevice lights it.
+// Applied to the direct term as well it reads as dirt painted into the wrong
+// places — darkest exactly where a light is pointing — and the mistake survives
+// review because a dirty crevice looks like a dirty crevice. `environment_light`
+// is scaled by the same number at the call site, for the same reason: it is the
+// other term that arrives from everywhere.
+float3 lambert(float3 normal, float occlusion)
 {
     float ambient = push.frame[0].lighting.x;
     uint count = (uint)push.frame[0].lighting.y;
@@ -771,7 +831,15 @@ float3 lambert(float3 normal)
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient + (1.0 - ambient) * direct;
+    return ambient * occlusion + (1.0 - ambient) * direct;
+}
+
+// The same light with nothing occluding it, which is every caller that has no
+// map — and every `ShaderMaterial` body ever written, all of which spell it
+// `lambert(s.normal)`.
+float3 lambert(float3 normal)
+{
+    return lambert(normal, 1.0);
 }
 
 // The specular highlight, over the same lights `lambert` sums the diffuse over.
@@ -899,6 +967,11 @@ float3 environment_light(float3 normal, float3 position, float3 albedo, float ro
     return sky * fresnel * intensity;
 }
 
+// The surface maths this file and `material.slang` would otherwise carry twice —
+// `shaders/surface.slang`, spliced in here by `shader_source`. `mapped_normal_frame`
+// is what makes binding 3 mean anything.
+//@shared
+
 
 
 // **The debug views, and the whole of `plan.md` §20.2's first two items.**
@@ -974,27 +1047,75 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // every node starts at.
     Draw draw = push.draw[0];
 
+    // Hoisted, because four maps sample at it now rather than one. The same
+    // expression `material.slang` builds for `Surface.uv`, so a body reading
+    // `s.uv` and this shader's own sampling land on the same texel.
+    float2 uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+
     // Three factors, in three spaces, and the asymmetry is the point — see the
     // block above `vertexMain`. The mesh's own is linear and used raw; the
     // instance's came from a script's hex and is decoded; the vertex attribute is
     // linear by the glTF specification and so is used raw as well.
     float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb) * input.vertex_color.rgb;
+
+    // The normal the mesh has, kept apart from the one the map bends: the shadow
+    // lookup is done with *this* one. A per-texel normal offset would move the
+    // sample point with the relief and put acne back where the offset exists to
+    // take it away — and `material.slang` looks the shadow up with `s.normal` for
+    // the same reason, so the two shaders shadow a surface identically.
+    float3 geometric = normalize(input.normal);
+    float3 normal = geometric;
+    float4 surface = draw.surface;
+    float occlusion = 1.0;
+
+    // **One test for all four maps.** A map is a picture laid on a surface by its
+    // uvs, and a mesh with none — a convex hull, a debug line — has nowhere to
+    // put any of them. Nested rather than four separate tests so that stays one
+    // statement rather than four places to forget it.
+    //
+    // Every branch below is uniform across the draw: the flags come off the
+    // bucket's record, so a quad never splits and the derivatives inside
+    // `mapped_normal_frame` are as well defined as the ones `Sample` takes here.
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
-        albedo *= base_color_map.Sample(input.uv * draw.uv_transform.xy + draw.uv_transform.zw).rgb;
+        albedo *= base_color_map.Sample(uv).rgb;
+
+        if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
+        {
+            normal = mapped_normal_frame(geometric, input.world, uv, normal_map.Sample(uv).rgb);
+        }
+
+        // glTF's channels: green is roughness, blue is metalness. **Multiplied
+        // into the material's own two rather than replacing them**, which is what
+        // glTF says `roughnessFactor` and `metallicFactor` mean and what every
+        // other renderer does — so a file's factors and its map compose, and the
+        // importer hands both over without either having to know about the other.
+        //
+        // The consequence worth knowing is on the other side of that multiply:
+        // this renderer's default metalness is 0, so a map on a material nobody
+        // set `metalness` on is multiplied away. `material.metalness = 1` is what
+        // lets the map's blue speak, and it is what glTF's own default already
+        // says.
+        if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
+        {
+            float2 pair = metalness_roughness_map.Sample(uv).gb;
+            surface.x *= pair.x;
+            surface.y *= pair.y;
+        }
+
+        if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0) occlusion = occlusion_map.Sample(uv).r;
     }
 
-    float3 normal = normalize(input.normal);
     // Once, here, and then left in `g_shadow` for `lambert` to fold into the
     // direct term — the same shape `material.slang` uses, so the two files do the
     // lookup the same number of times as well as the same way.
-    g_shadow = shadow_factor(input.world, normal);
+    g_shadow = shadow_factor(input.world, geometric);
 
     // After the normal and before the shading, which is the only place it can
     // be: the views need a world position and a normal, and they answer instead
     // of the shading rather than beside it.
     float3 view;
-    if (debug_view(input.world, normal, view)) return float4(view, 1.0);
+    if (debug_view(input.world, geometric, view)) return float4(view, 1.0);
 
     // The material's alpha times this copy's own, exactly as the rgb above
     // multiplies the two. `mesh.color = [r, g, b, a]` therefore fades one
@@ -1007,11 +1128,16 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // material nobody set — roughness 1, metalness 0, reflectance 0 — so this is
     // still `albedo * lambert(normal)` for every scene written before the term
     // existed.
-    float4 surface = draw.surface;
+    //
+    // **The occlusion map reaches two of the three terms**, and which two is the
+    // whole of getting it right: the ambient floor inside `lambert`, and the
+    // environment reflection here. Not the direct lobes — `lambert`'s own header
+    // has the argument, and the short version is that a lamp pointed into a
+    // crevice lights it.
     return float4(
-        albedo * lambert(normal) * (1.0 - surface.y)
+        albedo * lambert(normal, occlusion) * (1.0 - surface.y)
             + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z)
-            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z),
+            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z) * occlusion,
         draw.base_color.a * input.color.a * input.vertex_color.a
     );
 }

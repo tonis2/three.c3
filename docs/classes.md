@@ -350,7 +350,7 @@ angles. An option this does not have is refused rather than ignored — there is
 ## MeshLambertMaterial
 
 ```js
-new three.MeshLambertMaterial({ map, side, transparent, blending, opacity, roughness, metalness, reflectance })
+new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, side, transparent, blending, opacity, roughness, metalness, reflectance })
 ```
 
 The built-in shader with an image on it — the material to reach for when what you want is a picture
@@ -363,9 +363,21 @@ It has no `color`, because `mesh.color` is the per-copy channel and multiplies i
 — so one material tints a thousand copies differently and is still one draw call. With no map it is
 the cheapest way to ask for a side, which is what a skydome needs.
 
+**Four images, not one.** `map` is the base colour and the other three are the maps the built-in
+shader reads beside it — a normal map, glTF's packed metallic-roughness pair, and an occlusion map.
+None of them compiles anything either: they are sampler bindings on the pipeline that already
+existed. The last three are *data* rather than pictures and have to be loaded
+`{ colorSpace: three.LinearSRGBColorSpace }`; assigning an sRGB texture throws, because through an
+sRGB view every value in them arrives bent and the result reads as a bad file.
+
 ### Properties
 
 - `map` — a `three.texture`, or null; settable
+- `normalMap` — a tangent-space normal map, or null; must be loaded linear
+- `metalnessRoughnessMap` — glTF's packed pair: green is roughness, blue is metalness
+- `aoMap` — an occlusion map, red channel; darkens the ambient floor and the environment only
+- `roughnessMap` — Three.js has this and here it is half of `metalnessRoughnessMap`; assigning throws
+- `metalnessMap` — the other half, and throws for the same reason
 - `side` — `three.FrontSide`, `three.BackSide` or `three.DoubleSide`; settable
 - `transparent` — derived from `blending`, and read-only — see Material
 - `blending` — decided at construction and not settable — see Material
@@ -381,6 +393,61 @@ the cheapest way to ask for a side, which is what a skydome needs.
 
 - `dispose()`
 - `toJSON()`
+
+### Details
+
+#### normalMap
+
+A tangent-space normal map, or null. The frame is rebuilt per pixel from screen-space derivatives, so
+it works on any mesh with uvs — a generated PlaneGeometry included — and no mesh here has or needs a
+TANGENT attribute. A mirrored uv island comes out mirrored rather than flipped, which is the price of
+that.
+
+Load it linear:
+
+```js
+const bumps = three.texture('brick_n.png', { colorSpace: three.LinearSRGBColorSpace });
+const wall = new three.MeshLambertMaterial({ map: brick, normalMap: bumps });
+```
+
+Through an sRGB view the stored 0.5 that means "no tilt" arrives as 0.21, so every surface leans the
+same way and the detail goes soft. The setter refuses an sRGB texture rather than letting that
+happen, and `ref.material.normalMap` from a glTF is already linear.
+
+#### metalnessRoughnessMap
+
+glTF's `metallicRoughnessTexture`: **green is roughness and blue is metalness**, one image rather
+than two, which is what every exporter writes and what `ref.material` hands over.
+
+It **multiplies** `roughness` and `metalness` rather than replacing them, which is what glTF says its
+two factors mean — so a file's numbers and its map compose. The consequence is worth remembering:
+this renderer's default metalness is 0, so a map on a material nobody set `metalness` on is
+multiplied away. Set `metalness: 1`, which is glTF's own default, to let the blue channel speak.
+
+Red is unused. Loaded linear, for `normalMap`'s reason.
+
+#### aoMap
+
+An ambient occlusion map, red channel.
+
+**It darkens the ambient floor and the environment reflection, and not the lights.** An AO map
+records how much of the sky a crevice can see and says nothing about a lamp — a lamp pointed into
+that crevice still lights it. Applied to the direct light as well it reads as dirt painted where the
+light is pointing, which looks plausible enough to ship and is wrong.
+
+So on a scene with `three.light.ambient` at 0 and no `scene.environment`, this correctly changes
+nothing.
+
+#### roughnessMap
+
+Three.js keeps roughness and metalness in separate images and this renderer does not: glTF packs them
+into one, the loader hands one over, and the shader reads two channels of it. Assigning throws a
+sentence saying so rather than doing nothing, because a property that silently has no effect is the
+failure that gets blamed on the renderer.
+
+#### metalnessMap
+
+The other half of the same sentence — see `roughnessMap`.
 
 ## ShaderMaterial
 
@@ -401,6 +468,9 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
   with shadows off, and already folded into `lambert()`.
 - `roughness`, `metalness`, `reflectance` — the material's own three, which `specular()` and
   `standard()` read.
+- `height` — how far this point stands out of the surface the mesh has, where 0.5 is that surface.
+  0.5 everywhere today: nothing writes relief into it yet, and a body with a height map of its own
+  samples it directly.
 - `variant` — its row of the table, clamped.
 
 Each uniform is readable in the body by its own name; a uniform written as an array of arrays is a
@@ -418,7 +488,8 @@ Five helpers are already in scope in a body:
   no ShaderMaterial draws. `standard(s, albedo, normal)` is the same with a colour and a normal you
   worked out yourself.
 - `lambert(normal)` is the diffuse half alone, summed over every light with the shadow folded into the
-  sun's term — so `return s.albedo * lambert(s.normal)` is a matte surface.
+  sun's term — so `return s.albedo * lambert(s.normal)` is a matte surface. `lambert(normal, ao)`
+  takes an occlusion factor, which darkens the ambient floor and never the lights.
 - `specular(s)` is the other half.
 - `srgb_to_linear(c)` decodes a colour you wrote down yourself.
 - `mapped_normal(s, texel)` applies a tangent-space normal map: hand it the map's rgb exactly as
@@ -710,11 +781,11 @@ the same way.
 It is a description and not a material: what to build from it is yours, and
 `asset.instantiate({ materials: true })` is the shorter door.
 
-`aoMap` has no built-in term (one line in a shade body multiplies by it) and `metalnessRoughnessMap`
-has none either, because this renderer's pair is per material and a map of them is per texel — a
-LayeredMaterial layer's `metallicRoughness` is where a map of them does something. `metalness` and
-`roughness` themselves are the file's numbers and `instantiate()` applies them; glTF defaults both to
-1, so a file that says nothing is fully metallic and is dark without a sky to reflect.
+`normalMap`, `aoMap` and `metalnessRoughnessMap` are three of `MeshLambertMaterial`'s own properties,
+so a description goes straight onto a material that compiles nothing:
+`new three.MeshLambertMaterial({ normalMap: d.normalMap, metalness: d.metalness })`. `metalness` and
+`roughness` are the file's own numbers, and the map multiplies them — glTF defaults both to 1, so a
+file that says nothing is fully metallic and is dark without a sky to reflect.
 
 Like `layers`, this uploads the mesh and every read hands back fresh Texture handles holding
 references, so read it once and keep it.
