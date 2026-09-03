@@ -152,6 +152,40 @@ fn PipelineState state_for_blend(BlendMode blend)
 }
 
 <*
+ Which of the built-in material's maps a script is naming.
+
+ A number rather than a name, because the name would be the shader's — see
+ `NORMAL_MAP_BINDING`, which is where these become binding indices and where the
+ argument for not spelling `normal_map` in a script lives.
+
+ Three constants rather than three verbs, unlike `map`: they differ only in which
+ binding they write, they take and give back references identically, and one door
+ means one place where the retain and the release cannot get out of step.
+*>
+const int MATERIAL_SLOT_NORMAL               = 0;
+const int MATERIAL_SLOT_METALNESS_ROUGHNESS  = 1;
+const int MATERIAL_SLOT_OCCLUSION            = 2;
+
+<*
+ The binding one of those slots means.
+
+ Zero for a slot that is not one of the three, which is never a legal binding —
+ the same "zero means no" `sampler_binding_of` answers with, for the same reason:
+ binding 0 is the template's own base colour map and is reached through
+ `material.map` rather than through here.
+*>
+fn uint binding_for_material_slot(int slot)
+{
+	switch (slot)
+	{
+		case MATERIAL_SLOT_NORMAL: return NORMAL_MAP_BINDING;
+		case MATERIAL_SLOT_METALNESS_ROUGHNESS: return METALNESS_ROUGHNESS_MAP_BINDING;
+		case MATERIAL_SLOT_OCCLUSION: return OCCLUSION_MAP_BINDING;
+		default: return 0;
+	}
+}
+
+<*
  The material every debug line draws with.
 
  Index 1 of `MeshPass.materials`, built in `MeshPass.init` from the same
@@ -293,8 +327,16 @@ struct Material
 	// to be. `NO_TEXTURE` is -1 rather than 0 so the mistake is possible to make;
 	// a biased index-plus-one makes it impossible and makes every read arithmetic.
 	int texture;
-	// The samplers the body declared, at bindings 1..N. Binding 0 is `texture`
-	// above and is not in here. See `TextureSlots`.
+	// Every image this material holds past its base colour, indexed by binding.
+	// Binding 0 is `texture` above and is not in here.
+	// 
+	// Two kinds of material fill it and neither knows about the other. A
+	// `ShaderMaterial` puts the samplers its body declared here, at the bindings
+	// the assembler generated. A material drawn by `mesh.slang` puts its normal,
+	// metallic-roughness and occlusion maps here, at the three bindings that
+	// shader reserves — which are the same numbers, and cannot be confused,
+	// because a binding is only ever resolved against the pipeline that declared
+	// it. See `TextureSlots` and `MeshPass.set_material_slot`.
 	TextureSlots textures;
 	// `material.repeat` and `material.offset` — xy is how many times the texture
 	// repeats across the surface, zw is where it starts.

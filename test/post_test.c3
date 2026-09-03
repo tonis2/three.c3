@@ -589,7 +589,13 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 
 	@pool()
 	{
-		String template = three::load_source("shaders/material.slang", tmem)!!;
+		// The template as the assembler sees it, which is the file with the shared
+		// surface block already spliced into its `//@shared` line — `shader_source`
+		// does that before `assemble_shader` ever reads a marker, and `renumbered`
+		// is the assembler's own argument for taking no `#line` with it. Walking
+		// the raw file instead would expect a `//@shared` line in the output and
+		// find sixty lines of Slang.
+		String template = three::shader_source("material.slang", tmem, renumbered: true)!!;
 
 		List{String} want;
 		want.tinit(512);

@@ -123,6 +123,26 @@ const uint SHADOW_BINDING = 1;
 *>
 const uint ENVIRONMENT_BINDING = 2;
 
+<*
+ Where the built-in material's other three maps are bound, in `mesh.slang` and
+ nowhere else.
+
+ **The same numbers `MATERIAL_BINDING_FIRST` hands to an agent's first samplers,
+ and that is not a collision.** A binding is only ever resolved against the
+ pipeline that declared it — `render/bind.c3` walks the *reflected* layout of the
+ material's own shader — so binding 3 is a normal map on the built-in pipeline
+ and whatever a body called its first texture on a generated one. The two never
+ meet, because no material is both.
+
+ By index rather than by name, which is `SHADOW_BINDING`'s argument again: only
+ the pass knows that binding 3 is "the material's normal map", and a name would
+ make `normal_map` part of the script-facing API. `MeshPass.set_material_slot` is
+ the one door, and `MATERIAL_SLOT_*` is what a script names instead.
+*>
+const uint NORMAL_MAP_BINDING              = 3;
+const uint METALNESS_ROUGHNESS_MAP_BINDING = 4;
+const uint OCCLUSION_MAP_BINDING           = 5;
+
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the
 // generated declaration must all agree about it.
@@ -326,7 +346,11 @@ fn String? assemble_shader(
 {
 	@pool()
 	{
-		String template = shader_source(template_name, tmem)!;
+		// `renumbered`, because everything below numbers this text itself: the
+		// restores are absolute against the module being generated, so a `#line`
+		// spliced into the middle of the template would leave the preamble
+		// numbered two ways.
+		String template = shader_source(template_name, tmem, renumbered: true)!;
 
 		DString out;
 		out.tinit(template.len + 1024);

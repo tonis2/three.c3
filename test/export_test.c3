@@ -2838,3 +2838,260 @@ fn void an_unrigged_scene_says_nothing_about_rigs() @test
 		test::@check(!json.contains(`"targets"`) && !json.contains(`"weights"`), "and no morph keys");
 	};
 }
+
+
+<*
+ `textures: 'ktx2'` writes blocks, declares itself, and comes back as blocks.
+
+ The round trip is the assertion. A texture written as BC7 that reloads as BC7 is
+ the whole of §24 working; one that reloads as RGBA8 would look identical in
+ every other number while having thrown away everything §23 bought.
+
+ The declaration is asserted as *required* rather than merely used, on purpose.
+ Every other extension this writer emits degrades — a reader that skips
+ `KHR_lights_punctual` still gets the geometry — and this one does not: a reader
+ that cannot decode the image renders the material untextured and says nothing
+ about why. Required makes it refuse the file instead.
+
+ 8x8 keeps the BC7 encode to four blocks. The encoder is the expensive part of
+ this feature and a test is not where that should be demonstrated.
+*>
+fn void an_export_can_write_its_textures_as_blocks() @test
+{
+	String plain = "build/export_blocks_plain.glb";
+	String packed = "build/export_blocks_ktx2.glb";
+	defer { (void)file::delete(plain); (void)file::delete(packed); }
+
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	const uint W = 8;
+	const uint H = 8;
+	char[] made = mem::new_array(char, (sz)W * H * 4);
+	defer free(made);
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 0; x < W; x++)
+		{
+			sz i = ((sz)y * W + x) * 4;
+			bool on = ((x >> 1) + (y >> 1)) % 2 == 0;
+			made[i] = on ? (char)230 : (char)20;
+			made[i + 1] = (char)(y * 30);
+			made[i + 2] = on ? (char)40 : (char)200;
+			made[i + 3] = 255;
+		}
+	}
+
+	image::Image source = {
+		.width = W, .height = H, .bit_depth = 8,
+		.format = image::PixelFormat.RGBA, .pixels = made, .allocator = mem,
+	};
+	int slot = renderer.pass.assets.claim_texture(&renderer.gpu, source)!!;
+	uint material = renderer.pass.create_texture_material(slot)!!;
+
+	three::AssetId box = renderer.pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	three::ExportReport before = renderer.pass.export_scene(plain)!!;
+	test::@check(before.images == 1, "the plain export wrote %d images", before.images);
+	test::@check(before.compressed_images == 0,
+		"a plain export compressed %d images", before.compressed_images);
+
+	three::ExportReport after = renderer.pass.export_scene(packed, false, 0, three::ExportTextureFormat.KTX2_BC7)!!;
+	test::@check(after.images == 1, "the compressed export wrote %d images", after.images);
+	test::@check(after.compressed_images == 1,
+		"the compressed export compressed %d of its images", after.compressed_images);
+
+	// What the file says about itself.
+	String json = json_chunk(packed);
+	test::@check(json.contains(`"mimeType":"image/ktx2"`),
+		"the image was not written as a KTX2");
+	test::@check(json.contains(`"extensionsRequired":["CUSTOM_texture_ktx2"]`),
+		"the file does not require the extension it depends on");
+	// The half of that sentence a mime type cannot answer. A KTX2 holding BCn
+	// blocks is not what `KHR_texture_basisu` means, and a reader that acts on
+	// that name transcodes bytes that are already blocks.
+	test::@check(!json.contains("KHR_texture_basisu"),
+		"a BC7 export claimed the Basis extension, which is about other bytes entirely");
+	test::@check(!json_chunk(plain).contains("CUSTOM_texture_ktx2"),
+		"a plain export declared an extension it does not use");
+	test::@check(!json_chunk(plain).contains("extensionsRequired"),
+		"a plain export required an extension of its reader");
+
+	// And back in: the blocks stay blocks.
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, packed)!!;
+	int image = renderer.pass.assets.load_asset_image(&renderer.gpu, reloaded, 0)!!;
+	test::@check(image >= 0, "the exported KTX2 did not load back");
+
+	three::Texture* texture = renderer.pass.assets.texture_at(image);
+	test::@check(texture.format.family == three::TextureFamily.BC7,
+		"the round trip landed as RGBA8, so the compression did not survive it");
+	test::@check(texture.width == W && texture.height == H,
+		"the round trip changed the size to %dx%d", texture.width, texture.height);
+}
+
+
+<*
+ `textures: 'basis'` writes ETC1S, and declares the extension that means ETC1S.
+
+ The export for a file that is leaving. BC7 under `CUSTOM_texture_ktx2` is ours
+ and nobody else's reader knows the name; ETC1S under `KHR_texture_basisu` is the
+ one a Blender importer or another engine opens, which is the whole reason this
+ target exists.
+
+ So the two assertions that matter are about the *label*. Both families arrive as
+ `image/ktx2`, so a writer that declared the extension by mime type would put one
+ of the two names on both — and the wrong name is worse than none, because a
+ reader acts on it. This checks that the name follows the bytes.
+
+ 8x8 keeps the encode to four blocks, as the BC7 test does and for the same
+ reason.
+*>
+fn void an_export_can_write_its_textures_as_basis() @test
+{
+	String packed = "build/export_basis.glb";
+	defer (void)file::delete(packed);
+
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	const uint W = 8;
+	const uint H = 8;
+	char[] made = mem::new_array(char, (sz)W * H * 4);
+	defer free(made);
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 0; x < W; x++)
+		{
+			sz i = ((sz)y * W + x) * 4;
+			bool on = ((x >> 1) + (y >> 1)) % 2 == 0;
+			made[i] = on ? (char)230 : (char)20;
+			made[i + 1] = (char)(y * 30);
+			made[i + 2] = on ? (char)40 : (char)200;
+			made[i + 3] = 255;
+		}
+	}
+
+	image::Image source = {
+		.width = W, .height = H, .bit_depth = 8,
+		.format = image::PixelFormat.RGBA, .pixels = made, .allocator = mem,
+	};
+	int slot = renderer.pass.assets.claim_texture(&renderer.gpu, source)!!;
+	uint material = renderer.pass.create_texture_material(slot)!!;
+
+	three::AssetId box = renderer.pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	three::ExportReport report = renderer.pass.export_scene(
+		packed, false, 0, three::ExportTextureFormat.KTX2_BASIS
+	)!!;
+	test::@check(report.images == 1, "the basis export wrote %d images", report.images);
+	test::@check(report.compressed_images == 1,
+		"the basis export compressed %d of its images", report.compressed_images);
+
+	String json = json_chunk(packed);
+	test::@check(json.contains(`"mimeType":"image/ktx2"`),
+		"the image was not written as a KTX2");
+	test::@check(json.contains(`"extensionsRequired":["KHR_texture_basisu"]`),
+		"an ETC1S file does not require the extension that means ETC1S");
+	test::@check(!json.contains("CUSTOM_texture_ktx2"),
+		"an ETC1S file claimed our own BCn extension, which is about other bytes entirely");
+
+	// And back in. Basis takes the RGBA8 door rather than the block one — there is
+	// no GPU-side transcode here, which `scene/ktx.c3` argues — so what is checked
+	// is that the picture survived at all and came back the size it went out.
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, packed)!!;
+	int image = renderer.pass.assets.load_asset_image(&renderer.gpu, reloaded, 0)!!;
+	test::@check(image >= 0, "the exported ETC1S did not load back");
+
+	three::Texture* texture = renderer.pass.assets.texture_at(image);
+	test::@check(texture.width == W && texture.height == H,
+		"the round trip changed the size to %dx%d", texture.width, texture.height);
+}
+
+<*
+ A Basis image copied through an export keeps the extension it arrived under.
+
+ The case the writer could not get right while it read the mime type, and the
+ reason `Exporter.declare_image` reads the payload instead. A `.glb` full of
+ ETC1S loaded and written back out is copied byte for byte — that is the rule
+ for every image that has a file behind it — so the bytes leaving are the bytes
+ that arrived, and the only thing this export decides is what to call them.
+
+ Called `CUSTOM_texture_ktx2` they are a file a conformant reader would take to
+ our own extension and mis-transcode; the input's own `KHR_texture_basisu`
+ would have been dropped at the same time. Correct bytes under a wrong name is
+ worse than no declaration, because a reader acts on the name.
+
+ The export that does it asks for **PNG**, deliberately: the option is about
+ pictures the scene made, and it must have no say at all over one it merely
+ carried.
+*>
+fn void a_copied_through_basis_texture_keeps_its_own_extension() @test
+{
+	String made_file = "build/export_basis_source.glb";
+	String copied = "build/export_basis_copied.glb";
+	defer { (void)file::delete(made_file); (void)file::delete(copied); }
+
+	three::Renderer* renderer = device::borrow(200, 150, with_pass: false);
+	defer device::release();
+	renderer.pass.init(&renderer.gpu, &renderer.target)!!;
+
+	const uint W = 8;
+	const uint H = 8;
+	char[] pixels = mem::new_array(char, (sz)W * H * 4);
+	defer free(pixels);
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 0; x < W; x++)
+		{
+			sz i = ((sz)y * W + x) * 4;
+			pixels[i] = (char)(x * 28);
+			pixels[i + 1] = (char)(y * 28);
+			pixels[i + 2] = (char)(200 - x * 10);
+			pixels[i + 3] = 255;
+		}
+	}
+
+	image::Image source = {
+		.width = W, .height = H, .bit_depth = 8,
+		.format = image::PixelFormat.RGBA, .pixels = pixels, .allocator = mem,
+	};
+	int slot = renderer.pass.assets.claim_texture(&renderer.gpu, source)!!;
+	uint material = renderer.pass.create_texture_material(slot)!!;
+
+	three::AssetId box = renderer.pass.assets.primitive(&renderer.gpu, three::box_shape(1, 1, 1))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
+	renderer.pass.scene.set_material(node, material);
+
+	(void)renderer.pass.export_scene(made_file, false, 0, three::ExportTextureFormat.KTX2_BASIS)!!;
+
+	// The scene that wrote it steps aside, so what goes out next is the file's
+	// own image and nothing else.
+	renderer.pass.scene.set_visible(node, false);
+
+	three::AssetId reloaded = renderer.pass.assets.load(&renderer.gpu, made_file)!!;
+	three::NodeId placed = renderer.pass.scene.add_mesh(reloaded, 0);
+	(void)placed;
+	three::GpuMesh* mesh = renderer.pass.assets.mesh(reloaded, 0);
+	test::@check(mesh != null && mesh.texture >= 0,
+		"the reloaded mesh should carry the file's image, got texture %d",
+		mesh == null ? -99 : mesh.texture);
+
+	three::ExportReport report = renderer.pass.export_scene(copied)!!;
+	test::@check(report.images == 1, "the copy wrote %d images", report.images);
+	test::@check(report.compressed_images == 0,
+		"a PNG export encoded %d images, and copying is not encoding", report.compressed_images);
+
+	String json = json_chunk(copied);
+	test::@check(json.contains(`"mimeType":"image/ktx2"`),
+		"the copied image lost its mime type");
+	test::@check(json.contains(`"extensionsRequired":["KHR_texture_basisu"]`),
+		"a copied ETC1S image lost the extension it arrived under");
+	test::@check(!json.contains("CUSTOM_texture_ktx2"),
+		"a copied ETC1S image was relabelled as our own BCn extension");
+}

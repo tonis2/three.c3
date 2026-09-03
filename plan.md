@@ -63,10 +63,24 @@ Crossfading, morph targets and sockets are built. What they left open:
       character had to be delivered in a chat message. Smallest possible version
       of this section, and already missed — the interface can display the list
       now, so what is left is a scene API for declaring it.
-- [ ] **A texture in the interface.** `RectStyle.texture` is one field away, and
-      the handle question is what blocks it: `CanvasPass` samplers are a
-      different table from `pass.assets`, so a scene texture cannot be named
-      across. `UI.md` §9.
+- [ ] **A texture in the interface, by path.** cui has the field already —
+      `RectStyle.texture` and `CircleStyle.texture`
+      (`lib/cui.c3l/src/core/ui.c3:2169`, `:2181`), both an index into
+      `CanvasPass.textures` and fed by `CanvasPass.load_image(path)`
+      (`.../vulkan/canvas_pass.c3:390`). What is missing is a `texture` field on
+      `UiNodeSpec` (`src/render/ui.c3:532`, which has `color` and `border_color`
+      and nothing else) and a style key to set it. UI art is authored and lives
+      in a file, so a path goes straight across and no bridge is needed.
+- [ ] **A *scene* texture in the interface is the harder half, and is not this
+      one.** `CanvasPass.textures` is a different descriptor table from
+      `pass.assets`, so a `three.Texture` cannot be named across. The obvious
+      bridge — read the pixels back with `textureRead` and re-upload through
+      `CanvasPass.load_pixels` — was always a queue idle plus a second copy, and
+      §23 killed it outright: `textureRead` now refuses a block texture, so that
+      route would silently exclude every texture loaded from a `.ktx2`. Sharing
+      one descriptor table between the two passes is the only version that works
+      for every texture, and it wants a use case first — a generated or
+      rendered image on a rect, which nothing has asked for yet. `UI.md` §9.
 - [ ] **Styling stops at a theme.** Six colours and two text fields cross per
       node, layered over each widget's own default. Enough to restyle, not enough
       to reproduce a design. One field per knob to widen. `UI.md` §9.
@@ -250,11 +264,6 @@ is 2048x2048 going from 397 ms and 21.3 MiB to **23 ms and 5.3 MiB**, which is
 
 What is left is not this section's work, and none of it is blocking:
 
-- [ ] **Nothing produces a `.ktx2` in this repo's own pipeline.** The engine
-      reads them and `lib/ktx.c3l`'s CLI writes them, and in between there is no
-      step that says "these are the textures this game ships". Until there is,
-      the fast path only helps somebody who already ran `ktx create` by hand.
-
 - [ ] **The BC7 fallback has never run.** `Gpu.supports` decides it and a test
       asserts it agrees with itself, but this machine samples BC7, so the branch
       that decodes to RGBA8 instead has only ever been reached by files that were
@@ -270,6 +279,143 @@ What is left is not this section's work, and none of it is blocking:
       choice and the family is the file's, which is right for loading and wrong
       for `DataTexture` — a script with BC7 blocks in hand has no way to hand
       them over. Wants a real use before it gets an argument.
+
+## 24. Exporting compressed textures
+
+**Done.** `scene.export(path, { textures: 'png' | 'ktx2' | 'basis' })`. `ktx2` is
+BC7 with a mip chain for this engine — a quarter of the VRAM and seventeen times
+the load speed. `basis` is ETC1S for everyone else, declared
+`KHR_texture_basisu`, deliberately not the default because this engine reloads it
+on the slow path. PNG stays the default and a source file's bytes are still
+copied untouched whichever is asked for. The extension declared now follows the
+*payload* rather than the mime type, so a Basis image copied through an export
+keeps its own name instead of being relabelled. `notes.md` §24 has the design.
+
+- [ ] **`lib/gltf.c3l` is ahead of its committed pointer.** The extension
+      declaration lives in the submodule — a constant in `src/main.c3` and the
+      `extensionsRequired` emitter in `src/writer.c3`. Its own 67 tests pass, but
+      the change has to be committed *there* and the pointer bumped *here* or a
+      fresh clone builds a `.glb` nothing can read back.
+
+- [ ] **One format for everything is the wrong default, and §26 was the wait.**
+      BC7 is right for colour and wrong for two common maps: a normal map wants
+      BC5, which spends its bits on the two channels that survive, and a
+      single-channel occlusion map wants BC4 at *half* BC7's size (already in
+      `ktx.c3l` as `vk::BC4_UNORM`, encode and decode both wired; this side wants
+      it in `TextureFamily`). The renderer samples both maps now, so this is a
+      storage policy for data that is read rather than for data nothing looks at.
+
+- [ ] **A bake is encoded at whatever size it was baked.** `{ bake: 2048,
+      textures: 'ktx2' }` is two expensive things in a row and nothing warns that
+      the second one is about to take minutes. A progress signal or a count up
+      front would cost little.
+
+- [ ] **Nothing re-encodes an existing PNG asset in place.** The option covers
+      what a scene *generated*; a kit that shipped as PNG stays PNG through an
+      export because its source bytes are copied verbatim, which is right for
+      fidelity and wrong for anyone wanting to convert a project. That is a
+      different verb and it does not exist.
+
+## 25. A trim sheet from a function
+
+**Unblocked by §26**, which is what it was waiting for: a normal, a roughness and
+an occlusion map now shade on the built-in pipeline, so baking one is worth
+doing.
+
+`render/bake.c3` already runs a material body in uv space and reads the pixels
+back, which is most of a material authoring tool built for another reason. Two
+things are missing: it emits albedo and nothing else, and a body has no
+vocabulary to write a pattern with. Substance Designer is the shape to copy —
+procedural, no high-poly, no cage, no transfer bake.
+
+- [ ] **The bake emits one channel and there are four.** `Surface.height`, a
+      channel index in the bake push, and a switch under `THREE_BAKE`. One
+      pipeline and N submissions: MRT (§13) buys nothing here and costs a
+      pass-system change. Everything below waits on this.
+- [ ] **Normal is baked, not derived.** Central differences on `h` in the body,
+      at float precision. Storing height and differentiating *that* quantizes
+      first, and no operator recovers what the quantization threw away —
+      terracing is the symptom. Three things decide the quality: ε is one texel
+      at bake resolution, `heightScale` is in texels per metre or the relief
+      reads at the wrong depth, and a 2x bake box-downsampled and renormalized
+      antialiases the hard edges. RGBA8 is adequate; it is what a normal map
+      ships as.
+- [ ] **AO and curvature are derived, and for them that is right.** Both are low
+      frequency and forgive the precision. A horizon sweep over the readback, on
+      the CPU, testable without a device. Height packs 16 bits across R+G so the
+      RGBA8 target does not have to change.
+- [ ] **Roughness.** Nearly free once the channel index exists, and stone
+      without it reads as plastic.
+- [ ] **A body has no vocabulary.** Hashes, value/perlin/worley/fbm, brick and
+      hex lattices, 2D SDFs, smooth-min and the blend operators, domain warp,
+      molding profiles. It goes in as *more template*, not a Slang `import`:
+      `shader/material_source.c3` splices markers into `shaders/material.slang`
+      and brackets the body with `#line`. `shader/assemble.c3` counts `physical`
+      rather than computing it, so the restore arithmetic should absorb the
+      shift — should, and that is worth one test rather than one assumption.
+- [ ] **A sheet is a layout, not a texture.** Strips at known v ranges, and
+      geometry that uvs into them. Without a descriptor both sides agree on this
+      produces materials and never trim sheets. The piece most likely to be
+      skipped and then missed.
+- [ ] **Export writes one image per material.** glTF wants `normalTexture` and
+      `occlusionTexture` beside the base colour.
+- [ ] **The agent cannot see its own work.** `screenshot` returns the frame;
+      authoring wants the sheet flat *and* on a lit test mesh. This is the half
+      that decides whether an agent's iteration converges or wanders.
+
+**Verification:** bake a function whose derivative is known and compare the
+normal against the closed form. It is the one part of this whose correctness is
+a number rather than an opinion.
+
+**Not doing:** matching a reference image automatically. An agent looking at a
+reference and writing the function is the whole of the feature; sampling the
+reference *into* the bake is a different one and wants a use first.
+
+**The thesis holds.** A body is not a vertex, so none of this touches §Standing
+constraints — the agent writes a function and the geometry stays a quad.
+
+## 26. Shading the maps that already load
+
+**Done.** `normalMap`, `metalnessRoughnessMap` and `aoMap` are properties of a
+`MeshLambertMaterial` and reach the built-in pipeline: `mesh.slang` samples them
+at bindings 3, 4 and 5 under a flag each, the normal goes through the shared
+`mapped_normal_frame`, the pair multiplies `material.roughness` and `.metalness`
+glTF's way (green and blue of one image), and occlusion multiplies the ambient
+floor and the environment reflection and **not** the direct lobes.
+`test/maps_test.c3` is the whole of it, with the three injections that prove each
+claim.
+
+The cotangent frame is written once, in `shaders/surface.slang`, and spliced into
+both templates at their `//@shared` line by `shader_source` — the first thing the
+two shaders share rather than duplicate. `Surface.height` exists, neutral at 0.5,
+for §25 to bake into.
+
+What is left, and none of it is blocking:
+
+- [ ] **The GGX block is still duplicated character for character.** `lambert`,
+      `specular_light`, `environment_light`, `environment_uv`, `shadow_factor`
+      and `srgb_to_linear` are two copies held together by a comment, and the
+      mechanism that would end that now exists. What stopped them moving with
+      §26 is that `material.slang`'s copies carry `#ifdef THREE_BAKE` branches
+      `mesh.slang`'s do not, so unifying them is a change to the bake as well.
+
+- [ ] **A built-in material's maps do not export.** `scene/export.c3` writes
+      `normalTexture` out of a `LayeredMaterial`'s stack and knows nothing about
+      the three slots on a `MeshLambertMaterial`, so a script that sets one and
+      exports loses it silently.
+
+- [ ] **The glTF importer still does not apply them.**
+      `instantiate({ materials: true })` drops `aoMap` and
+      `metalnessRoughnessMap` and routes a normal map through a
+      `LayeredMaterial`, which now compiles a shader for something the built-in
+      pipeline does. Both are one edit in `js/prelude/asset.js`, and both change
+      what every existing import looks like — so they want a before-and-after of
+      their own rather than a line in this one.
+
+- [ ] **Nothing samples a height map on the built-in pipeline.** `parallax_uv`
+      is a `ShaderMaterial`'s and a `LayeredMaterial`'s; a fourth slot would be a
+      sixth binding and a fourth flag, and it waits for §25 to have something to
+      put in it.
 
 ## Standing constraints
 

@@ -36,7 +36,11 @@ import vk;
 
 // One past the last binding each kind of shader can have: its template's
 // reserved bindings plus what an agent may declare on top of them. A material
-// reserves one and a post pass reserves two — see `MATERIAL_BINDING_FIRST`.
+// reserves three and a post pass four — see `MATERIAL_BINDING_FIRST`.
+//
+// `mesh.slang` is not in the arithmetic and does not need to be: it declares six
+// bindings of its own and no agent ever adds to them, so it fits under whichever
+// of the two is larger.
 const uint MATERIAL_BINDINGS_END = MATERIAL_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
 const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
 

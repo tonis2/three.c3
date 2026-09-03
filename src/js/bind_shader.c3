@@ -41,6 +41,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "setSurface", &js_set_surface, 4);
 	self.bind(host, "getSurface", &js_get_surface, 1);
 	self.bind(host, "setMap", &js_set_map, 2);
+	self.bind(host, "setMaterialSlot", &js_set_material_slot, 3);
+	self.bind(host, "getMaterialSlot", &js_get_material_slot, 2);
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "setMaterial", &js_set_material, 3);
@@ -824,6 +826,81 @@ fn void js_set_map(
 		);
 		return;
 	}
+}
+
+<*
+ `material.normalMap = texture`, `.metalnessRoughnessMap` and `.aoMap` — the
+ built-in material's three maps past its base colour.
+
+ One verb for the three, keyed by a slot number, because they differ only in
+ which binding they land in — `MATERIAL_SLOT_*` in `scene/material.c3` is what
+ the prelude names and `NORMAL_MAP_BINDING` is where those become bindings.
+
+ The three refusals are told apart in the message, because they are three
+ different mistakes: a dead texture is one the material may not use, a built-in
+ material is one a script may not touch at all, and a `ShaderMaterial` is one
+ whose samplers belong to the body its author wrote.
+
+ @param [in] args : `(material, slot, texture).`
+*>
+fn void js_set_material_slot(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index  = (uint)arg_int(&js, argc, args, 0);
+	int slot    = arg_int(&js, argc, args, 1);
+	// The prelude sends `NO_TEXTURE` for a cleared map, exactly as `setMap` does.
+	int texture = argc > 2 ? arg_int(&js, argc, args, 2) : NO_TEXTURE;
+
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	if (catch err = self.pass.set_material_slot(gpu, index, slot, texture))
+	{
+		if (err == MATERIAL_TEXTURE_UNKNOWN)
+		{
+			*out = js.raise(
+				"that texture is not in this context — it was disposed, or it came from another renderer"
+			);
+			return;
+		}
+		if (err == MATERIAL_SAMPLER_UNKNOWN)
+		{
+			*out = js.raise(
+				"normalMap, metalnessRoughnessMap and aoMap are the built-in material's — "
+					"a ShaderMaterial declares its own samplers and fills them through material.textures"
+			);
+			return;
+		}
+		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
+		return;
+	}
+}
+
+<*
+ Which texture is in one of those three slots, or -1.
+*>
+fn void js_get_material_slot(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	int slot   = arg_int(&js, argc, args, 1);
+	*out = qjs::int_value(self.pass.material_slot(index, slot));
 }
 
 <*

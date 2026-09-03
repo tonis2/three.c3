@@ -1,7 +1,7 @@
 // three.c3 — sides, blending, and the two built-in materials.
 
 import { asPair } from './math.js';
-import { Texture } from './texture.js';
+import { LinearSRGBColorSpace, Texture } from './texture.js';
 
 const H = globalThis.__three;
 
@@ -40,6 +40,23 @@ const BLENDING_IS_BAKED =
 // `Material.texture` in scene/material.c3 — "this material has no image of
 // its own, use whatever the mesh brought".
 export const NoTexture = -1;
+
+// Which of the built-in material's maps a slot number means —
+// `MATERIAL_SLOT_*` in scene/material.c3, which is where they become sampler
+// bindings. Not exported: a script names a property, never a slot.
+const SLOT_NORMAL = 0;
+const SLOT_METALNESS_ROUGHNESS = 1;
+const SLOT_OCCLUSION = 2;
+
+// What `material.roughnessMap` and `material.metalnessMap` answer. Three.js
+// keeps the two apart and glTF packs them into one image, and this renderer
+// follows glTF: the pair is green and blue of `metalnessRoughnessMap`, which is
+// the shape every exporter writes and the shape `ref.material` already hands
+// over.
+const SPLIT_PBR_MAPS =
+	'roughness and metalness are one image here, not two — set '
+	+ 'metalnessRoughnessMap, which is glTF\'s packing: green is roughness and '
+	+ 'blue is metalness';
 
 // What every material here has, which is a pipeline index, a side and a map.
 //
@@ -393,11 +410,18 @@ export class Material {
 // the sampled texel, so one material can tint a thousand copies differently
 // and still be one draw call — a colour here would be a second way to say the
 // same thing that also splits the batch.
+//
+// **Four images, not one.** `map` is the base colour; `normalMap`,
+// `metalnessRoughnessMap` and `aoMap` are the three the built-in shader reads
+// beside it, and none of them compiles anything either — they are three more
+// sampler bindings on the pipeline that already existed. The last three are
+// *data* and have to be loaded `LinearSRGBColorSpace`; the setters refuse an
+// sRGB one by name.
 export class MeshLambertMaterial extends Material {
 	constructor(options = {}) {
 		if (options === null || typeof options !== 'object') {
 			throw new TypeError(
-				'new three.MeshLambertMaterial({ map, side, transparent, blending, opacity, roughness, metalness, reflectance }) wants an options object'
+				'new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, side, transparent, blending, opacity, roughness, metalness, reflectance }) wants an options object'
 			);
 		}
 		const { map = null, side = FrontSide } = options;
@@ -417,10 +441,113 @@ export class MeshLambertMaterial extends Material {
 			blending,
 		);
 		this._map = texture;
+		this._normalMap = null;
+		this._metalnessRoughnessMap = null;
+		this._aoMap = null;
 		// After `super`, because it is a write through the handle rather than a
 		// part of it — and the setter is what refuses a value outside 0..1, so
 		// the option and the property are checked by exactly one piece of code.
 		if (options.opacity !== undefined) this.opacity = options.opacity;
 		Material._applySurface(this, options);
+		// The three maps, through their own setters for the same reason: each
+		// takes a reference on the host side, and the option and the property
+		// have to be refused by one piece of code rather than two.
+		if (options.normalMap !== undefined) this.normalMap = options.normalMap;
+		if (options.metalnessRoughnessMap !== undefined) {
+			this.metalnessRoughnessMap = options.metalnessRoughnessMap;
+		}
+		if (options.aoMap !== undefined) this.aoMap = options.aoMap;
+	}
+
+	// A tangent-space normal map, or null.
+	//
+	// The frame is rebuilt per pixel from screen-space derivatives, so this
+	// works on any mesh with uvs — including a generated PlaneGeometry — and
+	// no mesh here has or needs a TANGENT attribute. A mirrored uv island
+	// comes out mirrored rather than flipped, which is the price of that.
+	//
+	// **It has to be loaded linear.** Through an sRGB view the stored 0.5 that
+	// means "no tilt" arrives as 0.21, so every surface leans the same way and
+	// the detail goes soft — it reads as a bad bake and the file is fine. The
+	// setter refuses an sRGB texture by name rather than letting that happen.
+	get normalMap() { return this._normalMap; }
+
+	set normalMap(v) { this._normalMap = this._setSlot(SLOT_NORMAL, v, 'normalMap'); }
+
+	// glTF's metallic-roughness image, or null: **green is roughness and blue
+	// is metalness**, one texture rather than two, because that is how every
+	// exporter writes the pair and how `ref.material` hands it over.
+	//
+	// **It multiplies `roughness` and `metalness` rather than replacing them**,
+	// which is what glTF says its two factors mean. The consequence is the one
+	// thing to remember: this renderer's default metalness is 0, so a map on a
+	// material nobody set `metalness` on is multiplied away. Set
+	// `metalness: 1` — glTF's own default — to let the blue channel speak.
+	//
+	// Loaded linear, for `normalMap`'s reason.
+	get metalnessRoughnessMap() { return this._metalnessRoughnessMap; }
+
+	set metalnessRoughnessMap(v) {
+		this._metalnessRoughnessMap = this._setSlot(
+			SLOT_METALNESS_ROUGHNESS, v, 'metalnessRoughnessMap'
+		);
+	}
+
+	// An ambient occlusion map, red channel, or null.
+	//
+	// **It darkens the ambient floor and the environment reflection, and not
+	// the lights.** An AO map records how much of the sky a crevice can see; a
+	// lamp pointed into that crevice still lights it. Applied to everything it
+	// reads as dirt painted where the light is, which looks plausible enough to
+	// ship and is wrong.
+	//
+	// So a scene with `three.light.ambient` at 0 and no environment sees
+	// nothing from this, correctly.
+	get aoMap() { return this._aoMap; }
+
+	set aoMap(v) { this._aoMap = this._setSlot(SLOT_OCCLUSION, v, 'aoMap'); }
+
+	// Three.js has these two as separate images and this renderer does not —
+	// glTF packs them into one, `ref.material` hands one over, and the shader
+	// reads two channels of it. Refused by name rather than ignored, because a
+	// property that silently does nothing is the shape of failure that gets
+	// blamed on the renderer.
+	set roughnessMap(v) { throw new TypeError(SPLIT_PBR_MAPS); }
+
+	set metalnessMap(v) { throw new TypeError(SPLIT_PBR_MAPS); }
+
+	// One of the three, checked and written through.
+	//
+	// The colourspace check is the half worth having: all three are *data* and
+	// not pictures, the host uploads whatever space the texture was loaded in,
+	// and an sRGB view of a normal map is the bug that reads as a bad bake.
+	// `ref.material` already hands back linear handles, so an imported map
+	// passes this without anybody having to know it exists.
+	_setSlot(slot, v, name) {
+		if (v !== null && v !== undefined && !(v instanceof Texture)) {
+			throw new TypeError(
+				'material.' + name + ' wants a three.texture(path, '
+				+ '{ colorSpace: three.LinearSRGBColorSpace }), or null for none'
+			);
+		}
+		const texture = v ?? null;
+		if (texture !== null && texture.colorSpace !== LinearSRGBColorSpace) {
+			throw new TypeError(
+				'material.' + name + ' is data rather than a picture and has to be loaded '
+				+ 'with { colorSpace: three.LinearSRGBColorSpace } — through an sRGB view '
+				+ 'every value in it arrives bent'
+			);
+		}
+		H.setMaterialSlot(this._index(), slot, texture === null ? NoTexture : texture._index());
+		return texture;
+	}
+
+	toJSON() {
+		return {
+			...super.toJSON(),
+			normalMap: this._normalMap?.toJSON() ?? null,
+			metalnessRoughnessMap: this._metalnessRoughnessMap?.toJSON() ?? null,
+			aoMap: this._aoMap?.toJSON() ?? null,
+		};
 	}
 }

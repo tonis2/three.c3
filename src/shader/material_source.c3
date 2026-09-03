@@ -397,7 +397,8 @@ const String[*] MATERIAL_CONTRACT_FIELDS @local = { // Surface. `shadow` is here
 	"color",
 	"vertex_color",
 	"variant",
-	"shadow", // Vertex adds these two; the rest it shares with Surface.
+	"shadow",
+	"height", // Vertex adds these two; the rest it shares with Surface.
 	"local",
 	"index",
 };

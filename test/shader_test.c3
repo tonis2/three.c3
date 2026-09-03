@@ -28,6 +28,20 @@ import std::io::path;
 const String MESH_PATH = "shaders/mesh.slang";
 
 <*
+ The mesh shader as the pass compiles it: the file, plus the shared surface
+ block its `//@shared` line names.
+
+ Two doors on purpose, and which one a check wants depends on what it is asking.
+ Anything that *compiles* comes through here, because the file on its own is a
+ template with a marker line in it and `mapped_normal_frame` defined nowhere.
+ Anything that reads the file as *text* — the declaration checks below, which cut
+ a struct out of it and compile that alone — uses `load_source`, because what
+ they are holding `material.slang` and `shadow.slang` against is what is written
+ in the file rather than what was spliced into it.
+*>
+fn String? mesh_module() => three::shader_source("mesh.slang", mem);
+
+<*
  A shader with one binding of every kind this pass can translate, in two sets.
 
  Deliberately not `mesh.slang`: the real shader has exactly one descriptor, so a
@@ -89,7 +103,7 @@ macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
 *>
 fn void the_mesh_shader_compiles_from_a_string() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = mesh_module()!!;
 	defer source.free(mem);
 
 	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
@@ -117,7 +131,7 @@ fn void the_mesh_shader_compiles_from_a_string() @test
 *>
 fn void the_entry_points_keep_their_names() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = mesh_module()!!;
 	defer source.free(mem);
 
 	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
@@ -160,7 +174,7 @@ fn void the_entry_points_keep_their_names() @test
 *>
 fn void matrices_are_column_major() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = mesh_module()!!;
 	defer source.free(mem);
 
 	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
@@ -181,7 +195,7 @@ fn void matrices_are_column_major() @test
 *>
 fn void the_same_source_compiles_to_the_same_bytes() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = mesh_module()!!;
 	defer source.free(mem);
 
 	three::ShaderModule first = three::compile_slang(source, "mesh.slang", both_stages())!!;
@@ -344,7 +358,7 @@ fn void the_stage_mask_covers_both_stages() @test
 *>
 fn void the_mesh_push_block_matches_the_struct() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = mesh_module()!!;
 	defer source.free(mem);
 
 	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
@@ -372,20 +386,24 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Three descriptors, and all three are reserved by the template: the
-	// material's map at 0, the shadow map at 1 and the environment map at 2.
-	// Derived, not declared — until M4 this was a literal in `MeshPipeline.init`,
-	// and it was one binding until the shadow pass claimed the second.
+	// Six descriptors, and every one of them is the template's own: the material's
+	// map at 0, the shadow map at 1, the environment map at 2, and the three maps
+	// the built-in material shades with at 3, 4 and 5. Derived, not declared —
+	// until M4 this was a literal in `MeshPipeline.init`, and it was one binding
+	// until the shadow pass claimed the second.
 	//
-	// **The count is checked as well as the names**, and that is the half that
-	// earns its keep: `MATERIAL_BINDING_FIRST` is 3 because this template reserves
-	// exactly these three, so a fourth reserved sampler appearing here without
-	// that constant moving is a material's first texture landing on top of it.
-	test::@check(mod.layout.bindings.len() == 3, "three descriptors, got %d", mod.layout.bindings.len());
+	// **The count is checked as well as the names**, and it is the half that earns
+	// its keep — but no longer against `MATERIAL_BINDING_FIRST`, which is where the
+	// two templates stopped agreeing. `material.slang` reserves three and numbers
+	// an agent's first sampler at 3; this file reserves six and has no agent. A
+	// binding is only ever resolved against the pipeline that declared it, so the
+	// two meanings of "3" never meet — see `NORMAL_MAP_BINDING`.
+	test::@check(mod.layout.bindings.len() == 6, "six descriptors, got %d", mod.layout.bindings.len());
 	test::@check(
-		three::MATERIAL_BINDING_FIRST == mod.layout.bindings.len(),
-		"and a material's own samplers start past them, at %d",
-		three::MATERIAL_BINDING_FIRST
+		mod.layout.binding_of("normal_map") != null
+			&& mod.layout.binding_of("metalness_roughness_map") != null
+			&& mod.layout.binding_of("occlusion_map") != null,
+		"and the three past the reserved ones are the built-in material's maps"
 	);
 
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
@@ -727,7 +745,7 @@ fn void the_pipeline_cache_skips_the_compile() @test
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;
@@ -768,7 +786,7 @@ fn void a_different_render_state_is_a_different_pipeline() @test
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;
@@ -814,7 +832,7 @@ fn void a_broken_shader_leaves_the_cache_empty() @test
 		test::@check(@catch(broken), "it failed");
 		test::@check(cache.entries.len() == 0, "and cached nothing");
 
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 		test::@check(good != null, "and the cache still works afterwards");
@@ -833,7 +851,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;
@@ -843,10 +861,14 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 3, "from three reflected bindings");
+		test::@check(pipeline.shader.bindings.len() == 6, "from six reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
 		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");
+		test::@check(
+			pipeline.shader.binding_of("normal_map") != null,
+			"and the built-in material's normal map"
+		);
 		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
 			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
 	};
@@ -876,7 +898,7 @@ fn void a_released_pipeline_is_kept_for_the_next_acquire() @test
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;
@@ -925,7 +947,7 @@ fn void the_pipeline_cache_evicts_what_nothing_uses() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;
@@ -982,7 +1004,7 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::load_source(MESH_PATH)!!;
+		String source = mesh_module()!!;
 		defer source.free(mem);
 
 		three::PipelineCache cache;

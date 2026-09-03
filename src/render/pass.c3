@@ -1249,7 +1249,11 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 					: 0) | (mesh.has_colors ? FLAG_HAS_COLORS
 						: 0) | (skinned ? FLAG_HAS_SKIN
 							: 0) | (preskinned ? FLAG_PRESKINNED
-								: 0), // The mesh's vertex count, and two readers want it for the same reason:
+								: 0) // Which of the built-in material's three maps this bucket has. Off the
+								// material rather than off the mesh, unlike every bit above it: the image is
+								// the material's and the geometry only says whether there are uvs to lay it
+								// on.
+								| self.map_flags(material), // The mesh's vertex count, and two readers want it for the same reason:
 								// both the compute pass's output and the morph target table hold one
 								// block per copy or per target, so finding block `n` means multiplying by
 								// this. Zero when neither reader is running, which is most buckets.
@@ -2381,6 +2385,13 @@ fn float MeshPass.material_opacity(&self, uint index)
  sphere seen from inside shows only back faces. A material that wants neither an
  image nor a side should still be `DEFAULT_MATERIAL`, which costs no slot at all.
 
+ **One texture here and three more afterwards.** The built-in shader also reads a
+ normal map, glTF's packed metallic-roughness pair and an occlusion map, and
+ those go in through `set_material_slot` rather than through this signature: each
+ takes a reference of its own, each is settable and clearable afterwards, and
+ widening the constructor would have been a fourth way to say what that verb
+ already says.
+
  @param texture : `An index into Assets.textures, or NO_TEXTURE for the mesh's own image.`
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Selects one of the three pipelines built in init; nothing is compiled here whichever it is.`
@@ -2557,8 +2568,13 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
  the name the template happens to use would make `base_color_map` part of the
  script-facing API.
 
- The built-in materials are refused, more simply here: neither declares a sampler
- past binding 0, so there is no name that could resolve.
+ The two built-in materials are refused by `editable`, as everywhere else, and a
+ material drawn by the *built-in shader* is refused here on its own account.
+ `mesh.slang` declares `normal_map`, `metalness_roughness_map` and
+ `occlusion_map`, so those names would otherwise resolve through this door — and
+ that is exactly the thing `NORMAL_MAP_BINDING` argues against, because it would
+ make the shader's own spelling part of the script-facing API and leave two ways
+ to write one slot. `set_material_slot` is the one way.
 
  The retain/release dance is `set_material_map`'s exactly.
 
@@ -2566,11 +2582,12 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
  @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back.`
  @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones.`
  @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
- @return ? MATERIAL_SAMPLER_UNKNOWN : `This material's shader has no sampler by that name.`
+ @return ? MATERIAL_SAMPLER_UNKNOWN : `This material's shader has no sampler by that name, or it is drawn by the built-in shader, whose own samplers are reached through set_material_slot.`
 *>
 fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name, int texture)
 {
 	Material* material = self.editable(index)!;
+	if (self.shades_built_in(material)) return MATERIAL_SAMPLER_UNKNOWN~;
 	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 
 	uint binding = material.binding_of_texture(name);
@@ -2583,6 +2600,106 @@ fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name,
 	self.assets.release_texture(gpu, held);
 
 	material.textures.set(binding, texture);
+}
+
+<*
+ `material.normalMap = texture`, and the two beside it — the built-in material's
+ three maps past its base colour.
+
+ `set_material_map` for the bindings `mesh.slang` reserves above zero, and the
+ differences are two. The slot is a number rather than a name, because the name
+ would be the shader's — `NORMAL_MAP_BINDING` has the argument. And the material
+ has to be one the *built-in* shader draws: a `ShaderMaterial` numbers its own
+ samplers at exactly these bindings, so writing a normal map into one would put
+ an image in whatever the body called its first texture and shade with it.
+
+ A mesh with no uvs is not refused, for `set_material_map`'s reason: `mesh.slang`
+ samples all four maps under one `FLAG_HAS_UVS` test, so a normal map on a convex
+ hull is set, correct and invisible.
+
+ The retain/release dance is `set_material_map`'s exactly.
+
+ @param slot : `MATERIAL_SLOT_NORMAL, MATERIAL_SLOT_METALNESS_ROUGHNESS or MATERIAL_SLOT_OCCLUSION.`
+ @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back and clear the flag.`
+ @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
+ @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
+ @return ? MATERIAL_SAMPLER_UNKNOWN : `Not one of the three slots, or a material whose shader is not the built-in one.`
+*>
+fn void? MeshPass.set_material_slot(&self, Gpu* gpu, uint index, int slot, int texture)
+{
+	Material* material = self.editable(index)!;
+	if (!self.shades_built_in(material)) return MATERIAL_SAMPLER_UNKNOWN~;
+
+	uint binding = binding_for_material_slot(slot);
+	if (binding == 0) return MATERIAL_SAMPLER_UNKNOWN~;
+	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
+
+	int held = material.textures.at(binding);
+	if (held == texture) return;
+
+	// Retain before release, for `set_material_map`'s reason: the two indices can
+	// name one slot, and releasing first would destroy the image about to be
+	// retained.
+	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
+	self.assets.release_texture(gpu, held);
+
+	material.textures.set(binding, texture);
+}
+
+<*
+ Which texture is in one of those three slots.
+
+ `NO_TEXTURE` for a material that does not exist, a slot that is not one of the
+ three, and a material whose shader is not the built-in one alike — `material_texture`'s
+ rule, which is that a getter answers what a material that was never given
+ anything would answer and the setter is where a mistake is reported.
+*>
+fn int MeshPass.material_slot(&self, uint index, int slot)
+{
+	Material* material = self.material(index);
+	if (material == null || !self.shades_built_in(material)) return NO_TEXTURE;
+	return material.textures.at(binding_for_material_slot(slot));
+}
+
+<*
+ Is this material drawn by `mesh.slang` rather than by a body somebody wrote?
+
+ Asked by pipeline rather than by how the material was built, because
+ `PipelineCache.acquire` hands the same pointer back for the same source and
+ state — so this is true of every material `create_texture_material` made and
+ false of every one `create_material` compiled, whatever else changed in between.
+
+ The line pipeline is deliberately not in the list. It is the same shader, but a
+ debug line carries no uvs and `LINE_MATERIAL` is refused by `editable` before
+ this is ever asked.
+*>
+fn bool MeshPass.shades_built_in(&self, Material* material)
+{
+	return material.pipeline == self.pipeline
+		|| material.pipeline == self.alpha_pipeline
+		|| material.pipeline == self.additive_pipeline;
+}
+
+<*
+ Which of the built-in material's three maps this bucket carries, as the bits
+ `shaders/mesh.slang` samples them under.
+
+ Zero for anything a body shades: a `ShaderMaterial`'s own samplers sit at the
+ same bindings, and a bit set from one of those would be this shader's answer to
+ a question that material never asked.
+*>
+fn uint MeshPass.map_flags(&self, Material* material)
+{
+	if (!self.shades_built_in(material)) return 0;
+
+	uint flags = 0;
+	if (material.textures.at(NORMAL_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_NORMAL_MAP;
+	if (material.textures.at(METALNESS_ROUGHNESS_MAP_BINDING) != NO_TEXTURE)
+	{
+		flags |= FLAG_HAS_METALNESS_ROUGHNESS_MAP;
+	}
+	if (material.textures.at(OCCLUSION_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_OCCLUSION_MAP;
+	return flags;
 }
 
 <*

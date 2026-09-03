@@ -1,5 +1,6 @@
 <*
- KTX2 decode, for `KHR_texture_basisu` and for `.ktx2` named by a script.
+ KTX2 decode, for `KHR_texture_basisu` and for `.ktx2` named by a script — and,
+ at the end of the file, the two encoders `scene.export` writes one with.
 
  **Every shipped `.glb` compressing its textures loaded with them missing**
  before this file existed: `image.c3l` does PNG and JPEG, `decode_image`
@@ -47,6 +48,7 @@ import image;
 import ktx::container;
 import ktx::basis;
 import ktx::codec;
+import ktx::mipgen;
 
 
 <*
@@ -96,6 +98,27 @@ fn bool is_ktx2(char[] encoded)
 	{
 		if (encoded[i] != byte) return false;
 	}
+	return true;
+}
+
+<*
+ Which of the two kinds of KTX2 these bytes are.
+
+ The file header's distinction, asked as a question. It matters outside the
+ decoder because the two answer to different glTF extensions —
+ `KHR_texture_basisu` for a Basis one, `CUSTOM_texture_ktx2` for a plain one —
+ and the mime type cannot tell them apart. A `.glb` that declares the wrong one
+ is worse than one that declares neither: a reader acts on it.
+
+ `basis::info` reads the descriptor block and fails for anything that is not
+ ETC1S or UASTC, which is exactly the test.
+
+ @param encoded : `The whole file. False for bytes that are not a KTX2 at all.`
+*>
+fn bool is_basis_ktx2(char[] encoded)
+{
+	if (!is_ktx2(encoded)) return false;
+	if (catch basis::info(encoded)) return false;
 	return true;
 }
 
@@ -276,4 +299,133 @@ fn TextureFamily? block_family_of(uint vk_format) @local
 		default:
 			return UNSUPPORTED_IMAGE~;
 	}
+}
+
+<*
+ RGBA8 pixels to a BC7 KTX2 with a full mip chain — the write side of §23.
+
+ The exporter's, not the loader's. `decode_ktx2_blocks` reads these files and
+ this writes them, and until it existed a game's textures became `.ktx2` only by
+ somebody running `ktx create` by hand.
+
+ ## This is expensive and is meant to be
+
+ BC7 encoding searches partition and endpoint combinations per block. It already
+ fans out across cores inside `bc7::encode`, and one 2048x2048 still costs around
+ 27 seconds of wall time here. That is the correct price for a build step and an
+ impossible one for anything on a frame's path, which is why it lives behind an
+ export option and why `notes.md` §23 argues against ever doing it at load.
+
+ ## The chain is generated here rather than on the device
+
+ `mipgen::next_level` is a proper box filter over the *decoded* pixels, done
+ before each level is encoded — so the file gets a chain built from full-precision
+ source rather than from the level above it after a lossy round trip. That is
+ strictly better than the device's blit chain, and it is the reason a KTX2's own
+ levels are worth keeping when it is read back.
+
+ `srgb` is handed to the filter as well as chosen as the format: averaging sRGB
+ values as though they were linear darkens every level, and it is the mistake
+ that reads as a texture dimming with distance.
+
+ @param decoded : `8-bit pixels. Narrowed to RGBA here, so RGB sources are fine.`
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
+ @return `The whole .ktx2 file, Zstd supercompressed, owned by the caller.`
+*>
+fn char[]? encode_ktx2_bc7(
+	image::Image* decoded,
+	ColorSpace space = ColorSpace.SRGB,
+	Allocator allocator = mem
+) => @pool()
+{
+	bool srgb   = space == ColorSpace.SRGB;
+	uint format = srgb ? 146u : 145u;
+	uint w      = decoded.width;
+	uint h      = decoded.height;
+	if (w == 0 || h == 0) return UNSUPPORTED_IMAGE~;
+
+	uint levels = mipgen::chain_length(w, h);
+
+	container::Texture tex = container::create(tmem, {
+		.vk_format = format,
+		.width = w,
+		.height = h,
+		.face_count = 1,
+		.layer_count = 0,
+		.level_count = levels,
+	})!;
+
+	mipgen::Options options = { .srgb = srgb, .renormalize = false };
+
+	// `to_rgba` rather than `pixels`, because an RGB source is three bytes a
+	// texel and the encoder wants four.
+	char[] rgba = decoded.to_rgba();
+	defer free(rgba);
+
+	uint lw = w;
+	uint lh = h;
+	char[] level = rgba;
+	for (uint l = 0; l < levels; l++)
+	{
+		if (l > 0)
+		{
+			level = mipgen::next_level(tmem, level, lw, lh, options);
+			lw = lw > 1 ? lw >> 1 : 1;
+			lh = lh > 1 ? lh >> 1 : 1;
+		}
+		// No alpha flag: `codec::encode_image` reads the level's own alpha and
+		// hands it to `bc7::encode`, which is a better answer than one taken off
+		// the base level — a chain can filter down to opaque.
+		char[] blocks = codec::encode_image(tmem, format, level, lw, lh)!;
+		tex.set_image(l, 0, 0, blocks)!;
+	}
+
+	// Zstd for the same reason the fixtures use it: it is what an engine-ready
+	// file looks like, and `container::read` inflates it on the way back in.
+	return container::write(allocator, &tex, { .scheme = container::Scheme.ZSTD, .zstd_level = 3 });
+}
+
+<*
+ RGBA8 pixels to an ETC1S KTX2 with a full mip chain — the portable half of §24.
+
+ `encode_ktx2_bc7`'s sibling and its opposite trade. BC7 is what *this* engine
+ wants: `decode_ktx2_blocks` uploads those blocks untouched, which is the whole
+ saving. Nothing else reads them — `CUSTOM_texture_ktx2` is our own name, so a
+ Blender importer or another engine handed one of those files declines it.
+
+ ETC1S is the one a stranger can read. It is `KHR_texture_basisu`, which every
+ glTF toolchain implements, and it is *supercompressed*: a BasisLZ payload a
+ fifth the size of the equivalent BC7. What it costs is quality — it is visibly
+ lossy where BC7 is nearly not — and load time here, since this engine has no
+ GPU-side transcode and takes the RGBA8 path back in. So it is for a file leaving
+ the engine, and PNG stays the default for one coming back.
+ 
+ The mip chain is basis_universal's rather than this file's: `mipmaps` makes the
+ encoder build one internally, from full-precision source, per level, before
+ quantising. Running `mipgen` first and handing the levels over as separate
+ images would make them array layers instead — six pictures rather than one
+ picture at six sizes.
+
+ @param decoded : `8-bit pixels. Narrowed to RGBA here, so RGB sources are fine.`
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
+ @return `The whole .ktx2 file, BasisLZ supercompressed, owned by the caller.`
+*>
+fn char[]? encode_ktx2_basis(
+	image::Image* decoded,
+	ColorSpace space = ColorSpace.SRGB,
+	Allocator allocator = mem
+) => @pool()
+{
+	uint w = decoded.width;
+	uint h = decoded.height;
+	if (w == 0 || h == 0) return UNSUPPORTED_IMAGE~;
+
+	char[] rgba = decoded.to_rgba();
+	defer free(rgba);
+
+	char[][1] one = { rgba };
+	// The CLI's own numbers — `ktx create -f etc1s` — so a file written here and
+	// one written by hand are the same file.
+	basis::EncodeOptions options = { .quality = 90, .effort = 2, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
+	return basis::encode(allocator, basis::ETC1S, one[..], w, h, basis::TexType.D2, options);
 }

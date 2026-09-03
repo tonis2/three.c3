@@ -85,7 +85,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "assetText", &js_asset_text, 1);
 	self.bind(host, "assetWriteText", &js_asset_write_text, 2);
-	self.bind(host, "exportScene", &js_export, 3);
+	self.bind(host, "exportScene", &js_export, 4);
 
 	// The graph
 	self.bind(host, "sceneCreate", &js_scene_create, 0);

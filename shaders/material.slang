@@ -77,7 +77,7 @@ struct Light
     float4 color;
 };
 
-// What every draw in the frame shares, written once per frame. 328 bytes, and
+// What every draw in the frame shares, written once per frame. 352 bytes, and
 // the size is pinned against this declaration by `FRAME_BLOCK_FIELDS` in
 // `src/gpu/pipeline.c3` — three files declare this struct and a field added to
 // two of them is a buffer read at the wrong offset with nothing to say so.
@@ -397,6 +397,20 @@ struct Surface
     // to the rows the material declared. So `palette[s.variant]` is always in
     // bounds, whatever a script set, and a material with no table sees zero.
     uint variant;
+    // How far this point stands out of the surface the mesh has, and **0.5 is
+    // that surface**: half the range stands proud of it and half sinks in, which
+    // is the convention `parallax_uv` already reads a height map by and the one a
+    // bake will write.
+    //
+    // **0.5 everywhere today, because nothing writes it yet.** The built-in
+    // material has no height slot and a body with a map of its own samples it
+    // itself — `parallax_uv(s, s.uv, relief.Sample(s.uv).r, 0.05)` is the whole
+    // of that and does not need this field. What it is here for is the channel
+    // `plan.md` §25 bakes: a material authoring pass runs this body in uv space
+    // and reads one channel back per pass, and a height it could not name is a
+    // channel it could not bake. Neutral rather than absent, so a body written
+    // against it today gets the flat answer instead of a compile error.
+    float height;
     // Game clock seconds, `three.clock.time`. The same number `p.time` is, so a
     // paused world stops waving too. Filled by the template; a body does not
     // write it.
@@ -675,7 +689,14 @@ static float g_shadow = 1.0;
 // and `standard(s)` is both — a body written against `lambert` alone is a matte
 // surface, which is what every body written before the specular term existed
 // asked for and still gets.
-float3 lambert(float3 normal)
+//
+// **`occlusion` multiplies the ambient floor and nothing else.** An occlusion map
+// records how much of the *sky* a crevice can see and says nothing about a lamp,
+// so applying it to the direct term reads as dirt painted where a light is
+// pointing. `mesh.slang` carries the long form of the argument beside its own
+// copy; a body with a map of its own writes `lambert(s.normal, ao)` and gets the
+// same answer the built-in shading gets.
+float3 lambert(float3 normal, float occlusion)
 {
 #ifdef THREE_BAKE
     // The identity, so `s.albedo * lambert(s.normal)` — the body most materials
@@ -692,8 +713,16 @@ float3 lambert(float3 normal)
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient + (1.0 - ambient) * direct;
+    return ambient * occlusion + (1.0 - ambient) * direct;
 #endif
+}
+
+// The same light with nothing occluding it, which is every body ever written
+// here: `lambert(s.normal)` is the line in `getApiDocs`, in `examples/vfx.js`
+// and in every material this project ships.
+float3 lambert(float3 normal)
+{
+    return lambert(normal, 1.0);
 }
 
 // The specular highlight, over the same lights `lambert` sums the diffuse over.
@@ -833,6 +862,11 @@ float3 environment_light(float3 normal, float3 position, float3 albedo, float ro
 #endif
 }
 
+// The surface maths this file and `mesh.slang` would otherwise carry twice —
+// `shaders/surface.slang`, spliced in here by `shader_source`. The wrappers
+// below are what give a body the `Surface` spelling of it.
+//@shared
+
 
 // This surface's highlight, so a body can have one without reproducing the four
 // terms above. `s.roughness`, `s.metalness` and `s.reflectance` are what it
@@ -875,16 +909,14 @@ float3 standard(Surface s)
 
 // A tangent-space normal map applied to a surface that carries no tangents.
 //
-// **The meshes here have positions, normals and uvs and nothing else.** There is
-// no `TANGENT` stream, `mesh.slang` has nowhere to put one, and a generated
-// primitive never had one to lose — so the frame is rebuilt per pixel from the
-// screen-space derivatives of the world position and the uv. That is the
-// standard cotangent-frame construction; it costs four derivatives and two cross
-// products, and what it buys is that a normal map works on *any* textured mesh
-// here rather than only on the ones whose exporter wrote tangents.
+// **The maths is `mapped_normal_frame`, spliced in above from
+// `shaders/surface.slang`**, because `mesh.slang` needs the identical frame for
+// the built-in material's own normal map and a second copy of it would be a
+// second thing to keep right. This is the `Surface` spelling of it: the values
+// taken apart, so the shared function never has to know that a `Surface` exists.
 //
 // `texel` is the map's rgb exactly as sampled. The decode from [0,1] to a
-// direction happens in here, which is the half worth reading twice: **the map
+// direction happens in there, which is the half worth reading twice: **the map
 // has to be loaded `LinearSRGBColorSpace`**. Through an sRGB view the stored
 // 0.5 that means "no tilt" arrives as 0.21, so every surface leans the same way
 // and the detail goes soft — it reads as a bad bake and the file is fine.
@@ -905,37 +937,7 @@ float3 standard(Surface s)
 // picture — which is the good outcome, and the reason it takes a `Surface`.
 float3 mapped_normal(Surface s, float3 texel)
 {
-    float3 n = normalize(s.normal);
-
-    float3 dp_dx = ddx(s.position);
-    float3 dp_dy = ddy(s.position);
-    float2 duv_dx = ddx(s.uv);
-    float2 duv_dy = ddy(s.uv);
-
-    // The tangent and bitangent that carry those uv derivatives, solved in the
-    // plane perpendicular to the interpolated normal — so the frame agrees with
-    // the normal the mesh already has rather than replacing it.
-    float3 dp_dy_perp = cross(dp_dy, n);
-    float3 dp_dx_perp = cross(n, dp_dx);
-    float3 tangent = dp_dy_perp * duv_dx.x + dp_dx_perp * duv_dy.x;
-    float3 bitangent = dp_dy_perp * duv_dx.y + dp_dx_perp * duv_dy.y;
-
-    float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
-    // No uv gradient, so there is no frame to build and nothing sensible to
-    // return but the normal that was already there. `rsqrt(0)` is an infinity
-    // and the pixel after it is a NaN, which the rasteriser is entitled to draw
-    // as anything at all.
-    if (longest <= 0.0) return n;
-
-    // One scale for both axes rather than normalizing each: the two are the same
-    // skew seen along two directions, and scaling them apart squares it.
-    float scale = rsqrt(longest);
-    float3 direction = texel * 2.0 - 1.0;
-    return normalize(
-        tangent * (direction.x * scale)
-        + bitangent * (direction.y * scale)
-        + n * direction.z
-    );
+    return mapped_normal_frame(s.normal, s.position, s.uv, texel);
 }
 
 // The base colour, sampled somewhere other than where the template sampled it.
@@ -1250,6 +1252,9 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.roughness = draw.surface.x;
     s.metalness = draw.surface.y;
     s.reflectance = draw.surface.z;
+    // The plane the mesh already has. Nothing writes relief into this yet — see
+    // `Surface.height`, which is where the argument for the number is.
+    s.height = 0.5;
     s.time = push.frame[0].lighting.z;
 
     // Before `shade`, so a debug view of a scene whose bodies are expensive is

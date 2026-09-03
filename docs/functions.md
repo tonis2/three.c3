@@ -324,9 +324,34 @@ placed it there in the first place, and the one an agent or a person keeps editi
 
 ## scene.export(path)
 
-Write the scene to a `.glb`. Answers with `{ path, meshes, entries, materials, images, nodes,
-instances, batches, skipped, shaded, bakedImages, bakedColors, layers, bytes }`. A folder on the way
-that is not there yet is made, as `three.writeText` makes one.
+Write the scene to a `.glb`. Answers with `{ path, meshes, entries, materials, images,
+compressedImages, nodes, instances, batches, skipped, shaded, bakedImages, bakedColors, layers,
+bytes }`. A folder on the way that is not there yet is made, as `three.writeText` makes one.
+
+`{ textures: 'ktx2' }` writes generated textures as BC7 KTX2 with a mip chain instead of PNG — the
+format `three.texture` loads seventeen times faster at a quarter of the VRAM. A texture that came
+from a file is copied unchanged whichever way you ask, so this only costs anything for pictures the
+scene made: a `DataTexture`, a bake, or a script-layer image. `compressedImages` says how many were
+actually written that way, which can be fewer than `images` — an encode that refuses falls back to
+PNG rather than failing the export.
+
+`{ textures: 'basis' }` is the one another program reads. BC7 is declared under our own
+`CUSTOM_texture_ktx2`, so a Blender importer or another engine handed one of those files declines
+it; `basis` writes ETC1S under `KHR_texture_basisu`, which every glTF toolchain implements, at
+about a fifth of BC7's size. What it costs is quality — it is visibly lossy where BC7 is nearly not
+— and load time back here, since this engine has no GPU-side transcode and takes the slow RGBA8
+path. So it is for a file leaving the engine. `'png'` stays the default, and anything else throws.
+
+**Both are build steps.** BC7 encoding searches per block and saturates every core, and a single
+2048x2048 texture still takes around half a minute. A scene with twenty of them is minutes, not
+seconds. Do it when you ship a level, not when you save one.
+
+Whichever is written is declared in `extensionsRequired`, so a glTF reader that does not know it
+refuses the file rather than rendering the materials untextured. Which name that is follows the
+bytes and not the mime type: both families arrive as `image/ktx2`, and a BCn image labelled
+`KHR_texture_basisu` — or a Basis one labelled `CUSTOM_texture_ktx2` — is worse than an undeclared
+file, because a reader acts on the name. An image copied through from a `.glb` that already carried
+one keeps the extension it arrived under.
 
 One mesh per unique (asset, mesh), so a thousand walls from one kit are one mesh in the file exactly
 as they are one draw call in the frame.
@@ -1774,14 +1799,21 @@ rather than flipped, and a face with degenerate uvs gets the interpolated normal
 
 Fragment stage only — calling it from a vertex body is a compile error, because there are no derivatives there.
 
-A roughness map has no equivalent yet: a roughness or metalness map loads correctly and in the right colourspace,
-but there is nothing built in to feed it — a body is free to use one for whatever it likes.
+A `MeshLambertMaterial` needs none of this: `material.normalMap = bumps` puts the same frame on the built-in
+shader, compiling nothing. This is the door for a body that wants the normal for something else — blending two
+maps, bending a reflection, feeding its own lighting.
 
-## new three.MeshLambertMaterial({ map, side })
+## new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, side })
 
 The built-in shader with an image. Compiles nothing, needs no Slang, and cannot fail with a shader diagnostic —
 this is the way to put a picture on a shape. With no map it is a side and nothing else, which is the cheapest
 skydome.
+
+Four images rather than one: the base colour, a normal map, glTF's packed metallic-roughness pair (green is
+roughness, blue is metalness, and both multiply the material's own numbers) and an occlusion map, whose red
+channel darkens the ambient floor and the environment reflection and never the lights. The last three are data
+rather than pictures and have to be loaded `{ colorSpace: three.LinearSRGBColorSpace }` — assigning an sRGB
+texture throws.
 
 ## material.map
 
@@ -1793,7 +1825,7 @@ A mesh with no uvs shows nothing: every parametric shape and every glTF mesh has
 
 ## new three.ShaderMaterial({ fragment, uniforms })
 
-Compile a fragment function into a material. Uniforms are at most 68 bytes in total (17 floats); each is a
+Compile a fragment function into a material. Uniforms are at most 104 bytes in total (26 floats); each is a
 number or an array of up to four numbers.
 
 ## mesh.material

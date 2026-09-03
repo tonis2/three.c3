@@ -77,6 +77,24 @@ const uint FLAG_HAS_SKIN    = 8;
 const uint FLAG_PRESKINNED  = 16;
 
 <*
+ The three maps the built-in material carries past its base colour, as
+ `shaders/mesh.slang` reads them.
+
+ Set by `MeshPass.build_draw_records` from the material's own texture slots, one
+ bit per slot, and read by `mesh.slang` alone: `material.slang` numbers an
+ agent's samplers at the same bindings and has its own body deciding what to do
+ with them, so these bits mean nothing to a `ShaderMaterial`.
+
+ A bit rather than a comparison against the bound image, because every declared
+ binding is written every draw and an empty one carries 1x1 white — which is the
+ identity for occlusion and is a tilt and a mirror for the other two. The shader
+ header has the long form.
+*>
+const uint FLAG_HAS_NORMAL_MAP              = 32;
+const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64;
+const uint FLAG_HAS_OCCLUSION_MAP           = 128;
+
+<*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so
