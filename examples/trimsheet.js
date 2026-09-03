@@ -1,48 +1,7 @@
-// A trim sheet baked out of a shader, in one headless run.
+// A trim sheet baked out of a shader, and a scene wearing it.
 //
-//   ./build/three --script examples/trimsheet.js \
-//       --width 1024 --height 1024 --frames 6 --every 1 \
-//       --screenshot build/trim_%d.png
+//   ./build/three --script examples/trimsheet.js --headless --frames 1
 //
-// Six frames, and each one writes the shot named after it:
-//
-//   trim_0.png  base colour   sRGB
-//   trim_1.png  normal        linear, tangent space
-//   trim_2.png  ORM           linear — red occlusion, green roughness, blue metalness
-//   trim_3.png  a calibration bake whose slope is known in closed form
-//   trim_4.png  the same bake's ORM, which is a ramp each way
-//   trim_5.png  the sheet worn by a scene, which is the point of the other five
-//
-// There is no render-to-texture verb here, so the sheet crosses on disk: a post
-// pass writes a frame, `--every 1` saves it, and a later frame in the same run
-// loads it back with `three.texture`. That is the whole trick, and it is why the
-// generator is a post body rather than a material — a post pass is the one shader
-// whose output is exactly the frame, so a texel of the PNG is a texel of the sheet
-// with no camera, no mesh and no uv layout in between.
-//
-// ## Wearing it without the repeat showing
-//
-// The scene at the end uses `material.uvVariants` — up to eight uv transforms per
-// material, picked by `mesh.variant`, applied to the face's own uv before
-// `repeat` maps it into a strip. Four crates and six column segments come out of
-// one mesh and one material each and no two of them are the same picture, at no
-// cost in draw calls. A row is the eight symmetries of a square and a slide, and
-// that is not a restriction here but the reason it works: those are the
-// transforms that leave a unit square a unit square, so a strip survives one.
-//
-// `material.stochastic` is the other half of `plan.md` §27 and is deliberately
-// *not* used here: it samples anywhere in the image, which is right for a ground
-// tiling one picture and wrong for a material windowed into one strip of eight.
-//
-// ## The two colour spaces
-//
-// The offscreen target is R8G8B8A8_SRGB and the readback is a memcpy, so a PNG
-// here holds whatever the hardware encoded. Colour wants that: the body works in
-// linear, the encode makes it sRGB, and `three.texture` decodes it back. The
-// normal and the ORM do not — they are numbers, and a number that goes through an
-// sRGB encode is a different number. `data()` below is the pre-encode that cancels
-// it, so the byte in the file is the value the body meant, and both maps load
-// `LinearSRGBColorSpace`.
 
 const SIZE = 1024; // the sheet, square
 const STRIPS = 8; // bands stacked down v
@@ -545,29 +504,97 @@ float3 shade(Surface s)
 // The run
 // ---------------------------------------------------------------------------
 
-const pass = three.setPost({
-	fragment: SHEET,
-	uniforms: { channel: 0, relief: RELIEF, probe: 0 },
-});
+// The sheet is square and 1024 a side because LAYOUT says it is, so the render
+// size is pinned to it rather than left to whatever `--width` or a window gave.
+// A post pass writes exactly the frame, and the frame has to be the sheet. It
+// stays pinned afterwards so the scene shot is the same picture whichever run
+// took it.
+three.setRenderSize(SIZE, SIZE);
 
-// One entry per shot, in the order `--frames 6 --every 1` writes them. `setup`
-// runs during the tick that precedes the capture, so what it changes is what
-// lands in the file beside it.
-const SHOTS = [
-	{ file: 'build/trim_0.png', what: 'baseColor', setup: () => { pass.uniforms.channel = 0; pass.uniforms.probe = 0; } },
-	{ file: 'build/trim_1.png', what: 'normal', setup: () => { pass.uniforms.channel = 1; } },
-	{ file: 'build/trim_2.png', what: 'orm', setup: () => { pass.uniforms.channel = 2; } },
-	{ file: 'build/trim_3.png', what: 'probeNormal', setup: () => { pass.uniforms.channel = 1; pass.uniforms.probe = 1; } },
-	{ file: 'build/trim_4.png', what: 'probeOrm', setup: () => { pass.uniforms.channel = 2; } },
-	{ file: 'build/trim_5.png', what: 'scene', setup: () => dress() },
+// One entry per file the sheet is made of: how it is written, and how it reads
+// back. **One table rather than two**, because the shot that writes a normal map
+// and the load that reads it linear are the same claim about one file — split in
+// two they drift, and a map read back through the wrong colour space is a bug
+// with no error message and a soft-looking scene.
+//
+// `setup` puts the generator in the state the shot wants and `three.screenshot`
+// draws and writes it on the next line, so what lands in the file is what the
+// entry beside it says. `pass` is the post pass, which exists only while baking.
+let pass = null;
+const MAPS = [
+	{ key: 'color', file: 'build/trim_0.png', what: 'baseColor', linear: false,
+		setup: () => { pass.uniforms.channel = 0; pass.uniforms.probe = 0; } },
+	{ key: 'normal', file: 'build/trim_1.png', what: 'normal', linear: true,
+		setup: () => { pass.uniforms.channel = 1; } },
+	{ key: 'orm', file: 'build/trim_2.png', what: 'orm', linear: true,
+		setup: () => { pass.uniforms.channel = 2; } },
+	{ key: 'probeNormal', file: 'build/trim_3.png', what: 'probeNormal', linear: true,
+		setup: () => { pass.uniforms.channel = 1; pass.uniforms.probe = 1; } },
+	{ key: 'probeOrm', file: 'build/trim_4.png', what: 'probeOrm', linear: true,
+		setup: () => { pass.uniforms.channel = 2; } },
 ];
 
-let shot = 0;
+// The sixth file, which is the scene rather than part of the sheet, so it is
+// written every run and is not something to reuse.
+const SCENE_SHOT = 'build/trim_5.png';
 
-three.setAnimationLoop(() => {
-	if (shot < SHOTS.length) SHOTS[shot].setup();
-	shot++;
-});
+// The sheet as five textures, or null if any one of the files is not there yet.
+//
+// **The load is the check.** There is no `three.exists`, and this wants the
+// images on the device anyway — three for the materials and two for the report —
+// so `three.texture` throwing on a path with no file behind it answers both
+// questions in one call.
+//
+// All five or none. A half-written sheet is not a sheet: an interrupted run or
+// one file deleted by hand would leave the maps from one bake beside probes from
+// another, and the report would then be checking a file the scene is not wearing.
+// So whatever did load is disposed and the whole thing is baked again.
+function readSheet() {
+	const loaded = {};
+	for (const map of MAPS) {
+		try {
+			loaded[map.key] = three.texture(map.file, map.linear ? { colorSpace: three.LinearSRGBColorSpace } : null);
+		} catch {
+			for (const texture of Object.values(loaded)) texture.dispose();
+			return null;
+		}
+	}
+	return loaded;
+}
+
+// Write all five, in one pass over the table.
+//
+// The post chain is set up here rather than at the top of the file because
+// setting it compiles the generator — three hundred lines of Slang — and a run
+// that is reusing the sheet has no use for it. It is taken down again at the end,
+// because the scene below is a scene and not a full-frame shader.
+function bakeSheet() {
+	pass = three.setPost({
+		fragment: SHEET,
+		uniforms: { channel: 0, relief: RELIEF, probe: 0 },
+	});
+
+	for (const map of MAPS) {
+		map.setup();
+		three.screenshot(map.file);
+	}
+
+	three.setPost(null);
+	pass = null;
+}
+
+// The whole run: read the sheet, bake it if it was not there, wear it, and say
+// what is actually in the files.
+let maps = readSheet();
+const baked = maps === null;
+if (baked) {
+	bakeSheet();
+	maps = readSheet();
+}
+
+dress(maps);
+three.screenshot(SCENE_SHOT);
+report(maps, baked);
 
 // ---------------------------------------------------------------------------
 // Wearing it
@@ -642,15 +669,11 @@ function skyTexture() {
 	return new three.DataTexture(bytes, w, h);
 }
 
-function dress() {
-	three.setPost(null);
-
-	const maps = {
-		color: three.texture('build/trim_0.png'),
-		normal: three.texture('build/trim_1.png', { colorSpace: three.LinearSRGBColorSpace }),
-		orm: three.texture('build/trim_2.png', { colorSpace: three.LinearSRGBColorSpace }),
-	};
-
+// The scene, out of the sheet it is handed. It does not load anything: the five
+// files were opened by `readSheet` — which is the same call whether they were
+// just baked or were already there — so there is one place that says which file
+// is read in which colour space, and it is the table.
+function dress(maps) {
 	const scene = new three.Scene();
 	scene.environment = skyTexture();
 	scene.background = 0x232a33;
@@ -790,8 +813,6 @@ function dress() {
 
 	three.camera.lookAt(-2.4, 2.2, 0.6);
 	three.camera.orbit(15, 11, 20);
-
-	report(maps);
 }
 
 // ---------------------------------------------------------------------------
@@ -819,7 +840,7 @@ function bandMean(pixels, k, channel) {
 	return sum / taps / 255;
 }
 
-function report(maps) {
+function report(maps, baked) {
 	const orm = maps.orm.read();
 	const normal = maps.normal.read();
 
@@ -858,7 +879,7 @@ function report(maps) {
 	//    trim_3.png is predictable before it is read, and a normal that is
 	//    differentiated wrongly, scaled wrongly or encoded wrongly cannot agree
 	//    with it by accident.
-	const probe = three.texture('build/trim_3.png', { colorSpace: three.LinearSRGBColorSpace }).read();
+	const probe = maps.probeNormal.read();
 	const y = Math.floor(SIZE / 2);
 	let worst = 0;
 	let at = 0;
@@ -879,7 +900,7 @@ function report(maps) {
 	//    checking is `data()` — a byte written through an sRGB attachment and
 	//    read back through a linear view is the number the body meant, or the
 	//    whole sheet is quietly wrong by a gamma.
-	const ramp = three.texture('build/trim_4.png', { colorSpace: three.LinearSRGBColorSpace }).read();
+	const ramp = maps.probeOrm.read();
 	let rampWorst = 0;
 	for (let x = 0; x < SIZE; x++) {
 		const wanted = Math.round(((x + 0.5) / SIZE) * 255);
@@ -893,10 +914,19 @@ function report(maps) {
 
 	const stats = three.stats();
 
-	// `console.log` rather than `three.debug.write`: entries written in a frame are
-	// reported by the *next* run, and this is the last frame there is.
+	// `console.log` rather than `three.debug.write`: this whole file runs as the
+	// boot script, so there is no next run to report a debug entry to.
+	//
+	// The checks below run either way, and that is the point of running them on
+	// the files rather than on the frames: a reused sheet is verified on the way
+	// in, so a stale or truncated one says so here instead of turning up as a
+	// scene that looks slightly wrong.
 	console.log(`sheet ${SIZE}x${SIZE}, ${STRIPS} strips of ${SIZE / STRIPS}, relief ${RELIEF} texels`);
-	for (const s of SHOTS) console.log(`  ${s.file}  ${s.what}`);
+	console.log(baked
+		? '  baked this run'
+		: '  read back from build/ — rm build/trim_*.png to bake it again');
+	for (const s of MAPS) console.log(`  ${s.file}  ${s.what}`);
+	console.log(`  ${SCENE_SHOT}  scene`);
 	console.log('read back out of the ORM: green is roughness, red is occlusion');
 	for (const r of roughness) {
 		console.log(`  ${r.strip.padEnd(9)} base ${r.wanted.toFixed(2)}   band mean ${r.read.toFixed(3)}   ao ${r.ao.toFixed(3)}`);

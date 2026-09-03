@@ -190,6 +190,37 @@ export class Texture {
 		return out;
 	}
 
+	// The same pixels, written straight to a .png, answering
+	// `{ path, width, height, bytes }`.
+	//
+	//   const sheet = three.texture('build/trim_0.png');
+	//   sheet.save('build/copy.png');
+	//
+	// Not `read()` plus an encoder: the bytes never enter JavaScript, so a
+	// 2048² sheet costs no 16MB array. It is what to reach for when the file
+	// is the point — a generated DataTexture kept as an asset, an atlas
+	// pulled out of a .glb, a bake looked at outside the run.
+	//
+	// **What goes in the file is what was uploaded.** No conversion happens
+	// here any more than in `read()`, so a normal map or an ORM sheet round
+	// trips through a file unchanged and `colorSpace` makes no difference —
+	// that is the sampler's decode, and this is upstream of it.
+	//
+	// Level 0, like `read()`. A KTX2 texture holding compressed blocks is
+	// refused by name — there are no pixels behind a block without a decoder.
+	//
+	// The path is the sandbox scene.export writes through: under --assets it
+	// is inside the game directory and cannot climb out.
+	save(path) {
+		if (this._t < 0) {
+			throw new TypeError('this texture has been disposed — save() it before dispose(), or keep a reference');
+		}
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('texture.save(path) wants a path to write a .png to');
+		}
+		return H.textureSave(this._t, path);
+	}
+
 	// Give back the reference this handle holds.
 	//
 	// **Not a free.** The image goes only when nothing names it at all, so

@@ -52,6 +52,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "dataTexture", &js_data_texture, 6);
 	self.bind(host, "textureDispose", &js_texture_dispose, 1);
 	self.bind(host, "textureRead", &js_texture_read, 2);
+	self.bind(host, "textureSave", &js_texture_save, 2);
 	self.bind(host, "primitive", &js_primitive, 9);
 	self.bind(host, "convex", &js_convex, 1);
 	self.bind(host, "extrude", &js_extrude, 4);
@@ -150,6 +151,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "reload", &js_reload, 0);
 	self.bind(host, "quit", &js_quit, 0);
 	self.bind(host, "render", &js_render, 0);
+	self.bind(host, "screenshot", &js_screenshot, 1);
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "renderResize", &js_render_resize, 2);
 	self.bind(host, "renderFollowWindow", &js_render_follow_window, 0);
@@ -1847,6 +1849,80 @@ fn void js_render(
 	{
 		*out = js.raise(string::tformat("the frame could not be drawn: %s", err));
 	}
+}
+
+<*
+ `screenshot(path)` — draw one frame and write it to a `.png`.
+
+ The `--screenshot` flag as a verb, and the reason it is one is that the flag
+ cannot answer a script that wants *several* pictures of one run: the CLI writes
+ a frame it was told to write, on a schedule made of `--frames` and `--every`, so
+ a script that wanted six different images had to arrange for the state of each
+ one to fall on the frame the flag would capture. That is a script written around
+ the harness rather than around what it is doing. `examples/trimsheet.js` was
+ exactly that until this existed.
+
+ One frame, drawn here. It is `Renderer.capture` — `render()` plus the readback —
+ so this both draws and writes, and a `three.render()` immediately before it is
+ a wasted frame rather than a required one. Post-processing, the interface and
+ `three.debug.overlay` are all in it, because there is one recording path and
+ this goes down it.
+
+ Called from inside the animation callback it still happens *now*: the capture
+ submits and waits on its own command buffer, the same way `three.render()` does,
+ and neither is the host loop's frame. That costs a device round trip in the
+ middle of a tick, so a script writing one file per frame of a real game is doing
+ something it should know it is doing.
+
+ The path is `resolve_write`'s — under `--assets` inside the game directory and
+ nowhere else — and a folder that is not there yet is made, exactly as
+ `scene.export` makes one.
+
+ @return `{ path, width, height, bytes } — see wrote_image.`
+*>
+fn void js_screenshot(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("three.screenshot needs a GPU device and this context has none");
+		return;
+	}
+
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 0, tmem);
+		if (asked.len == 0)
+		{
+			*out = js.raise("three.screenshot(path) wants a path to write a .png to");
+			return;
+		}
+
+		String? writing = self.open_for_write(&js, asked, "three.screenshot()", tmem, out);
+		if (catch writing) return;
+
+		if (catch err = self.renderer.screenshot(writing))
+		{
+			*out = js.raise(string::tformat("three.screenshot() could not write %s: %s", asked, err));
+			return;
+		}
+
+		*out = wrote_image(
+			&js,
+			writing,
+			self.renderer.target.extent.width,
+			self.renderer.target.extent.height
+		);
+	};
 }
 
 <*

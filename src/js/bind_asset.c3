@@ -21,6 +21,7 @@ import std::math;
 import std::math::vector;
 import qjs;
 import image;
+import image::png;
 import std::collections::list;
 import std::io::file;
 import std::io::path;
@@ -237,20 +238,111 @@ fn void js_asset_text(
 <*
  Makes the folder a path is about to be written into, if it is not there yet.
 
- The one thing `three.writeText` and `scene.export` do before opening the file,
- and shared so that the two doors cannot drift: `path_tdirname` is the folder,
- an empty one is the assets root itself and needs nothing, and `mkdir` with
- `recursive` answers false rather than failing when the folder already exists.
+ The one thing `three.writeText`, `scene.export`, `three.screenshot` and
+ `texture.save` do before opening the file, and shared so that the four doors
+ cannot drift: `path_tdirname` is the folder, an empty one is the assets root
+ itself and needs nothing, and `mkdir` with `recursive` answers false rather
+ than failing when the folder already exists.
+
+ `@private` rather than `@local` because `bind_scene.c3` writes a PNG through
+ the same door — the same reason `bind_shader.c3`'s `split_commas` is.
 
  @param writing : `The resolved path, already inside the sandbox.`
 *>
-fn void? make_way_for(String writing) @local
+fn void? make_way_for(String writing) @private
 {
 	if (try dir = writing.path_tdirname())
 	{
 		if (dir.len == 0) return;
 		path::mkdir((Path)dir, recursive: true)!;
 	}
+}
+
+<*
+ The whole write door as one call: resolve, refuse an escape by name, make the
+ folder that is not there yet.
+
+ `make_way_for`'s argument for existing, one step earlier. `three.screenshot`
+ and `texture.save` are two more verbs that write a file the script named, and
+ the sentence a refused path gets is the part that must not drift between them:
+ it is what tells an author that a sandbox exists, rather than that their path
+ was a typo. `three.writeText` and `scene.export` predate this and keep their
+ own wording, which names the file kind each of them writes.
+
+ The exception is raised here and `out` carries it, so a caller has only to
+ return — the shape every verb in this file already has for a bad argument.
+
+ A method, and so module-visible rather than `@private`: `resolve_write` next
+ door is one for the same reason, and `bind_scene.c3` is the other caller.
+
+ @param asked : `The path as the script wrote it, for the sentence.`
+ @param verb : `How the script spelled the call — "three.screenshot".`
+ @return `The path to open, allocated in the caller's allocator.`
+*>
+fn String? JsRuntime.open_for_write(
+	&self,
+	qjs::Context* js,
+	String asked,
+	String verb,
+	Allocator allocator,
+	qjs::Value* out
+)
+{
+	String? writing = self.resolve_write(asked, allocator);
+	if (catch err = writing)
+	{
+		if (err == qjs::MODULE_ESCAPES_ROOT)
+		{
+			*out = js.raise(
+				string::tformat(
+					"%s cannot write to '%s': it climbs out of the assets directory, and a game may "
+						"only write inside its own",
+					verb,
+					asked
+				)
+			);
+			return err~;
+		}
+		*out = js.raise(string::tformat("%s cannot write to '%s': %s", verb, asked, err));
+		return err~;
+	}
+
+	if (catch err = make_way_for(writing))
+	{
+		*out = js.raise(
+			string::tformat("%s cannot write to '%s': could not make its folder: %s", verb, asked, err)
+		);
+		return err~;
+	}
+
+	return writing;
+}
+
+<*
+ What a verb that wrote a file answers with: where it landed, how big the image
+ is, and how many bytes are on disk.
+
+ One shape for `three.screenshot` and `texture.save` both, because they answer
+ the same three questions and an agent that has to remember which one spells it
+ `size` has been given a second thing to get wrong. `bytes` is the file rather
+ than the pixels — a PNG of a flat colour is a few hundred bytes and one of a
+ noise field is megabytes, which is the number that says an encode happened.
+
+ A file that cannot be stat'd reads 0 rather than throwing: the write itself
+ already succeeded, and failing the call over the size afterwards would report a
+ file that is on disk as one that is not.
+*>
+fn qjs::Value wrote_image(qjs::Context* js, String path, uint width, uint height) @private
+{
+	qjs::Value described = js.object();
+	js.set_property(described, "path", js.string(path));
+	js.set_property(described, "width", qjs::int_value((int)width));
+	js.set_property(described, "height", qjs::int_value((int)height));
+
+	double bytes = 0;
+	if (try size = path::file_size((Path)path)) bytes = (double)size;
+	js.set_property(described, "bytes", qjs::number_value(bytes));
+	return described;
 }
 
 <*
@@ -824,6 +916,106 @@ fn void js_texture_read(
 	}
 
 	*out = qjs::int_value((int)need);
+}
+
+<*
+ `textureSave(index, path)` — write a texture's pixels to a `.png`.
+
+ `js_texture_read`'s other end, and the reason it is a verb rather than three
+ lines of prelude over `read()`: the pixels never enter JavaScript. A 2048²
+ sheet is 16MB, and a script that only wants the file on disk should not pay for
+ that array, the copy into it and the copy back out.
+
+ **The bytes written are the bytes uploaded.** `read_pixels` converts nothing, so
+ a `DataTexture` saved here holds exactly the array it was built from and a
+ texture loaded from a `.png` writes that `.png`'s own pixels back. What
+ `colorSpace` was chosen at load has no effect: it is the sampler's decode, and
+ this is upstream of any sampling. So a normal map or an ORM sheet round trips
+ through a file unchanged, which is the case a generated sheet actually needs.
+
+ Level 0. The mip levels are approximations this engine made up, and there is no
+ verb to ask for one here for the same reason `read()` has none.
+
+ Compressed textures are refused by name, as `read()` refuses them and for its
+ reason: there are no pixels behind a block without a decoder, and one written
+ into a PNG header would produce a file that opens and is wrong.
+
+ The path is `resolve_write`'s, so under `--assets` this writes inside the game
+ directory and nowhere else — the same door `scene.export` and `three.screenshot`
+ go through.
+*>
+fn void js_texture_save(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("texture.save() needs a GPU device and this context has none");
+		return;
+	}
+
+	int index = arg_int(&js, argc, args, 0);
+	if (!self.pass.assets.texture_alive(index))
+	{
+		*out = js.raise("texture.save() was given a texture that has been disposed");
+		return;
+	}
+
+	Texture* texture = self.pass.assets.texture_at(index);
+	if (texture.format.is_block())
+	{
+		*out = js.raise(
+			string::tformat(
+				"texture.save() cannot write a %s texture: it holds compressed blocks, not pixels. "
+				"Load it from a .png or .jpg if the pixels are what you need",
+				block_family_name(texture.format.family)
+			)
+		);
+		return;
+	}
+
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 1, tmem);
+		if (asked.len == 0)
+		{
+			*out = js.raise("texture.save(path) wants a path to write a .png to");
+			return;
+		}
+
+		String? writing = self.open_for_write(&js, asked, "texture.save()", tmem, out);
+		if (catch writing) return;
+
+		char[] pixels = alloc::new_array(tmem, char, (sz)texture.width * (sz)texture.height * 4);
+		if (catch err = texture.read_pixels(&self.renderer.gpu, pixels))
+		{
+			*out = js.raise(string::tformat("texture.save() could not copy the image back: %s", err));
+			return;
+		}
+
+		image::Image shot = {
+			.width = texture.width,
+			.height = texture.height,
+			.bit_depth = 8,
+			.format = image::PixelFormat.RGBA,
+			.pixels = pixels,
+		};
+		if (catch err = png::save_file(&shot, writing, tmem))
+		{
+			*out = js.raise(string::tformat("texture.save() could not write %s: %s", asked, err));
+			return;
+		}
+
+		*out = wrote_image(&js, writing, texture.width, texture.height);
+	};
 }
 
 <*
