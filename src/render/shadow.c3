@@ -67,13 +67,25 @@
  two maps — puts a second sampler and a second projection into
  `shaders/mesh.slang`, which every `ShaderMaterial` in every scene shares.
 
- A depth pass has no fragment stage, so nothing is alpha tested and no vertex
- body runs. A leaf card casts the shadow of its quad and a `ShaderMaterial` with
- a `vertex:` body casts the shadow of its undisplaced geometry. Both follow from
- `shaders/shadow.slang` being a single pipeline shared by every caster: the alpha
- test needs the material's map and a fragment stage to discard in, and the
- displacement needs the material's own assembled vertex body. The trigger is the
- first scene where foliage is the subject rather than the scenery.
+ ## The fragment stage there is, and the one there still is not
+
+ A depth pass has no fragment stage and needs none — depth is what the rasteriser
+ already produced. Two things followed from that, and one of them no longer does.
+
+ **`material.alphaTest` cuts the shadow.** A second compile of
+ `shaders/shadow.slang` under `THREE_SHADOW_CUTOUT` declares the base colour map
+ and a fragment stage that discards below the threshold, so a leaf card casts the
+ shadow of the leaf rather than of its quad. It is a second pipeline and not a
+ sampler on the one every caster shares, so a scene with no cut-outs in it
+ declares no binding, pushes no descriptor and taps no texture —
+ `build_cutout_pipeline` compiles it the first frame something asks and never
+ before. `Material.alpha_test` has what the property means and why it is not
+ `opacity`.
+
+ **A `ShaderMaterial` with a `vertex:` body still casts the shadow of its
+ undisplaced geometry**, and that one is unchanged. The displacement needs the
+ material's own assembled vertex body, which would make a shadow pipeline per
+ material where there are now exactly two.
 
  ## The two barriers rest on the specification, not on the layer
 
@@ -199,12 +211,12 @@ const float SHADOW_DEFAULT_REACH = 5.0;
  derived from where the camera is standing.
 
  The derivation is deliberately not clamped to the far plane here —
- `Camera.view_bounds` already takes the smaller of the two, and doing it in one
+ `Camera.view_sphere` already takes the smaller of the two, and doing it in one
  place keeps "reach past the far plane" meaning the far plane rather than two
  different things in two files.
 
  @param orbit_distance : `The camera's own distance from its target, in world units.`
- @return `The world-space reach for Camera.view_bounds. Never zero for a camera that is anywhere.`
+ @return `The world-space reach for Camera.view_sphere. Never zero for a camera that is anywhere.`
 *>
 fn float ShadowMap.reach(&self, float orbit_distance)
 {
@@ -281,6 +293,37 @@ struct ShadowSettings
 	// floor, 0 is no shadow at all. Doubles as the shader's "is there a shadow
 	// pass this frame" flag — see `params`.
 	float intensity;
+
+	<*
+	 Whether the map is fitted around what the camera can see, or around the whole
+	 scene.
+
+	 **True is the default and is what makes a village's shadows sharp**: a level
+	 224 units across framed 70 at a time spends nine tenths of its texels outside
+	 the picture, so the fit follows the eye and `Camera.view_sphere` is the shape
+	 it follows it with.
+
+	 False is the answer to the cost of that, and the cost is a *rebuild*: the
+	 cached static map is a picture in one projection, so every time the fit moves
+	 far enough to matter, every static caster is rasterised again. On the Evil
+	 Forest scene that is 39 draw calls over 4,800 instances and 0.27 ms against a
+	 0.10 ms steady pass — a spike that scales with the scenery, and one a script
+	 dragging a turntable can provoke a few times a second. Fitted to the scene
+	 instead, nothing about the camera is in the key at all: the map is rebuilt
+	 when the light turns, when the scene's bounds change and when a static caster
+	 does, and not otherwise.
+
+	 What it costs is texels, and how many is arithmetic a scene can do for itself:
+	 the map covers the whole level rather than `distance` units of it, so a 224-
+	 unit village at 2048 is 11 cm a texel where a 40-unit fit is 2 cm. `size` is
+	 the knob that buys some of that back, and `stats().shadowBytes` is what it
+	 costs.
+
+	 **Not a default anything derives.** Which of the two a scene wants depends on
+	 how big the level is and on whether the camera moves, and neither is knowable
+	 from here — see `plan.md`'s standing constraint about `shadow.size`.
+	*>
+	bool follow;
 }
 
 // The settings a shadow map starts on, and the ones a fresh `Scene` carries.
@@ -290,6 +333,10 @@ const ShadowSettings DEFAULT_SHADOW = {
 	.size = SHADOW_DEFAULT_SIZE,
 	.bias = 0.0,
 	.intensity = 1.0,
+	// The one field here whose default is not the zero value, which is why both
+	// places that build a `ShadowSettings` state it: a forgotten initializer is a
+	// scene-fitted map, which works and is coarse, rather than a visible fault.
+	.follow = true,
 };
 
 <*
@@ -355,6 +402,13 @@ struct ShadowMap
 	 What is deliberately *not* in here is anything about the camera or about a
 	 dynamic node. That is the point: a character walking through the village must
 	 not cost the village its map, and a camera that turns must not either.
+
+	 A camera that turns *did*, for as long as the focus was a box: `fit` read its
+	 extent off an axis-aligned box around an oriented frustum, which grows as it
+	 yaws, so the fit moved and this key went with it. `Camera.view_sphere` is the
+	 shape that made the sentence above true rather than intended, and
+	 `ShadowSettings.follow` is how a scene takes the camera out of the key
+	 altogether.
 	*>
 	Matrix4f static_fit;
 	uint static_revision;
@@ -404,6 +458,28 @@ struct ShadowMap
 	// shadows are switched on and kept until the pass is freed.
 	MeshPipeline pipeline;
 	bool pipeline_ready;
+
+	<*
+	 The second one, and the only material property that reaches this pass:
+	 `material.alphaTest`.
+
+	 A cut-out caster needs a fragment stage to `discard` in and the base colour
+	 map to sample, and a depth pass has neither. So there are two pipelines rather
+	 than one pipeline with a sampler on it: a scene with no foliage in it declares
+	 no binding, pushes no descriptor and taps no texture, and a scene with foliage
+	 pays a pipeline object and a bind per bucket.
+
+	 Built by `build_cutout_pipeline` the first frame a cut-out caster is actually
+	 in the draw list, on `ensure_static`'s terms — a project that never sets
+	 `alphaTest` never compiles it.
+	*>
+	MeshPipeline cutout_pipeline;
+	bool cutout_ready;
+	// Set when the cut-out shader would not compile, so the diagnostic is one
+	// sentence and not one per frame. Cut-out casters then draw as whole quads,
+	// which is the picture this pass drew before the variant existed — the same
+	// answer `static_refused` gives, and for the same reason.
+	bool cutout_refused;
 
 	// ---- this frame ----
 
@@ -704,6 +780,57 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 }
 
 <*
+ Compiles the cut-out variant of the same file and builds the pipeline that
+ draws `material.alphaTest` casters, once.
+
+ Later than `build_pipeline` and for a stricter reason than "shadows may never be
+ switched on": most scenes that *do* use shadows still have no cut-out in them, so
+ this is a Slang compile and a `VkPipeline` charged to the first frame in which
+ something actually asks. `MeshPass.plan_shadow` is what asks, and it asks from
+ the same place `ensure_static` is called from — between frames.
+
+ ## The define, and why it is a second compile
+
+ `shaders/shadow.slang` guards its sampler, its varying and its fragment stage
+ behind `THREE_SHADOW_CUTOUT`, and this prepends the definition. Two compiles
+ rather than one module with two programs, because reflection reports the *linked
+ program*: a sampler declared anywhere in the source would land in the layout of
+ the pipeline every ordinary caster shares, and a declared binding that nothing
+ writes is undefined behaviour rather than an unused slot.
+
+ `#line 1` after the define, so a Slang diagnostic still names the line the file
+ has. `shader/assemble.c3` solves the same problem the other way — it swaps a
+ marker line for the define, keeping the line count — and either is fine; this
+ file has no marker to swap.
+
+ @return ? SHADER_MISSING_ENTRY_POINT : `The cut-out variant would not compile. The diagnostic is printed, for build_pipeline's reason.`
+*>
+fn void? ShadowMap.build_cutout_pipeline(&self, Gpu* gpu)
+{
+	if (self.cutout_ready) return;
+
+	String source = shader_source("shadow.slang", mem)!;
+	defer source.free(mem);
+
+	DString variant;
+	variant.init(mem);
+	defer variant.free();
+	variant.append_string("#define THREE_SHADOW_CUTOUT 1\n#line 1\n");
+	variant.append_string(source);
+
+	ShaderModule mod = compile_slang(variant.str_view(), "shadow.slang", SHADOW_CUTOUT_ENTRIES[..])!;
+	defer mod.free();
+	if (!mod.ok)
+	{
+		@advise("three: the cut-out shadow shader would not compile: %s", mod.diagnostic);
+		return SHADER_MISSING_ENTRY_POINT~;
+	}
+
+	self.cutout_pipeline.init_shadow(gpu, &mod, self.format, cutout: true)!;
+	self.cutout_ready = true;
+}
+
+<*
  Fits the light's orthographic box around what the scene holds, and derives the
  two numbers the lookup needs from it.
 
@@ -739,8 +866,17 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  - The extent may not change when the camera turns. An axis-aligned box in light
  space grows and shrinks as the camera orbits, which changes the world size of
  a texel every frame and makes every shadow edge boil. So the extent is a
- *square* the size of the focus box's diagonal — the one number a rotation
- cannot move.
+ *square*: the diameter of the focus sphere when there is one, and otherwise
+ the focus box's diagonal.
+
+ The two are not equally good and the difference is what `Camera.view_sphere`
+ exists for. A diagonal is invariant for a box that *rotates rigidly* and the
+ focus box does not — it is an axis-aligned box re-bounded around an oriented
+ frustum, so it grows as well as drifts, and the extent grows with it. A
+ sphere has no orientation to lose, so its diameter is a function of the field
+ of view, the aspect and the reach and of nothing a drag can touch. On the
+ Evil Forest scene that is the difference between 20 rebuilds in 300 frames of
+ a dragged turntable and a handful.
  - The origin may only move in whole texels. With a stable texel size, the
  remaining shimmer is the grid sliding under static geometry, and flooring the
  light-space origin to a multiple of the texel size removes it.
@@ -772,10 +908,18 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 
  @param light : `xyz surface-to-light in world space, w ignored. A zero direction is treated as straight up rather than producing a NaN matrix — the same value three.light refuses at the door, defended again here because this is the only place it would be silent.`
  @param bounds : `The world box of everything drawable — Scene.bounds. A unit box for an empty scene, which fits and shadows nothing. Sets the light's stand-off and the near and far planes.`
- @param focus : `The part of it worth spending texels on — Camera.view_bounds intersected with bounds. Omitted, empty or degenerate falls back to bounds, which is what the tests that check the fit itself pass.`
+ @param focus : `The part of it worth spending texels on. A box, or — with focus_radius beside it — a sphere whose centre this is. Omitted, empty or degenerate falls back to bounds, which is what the tests that check the fit itself pass.`
  @param stable : `Whether to hold a fit that is still good rather than recentring on the focus. What a scene with static casters wants; see above for what it costs.`
+ @param focus_radius : `The focus sphere's radius, or 0 for a focus that is a box. See Camera.view_sphere: a sphere is the shape a turning camera cannot resize, and it is the one MeshPass.prepare passes. Ignored once the sphere is as big as the scene, which is fitted as a box instead.`
 *>
-fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision::Aabb3 focus = { }, bool stable = false)
+fn void ShadowMap.fit(
+	&self,
+	float[4] light,
+	collision::Aabb3 bounds,
+	collision::Aabb3 focus = { },
+	bool stable = false,
+	float focus_radius = 0
+)
 {
 	Vec3 direction = { light[0], light[1], light[2] };
 	float length   = direction.length();
@@ -805,15 +949,46 @@ fn void ShadowMap.fit(&self, float[4] light, collision::Aabb3 bounds, collision:
 	// Degenerate on any axis means nobody supplied one, or the camera is looking
 	// away from the scene entirely. The whole box is the honest answer to both.
 	Vec3 span3 = focus.size();
-	if (span3.x <= 0.0f || span3.y <= 0.0f || span3.z <= 0.0f) focus = bounds;
+	if (span3.x <= 0.0f || span3.y <= 0.0f || span3.z <= 0.0f)
+	{
+		focus = bounds;
+		focus_radius = 0;
+	}
+
+	// The cap, and it decides which of the two focus shapes below is used as well
+	// as bounding the answer: a focus at least as big as the scene *is* the scene,
+	// and fitting the scene is both tighter and stiller than fitting a sphere
+	// around it.
+	float ceiling = math::max(box.max.x - box.min.x, box.max.y - box.min.y);
+	bool sphere   = focus_radius > 1e-4f && focus_radius * 2.0f < ceiling;
 
 	collision::Aabb3 lit = focus.transform_matrix(view);
-
-	// The diagonal, so that orbiting the camera cannot change it — and capped at
-	// the scene's own light-space extent, so a camera which frames everything is
-	// fitted exactly as it was before this existed.
-	float extent  = (focus.max - focus.min).length();
-	float ceiling = math::max(box.max.x - box.min.x, box.max.y - box.min.y);
+	float extent;
+	if (sphere)
+	{
+		// A view matrix is a rotation and a translation, so it takes a sphere to a
+		// sphere: the light-space square is the transformed centre and the same
+		// radius, exactly. Nothing is re-bounded, which is the whole point — a
+		// re-bounded box is a box and grows as it turns.
+		Vec3 middle = transform_point(view, focus.center());
+		lit = {
+			.min = { middle.x - focus_radius, middle.y - focus_radius, lit.min.z },
+			.max = { middle.x + focus_radius, middle.y + focus_radius, lit.max.z },
+		};
+		extent = focus_radius * 2.0f;
+	}
+	else
+	{
+		// The diagonal, so that orbiting the camera cannot change it — and capped at
+		// the scene's own light-space extent, so a camera which frames everything is
+		// fitted exactly as it was before this existed.
+		//
+		// It is the *box's* diagonal and so it does still change: an axis-aligned
+		// box around an oriented frustum grows as it yaws. That is what
+		// `Camera.view_sphere` and the branch above exist to take away, and this
+		// half is what a caller that hands over a plain box still gets.
+		extent = (focus.max - focus.min).length();
+	}
 	// The slack is applied before the cap, so a scene the camera can see all of is
 	// fitted to the scene either way and pays nothing for hysteresis it cannot use.
 	if (stable) extent *= SHADOW_FIT_SLACK;
@@ -1298,4 +1473,7 @@ fn void ShadowMap.free(&self, Gpu* gpu)
 	self.destroy_static_image(gpu);
 	if (self.pipeline_ready) self.pipeline.free(gpu);
 	self.pipeline_ready = false;
+	if (self.cutout_ready) self.cutout_pipeline.free(gpu);
+	self.cutout_ready = false;
+	self.cutout_refused = false;
 }

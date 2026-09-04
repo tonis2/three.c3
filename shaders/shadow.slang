@@ -10,10 +10,14 @@
 //    `MeshPipeline.init_shadow` builds a pipeline with one stage and no colour
 //    attachment. A fragment stage here would be a stage that returns nothing on
 //    every pixel of every caster in the scene.
-//  - **It declares no samplers.** Alpha-tested shadows would need the base colour
-//    map and a fragment stage to discard in; this pass has neither, which is the
-//    honest statement that a leaf card casts the shadow of its quad. See
-//    `render/shadow.c3` for what that costs and what would change it.
+//  - **It declares no samplers** — in the compile every ordinary caster uses. A
+//    second compile of this same file, with `THREE_SHADOW_CUTOUT` defined,
+//    declares the base colour map and a fragment stage that discards below
+//    `material.alphaTest`, so a leaf card casts the shadow of the leaf. Two
+//    compiles rather than one sampler on the pipeline every caster shares: a
+//    scene with no cut-outs in it then pays neither the binding nor the tap.
+//    `ShadowMap.build_cutout_pipeline` is the second compile and builds it only
+//    once something in the scene has asked.
 //
 // ## Why the whole geometry contract is repeated here
 //
@@ -174,8 +178,9 @@ struct Draw
 };
 
 // The mesh contract exactly, and nothing appended: there are no material
-// uniforms in a depth pass, so `MESH_PUSH_FIELDS` is not merely satisfied here,
-// it is the whole block. 24 bytes of the 128 every device offers.
+// uniforms in a depth pass — the cut-out threshold rides `Draw.surface.w`, which
+// the record already carried — so `MESH_PUSH_FIELDS` is not merely satisfied
+// here, it is the whole block. 24 bytes of the 128 every device offers.
 struct PushData
 {
     FrameBlock* frame;
@@ -227,16 +232,19 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
     return pose + (from - pose) * instance.blend;
 }
 
-// **No normal, no uv, no colour — and no `displace`.**
+// **No normal, no colour — and no `displace`.**
 //
-// The first three are absences that cost nothing: depth is a function of
-// position, so a varying nothing reads is interpolation nobody pays for. The
-// fourth is a real limitation and is stated rather than hidden: a
+// The first two are absences that cost nothing: depth is a function of position,
+// so a varying nothing reads is interpolation nobody pays for. A uv used to be on
+// that list and is now the one thing the cut-out variant adds, which is exactly
+// how much it is worth carrying it for.
+//
+// The third is a real limitation and is stated rather than hidden: a
 // `ShaderMaterial` with a `vertex:` body moves its surface in `material.slang`
 // and this pass does not run that body, so such a mesh casts the shadow of its
 // *undisplaced* geometry. `render/shadow.c3` carries what it would take to fix —
 // the body would have to be assembled into this template too, which makes a
-// shadow pipeline per material where today there is exactly one.
+// shadow pipeline per material where today there are two.
 // The base vertex, displaced by every morph target this bucket carries.
 //
 // **Before the skin and never after.** A blend shape is authored against the rest
@@ -273,8 +281,13 @@ void apply_morph(Draw draw, Instance instance, uint vid, inout float3 position, 
     }
 }
 
-[shader("vertex")]
-float4 vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) : SV_Position
+// Where one vertex of one copy lands in the light's clip space.
+//
+// Split out of `vertexMain` because there are two of those: the depth-only
+// entry point and the cut-out one, which needs a uv beside the position. Both
+// have to pose a vertex *identically* — a leaf whose shadow is cast from a
+// different pose is the same bug as a character whose is.
+float4 posed_clip(uint vid, uint iid)
 {
     Draw draw = push.draw[0];
     Instance instance = push.instances[iid];
@@ -306,3 +319,109 @@ float4 vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) : SV_Positio
     // the light looks at the world.
     return mul(push.frame[0].light_view_projection, mul(instance.model, float4(position, 1.0)));
 }
+
+#ifdef THREE_SHADOW_CUTOUT
+
+// ## The cut-out variant
+//
+// Everything from here down exists only in the second compile of this file —
+// `ShadowMap.build_cutout_pipeline` prepends the define, which is `THREE_BAKE`'s
+// arrangement one file along. **The plain pass must not merely skip this code but
+// not contain it**: reflection reports the linked program, so a sampler declared
+// here would put a descriptor binding on the pipeline every ordinary caster
+// shares, and a binding declared and never written is undefined behaviour rather
+// than a wasted byte.
+//
+// What it buys is the thing the header above says this pass could not do: a leaf
+// card casts the shadow of the leaf instead of the shadow of its quad. What it
+// costs is one pipeline object, a bind per bucket of cut-out casters, and a
+// texture tap per fragment of them — charged only to the materials that set
+// `alphaTest`, and to nothing else in the scene.
+
+// The material's base colour map, and the only sampler this pass ever declares.
+// Binding 0, which is `mesh.slang`'s number for the same image and is written by
+// hand in `MeshPass.record_casters` for `render/bind.c3`'s reason: only the pass
+// knows what this image is.
+[vk::binding(0, 0)] Sampler2D base_color_map;
+
+// Byte for byte what `surface.slang` declares, and a copy for the reason every
+// other declaration in this file is one: this shader is compiled on its own and
+// shares no text with the templates. A copy that drifts is a cut-out sampled
+// from a different part of the sheet than the surface was drawn from, which is a
+// leaf whose shadow is a different leaf.
+float2 variant_uv(float2 uv, float4 row)
+{
+    uint turns = ((uint)row.z) & 3u;
+    if (turns == 1u) uv = float2(uv.y, 1.0 - uv.x);
+    else if (turns == 2u) uv = float2(1.0 - uv.x, 1.0 - uv.y);
+    else if (turns == 3u) uv = float2(1.0 - uv.y, uv.x);
+
+    uint flip = (uint)row.w;
+    if ((flip & 1u) != 0u) uv.x = 1.0 - uv.x;
+    if ((flip & 2u) != 0u) uv.y = 1.0 - uv.y;
+
+    return uv + row.xy;
+}
+
+// One varying, and it is the whole difference between the two pipelines: a
+// fragment stage that discards needs somewhere to sample, and depth needs
+// nothing at all.
+struct VertexOutput
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    Draw draw = push.draw[0];
+
+    VertexOutput output;
+    output.position = posed_clip(vid, iid);
+
+    // `mesh.slang`'s vertex stage exactly: the mesh's own uv, then this copy's
+    // row of the variant table. The `uv_transform` is deliberately *not* here and
+    // is applied in the fragment stage, which is where `mesh.slang` applies it —
+    // the two have to sample the same texel or the cut-out and the surface
+    // disagree about where the leaf is.
+    output.uv = float2(0.0, 0.0);
+    if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[vid];
+    if (draw.uv_variant_count != 0u)
+    {
+        Instance instance = push.instances[iid];
+        output.uv = variant_uv(output.uv, draw.uv_variants[min(instance.variant, draw.uv_variant_count - 1u)]);
+    }
+    return output;
+}
+
+// The one thing a shadow fragment stage is for: deciding this texel is not
+// there. It writes nothing — depth is still the rasteriser's — so `void` is the
+// whole return type and a `discard` is the whole body.
+[shader("fragment")]
+void fragmentMain(VertexOutput input)
+{
+    Draw draw = push.draw[0];
+    // A mesh with no uvs has nowhere to put a map, so there is nothing to cut and
+    // the whole quad casts — which is what this pass did for everything before
+    // the variant existed.
+    if ((draw.flags & FLAG_HAS_UVS) == 0) return;
+
+    float2 uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+    // A plain `Sample` and not `stochastic_sample`, even on a material that asked
+    // for scattering. The three-tap blend is there to hide a tiling repeat in a
+    // *colour*, and a blend of three alphas cuts a shape that is in none of the
+    // three. `plan.md` §27 is where the two features meet, and this is the side
+    // of it that has an answer.
+    if (base_color_map.Sample(uv).a * draw.base_color.a < draw.surface.w) discard;
+}
+
+#else
+
+[shader("vertex")]
+float4 vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) : SV_Position
+{
+    return posed_clip(vid, iid);
+}
+
+#endif

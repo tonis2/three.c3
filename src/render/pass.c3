@@ -982,17 +982,32 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		}
 		else
 		{
-			// The two boxes the fit splits. `bounds` is everything drawable and
-			// decides where the light stands and how far it reaches; the focus is
-			// what the camera can actually see, clipped to the same box, and is what
-			// the texels are spent on. Intersected here rather than inside `fit`
-			// because this is the only place that has a camera.
+			// The two regions the fit splits. `bounds` is everything drawable and
+			// decides where the light stands and how far it reaches; the focus is what
+			// the camera can actually see, and is what the texels are spent on. Derived
+			// here rather than inside `fit` because this is the only place that has a
+			// camera.
 			collision::Aabb3 bounds = self.scene.bounds(&self.assets);
-			collision::Aabb3 seen   = self.camera.view_bounds(aspect, self.shadows.reach(self.camera.distance));
-			collision::Aabb3 focus = {
-				.min = math::max(seen.min, bounds.min),
-				.max = math::min(seen.max, bounds.max),
-			};
+			// A sphere, and this used to intersect a box around the frustum. The box
+			// around an oriented frustum changes size as the camera yaws, so the fit
+			// changed with it and the cached static map was thrown away by a camera
+			// that only *turned* — `Camera.view_sphere` has the measurement. A sphere
+			// has no orientation to lose.
+			//
+			// Clamped into the level rather than intersected with it. An intersection
+			// answers "nothing" for a camera looking off the end of a level, which fell
+			// back to fitting the whole scene; a clamp answers "the nearest part of the
+			// level", which is where the geometry that can cast into the picture is.
+			collision::Aabb3 focus = { };
+			float focus_radius     = 0;
+			if (self.shadows.follow)
+			{
+				ViewSphere seen = self.camera.view_sphere(aspect, self.shadows.reach(self.camera.distance));
+				Vec3 middle     = math::min(math::max(seen.center, bounds.min), bounds.max);
+				Vec3 reach      = { seen.radius, seen.radius, seen.radius };
+				focus = { .min = middle - reach, .max = middle + reach };
+				focus_radius = seen.radius;
+			}
 			// Stable only when there is something to keep. A fit that recentres
 			// every frame throws away a cached shadow map every frame; a fit that
 			// holds still spends texel density to avoid that. `ShadowMap.fit`'s
@@ -1000,10 +1015,24 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			// scene is which.
 			// Light zero and no other: it is the one the map is fitted around, which
 			// is the whole of why the rest do not cast.
-			self.shadows.fit(self.lighting.lights[0].direction, bounds, focus, stable: self.scene.static_nodes > 0);
+			self.shadows.fit(
+				self.lighting.lights[0].direction,
+				bounds,
+				focus,
+				stable: self.scene.static_nodes > 0,
+				focus_radius: focus_radius
+			);
 			self.shadows.live = true;
 		}
 	}
+
+	// Where the coalescing loop puts the copies. It writes them into this slot's
+	// mapped buffer directly — `Scene.build_draw_list` used to fill a
+	// `List{Instance}` that only `write_instances` read, and then copy the whole of
+	// it across, which on the reference village is 635 KB a frame of bytes nothing
+	// else looks at. `InstanceReserve` is the one call between the loop that knows
+	// the count and the pass that owns the memory.
+	InstanceTarget copies = { .pass = self, .gpu = gpu, .slot = slot };
 
 	@pool()
 	{
@@ -1025,7 +1054,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			view_projection,
 			transparent,
 			margins,
-			self.shadows.live ? &self.shadows.light_view_projection : null
+			self.shadows.live ? &self.shadows.light_view_projection : null,
+			&reserve_instances,
+			&copies
 		);
 	};
 	if (self.scene.buckets.len() == 0)
@@ -1053,7 +1084,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	};
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
-	self.instance_address = self.write_instances(gpu, slot)!;
+	// Already written, unless the growth inside the callback faulted — in which
+	// case the copies went into `Scene.instances` and this is the retry that both
+	// uploads them and produces the fault the callback could not return.
+	self.instance_address = copies.failed ? self.write_instances(gpu, slot)!
+		: self.instance_buffers[slot].address;
 
 	// Sized against every bucket, including the ones that resolve to nothing. Their
 	// records are stale bytes nothing points at — `build_draw_records` only
@@ -1112,6 +1147,7 @@ fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 
 	uint statics = 0;
 	uint movers  = 0;
+	uint cutouts = 0;
 	foreach (bucket : self.scene.buckets)
 	{
 		Material* material = self.material(bucket.material);
@@ -1119,6 +1155,30 @@ fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 		if (self.assets.mesh(bucket.asset, bucket.mesh) == null) continue;
 		statics += bucket.static_count;
 		movers += bucket.count - bucket.static_count;
+		if (material.alpha_test > 0.0f) cutouts++;
+	}
+
+	// The second pipeline, built the first frame something in the scene actually
+	// asks for a cut-out shadow and never before — `ShadowMap.cutout_pipeline` has
+	// why it is a pipeline rather than a sampler on the one every caster shares.
+	// Counted here rather than at the material, because a material nothing draws
+	// with is a material this pass does not have to compile a shader for.
+	// 
+	// Before the `statics` return below, because the two are unrelated: a scene
+	// with foliage and nothing marked static wants the cut-out pipeline just as
+	// much.
+	if (cutouts > 0 && !self.shadows.cutout_ready && !self.shadows.cutout_refused)
+	{
+		if (catch self.shadows.build_cutout_pipeline(gpu))
+		{
+			// One sentence and then the ordinary path forever, which is this
+			// function's rule for the cached image: the frame still draws and the
+			// shadows are still there, they are the shadows of whole quads.
+			io::eprintn(
+				"three: the cut-out shadow shader would not build — an alphaTest caster casts its whole geometry"
+			);
+			self.shadows.cutout_refused = true;
+		}
 	}
 
 	if (statics == 0 || self.shadows.static_refused) return;
@@ -1479,6 +1539,12 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
  `PipelineCache.acquire` hands the same pointer back for the same source and
  state — so this covers any material drawn as lines.
 
+ A **cut-out** material is neither of those and does cast. `material.alphaTest`
+ is opaque — it keeps the depth test and the depth write and simply has holes in
+ it — so it is exactly the case a shadow map can record, and `record_casters`
+ sends it to a second pipeline that discards below the threshold. That is the
+ whole of why `alphaTest` is the property foliage wants and `opacity` is not.
+
  What is deliberately *not* here is a per-node `castShadow`: a third per-copy
  channel splits buckets, which is the trade the whole renderer exists to refuse.
 *>
@@ -1554,10 +1620,14 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 *>
 fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 {
-	// One bind for the whole pass. There is no material in a depth pass and so
-	// nothing to change pipelines for — the counterpart to `record`'s `bound`
-	// tracking, which exists because a bucket there chooses its own shader.
-	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.shadows.pipeline.handle);
+	// Two pipelines at most, and one in nearly every scene. There is no material
+	// in a depth pass and so nothing to change pipelines for — except
+	// `material.alphaTest`, which is the one property that decides whether a
+	// fragment is there at all. `bound` is `record`'s tracking for `record`'s
+	// reason: the draw list is material-major, so a scene with foliage in it costs
+	// one bind per run rather than one per bucket, and a scene without it costs the
+	// single bind this always was.
+	vk::Pipeline bound = (vk::Pipeline)null;
 
 	// No `cmdSetCullMode`: `init_shadow` bakes CULL_MODE_NONE in and does not
 	// declare the dynamic state, so `material.side` is deliberately not honoured
@@ -1575,6 +1645,34 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 		if (mesh == null || material == null) continue;
 		if (!self.casts_shadow(material)) continue;
 
+		// `cutout_ready` and not only the threshold: the pipeline is compiled the
+		// first frame something asks for it, and a compile that failed leaves
+		// `cutout_refused` set — either way the caster falls back to the pipeline
+		// every other one uses and casts its whole geometry, which is the picture
+		// this pass drew before cut-outs existed.
+		bool cutout            = self.shadows.cutout_ready && material.alpha_test > 0.0f;
+		MeshPipeline* pipeline = cutout ? &self.shadows.cutout_pipeline : &self.shadows.pipeline;
+
+		if (pipeline.handle != bound)
+		{
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			bound = pipeline.handle;
+		}
+
+		if (cutout)
+		{
+			// Binding 0 by hand and nothing above it, which is `record`'s rule cut
+			// down to the one image this pass has any use for: the material's own map
+			// wins over the mesh's, for the reason `record` gives at length. Pushed
+			// after the bind because a pipeline bind is what a push descriptor is
+			// specified against.
+			Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
+				: self.assets.texture_at(material.texture);
+			SampledBindings samplers;
+			samplers.add(0, sampled.descriptor());
+			samplers.push(cmd, pipeline);
+		}
+
 		// The four cells of `Bucket.static_first`, read back out. `tail` is the
 		// hidden dynamic copies, which are the one group that is not adjacent to its
 		// own kind — the cost the layout pays to keep `visible` a prefix.
@@ -1585,12 +1683,20 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 				// `count`, not `visible` — the counterpart of the line in `record`.
 				// This pass wants every copy the light's box kept, which is the
 				// visible prefix plus the tail of casters the camera cannot see.
-				recorded += self.draw_casters(cmd, mesh, bucket, at, 0, bucket.count);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count);
 			case CASTERS_STATIC:
-				recorded += self.draw_casters(cmd, mesh, bucket, at, bucket.static_first, bucket.static_count);
+				recorded += self.draw_casters(
+					cmd,
+					pipeline,
+					mesh,
+					bucket,
+					at,
+					bucket.static_first,
+					bucket.static_count
+				);
 			case CASTERS_DYNAMIC:
-				recorded += self.draw_casters(cmd, mesh, bucket, at, 0, bucket.static_first);
-				recorded += self.draw_casters(cmd, mesh, bucket, at, tail_at, bucket.count - tail_at);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at);
 			default:
 				break;
 		}
@@ -1602,12 +1708,14 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 <*
  One range of one bucket's copies, pushed and drawn.
 
+ @param pipeline : `Which of the shadow map's two this bucket draws with — see record_casters. Its layout is what the push goes against, and the cut-out one's declares a sampler.`
  @param offset : `Where in the bucket the run starts, counted from Bucket.first.`
  @return `1 if anything was drawn, 0 for an empty run — which is what makes the caller's sum a draw-call count.`
 *>
 fn uint MeshPass.draw_casters(
 	&self,
 	vk::CommandBuffer cmd,
+	MeshPipeline* pipeline,
 	GpuMesh* mesh,
 	Bucket bucket,
 	uint at,
@@ -1637,10 +1745,10 @@ fn uint MeshPass.draw_casters(
 	// so they cannot drift without an edit that hardcodes one of them.
 	vk::cmdPushConstants(
 		cmd,
-		self.shadows.pipeline.layout,
-		self.shadows.pipeline.shader.stages,
+		pipeline.layout,
+		pipeline.shader.stages,
 		0,
-		self.shadows.pipeline.shader.push_size,
+		pipeline.shader.push_size,
 		&push
 	);
 
@@ -1660,16 +1768,23 @@ fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* fra
 }
 
 <*
- Writes this frame's instance array into this slot's buffer, growing it first if
- the scene outgrew it.
+ Makes this slot's instance buffer big enough for `needed` copies and answers
+ with where they go.
 
  Doubling rather than fitting exactly: a scene that adds one instance a frame
  would otherwise reallocate every frame, and the allocator's free-block reuse
  makes a discarded buffer cheap but not free.
+
+ The pointer is into host-visible coherent memory and the frame is not submitted
+ until recording ends, so writing through it during `prepare` is the same
+ discipline `write_live_poses` and `build_draw_records` already follow — and this
+ slot's fence has been waited on, which is what makes freeing the old buffer safe.
+
+ @return `Where the copies go, or null for a frame with none.`
 *>
-fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
+fn Instance*? MeshPass.grow_instances(&self, Gpu* gpu, uint slot, sz needed)
 {
-	sz needed = self.scene.instances.len();
+	if (needed == 0) return null;
 
 	if (self.instance_capacity[slot] < needed)
 	{
@@ -1685,8 +1800,59 @@ fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
 		self.instance_capacity[slot] = capacity;
 	}
 
-	self.instance_buffers[slot].upload(self.scene.instances.entries, (sz)(needed * Instance::size));
+	return (Instance*)self.instance_buffers[slot].data();
+}
+
+<*
+ Copies `Scene.instances` into this slot's buffer.
+
+ The path a frame does **not** take any more. `Scene.build_draw_list` writes the
+ copies straight into the mapped buffer through `grow_instances`, so this exists
+ for the one case that leaves them in the list: a growth inside the reserve
+ callback that failed. `prepare` retries the same growth here, where the fault has
+ somewhere to go — see `reserve_instances`.
+*>
+fn ulong? MeshPass.write_instances(&self, Gpu* gpu, uint slot)
+{
+	sz needed = self.scene.instances.len();
+	self.grow_instances(gpu, slot, needed)!;
+	if (needed > 0)
+	{
+		self.instance_buffers[slot].upload(self.scene.instances.entries, (sz)(needed * Instance::size));
+	}
 	return self.instance_buffers[slot].address;
+}
+
+<*
+ What `Scene.build_draw_list` is handed so it can put the instance array
+ somewhere.
+
+ A struct on `prepare`'s stack rather than fields on the pass, because it is alive
+ for exactly one call and two of the three things in it — the device and the frame
+ slot — are arguments to that call rather than properties of the renderer.
+*>
+struct InstanceTarget @local
+{
+	MeshPass* pass;
+	Gpu* gpu;
+	uint slot;
+	// Set when the growth faulted. `InstanceReserve` answers with a pointer and has
+	// nowhere to put an error, so this is how one gets back out — `prepare` reads
+	// it and runs the same growth again, which faults again with something it can
+	// return.
+	bool failed;
+}
+
+fn Instance* reserve_instances(void* context, sz count) @local
+{
+	InstanceTarget* target = (InstanceTarget*)context;
+	Instance*? into = target.pass.grow_instances(target.gpu, target.slot, count);
+	if (catch into)
+	{
+		target.failed = true;
+		return null;
+	}
+	return into;
 }
 
 <*
@@ -2185,6 +2351,10 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// `stats()` is a query and does not record a pass to count.
 	stats.shadow_draws = self.shadows.draws;
 	stats.shadow_static_draws = self.shadows.static_draws;
+	// A fact about right now rather than about last frame, and it stays true once
+	// it is: the pipeline is kept until the pass is freed, the way the ordinary
+	// shadow pipeline is.
+	stats.shadow_cutout = self.shadows.cutout_ready;
 	// For the same reason, and it is a fact about right now rather than about last
 	// frame: the count is maintained at the two ends of a material's life rather
 	// than swept for here.
@@ -2475,21 +2645,31 @@ fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repea
 }
 
 <*
- `material.roughness`, `.metalness` and `.reflectance` — everything the specular
- term reads off a material.
+ `material.roughness`, `.metalness`, `.reflectance` and `.alphaTest` — the whole
+ of `DrawRecord.surface`.
 
- One verb for the three, for `set_material_uv`'s reason: they are one `float4` in
- the record and setting them separately would be three host crossings to write
- three quarters of the same sixteen bytes.
+ One verb for the four, for `set_material_uv`'s reason: they are one `float4` in
+ the record and setting them separately would be four host crossings to write the
+ same sixteen bytes.
 
  Free to animate, like the opacity and unlike the side: nothing is rebuilt, and a
- material that goes from matte to wet between frames costs the write.
+ material that goes from matte to wet between frames costs the write. `alphaTest`
+ is free in the colour pass for the same reason and is *not* free in the shadow
+ pass: the first frame a cut-out caster exists compiles a second shadow pipeline
+ — see `ShadowMap.build_cutout_pipeline` — and after that it is a bind.
 
  The prelude has already refused a value outside 0..1 by name.
 
  @return ? MATERIAL_UNKNOWN : `No such material in this context.`
 *>
-fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float metalness, float reflectance)
+fn void? MeshPass.set_material_surface(
+	&self,
+	uint index,
+	float roughness,
+	float metalness,
+	float reflectance,
+	float alpha_test = 0
+)
 {
 	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
 
@@ -2497,6 +2677,7 @@ fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float
 	material.one_minus_roughness = 1.0f - roughness;
 	material.metalness = metalness;
 	material.reflectance = reflectance;
+	material.alpha_test = alpha_test;
 }
 
 <*

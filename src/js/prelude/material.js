@@ -237,6 +237,29 @@ export class Material {
 
 	set reflectance(v) { this._surface(2, v, 'reflectance'); }
 
+	// The alpha below which a fragment is not drawn at all, 0 to 1. **0 is the
+	// default and means off**, so nothing that does not ask for a cut-out pays
+	// for one.
+	//
+	// This is the leaf-card property. `map` supplies the alpha, and anything
+	// under this threshold is discarded rather than blended — so a quad with a
+	// leaf painted on it draws as the leaf, keeps writing depth, and needs no
+	// back-to-front sort. Three.js's name, Three.js's meaning.
+	//
+	// **It is not `transparent`, and the difference is the one worth knowing.**
+	// A transparent material is sorted and writes no depth, which is right for
+	// glass and ruinous for a thousand overlapping quads of foliage; and it
+	// casts no shadow at all, because a shadow map holds one depth per texel
+	// and cannot record "half there". A cut-out can: set this, and the shadow
+	// pass draws the leaf's shape instead of the quad's.
+	//
+	// The shadow half costs one extra pipeline the first frame a cut-out caster
+	// is in the scene, and a pipeline bind per bucket after that. A scene with
+	// no cut-outs in it pays neither.
+	get alphaTest() { return H.getSurface(this._index())[3]; }
+
+	set alphaTest(v) { this._surface(3, v, 'alphaTest'); }
+
 	// What this surface gives off regardless of any light, as `[r, g, b]`.
 	// Black by default, which is "does not glow".
 	//
@@ -285,11 +308,11 @@ export class Material {
 		H.setEmissive(this._index(), was[0], was[1], was[2], v);
 	}
 
-	// One of the three, written back with the other two beside it.
+	// One of the four, written back with the other three beside it.
 	//
-	// The host takes all three at once — they are one float4 in the draw
-	// record — so a setter reads the current triple, replaces its own, and
-	// writes. Shared because three copies of this is three places for the
+	// The host takes all four at once — they are one float4 in the draw
+	// record — so a setter reads the current four, replaces its own, and
+	// writes. Shared because four copies of this is four places for the
 	// range check to drift.
 	_surface(at, v, name) {
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
@@ -298,7 +321,7 @@ export class Material {
 		const index = this._index();
 		const s = H.getSurface(index);
 		s[at] = v;
-		H.setSurface(index, s[0], s[1], s[2]);
+		H.setSurface(index, s[0], s[1], s[2], s[3]);
 	}
 
 	// The base colour image, or null.
@@ -465,8 +488,8 @@ export class Material {
 		H.setStochastic(this._index(), v ? 1 : 0);
 	}
 
-	// `{ roughness, metalness, reflectance }` off a constructor's options, for
-	// every constructor that takes options.
+	// `{ roughness, metalness, reflectance, alphaTest }` off a constructor's
+	// options, for every constructor that takes options.
 	//
 	// After the handle exists rather than as part of it, exactly as `opacity`
 	// is: these are writes through the handle, and going through the setters is
@@ -475,6 +498,7 @@ export class Material {
 		if (options.roughness !== undefined) material.roughness = options.roughness;
 		if (options.metalness !== undefined) material.metalness = options.metalness;
 		if (options.reflectance !== undefined) material.reflectance = options.reflectance;
+		if (options.alphaTest !== undefined) material.alphaTest = options.alphaTest;
 		// The intensity first, so a description that states both lands on the pair
 		// it wrote whichever order the setters read the other half back in.
 		if (options.emissiveIntensity !== undefined) {
@@ -546,6 +570,7 @@ export class Material {
 			opacity: this.alive ? this.opacity : null,
 			emissive: this.alive ? this.emissive : null,
 			emissiveIntensity: this.alive ? this.emissiveIntensity : null,
+			alphaTest: this.alive ? this.alphaTest : null,
 		};
 	}
 }

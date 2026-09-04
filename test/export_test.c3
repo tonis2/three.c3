@@ -2073,6 +2073,125 @@ fn void a_source_materials_normal_map_is_written_across() @test
 }
 
 <*
+ A built-in material's own maps are written across.
+
+ **`plan.md` §26 and §28's shared entry.** The check above is a *source* material's
+ normal map — an image the exporter finds by walking back to the document a mesh
+ was loaded from. A script that writes `material.emissiveMap = ...` on a
+ `MeshLambertMaterial` has no document to walk back to: the image is a slot on the
+ material, at a binding `mesh.slang` samples, and `surface_for` used to look
+ straight past it. So a glowing sign exported as a sign that does not glow, and
+ the factor beside it crossed — which is worse than losing both, because the file
+ then states an emissive colour multiplying an image that is not there.
+
+ All three at once, because they are one omission: `normalMap`, `aoMap` and
+ `emissiveMap` are the three of the built-in material's four slots that glTF has a
+ place for. The fourth is the metallic-roughness map, and `material_for` writes
+ the two *factors* instead — see `surface_for` for why.
+
+ Out of the JSON chunk, for the check above's reason. The images are generated
+ rather than loaded, so this is also the path where the pixels come back off the
+ device: `device_texture_for` reads the texture out of the GPU and encodes it,
+ which is the half a source-loaded map never exercises.
+*>
+fn void a_built_in_materials_own_maps_are_written_across() @test
+{
+	String path = "build/export_builtin_maps.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const flat = () => new three.DataTexture(
+				new Uint8Array([128, 128, 255, 255]), 1, 1,
+				{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+			const material = new three.MeshLambertMaterial({
+				normalMap: flat(),
+				aoMap: flat(),
+				emissiveMap: new three.DataTexture(new Uint8Array([255, 200, 40, 255]), 1, 1),
+				emissive: 0xffffff,
+			});
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), material));
+			return scene.export("build/export_builtin_maps.glb");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"normalTexture"`), "the normal map crossed: %s", json);
+		test::@check(json.contains(`"occlusionTexture"`), "the occlusion map crossed: %s", json);
+		test::@check(json.contains(`"emissiveTexture"`), "the emissive map crossed: %s", json);
+	};
+}
+
+<*
+ A file's maps come back onto a material that compiles nothing.
+
+ **`plan.md` §26 and §28's importer entry, as the round trip it is.**
+ `instantiate({ materials: true })` used to route a normal map or a glow through a
+ `LayeredMaterial` — a generated body, a Slang compile and a pipeline per glTF
+ material — and to drop the occlusion and metallic-roughness maps on the floor.
+ Every one of those is a sampler binding on the pipeline the renderer built at
+ startup, so the layered path was compiling a shader for something the built-in
+ one already does.
+
+ The class is the assertion that matters and is checked by name: a
+ `LayeredMaterial` with the same three maps on it would draw the same picture and
+ would be the bug. The maps beside it are what says the class was not reached by
+ dropping them.
+
+ `alphaTest` is the fourth thing here and is a different claim: glTF's `MASK` had
+ no path on this side at all, so a cut-out imported as a *blend* — sorted, writing
+ no depth, casting no shadow. It is now the mode's own meaning, exported as `MASK`
+ with the material's cutoff and read back as the same number.
+*>
+fn void a_files_maps_import_onto_the_built_in_material() @test
+{
+	String path = "build/export_import_maps.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const data = () => new three.DataTexture(
+				new Uint8Array([128, 128, 255, 255]), 1, 1,
+				{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+			const cube = new three.Mesh(new three.BoxGeometry(1, 1, 1), new three.MeshLambertMaterial({
+				normalMap: data(),
+				aoMap: data(),
+				emissiveMap: new three.DataTexture(new Uint8Array([255, 200, 40, 255]), 1, 1),
+				emissive: 0xffffff,
+				alphaTest: 0.25,
+			}));
+			scene.add(cube);
+			scene.export("build/export_import_maps.glb");
+
+			const back = three.load("build/export_import_maps.glb");
+			const root = back.instantiate("back", { materials: true });
+			let found = null;
+			root.traverse((o) => { if (o.material) found = o.material; });
+			if (found === null) return "no material was applied at all";
+			return [
+				found.constructor.name,
+				found.normalMap !== null,
+				found.aoMap !== null,
+				found.emissiveMap !== null,
+				found.alphaTest,
+			].join(',');
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value == `"MeshLambertMaterial,true,true,true,0.25"`,
+			"the file's maps came back on a material that compiles nothing, with its cut-out: %s",
+			result.value
+		);
+	};
+}
+
+<*
  The camera and the light are in the file.
 
  An exported scene used to open pointing wherever the viewer decided and lit by

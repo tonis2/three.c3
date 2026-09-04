@@ -255,7 +255,7 @@ Object.defineProperties(light, {
 	// `mapSize`, a Vector2: this map is square, and a name Three.js does
 	// not have is `plan.md` §4's rule for saying so.
 	//
-	// A fresh object each read, like `direction` above, so the four
+	// A fresh object each read, like `direction` above, so the
 	// properties always answer with what the host holds rather than with
 	// what a captured copy remembered.
 	shadow: {
@@ -267,8 +267,8 @@ Object.defineProperties(light, {
 			// — a project that does not ask pays for none of it.
 			get enabled() { return H.shadowGet()[0] !== 0; },
 			set enabled(v) {
-				const [, size, bias, intensity, distance] = H.shadowGet();
-				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
+				const [, size, bias, intensity, distance, follow] = H.shadowGet();
+				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance, follow);
 			},
 
 			// Texels per side. Clamped to 256..8192 and rounded down to a
@@ -276,8 +276,8 @@ Object.defineProperties(light, {
 			// allocated rather than as what was typed.
 			get size() { return H.shadowGet()[1]; },
 			set size(v) {
-				const [enabled, , bias, intensity, distance] = H.shadowGet();
-				H.shadowSet(enabled, +v, bias, intensity, distance);
+				const [enabled, , bias, intensity, distance, follow] = H.shadowGet();
+				H.shadowSet(enabled, +v, bias, intensity, distance, follow);
 			},
 
 			// Extra depth offset in the light's clip space, 0 by default.
@@ -288,8 +288,8 @@ Object.defineProperties(light, {
 			// tune.
 			get bias() { return H.shadowGet()[2]; },
 			set bias(v) {
-				const [enabled, size, , intensity, distance] = H.shadowGet();
-				H.shadowSet(enabled, size, +v, intensity, distance);
+				const [enabled, size, , intensity, distance, follow] = H.shadowGet();
+				H.shadowSet(enabled, size, +v, intensity, distance, follow);
 			},
 
 			// How dark a shadow is, 0 to 1. 1 takes the whole directional
@@ -297,8 +297,8 @@ Object.defineProperties(light, {
 			// shadow is never black unless the ambient floor is zero.
 			get intensity() { return H.shadowGet()[3]; },
 			set intensity(v) {
-				const [enabled, size, bias, , distance] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, +v, distance);
+				const [enabled, size, bias, , distance, follow] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, +v, distance, follow);
 			},
 
 			// How far down the view direction the map is fitted, in world
@@ -313,8 +313,34 @@ Object.defineProperties(light, {
 			// ground; too large and they are soft mush.
 			get distance() { return H.shadowGet()[4]; },
 			set distance(v) {
-				const [enabled, size, bias, intensity] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, intensity, +v);
+				const [enabled, size, bias, intensity, , follow] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, intensity, +v, follow);
+			},
+
+			// Whether the map is fitted around what the camera can see,
+			// or around the whole scene. True by default, and true is
+			// what makes shadows sharp: the map covers `distance` units
+			// of the world rather than all of it.
+			//
+			// The cost of following is a *rebuild*. A cached shadow map
+			// is a picture in one projection, so whenever the fit moves
+			// far enough to matter every static caster is drawn again —
+			// on a forest that is 39 draw calls over 4,800 instances and
+			// 0.27 ms against a 0.10 ms steady pass, which reads as a
+			// stutter while a turntable is being dragged. Set this false
+			// and nothing about the camera is in the key at all: the map
+			// is rebuilt when the light turns, when the level's bounds
+			// change, and when something marked `static` moves.
+			//
+			// What that costs is texels, and the arithmetic is yours to
+			// do: a 224-unit village at `size: 2048` is 11 cm a texel
+			// fitted whole and 2 cm fitted to a 40-unit view. Big level
+			// and a moving camera, or a small one and shadows that never
+			// stutter — there is no default that knows which.
+			get follow() { return H.shadowGet()[5] !== 0; },
+			set follow(v) {
+				const [enabled, size, bias, intensity, distance] = H.shadowGet();
+				H.shadowSet(enabled, size, bias, intensity, distance, v ? 1 : 0);
 			},
 
 			// Where the map actually landed last frame, read-only.
@@ -359,13 +385,13 @@ Object.defineProperties(light, {
 		// anything and the second is what they write after. An object sets
 		// only the keys it names; a boolean is `{ enabled: it }`.
 		set(v) {
-			const [enabled, size, bias, intensity, distance] = H.shadowGet();
+			const [enabled, size, bias, intensity, distance, follow] = H.shadowGet();
 			if (typeof v === 'boolean' || v == null) {
-				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance);
+				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance, follow);
 				return;
 			}
 			if (typeof v !== 'object') {
-				throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias, intensity or distance');
+				throw new TypeError('three.light.shadow takes true, false, or an object with enabled, size, bias, intensity, distance or follow');
 			}
 			H.shadowSet(
 				('enabled' in v ? (v.enabled ? 1 : 0) : enabled),
@@ -373,6 +399,7 @@ Object.defineProperties(light, {
 				('bias' in v ? +v.bias : bias),
 				('intensity' in v ? +v.intensity : intensity),
 				('distance' in v ? +v.distance : distance),
+				('follow' in v ? (v.follow ? 1 : 0) : follow),
 			);
 		},
 	},

@@ -1165,7 +1165,23 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         // ones a plain `Sample` takes.
         bool scattered = (draw.flags & FLAG_STOCHASTIC) != 0;
 
-        albedo *= scattered ? stochastic_sample(base_color_map, uv).rgb : base_color_map.Sample(uv).rgb;
+        float4 base = scattered ? stochastic_sample(base_color_map, uv) : base_color_map.Sample(uv);
+
+        // **`material.alphaTest`, and the whole of it in the colour pass.** The
+        // threshold is `w` of the record's surface, zero on every material that
+        // never asked for a cut-out — and zero can discard nothing, because no
+        // alpha is below it. So there is no flag, no second pipeline and no
+        // branch here: a scene with no foliage in it pays one compare that is
+        // always false.
+        //
+        // The alpha is the map's times the material's own, and *not* times
+        // `input.color.a`. A cut-out is a property of the picture painted on the
+        // surface, so fading one copy of a leaf card out with `mesh.color` has to
+        // fade it rather than dissolve it — and the shadow pass, which has no
+        // per-copy colour to read, then cuts the same shape this does.
+        if (base.a * draw.base_color.a < draw.surface.w) discard;
+
+        albedo *= base.rgb;
 
         if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
         {

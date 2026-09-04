@@ -2794,9 +2794,11 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 	// Neither direction round-trips, and the one that loses less is the one that
 	// stays silent. The dedup key carries it anyway — see `ExportSurface`.
 	// 
-	// `BLEND` rather than `MASK`, because that is what this renderer does: the
-	// alpha is a blend factor, not a cutoff, and `alpha_cutoff` is left at its
-	// default because `BLEND` does not read it. An opaque material stays `OPAQUE`
+	// `BLEND` for a transparent material, because that is what this renderer does
+	// with one: the alpha is a blend factor and not a cutoff. `MASK` is no longer
+	// only a bake's answer — `material.alphaTest` is a threshold on the base
+	// colour's alpha and nothing else, which is what `MASK` means, so it writes
+	// the mode and the cutoff it was given. An opaque material stays `OPAQUE`
 	// rather than being written as `BLEND` with an alpha of 1 — the two render the
 	// same and only one of them tells a viewer it may skip the sort.
 	uint written = self.out.add_material(
@@ -2813,6 +2815,11 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 			// with a soft edge.
 		alpha_mode: surface.transparent ? gltf::AlphaMode.BLEND
 			: (surface.cutout ? gltf::AlphaMode.MASK : gltf::AlphaMode.OPAQUE),
+		// The material's own threshold where it stated one, and the format's own
+		// default where the cut-out came from a bake instead — a `discard` has no
+		// number behind it, and 0.5 is what a reader assumes when the field is
+		// absent.
+		alpha_cutoff: surface.surface[3] > 0 ? surface.surface[3] : 0.5,
 	);
 	self.out.set_material_maps(
 		written,
@@ -2856,13 +2863,17 @@ fn int Exporter.material_for(&self, ExportSurface surface)
  dedup check costs nothing: an image any material references has to be in the
  file, and two materials that turn out to be one reference the same one.
 
- The script's material wins over the source document's. A node drawing a file's
- mesh under its own `LayeredMaterial` shows the script's stack and the script's
- base normal; writing the file's would be a picture the frame did not draw.
+ The script's material wins over the source document's, map by map. A node drawing
+ a file's mesh under its own `LayeredMaterial` shows the script's stack and the
+ script's base normal; a node drawing it under a `MeshLambertMaterial` with a
+ `normalMap` on it shows that one. Writing the file's would be a picture the frame
+ did not draw. Where the script stated nothing the file's map crosses, which is
+ the rule `emissive_factor` already followed and is now what all three follow.
 
  Not the metallic-roughness *map*: this renderer's roughness and metalness are one
  number each for a whole material rather than a texel-by-texel pair, so there is
- nothing to write one from. The two factors do go across — see `material_for`.
+ nothing to write one from, and `gltf::GltfBuilder` has no slot for it either. The
+ two factors do go across — see `material_for`.
 
  ## What a bake replaces
 
@@ -2914,6 +2925,16 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		.script_material = self.script_material_index(node),
 	};
 
+	// `material.alphaTest` is glTF's `MASK`, exactly — a threshold on the base
+	// colour's alpha with nothing else about it — so it is the one alpha mode this
+	// renderer has a lossless equivalent for, and it says so. The threshold rides
+	// `surface[3]` because that is where the record carries it; see
+	// `Material.surface`.
+	//
+	// It composes with a bake rather than fighting it: a baked image whose alpha
+	// came from a `discard` is already `cutout`, and this can only turn the flag on.
+	if (surface.surface[3] > 0) surface.cutout = true;
+
 	if (surface.script_material >= 0)
 	{
 		Material* script = self.pass.material((uint)surface.script_material);
@@ -2929,14 +2950,52 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		return surface;
 	}
 
+	// A built-in material's own maps — `MeshLambertMaterial`'s `normalMap`, `aoMap`
+	// and `emissiveMap`, which are three sampler slots on the pipeline every
+	// untextured mesh already uses. This used to look at a `LayeredMaterial`'s
+	// stack and at the source document and at nothing else, so a script that set
+	// one of these and exported lost it silently.
+	//
+	// **Asked by pipeline**, through `shades_built_in`, and that is not a detail:
+	// a `ShaderMaterial`'s own samplers sit at the *same bindings*, so reading them
+	// here without the test would write an agent's noise texture out as a normal
+	// map. It is the same guard `MeshPass.map_flags` puts on the same four slots.
+	//
+	// The metallic-roughness map is the fourth slot and is deliberately absent:
+	// `gltf::GltfBuilder` has no `metallicRoughnessTexture`, and this renderer's
+	// roughness and metalness are one number each for a whole material — which is
+	// what `material_for` writes instead.
+	if (material_of != null && self.pass.shades_built_in(material_of))
+	{
+		surface.normal = gltf::texture_ref(
+			self.device_texture_for(material_of.textures.at(NORMAL_MAP_BINDING))
+		);
+		surface.occlusion = gltf::texture_ref(
+			self.device_texture_for(material_of.textures.at(OCCLUSION_MAP_BINDING))
+		);
+		surface.emissive = gltf::texture_ref(
+			self.device_texture_for(material_of.textures.at(EMISSIVE_MAP_BINDING))
+		);
+	}
+
 	int source_material = self.source_material_of(node);
 	if (source_material < 0) return surface;
 
 	Asset* asset           = self.pass.assets.slot(node.asset);
 	gltf::Material* source = asset.stream.gltf.materials.get_ref((usz)source_material);
-	surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
-	surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
-	surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
+	// The file's maps, and only where the script did not state one — the rule the
+	// emissive *factor* below already follows, applied to the images beside it. A
+	// script that put its own normal map on a file's mesh drew with the script's,
+	// and writing the file's would be a picture the frame did not show.
+	if (surface.normal.texture < 0) surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
+	if (surface.occlusion.texture < 0)
+	{
+		surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
+	}
+	if (surface.emissive.texture < 0)
+	{
+		surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
+	}
 	// The file's factor, and only where the script did not state one. Every other
 	// field here is read off the source material unconditionally because the script
 	// has no way to say them; `material.emissive` is a way to say this one, and a

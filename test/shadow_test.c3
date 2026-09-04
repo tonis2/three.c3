@@ -1944,3 +1944,541 @@ fn void the_fit_reports_itself_in_world_units() @test
 	test::@check(math::abs(after.centre.z) < 4.0f, "centred in z, %s", after.centre.z);
 	test::@check(math::abs(after.centre.y - 3.0f) < 6.0f, "and in y, %s", after.centre.y);
 }
+
+// ============================================================================
+// The focus, and the camera motion that used to cost a rebuild — plan.md §19.5
+// ============================================================================
+
+// The eight corners of what a camera can see out to `reach`, built the way
+// `look_at` builds its basis. Here rather than in `scene/camera.c3` because it is
+// what the sphere is *checked against*: a containment test wants the shape the
+// sphere claims to hold, stated independently of the code that answers.
+fn Vec3[8] frustum_corners(three::Camera camera, float aspect, float reach)
+{
+	Vec3 back    =  camera.orbit_dir();
+	Vec3 forward = -back;
+	Vec3 right   =  forward.cross(camera.up()).normalize();
+	Vec3 up      =  right.cross(forward);
+
+	float near = camera.near_plane;
+	float far  = camera.far_plane;
+	if (reach > 0.0f && reach < far) far = reach;
+
+	float tan_half = math::tan(math::deg_to_rad(camera.fov) * 0.5f);
+	Vec3 eye       = camera.eye();
+
+	Vec3[8] corners;
+	uint at         = 0;
+	float[2] depths = { near, far };
+	float[2] signs  = { -1.0f, 1.0f };
+	foreach (d : depths)
+	{
+		float h     = d * tan_half;
+		float w     = h * aspect;
+		Vec3 centre = eye + forward * d;
+		foreach (sx : signs)
+		{
+			foreach (sy : signs)
+			{
+				corners[at++] = centre + right * (w * sx) + up * (h * sy);
+			}
+		}
+	}
+	return corners;
+}
+
+// What `MeshPass.prepare` derives, in the three lines a test can reproduce
+// without a device: the camera's focus sphere, held inside the level.
+fn void fit_to_camera(
+	three::ShadowMap* map,
+	float[4] light,
+	collision::Aabb3 bounds,
+	three::Camera camera,
+	float aspect,
+	float reach
+)
+{
+	three::ViewSphere seen = camera.view_sphere(aspect, reach);
+	Vec3 middle            = math::min(math::max(seen.center, bounds.min), bounds.max);
+	Vec3 out               = { seen.radius, seen.radius, seen.radius };
+	collision::Aabb3 focus = { .min = middle - out, .max = middle + out };
+	map.fit(light, bounds, focus, stable: true, focus_radius: seen.radius);
+}
+
+// The focus as it was before the sphere: an axis-aligned box re-bounded around
+// the frustum's corners, and the shape whose *extent* a yaw changes. Kept here
+// because the check below is a comparison — "fewer rebuilds" is not a claim a
+// test can make against nothing.
+fn collision::Aabb3 frustum_box(three::Camera camera, float aspect, float reach)
+{
+	collision::Aabb3 box = collision::NEW_AABB3;
+	Vec3[8] corners      = frustum_corners(camera, aspect, reach);
+	foreach (corner : corners)
+	{
+		box.min = math::min(box.min, corner);
+		box.max = math::max(box.max, corner);
+	}
+	return box;
+}
+
+<*
+ The focus sphere is the same size whichever way the camera points, and holds
+ every corner of the frustum it was built for.
+
+ **Both halves, because either alone is satisfiable by a wrong answer.** A radius
+ that never changes is trivially available by returning a constant, and a sphere
+ that holds every corner is trivially available by returning something enormous.
+ What the fit needs is a shape that does both, and `plan.md` §19.5 is what happens
+ when the first is not true: the box this replaced grows as it yaws, the fit moves
+ with it, and the cached shadow map is rebuilt by a camera that only turned.
+
+ Bitwise equality on the radius rather than a tolerance, for `same_matrix`'s
+ reason: it is computed from the field of view, the aspect, the two depths and
+ the orbit distance, and a turn touches none of them, so the same inputs must
+ produce the same float.
+
+ The third check is the box, measured beside it. Without it "the radius does not
+ change" is a fact about a number nobody was varying.
+*>
+fn void the_focus_sphere_cannot_be_resized_by_turning() @test
+{
+	three::Camera camera = three::default_camera();
+	camera.target = { 4, 1, -2 };
+	camera.distance = 15.5f;
+	camera.near_plane = 0.1f;
+
+	float aspect = 16.0f / 9.0f;
+	float reach  = 24.0f;
+
+	camera.yaw = 0;
+	camera.pitch = 0;
+	float first = camera.view_sphere(aspect, reach).radius;
+
+	float widest = 0;
+	float narrowest = 1e9f;
+
+	float[*] yaws    = { 0, 37, 90, 143, 180, 251, 299, 355 };
+	float[*] pitches = { -80, -31, 0, 12, 45, 80 };
+	foreach (yaw : yaws)
+	{
+		foreach (pitch : pitches)
+		{
+			camera.yaw = yaw;
+			camera.pitch = pitch;
+
+			three::ViewSphere seen = camera.view_sphere(aspect, reach);
+			test::@check(
+				seen.radius == first,
+				"at yaw %f pitch %f the focus radius is %f against %f — a turn resized it",
+				yaw, pitch, seen.radius, first
+			);
+
+			Vec3[8] corners = frustum_corners(camera, aspect, reach);
+			foreach (i, corner : corners)
+			{
+				float away = (corner - seen.center).length();
+				test::@check(
+					away <= seen.radius * 1.0001f,
+					"at yaw %f pitch %f corner %d is %f from the centre of a %f sphere",
+					yaw, pitch, i, away, seen.radius
+				);
+			}
+
+			collision::Aabb3 box = frustum_box(camera, aspect, reach);
+			float diagonal       = (box.max - box.min).length();
+			if (diagonal > widest) widest = diagonal;
+			if (diagonal < narrowest) narrowest = diagonal;
+		}
+	}
+
+	// The number `fit` used to take its extent from, over the same angles. It is
+	// the *cause* of §19.5 and it is a fact about the shape rather than about this
+	// scene: an axis-aligned box around an oriented frustum is a different size
+	// looking down an axis and looking down a diagonal.
+	test::@check(
+		widest > narrowest * 1.02f,
+		"the box focus this replaced was %f to %f across the same turn — if it does not "
+			"move, the check above is asserting nothing",
+		narrowest, widest
+	);
+}
+
+<*
+ A dragged turntable keeps the fit a box focus would have thrown away.
+
+ **The bug in `plan.md` §19.5, as the two numbers that are its whole content.**
+ The report was a lag spike while dragging the view and none while walking, and
+ the cause was that the fit's extent was read off an axis-aligned box around an
+ oriented frustum: that box grows as it yaws, so the extent grew, so
+ `ShadowMap.static_current` compared two different matrices and every static
+ caster in the scene was rasterised again.
+
+ A full turn at the measured boom, in the 60 steps a drag arrives in. Both focus
+ shapes go through the *same* `fit` with the same slack — the only difference is
+ the shape — so this is a check on the shape and not on the hysteresis.
+
+ Zero and not "fewer", because the sphere is centred on the camera's *target*: a
+ turn moves the eye around it and moves the target not at all, so every input the
+ fit has is the same float sixty times over. The hysteresis is still what absorbs
+ a target that is *walking*, which is what `the_stable_fit_holds_while_the_focus_does`
+ checks.
+*>
+fn void a_dragged_turntable_keeps_the_fit_a_box_would_have_lost() @test
+{
+	collision::Aabb3 bounds = { .min = { -112, -1, -112 }, .max = { 112, 14, 112 } };
+	float[4] light = { 0.3f, 1.0f, 0.2f, 0.0f };
+	float aspect   = 16.0f / 9.0f;
+	float reach    = 24.0f;
+
+	three::Camera camera = three::default_camera();
+	camera.distance = 15.5f;
+	camera.pitch = 30.0f;
+	camera.near_plane = 0.1f;
+
+	three::ShadowMap round;
+	round.defaults();
+	round.size = 2048;
+
+	three::ShadowMap boxed;
+	boxed.defaults();
+	boxed.size = 2048;
+
+	uint round_rebuilds = 0;
+	uint boxed_rebuilds = 0;
+	Matrix4f round_was;
+	Matrix4f boxed_was;
+	for (uint step = 0; step < 60; step++)
+	{
+		camera.yaw = (float)step * 6.0f;
+
+		fit_to_camera(&round, light, bounds, camera, aspect, reach);
+		boxed.fit(light, bounds, frustum_box(camera, aspect, reach), stable: true);
+
+		if (step > 0 && !same_fit(round_was, round.light_view_projection)) round_rebuilds++;
+		if (step > 0 && !same_fit(boxed_was, boxed.light_view_projection)) boxed_rebuilds++;
+		round_was = round.light_view_projection;
+		boxed_was = boxed.light_view_projection;
+	}
+
+	test::@check(
+		round_rebuilds == 0,
+		"a full turn cost %d rebuilds — the sphere is centred on the target precisely so it costs none",
+		round_rebuilds
+	);
+	test::@check(
+		boxed_rebuilds > 0,
+		"the box focus refitted %d times, so the check above is against nothing",
+		boxed_rebuilds
+	);
+}
+
+<*
+ A scene-fitted map is not in the camera's key at all.
+
+ `ShadowSettings.follow` set false is the answer to the cost the check above
+ halves rather than removes: a camera that keeps moving in a level bigger than
+ its own view must eventually refit, and a scene that would rather pay texels
+ than a rebuild says so. `MeshPass.prepare` spells that as "pass no focus", and
+ what `fit` does with no focus is fit the scene — so the fit is a function of the
+ light and of `Scene.bounds` and of nothing else.
+
+ The camera is moved further here than any drag would: a different orbit, a
+ different target and a different distance, which between them change every input
+ the following fit has.
+*>
+fn void a_scene_fitted_map_is_not_in_the_cameras_key() @test
+{
+	collision::Aabb3 bounds = { .min = { -112, -1, -112 }, .max = { 112, 14, 112 } };
+	float[4] light = { 0.3f, 1.0f, 0.2f, 0.0f };
+
+	three::ShadowMap map;
+	map.defaults();
+	map.size = 2048;
+	map.fit(light, bounds, stable: true);
+	Matrix4f first = map.light_view_projection;
+
+	map.fit(light, bounds, stable: true);
+	test::@check(same_fit(first, map.light_view_projection), "the same scene fitted differently twice");
+
+	// And the light is still what moves it, which is the other half of the
+	// promise: a scene-fitted map is not a map that never rebuilds.
+	map.fit({ -0.5f, 0.8f, 0.1f, 0.0f }, bounds, stable: true);
+	test::@check(
+		!same_fit(first, map.light_view_projection),
+		"the sun turned and the fit did not follow it"
+	);
+}
+
+// A level big enough that the fit is a window onto it rather than the whole of
+// it, with something static in every direction. `ORBIT_SCENE` and not `SCENE`
+// because the question is what a *drag across a large scene* costs, and a 12-unit
+// ground is fitted whole whichever way the camera points.
+const String ORBIT_SCENE = `
+	const scene = new three.Scene();
+	globalThis.stage = scene;
+	const ground = new three.Mesh(new three.PlaneGeometry(200, 200), new three.MeshLambertMaterial());
+	ground.rotation.x = -Math.PI / 2;
+	scene.add(ground);
+	const geom = new three.BoxGeometry(2, 4, 2);
+	const mat = new three.MeshLambertMaterial();
+	for (let x = -4; x <= 4; x++) {
+		for (let z = -4; z <= 4; z++) {
+			const b = new three.Mesh(geom, mat);
+			b.position.set(x * 8, 2, z * 8);
+			scene.add(b);
+		}
+	}
+	three.light.set([0.3, 1.0, 0.2], 0.2);
+	three.camera.orbit(0, 30, 15.5);
+	three.light.shadow = { enabled: true, size: 1024, distance: 24 };
+	scene.traverse(o => { o.static = true; });
+	three.render();
+`;
+
+<*
+ Dragging the view across a large static level rasterises nothing.
+
+ **The report in `plan.md` §19.5, end to end and through the script's own door.**
+ It arrived as "a lag spike while dragging, and none the moment the view changes
+ to first person", and `shadowStaticDraws` is exactly that spike counted: it is
+ non-zero only in a frame that rebuilt the cached map, which on this scene is 82
+ casters rasterised again for a camera that moved nothing but its angle.
+
+ Sixty frames of a full turn, and then a dolly. The dolly is what stops this
+ being a check that the cache is never invalidated at all: pulling the camera back
+ makes the sphere genuinely bigger, the map genuinely has to cover more ground,
+ and a rebuild there is the right answer rather than a regression.
+*>
+fn void dragging_the_view_across_a_static_level_rebuilds_nothing() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult turned = run.run(ORBIT_SCENE +++ `
+			let rebuilt = 0;
+			for (let i = 1; i <= 60; i++) {
+				three.camera.orbit(i * 6, 30, 15.5);
+				three.render();
+				if (three.stats().shadowStaticDraws > 0) rebuilt++;
+			}
+			return rebuilt;
+		`);
+		defer turned.free();
+		test::@check(turned.ok, "the scene built and turned: %s", turned.error);
+		test::@check(
+			turned.value == "0",
+			"a full turn over a static level rebuilt the cached map %s times",
+			turned.value
+		);
+
+		three::RunResult dollied = run.run(`
+			three.camera.orbit(360, 30, 44);
+			three.render();
+			return three.stats().shadowStaticDraws > 0;
+		`);
+		defer dollied.free();
+		test::@check(dollied.ok, "the camera pulled back: %s", dollied.error);
+		test::@check(
+			dollied.value == "true",
+			"pulling the camera back did not rebuild the map, so the check above is asserting nothing"
+		);
+	};
+}
+
+<*
+ `three.light.shadow.follow` is a property like the other five, and takes the
+ camera out of the fit.
+
+ The round trip first, because a sixth field on `shadowGet`'s array is the one
+ way the other five break: each setter reads the lot back and writes the lot, so
+ a field left out of one of them is a property that silently resets another.
+
+ Then the fit itself, through `three.light.shadow.fit`: scene-fitted, a camera
+ that has moved to somewhere else entirely leaves the box where it was.
+*>
+fn void a_scene_fitted_shadow_ignores_where_the_camera_went() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(ORBIT_SCENE +++ `
+			const on = three.light.shadow.follow;
+			three.light.shadow.follow = false;
+			three.light.shadow.bias = 0.25;
+			const still_off = three.light.shadow.follow;
+			three.render();
+			const before = three.light.shadow.fit;
+
+			three.camera.orbit(140, 12, 60);
+			three.camera.lookAt({ x: 40, y: 0, z: -30 });
+			three.render();
+			const after = three.light.shadow.fit;
+
+			const same = before.extent === after.extent
+				&& before.center.every((v, i) => v === after.center[i]);
+			return [on, still_off, three.light.shadow.bias, same].join(',');
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `"true,false,0.25,true"`,
+			"follow defaults on, turns off, survives a bias written beside it, and takes the camera "
+				"out of the fit: %s",
+			result.value
+		);
+	};
+}
+
+// ============================================================================
+// Alpha-tested shadows — plan.md §28
+// ============================================================================
+
+// A card with holes in it, over a floor, lit straight down.
+//
+// The image is 2x2 and nearest-filtered, so the quad is four quadrants: two
+// opaque and two clear, which is the smallest thing that is a cut-out rather
+// than a fade. Linear space and no mips, because the alpha here is a *mask* —
+// through an sRGB view and a mip chain the threshold would be compared against a
+// number the file does not contain.
+const String CUTOUT_SCENE = `
+	const scene = new three.Scene();
+	const ground = new three.Mesh(new three.PlaneGeometry(40, 40), new three.MeshLambertMaterial());
+	ground.rotation.x = -Math.PI / 2;
+	scene.add(ground);
+
+	const sheet = new three.DataTexture(new Uint8Array([
+		255, 255, 255, 255,   255, 255, 255, 0,
+		255, 255, 255, 0,     255, 255, 255, 255,
+	]), 2, 2, {
+		colorSpace: three.LinearSRGBColorSpace,
+		generateMipmaps: false,
+		filter: three.NearestFilter,
+	});
+
+	globalThis.leaf = new three.MeshLambertMaterial({ map: sheet });
+	const card = new three.Mesh(new three.PlaneGeometry(6, 6), globalThis.leaf);
+	card.rotation.x = -Math.PI / 2;
+	card.position.set(0, 10, 0);
+	// Red, so a quadrant that stops being drawn stops being red: the floor under
+	// it is the same white material lit by the same overhead light, and a card the
+	// colour of what is behind it is a cut-out nothing can see.
+	card.color = 0xff2020;
+	scene.add(card);
+
+	// Off the vertical, so the shadow lands beside the card rather than under it —
+	// a card ten units up throws its shadow five units along, which is more than
+	// its own half width, so the shadow is on open floor the camera can see.
+	three.light.set([0.5, 1.0, 0.35], 0.25);
+	three.camera.orbit(25, 40, 30);
+	three.render();
+`;
+
+<*
+ `material.alphaTest` cuts the surface, and cuts the shadow it throws.
+
+ **`plan.md` §28's one open entry, and the check is built around the half that is
+ easy to fake.** Making the *card* have holes in it is one `discard` in
+ `mesh.slang` and would be visible in a screenshot; making its *shadow* have the
+ same holes needs a fragment stage on a pass that has never had one, a second
+ pipeline, and the base colour map bound to it — and a renderer that did the first
+ and not the second draws a leaf casting the shadow of its quad, which is the
+ state this feature was written to leave.
+
+ So the assertion is a comparison of comparisons, and needs no pixel coordinates:
+
+ - With shadows **off**, turning `alphaTest` on changes the frame by the card's
+   own missing quadrants. That is the colour half.
+ - With shadows **on**, it has to change the frame by *more* than that — the
+   missing quadrants and the light now reaching the floor under them.
+
+ A renderer whose shadow pass ignores `alphaTest` produces the same difference
+ both times, which is exactly the failure that looks right in a screenshot of the
+ card.
+*>
+fn void an_alpha_tested_card_casts_the_shadow_of_its_holes() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(CUTOUT_SCENE);
+		defer built.free();
+		test::@check(built.ok, "the cut-out scene built: %s", built.error);
+
+		image::Image whole = renderer.capture()!!;
+		defer whole.free();
+
+		three::RunResult cut = run.run(`
+			leaf.alphaTest = 0.5;
+			three.render();
+			return leaf.alphaTest;
+		`);
+		defer cut.free();
+		test::@check(cut.ok, "the cut-out was set: %s", cut.error);
+		test::@check(cut.value == "0.5", "and reads back as 0.5, not %s", cut.value);
+
+		image::Image holes = renderer.capture()!!;
+		defer holes.free();
+
+		sz unlit = differing_bytes(&whole, &holes);
+		test::@check(unlit > 0, "with no shadow pass, alphaTest changed nothing about the card itself");
+
+		three::RunResult shadowed = run.run(`
+			leaf.alphaTest = 0;
+			three.light.shadow = { enabled: true, size: 1024, distance: 40 };
+			three.render();
+		`);
+		defer shadowed.free();
+		test::@check(shadowed.ok, "shadows went on: %s", shadowed.error);
+
+		image::Image quad_shadow = renderer.capture()!!;
+		defer quad_shadow.free();
+
+		three::RunResult cut_shadow = run.run(`
+			leaf.alphaTest = 0.5;
+			three.render();
+		`);
+		defer cut_shadow.free();
+		test::@check(cut_shadow.ok, "the cut-out went back on: %s", cut_shadow.error);
+
+		image::Image holes_shadow = renderer.capture()!!;
+		defer holes_shadow.free();
+
+		sz lit = differing_bytes(&quad_shadow, &holes_shadow);
+		test::@check(
+			lit > unlit,
+			"the same cut-out changed %d bytes with no shadow pass and %d with one — the shadow pass "
+				"is drawing the whole quad",
+			unlit, lit
+		);
+	};
+}
+
+<*
+ A scene with no cut-out in it compiles no second shadow pipeline.
+
+ The other half of `ShadowMap.cutout_pipeline`'s claim, and the reason it is a
+ second pipeline rather than a sampler on the one every caster shares: a project
+ that never sets `alphaTest` pays neither a Slang compile nor a `VkPipeline` nor a
+ descriptor push. Asserted through `three.stats()`, which counts pipelines
+ already.
+*>
+fn void a_scene_with_no_cutout_builds_no_second_shadow_pipeline() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult plain = run.run(CUTOUT_SCENE +++ `
+			three.light.shadow = { enabled: true, size: 512, distance: 40 };
+			three.render();
+			return three.stats().shadowCutout;
+		`);
+		defer plain.free();
+		test::@check(plain.ok, "the scene rendered with shadows: %s", plain.error);
+		test::@check(plain.value == "false", "a scene with no alphaTest built a cut-out pipeline anyway");
+
+		three::RunResult cut = run.run(`
+			leaf.alphaTest = 0.5;
+			three.render();
+			return three.stats().shadowCutout;
+		`);
+		defer cut.free();
+		test::@check(cut.ok, "the cut-out was set: %s", cut.error);
+		test::@check(cut.value == "true", "and a scene with one did not build it");
+	};
+}

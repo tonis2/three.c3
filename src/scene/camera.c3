@@ -175,7 +175,7 @@ const float FIRST_PERSON_NEAR = 0.05f;
  Which way is up for this camera, in world space.
 
  World +Y until `roll` is set, and the one function that decides it. `view`,
- `basis` and `view_bounds` spelling `{ 0, 1, 0 }` inline is how a rolled view
+ `basis` and `frame_bounds` spelling `{ 0, 1, 0 }` inline is how a rolled view
  matrix ends up disagreeing with a rolled pan: the picture leans and the drag
  does not, which reads as the mouse being broken.
 
@@ -514,67 +514,87 @@ fn void CameraFollow.settle(&self, Camera* camera, Vec3 want, float dt_ms)
 }
 
 <*
- The world box of everything this camera can see, out to `reach`.
+ A sphere in world space: a centre and a radius, and nothing else.
 
- A shadow map fitted around `Scene.bounds` spends its texels on the whole level;
- a village is 224 units across and the camera frames about 70 of them, so nine
- tenths of the map is rasterised into and never sampled. This is the box that
- says which tenth is worth having.
+ Its own two-field struct rather than a `Vec4`, because the two halves are not
+ the same kind of number and `sphere.w` reads as neither.
+*>
+struct ViewSphere
+{
+	Vec3 center;
+	float radius;
+}
+
+<*
+ The sphere the shadow fit spends its texels on: everything this camera can see
+ out to `reach`, held around the point a turn cannot move.
+
+ A map fitted around `Scene.bounds` spends its texels on the whole level — a
+ village is 224 units across and the camera frames about 70 of them — and this is
+ the region that says which part is worth having.
+
+ ## Why a sphere, and why it is centred on the target
+
+ It used to be an axis-aligned box around the frustum's corners, and that box
+ changes as the camera turns: it *grows* as it yaws, and its centre swings with
+ the eye. `ShadowMap.fit` keys the cached static map on the fit, so a camera that
+ only turned rebuilt every static caster in the scene — 39 draw calls over 4,800
+ instances, 0.27 ms against a 0.10 ms steady pass, reported as a stutter while
+ dragging the view and none while walking. `plan.md` §19.5 is the measurement.
+
+ Two things had to go, and only one of them is the box. The radius is a function
+ of the field of view, the aspect, the two depths and the orbit distance, so no
+ angle can change it. And the centre is the **target**, which is the one point a
+ turn holds still — the eye orbits it, the frustum swings around it, and the
+ sphere does not move at all. A turntable dragged through a full circle produces
+ one fit.
+
+ ## What that costs, and when
+
+ Texels, in proportion to how far the target sits from the middle of the view.
+ A camera framing its subject pays almost nothing: at a 15.5-unit boom with
+ `shadow.distance = 24` the sphere is 44 units across against the 44.5 the box
+ was, so it is fractionally *sharper* as well as still. A first-person camera pays
+ a lot — its target is at the eye, so half the sphere is behind the viewer and it
+ comes out 63 units across for the same view. That is the trade the header of
+ `ShadowSettings.follow` is about, and `shadow.distance` is the knob that answers
+ it: the radius is roughly the reach, so halving the reach halves the sphere.
 
  Built from the camera's own fields rather than from the inverse of its
- view-projection: the eight corners are `eye + forward * d ± right * w ± up * h`
- at two depths, which is four multiplies rather than a matrix inversion, and it
- cannot disagree with `view()` about handedness because it comes from the same
- `orbit_dir`. The basis is `look_at`'s: forward towards the target, right the
- cross with world up, up the cross back.
+ view-projection. `Camera.up` and therefore `roll` are absent on purpose, and so
+ are `yaw` and `pitch`: a roll turns the frustum about its own axis and a
+ yaw or pitch turns it about the target, and a sphere centred on the target is
+ invariant under all three.
 
- The result is conservative and axis-aligned, which is the right shape for what
- reads it: intersecting it with the scene's own box is two `min`/`max` pairs, and
- a tighter hull would buy texels that the square, snapped fit in `ShadowMap.fit`
- immediately gives back.
-
- @param aspect : `Width over height, the same number view_projection is given. A different one here would size the box for a frame nobody is drawing.`
+ @param aspect : `Width over height, the same number view_projection is given. A different one here would size the sphere for a frame nobody is drawing.`
  @param reach : `How far down the view direction to bother with, in world units. 0 or more than the far plane means the far plane — which for the default camera is 1000 units and is why shadow.distance exists.`
 *>
-fn collision::Aabb3 Camera.view_bounds(&self, float aspect, float reach = 0)
+fn ViewSphere Camera.view_sphere(&self, float aspect, float reach = 0)
 {
-	Vec3 back    =  self.orbit_dir();
-	Vec3 forward = -back;
-	// `look_at` builds its basis this way round, and at the 89-degree pitch limit
-	// the cross product is still well conditioned.
-	// 
-	// Rolled, through `Camera.up`, so the box is around the frustum the frame is
-	// actually drawn with. A roll rotates the frustum about its own axis and the
-	// axis-aligned box around it genuinely changes — for a wide field of view, by
-	// up to a factor of the aspect ratio.
-	Vec3 right   =  forward.cross(self.up()).normalize();
-	Vec3 up      =  right.cross(forward);
-
 	float near = self.near_plane;
 	float far  = self.far_plane;
 	if (reach > 0.0f && reach < far) far = reach;
 	if (far <= near) far = near + 1.0f;
 
 	float tan_half = math::tan(math::deg_to_rad(self.fov) * 0.5f);
-	Vec3 eye       = self.eye();
+	// The half-height and half-width *per unit of depth*, so a corner at depth d
+	// is `d * sqrt(k2)` off the axis whatever d is.
+	float h  = tan_half;
+	float w  = h * aspect;
+	float k2 = w * w + h * h;
 
-	collision::Aabb3 box = collision::NEW_AABB3;
-	float[2] depths      = { near, far };
-	foreach (d : depths)
-	{
-		float h        = d * tan_half;
-		float w        = h * aspect;
-		Vec3 centre    = eye + forward * d;
-		float[2] signs = { -1.0f, 1.0f };
-		foreach (sx : signs)
-		{
-			foreach (sy : signs)
-			{
-				Vec3 corner = centre + right * (w * sx) + up * (h * sy);
-				box.min = math::min(box.min, corner);
-				box.max = math::max(box.max, corner);
-			}
-		}
-	}
-	return box;
+	// A corner at depth d is `(d - distance)` along the view axis from the target
+	// and `d * sqrt(k2)` across it, so its squared distance from the target is a
+	// convex quadratic in d — which means the furthest corner is on the near plane
+	// or on the far plane and never between them. Two evaluations rather than a
+	// loop over eight corners, and the same answer.
+	float toward = near - self.distance;
+	float beyond = far - self.distance;
+	float closest = toward * toward + near * near * k2;
+	float furthest = beyond * beyond + far * far * k2;
+
+	return {
+		.center = self.target,
+		.radius = math::sqrt(math::max(closest, furthest)),
+	};
 }

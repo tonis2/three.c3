@@ -400,6 +400,27 @@ struct Material
 	// one. `js/prelude/asset.js` has the import rule.
 	float metalness;
 	float reflectance;
+
+	<*
+	 `material.alphaTest` — the alpha below which a fragment is not drawn at all.
+
+	 **Zero is off**, which is the zero fill and the right default: a cut-out is a
+	 thing a leaf card and a chain-link fence ask for, and every other surface would
+	 rather have the compare not happen.
+
+	 What it is *not* is `opacity`. A blended material writes no depth and is sorted
+	 back to front, which is what glass wants and what a thousand overlapping leaf
+	 quads cannot afford; a cut-out stays opaque, keeps the depth test, and simply
+	 has holes in it. That is also why this is the property that reaches the shadow
+	 pass and `opacity` is not — see `MeshPass.casts_shadow`, and
+	 `render/shadow.c3` for the second pipeline it costs.
+
+	 It rides `DrawRecord.surface.w` rather than a flag of its own, which is why
+	 there is no `FLAG_ALPHA_TEST`: the shaders compare against it and a zero can
+	 never discard anything, so "off" and "on" are one code path and one pipeline
+	 in the colour pass.
+	*>
+	float alpha_test;
 	// `material.emissive` — the colour this surface gives off, **sRGB as the script
 	// wrote it**, and 0 on every material nobody set one on. Black is "does not
 	// glow", which is what the zero fill already says and what glTF's own default
@@ -620,15 +641,20 @@ fn float Material.opacity(&self)
 }
 
 <*
- The three numbers the specular term reads, in `DrawRecord.surface`'s order.
+ The four numbers `DrawRecord.surface` carries, in its order: the three the
+ specular term reads, and the cut-out threshold on the end.
 
- One accessor rather than three fields read directly, so the roughness complement
+ One accessor rather than four fields read directly, so the roughness complement
  is undone in exactly one place — `Material.opacity` is the same shape for the
  same reason.
+
+ `alpha_test` is in here because it is in the *record*, not because it belongs
+ with the specular term: `w` was the spare lane of a `float4` the record already
+ carried, and a threshold that rides it costs no bytes and no second write.
 *>
 fn float[4] Material.surface(&self)
 {
-	return { 1.0f - self.one_minus_roughness, self.metalness, self.reflectance, 0 };
+	return { 1.0f - self.one_minus_roughness, self.metalness, self.reflectance, self.alpha_test };
 }
 
 <*
