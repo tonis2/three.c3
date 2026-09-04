@@ -1,5 +1,5 @@
 <*
- `three.cooldown(duration, options)` — `notes.md` §17 / §21, `src/js/prelude/cooldown.js`.
+ `three.cooldown(duration, options)` — `src/js/prelude/cooldown.js`.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::cooldown`
 

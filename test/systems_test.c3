@@ -1,5 +1,5 @@
 <*
- The ordered system registry and the cast — `notes.md` §21.
+ The ordered system registry and the cast.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::systems`
 

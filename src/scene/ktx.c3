@@ -205,8 +205,8 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
  A KTX2's blocks, kept rather than narrowed — every level, in the file's format.
 
  The fast path this whole section exists for. `decode_ktx2` above expands blocks
- to RGBA8, which costs four times the memory and, by `notes.md` §23's
- measurement, 86% of what a texture takes to load. Here nothing is decoded at
+ to RGBA8, which costs four times the memory and, by measurement, 86% of what
+ a texture takes to load. Here nothing is decoded at
  all: `container::read` undoes the supercompression and the blocks go to the
  device as they are.
 
@@ -224,7 +224,7 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 	// A Basis file states `vkFormat` 0 and its payload is ETC1S or UASTC, which
 	// is not a family any device samples. Turning one into BC7 means decoding it
 	// and re-encoding on the CPU — a build step, not a load — so it goes the
-	// RGBA8 way and `notes.md` §23 has why.
+	// RGBA8 way.
 	if (try basis::info(encoded)) return UNSUPPORTED_IMAGE~;
 
 	container::Texture? maybe = container::read(allocator, encoded);
@@ -314,7 +314,7 @@ fn TextureFamily? block_family_of(uint vk_format) @local
  fans out across cores inside `bc7::encode`, and one 2048x2048 still costs around
  27 seconds of wall time here. That is the correct price for a build step and an
  impossible one for anything on a frame's path, which is why it lives behind an
- export option and why `notes.md` §23 argues against ever doing it at load.
+ export option and why nothing should ever do it at load.
 
  ## The chain is generated here rather than on the device
 

@@ -463,7 +463,7 @@ jobs:
       # the failure they guard is a packaging one — a driver missing from the
       # zip, staged for the wrong architecture, or replaced by something that is
       # not an ICD. `minos` is printed rather than asserted: it is the bundle's
-      # OS floor (notes.md §10) and belongs in the log of the build that shipped
+      # OS floor, and belongs in the log of the build that shipped
       # it, but nothing on this runner has to satisfy it any more.
       - name: Check the bundled driver is one
         if: runner.os == 'macOS'

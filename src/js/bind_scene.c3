@@ -2430,8 +2430,8 @@ fn void js_clock_time(
 
  So this is a second clock and it answers a different question: **how long did
  that take**, in real milliseconds, whatever the game clock is doing. It is what
- `three.systems.report()` is built on, and `notes.md` §19.5 — "the CPU side of a
- frame, which nothing measures" — is why that report is worth having:
+ `three.systems.report()` is built on, and the CPU side of a frame — which
+ nothing else measures — is why that report is worth having:
  `three.stats()` already breaks the GPU frame into six numbers so a slow scene
  can be blamed on the shadow pass, and there has been nothing at all for the
  half of the frame a script owns.

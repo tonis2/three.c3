@@ -3474,8 +3474,8 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	// Blocks first, and only for a file that actually holds them. Everything
 	// about this is a fast path rather than a different feature: the same
 	// picture arrives either way, and what changes is whether it is decoded to
-	// RGBA8 on the way — 86% of a texture's load time by `notes.md` §23's
-	// measurement, and four times its memory.
+	// RGBA8 on the way — 86% of a texture's load time by measurement, and
+	// four times its memory.
 	//
 	// Three ways to fall through, all of them ordinary: not a KTX2, a KTX2 whose
 	// contents are Basis or uncompressed, or a device that cannot sample the
