@@ -40,6 +40,8 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "getOpacity", &js_get_opacity, 1);
 	self.bind(host, "setSurface", &js_set_surface, 4);
 	self.bind(host, "getSurface", &js_get_surface, 1);
+	self.bind(host, "setEmissive", &js_set_emissive, 5);
+	self.bind(host, "getEmissive", &js_get_emissive, 1);
 	self.bind(host, "setMap", &js_set_map, 2);
 	self.bind(host, "setMaterialSlot", &js_set_material_slot, 3);
 	self.bind(host, "getMaterialSlot", &js_get_material_slot, 2);
@@ -654,6 +656,67 @@ fn void js_get_surface(
 	float[4] surface = self.pass.material_surface((uint)arg_int(&js, argc, args, 0));
 	qjs::Value list  = js.array();
 	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(surface[i]));
+	*out = list;
+}
+
+<*
+ `material.emissive` and `material.emissiveIntensity` — what this surface gives
+ off regardless of any light.
+
+ One verb for the four, for `js_set_surface`'s reason: they are one `float4` in
+ the draw record, and a lamp is a colour and how bright it is rather than two
+ unrelated statements.
+
+ The prelude has already refused a colour outside 0..1. The intensity is not
+ clamped and that is the point of having it: a colour is a colour, and this is how
+ something goes brighter than white.
+*>
+fn void js_set_emissive(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	uint index = (uint)arg_int(&js, argc, args, 0);
+	if (catch self.pass.set_material_emissive(
+		index,
+		arg_float(&js, argc, args, 1),
+		arg_float(&js, argc, args, 2),
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
+	))
+	{
+		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
+	}
+}
+
+<*
+ `material.emissive` and `.emissiveIntensity`, as `[r, g, b, intensity]`.
+
+ An index that names nothing answers black at strength 1, which is
+ `getSurface`'s rule.
+*>
+fn void js_get_emissive(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float[4] emissive = self.pass.material_emissive((uint)arg_int(&js, argc, args, 0));
+	qjs::Value list   = js.array();
+	for (uint i = 0; i < 4; i++) js.set_index(list, i, qjs::number_value(emissive[i]));
 	*out = list;
 }
 

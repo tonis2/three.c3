@@ -524,6 +524,184 @@ fn void the_default_look_is_one_call_away() @test
 }
 
 <*
+ A body reading a packed ORM map has somewhere to put all three channels.
+
+ Occlusion in red, roughness in green, metalness in blue is what a trim sheet
+ ships and what glTF packs, and before these overloads existed a body could state
+ the second and third only by writing `s.roughness` before the call — which works,
+ because `Surface` is by value, and was nowhere written down — and the first only
+ by folding it into the albedo, which darkens the direct light with it.
+
+ Compiled rather than asserted on text: an overload that is not there is a
+ diagnostic, and one whose parameters are in a different order is not.
+*>
+fn void an_orm_map_has_a_parameter_for_each_channel() @test
+{
+	three::MaterialUniform[] none = {};
+
+	String source = three::material_source(
+		`float3 shade(Surface s)
+		{
+			float3 orm = float3(0.4, 0.3, 0.0);
+			float3 whole = standard(s, s.albedo, s.normal, orm.g, orm.b, orm.r);
+			float3 pair = standard(s, s.albedo, s.normal, orm.g, orm.b);
+			float3 shut = standard(s, s.albedo, s.normal, orm.r);
+			// The spelling these three replace, and still supported: the parameter
+			// is by value, so a body's copy is its own.
+			s.roughness = orm.g;
+			s.metalness = orm.b;
+			return whole + pair + shut + standard(s, s.albedo, s.normal);
+		}`,
+		none
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "every ORM spelling compiles: %s", mod.diagnostic);
+	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
+}
+
+<*
+ The noise a body used to bring with it is in scope.
+
+ A hash, a value noise, an fbm and a worley was 120 lines at the top of every
+ generated material in this project and outside it, and the tiling forms are the
+ reason it matters rather than merely being tidy — a period that does not divide
+ the image is a seam nothing reports.
+
+ Compiled, and every overload called, because a function that is not in the
+ spliced block is a diagnostic and one whose argument order changed is not.
+*>
+fn void the_noise_a_body_needs_is_already_there() @test
+{
+	three::MaterialUniform[] none = {};
+
+	String source = three::material_source(
+		`float3 shade(Surface s)
+		{
+			float seed = hash11(s.origin.x) + hash21(s.origin.xz) + hash22(s.mesh_uv).y;
+			float rough = noise2(s.uv * 8.0) + noise2(s.uv * 8.0, float2(16.0, 0.0));
+			float grain = fbm2(s.uv * 4.0, 4) + fbm2(s.uv * 4.0, float2(8.0, 8.0), 4);
+			float stones = worley2(s.uv * 6.0) + worley2(s.uv * 6.0, float2(6.0, 6.0));
+			return s.albedo * lambert(s.normal) * saturate(seed + rough + grain + stones);
+		}`,
+		none
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "the noise block compiles: %s", mod.diagnostic);
+	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
+}
+
+<*
+ A vertex body reaches the same noise the fragment one does.
+
+ `surface.slang` is spliced into `mesh.slang` as well and holds nothing that needs
+ a `Surface` or a derivative, so a `displace` that scatters vertices has the hash
+ too — which is what `examples/vfx.js` was carrying its own copy of.
+*>
+fn void a_vertex_body_reaches_the_noise_too() @test
+{
+	three::MaterialUniform[] none = {};
+
+	three::MaterialTexture[] no_textures = {};
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`,
+		none,
+		mem,
+		no_textures,
+		`void displace(inout Vertex v)
+		{
+			v.position += float3(hash11(float(v.index)) - 0.5, 0.0, 0.0) * 0.01;
+		}`
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "a vertex body hashes its index: %s", mod.diagnostic);
+	test::@check(mod.spirv.len > 0, "and produced a module");
+}
+
+<*
+ Triplanar is a shared function, and it carries the two things that are not
+ guessable from the naive version.
+
+ A projection rather than an unwrap is what a rock, a cliff, a merged terrain and
+ an imported blockout all have — half the meshes in one carry no TEXCOORD_0 at
+ all — so every scene that hits it was writing the same forty lines, and the two
+ halves that are easy to get wrong are the ones that produce a plausible picture:
+
+ - the window into a band samples with `SampleGrad` and the *unwrapped* gradients,
+   or the `frac` puts a blurred line along every tile boundary in the scene;
+ - three tangent-space normals blend Whiteout rather than averaged, or anything
+   facing two ways at once comes out flat.
+
+ Compiled with every overload called, because a signature that moved is a
+ diagnostic and one that quietly lost its band is not.
+*>
+fn void triplanar_is_one_call_and_carries_the_mip_fix() @test
+{
+	three::MaterialUniform[] none = {};
+	three::MaterialTexture[2] textures = { { "sheet" }, { "sheet_normal" } };
+
+	String source = three::material_source(
+		`float3 shade(Surface s)
+		{
+			float3 w = triplanar_weights(s.normal, 6.0);
+			float3 whole = triplanar_sample(sheet, s.position, s.normal, 0.5, 6.0).rgb;
+			// One band of a trim sheet: an eighth of the image, third strip down.
+			float3 band = triplanar_sample(sheet, s.position, s.normal, 0.5, 6.0, float2(0.125, 0.375)).rgb;
+			float3 n = triplanar_normal(sheet_normal, s.position, s.normal, 0.5, 6.0, float2(0.125, 0.375));
+			float3 flat_n = triplanar_normal(sheet_normal, s.position, s.normal, 0.5, 6.0);
+			return standard(s, whole * band * w.x + flat_n * 0.0, n);
+		}`,
+		none,
+		mem,
+		textures[..]
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "the triplanar block compiles: %s", mod.diagnostic);
+	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
+}
+
+<*
+ A body can ask for the mesh's own uv, before the material's transform.
+
+ `s.uv` carries `material.repeat` and `material.offset`, which is right for every
+ image that is a pattern laid across a surface and wrong for the one kind that
+ describes the surface itself — a splat mask, a painted wear map, an id map. That
+ is what `s.mesh_uv` is, and a `LayeredMaterial` samples its masks with it.
+*>
+fn void a_body_can_read_the_uv_before_the_transform() @test
+{
+	three::MaterialUniform[] none = {};
+
+	String source = three::material_source(
+		`float3 shade(Surface s) { return s.albedo * float3(s.mesh_uv, 0.0) * lambert(s.normal); }`,
+		none
+	)!!;
+	defer source.free(mem);
+
+	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "a body that reads s.mesh_uv compiles: %s", mod.diagnostic);
+	test::@check(mod.spirv.len > 0, "and produced a module");
+}
+
+<*
  A uniform whose name is also a swizzle cannot reach the template.
 
  `a` is a legal uniform name and is not reserved, but `fragmentMain` ends with

@@ -218,6 +218,14 @@ struct Draw
     // record; a script that wants a thousand variations wants a different
     // feature.
     float4 uv_variants[8];
+    // What this surface gives off regardless of any light — `material.emissive`
+    // times `material.emissiveIntensity`, linear rgb, and w unused.
+    //
+    // **Added after the shading rather than folded into the albedo**, which is the
+    // whole of what an emissive is: a lamp's glass is bright where nothing is
+    // lighting it, and a black surface can glow. Zero on every material nobody set
+    // one on, which is the value the record already holds.
+    float4 emissive;
 };
 
 // **The three mesh fields come first, in this order, and material uniforms only
@@ -365,6 +373,23 @@ struct Surface
     float3 albedo;          // base colour factor, times the texture and the instance colour
     float3 normal;          // normalized, world space
     float2 uv;
+    // The mesh's own uv, **before `material.repeat` and `material.offset`** —
+    // `uv` above is after them, and is what a body samples its maps with.
+    //
+    // The difference matters for exactly one kind of image: one that describes
+    // *this surface* rather than a pattern laid across it. A splat mask, a
+    // painted wear map, a light map or an id map is one image stretched over one
+    // mesh, and tiling it repeats the terrain rather than tiling a texture. Every
+    // other image wants `uv`, which is why that is the one with the short name.
+    //
+    // A copy's `uvVariants` row **is** in here — the row is applied in the vertex
+    // stage, before either of these — which is right for the same reason: a row
+    // is one of the symmetries of the square and it moves the surface, not the
+    // material's tiling.
+    //
+    // Costs no varying. `uv` is computed from this in `fragmentMain`, so both
+    // were already in a register.
+    float2 mesh_uv;
     float3 position;        // world space
     // This copy's own colour, raw — `albedo` already has it. Here for a body
     // that wants it as something other than a tint: an emissive amount, a
@@ -457,6 +482,20 @@ struct Surface
     // paused world stops waving too. Filled by the template; a body does not
     // write it.
     float time;
+    // What this surface gives off regardless of any light — `material.emissive`
+    // times `material.emissiveIntensity`, linear rgb.
+    //
+    // **`standard` adds it and `lambert` does not**, which is the same split
+    // those two have always had: `standard(s)` is the built-in shading whole, and
+    // a body written against `lambert` is the diffuse term and is asking for it.
+    // A body that wants the glow somewhere else — through a post pass's bright
+    // pass, into a rim — writes it itself.
+    //
+    // There is no emissive *map* here. `material.emissiveMap` is a binding on the
+    // built-in pipeline, which a ShaderMaterial's is not; a body with a texture to
+    // multiply declares it and does the multiply, exactly as it does for a normal
+    // map.
+    float3 emissive;
 };
 
 // **The other contract with the agent**, and the one thing about it worth
@@ -722,6 +761,19 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
 
 static float g_shadow = 1.0;
 
+// This fragment's world position, left where `lambert` can reach it.
+//
+// **The same lifetime and the same argument as `g_shadow` beside it**: written
+// once in `fragmentMain` before anything shades, read in `lambert`. It exists
+// because a light may be a *place* — `light_toward` needs to know where the
+// surface is to work out which way a point light is and how much of it arrives —
+// and `lambert(float3 normal)` is how every body ever written spells the call.
+// Adding a parameter would have left every one of them compiling and lit by the
+// directional lights alone, which is a scene missing a campfire and no diagnostic
+// anywhere. `specular_light` already takes the position and uses its own.
+static float3 g_position = float3(0.0, 0.0, 0.0);
+
+
 // The direct light reaching this point, as a colour, so a body can ask for the
 // built-in diffuse without reproducing it. `return s.albedo * lambert(s.normal);`
 // is the same arithmetic `mesh.slang` performs for a mesh with no material at all
@@ -766,7 +818,9 @@ float3 lambert(float3 normal, float occlusion)
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
-        float n_dot_l = max(dot(normal, normalize(light.direction.xyz)), 0.0);
+        float reach;
+        float3 to_light = light_toward(light.direction, g_position, reach);
+        float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
@@ -829,7 +883,8 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
-        float3 to_light = normalize(light.direction.xyz);
+        float reach;
+        float3 to_light = light_toward(light.direction, position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0);
         if (n_dot_l <= 0.0) continue;
 
@@ -846,7 +901,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
         // `lambert` where the two are the same multiply: an occluded light delivers
         // less energy, it does not change the shape of the microfacets.
         float occlusion = i == 0u ? g_shadow : 1.0;
-        sum += light.color.rgb * light.color.w * occlusion
+        sum += light.color.rgb * light.color.w * occlusion * reach
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
     return sum;
@@ -933,6 +988,40 @@ float3 specular(Surface s)
     return specular_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance);
 }
 
+// The built-in shading with a colour, a normal and an occlusion the body worked
+// out for itself — which is what a body reading a packed ORM map has, and every
+// body wearing a trim sheet is one of those.
+//
+// **`ao` multiplies what the sky delivers and nothing else** — the ambient floor
+// and the environment reflection — which is `lambert(normal, ao)`'s own rule one
+// term further along. An occlusion map records how much of the sky a crevice can
+// see and says nothing about where a lamp is pointing, so folding it into the
+// direct light reads as dirt painted on the lit side. Folding it into the *albedo*
+// instead, which is what a body had to do before this overload existed, darkens
+// the direct light and the highlight with it.
+//
+// 1 is no occlusion, and is what the three overloads below hand in.
+float3 standard(Surface s, float3 albedo, float3 normal, float ao)
+{
+#ifdef THREE_BAKE
+    // The colour and not the colour times `1 - metalness`. With `lambert` at 1 and
+    // the highlight at 0 the expression below would already be unlit, and it would
+    // bake a metal as black — a surface whose colour comes back entirely through a
+    // reflection the file has no environment for. The occlusion is a fact about
+    // the light rather than about the colour, so it stays out of the bake too.
+    return albedo;
+#else
+    return albedo * lambert(normal, ao) * (1.0 - s.metalness)
+         + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance)
+         + environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * ao
+         // Last, and reached by nothing above it — not the occlusion, not the
+         // shadow, not the metalness. A surface that gives off light gives it off
+         // in a crevice, in shadow and on a metal. `mesh.slang` adds it in exactly
+         // this place, which is what keeps `standard(s)` the built-in shading.
+         + s.emissive;
+#endif
+}
+
 // The built-in shading with a colour and a normal the body worked out for
 // itself — which is what a body that blends layers or reads a normal map has.
 //
@@ -940,17 +1029,35 @@ float3 specular(Surface s)
 // that changed neither wants.
 float3 standard(Surface s, float3 albedo, float3 normal)
 {
-#ifdef THREE_BAKE
-    // The colour and not the colour times `1 - metalness`. With `lambert` at 1 and
-    // the highlight at 0 the expression below would already be unlit, and it would
-    // bake a metal as black — a surface whose colour comes back entirely through a
-    // reflection the file has no environment for.
-    return albedo;
-#else
-    return albedo * lambert(normal) * (1.0 - s.metalness)
-         + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance)
-         + environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance);
-#endif
+    return standard(s, albedo, normal, 1.0);
+}
+
+// The same, with the roughness and metalness read per texel rather than per
+// material — which is the other half of shading a packed ORM map, and the pair a
+// glTF metallicRoughness texture carries in green and blue.
+//
+//     float3 orm = rust_orm.Sample(s.uv).rgb;
+//     float3 n = mapped_normal(s, rust_normal.Sample(s.uv).rgb);
+//     return standard(s, albedo, n, orm.g, orm.b, orm.r);
+//
+// **Writing `s.roughness` before the call does the same thing**, because `Surface`
+// is a by-value parameter and a body's copy is its own. That is supported and is
+// what these two overloads are made of; they exist because it is not something a
+// body should have to know about the calling convention to discover.
+float3 standard(Surface s, float3 albedo, float3 normal, float roughness, float metalness)
+{
+    s.roughness = roughness;
+    s.metalness = metalness;
+    return standard(s, albedo, normal, 1.0);
+}
+
+// All three channels of an ORM at once: green, blue, red, in the order the
+// packing puts them.
+float3 standard(Surface s, float3 albedo, float3 normal, float roughness, float metalness, float ao)
+{
+    s.roughness = roughness;
+    s.metalness = metalness;
+    return standard(s, albedo, normal, ao);
 }
 
 // The built-in shading, whole: exactly what a mesh with no ShaderMaterial draws.
@@ -1052,7 +1159,14 @@ float3 base_albedo(Surface s, float2 uv)
 //
 // **Fragment stage only**, exactly like `mapped_normal`, and a compile error in a
 // `vertex:` body rather than a wrong picture.
-float2 parallax_uv(Surface s, float2 uv, float height, float depth)
+//
+// The overload below takes the uv gradients instead of computing them, for a
+// caller whose uv has a `frac` in it — a LayeredMaterial layer windowing into a
+// trim sheet. Across such a seam `ddx(uv)` is a whole tile wide, which tells the
+// solve that one unit of u is a millimetre of surface and puts a line of enormous
+// parallax along every tile boundary. The unwrapped gradients are what the
+// surface actually has.
+float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float height, float depth)
 {
 #ifdef THREE_BAKE
     return uv;
@@ -1064,8 +1178,6 @@ float2 parallax_uv(Surface s, float2 uv, float height, float depth)
 
     float3 dp_dx = ddx(s.position);
     float3 dp_dy = ddy(s.position);
-    float2 duv_dx = ddx(uv);
-    float2 duv_dy = ddy(uv);
 
     float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
     if (abs(det) < 1e-12) return uv;
@@ -1088,6 +1200,13 @@ float2 parallax_uv(Surface s, float2 uv, float height, float depth)
 
     return uv + lift * float2(dot(along, du) / du2, dot(along, dv) / dv2);
 #endif
+}
+
+// The same, with the gradients the hardware computes — which is every caller
+// whose uv is continuous, and is what a body writes.
+float2 parallax_uv(Surface s, float2 uv, float height, float depth)
+{
+    return parallax_uv(s, uv, ddx(uv), ddy(uv), height, depth);
 }
 
 // The agent's vertex body, bracketed by `#line` exactly as the fragment one is
@@ -1312,6 +1431,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     }
     s.normal = normalize(input.normal);
     s.uv = uv;
+    s.mesh_uv = input.uv;
     s.position = input.world;
     s.color = float4(srgb_to_linear(input.color.rgb), input.color.a);
     // No decode, unlike `color` above. glTF defines COLOR_0 linear — it is the
@@ -1331,6 +1451,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // never calls it at all.
     s.shadow = shadow_factor(s.position, s.normal);
     g_shadow = s.shadow;
+    g_position = s.position;
     // Straight off the record, unclamped: `setSurface` clamps at the boundary, so
     // a second clamp here would be a second place for the range to be decided.
     s.roughness = draw.surface.x;
@@ -1340,6 +1461,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // `Surface.height`, which is where the argument for the number is.
     s.height = 0.5;
     s.time = push.frame[0].lighting.z;
+    s.emissive = draw.emissive.rgb;
 
     // Before `shade`, so a debug view of a scene whose bodies are expensive is
     // still one render — and so a body that cannot compile is still diagnosable.

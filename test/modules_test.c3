@@ -201,6 +201,93 @@ fn void a_game_boots_from_many_files() @test
 }
 
 <*
+ `--no-boot` is the assets root without the game.
+
+ The two-stage pipeline's first half: a bake has to run under the game's own root
+ — that is what makes its imports and its paths mean what the game means by them
+ — and *before* the game, which on a clean checkout is waiting on the file the
+ bake has not written yet. Booting first throws on a missing file before the
+ script that would have made it ever runs.
+
+ The root is still set, which is the whole point of the flag: what is skipped is
+ the entry module and nothing else.
+*>
+fn void no_boot_is_the_root_without_the_game() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+
+	three::boot_world(&runtime, "test/fixtures/game", "", boot: false)!!;
+
+	three::RunResult read = runtime.run("return String(globalThis.__game);");
+	defer read.free();
+	test::@check(read.value.contains("undefined"), "main.js did not run (%s)", read.value);
+
+	// And the root did arrive: a module resolves against it, which is what the
+	// bake that runs next needs.
+	three::RunResult booted = runtime.run_module("main.js");
+	defer booted.free();
+	test::@check(booted.ok, "the root is there for whatever runs next (%s)", booted.error);
+}
+
+<*
+ `--module` is an entry point that may import, which `--script` cannot be.
+
+ A script is wrapped in an async function so top-level `await` and `return` work,
+ and an `import` declaration inside a function body is a syntax error before the
+ engine has looked at anything else. So `import` worked in `main.js` and was a
+ `SyntaxError` in the file beside it.
+
+ Twice, because the root is the whole of what a module needs: once inside an
+ assets directory that is already set, and once with none — where the file's own
+ directory becomes it, since a module with a root of nowhere could not import at
+ all.
+*>
+fn void a_module_entry_point_imports_the_way_main_js_does() @test
+{
+	three::JsRuntime rooted;
+	rooted.open(null)!!;
+	defer rooted.close();
+	rooted.set_assets_root("test/fixtures/game");
+
+	three::boot_module(&rooted, "test/fixtures/game/main.js")!!;
+	three::RunResult read = rooted.run("return String(globalThis.__game.grid);");
+	defer read.free();
+	test::@check(read.value.contains("9"), "the module and its imports evaluated (%s)", read.value);
+
+	three::JsRuntime alone;
+	alone.open(null)!!;
+	defer alone.close();
+
+	three::boot_module(&alone, "test/fixtures/game/main.js")!!;
+	three::RunResult again = alone.run("return String(globalThis.__game.grid);");
+	defer again.free();
+	test::@check(again.value.contains("9"), "and its own directory is a root (%s)", again.value);
+}
+
+<*
+ A `--module` outside the assets root is refused rather than silently rooted
+ somewhere else.
+
+ The root is what its imports resolve against, so a module outside it would
+ resolve them against a directory it is not in — which finds nothing, or finds the
+ wrong file, and says neither.
+*>
+fn void a_module_outside_the_root_is_refused() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("test/fixtures/game/parts");
+
+	test::@check(
+		@catch(three::boot_module(&runtime, "test/fixtures/game/main.js")),
+		"a module outside the assets root was accepted"
+	);
+}
+
+<*
  The `three:` space is closed from the outside. The refusal has to name the
  import, because "could not load" would send an author looking for a missing
  file rather than at a door that is shut.

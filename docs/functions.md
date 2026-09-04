@@ -1079,6 +1079,9 @@ into a mesh is three lines and the caller almost always wants to vary the colour
 - `avoid` takes `{ x, z, radius }` circles and `{ path, width }` corridors, so the same polyline that carved
   the river keeps the trees out of it.
 - `maxSlope` is in degrees off flat.
+- `accept` is `(x, y, z, normal)` — four arguments, **not** the record the list comes back as. It is the
+  last test run, after the cheap ones have rejected most candidates, and returning false drops the point.
+  `normal` is `[x, y, z]`.
 - `spacing` is a minimum separation enforced by rejection, not a guarantee: the sampler gives up after a
   bounded number of tries and returns a shorter list rather than spinning, so read `.length`.
 
@@ -1750,6 +1753,18 @@ are lit and `max` is how many there can be.
 
 `add(direction, color, intensity)` fills the next slot and answers with it, and also takes
 `add({ direction, color, intensity })`; it throws once four are lit rather than dropping the fifth.
+
+`add({ position, range, color, intensity })` is the other kind: a point light standing at `position` and
+reaching `range` metres, which is a campfire, a torch, a lamp. `range` defaults to 10 and naming both a
+`position` and a `direction` throws, because they are one field and a light is one or the other. On a light
+you already have, `light.position` and `light.range` are the same switch — writing either makes it a point
+light, and `light.range = 0` makes it directional again.
+
+The falloff is inverse-square with a window that brings it to zero at `range`, so **`intensity` on a point
+light is its brightness one metre away**: to read like a sun of 1 at three metres it wants about 9.
+
+`three.lights[0]` is the sun the shadow map is fitted around and is a direction — setting a position on it
+throws rather than silently aiming the shadow pass somewhere nobody asked for.
 
 `remove(i)` or `remove(light)` takes one out and closes the gap, exactly as `Array.splice` does, so an index
 held across a remove names a different light. Light zero cannot be removed — it is the one the shadow map is

@@ -591,21 +591,36 @@ ignored.
 
 ## lights
 
-Up to four directional lights, and none of them is an Object3D. `three.lights` is the list;
+Up to four lights, and none of them is an Object3D. `three.lights` is the list;
 `three.lights[0] === three.light` is the sun, the only one that casts a shadow, which is why the shadow
 settings hang off it.
 
-Each has `direction` (a world-space surface-to-light vector, live: `three.light.direction.y = -1` writes
-through), `color` (white by default) and `intensity` (1 by default, multiplying the colour, so it is how a
-light goes brighter than white).
+Each has `color` (white by default) and `intensity` (1 by default, multiplying the colour, so it is how a
+light goes brighter than white), and is a *direction* or a *place*:
+
+- `direction` — a world-space surface-to-light vector, live: `three.light.direction.y = -1` writes through.
+- `position` and `range` — a point light, where `range` is how far it reaches in metres. `range = 0` is
+  what makes a light directional again, so the two kinds are one field and not a mode beside one.
+
+```js
+three.lights.add({ position: [0, 1.5, 0], range: 8, color: 0xffaa44, intensity: 6 });  // a campfire
+```
+
+A point light falls off with the inverse square of the distance, windowed so it reaches exactly zero at
+`range`. So **`intensity` on a point light is its brightness one metre away**: a lamp that should read like
+a sun of 1 at three metres wants about 9. The window is what lets a light end — a pure inverse square never
+reaches zero, so every light would contribute a little to every pixel.
+
+`three.lights[0]` is a direction and refuses to be anything else: it is the light the shadow map is fitted
+around, and a fit takes a heading. A point light goes in one of the other three slots.
 
 `three.lights.add([1, 0, 0], 0x4060ff, 0.5)` fills the next slot and answers with it;
 `three.lights.remove(i)` closes the gap. Light 0 cannot be removed — set its intensity to 0. Adding a fifth
 throws.
 
-Not `scene.add(new DirectionalLight(...))`: a light here has no position, nothing can be parented to it and
-`scene.remove` does not reach it. A direction is not normalized, so it reads back as you wrote it, and a
-zero one throws rather than turning every shaded pixel into a NaN.
+Not `scene.add(new DirectionalLight(...))`: nothing can be parented to a light and `scene.remove` does not
+reach it. A direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than
+turning every shaded pixel into a NaN.
 
 ## ambient
 
@@ -630,6 +645,27 @@ There is a specular term and it is off on every material until you ask.
 
 In a ShaderMaterial body, `standard(s)` is the whole built-in shading, `specular(s)` is the highlight alone
 and `lambert(s.normal)` is the diffuse alone — a body written against `lambert` is matte and stays matte.
+A body with maps of its own hands the numbers straight in:
+`standard(s, albedo, normal, roughness, metalness, ao)` is a packed ORM in the order it packs them, and
+the occlusion darkens the ambient floor and the environment reflection and never the lights.
+
+## emissive-is-not-a-light
+
+`material.emissive` is what a surface gives off regardless of any light, and `material.emissiveIntensity`
+is how strongly — 1 by default, and not clamped, so it is how something goes brighter than white.
+
+```js
+const rune = new three.MeshLambertMaterial({ emissive: 0xff6600, emissiveIntensity: 2 });
+```
+
+It is added after the shading and reached by nothing in it: not the occlusion, not the shadow, not the
+metalness. A lamp's glass is bright in a crevice, in shadow and on a metal, and a black surface can glow.
+`material.emissiveMap` is where it glows — glTF's `emissiveTexture`, multiplying the factor, and the one
+map on the built-in material that is a picture and so loads sRGB rather than linear.
+
+**It lights nothing.** There is no bounce here and a material is not a light, so a glowing mesh is bright
+and the floor beside it is not. A lamp is a glowing mesh and `three.lights.add({ position, range })` in the
+same place — the two together, and neither on its own.
 
 ## shadows-off-by-default
 
@@ -721,6 +757,27 @@ the file gave it.
 ShaderMaterial takes a fragment function, not a whole program: you write `float3 shade(Surface s)` and three.c3
 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js's
 `{ value }` wrappers.
+
+## uniform-names-are-not-shadowed
+
+A local with the same name as a uniform is an error, not a shadow. `{ uniforms: { gain: 0.5 } }` beside
+`float gain = 0.25;` in the body is
+
+```
+error[E30011]: left of '=' is not an l-value
+```
+
+and a helper whose *parameter* is called `gain` is `error[E20001]: unexpected token`. Both are true of a
+ShaderMaterial body and of a post body, and in both the line and column point at your own source.
+
+The reason is how a uniform gets its name: it is a `#define`, so the identifier in your body **is** the push
+field textually — which is what lets `plan.md`'s one-line examples read the way they do, with no push block
+for an agent to learn about. `float gain = 0.25` therefore expands to `float (push.gain) = 0.25`, which is
+the message. A shadow, which is what every other language would give you, would need the uniforms to be real
+declarations in an enclosing scope.
+
+Rename the local. Reserved names are refused up front with a sentence saying so; this is the other half —
+a name that is yours to use, used twice.
 
 ## post-is-a-chain
 

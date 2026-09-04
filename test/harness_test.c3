@@ -66,6 +66,37 @@ fn void the_camera_override_is_carried_verbatim() @test
 }
 
 <*
+ The two flags a two-stage pipeline needs, and what each of them means.
+
+ `--assets` used to be two jobs a script could not separate: the directory a game
+ boots from, and the root that makes its paths resolve. A baker that writes the
+ file the game loads has to run under that root and *before* that boot, and on a
+ clean checkout the boot throws on a file that is not there yet — so the baker had
+ to be rooted at a subdirectory with no `main.js` in it, which works and reads as
+ a trick.
+
+ `--no-boot` is the root without the game. `--module` is the other half: a file
+ evaluated as an ES module, so `import` works in it, which the async wrapper
+ `--script` puts around a file makes a syntax error.
+*>
+fn void a_bake_can_run_under_the_game_root_without_booting_it() @test
+{
+	String[*] staged = { "three", "--assets", "./game", "--no-boot", "--module", "./game/bake.js" };
+	three::Options opts = three::parse_args(staged[..])!!;
+	test::@check(opts.assets == "./game", "the root is the game's, got '%s'", opts.assets);
+	test::@check(opts.no_boot, "and the game is not booted");
+	test::@check(opts.entry_module == "./game/bake.js", "the module is the baker, got '%s'", opts.entry_module);
+	test::@check(opts.script.len == 0, "which is not the same flag as --script");
+
+	// The default, and the one that must not move: a run that says nothing boots
+	// what it always booted.
+	String[*] plain = { "three", "--assets", "./game" };
+	three::Options was = three::parse_args(plain[..])!!;
+	test::@check(!was.no_boot, "--assets alone still boots main.js");
+	test::@check(was.entry_module.len == 0, "and evaluates no module of its own");
+}
+
+<*
  A bare word on the command line is refused, and named in the refusal.
 
  **The regression this exists for is a model on screen that no script can

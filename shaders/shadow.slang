@@ -163,6 +163,14 @@ struct Draw
     // record; a script that wants a thousand variations wants a different
     // feature.
     float4 uv_variants[8];
+    // What this surface gives off regardless of any light — `material.emissive`
+    // times `material.emissiveIntensity`, linear rgb, and w unused.
+    //
+    // **Added after the shading rather than folded into the albedo**, which is the
+    // whole of what an emissive is: a lamp's glass is bright where nothing is
+    // lighting it, and a black surface can glow. Zero on every material nobody set
+    // one on, which is the value the record already holds.
+    float4 emissive;
 };
 
 // The mesh contract exactly, and nothing appended: there are no material

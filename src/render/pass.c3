@@ -1267,6 +1267,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			// the material list would be a pointer into a list that grows.
 			.uv_variant_count = material.uv_variant_count,
 			.uv_variants = material.uv_variants,
+			.emissive = material.emissive_value(),
 		};
 
 		self.draw_indices.push(recorded);
@@ -2499,6 +2500,49 @@ fn void? MeshPass.set_material_surface(&self, uint index, float roughness, float
 }
 
 <*
+ `material.emissive` and `material.emissiveIntensity` — what this surface gives
+ off regardless of any light.
+
+ One verb for the four numbers, for `set_material_surface`'s reason: they are one
+ `float4` in the draw record, and the colour and the strength are never set apart
+ from each other in practice — a lamp is a colour and how bright it is.
+
+ Free to change between frames. Nothing is rebuilt and nothing recompiled, so a
+ pulsing rune is a write per frame and stays in the draw call it was in.
+
+ The prelude has already clamped the colour; the strength is deliberately not
+ clamped, because that is how a light source goes brighter than white.
+
+ @return ? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
+*>
+fn void? MeshPass.set_material_emissive(&self, uint index, float r, float g, float b, float intensity)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	Material* material = &self.materials[index];
+	material.emissive = { r, g, b };
+	material.one_minus_emissive_intensity = 1.0f - intensity;
+}
+
+<*
+ What those four read back as: the colour as it was written, and the strength
+ beside it rather than folded in.
+
+ A material that does not exist answers black at strength 1, which is
+ `material_surface`'s rule — a getter answers what a material nobody gave
+ anything would answer.
+*>
+fn float[4] MeshPass.material_emissive(&self, uint index)
+{
+	if (index >= self.materials.len()) return { 0, 0, 0, 1 };
+
+	Material* material = &self.materials[index];
+	return {
+		material.emissive[0], material.emissive[1], material.emissive[2], material.emissive_intensity()
+	};
+}
+
+<*
  `material.stochastic` — sample this material's maps so they stop repeating.
 
  A bool and not a strength, because there is nothing continuous to turn down:
@@ -2788,7 +2832,7 @@ fn bool MeshPass.shades_built_in(&self, Material* material)
 }
 
 <*
- Which of the built-in material's three maps this bucket carries, as the bits
+ Which of the built-in material's four maps this bucket carries, as the bits
  `shaders/mesh.slang` samples them under.
 
  Zero for anything a body shades: a `ShaderMaterial`'s own samplers sit at the
@@ -2812,6 +2856,7 @@ fn uint MeshPass.map_flags(&self, Material* material)
 		flags |= FLAG_HAS_METALNESS_ROUGHNESS_MAP;
 	}
 	if (material.textures.at(OCCLUSION_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_OCCLUSION_MAP;
+	if (material.textures.at(EMISSIVE_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_EMISSIVE_MAP;
 	return flags;
 }
 

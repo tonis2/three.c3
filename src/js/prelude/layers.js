@@ -108,7 +108,7 @@ const LAYER_KEYS = new Set([
 	'name', 'map', 'normal', 'emissive', 'emissiveFactor', 'tint', 'opacity',
 	'blend', 'mask', 'maskSource', 'maskTexture', 'invert', 'uvScale', 'uvOffset',
 	'enabled', 'animated', 'roughness', 'metalness', 'metallicRoughness',
-	'height', 'bump',
+	'height', 'bump', 'uvWindow',
 ]);
 
 // Where a layer's weight comes from, in the extension's own two words.
@@ -333,6 +333,13 @@ function readLayer(raw, at) {
 	if (!Array.isArray(uvOffset) || uvOffset.length !== 2) {
 		throw new TypeError(`${label}: uvOffset wants [u, v]`);
 	}
+	// Whether the scale and offset above are a window into the image or a tiling
+	// of it. See `layerUv` for what changes and why the two cannot both be the
+	// same pair of numbers.
+	if (raw.uvWindow !== undefined && typeof raw.uvWindow !== 'boolean') {
+		throw new TypeError(`${label}: uvWindow wants true or false, not ${String(raw.uvWindow)}`);
+	}
+	const uvWindow = raw.uvWindow === true;
 
 	const tint = raw.tint ?? [1, 1, 1];
 	if (!Array.isArray(tint) || tint.length !== 3) {
@@ -394,6 +401,7 @@ function readLayer(raw, at) {
 		invert: raw.invert === true,
 		uvScale,
 		uvOffset,
+		uvWindow,
 		enabled: raw.enabled !== false,
 		animated: raw.animated === true,
 		// Filled in by the emitter, which is the only thing that decides what a
@@ -417,13 +425,42 @@ function readLayer(raw, at) {
 // a specific surface and tiling it would repeat the whole terrain; the detail
 // maps are the things that want to repeat, which is the entire reason the two
 // numbers are separate.
+//
+// **`uvWindow: true` turns the same two numbers into a window.** Without it a
+// scale and an offset are one affine map, so tiling and windowing are the same
+// axis and cannot both happen: `uvScale: 4` beside `uvOffset: [0, 0.5]` runs the
+// uv from 0.5 to 4.5 and walks straight out of whatever band the offset put it
+// in. With it the surface uv wraps to one tile first, so the scale is a band size
+// and the offset is where that band starts — a terrain's four materials come out
+// of one sheet, and the tiling is `material.repeat`, which is applied before the
+// body runs and is therefore inside the `frac`.
 function layerUv(layer, surface) {
 	const [su, sv] = layer.uvScale;
 	const [ou, ov] = layer.uvOffset;
-	let uv = surface;
+	let uv = layer.uvWindow ? `frac(${surface})` : surface;
 	if (su !== 1 || sv !== 1) uv = `${uv} * float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`;
 	if (ou !== 0 || ov !== 0) uv = `${uv} + float2(${num(ou, 'uvOffset[0]')}, ${num(ov, 'uvOffset[1]')})`;
 	return uv;
+}
+
+// The screen-space gradients of a windowed layer's uv, *unwrapped* — the ones
+// the surface actually has, with no `frac` in them.
+//
+// **This is the whole of whether a window works**, and it is `stochastic_sample`'s
+// rule for the same reason: `frac` jumps by a whole tile at every boundary, so the
+// derivatives the hardware computes for itself are enormous exactly along the
+// seams, which picks the smallest mip there and draws a blurred line around every
+// tile. The gradients below are the wrap's own — the band's scale times the
+// surface's — so every tap on a windowed layer is a `SampleGrad` with these.
+function windowGradients(layer, surface, i) {
+	const [su, sv] = layer.uvScale;
+	const scale = su !== 1 || sv !== 1
+		? ` * float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`
+		: '';
+	return [
+		`    float2 gx${i} = ddx(${surface})${scale};`,
+		`    float2 gy${i} = ddy(${surface})${scale};`,
+	];
 }
 
 // The whole material, as Slang.
@@ -485,13 +522,38 @@ function emit(base, layers) {
 	// this does: the pixel asks what is under it and the answer says where to
 	// look instead.
 	let surface = 's.uv';
+	// Where a mask is sampled, and it is **not** `surface`. A mask describes one
+	// specific surface — where the mud is on this terrain — while every other image
+	// in a stack is a pattern laid across it, so a stack whose base map wants
+	// `material.repeat = [12, 12]` would otherwise get twelve copies of its splat
+	// map with it. `s.mesh_uv` is the mesh's own uv with the material's transform
+	// left off, which is what a mask has always meant.
+	let mask_uv = 's.mesh_uv';
 	let albedo = 's.albedo';
+	// Whether anything reads a mask, so that the second parallax below is emitted
+	// only for a stack that has one.
+	const anyMask = shared || layers.some(l => l.maskTexture !== null);
 	if (base.height !== null && base.depth !== 0) {
 		textures.base_height_map = base.height;
 		body.push(
-			`    float2 puv = parallax_uv(s, s.uv, base_height_map.Sample(s.uv).r, `
+			`    float bh = base_height_map.Sample(s.uv).r;`
+		);
+		body.push(
+			`    float2 puv = parallax_uv(s, s.uv, bh, `
 			+ `${num(base.depth, 'LayeredMaterial: bump')});`
 		);
+		// The same relief, solved in the mesh's own uv. One height and one depth,
+		// so it is the same physical displacement — `parallax_uv` works the world
+		// size of a uv unit out from the derivatives of whichever uv it is handed,
+		// so the two answers agree about where the surface moved to and disagree
+		// only about which coordinates say so.
+		if (anyMask) {
+			body.push(
+				`    float2 muv = parallax_uv(s, s.mesh_uv, bh, `
+				+ `${num(base.depth, 'LayeredMaterial: bump')});`
+			);
+			mask_uv = 'muv';
+		}
 		surface = 'puv';
 		// `s.albedo` was sampled at `s.uv` by the template before this body ran, so
 		// the base colour is the one thing parallax cannot reach by moving a uv —
@@ -524,11 +586,17 @@ function emit(base, layers) {
 			body.push('    float3 nt = float3(0.5, 0.5, 1.0);');
 		}
 	}
-	if (shared) body.push(`    float4 mask = layer_mask.Sample(${surface});`);
+	if (shared) body.push(`    float4 mask = layer_mask.Sample(${mask_uv});`);
 
 	for (const layer of layers) {
 		const i = layer.at;
 		let uv = layerUv(layer, surface);
+		// One tap of one of this layer's images. A windowed layer samples with the
+		// unwrapped gradients and every other layer samples the ordinary way, so
+		// nothing already written changes shape.
+		const tap = layer.uvWindow
+			? (name, at) => `${name}.SampleGrad(${at}, gx${i}, gy${i})`
+			: (name, at) => `${name}.Sample(${at})`;
 		body.push('');
 		body.push(`    // ${layer.label}${layer.blend === 'mix' ? '' : `, ${layer.blend}`}`);
 
@@ -562,6 +630,11 @@ function emit(base, layers) {
 			continue;
 		}
 
+		// The gradients a window samples with, declared once for the layer and
+		// before anything reads them. Nothing is emitted for a layer that has no
+		// window, which is every layer written before this existed.
+		if (layer.uvWindow) body.push(...windowGradients(layer, surface, i));
+
 		// The weight. A layer with no mask at all is visible everywhere, which is
 		// the extension's own default and is what a full-coverage tint or a
 		// straight overlay wants.
@@ -575,7 +648,7 @@ function emit(base, layers) {
 			const name = `layer${i}_mask`;
 			textures[name] = layer.maskTexture;
 			layer.samplers.mask = name;
-			w = `${name}.Sample(s.uv).${layer.channel}`;
+			w = `${name}.Sample(${mask_uv}).${layer.channel}`;
 		} else if (layer.channel !== null) {
 			w = `mask.${layer.channel}`;
 		}
@@ -604,9 +677,15 @@ function emit(base, layers) {
 			textures[name] = layer.height;
 			layer.samplers.height = name;
 			body.push(`    float2 uv${i} = ${uv};`);
+			// The windowed form takes the unwrapped gradients too: `parallax_uv`
+			// works out the world size of a uv unit from the derivatives, and a
+			// `frac` seam would tell it a texel is the width of the screen.
 			body.push(
-				`    uv${i} = parallax_uv(s, uv${i}, ${name}.Sample(uv${i}).r, `
-				+ `${num(layer.depth, `${layer.label}: bump`)});`
+				layer.uvWindow
+					? `    uv${i} = parallax_uv(s, uv${i}, gx${i}, gy${i}, `
+						+ `${tap(name, `uv${i}`)}.r, ${num(layer.depth, `${layer.label}: bump`)});`
+					: `    uv${i} = parallax_uv(s, uv${i}, ${name}.Sample(uv${i}).r, `
+						+ `${num(layer.depth, `${layer.label}: bump`)});`
 			);
 			uv = `uv${i}`;
 		}
@@ -624,7 +703,7 @@ function emit(base, layers) {
 				const name = `layer${i}_map`;
 				textures[name] = layer.map;
 				layer.samplers.map = name;
-				parts.push(`${name}.Sample(${uv}).rgb`);
+				parts.push(`${tap(name, uv)}.rgb`);
 			}
 			body.push(`    float3 b${i} = ${parts.join(' * ')};`);
 			body.push(`    c = lerp(c, ${BLEND[layer.blend](`c`, `b${i}`)}, w${i});`);
@@ -638,7 +717,7 @@ function emit(base, layers) {
 			// averaged after decoding drift off the unit sphere and have to be
 			// renormalized per layer; mixing what was sampled costs one lerp and
 			// leaves exactly one decode at the bottom.
-			body.push(`    nt = lerp(nt, ${name}.Sample(${uv}).rgb, w${i});`);
+			body.push(`    nt = lerp(nt, ${tap(name, uv)}.rgb, w${i});`);
 		}
 		if (layer.emissive !== null || layer.emissiveFactor.some(c => c !== 0)) {
 			const emissive = [];
@@ -649,7 +728,7 @@ function emit(base, layers) {
 				const name = `layer${i}_emissive`;
 				textures[name] = layer.emissive;
 				layer.samplers.emissive = name;
-				emissive.push(`${name}.Sample(${uv}).rgb`);
+				emissive.push(`${tap(name, uv)}.rgb`);
 			}
 			body.push(`    e = lerp(e, ${emissive.join(' * ')}, w${i});`);
 		}
@@ -669,7 +748,7 @@ function emit(base, layers) {
 				layer.samplers.metallicRoughness = name;
 				// glTF's packing, unchanged: green is roughness and blue is metalness,
 				// and red is the occlusion channel this renderer has no term for.
-				body.push(`    float2 mr${i} = ${name}.Sample(${uv}).gb;`);
+				body.push(`    float2 mr${i} = ${tap(name, uv)}.gb;`);
 			}
 			const pair = [
 				['rough', 'roughness', layer.roughness, `mr${i}.x`],

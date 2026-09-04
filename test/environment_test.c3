@@ -746,6 +746,393 @@ fn void the_ambient_floor_is_what_a_face_turned_away_gets() @test
 }
 
 <*
+ An occlusion darkens the ambient floor and leaves the direct light alone.
+
+ `standard(s, albedo, normal, ao)` is the fourth parameter a body reading a packed
+ ORM map needs. What it must **not** be is a multiply on the colour, which is what
+ a body had to write before it existed: that darkens the sun as well, and reads as
+ dirt painted on the lit side of everything.
+
+ Two frames per half, one plane, and the two halves separate the two terms. With
+ the light pointing away and the ambient floor at 1 the occlusion is the only
+ thing deciding anything, so it has to darken; with the light on the plane and no
+ ambient at all it has to change nothing, and exactly nothing — the arithmetic is
+ identical, so a byte of difference is a term the occlusion reached that it should
+ not have.
+*>
+fn void an_occlusion_darkens_the_ambient_and_not_the_sun() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.shaded = (ao) => new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return standard(s, s.albedo, s.normal, " + ao + "); }",
+			});
+			globalThis.scene = new three.Scene();
+			globalThis.plane = new three.Mesh(new three.PlaneGeometry(2, 2), shaded("1.0"));
+			scene.add(plane);
+			three.camera.frameAll();
+			// The floor is all there is: the light points away from the plane.
+			three.light.set([0, 0, -1], 1);
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image open = renderer.capture()!!;
+		defer open.free();
+		char[3] lit = centre_pixel(&open);
+
+		three::RunResult occluded = run.run(`
+			plane.material = shaded("0.25");
+			three.render(scene);
+			return 1;
+		`);
+		defer occluded.free();
+		test::@check(occluded.ok, "the occluded script succeeded: %s", occluded.error);
+
+		image::Image shut = renderer.capture()!!;
+		defer shut.free();
+		char[3] dark = centre_pixel(&shut);
+
+		test::@check(
+			(int)dark[0] < (int)lit[0] - 30,
+			"a quarter of the sky is a darker floor — %d,%d,%d against %d,%d,%d",
+			(int)dark[0], (int)dark[1], (int)dark[2], (int)lit[0], (int)lit[1], (int)lit[2]
+		);
+
+		three::RunResult sun = run.run(`
+			plane.material = shaded("1.0");
+			three.light.set([0, 0, 1], 0);
+			three.render(scene);
+			return 1;
+		`);
+		defer sun.free();
+		test::@check(sun.ok, "the sunlit script succeeded: %s", sun.error);
+
+		image::Image full = renderer.capture()!!;
+		defer full.free();
+		char[3] direct = centre_pixel(&full);
+
+		three::RunResult still = run.run(`
+			plane.material = shaded("0.25");
+			three.render(scene);
+			return 1;
+		`);
+		defer still.free();
+		test::@check(still.ok, "the second sunlit script succeeded: %s", still.error);
+
+		image::Image again = renderer.capture()!!;
+		defer again.free();
+		char[3] unchanged = centre_pixel(&again);
+
+		test::@check(
+			direct[0] == unchanged[0] && direct[1] == unchanged[1] && direct[2] == unchanged[2],
+			"and with no ambient at all it changes nothing — %d,%d,%d against %d,%d,%d",
+			(int)unchanged[0], (int)unchanged[1], (int)unchanged[2],
+			(int)direct[0], (int)direct[1], (int)direct[2]
+		);
+	};
+}
+
+<*
+ A light can be a place, and it lights what is near it and nothing far away.
+
+ The largest visible gap this renderer had: four lights, all of them directions,
+ so a campfire could not light the ground it stands on. The pool under one was an
+ additive quad and the warm light on the props around it was a global directional
+ that tinted the whole level once it was pushed past about half intensity.
+
+ Three frames of one plane, lit by one lamp two metres above the middle of it and
+ by nothing else — the sun is off and the floor is zero, so the lamp is the only
+ thing deciding any pixel.
+
+ - It lights the ground under it. A directional light cannot be told from a point
+   one on a single flat surface by brightness alone, which is why the second frame
+   is here rather than a comparison against the sun.
+ - **It ends at its range.** With the range under the distance to the surface the
+   window is exactly zero, so the plane goes black — a light that merely got dim
+   would pass a threshold check and would still be reaching every pixel in the
+   level.
+ - It falls off with distance. The middle of the pool is brighter than the far
+   corner of the same plane, which is the inverse square and is what a directional
+   light has no way to produce.
+*>
+fn void a_point_light_lights_what_is_near_it() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(12, 12));
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+			three.camera.orbit(0, 70);
+			three.camera.frameAll();
+			// Nothing but the lamp: the sun is off and there is no floor.
+			three.light.set([0, 1, 0], 0);
+			three.light.intensity = 0;
+			globalThis.lamp = three.lights.add({ position: [0, 2, 0], range: 8, intensity: 10 });
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image pool = renderer.capture()!!;
+		defer pool.free();
+		char[3] under = centre_pixel(&pool);
+		// A little in from the top left, which is the far side of the plane.
+		sz bpp = pool.bytes_per_pixel();
+		sz at  = ((sz)10 * (sz)pool.width + (sz)10) * bpp;
+		char far_side = pool.pixels[at];
+
+		test::@check(
+			(int)under[0] > 60,
+			"the ground under the lamp is lit — %d,%d,%d",
+			(int)under[0], (int)under[1], (int)under[2]
+		);
+		test::@check(
+			(int)far_side < (int)under[0],
+			"and the far side of the same plane is dimmer — %d against %d",
+			(int)far_side, (int)under[0]
+		);
+
+		three::RunResult shortened = run.run(`
+			lamp.range = 0.5;
+			three.render(scene);
+			return 1;
+		`);
+		defer shortened.free();
+		test::@check(shortened.ok, "the shortened script succeeded: %s", shortened.error);
+
+		image::Image ended = renderer.capture()!!;
+		defer ended.free();
+		char[3] dark = centre_pixel(&ended);
+
+		test::@check(
+			(int)dark[0] < 8,
+			"a range of half a metre does not reach a surface two metres away — %d,%d,%d",
+			(int)dark[0], (int)dark[1], (int)dark[2]
+		);
+	};
+}
+
+<*
+ The range is the switch between the two kinds of light, and it round trips.
+
+ One field on the wire — `Light.direction.w` — so this is not a mode beside a
+ position: writing a position gives a light a range if it had none, writing a
+ direction takes it away, and 0 is what directional means.
+*>
+fn void a_light_is_a_direction_or_a_place_and_says_which() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const lamp = three.lights.add({ position: [1, 2, 3], range: 7, intensity: 2 });
+			const was = [lamp.position.x, lamp.position.y, lamp.position.z, lamp.range];
+
+			// A position on a light that had none takes a default range rather
+			// than leaving it reaching nowhere.
+			const second = three.lights.add([0, 1, 0]);
+			const before = second.range;
+			second.position = [4, 5, 6];
+			const after = second.range;
+
+			// And a direction takes it back off.
+			second.direction = [0, 1, 0];
+
+			return [was.join(","), before, after, second.range].join(" | ");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value.contains("1,2,3,7"),
+			"a point light reads back where it stands and how far it reaches: %s",
+			result.value
+		);
+		test::@check(result.value.contains("| 0 | 10 | 0"), "a position gives a light a range and a direction takes it away: %s", result.value);
+	};
+}
+
+<*
+ Light zero is a direction and refuses to be anything else.
+
+ It is the light `ShadowMap.fit` builds its box along, and a position there is
+ three numbers the fit would read as a heading — a shadow map aimed somewhere
+ nobody asked for, with nothing anywhere saying so. Refused by name rather than by
+ quietly turning the shadow pass off.
+*>
+fn void the_sun_refuses_to_become_a_point_light() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			try {
+				three.light.position = [0, 1, 0];
+				return "no error";
+			} catch (e) { return String(e.message); }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value.contains("three.lights[0]") && result.value.contains("direction"),
+			"the refusal says which slot and why: %s",
+			result.value
+		);
+	};
+}
+
+<*
+ A light is a direction or a place, and a description naming both is refused.
+*>
+fn void a_light_described_as_both_is_refused() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			try {
+				three.lights.add({ direction: [0, 1, 0], position: [1, 1, 1] });
+				return "no error";
+			} catch (e) { return String(e.message); }
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(
+			result.value.contains("not both"),
+			"the refusal names the contradiction: %s",
+			result.value
+		);
+	};
+}
+
+<*
+ An emissive is added after the shading and reached by nothing in it.
+
+ The claim, in one frame: a plane turned away from the only light, with the
+ ambient floor at zero, is black — and the same plane with an emissive on it is
+ the colour it was given, exactly. Not approximately: `material.emissive` is sRGB
+ like every colour stated in a script, the shading is linear, and the encode at
+ the end is what puts the byte back — so an unlit surface that glows 0xff6600
+ screenshots as 0xff6600. A decode missing at either end shows up here as a
+ different orange.
+
+ The second half is the one that makes it an emissive rather than a bright albedo:
+ the intensity multiplies it and is not clamped, so a colour already at the top of
+ its range still goes brighter.
+*>
+fn void an_emissive_is_added_after_the_light() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			globalThis.scene = new three.Scene();
+			globalThis.material = new three.MeshLambertMaterial();
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), material));
+			three.camera.frameAll();
+			// Turned away from the only light, with no floor: nothing is lit.
+			three.light.set([0, 0, -1], 0);
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image unlit = renderer.capture()!!;
+		defer unlit.free();
+		char[3] dark = centre_pixel(&unlit);
+		test::@check(
+			(int)dark[0] < 4 && (int)dark[1] < 4 && (int)dark[2] < 4,
+			"an unlit plane is black — %d,%d,%d",
+			(int)dark[0], (int)dark[1], (int)dark[2]
+		);
+
+		three::RunResult glowing = run.run(`
+			material.emissive = 0xff6600;
+			three.render(scene);
+			return material.emissive.join(",");
+		`);
+		defer glowing.free();
+		test::@check(glowing.ok, "the glowing script succeeded: %s", glowing.error);
+
+		image::Image lit = renderer.capture()!!;
+		defer lit.free();
+		char[3] glow = centre_pixel(&lit);
+		test::@check(
+			(int)glow[0] == 255 && (int)glow[1] == 102 && (int)glow[2] == 0,
+			"and it comes back as the colour it was given — expected 255,102,0, got %d,%d,%d",
+			(int)glow[0], (int)glow[1], (int)glow[2]
+		);
+
+		three::RunResult brighter = run.run(`
+			material.emissive = 0x404040;
+			material.emissiveIntensity = 4;
+			three.render(scene);
+			return String(material.emissiveIntensity);
+		`);
+		defer brighter.free();
+		test::@check(brighter.ok, "the brighter script succeeded: %s", brighter.error);
+		test::@check(brighter.value.contains("4"), "the intensity reads back (%s)", brighter.value);
+
+		image::Image strong = renderer.capture()!!;
+		defer strong.free();
+		char[3] up = centre_pixel(&strong);
+		// 0x40 is 0.0513 linear; four of those is 0.205, which encodes to about 125.
+		test::@check(
+			(int)up[0] > 100 && (int)up[0] < 150,
+			"and the intensity multiplies it — expected about 125, got %d,%d,%d",
+			(int)up[0], (int)up[1], (int)up[2]
+		);
+	};
+}
+
+<*
+ An emissive lights nothing, which is the sentence the docs have to keep.
+
+ A glowing surface is bright and the floor beside it is not. There is no bounce
+ in this renderer and a material is not a light, so a lamp is a glowing mesh and a
+ point light standing in the same place — the two together, and neither on its
+ own.
+*>
+fn void an_emissive_surface_does_not_light_the_one_beside_it() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(8, 8));
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+			const lamp = new three.Mesh(
+				new three.BoxGeometry(0.2, 0.2, 0.2),
+				new three.MeshLambertMaterial({ emissive: 0xffffff, emissiveIntensity: 4 }),
+			);
+			lamp.position.set(0, 3, 0);
+			scene.add(lamp);
+			three.camera.orbit(0, 70);
+			three.camera.frameAll();
+			three.light.set([0, 1, 0], 0);
+			three.light.intensity = 0;
+			three.render(scene);
+			return 1;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		char[3] ground = centre_pixel(&shot);
+		test::@check(
+			(int)ground[0] < 6,
+			"the ground under a glowing box is unlit — %d,%d,%d",
+			(int)ground[0], (int)ground[1], (int)ground[2]
+		);
+	};
+}
+
+<*
  The direction is not normalized on the way in, and the vector it hands back is
  live.
 

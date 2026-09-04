@@ -493,6 +493,11 @@ export function scatter(options = {}) {
 	// degrees and the test is one compare. 90 accepts anything.
 	const maxSlope = Math.cos((+(options.maxSlope ?? 90) * Math.PI) / 180);
 	const spacing = Math.max(0, +(options.spacing ?? 0));
+	// `(x, y, z, normal)` — four arguments, and deliberately not the `{ x, y, z,
+	// normal, index }` record this function *answers* with. Passing the record
+	// back is the obvious guess and would make every callback that destructured
+	// one silently reject everything, so the shape is written down here and in
+	// `functions.md`.
 	const accept = typeof options.accept === 'function' ? options.accept : null;
 
 	// Keep-out: circles as { x, z, radius }, and paths as { path, width }.

@@ -58,47 +58,19 @@ float3 data(float3 c)
     return float3(to_linear(c.r), to_linear(c.g), to_linear(c.b));
 }
 
-float hash21(float2 p)
-{
-    p = frac(p * float2(127.1, 311.7));
-    p += dot(p, p + 34.23);
-    return frac(p.x * p.y);
-}
-
 float wrap(float x, float period)
 {
     return x - floor(x / period) * period;
 }
 
-// Value noise that repeats in x, because a strip has to tile along u and a
-// lattice that does not wrap puts a visible seam at the end of every wall.
-float pnoise(float2 p, float period)
+// The noise is shaders/surface.slang's and is already in scope: hash21,
+// noise2(p, period) and fbm2(p, period, octaves). A period of 0 on an axis
+// leaves it alone, which is what a strip wants — it has to tile along u and is
+// one band tall, so only x has a period to wrap at. A lattice that does not wrap
+// puts a visible seam at the end of every wall.
+float2 strip_period(float period)
 {
-    float2 i = floor(p);
-    float2 f = frac(p);
-    float2 w = f * f * (3.0 - 2.0 * f);
-    float x0 = wrap(i.x, period);
-    float x1 = wrap(i.x + 1.0, period);
-    float a = hash21(float2(x0, i.y));
-    float b = hash21(float2(x1, i.y));
-    float c = hash21(float2(x0, i.y + 1.0));
-    float d = hash21(float2(x1, i.y + 1.0));
-    return lerp(lerp(a, b, w.x), lerp(c, d, w.x), w.y);
-}
-
-float pfbm(float2 p, float period, int octaves)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    float per = period;
-    for (int i = 0; i < octaves; i++)
-    {
-        sum += amp * pnoise(p, per);
-        p *= 2.0;
-        per *= 2.0;
-        amp *= 0.5;
-    }
-    return sum;
+    return float2(period, 0.0);
 }
 
 // What one texel of the sheet is: a height, a colour, and the two numbers the
@@ -122,7 +94,7 @@ Trim planks(float2 q)
     float board = floor(y);
     float by = frac(y);
     float gap = smoothstep(0.0, 0.05, by) * smoothstep(0.0, 0.05, 1.0 - by);
-    float grain = pfbm(float2(q.x * 6.0, board * 17.0 + by * 3.0), 48.0, 4);
+    float grain = fbm2(float2(q.x * 6.0, board * 17.0 + by * 3.0), strip_period(48.0), 4);
     float rings = frac(grain * 7.0);
     float tone = hash21(float2(board, 3.0));
 
@@ -145,7 +117,7 @@ Trim rivets(float2 q)
     float d = length(g);
     float dome = sqrt(saturate(1.0 - saturate(d / 0.34) * saturate(d / 0.34)));
     float edge = smoothstep(0.0, 0.09, q.y) * smoothstep(0.0, 0.09, 1.0 - q.y);
-    float scuff = pfbm(float2(q.x * 20.0, q.y * 5.0), 160.0, 3);
+    float scuff = fbm2(float2(q.x * 20.0, q.y * 5.0), strip_period(160.0), 3);
 
     Trim o;
     o.h = 0.35 * edge + dome * 0.45 - scuff * 0.05;
@@ -177,7 +149,7 @@ Trim brick(float2 q)
                * smoothstep(0.0, mortar_y, ry) * smoothstep(0.0, mortar_y, 1.0 - ry);
 
     float tone = hash21(float2(col, course));
-    float grit = pfbm(float2(q.x * 24.0, q.y * 24.0), 192.0, 4);
+    float grit = fbm2(float2(q.x * 24.0, q.y * 24.0), strip_period(192.0), 4);
 
     Trim o;
     o.h = 0.28 + face * 0.55 + (grit - 0.5) * 0.06 * face;
@@ -199,7 +171,7 @@ Trim panel(float2 q)
     float dy = min(q.y, 1.0 - q.y);
     float d = min(dx, dy);
     float bevel = smoothstep(0.05, 0.17, d);
-    float dirt = pfbm(float2(q.x * 12.0, q.y * 12.0), 96.0, 4);
+    float dirt = fbm2(float2(q.x * 12.0, q.y * 12.0), strip_period(96.0), 4);
 
     Trim o;
     o.h = 0.85 - bevel * 0.40;
@@ -219,7 +191,7 @@ Trim molding(float2 q)
     float roll = sqrt(saturate(1.0 - (k * 2.0 - 1.0) * (k * 2.0 - 1.0)));
     float fillet = smoothstep(0.56, 0.64, t) * (1.0 - smoothstep(0.76, 0.84, t));
     float lip = smoothstep(0.86, 0.91, t);
-    float chip = pfbm(float2(q.x * 30.0, q.y * 6.0), 240.0, 3);
+    float chip = fbm2(float2(q.x * 30.0, q.y * 6.0), strip_period(240.0), 3);
 
     Trim o;
     o.h = 0.20 + roll * 0.55 + fillet * 0.22 + lip * 0.22 - chip * 0.06;
@@ -255,9 +227,9 @@ Trim tiles(float2 q)
 // Cast concrete: low-frequency lumps with pits punched out of them.
 Trim concrete(float2 q)
 {
-    float lumps = pfbm(float2(q.x * 8.0, q.y * 8.0), 64.0, 5);
-    float fine = pfbm(float2(q.x * 40.0, q.y * 40.0), 320.0, 3);
-    float pit = smoothstep(0.60, 0.72, pnoise(float2(q.x * 26.0, q.y * 26.0), 208.0));
+    float lumps = fbm2(float2(q.x * 8.0, q.y * 8.0), strip_period(64.0), 5);
+    float fine = fbm2(float2(q.x * 40.0, q.y * 40.0), strip_period(320.0), 3);
+    float pit = smoothstep(0.60, 0.72, noise2(float2(q.x * 26.0, q.y * 26.0), strip_period(208.0)));
 
     Trim o;
     o.h = 0.62 + (lumps - 0.5) * 0.22 + (fine - 0.5) * 0.05 - pit * 0.40;
@@ -275,7 +247,7 @@ Trim gold(float2 q)
     float diamond = abs(g.x) + abs(g.y);
     float boss = 1.0 - smoothstep(0.16, 0.24, diamond);
     float rail = smoothstep(0.30, 0.36, abs(g.y)) * (1.0 - smoothstep(0.42, 0.47, abs(g.y)));
-    float wear = pfbm(float2(q.x * 26.0, q.y * 8.0), 208.0, 3);
+    float wear = fbm2(float2(q.x * 26.0, q.y * 8.0), strip_period(208.0), 3);
 
     Trim o;
     o.h = 0.30 + boss * 0.45 + rail * 0.30 - wear * 0.05;
@@ -398,47 +370,15 @@ float3 post(Post p)
 // ---------------------------------------------------------------------------
 
 const CRACK = `
-float hash11(float n)
-{
-    return frac(sin(n * 78.233) * 43758.5453);
-}
-
-float hash21(float2 p)
-{
-    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
-}
-
-float vnoise(float2 p)
-{
-    float2 i = floor(p);
-    float2 f = frac(p);
-    float2 w = f * f * (3.0 - 2.0 * f);
-    return lerp(
-        lerp(hash21(i), hash21(i + float2(1.0, 0.0)), w.x),
-        lerp(hash21(i + float2(0.0, 1.0)), hash21(i + float2(1.0, 1.0)), w.x),
-        w.y
-    );
-}
-
-float fbm(float2 p)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    for (int i = 0; i < 4; i++)
-    {
-        sum += amp * vnoise(p);
-        p *= 2.0;
-        amp *= 0.5;
-    }
-    return sum;
-}
+// hash11, noise2 and fbm2 come from shaders/surface.slang and are in scope in
+// every body — this used to be forty lines of the same four functions.
 
 // The scalar field whose level set is the crack, warped so the level set
 // branches the way a fracture front does instead of meandering like a river.
 float field(float2 p)
 {
-    p += 0.45 * float2(fbm(p * 1.4 + 3.1), fbm(p * 1.4 - 1.4));
-    return fbm(p);
+    p += 0.45 * float2(fbm2(p * 1.4 + 3.1, 4), fbm2(p * 1.4 - 1.4, 4));
+    return fbm2(p, 4);
 }
 
 // How much of a crack is at this point of the quad, 1 on the fracture and 0 off
@@ -470,7 +410,7 @@ float crack(float2 uv, float seed, float taper)
     // of the quad — the taper is in the *width* rather than in the mask, so the
     // crack narrows away instead of being cut off square. That straight cut is
     // the tell that gives away every badly placed decal.
-    float width = (0.010 + 0.026 * fbm(p * 2.5 + 11.0)) * taper;
+    float width = (0.010 + 0.026 * fbm2(p * 2.5 + 11.0, 4)) * taper;
     return 1.0 - smoothstep(width, width * 2.6, dist);
 }
 

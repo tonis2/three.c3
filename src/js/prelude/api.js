@@ -73,8 +73,12 @@ const renderedNav = makeSceneNav(renderedScene);
 // -------------------------------------------------------------------
 // The lights
 //
-// Up to four directional lights and one ambient floor, which is the whole
-// model the shaders implement. Not `scene.add(new three.DirectionalLight(...))`:
+// Up to four lights and one ambient floor, which is the whole model the
+// shaders implement. A light is a direction or a place: `{ direction }` is a
+// sun and `{ position, range }` is a lamp, a campfire, a torch — one field on
+// the wire, so `range` at 0 is what "directional" means and slot zero, the one
+// the shadow map is fitted around, is a direction and refuses to be anything
+// else. Not `scene.add(new three.DirectionalLight(...))`:
 // that name would promise a light with a position, a light you can parent
 // something to, and a light `scene.remove` reaches. A light here is none of
 // those — it is a direction, a colour and a slot. `plan.md` §4's half-match
@@ -117,15 +121,58 @@ function lightAt(index) {
 			v._o = {
 				_flush() {
 					const c = H.lightGet(index);
-					H.lightSet(index, v._x, v._y, v._z, c[3], c[4], c[5], c[6]);
+					H.lightSet(index, v._x, v._y, v._z, c[3], c[4], c[5], c[6], c[7]);
 				},
 			};
 			return v;
 		},
+		// Writing a direction makes this a directional light, whatever it was —
+		// the range goes to 0, which is what a direction means. The two are one
+		// field on the wire and one of them has to win; the one being written is
+		// the one the script is looking at.
 		set direction(v) {
 			const [x, y, z] = readVector(v, 'light.direction');
 			const c = H.lightGet(index);
-			H.lightSet(index, x, y, z, c[3], c[4], c[5], c[6]);
+			H.lightSet(index, x, y, z, c[3], c[4], c[5], c[6], 0);
+		},
+
+		// Where a point light stands, as a live Vector3 — the same three
+		// numbers `direction` reads, meaning a place instead of a heading.
+		//
+		// **`range` is what says which.** A light with `range` at 0 is
+		// directional and this answers with where its direction points, which
+		// is nowhere in particular; setting it turns the light into a point
+		// light at that place, and gives it a range if it had none, because a
+		// point light with no reach is a light that lights nothing.
+		get position() {
+			const l = H.lightGet(index);
+			const v = new Vector3(null, l[0], l[1], l[2]);
+			v._o = {
+				_flush() {
+					const c = H.lightGet(index);
+					H.lightSet(index, v._x, v._y, v._z, c[3], c[4], c[5], c[6], c[7] > 0 ? c[7] : 10);
+				},
+			};
+			return v;
+		},
+		set position(v) {
+			const [x, y, z] = readVector(v, 'light.position');
+			const c = H.lightGet(index);
+			H.lightSet(index, x, y, z, c[3], c[4], c[5], c[6], c[7] > 0 ? c[7] : 10);
+		},
+
+		// How far a point light reaches, in metres, and **0 is what makes it
+		// directional** — the two kinds are one field, so this is the switch
+		// rather than a property beside one.
+		//
+		// The falloff inside it is inverse-square with a window that brings it
+		// to exactly zero at the range, so `intensity` on a point light is its
+		// brightness one metre away: a lamp meant to read like a sun of 1 at
+		// three metres wants about 9.
+		get range() { return H.lightGet(index)[7]; },
+		set range(v) {
+			const l = H.lightGet(index);
+			H.lightSet(index, l[0], l[1], l[2], l[3], l[4], l[5], l[6], Math.max(0, +v));
 		},
 
 		// The light's own colour, as `[r, g, b]` from 0 to 1. White is what
@@ -143,7 +190,7 @@ function lightAt(index) {
 		set color(v) {
 			const c = readColor(v, 'light.color');
 			const l = H.lightGet(index);
-			H.lightSet(index, l[0], l[1], l[2], c[0], c[1], c[2], l[6]);
+			H.lightSet(index, l[0], l[1], l[2], c[0], c[1], c[2], l[6], l[7]);
 		},
 
 		// How strongly this light shines, 1 by default. It multiplies the
@@ -155,7 +202,7 @@ function lightAt(index) {
 		get intensity() { return H.lightGet(index)[6]; },
 		set intensity(v) {
 			const l = H.lightGet(index);
-			H.lightSet(index, l[0], l[1], l[2], l[3], l[4], l[5], +v);
+			H.lightSet(index, l[0], l[1], l[2], l[3], l[4], l[5], +v, l[7]);
 		},
 	};
 }
@@ -188,7 +235,7 @@ Object.defineProperties(light, {
 		value(direction, ambient = H.ambientGet()) {
 			const [x, y, z] = readVector(direction, 'three.light.set(direction, ambient)');
 			const l = H.lightGet(0);
-			H.lightSet(0, x, y, z, l[3], l[4], l[5], l[6]);
+			H.lightSet(0, x, y, z, l[3], l[4], l[5], l[6], 0);
 			H.ambientSet(+ambient);
 			return light;
 		},
@@ -352,19 +399,36 @@ const lights = {
 	// is what somebody writes without reading anything and the second is
 	// what they write after.
 	add(direction, color = 0xffffff, intensity = 1) {
-		let d = direction, c = color, i = intensity;
+		let d = direction, c = color, i = intensity, range = 0, where = 'direction';
 		if (direction !== null && typeof direction === 'object' && !Array.isArray(direction)
 			&& !('x' in direction) && !('0' in direction)) {
-			d = direction.direction;
+			// `position` is what makes it a point light, and `range` is what the
+			// shader reads — so a description that names a position and no range
+			// gets ten metres rather than a light that reaches nowhere. Naming
+			// both is a contradiction: one of the three numbers is a place and
+			// the other is a heading, and there is one field for them.
+			if ('position' in direction && 'direction' in direction) {
+				throw new TypeError(
+					'three.lights.add takes a direction or a position, not both — a light is one or the other'
+				);
+			}
+			if ('position' in direction) {
+				d = direction.position;
+				where = 'position';
+				range = 'range' in direction ? Math.max(0, +direction.range) : 10;
+			} else {
+				d = direction.direction;
+				range = 0;
+			}
 			c = 'color' in direction ? direction.color : 0xffffff;
 			i = 'intensity' in direction ? direction.intensity : 1;
 		}
 		if (d === undefined) {
-			throw new TypeError('three.lights.add wants a direction — add([x, y, z]) or add({ direction, color, intensity })');
+			throw new TypeError('three.lights.add wants a direction — add([x, y, z]) or add({ direction, color, intensity }) or add({ position, range, color, intensity })');
 		}
-		const [x, y, z] = readVector(d, 'three.lights.add(direction)');
+		const [x, y, z] = readVector(d, `three.lights.add(${where})`);
 		const rgb = readColor(c, 'three.lights.add(direction, color)');
-		return lightAt(H.lightAdd(x, y, z, rgb[0], rgb[1], rgb[2], +i));
+		return lightAt(H.lightAdd(x, y, z, rgb[0], rgb[1], rgb[2], +i, range));
 	},
 
 	// Take one out. The slots above it move down, exactly as

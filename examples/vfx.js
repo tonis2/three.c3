@@ -348,11 +348,9 @@ const dissolveMat = new three.ShaderMaterial({
 	// vertex number — a per-vertex seed, and the only thing in `Vertex` that
 	// gives two corners of one face a reason to differ. Hashed into a direction,
 	// it scatters the surviving geometry as the front eats through it.
+	//
+	// `hash11` is in scope in a vertex body as well as a fragment one.
 	vertex: `
-	float hash11(float x)
-	{
-	    return frac(sin(x * 12.9898) * 43758.5453);
-	}
 	void displace(inout Vertex v)
 	{
 	    if (edge < 0.002) return;
