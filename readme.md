@@ -56,6 +56,7 @@ three.debug.write(scene.stats());   // { drawCalls: 2, uniqueMeshes: 2, instance
 ./build/three --help                         # every flag
 ```
 
+
 Use `--debug` flag for debug info and hot-reload (Shift+R)
 
 There are complete scenes in [`examples/`](examples/) to start from — including

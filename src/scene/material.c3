@@ -158,13 +158,14 @@ fn PipelineState state_for_blend(BlendMode blend)
  `NORMAL_MAP_BINDING`, which is where these become binding indices and where the
  argument for not spelling `normal_map` in a script lives.
 
- Three constants rather than three verbs, unlike `map`: they differ only in which
+ Four constants rather than four verbs, unlike `map`: they differ only in which
  binding they write, they take and give back references identically, and one door
  means one place where the retain and the release cannot get out of step.
 *>
 const int MATERIAL_SLOT_NORMAL               = 0;
 const int MATERIAL_SLOT_METALNESS_ROUGHNESS  = 1;
 const int MATERIAL_SLOT_OCCLUSION            = 2;
+const int MATERIAL_SLOT_EMISSIVE             = 3;
 
 <*
  The binding one of those slots means.
@@ -181,6 +182,7 @@ fn uint binding_for_material_slot(int slot)
 		case MATERIAL_SLOT_NORMAL: return NORMAL_MAP_BINDING;
 		case MATERIAL_SLOT_METALNESS_ROUGHNESS: return METALNESS_ROUGHNESS_MAP_BINDING;
 		case MATERIAL_SLOT_OCCLUSION: return OCCLUSION_MAP_BINDING;
+		case MATERIAL_SLOT_EMISSIVE: return EMISSIVE_MAP_BINDING;
 		default: return 0;
 	}
 }
@@ -398,6 +400,25 @@ struct Material
 	// one. `js/prelude/asset.js` has the import rule.
 	float metalness;
 	float reflectance;
+	// `material.emissive` — the colour this surface gives off, **sRGB as the script
+	// wrote it**, and 0 on every material nobody set one on. Black is "does not
+	// glow", which is what the zero fill already says and what glTF's own default
+	// `emissiveFactor` is.
+	// 
+	// Stored as written rather than decoded so the getter answers the colour that
+	// was set; `Material.emissive_value` is where it becomes what the shader adds.
+	float[3] emissive;
+	// `material.emissiveIntensity`, stored as its complement for the reason
+	// `one_minus_roughness` is: C3 zero-fills what an initializer leaves out, and a
+	// strength of *zero* would make every material given an emissive colour and
+	// nothing else glow black — a property that reads back what was written and
+	// changes no pixel.
+	// 
+	// Not clamped above 1. A colour is a colour and this is how a lamp goes
+	// brighter than white, exactly as `Light.color.w` does.
+	// 
+	// Never read directly outside `Material.emissive_value`.
+	float one_minus_emissive_intensity;
 	char[PUSH_BUDGET] block;
 	// The uniform table, when it did not fit the block. Empty for every material
 	// whose uniforms fit — almost all of them — and then nothing below this line
@@ -608,6 +629,33 @@ fn float Material.opacity(&self)
 fn float[4] Material.surface(&self)
 {
 	return { 1.0f - self.one_minus_roughness, self.metalness, self.reflectance, 0 };
+}
+
+<*
+ What this material gives off, in `DrawRecord.emissive`'s order — the colour
+ times the intensity, which is the only form the shader wants.
+
+ One accessor for `Material.surface`'s reason: the intensity complement is undone
+ in exactly one place.
+*>
+fn float[4] Material.emissive_value(&self)
+{
+	float strength = 1.0f - self.one_minus_emissive_intensity;
+	// **Decoded here and not in the shader**, unlike `mesh.color`, and the reason
+	// is the intensity: the record carries one number per channel, so the colour
+	// and the strength have to be multiplied together before they cross — and a
+	// decode after that multiply would bend the strength as well as the colour.
+	// `emissive` holds what the script wrote, which is what the getter answers.
+	float[4] linear = srgb_to_linear_rgb({ self.emissive[0], self.emissive[1], self.emissive[2], 1 });
+	return { linear[0] * strength, linear[1] * strength, linear[2] * strength, 0 };
+}
+
+<*
+ `material.emissiveIntensity` — how strongly the colour above is given off.
+*>
+fn float Material.emissive_intensity(&self)
+{
+	return 1.0f - self.one_minus_emissive_intensity;
 }
 
 <*

@@ -400,7 +400,9 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @param port : `Zero to run without a listener, which is a game with no agent attached.`
  @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
  @param script : `One .js file, or empty. Run once, as a script, before the first frame — see boot_script.`
- @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
+ @param boot : `False for --no-boot: take the assets directory as a root and leave its main.js alone.`
+ @param entry_module : `One .js file, or empty. Evaluated as an ES module before the first frame — see boot_module.`
+ @require port > 0 || assets.len > 0 || script.len > 0 || entry_module.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
 fn void? live(
 	Renderer* renderer,
@@ -411,7 +413,9 @@ fn void? live(
 	String script = "",
 	uint frames = 0,
 	uint every = 0,
-	String camera = ""
+	String camera = "",
+	bool boot = true,
+	String entry_module = ""
 )
 {
 	bool serving = port > 0;
@@ -427,7 +431,7 @@ fn void? live(
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
 	// attaches to should be the one `main.js` built.
-	boot_world(&runtime, assets, script)!;
+	boot_world(&runtime, assets, script, boot, entry_module)!;
 
 	// The bounded run, which is how a game is checked without a person watching it
 	// — and the only path in this function that is not an endless loop. The ticks
@@ -585,7 +589,7 @@ fn void? live(
 		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
-			reload(&runtime, &renderer.pass, renderer, window, assets, script)!;
+			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, entry_module)!;
 			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
 		}
 

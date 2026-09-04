@@ -103,6 +103,10 @@ const uint FLAG_HAS_OCCLUSION_MAP           = 128;
  for whether the built-in shader is drawing.
 *>
 const uint FLAG_STOCHASTIC                  = 256;
+// Whether the material carries an emissive map of its own — `mesh.slang`'s
+// `FLAG_HAS_EMISSIVE_MAP`. Zero on a material that glows a flat colour and on
+// one that does not glow at all.
+const uint FLAG_HAS_EMISSIVE_MAP            = 512;
 
 <*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
@@ -177,10 +181,17 @@ const uint MAX_LIGHTS = 4;
 *>
 struct Light
 {
-	// xyz surface-to-light in world space, w unused. Not normalized: the shaders
+	// xyz surface-to-light in world space, w the range. Not normalized: the shaders
 	// normalize on read, so a script's magnitude has never meant anything, and
 	// normalizing at the door would answer `three.light.direction` with numbers
 	// nobody wrote.
+	// 
+	// **`w` is what kind of light this is, and 0 is directional** — the value every
+	// light carried when this field was unused, so nothing in the wire format moved
+	// to make room and a scene written against four suns is the scene it was. Above
+	// zero, `xyz` is a world *position* and `w` is how far the light reaches, in
+	// metres. `light_toward` in `shaders/surface.slang` is the one function that
+	// unpacks it.
 	float[4] direction;
 	// rgb the light's colour, linear. w its intensity, which the shader multiplies
 	// in — so a colour stays a colour a picker can produce and a light can still be
@@ -448,6 +459,14 @@ struct DrawRecord
 	// kit piece on the built-in pipeline, and only a ShaderMaterial has uniforms
 	// to put a table in.
 	UvVariant[UV_VARIANTS] uv_variants;
+	// rgb what this surface gives off regardless of any light — `material.emissive`
+	// times `material.emissiveIntensity`, linear. w unused.
+	// 
+	// Here for `surface`'s reason: a glowing lamp, a screen and a rune are wearing
+	// the built-in material far more often than a ShaderMaterial, and only a
+	// ShaderMaterial has uniforms to put a colour in. Last in the record because
+	// appending costs nothing that moves — every offset above it is where it was.
+	float[4] emissive;
 }
 
 struct MeshPush
@@ -526,7 +545,7 @@ $assert @layout_matches(
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert DrawRecord::size == 264 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert DrawRecord::size == 280 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 352 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
@@ -651,6 +670,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "surface", 116, 16 },
 	{ "uv_variant_count", 132, 4 },
 	{ "uv_variants", 136, 128 },
+	{ "emissive", 264, 16 },
 };
 
 <*

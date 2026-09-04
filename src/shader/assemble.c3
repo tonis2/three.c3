@@ -124,7 +124,7 @@ const uint SHADOW_BINDING = 1;
 const uint ENVIRONMENT_BINDING = 2;
 
 <*
- Where the built-in material's other three maps are bound, in `mesh.slang` and
+ Where the built-in material's other four maps are bound, in `mesh.slang` and
  nowhere else.
 
  **The same numbers `MATERIAL_BINDING_FIRST` hands to an agent's first samplers,
@@ -142,6 +142,7 @@ const uint ENVIRONMENT_BINDING = 2;
 const uint NORMAL_MAP_BINDING              = 3;
 const uint METALNESS_ROUGHNESS_MAP_BINDING = 4;
 const uint OCCLUSION_MAP_BINDING           = 5;
+const uint EMISSIVE_MAP_BINDING            = 6;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the

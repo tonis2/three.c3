@@ -353,10 +353,16 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 		`)!!;
 		defer answer.free(mem);
 
-		// One sample of the shared mask for the whole stack, read by channel — and at
-		// the parallax-shifted uv, because the fixture's base carries a height map
-		// and relief moves everything on the surface rather than one image on it.
-		test::@check(answer.contains("float4 mask = layer_mask.Sample(puv);"), "the mask is sampled once: %s", answer);
+		// One sample of the shared mask for the whole stack, read by channel — at the
+		// mesh's own uv rather than the material's, and parallax-shifted in that uv,
+		// because the fixture's base carries a height map and relief moves everything
+		// on the surface rather than one image on it.
+		test::@check(
+			answer.contains("float2 muv = parallax_uv(s, s.mesh_uv, bh, 0.05);"),
+			"the relief is solved in the mesh's uv too: %s",
+			answer
+		);
+		test::@check(answer.contains("float4 mask = layer_mask.Sample(muv);"), "the mask is sampled once: %s", answer);
 		test::@check(answer.contains("float w0 = mask.r;"), "layer 0 reads red: %s", answer);
 		test::@check(answer.contains("float w2 = 1.0 - mask.b;"), "and layer 2 reads blue, inverted: %s", answer);
 
@@ -377,9 +383,15 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 		test::@check(answer.contains("+ e;"), "and the emissive is added after the light: %s", answer);
 
 		// The base material's height map, with `bump` folded into the one number the
-		// shader carries: the fixture's strength 0.5 times its distance 0.1.
+		// shader carries: the fixture's strength 0.5 times its distance 0.1. Sampled
+		// into a local because the mask's uv is solved from the same height.
 		test::@check(
-			answer.contains("float2 puv = parallax_uv(s, s.uv, base_height_map.Sample(s.uv).r, 0.05);"),
+			answer.contains("float bh = base_height_map.Sample(s.uv).r;"),
+			"the base height is read once: %s",
+			answer
+		);
+		test::@check(
+			answer.contains("float2 puv = parallax_uv(s, s.uv, bh, 0.05);"),
 			"the base relief moves the uv: %s",
 			answer
 		);
@@ -776,6 +788,10 @@ fn void an_empty_stack_is_the_default_look() @test
  not obvious: the mask describes one specific surface and must be sampled once
  across it, while the detail maps are the things that repeat. Sampling both with
  the same transform would repeat the terrain.
+
+ That is true of `material.repeat` as well as of `uvScale`, which is why the mask
+ reads `s.mesh_uv` — a terrain whose base map tiles twelve times would otherwise
+ get twelve copies of its splat map.
 *>
 fn void a_layer_tiles_its_detail_and_not_its_mask() @test
 {
@@ -791,8 +807,8 @@ fn void a_layer_tiles_its_detail_and_not_its_mask() @test
 		defer answer.free(mem);
 
 		test::@check(
-			answer.contains("layer_mask.Sample(s.uv)"),
-			"the mask is sampled at the surface's own uv: %s",
+			answer.contains("layer_mask.Sample(s.mesh_uv)"),
+			"the mask is sampled at the mesh's own uv, with no `material.repeat` on it: %s",
 			answer
 		);
 		test::@check(
@@ -800,6 +816,88 @@ fn void a_layer_tiles_its_detail_and_not_its_mask() @test
 			"and the detail at its own scale and offset: %s",
 			answer
 		);
+	};
+}
+
+<*
+ `uvWindow` makes a layer's scale and offset a window into a sheet.
+
+ Without it the two are one affine map, so a layer that tiles more than once
+ walks out of the band the offset put it in on the first repeat — windowing and
+ tiling are the same axis. The `frac` is what separates them, and the gradients
+ beside it are what stop every tile boundary picking the smallest mip.
+*>
+fn void a_windowed_layer_wraps_before_its_band() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "a window into a sheet", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			return new three.LayeredMaterial({
+				layers: [{ map: tex, uvWindow: true, uvScale: 0.5, uvOffset: [0.0, 0.5] }],
+			}).fragment;
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(
+			answer.contains("frac(s.uv) * float2(0.5, 0.5) + float2(0.0, 0.5)"),
+			"the uv wraps before the band scales it: %s",
+			answer
+		);
+		test::@check(
+			answer.contains("float2 gx0 = ddx(s.uv) * float2(0.5, 0.5);"),
+			"the gradients are the unwrapped ones: %s",
+			answer
+		);
+		test::@check(
+			answer.contains("SampleGrad(frac(s.uv) * float2(0.5, 0.5) + float2(0.0, 0.5), gx0, gy0)"),
+			"and the tap carries them: %s",
+			answer
+		);
+	};
+}
+
+<*
+ A layer with no window samples exactly as it always did.
+
+ The gradients cost two derivatives per layer and the flag is what buys them, so
+ the stack every scene already has must not grow a pair.
+*>
+fn void a_layer_with_no_window_declares_no_gradients() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "no window, no gradients", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			return new three.LayeredMaterial({
+				layers: [{ map: tex, uvScale: 4 }],
+			}).fragment;
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(!answer.contains("frac("), "nothing wraps: %s", answer);
+		test::@check(!answer.contains("ddx("), "and nothing declares a gradient: %s", answer);
+		test::@check(!answer.contains("SampleGrad"), "so the taps are plain: %s", answer);
+	};
+}
+
+<*
+ `uvWindow` is a boolean and a misspelling of one is refused.
+*>
+fn void a_window_that_is_not_a_boolean_is_refused() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "uvWindow wants a boolean", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			try {
+				new three.LayeredMaterial({ layers: [{ map: tex, uvWindow: "yes" }] });
+				return "no error";
+			} catch (e) { return String(e.message); }
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains("uvWindow"), "the refusal names the key: %s", answer);
 	};
 }
 

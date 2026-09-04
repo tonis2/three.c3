@@ -209,6 +209,10 @@ pipeline you can build draws triangles.
 - `metalness` — 0 to 1, 0 by default: a metal has no diffuse
 - `reflectance` — 0 to 1, 0 by default: how strongly a non-metal reflects, and the switch that turns
   the specular term on at all
+- `emissive` — what this surface gives off regardless of any light; a hex, a triple or an `{r, g, b}`,
+  answering with the triple. Black by default
+- `emissiveIntensity` — how strongly, 1 by default and not clamped: a colour is a colour, and this is
+  how something goes brighter than white
 - `repeat` — `[u, v]`, or one number for both: how many times the map is laid across the surface
 - `offset` — `[u, v]`: where the map starts, in whole repeats
 - `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
@@ -253,6 +257,26 @@ and is dark.
 
 A name Three.js does not have, because Three.js defaults every material to having a highlight and
 this one defaults to none.
+
+#### emissive
+
+```js
+const rune = new three.MeshLambertMaterial({ emissive: 0xff6600, emissiveIntensity: 2 });
+```
+
+It is added after the shading and reached by nothing in it — not the occlusion, not the shadow, not
+the metalness. A lamp's glass is bright in a crevice, in shadow and on a metal, which is what makes
+this an emissive rather than a very bright albedo, and it is what lets a black surface glow.
+
+`emissiveIntensity` is how it goes brighter than white, exactly as `three.light.intensity` is for a
+light. Above 1 it means something once a post pass has a bright pass in it, and is clipped white
+before then.
+
+**It does not light anything.** A glowing surface is bright and the floor beside it is not.
+`three.lights.add({ position, range })` is what lights the floor, and the two together are a lamp.
+
+Free to write every frame — it rides the draw record, so a pulsing rune costs nothing and stays in
+the draw call it was in.
 
 #### repeat
 
@@ -377,7 +401,7 @@ device is needed, because the image is on it.
 ## MeshLambertMaterial
 
 ```js
-new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, side, transparent, blending, opacity, roughness, metalness, reflectance })
+new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity })
 ```
 
 The built-in shader with an image on it — the material to reach for when what you want is a picture
@@ -390,12 +414,16 @@ It has no `color`, because `mesh.color` is the per-copy channel and multiplies i
 — so one material tints a thousand copies differently and is still one draw call. With no map it is
 the cheapest way to ask for a side, which is what a skydome needs.
 
-**Four images, not one.** `map` is the base colour and the other three are the maps the built-in
-shader reads beside it — a normal map, glTF's packed metallic-roughness pair, and an occlusion map.
-None of them compiles anything either: they are sampler bindings on the pipeline that already
-existed. The last three are *data* rather than pictures and have to be loaded
+**Five images, not one.** `map` is the base colour and the other four are the maps the built-in
+shader reads beside it — a normal map, glTF's packed metallic-roughness pair, an occlusion map and an
+emissive map. None of them compiles anything either: they are sampler bindings on the pipeline that
+already existed.
+
+Three of those four are *data* rather than pictures and have to be loaded
 `{ colorSpace: three.LinearSRGBColorSpace }`; assigning an sRGB texture throws, because through an
-sRGB view every value in them arrives bent and the result reads as a bad file.
+sRGB view every value in them arrives bent and the result reads as a bad file. `emissiveMap` is the
+exception and goes the other way: it is the colour of the light coming off the surface, so it loads
+sRGB — the default — and a linear one is refused.
 
 ### Properties
 
@@ -403,6 +431,7 @@ sRGB view every value in them arrives bent and the result reads as a bad file.
 - `normalMap` — a tangent-space normal map, or null; must be loaded linear
 - `metalnessRoughnessMap` — glTF's packed pair: green is roughness, blue is metalness
 - `aoMap` — an occlusion map, red channel; darkens the ambient floor and the environment only
+- `emissiveMap` — where this surface glows; multiplies `emissive`, and loads sRGB rather than linear
 - `roughnessMap` — Three.js has this and here it is half of `metalnessRoughnessMap`; assigning throws
 - `metalnessMap` — the other half, and throws for the same reason
 - `side` — `three.FrontSide`, `three.BackSide` or `three.DoubleSide`; settable
@@ -412,6 +441,8 @@ sRGB view every value in them arrives bent and the result reads as a bad file.
 - `roughness` — 0 to 1, 1 by default — see Material
 - `metalness` — 0 to 1, 0 by default — see Material
 - `reflectance` — 0 to 1, 0 by default — see Material
+- `emissive` — what this surface gives off regardless of any light, black by default — see Material
+- `emissiveIntensity` — how strongly, 1 by default and not clamped — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
 - `offset` — `[u, v]`: where the map starts, in whole repeats
 - `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
@@ -442,6 +473,26 @@ const wall = new three.MeshLambertMaterial({ map: brick, normalMap: bumps });
 Through an sRGB view the stored 0.5 that means "no tilt" arrives as 0.21, so every surface leans the
 same way and the detail goes soft. The setter refuses an sRGB texture rather than letting that
 happen, and `ref.material.normalMap` from a glTF is already linear.
+
+#### emissiveMap
+
+Where this surface glows, or null — glTF's `emissiveTexture`.
+
+```js
+const screen = new three.MeshLambertMaterial({
+  map: panel,
+  emissiveMap: lit_pixels,
+  emissive: 0xffffff,       // the map multiplies this, so white is "the map as it is"
+  emissiveIntensity: 2,
+});
+```
+
+**It multiplies `emissive` rather than replacing it**, which is glTF's own rule for a factor and a
+texture. So a map on a material nobody set `emissive` on glows black — set `emissive: 0xffffff` to
+let the image speak, exactly as `metalness: 1` is what lets a metallic-roughness map speak.
+
+The one map here that is a picture, so it loads in the default sRGB space and a linear one is refused
+by name.
 
 #### metalnessRoughnessMap
 
@@ -489,6 +540,10 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
 `Surface` carries:
 
 - `albedo`, `normal`, `uv`, `position`.
+- `mesh_uv` — the mesh's own uv, before `material.repeat` and `material.offset`; `uv` is after them.
+  It is what an image that describes *this surface* wants — a splat mask, a painted wear map, an id
+  map — because tiling one of those repeats the terrain rather than the texture. Every image that is
+  a pattern laid across the surface wants `uv`. A copy's `uvVariants` row is in both.
 - `color` — this copy's own, already in albedo.
 - `vertex_color` — the mesh's own COLOR_0 attribute, interpolated across the triangle, white where the
   file carried none, and not already in albedo. It is the one value here that varies across a
@@ -518,11 +573,28 @@ with the bindings in it and the host resolves each name through the compiled mod
 Sample with any uv you like, which is the point: `s.uv + float2(t, 0)` scrolls, `s.uv * 4` tiles,
 `float2(k, 0.5)` reads a gradient as a lookup table. A sampler left null reads 1x1 opaque white.
 
-Five helpers are already in scope in a body:
+These are already in scope in a body:
 
 - `standard(s)` is the built-in shading, whole — `return standard(s);` draws exactly what a mesh with
   no ShaderMaterial draws. `standard(s, albedo, normal)` is the same with a colour and a normal you
-  worked out yourself.
+  worked out yourself. Two more parameters follow it, for a body reading its own maps:
+  `standard(s, albedo, normal, ao)` takes an occlusion, and
+  `standard(s, albedo, normal, roughness, metalness)` takes the pair per texel rather than per
+  material. `standard(s, albedo, normal, roughness, metalness, ao)` is all three, which is a packed
+  ORM map in the order it packs them:
+
+  ```slang
+  float3 orm = rust_orm.Sample(s.uv).rgb;
+  float3 n = mapped_normal(s, rust_normal.Sample(s.uv).rgb);
+  return standard(s, srgb_to_linear(rust.Sample(s.uv).rgb), n, orm.g, orm.b, orm.r);
+  ```
+
+  `ao` multiplies what the sky delivers — the ambient floor and the environment reflection — and never
+  the lights, which is `lambert(normal, ao)`'s rule one term further on. Folding an occlusion into the
+  albedo instead darkens the sun with it and reads as dirt painted on the lit side.
+
+  Writing `s.roughness` and `s.metalness` before the call does the same thing as the pair, and is
+  supported: `Surface` is a by-value parameter, so a body's copy is its own.
 - `lambert(normal)` is the diffuse half alone, summed over every light with the shadow folded into the
   sun's term — so `return s.albedo * lambert(s.normal)` is a matte surface. `lambert(normal, ao)`
   takes an occlusion factor, which darkens the ambient floor and never the lights.
@@ -533,6 +605,45 @@ Five helpers are already in scope in a body:
 - `stochastic_sample(image, uv)` samples one of your textures so that it stops repeating — the same
   thing `material.stochastic` does to the built-in maps, available here for a texture the body
   declared. Three taps, so use it on the map that tiles and not on all of them.
+- `triplanar_sample(image, position, normal, scale, sharpness)` maps an image by world position
+  instead of by uv — three projections along the world axes, blended by which way the surface faces.
+  It is what a rock, a cliff, a merged terrain, a `ConvexGeometry` hull and an imported blockout want,
+  because their uv is a projection or is missing entirely. `scale` is repeats of the image per metre;
+  `sharpness` is how fast one projection gives way to the next, and 6 to 8 is a seam a few degrees wide
+  rather than three images ghosted over everything.
+
+  `triplanar_normal(image, position, normal, scale, sharpness)` is the same for a tangent-space normal
+  map, blended **Whiteout** — averaging three tangent-space normals as though they were world vectors
+  flattens every edge and corner, which is the one part of this nobody guesses right.
+
+  Both take an optional `band` as a last argument — `float2(height, offset)` in v — which windows the
+  projection into one strip of a trim sheet. `triplanar_weights(normal, sharpness)` is the blend on its
+  own, for a body doing its own taps.
+
+  ```slang
+  float3 c = triplanar_sample(rock, s.position, s.normal, 0.5, 6.0).rgb;
+  float3 n = triplanar_normal(rock_n, s.position, s.normal, 0.5, 6.0);
+  return standard(s, c, n);
+  ```
+
+  Three taps per image, which is what it costs, and fragment-stage only. The window samples with
+  `SampleGrad` and the unwrapped gradients — without that the `frac` draws a blurred line along every
+  tile boundary in the scene, which is the same rule `stochastic_sample` follows.
+- Noise, so a generated material does not open with 120 lines of it: `hash11(x)`, `hash21(p)` and
+  `hash22(p)` hash by the bits, so a per-copy seed off `s.origin` or a per-vertex one off `v.index`
+  is one call; `noise2(p)` is smooth value noise 0..1; `fbm2(p, octaves)` is octaves of it; and
+  `worley2(p)` is the distance to the nearest of one feature point per cell, 0 on a point and
+  climbing to 1 away from them all.
+
+  Each of the last three takes a period — `noise2(p, period)`, `fbm2(p, period, octaves)`,
+  `worley2(p, period)` — which is a `float2` of **whole cells** and is what makes a generated texture
+  tile. 0 on an axis leaves that axis unwrapped, which is what a trim sheet strip wants: it has to
+  meet itself along u and is one band tall. A period that does not divide the image is a seam nothing
+  reports, and an fbm whose octaves do not scale their period with their frequency tiles except for
+  one band of detail — which is the half `fbm2` exists to get right.
+
+  They work in a `vertex:` body too, unlike `mapped_normal` and `stochastic_sample`, because none of
+  them reads a derivative.
 
 ```slang
 float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb);
@@ -589,6 +700,8 @@ have been skipped; too small drops geometry you can see.
 - `roughness` — 0 to 1, 1 by default — see Material
 - `metalness` — 0 to 1, 0 by default — see Material
 - `reflectance` — 0 to 1, 0 by default — see Material
+- `emissive` — what this surface gives off regardless of any light, black by default — see Material
+- `emissiveIntensity` — how strongly, 1 by default and not clamped — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
 - `offset` — `[u, v]`: where the map starts, in whole repeats
 - `uvVariants` — one uv transform per copy, picked by `mesh.variant` — see Material
@@ -619,8 +732,8 @@ extra, and a stack with none of them shades as a MeshLambertMaterial.
 `layers` is an array, outermost last — each is blended over everything under it as
 `lerp(below, blend(below, layer), mask)`. A layer takes `map` (its albedo), `normal`, `emissive`,
 `emissiveFactor`, `tint`, `opacity`, `roughness`, `metalness`, `metallicRoughness`, `height`, `bump`,
-`blend`, `mask`, `maskSource`, `maskTexture`, `invert`, `uvScale`, `uvOffset`, `enabled`, `animated`
-and `name`.
+`blend`, `mask`, `maskSource`, `maskTexture`, `invert`, `uvScale`, `uvOffset`, `uvWindow`, `enabled`,
+`animated` and `name`.
 
 - `mask` is which channel this layer's weight is read from — `'r'`, `'g'`, `'b'` or `'a'` — which is
   the economy that makes a four-layer terrain one mask image instead of four. Pass that image as the
@@ -637,6 +750,32 @@ and `name`.
   where the glTF extension this implements comes from.
 - `uvScale` is per layer and tiles the detail without tiling the mask, which is the whole trick of a
   splat map. It composes with `material.repeat` rather than replacing it.
+- The mask is read at the mesh's own uv — `material.repeat` and `material.offset` are not on it. A
+  splat map describes one specific surface, so a terrain whose base map tiles twelve times gets one
+  mask across it and not twelve. `uvScale` on a layer is what tiles that layer's detail.
+- `uvWindow: true` turns that same pair into a *window* instead of a tiling: the uv wraps to one tile
+  first, so `uvScale` is how big a piece of the image this layer uses and `uvOffset` is where that
+  piece starts. It is how four terrain materials come out of one sheet instead of four files.
+
+Without `uvWindow` the two numbers are one affine map and windowing and tiling are the same axis:
+`{ uvScale: 4, uvOffset: [0, 0.5] }` runs the uv from 0.5 to 4.5 and leaves the band the offset put it
+in on the first repeat. With it the tiling is `material.repeat`, which is applied before the stack runs
+and is therefore inside the wrap:
+
+```js
+material.repeat = [12, 12];                                  // twelve tiles of terrain
+layers: [
+  { map: sheet, uvWindow: true, uvScale: 0.5, uvOffset: [0.0, 0.5] },              // top left quarter
+  { map: sheet, uvWindow: true, uvScale: 0.5, uvOffset: [0.5, 0.5], mask: 'r' },   // top right
+  { map: sheet, uvWindow: true, uvScale: 0.5, uvOffset: [0.0, 0.0], mask: 'g' },   // bottom left
+]
+```
+
+A windowed layer samples with `SampleGrad` and the unwrapped gradients, which is not optional and is
+why it is a flag rather than something you can write yourself with a scale: a wrap jumps by a whole
+tile at each seam, so the mip the hardware would pick there is the smallest one and the cure is a
+blurred line around every tile. Give the bands in the image a gutter of a few texels — the wrap is
+exact and bilinear filtering is not, so a band with a neighbour hard against it bleeds at its edge.
 
 Everything is baked into the shader as a literal unless you say `animated: true` on a layer, which
 promotes its `tint` and `opacity` to a uniform you can write every frame —
@@ -674,8 +813,10 @@ renderer does not have, and a material property that provably changes no pixel i
   `layers[i].opacity` read and write the ones declared animated
 - `fragment` — the generated Slang — read-only, and the thing to look at first
 - `uniforms, textures` — the ShaderMaterial proxies, under the generated names
-- `map, side, transparent, blending, opacity, roughness, metalness, reflectance, repeat, offset,
-  uvVariants, stochastic, alive` — as ShaderMaterial
+- `map, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive,
+  emissiveIntensity, repeat, offset, uvVariants, stochastic, alive` — as ShaderMaterial. The
+  material's own `emissive` is added on top of whatever the layers glow, so a stack imported with an
+  emissive layer and a material given one of its own do both.
 
 ### Methods
 

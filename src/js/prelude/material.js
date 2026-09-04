@@ -1,7 +1,7 @@
 // three.c3 — sides, blending, and the two built-in materials.
 
-import { asPair } from './math.js';
-import { LinearSRGBColorSpace, Texture } from './texture.js';
+import { asPair, readColor } from './math.js';
+import { LinearSRGBColorSpace, SRGBColorSpace, Texture } from './texture.js';
 
 const H = globalThis.__three;
 
@@ -54,6 +54,7 @@ const UV_VARIANTS = 8;
 
 const SLOT_METALNESS_ROUGHNESS = 1;
 const SLOT_OCCLUSION = 2;
+const SLOT_EMISSIVE = 3;
 
 // What `material.roughnessMap` and `material.metalnessMap` answer. Three.js
 // keeps the two apart and glTF packs them into one image, and this renderer
@@ -235,6 +236,54 @@ export class Material {
 	get reflectance() { return H.getSurface(this._index())[2]; }
 
 	set reflectance(v) { this._surface(2, v, 'reflectance'); }
+
+	// What this surface gives off regardless of any light, as `[r, g, b]`.
+	// Black by default, which is "does not glow".
+	//
+	// **Added after the shading and reached by nothing in it** — not the
+	// occlusion, not the shadow, not the metalness. A lamp's glass is bright in
+	// a crevice, in shadow and on a metal, which is what makes this an emissive
+	// rather than a very bright albedo. It is also what makes a black surface
+	// able to glow.
+	//
+	// sRGB, like every colour stated in a script, and it takes whatever
+	// `mesh.color` takes — a hex, a triple, an `{r, g, b}` — answering with the
+	// triple, for `light.color`'s reason: the components are what the arithmetic
+	// uses and a hex cannot represent what the arithmetic can hold.
+	//
+	// There is no light here. A glowing surface does not light what is around
+	// it; `three.lights.add({ position, range })` is what does that, and the two
+	// together are a lamp.
+	get emissive() { return H.getEmissive(this._index()).slice(0, 3); }
+
+	set emissive(v) {
+		const c = readColor(v, 'material.emissive');
+		const was = H.getEmissive(this._index());
+		H.setEmissive(
+			this._index(),
+			Math.min(Math.max(c[0], 0), 1),
+			Math.min(Math.max(c[1], 0), 1),
+			Math.min(Math.max(c[2], 0), 1),
+			was[3],
+		);
+	}
+
+	// How strongly that colour is given off, 1 by default.
+	//
+	// **Not clamped**, and that is the point of having it beside the colour: a
+	// colour is a colour and this is how a lamp goes brighter than white — the
+	// same split `three.light.color` and `three.light.intensity` have. Values
+	// above 1 mean something once there is a post pass with a bright pass in it,
+	// and are simply clipped white before then.
+	get emissiveIntensity() { return H.getEmissive(this._index())[3]; }
+
+	set emissiveIntensity(v) {
+		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+			throw new TypeError('`emissiveIntensity` wants a number from 0 up, not ' + String(v));
+		}
+		const was = H.getEmissive(this._index());
+		H.setEmissive(this._index(), was[0], was[1], was[2], v);
+	}
 
 	// One of the three, written back with the other two beside it.
 	//
@@ -426,6 +475,12 @@ export class Material {
 		if (options.roughness !== undefined) material.roughness = options.roughness;
 		if (options.metalness !== undefined) material.metalness = options.metalness;
 		if (options.reflectance !== undefined) material.reflectance = options.reflectance;
+		// The intensity first, so a description that states both lands on the pair
+		// it wrote whichever order the setters read the other half back in.
+		if (options.emissiveIntensity !== undefined) {
+			material.emissiveIntensity = options.emissiveIntensity;
+		}
+		if (options.emissive !== undefined) material.emissive = options.emissive;
 	}
 
 	static _checkSide(v) {
@@ -489,6 +544,8 @@ export class Material {
 			repeat: this.alive ? this.repeat : null,
 			offset: this.alive ? this.offset : null,
 			opacity: this.alive ? this.opacity : null,
+			emissive: this.alive ? this.emissive : null,
+			emissiveIntensity: this.alive ? this.emissiveIntensity : null,
 		};
 	}
 }
@@ -525,7 +582,7 @@ export class MeshLambertMaterial extends Material {
 	constructor(options = {}) {
 		if (options === null || typeof options !== 'object') {
 			throw new TypeError(
-				'new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, side, transparent, blending, opacity, roughness, metalness, reflectance }) wants an options object'
+				'new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity }) wants an options object'
 			);
 		}
 		const { map = null, side = FrontSide } = options;
@@ -548,6 +605,7 @@ export class MeshLambertMaterial extends Material {
 		this._normalMap = null;
 		this._metalnessRoughnessMap = null;
 		this._aoMap = null;
+		this._emissiveMap = null;
 		// After `super`, because it is a write through the handle rather than a
 		// part of it — and the setter is what refuses a value outside 0..1, so
 		// the option and the property are checked by exactly one piece of code.
@@ -561,6 +619,7 @@ export class MeshLambertMaterial extends Material {
 			this.metalnessRoughnessMap = options.metalnessRoughnessMap;
 		}
 		if (options.aoMap !== undefined) this.aoMap = options.aoMap;
+		if (options.emissiveMap !== undefined) this.emissiveMap = options.emissiveMap;
 	}
 
 	// A tangent-space normal map, or null.
@@ -611,6 +670,36 @@ export class MeshLambertMaterial extends Material {
 
 	set aoMap(v) { this._aoMap = this._setSlot(SLOT_OCCLUSION, v, 'aoMap'); }
 
+	// Where this surface glows, or null — glTF's `emissiveTexture`.
+	//
+	// **It multiplies `emissive` rather than replacing it**, which is what glTF
+	// says its factor and its texture mean. So a map on a material nobody set
+	// `emissive` on glows black: set `emissive: 0xffffff` to let the image speak,
+	// exactly as `metalness: 1` is what lets a metallic-roughness map speak.
+	//
+	// **The one map here that is a picture rather than data**, so it loads sRGB —
+	// the default — and a linear one is refused by name. The other three are
+	// values and load linear; this is the colour of the light coming off the
+	// surface.
+	get emissiveMap() { return this._emissiveMap; }
+
+	set emissiveMap(v) {
+		if (v !== null && v !== undefined && !(v instanceof Texture)) {
+			throw new TypeError('material.emissiveMap wants a three.texture(path), or null for none');
+		}
+		const texture = v ?? null;
+		if (texture !== null && texture.colorSpace !== SRGBColorSpace) {
+			throw new TypeError(
+				'material.emissiveMap is a picture rather than data — it is the colour of the '
+				+ 'light coming off the surface — so load it in the default sRGB space rather '
+				+ 'than with { colorSpace: three.LinearSRGBColorSpace }'
+			);
+		}
+		H.setMaterialSlot(this._index(), SLOT_EMISSIVE, texture === null ? NoTexture : texture._index());
+		this._emissiveMap = texture;
+		return texture;
+	}
+
 	// Three.js has these two as separate images and this renderer does not —
 	// glTF packs them into one, `ref.material` hands one over, and the shader
 	// reads two channels of it. Refused by name rather than ignored, because a
@@ -652,6 +741,7 @@ export class MeshLambertMaterial extends Material {
 			normalMap: this._normalMap?.toJSON() ?? null,
 			metalnessRoughnessMap: this._metalnessRoughnessMap?.toJSON() ?? null,
 			aoMap: this._aoMap?.toJSON() ?? null,
+			emissiveMap: this._emissiveMap?.toJSON() ?? null,
 		};
 	}
 }

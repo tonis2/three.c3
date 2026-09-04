@@ -386,24 +386,25 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Six descriptors, and every one of them is the template's own: the material's
-	// map at 0, the shadow map at 1, the environment map at 2, and the three maps
-	// the built-in material shades with at 3, 4 and 5. Derived, not declared —
-	// until M4 this was a literal in `MeshPipeline.init`, and it was one binding
+	// Seven descriptors, and every one of them is the template's own: the
+	// material's map at 0, the shadow map at 1, the environment map at 2, and the
+	// four maps the built-in material shades with at 3 to 6. Derived, not declared
+	// — until M4 this was a literal in `MeshPipeline.init`, and it was one binding
 	// until the shadow pass claimed the second.
 	//
 	// **The count is checked as well as the names**, and it is the half that earns
 	// its keep — but no longer against `MATERIAL_BINDING_FIRST`, which is where the
 	// two templates stopped agreeing. `material.slang` reserves three and numbers
-	// an agent's first sampler at 3; this file reserves six and has no agent. A
+	// an agent's first sampler at 3; this file reserves seven and has no agent. A
 	// binding is only ever resolved against the pipeline that declared it, so the
 	// two meanings of "3" never meet — see `NORMAL_MAP_BINDING`.
-	test::@check(mod.layout.bindings.len() == 6, "six descriptors, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 7, "seven descriptors, got %d", mod.layout.bindings.len());
 	test::@check(
 		mod.layout.binding_of("normal_map") != null
 			&& mod.layout.binding_of("metalness_roughness_map") != null
-			&& mod.layout.binding_of("occlusion_map") != null,
-		"and the three past the reserved ones are the built-in material's maps"
+			&& mod.layout.binding_of("occlusion_map") != null
+			&& mod.layout.binding_of("emissive_map") != null,
+		"and the four past the reserved ones are the built-in material's maps"
 	);
 
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
@@ -501,7 +502,7 @@ fn void the_draw_record_matches_the_shader() @test
 		"    + float4(push.morph[0].position + push.morph[0].normal, float(push.morph_targets))\n"
 		"    + push.palette[0][0] + float(push.joints[0].x) + float(push.skin_stride); }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
-		"{ return push.uv_transform * push.surface * push.colors[0] * float(push.flags); }\n",
+		"{ return push.uv_transform * push.surface * push.emissive * push.colors[0] * float(push.flags); }\n",
 		source[vertex_start : vertex_end],
 		source[delta_start : delta_end],
 		source[start : end]
@@ -539,7 +540,7 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	test::@check(three::DrawRecord::size == 264, "and the record is 264 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 280, "and the record is 280 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
@@ -861,7 +862,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 6, "from six reflected bindings");
+		test::@check(pipeline.shader.bindings.len() == 7, "from seven reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
 		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");

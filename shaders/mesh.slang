@@ -338,6 +338,14 @@ struct Draw
     // record; a script that wants a thousand variations wants a different
     // feature.
     float4 uv_variants[8];
+    // What this surface gives off regardless of any light — `material.emissive`
+    // times `material.emissiveIntensity`, linear rgb, and w unused.
+    //
+    // **Added after the shading rather than folded into the albedo**, which is the
+    // whole of what an emissive is: a lamp's glass is bright where nothing is
+    // lighting it, and a black surface can glow. Zero on every material nobody set
+    // one on, which is the value the record already holds.
+    float4 emissive;
 };
 
 struct PushData
@@ -392,6 +400,10 @@ static const uint FLAG_HAS_OCCLUSION_MAP           = 128u;
 // colour and whose relief disagree about where they are, and that reads as a
 // broken material rather than as a broken option.
 static const uint FLAG_STOCHASTIC                  = 256u;
+// Whether `emissive_map` is this material's own. Zero on every material that
+// glows a flat colour and on every one that does not glow at all, which is the
+// same test the three map flags above make.
+static const uint FLAG_HAS_EMISSIVE_MAP            = 512u;
 
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
 // means this frame's live palette, clear means the asset's baked table.
@@ -468,6 +480,10 @@ static const uint POSE_MASK = 0x7fffffffu;
 // is in `fragmentMain` and is the whole of why it is worth having a term rather
 // than folding it into albedo.
 [vk::binding(5, 0)] Sampler2D occlusion_map;
+// glTF's `emissiveTexture`, multiplied by `Draw.emissive` and added after the
+// shading. **A picture and not data** — it is the colour of the light this
+// surface gives off — so it uploads sRGB, unlike the three above it.
+[vk::binding(6, 0)] Sampler2D emissive_map;
 
 // The four influences of one vertex against one palette, summed into the matrix
 // that poses it.
@@ -837,6 +853,19 @@ float shadow_factor(float3 position, float3 normal)
 // argument.
 static float g_shadow = 1.0;
 
+// This fragment's world position, left where `lambert` can reach it.
+//
+// **The same lifetime and the same argument as `g_shadow` beside it**: written
+// once in `fragmentMain` before anything shades, read in `lambert`. It exists
+// because a light may be a *place* — `light_toward` needs to know where the
+// surface is to work out which way a point light is and how much of it arrives —
+// and `lambert(float3 normal)` is how every body ever written spells the call.
+// Adding a parameter would have left every one of them compiling and lit by the
+// directional lights alone, which is a scene missing a campfire and no diagnostic
+// anywhere. `specular_light` already takes the position and uses its own.
+static float3 g_position = float3(0.0, 0.0, 0.0);
+
+
 // The direct light reaching this point, as a colour.
 //
 // **The same function, character for character, in `mesh.slang` and in
@@ -876,7 +905,9 @@ float3 lambert(float3 normal, float occlusion)
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
-        float n_dot_l = max(dot(normal, normalize(light.direction.xyz)), 0.0);
+        float reach;
+        float3 to_light = light_toward(light.direction, g_position, reach);
+        float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
@@ -932,7 +963,8 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
-        float3 to_light = normalize(light.direction.xyz);
+        float reach;
+        float3 to_light = light_toward(light.direction, position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0);
         if (n_dot_l <= 0.0) continue;
 
@@ -949,7 +981,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
         // `lambert` where the two are the same multiply: an occluded light delivers
         // less energy, it does not change the shape of the microfacets.
         float occlusion = i == 0u ? g_shadow : 1.0;
-        sum += light.color.rgb * light.color.w * occlusion
+        sum += light.color.rgb * light.color.w * occlusion * reach
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
     return sum;
@@ -1111,6 +1143,10 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float3 normal = geometric;
     float4 surface = draw.surface;
     float occlusion = 1.0;
+    // What this surface gives off on its own, before a map has multiplied it.
+    // Zero on every material nobody set one on, and the add at the bottom is then
+    // an add of nothing.
+    float3 emissive = draw.emissive.rgb;
 
     // **One test for all four maps.** A map is a picture laid on a surface by its
     // uvs, and a mesh with none — a convex hull, a debug line — has nowhere to
@@ -1165,12 +1201,26 @@ float4 fragmentMain(VertexOutput input) : SV_Target
                 ? stochastic_sample(occlusion_map, uv).r
                 : occlusion_map.Sample(uv).r;
         }
+
+        // The map multiplies the factor, which is glTF's rule and the same one
+        // the metallic-roughness pair follows: the file states both and they
+        // compose. The consequence is the same too — a material with a map and
+        // no `emissive` colour set glows black, because the factor it is
+        // multiplied by is zero. `js/prelude/material.js` is where a map with no
+        // colour beside it takes white.
+        if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
+        {
+            emissive *= scattered
+                ? srgb_to_linear(stochastic_sample(emissive_map, uv).rgb)
+                : srgb_to_linear(emissive_map.Sample(uv).rgb);
+        }
     }
 
     // Once, here, and then left in `g_shadow` for `lambert` to fold into the
     // direct term — the same shape `material.slang` uses, so the two files do the
     // lookup the same number of times as well as the same way.
     g_shadow = shadow_factor(input.world, geometric);
+    g_position = input.world;
 
     // After the normal and before the shading, which is the only place it can
     // be: the views need a world position and a normal, and they answer instead
@@ -1198,7 +1248,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     return float4(
         albedo * lambert(normal, occlusion) * (1.0 - surface.y)
             + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z)
-            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z) * occlusion,
+            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z) * occlusion
+            // Added last and reached by nothing above it — not the occlusion, not
+            // the shadow, not the metalness. A surface that gives off light gives
+            // it off in a crevice, in shadow and on a metal, which is what makes
+            // it an emissive rather than a very bright albedo.
+            + emissive,
         draw.base_color.a * input.color.a * input.vertex_color.a
     );
 }

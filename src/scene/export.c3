@@ -2899,6 +2899,12 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 			: material_of.uv_transform_or_identity(),
 		.surface = material_of == null ? (float[4]) { 1, 0, 0, 0 } : material_of.surface(),
 		.transparent = material_of != null && material_of.blend != BlendMode.NONE,
+		// `material.emissive` times `material.emissiveIntensity`, which is exactly
+		// what glTF's `emissiveFactor` is: linear, and multiplying the emissive
+		// texture when there is one. Clamped, because the factor's range is 0..1 in
+		// the format — a strength above 1 is this renderer's own and needs
+		// `KHR_materials_emissive_strength` to survive, which is not written.
+		.emissive_factor = material_of == null ? (float[3]) { 0, 0, 0 } : clamped_emissive(material_of),
 		.double_sided = material_of != null && material_of.cull == CULL_MODE_NONE,
 		.normal = gltf::NO_TEXTURE_REF,
 		.occlusion = gltf::NO_TEXTURE_REF,
@@ -2931,7 +2937,14 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
 	surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
 	surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
-	surface.emissive_factor = { source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z };
+	// The file's factor, and only where the script did not state one. Every other
+	// field here is read off the source material unconditionally because the script
+	// has no way to say them; `material.emissive` is a way to say this one, and a
+	// script that did should not be overwritten by the file it started from.
+	if (surface.emissive_factor[0] == 0 && surface.emissive_factor[1] == 0 && surface.emissive_factor[2] == 0)
+	{
+		surface.emissive_factor = { source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z };
+	}
 	// The imported stack, on the same terms as the script's one above: a body that
 	// baked has already applied it.
 	if (source.has_layers() && !baked.baked)
@@ -2940,6 +2953,22 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		surface.layers_material = source_material;
 	}
 	return surface;
+}
+
+// `material.emissive` times its intensity, in glTF's range.
+//
+// `Material.emissive_value` answers linear rgb with the strength folded in, which
+// is what the format's `emissiveFactor` means — but the format bounds it at 1 and
+// this renderer does not, so a lamp at intensity 4 is written as the brightest
+// factor there is rather than as a number a validator refuses.
+fn float[3] clamped_emissive(Material* material) @local
+{
+	float[4] value = material.emissive_value();
+	return {
+		math::clamp(value[0], 0.0f, 1.0f),
+		math::clamp(value[1], 0.0f, 1.0f),
+		math::clamp(value[2], 0.0f, 1.0f),
+	};
 }
 
 // A source document's textureInfo as a written one: its image resolved to an
@@ -3180,7 +3209,8 @@ fn void Exporter.write_camera(&self)
 }
 
 <*
- Every light, as a directional `KHR_lights_punctual` on a node of its own.
+ Every light, as a `KHR_lights_punctual` on a node of its own — directional or
+ point, whichever `Light.direction.w` says it is.
 
  `Light.direction` is the *surface-to-light* direction. A glTF directional light
  shines along its node's -Z, and the direction light *travels* is the negation of
@@ -3193,6 +3223,12 @@ fn void Exporter.write_camera(&self)
  blue. glTF measures a directional light's intensity in lux and this renderer
  measures it in nothing at all, so the number is carried rather than converted —
  the alternative is a unit conversion with no defined input.
+
+ **A point light is a place rather than a heading**, so it is written as a `POINT`
+ with the range in the extension's own `range` field and the position on the
+ node's translation, and it carries no rotation at all — a point light has nothing
+ to aim. That is the one shape in here that round trips without a convention to
+ get backwards.
 
  **The names say which one is the sun.** Light zero casts the scene's shadows and
  nothing in glTF records that, so it is written as `sun` and the rest as `light 1`
@@ -3210,19 +3246,26 @@ fn void Exporter.write_light(&self)
 	for (uint i = 0; i < self.pass.lighting.count; i++)
 	{
 		Light light   = self.pass.lighting.lights[i];
-		Vec3 to_light = { light.direction[0], light.direction[1], light.direction[2] };
-		// A light of zero length points nowhere, and normalising it would put NaNs
-		// into the node's rotation. Nothing is written rather than something wrong.
-		if (to_light.length() < 1e-6f) continue;
+		Vec3 where    = { light.direction[0], light.direction[1], light.direction[2] };
+		float range   = light.direction[3];
+		bool punctual = range > 0.0f;
+
+		// A *direction* of zero length points nowhere, and normalising it would put
+		// NaNs into the node's rotation. Nothing is written rather than something
+		// wrong. A point light at the origin is a light at the origin.
+		if (!punctual && where.length() < 1e-6f) continue;
 
 		String name = i == 0 ? "sun" : string::tformat("light %d", i);
 		uint written = self.out.add_light(
 			name,
-			gltf::LightType.DIRECTIONAL,
+			punctual ? gltf::LightType.POINT : gltf::LightType.DIRECTIONAL,
 			color: { light.color[0], light.color[1], light.color[2] },
-			intensity: light.color[3]
+			intensity: light.color[3],
+			range: punctual ? range : 0
 		);
-		uint node = self.out.add_node(name, rotation: rotation_towards(to_light.normalize()));
+		uint node = punctual
+			? self.out.add_node(name, translation: where)
+			: self.out.add_node(name, rotation: rotation_towards(where.normalize()));
 		self.out.set_node_light(node, written);
 		self.out.add_root(node);
 		self.report.nodes++;

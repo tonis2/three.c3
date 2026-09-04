@@ -2139,6 +2139,74 @@ fn void the_camera_and_the_light_are_in_the_file() @test
 	};
 }
 
+<*
+ A point light is a place in the file, not a heading.
+
+ `KHR_lights_punctual` has the kind and the range, so this is the one light shape
+ that round trips without a convention to get backwards: no rotation at all, the
+ position on the node's translation, and the reach in the extension's own `range`.
+ An exporter that wrote it as a directional would put a sun where a campfire was
+ and light the whole scene with it.
+*>
+fn void a_point_light_is_a_place_in_the_file() @test
+{
+	String path = "build/export_point_light.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.add({ position: [2, 3, 4], range: 9, color: 0xff8800, intensity: 5 });
+			const report = scene.export("build/export_point_light.glb");
+			return { nodes: report.nodes };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"type":"point"`), "the kind crosses: %s", json);
+		test::@check(json.contains(`"range":9`), "and so does how far it reaches: %s", json);
+		test::@check(json.contains(`"translation":[2,3,4]`),
+			"the position is on the node, where a place belongs: %s", json);
+		test::@check(!json.contains(`"name":"light 1","rotation"`),
+			"and a point light is not aimed at anything: %s", json);
+	};
+}
+
+<*
+ A material's emissive is in the file.
+
+ `emissiveFactor` is glTF's word for it and means the same thing: linear rgb
+ added after the shading. The strength is folded in, because the format bounds the
+ factor at 1 and this renderer does not — a lamp at intensity 4 writes the
+ brightest factor there is rather than a number a validator refuses.
+*>
+fn void a_materials_emissive_is_in_the_file() @test
+{
+	String path = "build/export_emissive.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const rune = new three.MeshLambertMaterial({ emissive: 0xff0000 });
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), rune));
+			return scene.export("build/export_emissive.glb").nodes;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		String json = json_chunk(path);
+		// Pure red at full strength is linear 1 in the red channel and 0 in the
+		// other two, whatever the sRGB decode does to the middle of the range.
+		test::@check(json.contains(`"emissiveFactor":[1,0,0]`),
+			"the emissive crosses as glTF's own factor: %s", json);
+	};
+}
+
 // ============================================================================
 // Baking: getting a ShaderMaterial's shading into the file
 // ============================================================================

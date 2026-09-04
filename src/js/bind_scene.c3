@@ -2694,12 +2694,14 @@ fn uint arg_light(
 }
 
 <*
- `lightGet(index)` — one light, as `[x, y, z, r, g, b, intensity]`.
+ `lightGet(index)` — one light, as `[x, y, z, r, g, b, intensity, range]`.
 
- The direction is surface-to-light in world space, unnormalized — see `Light`.
- The colour is linear rgb and the intensity multiplies it.
+ The colour is linear rgb and the intensity multiplies it. The last number says
+ what the first three are: 0 is a directional light and they are a surface-to-light
+ direction in world space, unnormalized; above 0 it is a point light, they are a
+ world position and the number is how far it reaches. See `Light`.
 
- Six numbers and a seventh in one array rather than an object, for the reason
+ Seven numbers and an eighth in one array rather than an object, for the reason
  `pointer()` gives: an array crosses in a third of the time an object does, and
  the JS side reads it positionally.
 *>
@@ -2722,11 +2724,17 @@ fn void js_light_get(
 	qjs::Value list = js.array();
 	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(light.direction[i]));
 	for (uint i = 0; i < 4; i++) js.set_index(list, i + 3, qjs::number_value(light.color[i]));
+	// The eighth: the range, 0 for a directional light. Last so that every reader
+	// written when there were seven still reads the seven it knows.
+	js.set_index(list, 7, qjs::number_value(light.direction[3]));
 	*out = list;
 }
 
 <*
- `lightSet(index, x, y, z, r, g, b, intensity)` — one light, whole.
+ `lightSet(index, x, y, z, r, g, b, intensity, range)` — one light, whole.
+
+ `range` is optional and 0 — a directional light — is what its absence means, so
+ every caller written before point lights existed still sets the light it set.
 
  ## Why there is a list of four and why none of them is an Object3D
 
@@ -2771,14 +2779,30 @@ fn void js_light_set(
 	Light light;
 	if (!read_light(&js, argc, args, 1, &light, out)) return;
 
+	// **Light zero is a direction and stays one.** It is the light the shadow map
+	// is fitted around, and the fit takes a direction — `MeshPass.plan_shadow`
+	// hands `lights[0].direction` to `ShadowMap.fit`, which builds an orthographic
+	// box along it. A position there is three numbers the fit would read as a
+	// heading, which is a shadow map aimed somewhere nobody asked for and nothing
+	// anywhere saying so. Refused by name rather than by quietly turning the
+	// shadow pass off.
+	if (index == 0 && light.direction[3] > 0.0f)
+	{
+		*out = js.raise(
+			"three.lights[0] is the sun the shadow map is fitted around and is a direction — a point light goes in one of the other three slots"
+		);
+		return;
+	}
+
 	Lighting lighting = self.pass.lighting;
 	lighting.lights[index] = light;
 	self.set_lighting(lighting);
 }
 
 <*
- `lightAdd(x, y, z, r, g, b, intensity)` — a light in the next free slot, whose
- index it answers with.
+ `lightAdd(x, y, z, r, g, b, intensity, range)` — a light in the next free slot,
+ whose index it answers with. `range` above 0 makes it a point light standing at
+ `x, y, z`.
 
  Refused rather than silently dropped once four are lit. A fifth light that did
  nothing would be a scene lit differently from the one the script describes, with
@@ -2875,8 +2899,14 @@ fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* 
 	float x = arg_float(js, argc, args, at);
 	float y = arg_float(js, argc, args, at + 1);
 	float z = arg_float(js, argc, args, at + 2);
+	// The range, and so which kind of light this is — 0 is directional, which is
+	// what a caller that passes seven numbers means and what every caller written
+	// before there was an eighth one meant.
+	float range = math::max(arg_float(js, argc, args, at + 7), 0.0f);
 
-	if (x * x + y * y + z * z <= 0.0f)
+	// Only a *direction* cannot be zero. A point light at the origin is a light at
+	// the origin, and the three numbers are a place rather than a heading.
+	if (range == 0.0f && x * x + y * y + z * z <= 0.0f)
 	{
 		*out = js.raise(
 			"a light's direction cannot be zero — it is a direction, and normalizing it would be a NaN in every shading term"
@@ -2885,7 +2915,7 @@ fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* 
 	}
 
 	*light = {
-		.direction = { x, y, z, 0 },
+		.direction = { x, y, z, range },
 		.color = {
 			math::clamp(arg_float(js, argc, args, at + 3), 0.0f, 1.0f),
 			math::clamp(arg_float(js, argc, args, at + 4), 0.0f, 1.0f),
