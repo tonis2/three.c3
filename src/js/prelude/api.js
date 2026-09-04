@@ -1700,8 +1700,8 @@ export const three = {
 	moveAndSlide,
 
 	// The same controller for a whole crowd, in ONE call — and it exists for
-	// the shape of the answer rather than for the crossing. notes.md §17 took
-	// the single form's 7.53 us per agent apart: 3.10 us is the sweep, 1.05 us
+	// the shape of the answer rather than for the crossing. The single form's
+	// 7.53 us per agent comes apart: 3.10 us is the sweep, 1.05 us
 	// is the crossing and the raw host answer, and 3.63 us — three fifths — is
 	// the JavaScript result object, three live Vector3s and two lazy node
 	// properties built for a caller who reads four numbers out of them. This
@@ -1722,8 +1722,8 @@ export const three = {
 	moveBuffer,
 
 	// Move many nodes in one crossing, through a Float32Array. NOT a faster
-	// way to move a dozen things — notes.md §17 measured five hundred ordinary
-	// position writes at three per cent of a frame — but the right shape when
+	// way to move a dozen things — five hundred ordinary position writes
+	// measure three per cent of a frame — but the right shape when
 	// the write is already a loop over numbers: a crowd, a particle field, a
 	// chunked terrain. The trigger is about two thousand nodes a frame.
 	batch,
@@ -1748,7 +1748,7 @@ export const three = {
 	// for agents that collide and a plain add for agents that do not.
 	steer,
 
-	// The ordered system registry — `notes.md` §21. setFixedLoop and
+	// The ordered system registry. setFixedLoop and
 	// setAnimationLoop each take ONE callback, so a game with five things to do
 	// a frame has one function with five things in it. This is that function
 	// split into named parts that run in a declared order, with per-system

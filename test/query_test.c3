@@ -1,6 +1,5 @@
 <*
- Bulk spatial queries, the character controller, navigation and steering —
- `notes.md` §17.
+ Bulk spatial queries, the character controller, navigation and steering.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::query`
 
@@ -392,7 +391,7 @@ fn void the_collider_count_is_what_a_script_watches() @test
  stops being found and comes back exactly as it was, and that a sequence of
  write-then-ask answers correctly however it is interleaved. Both were true
  before the fix as well — what changed is the price — so this is a guard on the
- re-file being right, not on it being fast. `notes.md` §17 has the numbers.
+ re-file being right, not on it being fast.
 
  The interleaved half is the one that could actually break: a re-filed entry
  stays filed in the cells it used to cover, and the stamp is what stops it being

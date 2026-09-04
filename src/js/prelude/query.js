@@ -1,11 +1,11 @@
 // three.c3 — bulk spatial queries, the character controller, and the batched
-// transform write. `notes.md` §17.
+// transform write.
 //
 // ## Two answer shapes, and which one to reach for
 //
 // Every verb here comes in a convenient form that allocates an array of
 // Object3Ds, and a flat form that fills a buffer the caller keeps. That is not
-// indecision: `notes.md` §17 measured the boundary and found that a host call
+// indecision: the boundary was measured, and a host call
 // answering with a scalar is CHEAPER than the JavaScript it replaces (55 ns
 // against 70), while one that allocates to answer costs three times as much —
 // so the cost of an answer is the allocation, and whether that matters depends
@@ -230,7 +230,7 @@ export const query = {
 };
 
 // -----------------------------------------------------------------------
-// The character controller — notes.md §17, and §7's first entry before it was built.
+// The character controller.
 
 const MOVE_DEFAULTS = {
 	radius: 0.3,
@@ -373,8 +373,8 @@ function selfColumn(value, agents, where) {
 // however many characters.
 //
 // **This is the same controller as `three.moveAndSlide` and it exists for one
-// reason: the shape of the answer.** `notes.md` §17 measured the single form at
-// 7.53 us per agent and took it apart — 3.10 us is the sweep, 1.05 us is the
+// reason: the shape of the answer.** The single form measures 7.53 us per
+// agent, and it comes apart — 3.10 us is the sweep, 1.05 us is the
 // crossing and the raw host answer, and 3.63 us, three fifths of it, is the
 // JavaScript result object: three live `Vector3`s and two lazy node properties,
 // built for a caller who reads four numbers out of them. At two hundred agents
@@ -477,13 +477,13 @@ export function moveAndSlideAll(positions, motions, options = null) {
 }
 
 // -----------------------------------------------------------------------
-// Batched transforms — notes.md §17
+// Batched transforms
 
 // Move many nodes in one crossing.
 //
 // **This is not a faster way to move a dozen things and should not be reached
-// for as one.** `notes.md` §17 measured five hundred `mesh.position.set(x,y,z)`
-// at 0.245 ms a frame — three per cent of the eight-millisecond budget — and
+// for as one.** Five hundred `mesh.position.set(x,y,z)` measure
+// 0.245 ms a frame — three per cent of the eight-millisecond budget — and
 // set the trigger at about two thousand nodes a frame. Below that the ordinary
 // property write is clearer and costs nothing anybody can see.
 //
@@ -511,8 +511,8 @@ export function moveAndSlideAll(positions, motions, options = null) {
 // one angle each, typed by a person.
 //
 // The Euler form is what makes a crowd of characters one crossing instead of
-// four. `notes.md` §17 measured a critter writing a group position, a group
-// heading and two leg angles at four crossings a frame, about 380 ns apiece —
+// four. A critter writing a group position, a group heading and two leg
+// angles measured four crossings a frame, about 380 ns apiece —
 // and the reason it was four rather than one was that the batch could not
 // express the three angles it wanted to write.
 //

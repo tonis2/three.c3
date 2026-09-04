@@ -32,8 +32,6 @@ somebody has one. The third wants ten minutes with a mouse.
 
 ## 3. Skinning
 
-Crossfading, morph targets and sockets are built. What they left open:
-
 - [ ] **A glTF node with several primitives only morphs its first.** Each
       primitive became its own scene node and only one of them carries the glTF
       index a WEIGHTS channel names. A face is one primitive in every file that
@@ -152,11 +150,6 @@ count is not the trigger and never was.
 
 ## 17. Gameplay
 
-**Everything here but the three below was built.** What each of them settled, and
-what it measured, is `notes.md` §17; the ordering argument that used to head this
-section went with them, because the order was the argument and it has been
-followed.
-
 - [ ] **Clip events**: a sorted time list per clip compared against the player's
       clock, fired into a JS callback. Cheap on both paths. The blending it was
       bundled with is built — §3.
@@ -185,17 +178,37 @@ followed.
       cluster's list, and **not one material body has to change**. **Trigger:** the
       fifth light. The shading side is not what is hurting.
 - [ ] **Revisit `SHADOW_PLAN_STATIC` on a device where the full-image copy is not
-      free.** Two lines in `MeshPass.plan_shadow`; `notes.md` §19.3 has the
-      numbers to beat and why the measurement came out backwards here.
+      free.** Two lines in `MeshPass.plan_shadow`; the measurement came out
+      backwards on this device, so the numbers to beat want taking again.
+- [ ] **An orbiting camera refits the cached shadow map; a walking one never
+      does.** `ShadowMap.static_fit`'s own comment says what is deliberately not
+      a key: "anything about the camera... a character walking through the
+      village must not cost the village its map, and a camera that turns must
+      not either." It turns out a camera that *turns* is the only one that does.
+      The key is `light_view_projection`, fitted around `Camera.view_bounds`,
+      which is the AABB of the frustum corners — so it follows the eye, and
+      `SHADOW_FIT_SLACK` absorbs 7.5% of the box width of eye travel per refit.
+      Walking moves the eye 2.4 m/s; a turntable dragged at 180 deg/s on a 15.5 m
+      boom moves it 48 m/s, twenty times faster, and an AABB around an oriented
+      frustum also changes *extent* as it yaws, so the box escapes the slack by
+      growing as well as by drifting. Measured on the Evil Forest scene at 1080p,
+      2048 map, `shadow.distance = 24`: dragged, 20 rebuilds in 300 frames at
+      0.27 ms against a 0.10 ms steady pass; camera still, 0 in 300; walking in
+      first person, 0 in 300. Reported from a window as a lag spike that stops
+      the moment the view changes to first person. The cost of a rebuild is
+      39 draw calls over ~4,800 static instances, most of them crossed cards
+      casting their whole quads because the depth pass has no fragment stage —
+      so it scales with the scenery and it is the scene with grass in it that
+      feels it. Two candidate fixes, and the measurement above does not say
+      which: apply the slack to the fit's extent and not only to its centre, or
+      fit the focus around a bounding *sphere*, which is rotation-invariant by
+      construction and costs texel density in exchange.
 
 **Not doing:** the depth prepass (measured — pay 0.59 ms to save at most 0.23),
-and deferred shading (it breaks the material contract). Both are in `notes.md`
-so that the next person to have the idea finds the measurement rather than the
-argument.
+and deferred shading (it breaks the material contract). The measurement is what
+answers the idea; the argument is not.
 
 ## 20. Authoring a level
-
-All four items are built. What they left open:
 
 - [ ] **`Heightmap.furthest_point` still returns the four corners of the map.**
       Harmless now that the dispatch never sends a heightfield to GJK, and wrong
@@ -209,9 +222,6 @@ All four items are built. What they left open:
 
 ## 21. Systems and a cast
 
-**Built.** `notes.md` §21 has the shape, the three decisions it forced and what
-the example it was measured against looked like before and after.
-
 - [ ] **`three.systems.report()` has no way to reach a HUD.** It is the CPU half
       of `three.stats()` and there is nowhere to draw either — §5's text work is
       what unblocks it, and until then the numbers reach a person through
@@ -221,13 +231,8 @@ the example it was measured against looked like before and after.
 
 ## 22. Shipping a game
 
-What a bundle needs that a viewer does not. Most of it is built: the cache no
-longer follows the launcher around, a game names itself and its save folder
-through `three.configure`, the window can be titled and made fullscreen, the
-picture follows the window, and saves have a directory of their own —
-`test/shipping_test.c3` is the whole of it in one file. Audio is §6. Steamworks
-and macOS notarisation are deliberately absent: neither can be done from this
-repo.
+What a bundle needs that a viewer does not. Audio is §6. Steamworks and macOS
+notarisation are deliberately absent: neither can be done from this repo.
 
 - [ ] **No gamepad.** Steam Input presents every controller as XInput or evdev,
       so this is the whole of controller support without Steamworks:
@@ -249,13 +254,7 @@ repo.
 
 ## 23. Compressed textures
 
-**Done.** A plain BCn KTX2 now reaches the device as blocks, with the mip levels
-its author wrote, through both doors — `three.texture(path)` and an image inside
-a `.glb`. `notes.md` §23 has the design and the measurements; the short version
-is 2048x2048 going from 397 ms and 21.3 MiB to **23 ms and 5.3 MiB**, which is
-17x the load speed and a quarter of the memory.
-
-What is left is not this section's work, and none of it is blocking:
+None of this is blocking:
 
 - [ ] **The BC7 fallback has never run.** `Gpu.supports` decides it and a test
       asserts it agrees with itself, but this machine samples BC7, so the branch
@@ -274,15 +273,6 @@ What is left is not this section's work, and none of it is blocking:
       them over. Wants a real use before it gets an argument.
 
 ## 24. Exporting compressed textures
-
-**Done.** `scene.export(path, { textures: 'png' | 'ktx2' | 'basis' })`. `ktx2` is
-BC7 with a mip chain for this engine — a quarter of the VRAM and seventeen times
-the load speed. `basis` is ETC1S for everyone else, declared
-`KHR_texture_basisu`, deliberately not the default because this engine reloads it
-on the slow path. PNG stays the default and a source file's bytes are still
-copied untouched whichever is asked for. The extension declared now follows the
-*payload* rather than the mime type, so a Basis image copied through an export
-keeps its own name instead of being relabelled. `notes.md` §24 has the design.
 
 - [ ] **`lib/gltf.c3l` is ahead of its committed pointer.** The extension
       declaration lives in the submodule — a constant in `src/main.c3` and the
@@ -310,10 +300,6 @@ keeps its own name instead of being relabelled. `notes.md` §24 has the design.
       different verb and it does not exist.
 
 ## 25. A trim sheet from a function
-
-**Unblocked by §26**, which is what it was waiting for: a normal, a roughness and
-an occlusion map now shade on the built-in pipeline, so baking one is worth
-doing.
 
 `render/bake.c3` already runs a material body in uv space and reads the pixels
 back, which is most of a material authoring tool built for another reason. Two
@@ -364,14 +350,11 @@ exist and the items below are about moving that inside.
       authoring wants the sheet flat *and* on a lit test mesh. This is the half
       that decides whether an agent's iteration converges or wanders.
 
-**Verification: done, and the number is 0.** `examples/trimsheet.js` bakes
-`h = 0.5 + 0.5 sin(2pi k u)`, whose slope is closed-form, and compares every
-texel of the resulting normal against it: worst error 0/255 across 1024. It bakes
-through a post pass and a screenshot rather than through `render/bake.c3`, so it
-proves the *arithmetic* — central differences at float precision, scaled by a
-relief in texels, pre-encoded past the target's sRGB write — and not the channel
-index above. When the bake grows the other three channels, that comparison is
-what it has to reproduce.
+**When the bake grows the other three channels**, the check it has to reproduce
+is `examples/trimsheet.js`'s: bake `h = 0.5 + 0.5 sin(2pi k u)`, whose slope is
+closed-form, and compare every texel of the resulting normal against it — worst
+error 0/255 across 1024, at float precision, scaled by a relief in texels and
+pre-encoded past the target's sRGB write.
 
 **Not doing:** matching a reference image automatically. An agent looking at a
 reference and writing the function is the whole of the feature; sampling the
@@ -382,21 +365,7 @@ constraints — the agent writes a function and the geometry stays a quad.
 
 ## 26. Shading the maps that already load
 
-**Done.** `normalMap`, `metalnessRoughnessMap` and `aoMap` are properties of a
-`MeshLambertMaterial` and reach the built-in pipeline: `mesh.slang` samples them
-at bindings 3, 4 and 5 under a flag each, the normal goes through the shared
-`mapped_normal_frame`, the pair multiplies `material.roughness` and `.metalness`
-glTF's way (green and blue of one image), and occlusion multiplies the ambient
-floor and the environment reflection and **not** the direct lobes.
-`test/maps_test.c3` is the whole of it, with the three injections that prove each
-claim.
-
-The cotangent frame is written once, in `shaders/surface.slang`, and spliced into
-both templates at their `//@shared` line by `shader_source` — the first thing the
-two shaders share rather than duplicate. `Surface.height` exists, neutral at 0.5,
-for §25 to bake into.
-
-What is left, and none of it is blocking:
+None of this is blocking:
 
 - [ ] **The GGX block is still duplicated character for character.** `lambert`,
       `specular_light`, `environment_light`, `environment_uv`, `shadow_factor`
@@ -425,9 +394,7 @@ What is left, and none of it is blocking:
 
 ## 27. Hiding the repeat
 
-**Done, for the first of the three families below and most of the second.** A
-tiled texture reads as tiled, and the fix is three separate tricks rather than
-one:
+Three separate tricks rather than one:
 
 - **break the grid** — vary per *copy*: turn, flip or slide the uv, drift the
   tint, so a row of one shape stops being a row of one picture;
@@ -436,53 +403,13 @@ one:
 - **break the uniformity** — put things on top that do not repeat at all:
   decals, painted grime, edge wear.
 
-§25's trim sheet is what made this urgent rather than nice: one sheet dressing a
-whole level is exactly the arrangement whose repeat is most visible, and a strip
-is a band of v, which is what decides the order things apply in.
-
-`s.origin` is where a copy *is*, on `Surface` and `Vertex` — the seed every
-per-copy trick wants, and the one thing a body could not work out for itself:
-`s.position` varies per pixel, and an instance index is not stable across culling
-and re-bucketing, so a pattern keyed on one swims as the scene changes. It costs
-no instance field and no new per-copy channel, being
-`mul(instance.model, float4(0,0,0,1))` and one `nointerpolation float3`. A merged
-mesh is one copy, so the seed is per merge and not per piece.
-`test/origin_test.c3`.
-
-`material.uvVariants` is up to eight `[offsetU, offsetV, turns, flip]` rows in
-the `DrawRecord`, picked by `mesh.variant` — the channel that already varied per
-copy, now meaningful on every material and not only inside a body. **Applied to
-the mesh's own uv before `material.repeat`**, and that order is the design rather
-than a detail: a row is one of the eight symmetries of the square, so whatever
-band the repeat then maps into is still the band it was, and a trim sheet's strip
-survives a quarter turn that would otherwise walk straight out of it. Explicit
-rows and not a count to hash, because a distribution is a default invented from
-one scene. `test/variant_test.c3`.
-
-`material.stochastic` is Heitz and Neyret's tile blend in
-`shaders/surface.slang` — three taps at three per-cell offsets over a triangular
-lattice — and a body reaches the same function as `stochastic_sample(image, uv)`.
-`SampleGrad` with the *un-jittered* derivatives is not optional: without it every
-cell boundary picks its own mip and the cure is more visible than the disease.
-`test/stochastic_test.c3` measures it the only way it can be measured without
-knowing where anything is on screen — a repeat *is* a period, so shifting the map
-by one whole repeat has to draw the identical frame back straight and a different
-one scattered.
-
-**And it settled one guess this entry had made in the other direction.**
-Stochastic sampling cannot be used on a trim sheet strip: the offsets go on
+**Stochastic sampling cannot be used on a trim sheet strip:** the offsets go on
 *after* `uv_transform`, so a band an eighth of a sheet tall is left several
 strips behind, and a brick band comes back showing the tile band. It assumes the
 whole image tiles over the surface, which is the case it exists for.
 `uvVariants` is the one that is safe on a sheet.
 
-`examples/trimsheet.js` wears both, and is also where the cost of getting a slide
-wrong is written down: the rivet strip repeats every sixteenth of the sheet, so
-the first four crate rows there were slides of exactly one and one-and-a-half of
-those and two of the four crates were pixel-identical to the other two. A slide
-is measured against the *pattern's* period, not against the face.
-
-What is left, and none of it is blocking:
+None of this is blocking:
 
 - [ ] **A strip-safe scatter.** The gap the paragraph above opens. Inside a strip
       there is nowhere to move but along it, so the offset would have to be one
@@ -534,11 +461,6 @@ What is left, and none of it is blocking:
       generated body already has `s.position`; this is a couple of lines in
       `js/prelude/layers.js`.
 
-- [ ] **Triplanar as a shared function.** `scene/convex.c3` already says a
-      hull's projected uv is "the same thing in the shader". Same home as the
-      stochastic sample, and the same argument for it: a rock, a cliff and a
-      merged terrain all have uvs that are a projection rather than an unwrap.
-
 - [ ] **Nothing paints a vertex colour.** `maskSource: 'vertexColor'` is half of
       painted grime and the other half only ever arrives from a `.glb`. The
       in-keeping version is generated rather than painted — the engine
@@ -553,100 +475,50 @@ the one that composes with instancing and with the exporter.
 
 ## 28. Wearing a sheet on somebody else's mesh
 
-§25 baked a trim sheet and §27 stopped it repeating, and both were measured
-against geometry this repo built. These came out of the other case: an imported
-Blender blockout — nineteen meshes, two materials, no uvs on half of them —
-dressed with two sheets, a layered ground and a fire. Everything below either
-cost a workaround or has one written down somewhere it should not be.
+**Alpha-tested shadows: decided, not built.** A fragment stage and a sampler on
+the shadow pipeline would stop grass, foliage, chain and rope casting
+rectangles. Reading the code says it is the *second* half of a feature whose
+first half does not exist: there is no `material.alphaTest` anywhere,
+`mesh.slang` never reads the base colour map's alpha, and a transparent material
+casts no shadow at all — so today a leaf card either casts the shadow of its
+quad while being drawn as a blended quad, or casts nothing. Building the shadow
+half alone would be building the half nothing can use. The whole feature is one
+change: an `alphaTest` on the material, a `discard` in `mesh.slang`, and a
+second shadow pipeline with a fragment stage used only by the materials that ask
+— a second pipeline rather than a sampler on the one every caster shares, so a
+scene with no cut-outs pays one pipeline object and nothing per draw. The
+trigger is `render/shadow.c3`'s own: the first scene where foliage is the
+subject rather than the scenery.
 
-- [ ] **A layer cannot window into a strip.** `layerUv` in
-      `js/prelude/layers.js` emits `s.uv * uvScale + uvOffset` and no `frac`, so
-      a layer that tiles more than once walks straight out of whatever band the
-      offset put it in — windowing into a sheet and tiling are the same axis and
-      cannot both happen. One `frac` behind a layer flag would let a terrain's
-      four materials come out of one sheet; without it they are four images, and
-      the ground half of a nature sheet has to be baked a second time as whole
-      tiling pictures. Six extra bakes for the scene that found it.
+None of this is blocking:
 
-- [ ] **The splat mask follows `material.repeat`.** The mask is sampled at
-      `s.uv`, and the fragment stage applies `repeat` and `offset` before the
-      body runs, so a stack whose base map wants tiling gets its mask tiled with
-      it. The consequence is not obvious from the docs and is the first thing a
-      terrain hits: it has to leave `repeat` at 1, own no base map at all, and
-      make its base material layer zero with no mask. Either the mask reads the
-      untransformed uv, or the class says this out loud.
+- [ ] **The alpha test itself**, as the paragraph above spells it: `alphaTest` on
+      the material, a `discard` in `mesh.slang`, and a cut-out shadow pipeline
+      beside the one every other caster shares. One feature, two halves, and the
+      shadow half is the cheaper of them once the first exists.
 
-- [ ] **`standard()` has nowhere to put an occlusion.** `lambert(normal, ao)`
-      takes one and skips the specular and environment terms; `standard(s,
-      albedo, normal)` has both and takes no ao. A body reading a packed ORM —
-      which is every body wearing a sheet — therefore folds the red channel into
-      the albedo and darkens the direct light along with the ambient. It is a
-      fourth parameter.
+- [ ] **`emissiveMap` does not export**, which is §26's open entry about the
+      built-in material's maps with a fourth one on the end. The *factor* crosses
+      — `emissiveFactor` is written from `material.emissive` — and the image does
+      not, because `scene/export.c3` writes maps out of a `LayeredMaterial`'s
+      stack and knows nothing about the slots on a `MeshLambertMaterial`.
 
-- [ ] **Per-texel roughness is undocumented and may be accidental.** A body sets
-      `s.roughness` and `s.metalness` before calling `standard(s, albedo,
-      normal)` and it works, because `Surface` is a by-value parameter. That is
-      the only way to shade an ORM map correctly today and nothing says it is
-      supported. Either document it or add
-      `standard(s, albedo, normal, roughness, metalness)`.
+- [ ] **The importer still routes a glow through a `LayeredMaterial`.**
+      `instantiate({ materials: true })` turns an `emissiveFactor` and an
+      `emissiveTexture` into a layer at zero opacity, which now compiles a shader
+      for something the built-in pipeline does. It is one edit in
+      `js/prelude/asset.js` and it changes what every existing import looks like,
+      so it wants the before-and-after §26 asks for on the same file.
 
-- [ ] **A body brings its own noise.** `three.hash`, `noise2` and `fbm2` are
-      JavaScript; a fragment body gets `standard`, `lambert`, `specular`,
-      `srgb_to_linear`, `mapped_normal` and `stochastic_sample`, and no noise at
-      all. So every generated material in `examples/` and every one outside it
-      carries the same hash, the same tiling value noise, the same fbm and its
-      own worley — 120 lines before the first material. `surface.slang` already
-      holds `hash_cell` for exactly this reason and is the home for the rest:
-      the tiling ones especially, since a period that does not divide the image
-      is a seam nothing reports.
+- [ ] **A point light casts nothing**, and cannot: the shadow map is fitted around
+      light zero, which is a direction. A lamp that shadows wants a cube map or a
+      second fit, and `plan.md` §19's atlas is what turns that into a tiling
+      question rather than an allocation one.
 
-- [ ] **Alpha-tested shadows.** `shadow.slang` has one entry point and no
-      fragment stage, and says so — a leaf card casts the shadow of its quad.
-      That is the honest statement and it is also a ceiling: grass, foliage,
-      chain, rope and every cut-out decal cast a rectangle. It costs a fragment
-      stage and one sampler on that pipeline, which is real, so the entry is to
-      decide rather than to build.
-
-- [ ] **Nothing is lit from a point.** Four lights, all directional. A campfire
-      cannot light the ground it stands on, so the light pool under one is an
-      additive quad and the warm light on the props around it is a global
-      directional that tints the whole level if it is pushed past about half
-      intensity. This is the largest visible gap between what a scene like that
-      should look like and what it does.
-
-- [ ] **`--assets` boots `main.js` even when `--script` is given.** A two-stage
-      pipeline — bake to disk, then load the bake — cannot put its baker in the
-      game directory: the boot builds the game first, and on a clean checkout it
-      throws, because the scene is waiting on the file the baker has not written
-      yet. The workaround is to root the bake at a subdirectory with no
-      `main.js` in it, which works and reads as a trick. `--no-boot`, or
-      `--script` suppressing the boot, is the honest spelling.
-
-- [ ] **`--script` does not evaluate a module.** `--assets <dir>/main.js` does,
-      so `import` works there and is a `SyntaxError` in the file beside it. Any
-      pipeline with two entry points is therefore one self-contained file plus a
-      module set that cannot share a line with it.
-
-- [ ] **`scatter`'s `accept` signature is not written down.** It is
-      `(x, y, z, normal)`; `scatter` answers with `{ x, y, z, normal, index }`,
-      and passing the callback the record it returns is the obvious guess and
-      the wrong one. One line in `functions.md`.
-
-- [ ] **A post uniform and a local of one name is an error.** `float d` beside a
-      `d` in the uniform block is `error[E40011]: ambiguous reference`, where a
-      local shadowing an outer name is what every language the author came from
-      does. Nothing to fix in the compiler; it belongs in `differences.md`
-      beside the other things that fail at the first run.
-
-- [ ] **Triplanar wants the mip fix in it.** §27 already asks for triplanar as a
-      shared function. What that entry should carry when it is written: the
-      window into a band has to sample with `SampleGrad` and the *unwrapped*
-      gradients, exactly as `stochastic_sample` does, or the `frac` puts a
-      blurred line along every tile boundary on every surface in the scene; and
-      three tangent-space normals have to be blended Whiteout rather than
-      averaged, or anything facing two ways at once comes out flat. Both are
-      written out in `~/Documents/FF9/sheets.js` and neither is guessable from
-      the naive version.
+- [ ] **Four lights is still four.** A point light spends one of the same four
+      slots a directional one does, so a room with three lamps has one left for
+      the sun. §19 already names the fifth light as clustered forward's trigger;
+      point lights are what make reaching it plausible.
 
 ## Standing constraints
 

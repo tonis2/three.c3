@@ -258,7 +258,7 @@ faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
  written by a game is a file that game reloads. Nothing about it can surprise
  a reader.
  - `KTX2_BC7` is what *this* engine wants back: `decode_ktx2_blocks` hands those
- blocks to the device untouched, which is `notes.md` §23's whole saving. Nobody
+ blocks to the device untouched, which is the whole saving. Nobody
  else reads them, because `CUSTOM_texture_ktx2` is our own name.
  - `KTX2_BASIS` is what a stranger reads. ETC1S under `KHR_texture_basisu`,
  which every glTF toolchain implements, at a fifth of BC7's size — and visibly
@@ -1502,7 +1502,7 @@ fn bool Exporter.drives_a_bone(&self, AssetId id, AnimationClip* clip)
  **A WEIGHTS channel is never one of them.** It drives a mesh's blend shapes
  through the node the mesh hangs on, and that node is not a joint and is not in a
  skeleton's map. What each copy's weights *are* went into the file on the copy's
- own node; the curve that would move them did not, and `notes.md` §16 is where
+ own node; the curve that would move them did not, and `plan.md` §16 is where
  that would be picked up.
 *>
 fn int Exporter.first_target(&self, AssetId id, uint node, AnimatedPath path)

@@ -1,4 +1,4 @@
-// three.c3 — navigation and steering. `notes.md` §17.
+// three.c3 — navigation and steering.
 //
 // ## Two verbs, and the split is the whole design
 //
@@ -72,8 +72,8 @@ export class NavField {
 	// `direction` and `cost` for a whole crowd, in ONE crossing.
 	//
 	// **The two above are the wrong verbs to call in a loop, and the reason is
-	// not the crossing.** `notes.md` §17 measured the bare host call that
-	// answers a number at 143 ns and `cost(point)` — the same call, through the
+	// not the crossing.** The bare host call that answers a number measures
+	// 143 ns, and `cost(point)` — the same call, through the
 	// `readVector` that allocates a three-element array and runs three
 	// `Number.isFinite` checks to be polite about its argument — at 455 ns. The
 	// ergonomics layer costs twice what the boundary does. That is a good trade
@@ -262,7 +262,7 @@ export function makeSceneNav(scene) {
 // Fill `velocities` with a desired velocity per agent — the crowd verb.
 //
 // **One crossing however many agents there are**, which is the whole point.
-// `notes.md` §17 measured the boundary and the rule it wrote down is that a
+// The boundary was measured, and the rule it wrote down is that a
 // verb answering with vectors writes into a Float32Array the caller owns; this
 // is that rule at crowd scale. A hundred agents cost one call.
 //

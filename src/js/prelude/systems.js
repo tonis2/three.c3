@@ -1,8 +1,8 @@
-// three.c3 — the ordered system registry. `notes.md` §21.
+// three.c3 — the ordered system registry.
 //
 // ## What this is for, and it is not speed
 //
-// `notes.md` §17's crowd table put every JavaScript-side data layout — arrays
+// The crowd table put every JavaScript-side data layout — arrays
 // of structs, structures of arrays, a masked dispatch through a callback —
 // between 70 and 150 ns per agent per frame, inside the ±142 ns noise floor of
 // the measurement itself. **None of this makes a frame faster.** The speed was
@@ -87,7 +87,7 @@
 // first version of this file divided the cumulative number by a thousand and
 // called it `dt`, so every frame-phase system multiplied by the time since the
 // level loaded, and the test that should have caught it asserted that the two
-// arguments AGREED — which the wrong number satisfies exactly. `notes.md` §21.
+// arguments AGREED — which the wrong number satisfies exactly.
 import { clamp01 } from './math.js';
 
 const H = globalThis.__three;
@@ -577,5 +577,5 @@ export const systems = new Registry();
 
 // A 0..1 reading of how much of the frame budget the registry is using, for a
 // HUD that wants a bar rather than a number. Eight milliseconds is the budget
-// `notes.md` §5 measures against.
+// everything here is measured against.
 export function systemLoad(budgetMs = 8) { return clamp01(systems.frameMs / budgetMs); }

@@ -28,8 +28,8 @@
 // So every live Cooldown sits in a module-level list per phase, decremented
 // by that phase's own `dt` inside a system registered LAZILY on the first
 // `three.cooldown()` call that needs it, and removed once the last cooldown
-// on that phase disposes. This is not optional: `notes.md` §21 — "a phase's
-// host slot is taken only while that phase has systems in it" — means a
+// on that phase disposes. This is not optional: a phase's host slot is taken
+// only while that phase has systems in it, which means a
 // `'fixed'` system registered at module load would take the fixed-loop slot,
 // and change `JsRuntime.tick`'s "did anything run" answer
 // (`is_animating()`), for every scene that merely imports this file.
@@ -44,9 +44,9 @@
 // are plain field reads with no host crossing at all.
 //
 // Wiring the `'frame'` phase is what found the registry handing frame systems
-// the cumulative clock instead of a delta — fixed in `systems.js`, recorded in
-// `notes.md` §21. The first draft of this file read `three.clock.dt` itself to
-// get round it; the workaround went with the bug.
+// the cumulative clock instead of a delta — fixed in `systems.js`. The first
+// draft of this file read `three.clock.dt` itself to get round it; the
+// workaround went with the bug.
 import { systems } from './systems.js';
 import { clamp01 } from './math.js';
 

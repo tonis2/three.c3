@@ -414,8 +414,8 @@ export function asTriple(value, where) {
 // that was is why this section exists.
 //
 // **They stay in JavaScript, and that is a measurement rather than a
-// preference.** `notes.md` §17 timed a host call that allocates to answer
-// arithmetic at 185 ns against the 70 ns of the JavaScript it replaced —
+// preference.** A host call that allocates to answer arithmetic timed at
+// 185 ns against the 70 ns of the JavaScript it replaced —
 // slower on every call, forever. A verb belongs on the host when it does
 // real work or answers a scalar about state the host owns; none of these do
 // either.
@@ -572,11 +572,11 @@ export function tintColor(colour, k) {
 }
 
 // -----------------------------------------------------------------------
-// Randomness that can be replayed — notes.md §17, §6
+// Randomness that can be replayed
 //
 // **`Math.random` is the one thing that throws away the determinism the rest
-// of this engine goes to some trouble to have.** `notes.md` §17 named it
-// while building the clock: the fixed step, the solver's own accumulator and
+// of this engine goes to some trouble to have.** It was named while building
+// the clock: the fixed step, the solver's own accumulator and
 // `state_hash` exist so that the same inputs produce the same frame, and one
 // `Math.random()` in the gameplay layer costs all of it — a bug that
 // reproduces on the tester's machine and not on yours, with no way to
@@ -731,11 +731,11 @@ export function fbm2(x, y, options = null) {
 }
 
 // -----------------------------------------------------------------------
-// Damping — notes.md §17
+// Damping
 //
 // The two verbs a game reaches for between "where it is" and "where it
-// should be", and both are here rather than on the host for the reason
-// notes.md §17 measured: a host call that allocates in order to answer
+// should be", and both are here rather than on the host for a measured
+// reason: a host call that allocates in order to answer
 // arithmetic costs 185 ns against the 70 ns of the JavaScript it replaced,
 // and it costs that on every call forever. These are four multiplies.
 //
@@ -869,7 +869,7 @@ export function smoothDamp(current, target, state, smoothTime, dt, maxSpeed = In
 }
 
 // -----------------------------------------------------------------------
-// CatmullRomCurve3 — notes.md §17
+// CatmullRomCurve3
 //
 // The three-dimensional half of the curve pair. `three.catmullRom` in
 // field.js is a GROUND path: [x, z] in, a dense polyline out, built to be
