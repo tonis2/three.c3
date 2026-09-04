@@ -177,7 +177,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "ambientGet", &js_ambient_get, 0);
 	self.bind(host, "ambientSet", &js_ambient_set, 1);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
-	self.bind(host, "shadowSet", &js_shadow_set, 5);
+	self.bind(host, "shadowSet", &js_shadow_set, 6);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -1773,6 +1773,10 @@ fn void js_stats(
 	// the next, which is what marking things static is for. See
 	// `SceneStats.shadow_static_draws`.
 	js.set_property(object, "shadowStaticDraws", qjs::int_value((int)stats.shadow_static_draws));
+	// Whether anything in the scene has asked for a cut-out shadow — §28. False
+	// until the first frame a `material.alphaTest` caster is drawn, and true from
+	// then on: it reports a pipeline that exists, not one that was used this frame.
+	js.set_property(object, "shadowCutout", qjs::bool_value(stats.shadow_cutout));
 	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming) { };
 	js.set_property(object, "gpuMs", qjs::number_value(timing.total));
 	js.set_property(object, "prepareMs", qjs::number_value(timing.prepare));
@@ -2968,7 +2972,8 @@ fn void js_ambient_set(
 }
 
 <*
- `shadowGet()` — the shadow settings, as `[enabled, size, bias, intensity, distance]`.
+ `shadowGet()` — the shadow settings, as
+ `[enabled, size, bias, intensity, distance, follow]`.
 
  `enabled` comes back as 1 or 0 rather than as a boolean because this array is
  the same shape `lightGet` uses and the JS side reads it positionally; `api.js`
@@ -2999,6 +3004,10 @@ fn void js_shadow_get(
 	js.set_index(list, 2, qjs::number_value((double)shadows.bias));
 	js.set_index(list, 3, qjs::number_value((double)shadows.intensity));
 	js.set_index(list, 4, qjs::number_value((double)shadows.distance));
+	// 1 or 0 for `enabled`'s reason, and last for the reason every field added to
+	// one of these arrays is last: a script destructuring the first five keeps
+	// working.
+	js.set_index(list, 5, qjs::number_value(shadows.follow ? 1.0 : 0.0));
 	*out = list;
 }
 
@@ -3127,12 +3136,12 @@ fn void say_shadow_size(uint was, uint now) @local
 }
 
 <*
- `shadowSet(enabled, size, bias, intensity, distance)` — all five at once.
+ `shadowSet(enabled, size, bias, intensity, distance, follow)` — all six at once.
 
  ## Why all five rather than five setters
 
- The same shape `lightSet` has, for the same reason: `api.js` presents five
- independent properties and each one reads the other four back and writes the
+ The same shape `lightSet` has, for the same reason: `api.js` presents six
+ independent properties and each one reads the other five back and writes the
  lot, so there is one crossing per assignment instead of a getter and a setter per
  field. It also makes the clamping happen in one place.
 
@@ -3188,6 +3197,9 @@ fn void js_shadow_set(
 	// and refusing a number that already behaves sensibly would be noise.
 	float reach = arg_float(&js, argc, args, 4);
 	settings.distance = reach > 0.0f ? reach : 0.0f;
+	// Stated rather than left to the zero fill, which is the one field here where
+	// those differ — see `ShadowSettings.follow` and `DEFAULT_SHADOW`.
+	settings.follow = arg_float(&js, argc, args, 5) != 0.0f;
 
 	self.set_shadow(settings);
 }

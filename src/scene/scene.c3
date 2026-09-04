@@ -338,6 +338,18 @@ struct SceneStats
 	uint shadow_static_draws;
 
 	<*
+	 Whether the cut-out shadow pipeline exists.
+
+	 One bool rather than a count, because there is at most one: `material.alphaTest`
+	 needs a fragment stage on a pass that has none, so the whole of what a scene
+	 with foliage in it costs the shadow map is a second `VkPipeline` and a bind per
+	 run of cut-out buckets. False is what a project that never set `alphaTest`
+	 reports, forever — see `ShadowMap.cutout_pipeline` for why it is built the
+	 first frame something asks and not before.
+	*>
+	bool shadow_cutout;
+
+	<*
 	 The four blocks of memory the renderer owns, in bytes.
 
 	 `texture_bytes` and `pose_bytes` above were the only memory numbers here, and
@@ -2028,6 +2040,26 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 // ============================================================================
 
 <*
+ Where `build_draw_list` puts the copies it places.
+
+ A function pointer rather than a slice, because of *when* the number is known: it
+ is the length of the sorted draw list, which does not exist until the traversal
+ and the sort have run — and the memory that answers it is a per-frame GPU
+ allocation two layers up. So this is the one call between the loop that knows the
+ count and the pass that owns the buffer.
+
+ Answering null means "put them in `Scene.instances`", which is what a caller with
+ no device does and what a growth that failed falls back to. `plan.md` §19.5 is
+ the entry: the list was written in full and then `mem::copy`ed into the mapped
+ buffer, 635 KB a frame on the reference village, to produce bytes nothing else
+ ever read.
+
+ @param count : `Exactly how many copies are about to be written. Never zero — an empty draw list returns before this is asked.`
+ @return `Where to write them, or null to use the list instead.`
+*>
+alias InstanceReserve = fn Instance*(void* context, sz count);
+
+<*
  Brings the world matrices up to date and rebuilds the draw list for a camera.
 
  The near plane goes in whether or not culling is on, and the two uses of the
@@ -2040,6 +2072,7 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
  @param view_projection : `What the frustum and the near plane are derived from. Culling is skipped entirely when Scene.cull is false; the near plane is passed regardless.`
  @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes.`
  @param light_view_projection : `The light's clip matrix when a shadow pass will read this draw list, null otherwise. Its frustum keeps casters the camera cannot see — but as a second test beside the camera's rather than instead of it, so both passes get a cull.`
+ @param reserve : `Where the instance array goes — see InstanceReserve. Null puts it in Scene.instances, which is what every caller but a frame does.`
 *>
 fn void Scene.update(
 	&self,
@@ -2047,7 +2080,9 @@ fn void Scene.update(
 	Matrix4f view_projection,
 	bool[] transparent = { },
 	float[] margins = { },
-	Matrix4f* light_view_projection = null
+	Matrix4f* light_view_projection = null,
+	InstanceReserve reserve = null,
+	void* reserve_context = null
 )
 {
 	self.update_world_matrices();
@@ -2067,7 +2102,10 @@ fn void Scene.update(
 		transparent,
 		&frustum.planes[4],
 		margins,
-		light_view_projection != null ? &light : null
+		light_view_projection != null ? &light : null,
+		false,
+		reserve,
+		reserve_context
 	);
 	// Promoted here rather than inside `build_draw_list`, because this call is what
 	// "a frame happened" means and the other caller is a query. Assigned
@@ -2142,7 +2180,9 @@ fn void Scene.build_draw_list(
 	// asked for one.
 	float[] margins = { },
 	Frustum* light = null,
-	bool counts_only = false
+	bool counts_only = false,
+	InstanceReserve reserve = null,
+	void* reserve_context = null
 )
 {
 	self.draws.clear();
@@ -2269,6 +2309,14 @@ fn void Scene.build_draw_list(
 
 	if (self.draws.len() == 0) return;
 
+	// The count, and the one moment it is known before the copies are written: the
+	// traversal is over, so this is exactly how many there will be, and the
+	// coalescing loop has not started, so nothing has been placed yet. See
+	// `InstanceReserve` — a null answer, and every caller that passes none, puts
+	// them in `Scene.instances` the way this always did.
+	Instance* into = null;
+	if (!counts_only && reserve != null) into = reserve(reserve_context, (sz)self.draws.len());
+
 	// Sorted emit, not a permutation of finished buckets. This one sort puts the
 	// draws in the order they will be recorded in, and the coalescing loop below is
 	// exactly the loop it was before transparency existed: it walks the sorted list
@@ -2378,8 +2426,7 @@ fn void Scene.build_draw_list(
 
 		if (!counts_only)
 		{
-			self.instances.push(
-				{
+			Instance copy = {
 					.model = node.world,
 					.normal = node.normal,
 					.color = node.color,
@@ -2395,8 +2442,19 @@ fn void Scene.build_draw_list(
 						.blend, // Written by `MeshPass.write_morph_weights` just before this walk,
 						// and zero on everything it did not touch.
 					.morph = node.morph,
-				}
-			);
+			};
+			// Straight into the mapped buffer when there is one, and into the list
+			// when there is not. `placed` is the index either way, which is what makes
+			// the two the same arrangement: `Bucket.first` counts from the start of
+			// the array whichever array it is.
+			if (into != null)
+			{
+				into[placed] = copy;
+			}
+			else
+			{
+				self.instances.push(copy);
+			}
 		}
 		placed++;
 

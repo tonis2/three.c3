@@ -1425,9 +1425,17 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
-        s.albedo *= (draw.flags & FLAG_STOCHASTIC) != 0
-            ? stochastic_sample(base_color_map, uv).rgb
-            : base_color_map.Sample(uv).rgb;
+        float4 base = (draw.flags & FLAG_STOCHASTIC) != 0
+            ? stochastic_sample(base_color_map, uv)
+            : base_color_map.Sample(uv);
+        // `material.alphaTest`, the same line `mesh.slang` carries and for the
+        // same reasons — the threshold is `surface.w`, zero discards nothing, and
+        // the alpha is the map's times the material's rather than times this
+        // copy's. It is *before* the body rather than inside it: a cut-out is
+        // whether the surface is there at all, and a `shade` that never runs is
+        // also a `shade` that cannot be asked to decide.
+        if (base.a * draw.base_color.a < draw.surface.w) discard;
+        s.albedo *= base.rgb;
     }
     s.normal = normalize(input.normal);
     s.uv = uv;

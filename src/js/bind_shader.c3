@@ -38,7 +38,7 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "setSide", &js_set_side, 2);
 	self.bind(host, "setOpacity", &js_set_opacity, 2);
 	self.bind(host, "getOpacity", &js_get_opacity, 1);
-	self.bind(host, "setSurface", &js_set_surface, 4);
+	self.bind(host, "setSurface", &js_set_surface, 5);
 	self.bind(host, "getSurface", &js_get_surface, 1);
 	self.bind(host, "setEmissive", &js_set_emissive, 5);
 	self.bind(host, "getEmissive", &js_get_emissive, 1);
@@ -627,7 +627,8 @@ fn void js_set_surface(
 		index,
 		arg_float(&js, argc, args, 1),
 		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3)
+		arg_float(&js, argc, args, 3),
+		arg_float(&js, argc, args, 4)
 	))
 	{
 		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
@@ -635,8 +636,8 @@ fn void js_set_surface(
 }
 
 <*
- `material.roughness`, `.metalness` and `.reflectance` — what they read back as,
- as `[roughness, metalness, reflectance]`.
+ `material.roughness`, `.metalness`, `.reflectance` and `.alphaTest` — what they
+ read back as, as `[roughness, metalness, reflectance, alphaTest]`.
 
  An index that names nothing answers the defaults rather than throwing, which is
  `getOpacity`'s rule.
@@ -655,7 +656,9 @@ fn void js_get_surface(
 
 	float[4] surface = self.pass.material_surface((uint)arg_int(&js, argc, args, 0));
 	qjs::Value list  = js.array();
-	for (uint i = 0; i < 3; i++) js.set_index(list, i, qjs::number_value(surface[i]));
+	// All four, which is the whole record field: `alphaTest` is `w` and is read
+	// back exactly as the other three are.
+	for (uint i = 0; i < 4; i++) js.set_index(list, i, qjs::number_value(surface[i]));
 	*out = list;
 }
 

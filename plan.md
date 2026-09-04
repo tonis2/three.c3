@@ -161,12 +161,6 @@ count is not the trigger and never was.
 
 ## 19. Shadows at game scale
 
-- [ ] **The instance array is written twice.** `build_draw_list` fills a
-      `List{Instance}` (~635 KB on the village) that only `write_instances` reads,
-      which then `mem::copy`s the whole of it into the mapped buffer. The count is
-      known before the coalescing loop, so the loop could write straight into the
-      slot's buffer the way `write_live_poses` and `build_draw_records` already
-      do. The last of §19.5's five and the cheapest thing on this list.
 - [ ] **A shadow atlas and a casting budget.** One depth image, tiles allocated
       per light by screen-space importance; "four casters this frame" rather than
       a per-light bool; cascades for the sun become atlas tiles like everything
@@ -180,29 +174,15 @@ count is not the trigger and never was.
 - [ ] **Revisit `SHADOW_PLAN_STATIC` on a device where the full-image copy is not
       free.** Two lines in `MeshPass.plan_shadow`; the measurement came out
       backwards on this device, so the numbers to beat want taking again.
-- [ ] **An orbiting camera refits the cached shadow map; a walking one never
-      does.** `ShadowMap.static_fit`'s own comment says what is deliberately not
-      a key: "anything about the camera... a character walking through the
-      village must not cost the village its map, and a camera that turns must
-      not either." It turns out a camera that *turns* is the only one that does.
-      The key is `light_view_projection`, fitted around `Camera.view_bounds`,
-      which is the AABB of the frustum corners — so it follows the eye, and
-      `SHADOW_FIT_SLACK` absorbs 7.5% of the box width of eye travel per refit.
-      Walking moves the eye 2.4 m/s; a turntable dragged at 180 deg/s on a 15.5 m
-      boom moves it 48 m/s, twenty times faster, and an AABB around an oriented
-      frustum also changes *extent* as it yaws, so the box escapes the slack by
-      growing as well as by drifting. Measured on the Evil Forest scene at 1080p,
-      2048 map, `shadow.distance = 24`: dragged, 20 rebuilds in 300 frames at
-      0.27 ms against a 0.10 ms steady pass; camera still, 0 in 300; walking in
-      first person, 0 in 300. Reported from a window as a lag spike that stops
-      the moment the view changes to first person. The cost of a rebuild is
-      39 draw calls over ~4,800 static instances, most of them crossed cards
-      casting their whole quads because the depth pass has no fragment stage —
-      so it scales with the scenery and it is the scene with grass in it that
-      feels it. Two candidate fixes, and the measurement above does not say
-      which: apply the slack to the fit's extent and not only to its centre, or
-      fit the focus around a bounding *sphere*, which is rotation-invariant by
-      construction and costs texel density in exchange.
+- [ ] **Take the turntable measurement again.** `Camera.view_sphere` and
+      `shadow.follow` were built against the numbers in the report — Evil Forest
+      at 1080p, 2048 map, `shadow.distance = 24`, 20 rebuilds in 300 frames of a
+      dragged turntable — and are checked in `three_tests::shadow` against a
+      simulated drag rather than against that scene. The scene is where the
+      claim was made and is where it wants confirming, on the two numbers that
+      matter: rebuilds per drag, and what the sphere costs a *first-person*
+      camera, whose target sits at the eye and whose fit is therefore the widest
+      this shape produces.
 
 **Not doing:** the depth prepass (measured — pay 0.59 ms to save at most 0.23),
 and deferred shading (it breaks the material contract). The measurement is what
@@ -299,56 +279,6 @@ None of this is blocking:
       fidelity and wrong for anyone wanting to convert a project. That is a
       different verb and it does not exist.
 
-## 25. A trim sheet from a function
-
-`render/bake.c3` already runs a material body in uv space and reads the pixels
-back, which is most of a material authoring tool built for another reason. Two
-things are missing: it emits albedo and nothing else, and a body has no
-vocabulary to write a pattern with. Substance Designer is the shape to copy —
-procedural, no high-poly, no cage, no transfer bake.
-
-`examples/trimsheet.js` is the whole feature done *around* the bake — a post pass
-draws one channel, `three.screenshot` writes it, and the next lines load them
-back with `three.texture` — so the sheet, the maps and the scene wearing them
-exist and the items below are about moving that inside.
-
-- [ ] **The bake emits one channel and there are four.** `Surface.height`, a
-      channel index in the bake push, and a switch under `THREE_BAKE`. One
-      pipeline and N submissions: MRT (§13) buys nothing here and costs a
-      pass-system change. Everything below waits on this.
-- [ ] **Normal is baked, not derived.** Central differences on `h` in the body,
-      at float precision. Storing height and differentiating *that* quantizes
-      first, and no operator recovers what the quantization threw away —
-      terracing is the symptom. Three things decide the quality: ε is one texel
-      at bake resolution, `heightScale` is in texels per metre or the relief
-      reads at the wrong depth, and a 2x bake box-downsampled and renormalized
-      antialiases the hard edges. RGBA8 is adequate; it is what a normal map
-      ships as.
-- [ ] **AO and curvature are derived, and for them that is right.** Both are low
-      frequency and forgive the precision. A horizon sweep over the readback, on
-      the CPU, testable without a device. Height packs 16 bits across R+G so the
-      RGBA8 target does not have to change.
-- [ ] **Roughness.** Nearly free once the channel index exists, and stone
-      without it reads as plastic.
-- [ ] **A body has no vocabulary.** Hashes, value/perlin/worley/fbm, brick and
-      hex lattices, 2D SDFs, smooth-min and the blend operators, domain warp,
-      molding profiles. It goes in as *more template*, not a Slang `import`:
-      `shader/material_source.c3` splices markers into `shaders/material.slang`
-      and brackets the body with `#line`. `shader/assemble.c3` counts `physical`
-      rather than computing it, so the restore arithmetic should absorb the
-      shift — should, and that is worth one test rather than one assumption.
-- [ ] **A sheet is a layout, not a texture.** Strips at known v ranges, and
-      geometry that uvs into them. Without a descriptor both sides agree on this
-      produces materials and never trim sheets. The piece most likely to be
-      skipped and then missed. `examples/trimsheet.js` has the shape of one —
-      a strip table spliced into the generator and read by the scene, and a
-      `wearStrip` that derives the tiling from the piece — so what is left is
-      deciding whether the engine owns it or the script does.
-- [ ] **Export writes one image per material.** glTF wants `normalTexture` and
-      `occlusionTexture` beside the base colour.
-- [ ] **The agent cannot see its own work.** `screenshot` returns the frame;
-      authoring wants the sheet flat *and* on a lit test mesh. This is the half
-      that decides whether an agent's iteration converges or wanders.
 
 **When the bake grows the other three channels**, the check it has to reproduce
 is `examples/trimsheet.js`'s: bake `h = 0.5 + 0.5 sin(2pi k u)`, whose slope is
@@ -374,22 +304,9 @@ None of this is blocking:
       §26 is that `material.slang`'s copies carry `#ifdef THREE_BAKE` branches
       `mesh.slang`'s do not, so unifying them is a change to the bake as well.
 
-- [ ] **A built-in material's maps do not export.** `scene/export.c3` writes
-      `normalTexture` out of a `LayeredMaterial`'s stack and knows nothing about
-      the three slots on a `MeshLambertMaterial`, so a script that sets one and
-      exports loses it silently.
-
-- [ ] **The glTF importer still does not apply them.**
-      `instantiate({ materials: true })` drops `aoMap` and
-      `metalnessRoughnessMap` and routes a normal map through a
-      `LayeredMaterial`, which now compiles a shader for something the built-in
-      pipeline does. Both are one edit in `js/prelude/asset.js`, and both change
-      what every existing import looks like — so they want a before-and-after of
-      their own rather than a line in this one.
-
 - [ ] **Nothing samples a height map on the built-in pipeline.** `parallax_uv`
-      is a `ShaderMaterial`'s and a `LayeredMaterial`'s; a fourth slot would be a
-      sixth binding and a fourth flag, and it waits for §25 to have something to
+      is a `ShaderMaterial`'s and a `LayeredMaterial`'s; a fifth slot would be an
+      eighth binding and a fifth flag, and it waits for §25 to have something to
       put in it.
 
 ## 27. Hiding the repeat
@@ -475,40 +392,7 @@ the one that composes with instancing and with the exporter.
 
 ## 28. Wearing a sheet on somebody else's mesh
 
-**Alpha-tested shadows: decided, not built.** A fragment stage and a sampler on
-the shadow pipeline would stop grass, foliage, chain and rope casting
-rectangles. Reading the code says it is the *second* half of a feature whose
-first half does not exist: there is no `material.alphaTest` anywhere,
-`mesh.slang` never reads the base colour map's alpha, and a transparent material
-casts no shadow at all — so today a leaf card either casts the shadow of its
-quad while being drawn as a blended quad, or casts nothing. Building the shadow
-half alone would be building the half nothing can use. The whole feature is one
-change: an `alphaTest` on the material, a `discard` in `mesh.slang`, and a
-second shadow pipeline with a fragment stage used only by the materials that ask
-— a second pipeline rather than a sampler on the one every caster shares, so a
-scene with no cut-outs pays one pipeline object and nothing per draw. The
-trigger is `render/shadow.c3`'s own: the first scene where foliage is the
-subject rather than the scenery.
-
 None of this is blocking:
-
-- [ ] **The alpha test itself**, as the paragraph above spells it: `alphaTest` on
-      the material, a `discard` in `mesh.slang`, and a cut-out shadow pipeline
-      beside the one every other caster shares. One feature, two halves, and the
-      shadow half is the cheaper of them once the first exists.
-
-- [ ] **`emissiveMap` does not export**, which is §26's open entry about the
-      built-in material's maps with a fourth one on the end. The *factor* crosses
-      — `emissiveFactor` is written from `material.emissive` — and the image does
-      not, because `scene/export.c3` writes maps out of a `LayeredMaterial`'s
-      stack and knows nothing about the slots on a `MeshLambertMaterial`.
-
-- [ ] **The importer still routes a glow through a `LayeredMaterial`.**
-      `instantiate({ materials: true })` turns an `emissiveFactor` and an
-      `emissiveTexture` into a layer at zero opacity, which now compiles a shader
-      for something the built-in pipeline does. It is one edit in
-      `js/prelude/asset.js` and it changes what every existing import looks like,
-      so it wants the before-and-after §26 asks for on the same file.
 
 - [ ] **A point light casts nothing**, and cannot: the shadow map is fitted around
       light zero, which is a direction. A lamp that shadows wants a cube map or a

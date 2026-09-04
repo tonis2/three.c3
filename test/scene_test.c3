@@ -1961,6 +1961,13 @@ fn void the_bounds_cache_notices_every_way_a_scene_moves() @test
  build had simply stopped working. The frame at the end is the third: a query
  that left the draw list in a state the next frame could not use would be a much
  worse trade than the one it saves.
+
+ **`Scene.instances` stays empty across the frame too**, and that is the second
+ half of §19.5 rather than a regression: the copies a frame places go straight
+ into the slot's mapped buffer through `InstanceReserve`, so the list is now the
+ path nothing but a growth that failed takes. So the frame is checked where its
+ copies actually land — a hundred and one of them, the last standing at x = 198,
+ read back out of the buffer the shader will read.
 *>
 fn void stats_counts_without_writing_the_instance_array() @test
 {
@@ -1983,7 +1990,7 @@ fn void stats_counts_without_writing_the_instance_array() @test
 			"and wrote %d instance records for a query that reads none", scene.instances.len()
 		);
 
-		// The list the query did not build is the list the next frame builds.
+		// The array the query did not build is the array the next frame builds.
 		// Culling off so the number is about the rebuild rather than about where
 		// the camera happens to point — which is the same reason `stats()` turns
 		// it off, one function over.
@@ -1992,8 +1999,30 @@ fn void stats_counts_without_writing_the_instance_array() @test
 
 		defer shot.free();
 		test::@check(
-			scene.instances.len() == 101,
-			"the frame after built them, %d of them", scene.instances.len()
+			scene.instances.len() == 0,
+			"the frame put %d copies in the list rather than in the buffer the shader reads",
+			scene.instances.len()
+		);
+
+		// Which frame in flight that was is the renderer's business, so both slots
+		// are looked at and the one that was written answers. A slot that was never
+		// grown has no buffer to read.
+		float furthest = 0;
+		for (uint i = 0; i < three::MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			if (renderer.pass.instance_capacity[i] < 101) continue;
+			three::Instance* placed = (three::Instance*)renderer.pass.instance_buffers[i].data();
+			for (uint copy = 0; copy < 101; copy++)
+			{
+				// Column-major, so element 12 is the model matrix's x translation —
+				// the `set_position` above, read back through the whole draw list.
+				if (placed[copy].model.m[12] > furthest) furthest = placed[copy].model.m[12];
+			}
+		}
+		test::@check(
+			furthest == 198.0f,
+			"the frame wrote its copies into the mapped buffer: the furthest stands at %f, not 198",
+			furthest
 		);
 	};
 }

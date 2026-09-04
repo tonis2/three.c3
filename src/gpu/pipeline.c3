@@ -155,6 +155,20 @@ const ShaderEntry[*] SHADOW_ENTRIES = {
 	{ "vertexMain", slang::STAGE_VERTEX },
 };
 
+<*
+ The same file's entry points in its cut-out variant.
+
+ Two, because a fragment stage is the only place a `discard` can happen and a
+ cut-out shadow is a discard. It is a second *compile* of `shaders/shadow.slang`
+ rather than a second entry point in the first one — see the `#ifdef
+ THREE_SHADOW_CUTOUT` block there — so that the pipeline every ordinary caster
+ shares has no sampler in its layout at all.
+*>
+const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
+	{ "vertexMain", slang::STAGE_VERTEX },
+	{ "fragmentMain", slang::STAGE_FRAGMENT },
+};
+
 // The workgroup size `skin.slang` declares. Here so the dispatch and the shader
 // cannot drift: one thread per (instance, vertex), rounded up to whole groups,
 // and the shader drops the tail itself.
@@ -1400,10 +1414,12 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  shares `build_layouts` with the other two and differs in five places, each of
  which would be a validation error or a wrong picture if it did not:
 
- - One shader stage. A depth-only pipeline is allowed to have no fragment shader.
- `SHADOW_ENTRIES` is what `build_layouts` is held to instead of `MESH_ENTRIES`,
- so a module with a `fragmentMain` is not required and one without it is not
- refused.
+ - One shader stage, or two. A depth-only pipeline is allowed to have no fragment
+ shader, so `SHADOW_ENTRIES` is what `build_layouts` is held to instead of
+ `MESH_ENTRIES` and a module without a `fragmentMain` is not refused. `cutout`
+ is the other half: `material.alphaTest` needs somewhere to `discard`, so that
+ variant is held to `SHADOW_CUTOUT_ENTRIES` and gets the fragment stage and the
+ one sampler that goes with it.
  - No colour attachment, and a depth format that is not the target's. The shadow
  map is its own image at its own extent, and dynamic rendering checks the
  declared formats against the attachments the pass actually begins with.
@@ -1422,23 +1438,31 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  buffers, which is what makes a skinned character's shadow the shadow of the
  pose it is actually in.
 
- @param mod : `A module from compile_slang containing vertexMain. Its layout is copied, not moved.`
+ @param mod : `A module from compile_slang containing vertexMain, and fragmentMain too when cutout is set. Its layout is copied, not moved.`
+ @param cutout : `Whether this is the alpha-tested variant — a fragment stage that discards, and the base colour map bound at 0. False builds the pipeline every ordinary caster shares.`
  @param depth_format : `The shadow map's format — see ShadowMap.ensure, which picks one the device will both render to and sample.`
  @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
 *>
-fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format)
+fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format, bool cutout = false)
 {
-	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], SHADOW_ENTRIES[..])!;
+	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], cutout ? SHADOW_CUTOUT_ENTRIES[..] : SHADOW_ENTRIES[..])!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::PipelineShaderStageCreateInfo[1] stages = {
+	// One stage, or two for a cut-out. The array is two long either way and the
+	// slice below is what decides — a second `VkPipelineShaderStageCreateInfo`
+	// array would be a second place for the vertex entry's name to be spelled.
+	vk::PipelineShaderStageCreateInfo[2] stages = {
 		vk::pipelineShaderStageCreateInfo()
 		.setStage(SHADER_STAGE_VERTEX_BIT)
 		.setMod(module_handle)
-		.setName("vertexMain"), };
+		.setName("vertexMain"),
+		vk::pipelineShaderStageCreateInfo()
+		.setStage(SHADER_STAGE_FRAGMENT_BIT)
+		.setMod(module_handle)
+		.setName("fragmentMain"), };
 
 	// Depth alone. `setColorAttachmentFormats` is not called rather than being
 	// called with an empty slice, for the reason `init_post` leaves the depth
@@ -1458,7 +1482,7 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 		mod,
 		{
 			...GRAPHICS_PIPELINE,
-			.stages = stages[..],
+			.stages = cutout ? stages[..] : stages[..0],
 			.rendering = &rendering,
 			.color_blend = &color_blend,
 			.depth_test = true,

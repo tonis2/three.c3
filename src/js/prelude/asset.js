@@ -5,7 +5,6 @@ import { Geometry } from './geometry.js';
 import { Object3D } from './object3d.js';
 import { Mesh } from './mesh.js';
 import { Texture } from './texture.js';
-import { LayeredMaterial } from './layers.js';
 import { DoubleSide, FrontSide, MeshLambertMaterial } from './material.js';
 import { LinearSRGBColorSpace, SRGBColorSpace, uploadOptions } from './texture.js';
 
@@ -714,15 +713,16 @@ export class Asset {
 	// question `plan.md` §2 left open and this is one answer to it, not the
 	// answer:
 	//
-	//  - The normal map goes to `normal`, which is the slot a hand-written
-	//    LayeredMaterial puts one in. Same shading path, same code.
-	//  - The emissive map and factor become a single layer at zero opacity. A
-	//    layer's `opacity` is how much of its *colour* is applied and its
-	//    emissive is added regardless, so zero is "add the glow and change
-	//    nothing else" — which is what a glTF emissive is.
-	//  - `alphaMode: 'BLEND'` becomes `transparent: true`, and MASK does too:
-	//    there is no alpha-test path here, and a cutout drawn as a blend is the
-	//    nearer of the two wrong answers.
+	//  - **Every map goes on a `MeshLambertMaterial`.** The normal map, the
+	//    occlusion map, the metallic-roughness pair and the emissive map are four
+	//    sampler bindings on the pipeline the renderer built at startup, so a
+	//    file's whole surface arrives without compiling a shader for it.
+	//  - `alphaMode: 'BLEND'` becomes `transparent: true`; **`MASK` becomes
+	//    `alphaTest: alphaCutoff`**, which is what it has always meant and what
+	//    there was no path for until §28. The two are now different things here:
+	//    a blend is sorted, writes no depth and casts no shadow, and a cut-out
+	//    does all three — which is the difference between a tree that reads as
+	//    foliage and one that reads as a stack of glass.
 	//  - `doubleSided` becomes `side: three.DoubleSide`.
 	//  - `metallicFactor` and `roughnessFactor` go on as `metalness` and
 	//    `roughness`, which is what the specular and environment terms read.
@@ -730,26 +730,22 @@ export class Asset {
 	//    them are 1 and 1 — so a file that never wrote a `pbrMetallicRoughness`
 	//    block imports as a fully metallic surface and looks like one. It is dark
 	//    without a `scene.environment`, correctly: a metal is what it reflects.
-	//  - Occlusion and the metallic-roughness *map* are not applied. Both shade
-	//    on a `MeshLambertMaterial` now, so this is a gap in the importer rather
-	//    than in the renderer: applying them here would change what every
-	//    existing `{ materials: true }` import looks like, and it wants its own
-	//    change with its own before-and-after. `ref.material` hands both over
-	//    for a script that wants them today.
+	//  - The emissive factor and map go on as `emissive` and `emissiveMap`, and
+	//    the map multiplies the factor exactly as glTF says. A file with a glow
+	//    texture and no `emissiveFactor` therefore glows black, which is the
+	//    specification's own answer and not this importer's.
 	//
-	// **Two materials come out of this, and which one is the whole economy of it.**
-	// A normal map or a glow needs a generated shading body and so a
-	// `LayeredMaterial`; the surface pair does not, because the built-in shader
-	// already reads it. So a file whose materials differ only in their PBR numbers
-	// — which is most files — gets `MeshLambertMaterial`s, and those compile
-	// nothing at all: the pipeline is the one the renderer built at startup. Going
-	// through the layered path for two floats would have been a shader per glTF
-	// material for a body identical to the built-in one.
+	// **What used to happen instead, and why it stopped.** A normal map or a glow
+	// routed the material through a `LayeredMaterial` — a generated shading body,
+	// a Slang compile and a pipeline per glTF material — because those were the
+	// only maps that had a home. `plan.md` §26 gave the built-in shader all four,
+	// so the layered path was compiling a shader for something the startup
+	// pipeline does. Occlusion and the metallic-roughness map were dropped
+	// entirely on the way past; they are applied now.
 	//
-	// The normal map no longer *needs* the layered path either — `material.normalMap`
-	// is one binding on that same startup pipeline — so a file with a normal map
-	// and no glow could stop compiling a shader as well. That is the same
-	// deliberate change as the line above and is not this one.
+	// `ref.layers` is still where a `CUSTOM_materials_layers` stack comes from, and
+	// still builds a `LayeredMaterial` — that is a file describing a stack, which
+	// is a different thing from a file describing a surface.
 	//
 	// A description with none of that in it builds nothing: an opaque,
 	// single-sided material with no maps and this renderer's own surface defaults
@@ -759,7 +755,11 @@ export class Asset {
 		const d = new MeshRef(this._a, this._g, mesh, '').material;
 		if (d === null) return null;
 
-		const transparent = d.alphaMode !== 'OPAQUE';
+		const transparent = d.alphaMode === 'BLEND';
+		// A cutoff of zero is glTF's way of saying nothing is cut, and is also this
+		// renderer's way of saying the test is off — so `MASK` with a zero cutoff
+		// arrives as an ordinary opaque material rather than as a special case.
+		const alphaTest = d.alphaMode === 'MASK' ? d.alphaCutoff : 0;
 		const side = d.doubleSided ? DoubleSide : FrontSide;
 		const glow = d.emissiveMap !== null
 			|| d.emissive[0] > 0 || d.emissive[1] > 0 || d.emissive[2] > 0;
@@ -767,43 +767,39 @@ export class Asset {
 		// question is whether saying it changes anything. `scene/material.c3` has
 		// why they are 1 and 0.
 		const surface = d.roughness !== 1 || d.metalness !== 0;
-		const body = d.normalMap !== null || glow;
-		if (!transparent && !d.doubleSided && !body && !surface) return null;
+		const maps = d.normalMap !== null || d.aoMap !== null
+			|| d.metalnessRoughnessMap !== null;
+		if (!transparent && alphaTest === 0 && !d.doubleSided && !glow && !surface && !maps) {
+			return null;
+		}
 
 		// The images are handles rather than values, so identity is what the key
 		// can be built from — two meshes that resolved the same slot get the same
 		// `_index()`.
 		const key = [
-			transparent, side, d.roughness, d.metalness,
+			transparent, alphaTest, side, d.roughness, d.metalness,
 			d.normalMap ? d.normalMap._index() : -1,
+			d.aoMap ? d.aoMap._index() : -1,
+			d.metalnessRoughnessMap ? d.metalnessRoughnessMap._index() : -1,
 			d.emissiveMap ? d.emissiveMap._index() : -1,
-			d.emissive.join(','),
+			d.emissive.join(','), d.emissiveIntensity,
 		].join('|');
 		const hit = cache.get(key);
 		if (hit) return hit;
 
-		const built = body
-			? new LayeredMaterial({
-				normal: d.normalMap,
-				transparent,
-				side,
-				roughness: d.roughness,
-				metalness: d.metalness,
-				layers: glow
-					? [{
-						name: 'emissive',
-						emissive: d.emissiveMap,
-						emissiveFactor: d.emissive,
-						opacity: 0,
-					}]
-					: [],
-			})
-			: new MeshLambertMaterial({
-				transparent,
-				side,
-				roughness: d.roughness,
-				metalness: d.metalness,
-			});
+		const built = new MeshLambertMaterial({
+			transparent,
+			side,
+			alphaTest,
+			roughness: d.roughness,
+			metalness: d.metalness,
+			normalMap: d.normalMap,
+			aoMap: d.aoMap,
+			metalnessRoughnessMap: d.metalnessRoughnessMap,
+			emissiveMap: d.emissiveMap,
+			emissive: d.emissive,
+			emissiveIntensity: d.emissiveIntensity,
+		});
 		cache.set(key, built);
 		return built;
 	}
