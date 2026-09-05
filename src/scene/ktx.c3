@@ -31,12 +31,10 @@
  device's on the other. The saving is decode time on levels covering a third of
  the texels; the cost would be two definitions of what a texture is.
 
- The same argument settles transcoding: a Basis texture *could* go to BC7 and
- stay compressed on the device, which is most of the point of shipping one. That
- wants a `Texture` that knows it is block-compressed, a format that survives
- `create_texture`, and mip levels uploaded rather than generated — three changes
- to the GPU side. Transcoding to RGBA8 needs none of them and renders the right
- picture today; the memory it costs is the memory the same asset costs as a PNG.
+ Transcoding took the other road once those three changes to the GPU side
+ existed. `transcode_ktx2_blocks` puts a Basis texture on the device as BC7 with
+ the file's own chain — a quarter of the RGBA8 the same file used to cost — and
+ `decode_ktx2_basis` below is what a device without BC7 still gets.
 
  A cubemap or an array reads face 0 of layer 0, which is what a material's
  base colour map wants. Faces are what `three.sky` will ask for and it asks
@@ -47,6 +45,7 @@ module three;
 import image;
 import ktx::container;
 import ktx::basis;
+import ktx::bc7;
 import ktx::codec;
 import ktx::mipgen;
 
@@ -54,23 +53,36 @@ import ktx::mipgen;
 <*
  A block-compressed image on its way to the device: every level, still encoded.
 
- The counterpart to `image::Image` for the path that does not decode. It holds
- views into the container it came out of rather than copies, so `source` is
- owned here and `free` is not optional — dropping one leaks the whole file.
+ The counterpart to `image::Image` for the path that does not decode. A file
+ that already holds blocks lends them: the levels are views into the container
+ it came out of, so `source` is owned here and `free` is not optional — dropping
+ one leaks the whole file. A Basis file has none to lend and its levels are
+ encoded here, one allocation each, which is what `owns_levels` says.
 *>
 struct BlockImage
 {
 	uint width;
 	uint height;
 	TextureFormat format;
-	// Level 0 first. Views into `source`, not allocations of their own.
+	// Level 0 first. Views into `source` unless `owns_levels`.
 	char[][] levels;
+	// True when each level is its own allocation and `source` is empty — the
+	// transcoded path. One flag rather than two structs, because everything
+	// downstream of here reads the levels and cares about nothing else.
+	bool owns_levels;
 	container::Texture source;
 	Allocator allocator;
 }
 
 fn void BlockImage.free(&self)
 {
+	if (self.owns_levels)
+	{
+		foreach (level : self.levels)
+		{
+			if (level.len) alloc::free(self.allocator, level.ptr);
+		}
+	}
 	if (self.levels.len) alloc::free(self.allocator, self.levels.ptr);
 	self.source.free();
 	self.levels = {};
@@ -222,9 +234,8 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
 
 	// A Basis file states `vkFormat` 0 and its payload is ETC1S or UASTC, which
-	// is not a family any device samples. Turning one into BC7 means decoding it
-	// and re-encoding on the CPU — a build step, not a load — so it goes the
-	// RGBA8 way.
+	// is not a family any device samples. It has no blocks to lend;
+	// `transcode_ktx2_blocks` is its door.
 	if (try basis::info(encoded)) return UNSUPPORTED_IMAGE~;
 
 	container::Texture? maybe = container::read(allocator, encoded);
@@ -268,6 +279,128 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 		.source = tex,
 		.allocator = allocator,
 	};
+}
+
+<*
+ A Basis KTX2 to BC7 blocks — every level the file carries, none of them decoded
+ to RGBA8 on the way to the device.
+
+ `decode_ktx2_blocks`'s twin for the half of KTX2 that has no blocks to lend.
+ ETC1S and UASTC are transport formats: no device samples either, so a
+ `KHR_texture_basisu` image has to become *something* on this side, and until
+ this existed that something was RGBA8 — four bytes a texel and a generated mip
+ chain, which is how `evil_forest.glb`'s 17.7 MB of images became 373 MiB of
+ device memory. BC7 is one byte a texel and the file's own chain, which is a
+ quarter of it.
+
+ ## Why BC7 and nothing else
+
+ One byte a texel for colour and for data alike, alpha carried, and near enough
+ to lossless over an ETC1S source that the picture does not move. BC5 for a
+ normal map and BC4 for a single-channel mask would be half that again, and both
+ are refused here for the same reason: they drop channels the shader reads. A
+ BC5 normal has no z and a BC4 mask has only red, so either would need the
+ sampling side to reconstruct what the format threw away — a shader change, and
+ a wrong picture until it lands. `space` still crosses, because `BC7_SRGB` and
+ `BC7_UNORM` are the same blocks read two ways and picking the wrong one shifts
+ every colour.
+
+ ## What it costs, and why the encode is the fast one
+
+ `ktx.c3l` has no block-level Basis-to-BC7 mapper: `basis::transcode` decodes to
+ RGBA8 and `bc7::encode` re-encodes, which is a real encode. So this trades load
+ time for device memory, and it is only ever asked of a file that chose to ship
+ Basis — a `.ktx2` already holding BCn goes the other way and costs nothing.
+
+ `fast` is what keeps the trade worth making. It stops the encoder after mode 6
+ instead of also searching mode 1's sixty-four partitions, and on one of
+ `evil_forest.glb`'s 1024x1024 images that is 250ms against 1813ms for 52.8dB
+ against 57.2dB — both far above where a difference is visible, because **the
+ source is already quantised**. ETC1S threw the detail away before these bytes
+ existed; the two-subset modes are searching for something that is no longer
+ there. Encoding full-precision pixels is the other case entirely, and
+ `encode_ktx2_bc7` below still asks for the whole search.
+
+ ## A file with no chain still gets one
+
+ The levels are the file's wherever the file has any — every image in
+ `evil_forest.glb` carries a full eleven or thirteen. A Basis file written
+ without mips is the one case where they cannot be, and it does not get to lose
+ them here: the RGBA8 path this replaces had the device blit a chain, so one is
+ built from the transcoded base instead. `mipgen` filters at full precision and
+ in the right space, which is a better chain than the blit was, and each level
+ is encoded like any other.
+
+ @param format : `The target. BC7 in the caller's space; nothing else is encoded here.`
+ @return ? UNSUPPORTED_IMAGE : `Not a Basis KTX2, an unencodable target, or a level that would not transcode.`
+*>
+fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Allocator allocator = mem)
+{
+	if (format.family != TextureFamily.BC7) return UNSUPPORTED_IMAGE~;
+
+	basis::Info? maybe = basis::info(encoded);
+	if (catch maybe) return UNSUPPORTED_IMAGE~;
+	basis::Info info = maybe;
+
+	if (info.width == 0 || info.height == 0) return UNSUPPORTED_IMAGE~;
+	if (info.levels == 0 || info.levels > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
+
+	bool generated = info.levels == 1 && (info.width > 1 || info.height > 1);
+	uint count = generated ? mipgen::chain_length(info.width, info.height) : info.levels;
+	if (count > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
+
+	BlockImage out = {
+		.width = info.width,
+		.height = info.height,
+		.format = format,
+		.levels = alloc::new_array(allocator, char[], count),
+		.owns_levels = true,
+		.allocator = allocator,
+	};
+	// Every level allocated so far goes back on any failure below, which is what
+	// makes a half-transcoded image cost nothing rather than leak the levels that
+	// did succeed.
+	bool ok = false;
+	defer if (!ok) out.free();
+
+	mipgen::Options options = { .srgb = format.space == ColorSpace.SRGB, .renormalize = false };
+	// The level being encoded, as pixels. Carried across iterations on the
+	// generated path, because each level is filtered from the one above it.
+	char[] pixels;
+	defer if (pixels.len) alloc::free(allocator, pixels.ptr);
+	uint lw;
+	uint lh;
+
+	for (uint level = 0; level < count; level++)
+	{
+		if (generated && level > 0)
+		{
+			char[] next = mipgen::next_level(allocator, pixels, lw, lh, options);
+			alloc::free(allocator, pixels.ptr);
+			pixels = next;
+			lw = lw > 1 ? lw >> 1 : 1;
+			lh = lh > 1 ? lh >> 1 : 1;
+		}
+		else
+		{
+			if (pixels.len) alloc::free(allocator, pixels.ptr);
+			pixels = {};
+			// Face 0 of layer 0, exactly as `decode_ktx2_plain` picks its image:
+			// a material's map is one picture, and a cube is `ktx_faces`' business.
+			basis::Transcoded? rgba = basis::transcode(allocator, encoded, level, 0, 0, basis::TF_RGBA32, 4);
+			if (catch rgba) return UNSUPPORTED_IMAGE~;
+			pixels = rgba.data;
+			lw = rgba.width;
+			lh = rgba.height;
+		}
+
+		char[]? blocks = bc7::encode(allocator, pixels, lw, lh, true, 0, true);
+		if (catch blocks) return UNSUPPORTED_IMAGE~;
+		out.levels[level] = blocks;
+	}
+
+	ok = true;
+	return out;
 }
 
 <*

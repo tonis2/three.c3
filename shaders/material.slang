@@ -275,7 +275,10 @@ static const uint FLAG_PRESKINNED  = 16u;
 // The three map bits between this and `FLAG_PRESKINNED` are `mesh.slang`'s and
 // are never set on a material that compiled a body: a `ShaderMaterial` samples
 // whatever its own `textures` declared, and `stochastic_sample` is in scope in a
-// body for exactly that.
+// body for exactly that. So is the emissive-map bit at 512 and
+// `FLAG_COLORS_ARE_MASK` at 1024 — the second one says the mesh's COLOR_0 is a
+// painted weight, which a body asks about by reading `Surface.vertex_mask`
+// instead of `Surface.vertex_color` rather than by testing a bit.
 static const uint FLAG_STOCHASTIC  = 256u;
 
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
@@ -409,6 +412,19 @@ struct Surface
     // whose product with the albedo is meaningless. So the shader carries the
     // attribute and the body decides what it means.
     float4 vertex_color;
+    // The same attribute, read as a weight instead of as a colour: **zero on a
+    // mesh that carries none**, where `vertex_color` is white.
+    //
+    // Two fields for one stream because the identity is not the same on both
+    // sides of the multiply. A tint that is missing is white — that is what makes
+    // `s.albedo * s.vertex_color.rgb` safe on any mesh. A mask that is missing is
+    // *nothing painted*, and white there means a layer masked by red covers every
+    // unpainted surface completely, which is the failure this field exists to
+    // stop. Blender's Colour Attribute node answers 0 for an attribute that is not
+    // on the mesh, so this is also what the artist saw.
+    //
+    // `layers.js` reads a `maskSource: 'vertexColor'` layer's weight from here.
+    float4 vertex_mask;
     // How much of the directional light reaches this point: 1 in the open, 0
     // under something, and the values between are the nine PCF taps disagreeing
     // at the edge of a shadow.
@@ -1446,6 +1462,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // same rule `base_color` follows and for the same reason: this came out of a
     // file rather than out of a colour picker in a script.
     s.vertex_color = input.vertex_color;
+    // The mask reading of the same varying, and the one place the two differ: a
+    // mesh with no COLOR_0 has painted nothing, so every weight read off it is 0
+    // while `vertex_color` stays white. `Surface.vertex_mask` has the argument.
+    s.vertex_mask = (draw.flags & FLAG_HAS_COLORS) != 0
+        ? input.vertex_color
+        : float4(0.0, 0.0, 0.0, 0.0);
     // Clamped once, here, rather than at each use: an out-of-range index into a
     // push-constant array is undefined behaviour that reads whatever is next in
     // the block — a wrong colour with no error anywhere, which is precisely the

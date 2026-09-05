@@ -2295,6 +2295,104 @@ fn void a_point_light_is_a_place_in_the_file() @test
 }
 
 <*
+ The lights and the camera come back out of the file.
+
+ The other half of the two checks above: they proved the file says the right
+ thing, and this proves a reader gets the scene back. It is the only fixture in
+ the repo where the exporter and the importer meet, and what it catches is a
+ convention flipped on one side alone — a directional light whose node +Z was
+ written as the surface-to-light vector and read back as the travel direction
+ lights the far side of everything, which reads as the normals being wrong.
+
+ **The intensities do not round trip, deliberately.** `scene.export` writes this
+ renderer's own multiplier because glTF has no unit to convert it to, and the
+ import reads a file's number as Blender's Watts — 2 out and 1.5 back for the
+ sun, 9 out and 1 back for the point. `asset.lights` reports the file's raw
+ numbers either way, which is the door out of both defaults, and
+ `docs/functions.md` says all of this once.
+*>
+fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
+{
+	String path = "build/export_relight.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+
+			three.light.direction = [0, 1, 0];
+			three.light.color = [1, 0.5, 0.25];
+			three.light.intensity = 2;
+			three.lights.add({ position: [2, 3, 4], range: 9, color: [1, 0, 0], intensity: 9 });
+			three.camera.fov = 60;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 8);
+			scene.export("build/export_relight.glb");
+
+			// Everything the file describes, moved somewhere else, so nothing below
+			// can pass by having been left alone.
+			three.light.direction = [1, 0, 0];
+			three.light.color = [0, 0, 1];
+			three.light.intensity = 1;
+			three.lights.remove(1);
+			three.camera.fov = 45;
+			three.camera.orbit(90, 45, 3);
+
+			const back = three.load("build/export_relight.glb");
+			const said = back.lights.map(l => [l.name, l.type, l.intensity, l.range]);
+			back.instantiate("back", { lights: true, camera: true });
+
+			const round = n => Math.round(n * 1e4) / 1e4;
+			return {
+				said,
+				count: three.lights.length,
+				sun: three.light.direction.toArray().map(round),
+				sunColor: three.light.color.map(round),
+				sunIntensity: round(three.light.intensity),
+				lamp: three.lights[1].position.toArray().map(round),
+				lampRange: round(three.lights[1].range),
+				lampIntensity: round(three.lights[1].intensity),
+				fov: round(three.camera.fov),
+				yaw: round(three.camera.yaw),
+				pitch: round(three.camera.pitch),
+				distance: round(three.camera.distance),
+				target: three.camera.target.toArray().map(round),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+
+		test::@check(result.value.contains(`"said":[["sun","directional",2,0],["light 1","point",9,9]]`),
+			"the file's own numbers come back as the file wrote them: %s", result.value);
+
+		test::@check(result.value.contains(`"count":2`),
+			"both lights reach a slot: %s", result.value);
+		test::@check(result.value.contains(`"sun":[0,1,0]`),
+			"the sun points back the way it was aimed, and not at the other side: %s", result.value);
+		test::@check(result.value.contains(`"sunColor":[1,0.5,0.25]`),
+			"with its colour: %s", result.value);
+		test::@check(result.value.contains(`"sunIntensity":1.5`),
+			"and 2 Watts read as 1.5 here: %s", result.value);
+
+		test::@check(result.value.contains(`"lamp":[2,3,4]`),
+			"the point light stands where it stood: %s", result.value);
+		test::@check(result.value.contains(`"lampRange":9`),
+			"reaching as far as it did: %s", result.value);
+		test::@check(result.value.contains(`"lampIntensity":1`),
+			"and 9 Watts read as brightness three metres out: %s", result.value);
+
+		test::@check(result.value.contains(`"fov":60`),
+			"the camera gets its field of view back, in degrees: %s", result.value);
+		test::@check(result.value.contains(`"yaw":0`) && result.value.contains(`"pitch":0`),
+			"aimed the way it was aimed: %s", result.value);
+		test::@check(result.value.contains(`"distance":8`) && result.value.contains(`"target":[0,0,0]`),
+			"from where it was, around the middle of what it can see: %s", result.value);
+	};
+}
+
+<*
  A material's emissive is in the file.
 
  `emissiveFactor` is glTF's word for it and means the same thing: linear rgb

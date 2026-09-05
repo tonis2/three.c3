@@ -53,7 +53,12 @@ const H = globalThis.__three;
 //
 // If they drift, the host still refuses. That is the floor under this, the same
 // way `cull_for_side` is the floor under `Material._checkSide`.
-const TEXTURE_LIMIT = 8;
+//
+// Twelve is three plus twelve against a guaranteed sixteen per-stage samplers —
+// the arithmetic is in `MATERIAL_TEXTURE_LIMIT`'s header and not repeated here.
+// What belongs here is what a stack does when twelve is still not enough, which
+// is `SHEDDING`.
+const TEXTURE_LIMIT = 12;
 const UNIFORM_BUDGET = 104;
 
 // A `float4` per animated layer — tint in rgb, opacity in a. Six of them fit and
@@ -120,9 +125,21 @@ const LAYER_KEYS = new Set([
 // same thing under both.
 const MASK_SOURCES = new Set(['texture', 'vertexColor']);
 
+// What the base material may say. Three of these are spelled the way
+// `MeshLambertMaterial` and `ref.material` spell them rather than the way a layer
+// does — `aoMap` and not `ao` — and the split is the point: `map`, `normal`,
+// `mask` and `height` are the stack's own bottom row, while those three are the
+// *core* material's maps being lent to a generated pipeline that has no built-in
+// slots for them. A script carrying a glTF material across writes the same three
+// words it would write for a plain material.
+//
+// `name` is for diagnostics only. A generated stack that sheds a map says which
+// material shed it, and "LayeredMaterial" is not an answer in a level with eight
+// of them.
 const TOP_KEYS = new Set([
 	'map', 'normal', 'mask', 'layers', 'side', 'transparent', 'blending', 'opacity',
 	'roughness', 'metalness', 'reflectance', 'height', 'bump',
+	'metalnessRoughnessMap', 'aoMap', 'emissiveMap', 'name',
 ]);
 
 // The parts of the extension this renderer parses and cannot evaluate, and the
@@ -289,7 +306,9 @@ function readLayer(raw, at) {
 	// that can vary across a surface. What changed is that the geometry contract
 	// moved out of the push block, so a fourth stream cost 8 bytes of a buffer
 	// instead of 8 of the 128 bytes every material's uniforms were competing over.
-	// `scene/asset.c3` uploads COLOR_0 and `s.vertex_color` is what this reads.
+	// `scene/asset.c3` uploads COLOR_0 and `s.vertex_mask` is what this reads —
+	// which is 0 on a mesh that carries no COLOR_0 at all, so a layer masked this
+	// way is off on an unpainted mesh rather than covering it.
 	const source = raw.maskSource ?? 'texture';
 	if (typeof source !== 'string' || !MASK_SOURCES.has(source)) {
 		throw new TypeError(
@@ -476,6 +495,13 @@ function emit(base, layers) {
 	const uniforms = {};
 	const body = [];
 
+	// Cleared rather than added to, because `emit` runs more than once on the same
+	// layers: a stack over the sampler budget is shed and emitted again, and a
+	// `samplers.height` left over from the attempt before would name a binding the
+	// generated module no longer declares — which `LayerView` would then read
+	// through and `addMaterialLayer` would resolve to nothing.
+	for (const layer of layers) layer.samplers = {};
+
 	// The shared mask, declared once however many layers read a channel of it.
 	// That is the economy the extension's per-layer `channel` field is for: four
 	// layers over one RGBA image is one sampler, and four separate greyscale
@@ -504,8 +530,10 @@ function emit(base, layers) {
 	// Whether anything in the stack has an opinion about how light behaves here,
 	// as opposed to what colour it finds. A stack with none pays nothing: no
 	// second chain, and `standard` reads the material's own pair exactly as it
-	// did before a layer could say anything about it.
-	const anySurface = layers.some(l => surfaces(l));
+	// did before a layer could say anything about it. The base's own
+	// metallic-roughness map joins that question, because it is the bottom of the
+	// same chain.
+	const anySurface = base.metallicRoughness !== null || layers.some(l => surfaces(l));
 
 	body.push('float3 shade(Surface s)');
 	body.push('{');
@@ -566,13 +594,53 @@ function emit(base, layers) {
 	// nothing here and a `LayeredMaterial` with no layers at all shades exactly as
 	// a MeshLambertMaterial does.
 	body.push(`    float3 c = ${albedo};`);
+
+	// The core material's other three maps.
+	//
+	// **They are here because a generated pipeline has no built-in slots.**
+	// `mesh.slang` binds a normal, a metallic-roughness, an occlusion and an
+	// emissive map at four fixed bindings and `MeshLambertMaterial` fills them in;
+	// `material.slang` reserves three bindings for the pass and hands every other
+	// one to the body, so a stack that wanted the file's occlusion map had nowhere
+	// to put it and an imported material quietly lost all three. Each costs a
+	// sampler of the same budget a layer's maps come out of, which is the honest
+	// price and is why `MATERIAL_TEXTURE_LIMIT` went to twelve in the same change.
+	//
+	// The emissive one multiplies `s.emissive` in place rather than being added at
+	// the end: `s.emissive` is `material.emissive` times `material.emissiveIntensity`
+	// and glTF's rule is that the texture multiplies the factor, so the material's
+	// own two numbers stay the way to turn the glow up. `Surface` is a by-value
+	// parameter — `material.slang`'s own `standard` overloads are built out of
+	// writing to it — so the copy this body holds is its own.
+	if (base.emissive !== null) {
+		textures.base_emissive_map = base.emissive;
+		body.push(`    s.emissive *= base_emissive_map.Sample(${surface}).rgb;`);
+	}
+	// 1 where the file has no occlusion map, which is the value the three shorter
+	// `standard` overloads hand in — so a stack without one generates exactly the
+	// line it generated before this existed.
+	let ao = '1.0';
+	if (base.ao !== null) {
+		textures.base_ao_map = base.ao;
+		body.push(`    float ao = base_ao_map.Sample(${surface}).r;`);
+		ao = 'ao';
+	}
 	if (anyEmissive) body.push('    float3 e = float3(0.0, 0.0, 0.0);');
 	// The second chain, starting where the first one does: at what the material
 	// itself says. `material.roughness` and `material.metalness` are the bottom of
-	// the stack for these two exactly as the base colour is for the first.
+	// the stack for these two exactly as the base colour is for the first, and the
+	// base's own map varies them per texel the way glTF says it does — green is
+	// roughness, blue is metalness, and the material's factors multiply it.
 	if (anySurface) {
-		body.push('    float rough = s.roughness;');
-		body.push('    float metal = s.metalness;');
+		if (base.metallicRoughness !== null) {
+			textures.base_surface_map = base.metallicRoughness;
+			body.push(`    float2 bmr = base_surface_map.Sample(${surface}).gb;`);
+			body.push('    float rough = s.roughness * bmr.x;');
+			body.push('    float metal = s.metalness * bmr.y;');
+		} else {
+			body.push('    float rough = s.roughness;');
+			body.push('    float metal = s.metalness;');
+		}
 	}
 	if (anyNormal) {
 		// Flat, in tangent space: 0.5 is "no tilt" on the x and y axes and 1.0 is
@@ -643,7 +711,16 @@ function emit(base, layers) {
 			// No sampler and no binding: the attribute is interpolated across the
 			// triangle and arrives in `Surface`. This is the one mask that costs
 			// nothing but the stream the mesh already carries.
-			w = `s.vertex_color.${layer.channel}`;
+			//
+			// **`vertex_mask` and not `vertex_color`**, which are the same varying
+			// read with two different identities: a missing tint is white and a
+			// missing mask is 0. One material drawn on a painted mesh and an
+			// unpainted one is the ordinary case in a level — the same wood material
+			// on a mossy root and on a deck nobody painted — and through
+			// `vertex_color` the second one comes back covered in the layer, because
+			// white is full weight. Blender's Colour Attribute node reads 0 for an
+			// attribute the mesh does not carry, which is what the artist saw.
+			w = `s.vertex_mask.${layer.channel}`;
 		} else if (layer.maskTexture !== null) {
 			const name = `layer${i}_mask`;
 			textures[name] = layer.maskTexture;
@@ -791,10 +868,73 @@ function emit(base, layers) {
 	// one, because the extension has no field for it. On a stack that changed none
 	// of them it is the same arithmetic `c * lambert(n)` was, so nothing already
 	// written moves.
-	body.push(anyEmissive ? '    return standard(s, c, n) + e;' : '    return standard(s, c, n);');
+	// The occlusion is the fourth argument only when there is one, so every stack
+	// written before the base maps existed emits the same two-or-three-argument
+	// call it always did. `standard` folds `ao` into the ambient floor and the
+	// environment reflection and into nothing else — its header says why.
+	const shaded = ao === '1.0' ? 'standard(s, c, n)' : `standard(s, c, n, ${ao})`;
+	body.push(anyEmissive ? `    return ${shaded} + e;` : `    return ${shaded};`);
 	body.push('}');
 
 	return { fragment: body.join('\n'), textures, uniforms };
+}
+
+// What a stack gives up, in order, when it wants more samplers than a material
+// may declare — and the reason it gives something up at all.
+//
+// **Refusing the whole surface because of one map is the wrong trade.** A stack
+// that will not build leaves its mesh drawing the plain base material, which for
+// a terrain is one flat colour where the file describes three; losing a
+// millimetre of parallax off a gravel layer is not a comparable loss. So the
+// budget is spent on the maps that change the picture most and the rest are shed
+// with a warning naming them, rather than the whole stack being thrown away with
+// a warning naming a number.
+//
+// The order, cheapest thing to lose first:
+//
+//  1. **Every layer's height.** Parallax is a uv shift of a fraction of a texel
+//     at most angles and the layer keeps its albedo, its normal and its mask —
+//     the relief is the one map whose absence is invisible head-on.
+//  2. **Every layer's metallic-roughness.** The layer keeps whatever `roughness`
+//     and `metalness` factors it stated, so the surface stays in the right half
+//     of the range and only stops varying per texel.
+//  3. **The base height.** Last of the three because it moves the uv for the
+//     whole stack — the mask included — so dropping it changes where every layer
+//     sits rather than how one of them is lit.
+//
+// Within 1 and 2 the layers shed in stack order, bottom first: the top of the
+// stack is what is drawn over everything else and is the relief most likely to be
+// seen. Nothing below the base height is shed — a stack still over the budget
+// with all three gone is asking for more albedos, normals or masks than a
+// material has bindings for, and which of *those* to lose is a decision about
+// what the surface is rather than about how it is lit. It is refused instead, and
+// that refusal now names what was already shed.
+//
+// The base's own metallic-roughness, occlusion and emissive maps are not on the
+// list either, and do not need to be: they arrived in the same change that took
+// the budget from eight to twelve, so a stack that fit in eight has three
+// bindings of room for all three of them and cannot be pushed over by carrying
+// them.
+function shedding(base, layers) {
+	const steps = [];
+	// A height with a depth of zero declares no sampler — `emit` skips it — so
+	// only the maps that actually cost a binding are on the list. Shedding one
+	// that costs nothing would spend a step and free nothing.
+	for (const layer of layers) {
+		if (layer.height === null || layer.depth === 0) continue;
+		steps.push({ what: `${layer.label}: height`, drop: () => { layer.height = null; } });
+	}
+	for (const layer of layers) {
+		if (layer.metallicRoughness === null) continue;
+		steps.push({
+			what: `${layer.label}: metallicRoughness`,
+			drop: () => { layer.metallicRoughness = null; },
+		});
+	}
+	if (base.height !== null && base.depth !== 0) {
+		steps.push({ what: 'the base height', drop: () => { base.height = null; } });
+	}
+	return steps;
 }
 
 // A live view of one layer: which images it samples, and its tint and opacity
@@ -936,6 +1076,7 @@ export class LayeredMaterial extends ShaderMaterial {
 			throw new TypeError('`layers` wants an array of layer descriptions, outermost last');
 		}
 		const bump = readBump(options.bump, 'LayeredMaterial');
+		const name = options.name === undefined || options.name === null ? '' : String(options.name);
 		const base = {
 			map: checkTexture(options.map, 'LayeredMaterial: map'),
 			normal: checkTexture(options.normal, 'LayeredMaterial: normal'),
@@ -944,6 +1085,15 @@ export class LayeredMaterial extends ShaderMaterial {
 			// too — under `base`, beside nothing else, because core glTF has no slot
 			// for a height map at all. It moves the uv for the whole stack.
 			height: checkTexture(options.height, 'LayeredMaterial: height'),
+			// The three core-glTF maps a generated pipeline has no built-in slot for.
+			// Named the way the material they came off names them — see `TOP_KEYS` —
+			// and turned into the stack's own vocabulary here, once, so `emit` reads
+			// as a description of the shader.
+			metallicRoughness: checkTexture(
+				options.metalnessRoughnessMap, 'LayeredMaterial: metalnessRoughnessMap'
+			),
+			ao: checkTexture(options.aoMap, 'LayeredMaterial: aoMap'),
+			emissive: checkTexture(options.emissiveMap, 'LayeredMaterial: emissiveMap'),
 			bump,
 			depth: bump.strength * bump.distance,
 		};
@@ -966,14 +1116,34 @@ export class LayeredMaterial extends ShaderMaterial {
 			);
 		}
 
-		const { fragment, textures, uniforms } = emit(base, layers);
+		let { fragment, textures, uniforms } = emit(base, layers);
+		const wanted = Object.keys(textures).length;
+		const shed = [];
+		for (const step of shedding(base, layers)) {
+			if (Object.keys(textures).length <= TEXTURE_LIMIT) break;
+			step.drop();
+			shed.push(step.what);
+			({ fragment, textures, uniforms } = emit(base, layers));
+		}
 		const count = Object.keys(textures).length;
 		if (count > TEXTURE_LIMIT) {
 			throw new TypeError(
 				`this stack needs ${count} samplers and a material may declare ${TEXTURE_LIMIT}: `
-				+ `${layers.length} layers over ${base.mask ? 'a shared mask' : 'no shared mask'}. `
-				+ 'Pack the masks into the four channels of one texture, drop a layer\'s normal, '
-				+ 'height or metallicRoughness map, or turn a layer off with { enabled: false }.'
+				+ `${layers.length} layers over ${base.mask ? 'a shared mask' : 'no shared mask'}`
+				+ `${shed.length === 0 ? '' : `, with ${shed.length} shed already`}. `
+				+ 'Pack the masks into the four channels of one texture, drop a layer\'s map or '
+				+ 'normal, or turn a layer off with { enabled: false }.'
+			);
+		}
+		// One warning for the whole stack, after it is known to fit, because the
+		// caller cannot act on the intermediate attempts and a line per dropped map
+		// would bury the one fact that matters — that this surface is drawing with
+		// less than the file describes.
+		if (shed.length > 0) {
+			console.warn(
+				`three: ${name === '' ? 'a LayeredMaterial' : `"${name}"`} needed ${wanted} samplers `
+				+ `and a material may declare ${TEXTURE_LIMIT} — dropped ${shed.join(', ')}. `
+				+ 'The stack still draws; pack its masks into one texture or turn a layer off to keep them.'
 			);
 		}
 
@@ -996,6 +1166,10 @@ export class LayeredMaterial extends ShaderMaterial {
 		// would be the same image bound twice and multiplied in twice.
 		if (base.map !== null) this.map = base.map;
 
+		// A name the way `Object3D` carries one, and the only material in this API
+		// that takes one — because it is the only one that can decide, on its own,
+		// to draw less than it was asked for. The warning above is what it is for.
+		this.name = name;
 		this._layers = layers;
 		this.layers = layers.map(l => new LayerView(this, l));
 
@@ -1052,6 +1226,7 @@ export class LayeredMaterial extends ShaderMaterial {
 		return {
 			...super.toJSON(),
 			type: 'LayeredMaterial',
+			name: this.name,
 			layers: this.layers.map(l => l.toJSON()),
 		};
 	}

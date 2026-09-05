@@ -38,10 +38,11 @@ faultdef POST_TAP_UNKNOWN;
  How many samplers of its own a post pass may declare, on top of `prev` and
  `scene`.
 
- `MATERIAL_TEXTURE_LIMIT`'s number, minus the part of its argument about
- per-bucket traffic — there is one post draw in a frame, so a binding here is
- paid for once. The limit is the same anyway because the other half holds: five
- images is an atlas or an array, and neither is a thing this project has.
+ `MATERIAL_TEXTURE_LIMIT`'s argument minus the half about per-bucket traffic —
+ there is one post draw in a frame, so a binding here is paid for once. It has
+ not moved with that limit because the other half holds and the pressure does
+ not: a stack of terrain layers is a material and never a post pass, and five
+ images in one pass is an atlas or an array, neither of which this project has.
 *>
 const uint POST_TEXTURE_LIMIT = 4;
 

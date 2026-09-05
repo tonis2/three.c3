@@ -34,6 +34,7 @@ import std::core::test;
 import std::io;
 import std::io::file;
 import ktx::container;
+import ktx::basis;
 import std::math;
 import std::math::vector;
 
@@ -2133,6 +2134,126 @@ fn void a_glb_image_can_be_block_compressed() @test
 		test::@check(assets.texture_bytes() == 452,
 			"the pair costs %d bytes, not the 112 + 340 they should",
 			(int)assets.texture_bytes());
+	};
+}
+
+<*
+ A `KHR_texture_basisu` image reaches the device as BC7 and costs a quarter of
+ what it used to.
+
+ ETC1S is a transport format that no device samples, so this one had exactly one
+ destination before: RGBA8, four bytes a texel, with the file's own mip chain
+ thrown away and a new one blitted on the device. `evil_forest.glb`'s 61 images
+ are what that costs at scale — 17.7 MB on disk and 373 MiB resident. So the
+ assertion is on both halves of the fix at once: the *family*, which says the
+ blocks were kept, and the *byte count*, which is the only thing a person
+ running out of device memory can see.
+
+ The count is exact rather than approximate, and it is compared against the
+ RGBA8 the same picture would have cost so the ratio is in the test rather than
+ in a comment. It is not quite four: the levels below 4x4 are one whole block
+ each whichever family they are in, so a 64x64 chain lands at 5488 against
+ 21844.
+
+ **Whether this device samples BC7 is a fact about this device**, which is why
+ the else branch is not a skip. Hardware without it must still get the picture,
+ as RGBA8 with a generated chain — the same fallback `a_device_is_asked_before_a_block_upload`
+ asserts the contract of, seen from the other end.
+*>
+fn void a_basis_image_is_transcoded_to_blocks() @test
+{
+	const uint SIDE = 64;
+	String path = "build/basis_chain.ktx2";
+
+	// Four flat quadrants, for `three_tests::ktx`'s reason: every codec on this
+	// path may move a texel and none of them may move a colour.
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+	for (uint y = 0; y < SIDE; y++)
+	{
+		for (uint x = 0; x < SIDE; x++)
+		{
+			sz at = ((sz)y * SIDE + x) * 4;
+			bool right = x >= SIDE / 2;
+			bool low = y >= SIDE / 2;
+			source[at + 0] = (char)(right ? 0xf0 : 0x10);
+			source[at + 1] = (char)(low ? 0xf0 : 0x10);
+			source[at + 2] = (char)(right == low ? 0xf0 : 0x10);
+			source[at + 3] = (char)0xff;
+		}
+	}
+
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::ETC1S, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = true }
+	)!!;
+	defer free(blob);
+	file::save(path, blob)!!;
+	defer (void)file::delete(path);
+
+	uint chain = three::mip_levels(SIDE, SIDE);
+	test::@check(basis::info(blob)!!.levels == chain,
+		"the fixture carries %d levels, not the full %d — the rest of this asserts nothing",
+		basis::info(blob)!!.levels, chain);
+
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		bool available = renderer.gpu.supports(bc7);
+
+		int slot = assets.load_texture_file(&renderer.gpu, path)!!;
+		test::@check(slot >= 0, "the Basis KTX2 did not load at all");
+		three::Texture* uploaded = assets.texture_at(slot);
+
+		test::@check(uploaded.width == SIDE && uploaded.height == SIDE,
+			"uploaded as %dx%d", uploaded.width, uploaded.height);
+		test::@check(uploaded.levels == chain,
+			"the file's %d levels became %d on the device", chain, uploaded.levels);
+
+		sz resident = 0;
+		sz as_pixels = 0;
+		three::TextureFormat rgba = three::rgba8(three::ColorSpace.SRGB);
+		for (uint i = 0; i < chain; i++)
+		{
+			uint side = three::level_extent(SIDE, i);
+			resident += bc7.image_size(side, side);
+			as_pixels += rgba.image_size(side, side);
+		}
+
+		if (available)
+		{
+			test::@check(uploaded.format.equals(bc7),
+				"an ETC1S image landed as %s rather than BC7 sRGB",
+				three::block_family_name(uploaded.format.family));
+			test::@check(assets.texture_bytes() == (usz)resident,
+				"the transcoded image costs %d bytes, not the %d its blocks come to",
+				(int)assets.texture_bytes(), (int)resident);
+			test::@check((sz)assets.texture_bytes() * 3 < as_pixels,
+				"%d bytes of blocks is not comfortably under the %d it cost as RGBA8",
+				(int)assets.texture_bytes(), (int)as_pixels);
+
+			// The space is the caller's, exactly as it is for a PNG, and it picks
+			// between two formats whose blocks are identical. Getting it wrong
+			// shifts every colour and nothing else, so it is asserted rather than
+			// assumed — and it is a second slot, because a texture's space is part
+			// of what it is.
+			int linear = assets.load_texture_file(&renderer.gpu, path, three::ColorSpace.LINEAR)!!;
+			test::@check(linear != slot, "two colourspaces of one file shared a slot");
+			test::@check(assets.texture_at(linear).format.vk() == FORMAT_BC7_UNORM_BLOCK,
+				"a linear Basis image did not land as BC7_UNORM");
+			test::@check(uploaded.format.vk() == FORMAT_BC7_SRGB_BLOCK,
+				"an sRGB Basis image did not land as BC7_SRGB");
+		}
+		else
+		{
+			test::@check(uploaded.format.family == three::TextureFamily.RGBA8,
+				"this device cannot sample BC7 and the loader uploaded blocks anyway");
+			test::@check(assets.texture_bytes() == (usz)as_pixels,
+				"the RGBA8 fallback costs %d bytes, not %d",
+				(int)assets.texture_bytes(), (int)as_pixels);
+		}
 	};
 }
 

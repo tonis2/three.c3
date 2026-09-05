@@ -73,6 +73,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "splitMesh", &js_split_mesh, 3);
 	self.bind(host, "merge", &js_merge, 5);
 	self.bind(host, "assetNodes", &js_asset_nodes, 3);
+	self.bind(host, "assetLights", &js_asset_lights, 2);
+	self.bind(host, "assetCameras", &js_asset_cameras, 2);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
 	self.bind(host, "assetBones", &js_asset_bones, 2);
 	self.bind(host, "bindAnimation", &js_bind_animation, 6);

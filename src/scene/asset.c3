@@ -280,6 +280,11 @@ struct GpuMesh
 	bool has_normals;
 	bool has_uvs;
 	bool has_colors;
+	// The COLOR_0 above is a layer mask rather than a tint, so the built-in shader
+	// must not multiply it into the albedo — `FLAG_COLORS_ARE_MASK`, which is where
+	// the argument is. True when this primitive's material carries
+	// `CUSTOM_materials_layers` at all, empty stack included.
+	bool colors_are_mask;
 	// Both skin streams are present and cover every vertex. The skin *itself* is on
 	// the node rather than here (`AssetNode.skin`), because that is where glTF puts
 	// it; this only says the geometry can be posed at all.
@@ -409,6 +414,108 @@ struct AssetNode
 }
 
 <*
+ One `KHR_lights_punctual` light, on the node that placed it, in world space.
+
+ Kept as a description rather than turned into one of the renderer's four light
+ slots, because the two questions are separate: what the file says, and which of
+ its lights a scene has room for. `three.lights` holds four and a level may
+ author twenty, so the choosing belongs to whoever is building the scene —
+ `asset.lights` is what they choose from.
+
+ **World, not local.** A directional light shines down its node's -Z and a point
+ light stands at its node's translation, and both of those are answers about the
+ node's *world* transform: a lantern parented to a boat is where the boat is. The
+ node chain is walked once here rather than by every reader.
+
+ `direction` is the way the light travels — the node's -Z — and is the negation of
+ the surface-to-light vector `three.light.direction` holds. Naming it after what
+ the file means rather than after what this renderer wants is what keeps the one
+ negation in the importer instead of in every script.
+*>
+struct AssetLight
+{
+	// The *node's* name, not the light's: gltf.c3l parses the extension's lights
+	// without their names, and an exporter names the node and the light the same
+	// thing anyway. Owned.
+	String name;
+
+	// `gltf::LightType`'s ordinal — 0 directional, 1 point, 2 spot — passed
+	// through untranslated, exactly as the layer stack's blend modes are.
+	uint kind;
+
+	float[3] color;
+	float intensity;
+
+	// The extension's `range`, in metres, or 0 when the file named none. See
+	// `GLTF_RANGE_UNSET`.
+	float range;
+
+	// Radians, and meaningful only for a spot.
+	float inner_cone;
+	float outer_cone;
+
+	Vec3 position;
+	Vec3 direction;
+
+	// The glTF node this light hangs on, so a script can find the same node in an
+	// instantiated tree.
+	int gltf_node;
+}
+
+<*
+ One glTF camera, on the node that placed it, in world space.
+
+ Same bargain as `AssetLight`: the file's answer, not this renderer's camera. A
+ glTF camera is an eye and a heading; the turntable here is a target, a boom and
+ two angles, and turning one into the other needs a distance the file does not
+ carry — so `distance` is derived here, once, rather than guessed by each script.
+
+ **The distance is where the view ray passes the middle of the file.** The
+ picture does not depend on it at all — any positive distance along -Z puts the
+ eye in the same place looking the same way — but the orbit *point* does, and it
+ is what a drag turns around and what the near and far planes are derived from.
+ The middle of the asset's bounds is the point a camera composed in Blender was
+ almost certainly composed around.
+*>
+struct AssetCamera
+{
+	// The node's name, for `AssetLight.name`'s reason and one more: gltf.c3l's
+	// `Camera.name` borrows from the JSON tree, which is freed after the parse.
+	String name;
+
+	Vec3 position;
+	// The node's -Z and +Y in world space, both unit length.
+	Vec3 forward;
+	Vec3 up;
+
+	// How far down `forward` the orbit point sits. See the struct's note.
+	float distance;
+
+	// Radians, as the file states it, and vertical — which is what
+	// `Camera.projection` wants and why no conversion happens here.
+	float yfov;
+	float znear;
+	float zfar;
+	// The file's `aspectRatio`, or 0 when it named none — which glTF says means
+	// "use the viewport's", and which is what this renderer does regardless.
+	float aspect;
+
+	int gltf_node;
+}
+
+<*
+ What gltf.c3l puts in a point light's `range` when the file names none.
+
+ glTF's own answer for an absent range is "infinite", which a windowed falloff
+ cannot use, so the library substitutes fifty metres — and having done so there is
+ no way left to tell that file apart from one that authored exactly fifty. This
+ reports the substitution as 0, "the file said nothing", and lets the importer
+ pick its own default; a file that really did write fifty loses the difference,
+ which is the smaller of the two wrong answers.
+*>
+const float GLTF_RANGE_UNSET = 50.0f;
+
+<*
  One glTF skin: which nodes are its joints, and how each one gets from the mesh's
  bind pose into its own space.
 
@@ -482,6 +589,13 @@ struct Asset
 	// listing the meshes flat when it is.
 	List{AssetNode} nodes;
 	List{uint} roots;
+
+	// The file's `KHR_lights_punctual` lights and its cameras, placed in world
+	// space at load. Both are JSON and cost nothing, and both are empty for the
+	// overwhelming majority of files that carry neither. `asset.lights` and
+	// `asset.cameras` are what a script reads them through.
+	List{AssetLight} lights;
+	List{AssetCamera} cameras;
 
 	// How a generated shape was described, for the exporter and for nothing else.
 	// `Primitive.build` regenerates its positions, normals and uvs from these eight
@@ -1488,6 +1602,7 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 			mesh.has_normals = false;
 			mesh.has_uvs = false;
 			mesh.has_colors = false;
+			mesh.colors_are_mask = false;
 			mesh.index_count = 0;
 			mesh.base_color = { 1, 1, 1, 1 };
 			report.meshes++;
@@ -1604,6 +1719,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 
 	record_skins(&asset, &asset.stream);
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
+	record_lights(&asset, &asset.stream);
 	record_clips(&asset);
 
 	return self.claim_slot(asset);
@@ -1827,6 +1943,107 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 }
 
 <*
+ Copy the file's lights and cameras onto the asset, each placed in world space.
+
+ Separate from `record_nodes` for the same reason that one is separate from the
+ upload loop: nothing here touches the device and nothing in it can fail. A file
+ with neither pays for one walk of its node list and allocates nothing.
+
+ **The node chain is walked per light rather than once for the whole tree.** A
+ file has a handful of lights and a cathedral of nodes, so a table of world
+ matrices for every node would be the expensive way round; `Node.global_matrix`
+ climbs the parents of the few that matter.
+
+ The camera's orbit distance comes from `asset.bounds`, which by this point is the
+ union of every primitive's own box. That is the file's extent as the rest of the
+ engine already measures it, and it is only ever used to choose *where along the
+ view ray* the turntable's pivot sits — never the picture, which is the same at
+ any positive distance.
+*>
+fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
+{
+	sz lights = stream.gltf.lights.len();
+	sz cameras = stream.gltf.cameras.len();
+	if (lights == 0 && cameras == 0) return;
+
+	if (lights > 0) asset.lights.init(mem, lights);
+	if (cameras > 0) asset.cameras.init(mem, cameras);
+
+	Vec3 middle = (asset.bounds.min + asset.bounds.max) * 0.5f;
+
+	foreach (&source : stream.gltf.nodes)
+	{
+		bool has_light = source.has_light() && source.light < (int)lights;
+		bool has_camera = source.camera >= 0 && source.camera < (int)cameras;
+		if (!has_light && !has_camera) continue;
+
+		Matrix4f world = source.global_matrix();
+		Vec3 place = { world.m[12], world.m[13], world.m[14] };
+		// The node's own axes, scale divided out. A light or a camera on a scaled
+		// node is a heading, not a size.
+		Vec3 forward = unit((Vec3) { -world.m[8], -world.m[9], -world.m[10] }, (Vec3) { 0, 0, -1 });
+		Vec3 upward = unit((Vec3) { world.m[4], world.m[5], world.m[6] }, (Vec3) { 0, 1, 0 });
+
+		if (has_light)
+		{
+			gltf::Light* lamp = &stream.gltf.lights[source.light];
+			AssetLight light = {
+				.kind = lamp.type.ordinal,
+				.color = lamp.color,
+				.intensity = lamp.intensity,
+				.range = lamp.type == POINT && lamp.range == GLTF_RANGE_UNSET ? 0.0f : lamp.range,
+				.inner_cone = lamp.inner_cone_angle,
+				.outer_cone = lamp.outer_cone_angle,
+				.position = place,
+				.direction = forward,
+				.gltf_node = (int)source.index,
+			};
+			if (source.name.len > 0) light.name = source.name.copy(mem);
+			asset.lights.push(light);
+		}
+
+		if (has_camera)
+		{
+			gltf::Camera* lens = &stream.gltf.cameras[source.camera];
+			// How far along the view ray the middle of the file lies. A middle
+			// behind the eye — a camera aimed away from what it was given — falls
+			// back to the straight-line distance, which is at least a length the
+			// file justifies.
+			Vec3 toward = middle - place;
+			float along = toward.dot(forward);
+			AssetCamera camera = {
+				.position = place,
+				.forward = forward,
+				.up = upward,
+				.distance = along > 0.001f ? along : math::max(toward.length(), 1.0f),
+				.gltf_node = (int)source.index,
+			};
+			// Orthographic cameras have no `yfov` and this renderer has no
+			// projection for one, so they arrive with zeroes and the importer
+			// leaves the field of view alone.
+			if (lens.type == PERSPECTIVE)
+			{
+				camera.yfov = lens.perspective.yfov;
+				camera.znear = lens.perspective.znear;
+				camera.zfar = lens.perspective.zfar;
+				camera.aspect = lens.perspective.aspectRatio;
+			}
+			if (source.name.len > 0) camera.name = source.name.copy(mem);
+			asset.cameras.push(camera);
+		}
+	}
+}
+
+// A vector normalized, or `fallback` when it has no length to normalize. A node
+// scaled flat in one axis is the case, and a NaN heading would reach a script as
+// a light that lights nothing anywhere.
+fn Vec3 unit(Vec3 v, Vec3 fallback) @local
+{
+	float length = v.length();
+	return length > 1e-8f ? v * (1.0f / length) : fallback;
+}
+
+<*
  Read one node's `EXT_mesh_gpu_instancing` block into `AssetNode.instances`.
 
  gltf.c3l has already parsed the extension — `Node.attributes` is its attribute
@@ -1920,6 +2137,13 @@ fn void free_nodes(Asset* asset) @local
 	asset.roots.free();
 	asset.nodes = { };
 	asset.roots = { };
+
+	foreach (&light : asset.lights) if (light.name.len > 0) light.name.free(mem);
+	foreach (&camera : asset.cameras) if (camera.name.len > 0) camera.name.free(mem);
+	asset.lights.free();
+	asset.cameras.free();
+	asset.lights = { };
+	asset.cameras = { };
 
 	foreach (&skin : asset.skins)
 	{
@@ -2481,6 +2705,13 @@ fn GpuMesh? Assets.upload_primitive(
 				material.baseColorFactor[2],
 				material.baseColorFactor[3],
 			};
+			// **Not gated on uvs and not gated on the stack having layers in it**,
+			// unlike the resolve below. The question this answers is what the paint
+			// on the mesh *means*, and the file answered it by masking layers with
+			// the attribute; a stack whose layers are all gone still had them when
+			// the artist painted, and drawing that mesh's mask as a tint is the
+			// rainbow `FLAG_COLORS_ARE_MASK` exists to stop.
+			out.colors_are_mask = material.layers_ext.present;
 			if (out.has_uvs)
 			{
 				out.texture = self.load_material_texture(gpu, stream, images, material.baseColorTexture)!;
@@ -2914,7 +3145,7 @@ fn void? Assets.load_material_layers(
  a splat map authored the way the extension intends has all of them naming *one*
  RGBA image and differing only in `channel`. Left as it arrives, that is one
  sampler per layer holding the same picture: four bindings for a four-layer terrain
- where one would do, against a budget of eight (`MATERIAL_TEXTURE_LIMIT`). Hoisted,
+ where one would do, against a budget of twelve (`MATERIAL_TEXTURE_LIMIT`). Hoisted,
  the generated shader samples it once into a `float4` and reads a component per
  layer — which is the arrangement the per-layer `channel` field exists for.
 
@@ -3126,8 +3357,9 @@ fn int? Assets.decode_material_texture(
 
 	// The same fast path a script's own `.ktx2` takes, asked in the same order.
 	// A `.glb` carrying engine-ready BCn images gets them on the device as
-	// blocks; `KHR_texture_basisu` is ETC1S or UASTC, which falls through here
-	// and is transcoded to RGBA8 below exactly as before.
+	// blocks; `KHR_texture_basisu` is ETC1S or UASTC and is transcoded to BC7
+	// there, keeping the file's mip chain. Only a device without BC7 falls
+	// through to the RGBA8 decode below.
 	//
 	// No `nearest`: a glTF sampler's filter is the material's business and this
 	// door has never taken one.
@@ -3505,6 +3737,17 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
  Every fault here means exactly one thing: fall through. None of them is a
  failure worth reporting, because the RGBA8 path that follows renders the same
  picture.
+
+ ## Two kinds of KTX2, two routes, one answer
+
+ A file already holding BCn lends its blocks and nothing is encoded. A Basis one
+ — `KHR_texture_basisu`, ETC1S or UASTC — holds a format no device samples, so
+ its levels are transcoded to BC7 here: a quarter of the RGBA8 the decoder would
+ have produced, with the file's own mip chain rather than a generated one.
+
+ **The device decides which.** `supports` is asked before the transcode and not
+ after, because the fallback is a decode that has not happened yet — hardware
+ without BC7 gets the RGBA8 it always got, and pays nothing for the question.
 *>
 fn int? Assets.claim_blocks_if_possible(
 	&self,
@@ -3523,7 +3766,17 @@ fn int? Assets.claim_blocks_if_possible(
 	if (!mips) return UNSUPPORTED_IMAGE~;
 	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
 
-	BlockImage blocks = decode_ktx2_blocks(encoded, space)!;
+	BlockImage blocks;
+	if (is_basis_ktx2(encoded))
+	{
+		TextureFormat target = { TextureFamily.BC7, space };
+		if (!gpu.supports(target)) return UNSUPPORTED_IMAGE~;
+		blocks = transcode_ktx2_blocks(encoded, target)!;
+	}
+	else
+	{
+		blocks = decode_ktx2_blocks(encoded, space)!;
+	}
 	defer blocks.free();
 
 	if (!gpu.supports(blocks.format)) return UNSUPPORTED_IMAGE~;
