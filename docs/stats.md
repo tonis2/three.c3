@@ -51,6 +51,10 @@
 - `shadowStaticDraws` — Draw calls into the cached half of the shadow map, and 0 on every frame that
   did not rebuild it — which should be nearly all of them. Equal to the caster count every frame
   means something is invalidating the cache: an unsettled camera, or a static node still being moved.
+- `shadowCutout` — Whether the cut-out shadow pipeline exists — false until the first frame something in
+  the scene has a `material.alphaTest` on it, and true from then on. It is a pipeline that exists rather
+  than one that was used this frame, and it is the whole of what alpha-tested shadows cost a scene beyond
+  a bind per bucket: a project that never sets `alphaTest` compiles no second shadow shader.
 - `skinnedDraws` — Draw calls whose geometry is posed by a skeleton.
 - `skinnedInstances` — Characters in those draws. A hundred here with `skinnedDraws` at 1 is the
   crowd working as intended.

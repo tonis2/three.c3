@@ -213,7 +213,7 @@ helpers in `vertex`, which comes first, and call them from `fragment`.
 
 ## material-samplers
 
-A ShaderMaterial may declare up to eight samplers of its own and a post pass up to four:
+A ShaderMaterial may declare up to twelve samplers of its own and a post pass up to four:
 `{ textures: { noise_map: tex } }` makes `noise_map.Sample(uv)` work in the body.
 
 You never write a binding number — the shader is generated with the bindings in it and the host

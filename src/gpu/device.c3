@@ -81,6 +81,14 @@ struct GpuLimits
 	bool shader_draw_parameters;
 	bool fill_mode_non_solid;
 	uint max_push_constants_size;
+	// What bounds `MATERIAL_TEXTURE_LIMIT`, read so the sum in its header can be
+	// checked against a real device rather than only against the spec's mandatory
+	// minimum of 16 for the two per-stage numbers and 32 for the push one. A
+	// combined image sampler spends one of each per-stage limit at once, so the
+	// smaller of the two is the answer for a material.
+	uint max_per_stage_samplers;
+	uint max_per_stage_sampled_images;
+	uint max_push_descriptors;
 	// Nanoseconds per timestamp tick. Meaningless unless `timestamps` is true — a
 	// device that cannot write a timestamp may report anything here.
 	float timestamp_period;
@@ -555,6 +563,9 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.shader_draw_parameters = v11.shaderDrawParameters == vk::TRUE,
 		.fill_mode_non_solid = features.features.fillModeNonSolid == vk::TRUE,
 		.max_push_constants_size = properties.limits.maxPushConstantsSize,
+		.max_per_stage_samplers = properties.limits.maxPerStageDescriptorSamplers,
+		.max_per_stage_sampled_images = properties.limits.maxPerStageDescriptorSampledImages,
+		.max_push_descriptors = push_descriptor.maxPushDescriptors,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim
@@ -748,6 +759,16 @@ fn void Gpu.report(&self)
 	io::printfn("  localRead            %s", self.limits.dynamic_rendering_local_read);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);
+	// The three a material's sampler budget is measured against — see
+	// `MATERIAL_TEXTURE_LIMIT`. Printed beside the count this build asks for, so
+	// the table answers the question rather than leaving it as a subtraction.
+	io::printfn(
+		"  perStageSamplers     %d (samplers) / %d (sampledImages), material wants %d",
+		self.limits.max_per_stage_samplers,
+		self.limits.max_per_stage_sampled_images,
+		MATERIAL_BINDINGS_END
+	);
+	io::printfn("  maxPushDescriptors   %d", self.limits.max_push_descriptors);
 	io::printfn("  timestamps           %s", self.limits.timestamps);
 	io::printfn("  timestampPeriod      %f", self.limits.timestamp_period);
 }

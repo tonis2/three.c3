@@ -3821,6 +3821,148 @@ fn void two_pieces_of_one_kit_share_the_upload() @test
 }
 
 <*
+ A file's lights and camera arrive as descriptions, placed in world space.
+
+ `lit.glb` is the fixture that carries `KHR_lights_punctual`, and everything in
+ it is a number this can be asserted against rather than eyeballed: six lights
+ around a camera at (0, 0, 10), each at a distance nothing else is at.
+
+ The two answers worth having are both here. **`wall_lamp` hangs off `bracket`**
+ at (0, 0, 7) with a local (0, 1, 0), so a reader that took the node's own
+ translation puts it a metre above the origin instead of at (0, 1, 7) — a lantern
+ parented to a boat is where the boat is, and nothing but a parented fixture
+ catches it. And **`wall_lamp` names no `range`**, which glTF says means infinite
+ and gltf.c3l substitutes fifty for; it is reported as 0, "the file said
+ nothing", so that the importer rather than the library picks the default.
+
+ The intensities and colours cross untouched. This is the file's own list and the
+ file's own units — the conversion happens where the slots are filled, one test
+ down.
+*>
+fn void a_files_lights_arrive_where_their_nodes_put_them() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const lit = three.load("test/fixtures/lit.glb");
+			const round = n => Math.round(n * 1e4) / 1e4;
+			const at = name => {
+				const l = lit.lights.find(x => x.name === name);
+				return [l.type, l.intensity, l.range, l.node.position.map(round), l.node.direction.map(round)];
+			};
+			return {
+				names: lit.lights.map(l => l.name),
+				sun: at("sun"),
+				lamp: at("wall_lamp"),
+				near: at("near_a"),
+				cameras: lit.cameras.map(c => [c.name, c.position, c.target, c.up, round(c.yfov), round(c.znear), c.zfar]),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"names":["sun","near_a","near_b","far_a","far_b","wall_lamp"]`),
+			"every light in the file, in the order its node is walked: %s", result.value);
+
+		// The node turns -90 degrees about X, which takes its -Z onto -Y: a sun
+		// straight overhead, travelling down.
+		test::@check(result.value.contains(`"sun":["directional",2,0,[0,0,0],[0,-1,0]]`),
+			"the sun travels down its node's -Z, in the file's own intensity: %s", result.value);
+		test::@check(result.value.contains(`"lamp":["point",18,0,[0,1,7],[0,0,-1]]`),
+			"`wall_lamp` is where its parent puts it, and names no range: %s", result.value);
+		test::@check(result.value.contains(`"near":["point",9,4,[0,0,8],[0,0,-1]]`),
+			"a light that does name a range keeps it: %s", result.value);
+
+		test::@check(result.value.contains(`"cameras":[["shot",[0,0,10],[0,0,0],[0,1,0],0.5,0.1,50]]`),
+			"the camera is an eye, a target down its -Z, an up and the file's lens: %s", result.value);
+	};
+}
+
+<*
+ `{ lights: true, camera: true }` lights and frames the scene from the file.
+
+ The acceptance for `plan.md` §29's sixth item, over the same fixture: six lights
+ and four slots, so three of them do not fit and the import has to choose. The
+ directional light is slot zero — the sun, the only one that casts — and the
+ remaining three go to the point lights nearest the camera at (0, 0, 10):
+ `near_a` at 2 metres, `wall_lamp` at 3.2 and `near_b` at 6, leaving `far_a` at 30
+ and `far_b` at 20. A reader measuring from the origin instead, or taking the
+ file's order, gets a different three and this says which.
+ 
+ `three.light.direction` is a **surface-to-light** vector and the file's is the
+ direction the light travels, so a sun straight overhead has to come back as +Y.
+ Getting that backwards lights the underside of everything.
+
+ The three conversions are asserted as the numbers they produce rather than as
+ factors, because the factors are a convention `docs/functions.md` writes down and
+ nothing about the file implies them: a sun of 2 W at 1.5, 9 W at 1 and 18 W at 2
+ three metres out, and ten metres of reach for the lamp that named none.
+*>
+fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const lit = three.load("test/fixtures/lit.glb");
+			// Somewhere else entirely, so nothing below can pass by being left alone.
+			three.light.direction = [1, 0, 0];
+			three.light.intensity = 1;
+			three.camera.fov = 45;
+			three.camera.orbit(90, 45, 3);
+
+			const scene = new three.Scene();
+			scene.add(lit.instantiate("lit", { lights: true, camera: true }));
+
+			const round = n => Math.round(n * 1e4) / 1e4;
+			const slot = i => [
+				three.lights[i].position.toArray().map(round),
+				round(three.lights[i].range),
+				three.lights[i].color.map(round),
+				round(three.lights[i].intensity),
+			];
+			return {
+				count: three.lights.length,
+				sun: three.light.direction.toArray().map(round),
+				sunIntensity: round(three.light.intensity),
+				one: slot(1), two: slot(2), three: slot(3),
+				fov: round(three.camera.fov),
+				yaw: round(three.camera.yaw),
+				pitch: round(three.camera.pitch),
+				distance: round(three.camera.distance),
+				target: three.camera.target.toArray().map(round),
+				roll: round(three.camera.roll),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"count":4`),
+			"every slot there is: %s", result.value);
+		test::@check(result.value.contains(`"sun":[0,1,0]`),
+			"the sun is the file's directional light, negated into surface-to-light: %s", result.value);
+		test::@check(result.value.contains(`"sunIntensity":1.5`),
+			"2 Watts of sun at 1.5: %s", result.value);
+
+		test::@check(result.value.contains(`"one":[[0,0,8],4,[1,0,0],1]`),
+			"the nearest point light is slot one, with the file's own range: %s", result.value);
+		test::@check(result.value.contains(`"two":[[0,1,7],10,[0,1,0],2]`),
+			"then the parented lamp, ten metres for having named no range: %s", result.value);
+		test::@check(result.value.contains(`"three":[[0,0,4],6,[0,0,1],3]`),
+			"then the third nearest, and the two far ones do not fit: %s", result.value);
+
+		// 0.5 radians is 28.6478897 degrees.
+		test::@check(result.value.contains(`"fov":28.6479`),
+			"the field of view is the file's yfov in degrees: %s", result.value);
+		test::@check(result.value.contains(`"yaw":0`) && result.value.contains(`"pitch":0`),
+			"the camera looks down -Z as its node does: %s", result.value);
+		test::@check(result.value.contains(`"distance":10`) && result.value.contains(`"target":[0,0,0]`),
+			"orbiting the middle of the file, from where the file put the eye: %s", result.value);
+		test::@check(result.value.contains(`"roll":0`),
+			"and level, as the node's up says: %s", result.value);
+	};
+}
+
+<*
  A piece named in a script is a piece named in the file, by every door.
 
  What a kit is for. `asset.node(name)` already worked, because a node's name

@@ -372,8 +372,9 @@ PNG rather than failing the export.
 `CUSTOM_texture_ktx2`, so a Blender importer or another engine handed one of those files declines
 it; `basis` writes ETC1S under `KHR_texture_basisu`, which every glTF toolchain implements, at
 about a fifth of BC7's size. What it costs is quality — it is visibly lossy where BC7 is nearly not
-— and load time back here, since this engine has no GPU-side transcode and takes the slow RGBA8
-path. So it is for a file leaving the engine. `'png'` stays the default, and anything else throws.
+— and load time back here, since no device samples ETC1S and the loader has to re-encode every
+level to BC7 before it can upload one. So it is for a file leaving the engine. `'png'` stays the
+default, and anything else throws.
 
 **Both are build steps.** BC7 encoding searches per block and saturates every core, and a single
 2048x2048 texture still takes around half a minute. A scene with twenty of them is minutes, not
@@ -1714,6 +1715,42 @@ It is the same ray a pick casts rather than a second derivation from `position()
 near plane and not at the eye: what sits in front of the near plane is invisible, and a ray taken from the
 picture does not hit it either.
 
+## asset.instantiate(name, { camera: true })
+
+Aim `three.camera` from the file's own camera. `{ camera: 'Camera' }` picks one of several by name.
+
+A glTF camera is an eye and a heading and this one is a turntable, so the import is: look at the point the
+file's -Z ray passes the middle of the file at, then orbit back along that ray to the eye. The eye lands
+exactly where the file put it, looking exactly the way it looked, which is the whole of what makes the
+frame match. The orbit *point* is the part the file does not carry and this chooses — the picture is the
+same wherever on that ray it sits, but a drag afterwards turns around it.
+
+`fov` is the file's `yfov` in degrees. Both are vertical: this renderer projects with
+`matrix::perspective(fov, aspect, …)`, whose angle is the vertical one, so the conversion is the radians
+and nothing else. `roll` comes from the node's up, and is zero for every camera authored level.
+
+**`near` and `far` are not applied.** They are derived here from the orbit distance and the scene's bounds
+every frame — which is why `three.camera.near` and `.far` throw on assignment — so a file's fixed pair
+would be overwritten before the first draw. `asset.cameras` reports what the file asked for.
+
+An orthographic camera arrives with zeroes for the four lens numbers and leaves the field of view alone;
+there is no orthographic projection here.
+
+## asset.cameras
+
+The file's cameras as descriptions, each placed in world space.
+
+`{ name, position, target, up, yfov, znear, zfar, aspect }`. `target` is a point along the node's -Z, at
+the distance where that ray passes the middle of the file's bounds. `yfov` is radians and vertical, and
+`aspect` is 0 when the file named none, which glTF says means "use the viewport's" and is what this
+renderer does regardless.
+
+`node` is `{ index, position, direction, distance }` — the node's world placement, its -Z, and the
+distance the target was put at.
+
+The name is the node's, for `asset.lights`' reason and one more: the glTF library's own camera name
+borrows from a JSON tree that is freed after the parse.
+
 ## three.camera.near / three.camera.far
 
 Where the depth range starts and ends, in world units. Read-only: both are derived, from the orbit distance and
@@ -1772,10 +1809,76 @@ fitted around — so turn it off with `three.light.intensity = 0`.
 
 It is iterable: `for (const l of three.lights)`. Only light zero casts; the rest light and do not shadow.
 
+## asset.instantiate(name, { lights: true })
+
+Fill `three.lights` from the file's own `KHR_lights_punctual` lights.
+
+The file's directional light becomes light zero — the sun, the only one that casts and the only one that
+cannot hold a position — aimed down its node's -Z. `three.light.direction` is a *surface-to-light* vector
+and the file's is the direction the light travels, so the importer is where the one negation lives. A file
+with no directional light leaves light zero exactly as the script had it.
+
+The remaining three slots go to the point lights **nearest the file's camera**, or nearest the origin when
+the file has none: three slots and six lanterns is the ordinary case for a level, and "nearest the shot" is
+the only ordering that puts the ones you can see in them. A spot light competes for the same slots and
+lights a sphere — there is no cone here — and everything that did not fit is named once by `console.warn`,
+because a lantern that quietly does not light is what somebody spends an afternoon looking for in a shader.
+`asset.lights` is the whole list, so a script that wants a different three picks them itself.
+
+### The intensities are a convention, and it is this one
+
+**There is no conversion here that could be physics.** glTF measures a directional light in lux and a point
+light in candela; Blender's glTF exporter writes neither — it writes the lamp's own Watts; and this
+renderer's `intensity` is a bare multiplier over a colour that saturates at 1. No two links of that chain
+share a unit. What follows is the pair of factors that put `evil_forest.glb` — a sun of 2.2 W and lanterns
+of 45 and 60 W — where its Blender render had it, and it is a starting point rather than an answer:
+
+| the file says | `three.lights` gets |
+| --- | --- |
+| `directional`, intensity *w* | `intensity = w * 0.75` |
+| `point` or `spot`, intensity *w* | `intensity = w / 9` |
+| `range` *r*, or none | `range = r`, or 10 metres |
+
+A point light's Watts are read as **the brightness the artist wanted three metres out**, which is the same
+three metres this page already uses to say what a point light's `intensity` means — 9 is 3², so 45 W arrives
+as 5 and 60 W as 6.7. A directional light has no distance to anchor to and its 0.75 is bare: it put that
+file's 2.2 W sun at 1.65, and 1.6 was what the frame wanted by eye. It also leaves Blender's own default
+sun of 1 W at 0.75, a little under this renderer's default sun of 1, which the ambient floor makes up.
+
+**A file this renderer exported does not round trip through it.** `scene.export` writes `three.lights`'s own
+numbers straight into the file, because there is no unit to convert them to; the import reads them back as
+Watts. `asset.lights` reports the file's raw numbers, which is the pair of doors a script needs to do
+better than either default.
+
+`KHR_lights_punctual` has no ambient light — it was taken out of the extension before ratification — so
+`three.light.ambient` is never written by an import, and neither is `three.light.shadow`: glTF records
+nothing about which light casts.
+
+## asset.lights
+
+The file's lights as descriptions, each placed in world space, whether or not any of them ever reaches a
+slot.
+
+```js
+for (const l of asset.lights) console.log(l.name, l.type, l.intensity);
+```
+
+`{ name, type, color, intensity, range, node }`, with `type` one of `'directional'`, `'point'` or `'spot'`,
+`color` linear rgb, and `intensity` and `range` **exactly as the file wrote them** — glTF's units, not
+this renderer's. `node` is `{ index, position, direction }`: the light's node in world space, and
+`direction` is the way the light travels, its -Z. A spot also carries `cone: [inner, outer]` in radians,
+which nothing here reads.
+
+The name is the *node's*. glTF names the light and the node separately and every exporter gives them the
+same name; the node's is the one that survives to here, and it is also the one that finds the same node in
+an instantiated tree.
+
+Read out of the JSON chunk at load, so it costs no upload, and cached.
+
 ## three.light.shadow
 
 The shadow this light casts, off until you ask. `three.light.shadow = true` turns it on;
-`three.light.shadow = { enabled: true, size: 4096 }` sets several at once; and the five properties read and
+`three.light.shadow = { enabled: true, size: 4096 }` sets several at once; and the six properties read and
 write one at a time.
 
 - `enabled` — whether the pass runs.
@@ -1787,10 +1890,21 @@ write one at a time.
   shadow is never black unless the ambient floor is.
 - `distance` — how far down the view direction the map is fitted, in world units. 0 (the default) means five
   times the camera's own orbit distance, derived every frame.
+- `follow` — whether the map is fitted around what the camera can see, or around the whole scene. True by
+  default, and true is what makes shadows sharp.
 
 `distance` is the sharpness knob and it beats `size`: the map covers a square this wide, so halving it is worth
 quadrupling `size` and costs nothing. Try roughly the distance shadows are worth having, and watch for the line
 across the ground where they stop.
+
+`follow` is the knob for the other cost, and the cost is a *rebuild*. A cached shadow map is a picture in one
+projection, so whenever the fit moves far enough to matter every static caster is drawn into it again — on a
+forest that is 39 draw calls over 4,800 instances and 0.27 ms against a 0.10 ms steady pass, which reads as a
+stutter while the view is being dragged. `three.light.shadow.follow = false` takes the camera out of the fit
+entirely: the map covers the level, and it is rebuilt when the light turns, when the level's bounds change and
+when something marked `static` moves. What it costs is texels — a 224-unit village at `size: 2048` is 11 cm a
+texel fitted whole and 2 cm fitted to a 40-unit view — so it is the trade a big level with a moving camera makes
+and a small one does not.
 
 `three.light.shadow.fit` reads back where the map actually landed: `{ live, center, extent, near, far, texel }`,
 in world units, for the last frame. Read `extent` first — `extent / size` is the world size of a texel, and that
@@ -2037,8 +2151,13 @@ at load or in a test rather than in a frame. It is also what makes a texture tes
 Decode a PNG, JPEG or KTX2 and upload it, answering with a Texture. Synchronous.
 
 A KTX2 may hold Basis (ETC1S or UASTC, which is what KHR_texture_basisu means) or an ordinary Vulkan format,
-compressed or not; either way it arrives as RGBA8, and a `.glb` whose textures are KTX2 loads with them. The
-format comes from the file's first bytes rather than its name.
+compressed or not, and a `.glb` whose textures are KTX2 loads with them. The format comes from the file's first
+bytes rather than its name.
+
+It reaches the device as blocks wherever it can. A BCn file lends its own, untouched. A Basis one is transcoded
+to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8, and the
+one case that is slow, because no device samples ETC1S and the re-encode is real CPU work at load. Anything
+else, and any device that cannot sample BC7, arrives as RGBA8 with a chain built on the device.
 
 Deduplicated by the decoded image, so the same picture reached by two paths — or by a path and a `.glb` — is one
 upload, and `three.stats().textures` counts it once.

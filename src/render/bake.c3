@@ -423,7 +423,9 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 		.palette = 0,
 		.posed = 0,
 		.base_color = { mesh.base_color[0], mesh.base_color[1], mesh.base_color[2], 1 },
-		.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | FLAG_HAS_UVS | (mesh.has_colors ? FLAG_HAS_COLORS : 0),
+		.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | FLAG_HAS_UVS
+			| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
+			| (mesh.colors_are_mask ? FLAG_COLORS_ARE_MASK : 0),
 		.skin_stride = 0,
 		.uv_transform = material.uv_transform_or_identity(),
 		.surface = material.surface(),

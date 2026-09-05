@@ -251,11 +251,12 @@ struct Draw
     float3* normals;
     float2* uvs;
     // glTF's COLOR_0, if the file carried one. Multiplied into albedo below when
-    // `FLAG_HAS_COLORS` is set — the specification defines it as a **linear**
-    // factor on the base colour, so it is used as it arrives and not decoded, on
-    // the same reasoning that leaves `base_color` alone. `material.slang` also
-    // hands it to a body as `s.vertex_color`, where a body may do something else
-    // with it entirely.
+    // `FLAG_HAS_COLORS` is set and `FLAG_COLORS_ARE_MASK` is not — the
+    // specification defines it as a **linear** factor on the base colour, so it is
+    // used as it arrives and not decoded, on the same reasoning that leaves
+    // `base_color` alone, and the second flag is the file saying it painted a mask
+    // here rather than a tint. `material.slang` also hands it to a body as
+    // `s.vertex_color`, where a body may do something else with it entirely.
     float4* colors;
     // glTF's JOINTS_0 and WEIGHTS_0: which four joints move this vertex and how
     // strongly. Widened to uint4 on upload from whatever width the file stored
@@ -404,6 +405,22 @@ static const uint FLAG_STOCHASTIC                  = 256u;
 // glows a flat colour and on every one that does not glow at all, which is the
 // same test the three map flags above make.
 static const uint FLAG_HAS_EMISSIVE_MAP            = 512u;
+
+// This mesh's COLOR_0 is a mask an artist painted rather than a colour, so the
+// albedo must not multiply by it.
+//
+// **glTF's rule for COLOR_0 is a tint and this is the exception to it**, set from
+// the file rather than guessed: `scene/asset.c3` raises it when the primitive's
+// material carries `CUSTOM_materials_layers`, whose layers take their weight from
+// a channel of this attribute. Three unrelated weights multiplied into a texture
+// is a rainbow, which is what the surface draws until a stack is put on it — and
+// a stack with no layers left in it takes the same door, because the attribute
+// was painted for one either way.
+//
+// `material.slang` has no need of the bit: a body reads the attribute as a weight
+// through `Surface.vertex_mask` and as a colour through `Surface.vertex_color`,
+// and decides for itself which it meant.
+static const uint FLAG_COLORS_ARE_MASK             = 1024u;
 
 // `Instance.pose` is an offset in matrices with a selector in its top bit: set
 // means this frame's live palette, clear means the asset's baked table.
@@ -1132,7 +1149,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // block above `vertexMain`. The mesh's own is linear and used raw; the
     // instance's came from a script's hex and is decoded; the vertex attribute is
     // linear by the glTF specification and so is used raw as well.
-    float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb) * input.vertex_color.rgb;
+    float3 albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+    // The third factor, and the one that is not always a factor: a COLOR_0 the
+    // file painted as a layer mask is a weight per channel and multiplying the
+    // texture by it draws the mask. See `FLAG_COLORS_ARE_MASK`.
+    if ((draw.flags & FLAG_COLORS_ARE_MASK) == 0) albedo *= input.vertex_color.rgb;
 
     // The normal the mesh has, kept apart from the one the map bends: the shadow
     // lookup is done with *this* one. A per-texel normal offset would move the
@@ -1270,6 +1291,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
             // it off in a crevice, in shadow and on a metal, which is what makes
             // it an emissive rather than a very bright albedo.
             + emissive,
-        draw.base_color.a * input.color.a * input.vertex_color.a
+        // The attribute's alpha joins the two the same way its rgb joins the
+        // albedo, and drops out under the same flag: a mask's fourth channel is a
+        // fourth weight, and a surface painted 0 there is not a surface that was
+        // asked to be invisible.
+        draw.base_color.a * input.color.a
+            * ((draw.flags & FLAG_COLORS_ARE_MASK) != 0 ? 1.0 : input.vertex_color.a)
     );
 }

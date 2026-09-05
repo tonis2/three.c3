@@ -423,10 +423,16 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
  is what paid for it.
 
  Two things are checked and the second is the one that would rot: the weight comes
- from `s.vertex_color`, and the layer declares **no sampler** for it. A mask that
+ from `s.vertex_mask`, and the layer declares **no sampler** for it. A mask that
  quietly took a binding would work, look right, and cost one of the eight a
  material has — which is exactly the failure `hoist_shared_mask` exists to prevent
  one field along.
+
+ `vertex_mask` and not `vertex_color`, which is the whole of the third check: the
+ two are the same varying read with two identities, and the mask one is 0 on a mesh
+ that carries no COLOR_0 where the tint one is white. Generating `s.vertex_color`
+ here compiles, renders and covers every unpainted mesh in the level with the
+ layer.
 *>
 fn void a_vertex_colour_mask_reads_the_attribute() @test
 {
@@ -449,7 +455,7 @@ fn void a_vertex_colour_mask_reads_the_attribute() @test
 
 		// The file's own `painted` layer, which named channel G.
 		test::@check(
-			answer.contains(`float w4 = s.vertex_color.g;`),
+			answer.contains(`float w4 = s.vertex_mask.g;`),
 			"the file's vertex mask reads the channel it named: %s",
 			answer
 		);
@@ -460,7 +466,7 @@ fn void a_vertex_colour_mask_reads_the_attribute() @test
 		);
 		// By hand, with no channel given: red, and inverted.
 		test::@check(
-			answer.contains(`float w0 = 1.0 - s.vertex_color.r;`),
+			answer.contains(`float w0 = 1.0 - s.vertex_mask.r;`),
 			"a source with no channel reads red, and invert still applies: %s",
 			answer
 		);
@@ -522,6 +528,179 @@ fn void the_colour_attribute_reaches_the_pixels() @test
 		test::@check(bytes > 200, "the byte-stored attribute is on screen, got %d pixels", bytes);
 		test::@check(floats > 200, "the float-stored one too, got %d pixels", floats);
 		test::@check(absent > 200, "and a mesh without one is white, got %d pixels", absent);
+	};
+}
+
+<*
+ The same attribute read as a weight is zero on a mesh that never carried one.
+
+ `s.vertex_color` is white where the file painted nothing, which is the identity
+ for a tint and exactly the wrong answer for a mask: a moss layer masked by red
+ covers every unpainted mesh in the level completely, and that is what
+ `~/Documents/FF9/evil_forest.glb` drew — the deck, the wales and the hatch frame
+ all moss, because none of the three was ever painted. Blender's Colour Attribute
+ node reads 0 for an attribute the mesh does not have, and `s.vertex_mask` is that
+ answer.
+
+ The three quads of `the_colour_attribute_reaches_the_pixels` again, through a body
+ that returns the mask rather than the colour: the two painted meshes read the same
+ as they do there, and `plain` is black where it was white. Black rather than
+ absent is why the background is not: a body that returned nothing and a body that
+ returned zero would otherwise be the same picture.
+*>
+fn void an_unpainted_mesh_reads_a_vertex_mask_as_zero() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "three quads render", `
+			const asset = three.load("test/fixtures/layered.glb");
+			const scene = new three.Scene();
+			scene.background = 0x3366ff;
+			const weights = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return s.vertex_mask.rgb; }",
+			});
+			for (const name of ["terrain", "weathered", "plain"]) {
+				const mesh = new three.Mesh(asset.mesh(name));
+				mesh.material = weights;
+				scene.add(mesh);
+			}
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(scene);
+			return ({ drawn: three.stats().drawCalls });
+		`)!!;
+		defer answer.free(mem);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		uint bytes = near(&shot, 0, 255, 137);
+		uint floats = near(&shot, 255, 0, 0);
+		uint unpainted = near(&shot, 0, 0, 0, 8);
+
+		test::@check(bytes > 200, "a painted mesh reads its own weights, got %d pixels", bytes);
+		test::@check(floats > 200, "at either stored width, got %d pixels", floats);
+		test::@check(unpainted > 200, "and a mesh with no COLOR_0 reads zero, got %d pixels", unpainted);
+	};
+}
+
+<*
+ A mesh whose material carries the extension is not tinted by its COLOR_0.
+
+ glTF's rule for the attribute is a tint on the base colour, and `mesh.slang`
+ applied it to every mesh that had one. What this file paints is a layer mask —
+ three weights, one per layer, whose product with the texture is a colour nobody
+ chose. `terrain` is painted (0, 1, 0.251), so multiplying it in zeroes the red
+ channel and draws a brown ground green.
+
+ **The mesh is drawn with no material at all**, which is the point of the check:
+ the door is a flag on the draw, off the file, rather than something a
+ `LayeredMaterial` does — so a mesh whose stack has not been built yet takes it,
+ and so does one whose stack has no layers left in it, which is the case
+ `evil_forest.glb`'s `rock_surface` is and the reason its stone block was a
+ rainbow.
+
+ Fully ambient, so a pixel is the albedo and nothing else.
+*>
+fn void a_painted_mask_is_not_a_tint() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the painted quad renders", `
+			const asset = three.load("test/fixtures/layered.glb");
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(asset.mesh("terrain")));
+			three.light.ambient = 1;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(scene);
+			return ({ drawn: three.stats().drawCalls });
+		`)!!;
+		defer answer.free(mem);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+
+		// The fixture's `ground` image is one flat (200, 120, 60) and the material's
+		// base colour factor is white, so the surface is that colour exactly.
+		uint texture = near(&shot, 200, 120, 60);
+		// The same albedo times the painted weights, which is what it drew before:
+		// no red at all, and a quarter of the blue.
+		uint painted = near(&shot, 0, 120, 30);
+
+		test::@check(texture > 200, "the ground's own colour is on screen, got %d pixels", texture);
+		test::@check(painted == 0, "and its mask is not, got %d pixels of it", painted);
+	};
+}
+
+<*
+ An instantiated tree wears the stacks the file carried.
+
+ `{ materials: true }` built a `MeshLambertMaterial` out of `ref.material` and
+ never looked at `ref.layers`, so a level authored in Blender with the extension
+ arrived drawing its masks: every stack in the file had to be found through
+ `asset.meshAt(o.geometry.mesh)` and put on by hand, which is a detour a script has
+ to know exists before it can take it. There is deliberately no second option to
+ pass — a stack is one of the file's materials.
+
+ Three things are checked and each fails on its own. The stack reaches the mesh
+ that wears it, as the class that shades one; a material with no extension still
+ builds nothing, which is what keeps a plain file from compiling a body per mesh;
+ and the body is the one the file describes, down to the vertex-colour mask of its
+ last layer — the same source `new three.LayeredMaterial(ref.layers)` generates,
+ because it is the same constructor.
+
+ The geometry the tree's meshes carry is the fourth: it is the `MeshRef` itself
+ now, so `o.geometry.layers` is the stack without the detour.
+*>
+fn void an_instantiated_tree_wears_the_stacks_the_file_carried() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the tree imports", `
+			const asset = three.load("test/fixtures/layered.glb");
+			const root = asset.instantiate("level", { materials: true });
+			const kinds = {};
+			const stacks = {};
+			let painted = "";
+			root.traverse((o) => {
+				if (!o.geometry) return;
+				kinds[o.name] = o.material === null ? null : o.material.toJSON().type;
+				const stack = o.geometry.layers;
+				stacks[o.name] = stack === null ? null : stack.layers.length;
+				if (o.name === "terrain") painted = o.material.fragment;
+			});
+			return ({
+				kinds,
+				stacks,
+				vertexMask: painted.includes("float w4 = s.vertex_mask.g;"),
+				overlay: painted.includes("overlay"),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(
+			answer.contains(`"terrain":"LayeredMaterial"`) && answer.contains(`"weathered":"LayeredMaterial"`),
+			"both meshes with a stack wear one: %s",
+			answer
+		);
+		test::@check(
+			answer.contains(`"plain":null`),
+			"and a material with no extension still builds nothing: %s",
+			answer
+		);
+		// Five and one, disabled layers included: the description is the file's, and
+		// the generator is what drops the layer that is off.
+		test::@check(
+			answer.contains(`"stacks":{"terrain":5,"weathered":1,"plain":null}`),
+			"the geometry a placed mesh carries reaches its own stack: %s",
+			answer
+		);
+		test::@check(
+			answer.contains(`"vertexMask":true`) && answer.contains(`"overlay":true`),
+			"and the body is the one the file describes: %s",
+			answer
+		);
 	};
 }
 
@@ -682,35 +861,217 @@ fn void a_stack_refuses_what_this_renderer_cannot_shade() @test
 *>
 fn void the_sampler_and_uniform_budgets_are_refused_by_layer() @test
 {
+	// **Sized from the constant rather than spelled**, which is
+	// `more_textures_than_a_material_may_have_are_refused`'s lesson: the budget
+	// went from eight to twelve for the Evil Forest's terrain, and a test asserting
+	// "nine" would have failed for a reason that has nothing to do with what it
+	// checks. Every layer here carries only a `map`, so there is nothing for the
+	// shedding order to take and the refusal is still a refusal.
+	const uint LIMIT = three::MATERIAL_TEXTURE_LIMIT;
+
 	@with_js_gpu(; three::JsRuntime* run)
 	{
-		String answer = script(run, "the budgets refuse", `
+		@pool()
+		{
+			String answer = script(run, "the budgets refuse", string::tformat(`
 			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
 			const refuse = (fn) => { try { fn(); return "NOT REFUSED"; } catch (e) { return e.message; } };
 			const many = (n, extra) => ({
 				mask: tex,
 				layers: Array.from({ length: n }, (_, i) => ({ mask: "r", map: tex, ...extra })),
 			});
-			// Seven maps plus the shared mask is exactly eight, and eight is allowed.
-			const full = new three.LayeredMaterial(many(7));
-			// The eighth layer is the ninth sampler.
-			const over = refuse(() => new three.LayeredMaterial(many(8)));
+			// One map short of the limit, plus the shared mask, is exactly the limit.
+			const full = new three.LayeredMaterial(many(%d));
+			// One more layer is one sampler past it, and nothing in it can be shed.
+			const over = refuse(() => new three.LayeredMaterial(many(%d)));
 			// Turning one off gives its binding back.
-			const off = many(8);
-			off.layers[7].enabled = false;
+			const off = many(%d);
+			off.layers[%d].enabled = false;
 			const recovered = new three.LayeredMaterial(off);
 			// A float4 each, against 104 bytes: six fit and a seventh does not.
 			const animated = refuse(() => new three.LayeredMaterial(many(7, { animated: true })));
 			return ({ full: full.layers.length, over, recovered: recovered.layers.length, animated });
+		`, LIMIT - 1, LIMIT, LIMIT, LIMIT - 1))!!;
+			defer answer.free(mem);
+
+			test::@check(
+				answer.contains(string::tformat(`"full":%d`, LIMIT - 1)),
+				"the limit less one layer over a shared mask is the limit: %s",
+				answer
+			);
+			test::@check(
+				answer.contains(string::tformat("needs %d samplers", LIMIT + 1)),
+				"the one past it is refused with the count: %s",
+				answer
+			);
+			test::@check(
+				answer.contains(string::tformat("%d layers", LIMIT)),
+				"in layers rather than only in textures: %s",
+				answer
+			);
+			test::@check(
+				answer.contains(string::tformat(`"recovered":%d`, LIMIT - 1)),
+				"and a disabled layer gives its binding back: %s",
+				answer
+			);
+			test::@check(answer.contains("room for 6"), "seven animated layers do not fit in 104 bytes: %s", answer);
+			test::@check(!answer.contains("NOT REFUSED"), "both budgets refused: %s", answer);
+		};
+	};
+}
+
+<*
+ The terrain the budget was raised for builds with every map the file wrote.
+
+ The Evil Forest's `ground` is the shape this is: a base normal, a base height and
+ the core material's own metallic-roughness under two layers carrying an albedo, a
+ normal, a metallic-roughness and — on the outer one — a height. That is ten
+ samplers, and it was refused outright at eight ("this stack needs 9 samplers")
+ with the mesh falling back to flat dirt.
+
+ The count is asserted as a *number* rather than against the limit, because the
+ number is the thing the budget was chosen to cover: a limit that stopped covering
+ it would be a decision somebody made, and this failing is how they would find out.
+*>
+fn void the_terrain_the_budget_was_raised_for_builds_whole() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the terrain fits", `
+			const said = [];
+			const was = console.warn;
+			console.warn = (...a) => { said.push(a.join(" ")); };
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			const mat = new three.LayeredMaterial({
+				name: "ground",
+				normal: tex, height: tex, bump: { distance: 0.001 },
+				metalnessRoughnessMap: tex,
+				layers: [
+					{ name: "dirt", map: tex, normal: tex, metallicRoughness: tex },
+					{
+						name: "gravel", maskSource: "vertexColor", mask: "g",
+						map: tex, normal: tex, metallicRoughness: tex,
+						height: tex, bump: { distance: 0.001 },
+					},
+				],
+			});
+			console.warn = was;
+			return ({
+				samplers: Object.keys(mat.textures).length,
+				said: said.length,
+				relief: mat.layers[1].toJSON().samplers.height ?? "GONE",
+				base: mat.fragment.includes("base_height_map") && mat.fragment.includes("base_surface_map"),
+			});
 		`)!!;
 		defer answer.free(mem);
 
-		test::@check(answer.contains(`"full":7`), "seven layers over a shared mask is eight samplers: %s", answer);
-		test::@check(answer.contains("needs 9 samplers"), "the ninth is refused with the count: %s", answer);
-		test::@check(answer.contains("8 layers"), "in layers rather than only in textures: %s", answer);
-		test::@check(answer.contains(`"recovered":7`), "and a disabled layer gives its binding back: %s", answer);
-		test::@check(answer.contains("room for 6"), "seven animated layers do not fit in 104 bytes: %s", answer);
-		test::@check(!answer.contains("NOT REFUSED"), "both budgets refused: %s", answer);
+		test::@check(answer.contains(`"samplers":10`), "the ground's stack is ten samplers: %s", answer);
+		test::@check(answer.contains(`"said":0`), "and nothing had to be shed for it: %s", answer);
+		test::@check(answer.contains(`"relief":"layer1_height"`), "the outer layer keeps its relief: %s", answer);
+		test::@check(answer.contains(`"base":true`), "and the base keeps its height and its pair: %s", answer);
+	};
+}
+
+<*
+ A stack past the ceiling gives up maps in the stated order instead of the surface.
+
+ **The order is the whole of the check**, because any shedding rule fits — what
+ makes this one right is which maps survive. Four layers each carrying a map, a
+ normal, a metallic-roughness and a height, over a base normal, a base height and a
+ shared mask, is nineteen samplers against twelve: seven have to go. Every layer's
+ height goes first, then metallic-roughness from the bottom of the stack up, and
+ the base height is still there at the end — so the top layer keeps the pair it
+ varies per texel while the bottom three lose it, and no layer keeps relief while
+ another has lost it.
+*>
+fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the stack sheds", `
+			const said = [];
+			const was = console.warn;
+			console.warn = (...a) => { said.push(a.join(" ")); };
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			const layer = (i) => ({
+				name: "L" + i, mask: "r",
+				map: tex, normal: tex, metallicRoughness: tex, height: tex, bump: { distance: 0.02 },
+			});
+			const mat = new three.LayeredMaterial({
+				name: "terrain", mask: tex, normal: tex, height: tex, bump: { distance: 0.05 },
+				layers: [layer(0), layer(1), layer(2), layer(3)],
+			});
+			console.warn = was;
+			const names = mat.layers.map((l) => Object.keys(l.toJSON().samplers).sort().join("+"));
+			return ({
+				samplers: Object.keys(mat.textures).length,
+				names,
+				base: mat.fragment.includes("base_height_map"),
+				warnings: said.length,
+				said: said[0] ?? "",
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains(`"samplers":12`), "the stack is shed until it fits: %s", answer);
+		// Every layer lost its height; the top one kept the metallic-roughness the
+		// three under it gave up.
+		test::@check(
+			answer.contains(`"names":["map+normal","map+normal","map+normal","map+metallicRoughness+normal"]`),
+			"heights first, then metallic-roughness from the bottom up: %s",
+			answer
+		);
+		test::@check(answer.contains(`"base":true`), "and the base height is the last one out: %s", answer);
+		test::@check(answer.contains(`"warnings":1`), "one warning for the whole stack: %s", answer);
+		test::@check(answer.contains(`terrain`), "naming the material: %s", answer);
+		test::@check(answer.contains(`L0': height`), "and every map it gave up: %s", answer);
+		test::@check(answer.contains(`L2': metallicRoughness`), "including the second kind: %s", answer);
+	};
+}
+
+<*
+ The core material's other three maps have somewhere to go.
+
+ A generated body has no built-in map bindings — `NORMAL_MAP_BINDING` and the three
+ beside it belong to `mesh.slang` — so an imported stack used to drop the file's
+ occlusion, emissive and metallic-roughness maps on the floor and say nothing. Each
+ is a sampler of the stack's own budget now, and each lands in the term it belongs
+ to: the occlusion in `standard`'s fourth argument, the pair as a multiply into the
+ material's own two numbers, and the emissive as a multiply into `s.emissive` —
+ which is what keeps `material.emissive` and `emissiveIntensity` the way to turn a
+ glow up.
+*>
+fn void the_base_materials_other_three_maps_reach_the_stack() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the base maps land", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			const mat = new three.LayeredMaterial({
+				metalnessRoughnessMap: tex, aoMap: tex, emissiveMap: tex,
+				layers: [{ name: "moss", maskSource: "vertexColor", mask: "r", map: tex }],
+			});
+			// A stack that names none of them generates exactly what it always did.
+			const bare = new three.LayeredMaterial({ layers: [{ map: tex, maskSource: "vertexColor", mask: "r" }] });
+			return ({
+				samplers: Object.keys(mat.textures).sort(),
+				ao: mat.fragment.includes("standard(s, c, n, ao)"),
+				glow: mat.fragment.includes("s.emissive *= base_emissive_map"),
+				pair: mat.fragment.includes("s.roughness * bmr.x"),
+				bare: bare.fragment.includes("standard(s, c, n);") && !bare.fragment.includes("bmr"),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(
+			answer.contains(`"samplers":["base_ao_map","base_emissive_map","base_surface_map","layer0_map"]`),
+			"three samplers for the three maps: %s",
+			answer
+		);
+		test::@check(answer.contains(`"ao":true`), "the occlusion is standard's fourth argument: %s", answer);
+		test::@check(answer.contains(`"glow":true`), "the emissive multiplies the material's own: %s", answer);
+		test::@check(answer.contains(`"pair":true`), "and the pair multiplies its two numbers: %s", answer);
+		test::@check(answer.contains(`"bare":true`), "a stack naming none of them is unchanged: %s", answer);
 	};
 }
 

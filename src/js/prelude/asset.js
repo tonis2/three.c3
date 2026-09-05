@@ -7,8 +7,53 @@ import { Mesh } from './mesh.js';
 import { Texture } from './texture.js';
 import { DoubleSide, FrontSide, MeshLambertMaterial } from './material.js';
 import { LinearSRGBColorSpace, SRGBColorSpace, uploadOptions } from './texture.js';
+// The one import that points back at a module which imports this one. It is
+// read inside a method rather than at the top level — `_layeredMaterial` runs
+// long after both modules are evaluated — which is what makes the cycle a
+// non-event: `layers.js` reads this file's three ordinal tables the same way.
+import { LayeredMaterial } from './layers.js';
+// The second import that points back at a module which imports this one, and
+// read the same way: `three.lights` and `three.camera` are touched inside
+// `instantiate`, long after both modules have evaluated. Nothing at this file's
+// top level reads it, which is what makes the cycle a non-event.
+import { three } from './api.js';
 
 const H = globalThis.__three;
+
+// `gltf::LightType`, by ordinal. The host passes the extension's own enum
+// through untranslated and this names it, for `BLEND_BY_ORDINAL`'s reason.
+const LIGHT_BY_ORDINAL = ['directional', 'point', 'spot'];
+
+// ---- The file's intensities, in this renderer's units -----------------------
+//
+// **These three numbers are a convention and not physics, and there is no
+// conversion that could be.** glTF measures a directional light in lux and a
+// point light in candela; Blender's exporter writes neither, it writes the
+// lamp's own Watts; and this renderer's `intensity` is a bare multiplier over a
+// colour that saturates at 1. There is no shared unit anywhere in that chain, so
+// what follows is the factor that put `evil_forest.glb` — a sun of 2.2 W and
+// lanterns of 45 and 60 W — where its Blender render had it, and nothing more.
+// A file authored to a different exposure wants its own numbers; that is what
+// `asset.lights` reports the file's raw ones for.
+//
+// A point light's Watts are read as **the brightness the artist wanted three
+// metres out**, which is the same three metres `docs/functions.md` already uses
+// to say what a point light's `intensity` means — so 45 W arrives as 5 and 60 W
+// as 6.7, against the 5 to 6 the reference frame was lit by hand with.
+const POINT_ANCHOR_METRES = 3;
+const POINT_FROM_WATTS = 1 / (POINT_ANCHOR_METRES * POINT_ANCHOR_METRES);
+
+// A directional light has no distance to anchor to, so this one is bare: 2.2 W
+// of Blender sun read as 1.65 here, and 1.6 was the number the reference frame
+// wanted. It leaves Blender's own default sun of 1 W at 0.75, a little under
+// this renderer's default sun of 1, which the ambient floor makes up.
+const DIRECTIONAL_FROM_WATTS = 0.75;
+
+// What a point light reaches when the file names no `range`. glTF's answer for
+// an absent range is "infinite", which a windowed falloff has no way to draw, and
+// ten metres is what `three.lights.add({ position })` already picks for a script
+// that does not say.
+const DEFAULT_RANGE_METRES = 10;
 
 // The extension's `LayerBlendMode` and `LayerMaskChannel`, by ordinal.
 //
@@ -305,6 +350,53 @@ export class MeshRef {
 	toString() { return `MeshRef(${this.name})`; }
 }
 
+// One imported stack as a string, so that two meshes wearing one glTF material
+// build one material.
+//
+// **Every image becomes the slot it resolved to.** A Texture is a handle and each
+// read of a stack makes new ones, so two descriptions of one material are equal in
+// every value and identical in none of their objects — the slot index is the thing
+// that is actually the same. Everything else about a layer is a number, a string
+// or a boolean and stringifies as itself.
+function stackSignature(options) {
+	const at = (texture) => (texture ? texture._index() : -1);
+	return JSON.stringify({
+		...options,
+		// **Out of the key deliberately.** The name is what a shed-map warning
+		// calls this material and it is the *mesh's*, so two meshes wearing one
+		// glTF material carry two of them — leaving it in would compile the same
+		// stack twice and name the second one differently for no picture.
+		name: undefined,
+		mask: at(options.mask),
+		height: at(options.height),
+		normal: at(options.normal),
+		metalnessRoughnessMap: at(options.metalnessRoughnessMap),
+		aoMap: at(options.aoMap),
+		emissiveMap: at(options.emissiveMap),
+		layers: options.layers.map((layer) => ({
+			...layer,
+			map: at(layer.map),
+			normal: at(layer.normal),
+			emissive: at(layer.emissive),
+			maskTexture: at(layer.maskTexture),
+			metallicRoughness: at(layer.metallicRoughness),
+			height: at(layer.height),
+		})),
+	});
+}
+
+// Every image one stack description holds, for a caller that has decided not to
+// keep it. The core material's own maps are deliberately not in here: when a
+// stack is refused the plain path is built out of those very textures.
+function stackTextures(stack) {
+	const all = [stack.mask, stack.height];
+	for (const layer of stack.layers) {
+		all.push(layer.map, layer.normal, layer.emissive, layer.maskTexture,
+			layer.metallicRoughness, layer.height);
+	}
+	return all.filter((texture) => texture instanceof Texture);
+}
+
 // The tail of a "no node named X" message. Every name for a small file, and a
 // prefix plus a count for a kit — a hundred and forty names is not an error
 // message anybody reads, and the first two dozen is enough to see the spelling
@@ -315,6 +407,34 @@ function nameList(names) {
 	if (!names.length) return '(none)';
 	if (names.length <= NAMES_SHOWN) return names.join(', ');
 	return `${names.slice(0, NAMES_SHOWN).join(', ')} … and ${names.length - NAMES_SHOWN} more`;
+}
+
+// Squared distance between two triples. Squared because the only thing that
+// reads it is a sort, and a sort does not care.
+function sqDistance(a, b) {
+	const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+	return dx * dx + dy * dy + dz * dz;
+}
+
+// How far a camera node's up is wound around its own view direction, in
+// degrees — `three.camera.roll`.
+//
+// The host builds a rolled up vector as `level * cos(roll) + sideways *
+// sin(roll)` with `sideways` the flattened right and `level` the un-rolled up
+// (`Camera.up` in `scene/camera.c3`), so the two dot products are the cosine and
+// the sine and `atan2` is the angle. A camera looking straight down has no
+// flattened right to measure against; zero is the answer there, and it is also
+// the answer for every camera authored level.
+function rollOf(forward, up) {
+	const [fx, fy, fz] = forward;
+	let sx = -fz, sy = 0, sz = fx;
+	const len = Math.hypot(sx, sy, sz);
+	if (len < 1e-6) return 0;
+	sx /= len; sy /= len; sz /= len;
+	const lx = sy * fz - sz * fy, ly = sz * fx - sx * fz, lz = sx * fy - sy * fx;
+	const sine = up[0] * sx + up[1] * sy + up[2] * sz;
+	const cosine = up[0] * lx + up[1] * ly + up[2] * lz;
+	return Math.atan2(sine, cosine) * 180 / Math.PI;
 }
 
 export class Asset {
@@ -392,6 +512,82 @@ export class Asset {
 			this._nodeNames = [...seen];
 		}
 		return this._nodeNames;
+	}
+
+	// The file's `KHR_lights_punctual` lights, each placed in world space.
+	//
+	//     for (const l of asset.lights) console.log(l.name, l.type, l.intensity);
+	//
+	// A description and not a light: `{ name, type, color, intensity, range,
+	// node }`, with `type` one of `'directional'`, `'point'` or `'spot'`, `color`
+	// linear rgb, and `intensity` and `range` **exactly as the file wrote them**
+	// — glTF's own units, which are not this renderer's. `node` is where the
+	// light hangs: `{ index, position, direction }`, the node's world translation
+	// and the way the light travels, which is its -Z.
+	//
+	// The reason it stops there is that there are four light slots and a level
+	// may author twenty, so which of them get lit is a choice.
+	// `instantiate({ lights: true })` is one policy over this list and a script
+	// is free to write another.
+	//
+	// A spot also carries `cone: [inner, outer]` in radians. This renderer has no
+	// cone, so the two angles are reported and nothing reads them.
+	//
+	// Read at load out of the JSON chunk, so this costs no upload; cached, for
+	// `nodes`' reason.
+	get lights() {
+		if (!this._lights) {
+			H.checkAsset(this._a, this._g);
+			this._lights = H.assetLights(this._a, this._g).map((row) => {
+				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node] = row;
+				const light = {
+					name,
+					type: LIGHT_BY_ORDINAL[kind] || 'point',
+					color: [r, g, b],
+					intensity,
+					range,
+					node: { index: node, position: [px, py, pz], direction: [dx, dy, dz] },
+				};
+				if (light.type === 'spot') light.cone = [inner, outer];
+				return light;
+			});
+		}
+		return this._lights;
+	}
+
+	// The file's cameras, each placed in world space.
+	//
+	// `{ name, position, target, up, yfov, znear, zfar, aspect }`. A glTF camera
+	// is an eye and a heading, so `target` is a point along the node's -Z — the
+	// distance to it is where that ray passes the middle of the file's bounds,
+	// which is chosen here because the turntable needs an orbit point and the
+	// file carries none. The picture does not depend on it: any point on that ray
+	// puts the eye in the same place looking the same way.
+	//
+	// `yfov` is radians and **vertical**, as the file states it and as
+	// `three.camera.fov` means it once converted to degrees. `znear` and `zfar`
+	// are reported and cannot be applied — this renderer derives both planes from
+	// the orbit distance and the scene's bounds every frame, which is why
+	// `three.camera.near` and `.far` throw on assignment.
+	//
+	// An orthographic camera reports zeroes for the four lens numbers, because
+	// there is no orthographic projection here to describe.
+	get cameras() {
+		if (!this._cameras) {
+			H.checkAsset(this._a, this._g);
+			this._cameras = H.assetCameras(this._a, this._g).map((row) => {
+				const [name, px, py, pz, fx, fy, fz, ux, uy, uz, distance, yfov, znear, zfar, aspect, node] = row;
+				return {
+					name,
+					position: [px, py, pz],
+					target: [px + fx * distance, py + fy * distance, pz + fz * distance],
+					up: [ux, uy, uz],
+					yfov, znear, zfar, aspect,
+					node: { index: node, position: [px, py, pz], direction: [fx, fy, fz], distance },
+				};
+			});
+		}
+		return this._cameras;
 	}
 
 	mesh(name) {
@@ -573,6 +769,11 @@ export class Asset {
 		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
 		this._carry(root, opt);
 		this._build(rows, -1, root, opt);
+		// After the tree, because both write the host's own camera and lights and
+		// neither reads it — the order only matters for what a script sees if it
+		// throws, and a half-built tree is the more useful half to have.
+		if (opt.lights) this._placeLights();
+		if (opt.camera) this._placeCamera(opt.camera);
 		return root;
 	}
 
@@ -624,11 +825,141 @@ export class Asset {
 		return this._uploaded(this.node(name, options));
 	}
 
-	// `{ skeleton, skinning, materials }` as the two instantiating doors read it.
-	// One place, so they cannot drift.
+	// `{ skeleton, skinning, materials, lights, camera }` as the two
+	// instantiating doors read it. One place, so they cannot drift.
+	//
+	// `lights` and `camera` are `instantiate`'s alone. A file's lighting is a
+	// property of the file and not of one piece of it, so `node(name)` parses
+	// them and does nothing with them rather than aiming the whole scene's camera
+	// at a crate.
 	_instanceOptions(options) {
-		const { skeleton = false, skinning = 'vertex', materials = false } = options || {};
-		return { skeleton: !!skeleton, compute: skinning === 'compute', materials: !!materials };
+		const {
+			skeleton = false, skinning = 'vertex', materials = false,
+			lights = false, camera = false,
+		} = options || {};
+		return {
+			skeleton: !!skeleton,
+			compute: skinning === 'compute',
+			materials: !!materials,
+			lights: !!lights,
+			camera,
+		};
+	}
+
+	// `three.lights` filled from the file — `instantiate({ lights: true })`.
+	//
+	// **The directional light is slot zero and the point lights are the rest.**
+	// Slot zero is the sun: it is the only one that casts a shadow and the only
+	// one that cannot hold a position, so the file's directional light goes there
+	// and nowhere else. A file with no directional light leaves it exactly as the
+	// script had it, which is how a level lit only by lanterns keeps whatever sun
+	// was set for it.
+	//
+	// `three.light.direction` is a **surface-to-light** vector and the file's is
+	// the direction the light travels, so the one negation in the importer is
+	// here.
+	//
+	// **The remaining slots go to the point lights nearest the file's camera**,
+	// or nearest the origin when the file has none. Three slots and six lanterns
+	// is the ordinary case for a level, and "nearest the shot" is the only
+	// ordering that puts the ones you can see in them. A spot light competes for
+	// the same slots as a point standing where it stands: this renderer has no
+	// cone, so its `cone` angles are dropped and it lights a sphere.
+	//
+	// Everything that did not fit is named once by `console.warn`, because a
+	// lantern that quietly does not light is the kind of thing somebody spends an
+	// afternoon looking for in a shader.
+	_placeLights() {
+		const found = this.lights;
+		if (!found.length) return;
+
+		const sun = found.find((l) => l.type === 'directional');
+		if (sun) {
+			const [dx, dy, dz] = sun.node.direction;
+			three.light.direction = [-dx, -dy, -dz];
+			three.light.color = sun.color;
+			three.light.intensity = sun.intensity * DIRECTIONAL_FROM_WATTS;
+		}
+
+		// Measured from the file's own camera, which is the shot the lights were
+		// placed for. Nothing to measure from is the origin, which is at least a
+		// stable answer rather than the file's first light.
+		const shot = this.cameras.length ? this.cameras[0].position : [0, 0, 0];
+		const near = found
+			.filter((l) => l !== sun)
+			.map((l) => [l, sqDistance(l.node.position, shot)])
+			.sort((a, b) => a[1] - b[1])
+			.map(([l]) => l);
+
+		// The script's own lights go before the file's — this is the file's
+		// lighting being imported, not added to. Slot zero is never removed
+		// because it cannot be; it was written above, or deliberately left.
+		while (three.lights.length > 1) three.lights.remove(three.lights.length - 1);
+
+		const room = three.lights.max - 1;
+		const lit = near.slice(0, room);
+		for (const point of lit) {
+			three.lights.add({
+				position: point.node.position,
+				range: point.range > 0 ? point.range : DEFAULT_RANGE_METRES,
+				color: point.color,
+				intensity: point.intensity * POINT_FROM_WATTS,
+			});
+		}
+
+		const dropped = found.filter((l) => l !== sun && !lit.includes(l));
+		if (dropped.length) {
+			console.warn(
+				`${this.path}: ${found.length} lights and ${three.lights.max} slots — `
+				+ `lit ${sun ? `${sun.name} as the sun and ` : ''}${lit.length} of them, `
+				+ `left out ${nameList(dropped.map((l) => l.name))}`
+			);
+		}
+	}
+
+	// `three.camera` aimed from the file — `instantiate({ camera: true })`, or
+	// `{ camera: 'Camera' }` to pick one of several by name.
+	//
+	// The turntable is a target, a boom and two angles and a glTF camera is an
+	// eye and a heading, so the import is: look at the point the file's -Z ray
+	// passes the middle of the file at, then orbit back along that ray to the
+	// eye. The eye lands exactly where the file put it, which is the whole of what
+	// makes the frame match.
+	//
+	// `fov` is the file's `yfov` in degrees. Both are **vertical** — this
+	// renderer's projection is `matrix::perspective(fov, aspect, …)`, whose first
+	// argument is the vertical half-angle doubled — so the conversion is the
+	// radians and nothing else.
+	//
+	// `roll` comes from the node's up: zero for every camera authored level, and
+	// the reason a shot composed with a tilted horizon does not arrive straight.
+	//
+	// `near` and `far` are not applied. They are derived here from the orbit
+	// distance and the scene's bounds every frame, and a file's fixed pair would
+	// be overwritten before the first draw — `asset.cameras` reports them so a
+	// script can see what the file asked for.
+	_placeCamera(which) {
+		const all = this.cameras;
+		if (!all.length) return;
+		const cam = typeof which === 'string'
+			? all.find((c) => c.name === which)
+			: all[0];
+		if (!cam) {
+			throw new Error(`no camera named "${which}" in ${this.path} — it has: ${nameList(all.map((c) => c.name))}`);
+		}
+
+		const [ex, ey, ez] = cam.position;
+		const [tx, ty, tz] = cam.target;
+		const bx = ex - tx, by = ey - ty, bz = ez - tz;
+		const boom = Math.hypot(bx, by, bz);
+		if (cam.yfov > 0) three.camera.fov = cam.yfov * 180 / Math.PI;
+		three.camera.lookAt(tx, ty, tz);
+		three.camera.orbit(
+			Math.atan2(bx, bz) * 180 / Math.PI,
+			Math.asin(boom > 0 ? by / boom : 0) * 180 / Math.PI,
+			boom,
+		);
+		three.camera.roll = rollOf(cam.node.direction, cam.up);
 	}
 
 	// What a tree's root has to carry whether it is the whole file or one node of
@@ -666,9 +997,16 @@ export class Asset {
 		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
 			const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] = rows[i];
 			if (from >= 0 && i !== from && !(parent >= 0 && built[parent])) continue;
+			// **A `MeshRef` rather than the bare `{ asset, mesh }` this used to
+			// build.** A Mesh only needs the three numbers, so the plain object drew
+			// exactly the same picture — but it is also what a script reads back off
+			// `o.geometry`, and there it was a dead end: the stack, the glTF material
+			// and the bounds of the piece were all one `asset.meshAt(o.geometry.mesh)`
+			// away, which is a detour that has to be found before it can be taken.
+			// The reference costs the same and answers all three.
 			const node = mesh < 0
 				? new Object3D()
-				: new Mesh({ asset: this._a, assetGeneration: this._g, mesh, name: label });
+				: new Mesh(new MeshRef(this._a, this._g, mesh, label));
 			if (label) node.name = label;
 			node.position.set(px, py, pz);
 			// The Euler triple is what `node.rotation` reads back as; the
@@ -693,7 +1031,7 @@ export class Asset {
 			// an object that has none.
 			if (mesh >= 0 && !(r === 1 && g === 1 && b === 1 && a === 1)) node.color = [r, g, b, a];
 			if (opt.materials && mesh >= 0) {
-				const imported = this._importedMaterial(mesh, materialCache);
+				const imported = this._importedMaterial(node.geometry, materialCache);
 				if (imported) node.material = imported;
 			}
 			// The starting row is the tree; everything else hangs off whatever
@@ -741,18 +1079,24 @@ export class Asset {
 	// only maps that had a home. `plan.md` §26 gave the built-in shader all four,
 	// so the layered path was compiling a shader for something the startup
 	// pipeline does. Occlusion and the metallic-roughness map were dropped
-	// entirely on the way past; they are applied now.
+	// entirely on the way past; they are applied now. A *stack* still compiles a
+	// body, and that is not the same mistake: a stack is a description of a
+	// shading body and there is no pipeline that draws one already.
 	//
-	// `ref.layers` is still where a `CUSTOM_materials_layers` stack comes from, and
-	// still builds a `LayeredMaterial` — that is a file describing a stack, which
-	// is a different thing from a file describing a surface.
+	// **A mesh whose material carried `CUSTOM_materials_layers` gets the stack**,
+	// as a `LayeredMaterial`, and that is the only path by which a level authored
+	// in Blender draws what was authored. There is no second option to pass: a
+	// stack *is* one of the file's materials, and a `{ layers: true }` beside this
+	// would mean a file that needs both draws its masks as albedo until somebody
+	// notices which flag was missing. `_layeredMaterial` has what is carried over
+	// and what a refusal does.
 	//
 	// A description with none of that in it builds nothing: an opaque,
 	// single-sided material with no maps and this renderer's own surface defaults
 	// is exactly what the default material already is, and one material per mesh
 	// that changes no pixel is a handle per mesh for nothing.
-	_importedMaterial(mesh, cache) {
-		const d = new MeshRef(this._a, this._g, mesh, '').material;
+	_importedMaterial(ref, cache) {
+		const d = ref.material;
 		if (d === null) return null;
 
 		const transparent = d.alphaMode === 'BLEND';
@@ -761,6 +1105,21 @@ export class Asset {
 		// arrives as an ordinary opaque material rather than as a special case.
 		const alphaTest = d.alphaMode === 'MASK' ? d.alphaCutoff : 0;
 		const side = d.doubleSided ? DoubleSide : FrontSide;
+
+		// The stack, if the file wrote one. Asked before anything below is decided,
+		// because it answers a different question: what is *on* this surface, rather
+		// than what the surface is.
+		const stack = ref.layers;
+		if (stack !== null) {
+			const layered = this._layeredMaterial(ref, d, stack, { transparent, alphaTest, side }, cache);
+			// Null is a stack that would not build — the sampler budget, most likely.
+			// The mesh keeps whatever the plain path makes of the same material, which
+			// is its base colour, its base colour map and its normal map: a piece of
+			// the level drawn without its weathering rather than a level that did not
+			// load.
+			if (layered !== null) return layered;
+		}
+
 		const glow = d.emissiveMap !== null
 			|| d.emissive[0] > 0 || d.emissive[1] > 0 || d.emissive[2] > 0;
 		// Against this renderer's defaults rather than against glTF's, because the
@@ -800,6 +1159,97 @@ export class Asset {
 			emissive: d.emissive,
 			emissiveIntensity: d.emissiveIntensity,
 		});
+		cache.set(key, built);
+		return built;
+	}
+
+	// One imported `CUSTOM_materials_layers` stack as a material, or null when the
+	// stack will not build.
+	//
+	// **What the core material lends the stack, and why only these.** The extension
+	// puts the base surface where core glTF already had it, so the two halves have
+	// to be put back together here:
+	//
+	//  - `normal` is `normalTexture`. It is the bottom of the stack's normal chain
+	//    — every layer's own normal is lerped over it — and the extension has no
+	//    slot of its own for one, deliberately, because core glTF's is not extra.
+	//  - `side` and `transparent` are the material's, exactly as on the plain path:
+	//    a leaf is double-sided whether or not moss grows on it.
+	//  - `alphaTest` is set after construction rather than passed, because a
+	//    LayeredMaterial takes the ShaderMaterial options and a cut-out is a
+	//    property every material has.
+	//  - `roughness` and `metalness` are the file's own numbers, as they are on the
+	//    plain path, and a layer that states either blends over them.
+	//  - `metalnessRoughnessMap`, `aoMap` and `emissiveMap` are the core material's
+	//    other three maps, under the names it hands them over with. They used to be
+	//    dropped here — a `LayeredMaterial` is a generated body and none of the
+	//    built-in map bindings exists on it — so a stack imported off a material
+	//    with an occlusion map drew without it and nothing said so. They are three
+	//    samplers of the stack's own budget now, which is what they cost.
+	//  - `emissive` and `emissiveIntensity` go on after construction, because they
+	//    are properties every material has rather than options a stack declares.
+	//    Without them the emissive map above would multiply a factor of zero.
+	//  - `name` is the mesh's, and is only ever read by a warning.
+	//
+	// **A stack that will not build costs its own mesh and nothing else.** Twelve
+	// samplers is a real ceiling, and a stack over it sheds its per-layer relief
+	// before it refuses anything (`layers.js`) — so what reaches the catch here is
+	// a stack asking for more albedos, normals or masks than a material has
+	// bindings for. That mesh keeps the plain material and the rest of the file
+	// draws its stacks; throwing instead would lose a whole level to one surface.
+	// The warning names the mesh, once per distinct stack, because the fix is in
+	// the file and the file names the mesh.
+	_layeredMaterial(ref, d, stack, look, cache) {
+		const options = {
+			...stack,
+			...(d.normalMap === null ? {} : { normal: d.normalMap }),
+			...(d.metalnessRoughnessMap === null ? {} : { metalnessRoughnessMap: d.metalnessRoughnessMap }),
+			...(d.aoMap === null ? {} : { aoMap: d.aoMap }),
+			...(d.emissiveMap === null ? {} : { emissiveMap: d.emissiveMap }),
+			name: ref.name,
+			side: look.side,
+			transparent: look.transparent,
+			roughness: d.roughness,
+			metalness: d.metalness,
+		};
+		// Two meshes wearing one glTF material read two descriptions of one stack,
+		// and the images in them are the same slots — so the signature dedupes them
+		// and a kit of ninety pieces over eight materials compiles eight bodies.
+		// The emissive pair is in the key because it is set after construction and
+		// so is not in the signature — two materials differing only in how brightly
+		// they glow are two materials.
+		const key = `layers|${look.alphaTest}|${d.emissive.join(',')}|${d.emissiveIntensity}`
+			+ `|${stackSignature(options)}`;
+		if (cache.has(key)) {
+			// Built already, off another mesh wearing the same glTF material. The
+			// handles this read produced are a second set over the same images and
+			// nothing is going to hold them, so they go back now — `ref.layers` says
+			// every read holds new references, and this is the caller obeying it.
+			for (const texture of stackTextures(stack)) texture.dispose();
+			return cache.get(key);
+		}
+
+		let built = null;
+		try {
+			built = new LayeredMaterial(options);
+		} catch (why) {
+			console.warn(
+				`three: "${ref.name}" is drawn with its plain material — its layer stack `
+				+ `would not build: ${why.message}`
+			);
+			// The images this description holds are handles of their own and nothing
+			// is going to use them, so they go back here rather than at the next
+			// unload. The core material's maps are *not* in the list: the plain path
+			// is about to build a material out of those very textures.
+			for (const texture of stackTextures(stack)) texture.dispose();
+		}
+		// After the construction rather than in the options: a cut-out and a glow are
+		// properties every material has and not ones a stack declares.
+		if (built !== null && look.alphaTest > 0) built.alphaTest = look.alphaTest;
+		if (built !== null && (d.emissive.some(c => c > 0) || d.emissiveMap !== null)) {
+			built.emissive = d.emissive;
+			built.emissiveIntensity = d.emissiveIntensity;
+		}
 		cache.set(key, built);
 		return built;
 	}

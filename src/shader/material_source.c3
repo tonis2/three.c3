@@ -190,24 +190,42 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
 <*
  How many samplers of its own a material may declare, on top of `map`.
 
- A budget rather than a device limit, the same way `PUSH_BUDGET` is. The real
- ceiling is `maxPushDescriptors`, which every implementation offering the
- extension must report as at least 32 — so eight plus the base colour map cannot
- be refused by a device, and nothing here has to query anything.
+ A budget rather than a device limit, the same way `PUSH_BUDGET` is — but unlike
+ `PUSH_BUDGET` it is now close enough to a real ceiling to be arithmetic rather
+ than taste, so here is the sum.
+
+ **What actually bounds it is the per-stage sampler limit, not
+ `maxPushDescriptors`.** Push descriptors are the roomier of the two: an
+ implementation offering VK_KHR_push_descriptor must report at least 32 of them,
+ and one material's set is the samplers plus nothing else. The tighter pair is
+ `maxPerStageDescriptorSamplers` and `maxPerStageDescriptorSampledImages` — a
+ combined image sampler counts against both — and Vulkan's mandatory minimum for
+ each is 16. A generated material's fragment stage declares
+ `MATERIAL_BINDING_FIRST` reserved bindings (`base_color_map`, `shadow_map`,
+ `environment_map`) plus this many, so three plus twelve is fifteen and fits on
+ the least capable conformant device with one binding to spare — which is what a
+ fourth reserved binding would cost, the way `environment_map` was the third.
+ Nothing has to be queried and there is no fallback path, because the number
+ cannot be refused. `Gpu.report` prints all three limits under `--debug` for a
+ device whose answers are worth checking.
 
  It was four, chosen against what a hand-written effect uses: a pattern, a ramp
  and a mask, with the fourth so three was not a cap anybody hit on their first
  attempt. A `LayeredMaterial` is not hand-written — `js/prelude/layers.js`
  generates one sampler per layer plus one for the packed mask — so four bought
  three layers over the base and no room for a normal map on any of them. Eight
- buys a mask, up to seven detail maps, or a mix of maps and normals.
+ bought a mask and seven detail maps, and an ordinary terrain exported from
+ Blender asked for nine: a base normal, a base height, a base metallic-roughness
+ and two layers carrying an albedo, a normal, a metallic-roughness and a height
+ each. Twelve is that terrain with room over it, and `layers.js` sheds maps in a
+ stated order rather than refusing the surface when a stack still does not fit.
 
  The cost is per draw: the descriptors are pushed per bucket, so every declared
  sampler is command traffic on every material that declares one. A material
  wanting more images than this wants an atlas or a texture array — both of which
  are one binding, and neither of which exists here yet.
 *>
-const uint MATERIAL_TEXTURE_LIMIT = 8;
+const uint MATERIAL_TEXTURE_LIMIT = 12;
 
 // The template, looked up the same way `mesh.slang` is — `shaders/` first, then
 // `build/shaders/`, both relative to the working directory.
@@ -396,6 +414,7 @@ const String[*] MATERIAL_CONTRACT_FIELDS @local = { // Surface. `shadow` is here
 	"position",
 	"color",
 	"vertex_color",
+	"vertex_mask",
 	"variant",
 	"shadow",
 	"height", // Vertex adds these two; the rest it shares with Surface.

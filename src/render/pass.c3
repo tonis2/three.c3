@@ -1304,10 +1304,14 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.morph = morphing ? mesh.morph.address : 0,
 			.posed = preskinned ? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size : 0,
 			.base_color = base_color,
+			//TODO: Use bitstruct/masking ?
 			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS
 				: 0) | (mesh.has_uvs ? FLAG_HAS_UVS
 					: 0) | (mesh.has_colors ? FLAG_HAS_COLORS
-						: 0) | (skinned ? FLAG_HAS_SKIN
+						: 0) // What the file said that stream means: a mask the artist painted, so the
+						// built-in shader leaves it out of the albedo instead of tinting by it.
+						| (mesh.colors_are_mask ? FLAG_COLORS_ARE_MASK
+							: 0) | (skinned ? FLAG_HAS_SKIN
 							: 0) | (preskinned ? FLAG_PRESKINNED
 								: 0) // Which of the built-in material's three maps this bucket has. Off the
 								// material rather than off the mesh, unlike every bit above it: the image is

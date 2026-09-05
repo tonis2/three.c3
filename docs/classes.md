@@ -209,6 +209,8 @@ pipeline you can build draws triangles.
 - `metalness` — 0 to 1, 0 by default: a metal has no diffuse
 - `reflectance` — 0 to 1, 0 by default: how strongly a non-metal reflects, and the switch that turns
   the specular term on at all
+- `alphaTest` — 0 to 1, 0 by default and off: the alpha below which a fragment is discarded rather
+  than drawn — the leaf-card property, and the one that reaches the shadow pass
 - `emissive` — what this surface gives off regardless of any light; a hex, a triple or an `{r, g, b}`,
   answering with the triple. Black by default
 - `emissiveIntensity` — how strongly, 1 by default and not clamped: a colour is a colour, and this is
@@ -257,6 +259,28 @@ and is dark.
 
 A name Three.js does not have, because Three.js defaults every material to having a highlight and
 this one defaults to none.
+
+#### alphaTest
+
+The alpha below which a fragment is not drawn at all. 0 is the default and means off.
+
+```js
+const leaves = new three.MeshLambertMaterial({ map: leaf_sheet, alphaTest: 0.5 });
+```
+
+This is what a leaf card, a chain-link fence and a rope want. The alpha comes from `map`; anything
+under the threshold is discarded, so the quad draws as the shape painted on it, keeps writing depth,
+and needs no back-to-front sort.
+
+**It is not `transparent`, and the difference is the one worth knowing.** A transparent material is
+sorted, writes no depth, and casts no shadow at all — a shadow map holds one depth per texel and
+cannot record half a surface. A cut-out can, so this is the property that reaches the shadow pass: set
+it and the shadow is the leaf rather than the quad. That costs one extra pipeline the first frame a
+cut-out caster exists, and a bind per bucket after; a scene without one pays neither.
+
+The threshold is compared against the map's alpha times the material's `opacity`, and not against
+`mesh.color`'s — fading one copy of a card out with a per-copy alpha fades it rather than dissolving
+it, and the shadow pass, which reads no per-copy colour, then cuts the same shape.
 
 #### emissive
 
@@ -441,6 +465,7 @@ sRGB — the default — and a linear one is refused.
 - `roughness` — 0 to 1, 1 by default — see Material
 - `metalness` — 0 to 1, 0 by default — see Material
 - `reflectance` — 0 to 1, 0 by default — see Material
+- `alphaTest` — 0 to 1, 0 by default and off: discard below this alpha — see Material
 - `emissive` — what this surface gives off regardless of any light, black by default — see Material
 - `emissiveIntensity` — how strongly, 1 by default and not clamped — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
@@ -548,6 +573,12 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
 - `vertex_color` — the mesh's own COLOR_0 attribute, interpolated across the triangle, white where the
   file carried none, and not already in albedo. It is the one value here that varies across a
   surface, so it is a painted weight as often as a tint.
+- `vertex_mask` — the same attribute read as a weight: **0 where the file carried none**, where
+  `vertex_color` is white. A missing tint is white and a missing mask is nothing painted, and one
+  material drawn on a painted mesh and an unpainted one is the ordinary case in a level — through
+  `vertex_color` the unpainted one comes back covered, because white is full weight. It is what a
+  LayeredMaterial's `maskSource: 'vertexColor'` reads, and what Blender's Colour Attribute node
+  answers for an attribute that is not on the mesh.
 - `shadow` — how much of the sun reaches this point, 1 in the open and 0 under something; 1 everywhere
   with shadows off, and already folded into `lambert()`.
 - `roughness`, `metalness`, `reflectance` — the material's own three, which `specular()` and
@@ -568,7 +599,7 @@ Each uniform is readable in the body by its own name; a uniform written as an ar
 table column, read as `name[s.variant]`.
 
 `textures` is the same idea for images: `{ noise_map: tex }` declares a Sampler2D called `noise_map`
-the body samples by that name, up to eight. You never write a binding number — the shader is generated
+the body samples by that name, up to twelve. You never write a binding number — the shader is generated
 with the bindings in it and the host resolves each name through the compiled module's own reflection.
 Sample with any uv you like, which is the point: `s.uv + float2(t, 0)` scrolls, `s.uv * 4` tiles,
 `float2(k, 0.5)` reads a gradient as a lookup table. A sampler left null reads 1x1 opaque white.
@@ -700,6 +731,7 @@ have been skipped; too small drops geometry you can see.
 - `roughness` — 0 to 1, 1 by default — see Material
 - `metalness` — 0 to 1, 0 by default — see Material
 - `reflectance` — 0 to 1, 0 by default — see Material
+- `alphaTest` — 0 to 1, 0 by default and off: discard below this alpha — see Material
 - `emissive` — what this surface gives off regardless of any light, black by default — see Material
 - `emissiveIntensity` — how strongly, 1 by default and not clamped — see Material
 - `repeat` — `[u, v]`, or one number for both; zero throws — see Material
@@ -717,7 +749,7 @@ have been skipped; too small drops geometry you can see.
 ## LayeredMaterial
 
 ```js
-new three.LayeredMaterial({ map, normal, mask, height, bump, layers, side, transparent, blending, opacity, roughness, metalness, reflectance })
+new three.LayeredMaterial({ map, normal, mask, height, bump, metalnessRoughnessMap, aoMap, emissiveMap, layers, side, transparent, blending, opacity, roughness, metalness, reflectance, name })
 ```
 
 An ordered stack of materials blended over a base one — terrain splatting, weathering, decals.
@@ -728,6 +760,16 @@ stack looks wrong.
 
 The base material is `map` plus the mesh's own base colour, exactly as without this: the layers are
 extra, and a stack with none of them shades as a MeshLambertMaterial.
+
+`normal`, `height`, `metalnessRoughnessMap`, `aoMap` and `emissiveMap` are the base surface's own maps
+and each costs one of the samplers counted below. A generated body has no built-in map bindings — those
+belong to `MeshLambertMaterial` — so the three spelled the long way are here under the names
+`ref.material` and MeshLambertMaterial already give them, and `asset.instantiate({ materials: true })`
+carries all five across. `emissiveMap` multiplies `material.emissive` times `material.emissiveIntensity`,
+which is glTF's rule and means the material's own two numbers are still how you turn the glow up; `aoMap`
+darkens the ambient floor and the environment reflection and nothing else; `metalnessRoughnessMap` is
+packed glTF's way and multiplies `roughness` and `metalness` per texel, under whatever the layers then
+blend over it.
 
 `layers` is an array, outermost last — each is blended over everything under it as
 `lerp(below, blend(below, layer), mask)`. A layer takes `map` (its albedo), `normal`, `emissive`,
@@ -741,7 +783,11 @@ extra, and a stack with none of them shades as a MeshLambertMaterial.
   own; `invert` flips it.
 - `maskSource` says which thing the channel belongs to: `'texture'` (the default) or `'vertexColor'`,
   which reads the mesh's own COLOR_0 attribute — a weight an artist painted per vertex, costing no
-  sampler and no image at all.
+  sampler and no image at all. **On a mesh that carries no COLOR_0 that weight is 0, not 1**: the
+  layer is off there rather than covering the surface, which is what Blender's Colour Attribute node
+  reads for an attribute that is not on the mesh and what one material shared between a painted mesh
+  and an unpainted one has to mean. It is `s.vertex_mask` in a body; `s.vertex_color`, the tint
+  reading of the same stream, stays white.
 - A layer that states no colour — no map, no tint, not animated — leaves what is under it alone rather
   than blending white over it, so `{ emissive: glow }` only glows and `{ normal: bumps }` only adds
   detail. Use a white map to paint white deliberately.
@@ -782,9 +828,28 @@ promotes its `tint` and `opacity` to a uniform you can write every frame —
 `mat.layers[2].opacity = 0.25`. That costs 16 of the material's 104 uniform bytes, so at most six
 layers may be animated; the rest cost the push block nothing.
 
-The real ceiling is samplers: eight, counting one per layer `map`, `normal`, `emissive`, `height`,
-`metallicRoughness` and own `mask`, plus one each for the shared mask and the base normal and height.
-The base map does not count. `{ enabled: false }` drops a layer and its samplers entirely.
+The real ceiling is samplers: twelve, counting one per layer `map`, `normal`, `emissive`, `height`,
+`metallicRoughness` and own `mask`, plus one each for the shared mask and for the base `normal`,
+`height`, `metalnessRoughnessMap`, `aoMap` and `emissiveMap`. The base `map` does not count — it is
+binding 0, which every material has. `{ enabled: false }` drops a layer and its samplers entirely.
+
+**A stack over that ceiling sheds maps rather than refusing to build.** Refusing costs the whole
+surface — a terrain draws as one flat colour instead of three materials — to save a map whose absence
+is usually invisible, which is the wrong trade. So maps come off in a stated order until the stack
+fits, and one `console.warn` names the material and everything it gave up:
+
+1. every layer's `height`, bottom of the stack first — parallax is a sub-texel uv shift at most angles
+   and the layer keeps its albedo, its normal and its mask;
+2. every layer's `metallicRoughness`, bottom first — the layer keeps whatever `roughness` and
+   `metalness` numbers it stated, and only stops varying them per texel;
+3. the base `height`, last of the three, because it moves the uv for the whole stack including the
+   mask.
+
+Nothing below that is shed. A stack still over the ceiling with all three gone is asking for more
+albedos, normals or masks than a material has bindings for, and which of those to lose is a decision
+about what the surface *is* — so it is refused, and the refusal says how many were shed on the way.
+Pass `name` to have the warning say which material it was; `asset.instantiate({ materials: true })`
+passes the mesh's.
 
 Load masks and normal maps with `{ colorSpace: three.LinearSRGBColorSpace }` — their channels are
 numbers rather than colours, and through the default sRGB every weight comes out wrong.
@@ -806,14 +871,25 @@ renderer does not have, and a material property that provably changes no pixel i
 
 `asset.mesh(name).layers` hands you a description straight out of a glTF authored with
 `CUSTOM_materials_layers`, so `new three.LayeredMaterial(ref.layers)` is the whole import.
+`asset.instantiate({ materials: true })` does exactly that for every mesh in a file, which is what a
+level exported from Blender wants and the only flag it needs — there is no `{ layers: true }` beside
+it, because a stack is one of the file's materials rather than a second kind of thing. A mesh whose
+stack will not build even after shedding warns with the mesh's name and draws with its plain material,
+so one surface cannot cost a level its import.
+
+A mesh whose material carries the extension is also **not tinted by its COLOR_0**, whatever is done
+with the stack afterwards. glTF's rule for that attribute is a multiply into the base colour and a
+mask is three unrelated weights, so a painted mesh drew its mask until something put a stack on it. A
+stack with no layers left in it takes the same door.
 
 ### Properties
 
 - `layers` — a view per enabled layer: `layers[i].map = tex` swaps an image, and `layers[i].tint` /
   `layers[i].opacity` read and write the ones declared animated
+- `name` — what a shed-map warning calls this material, and nothing else reads it
 - `fragment` — the generated Slang — read-only, and the thing to look at first
 - `uniforms, textures` — the ShaderMaterial proxies, under the generated names
-- `map, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive,
+- `map, side, transparent, blending, opacity, roughness, metalness, reflectance, alphaTest, emissive,
   emissiveIntensity, repeat, offset, uvVariants, stochastic, alive` — as ShaderMaterial. The
   material's own `emissive` is added on top of whatever the layers glow, so a stack imported with an
   emissive layer and a material given one of its own do both.
@@ -918,7 +994,9 @@ grew from.
 not constructible — asset.mesh(name) and asset.meshAt(i) answer with these
 ```
 
-One piece of a loaded file: the handle `new three.Mesh()` wants, plus bounds.
+One piece of a loaded file: the handle `new three.Mesh()` wants, plus bounds. It is also what the
+meshes of an `instantiate()`d tree carry as their `geometry`, so a placed node can be asked what it is
+made of.
 
 Reading `bounds` costs no upload — the box comes out of the glTF JSON at load, so asking how big two
 hundred kit pieces are before placing twelve of them still uploads twelve. It is not cached: a
@@ -1119,10 +1197,22 @@ the file's clips, and a channel naming a node outside the subtree drives nothing
 `{ materials: true }` builds a material per glTF material and puts it on the meshes that wear it, which
 is how a `.glb` authored with `alphaMode BLEND` renders blended and how a file's normal maps and
 emissive maps reach the frame. Without it the file draws with its base colour and base colour map and
-nothing else. It builds nothing for a material that is opaque, single-sided and has no normal or
-emissive map, because that is the default material already. Occlusion and metallic-roughness are not
-applied; `ref.material` has them and the reason. Off by default because it compiles a shader per
-distinct material.
+nothing else. It builds nothing for a material that is opaque, single-sided and has no maps and this
+renderer's own surface defaults, because that is the default material already. Off by default because
+it compiles a shader per distinct material.
+
+**A material carrying `CUSTOM_materials_layers` becomes a LayeredMaterial**, which is what a level
+exported from Blender with painted layers needs and the flag it needs is this one — there is no
+`{ layers: true }`, because a stack is one of the file's materials. The core material lends the stack
+its normal map, its occlusion, emissive and metallic-roughness maps, its emissive colour, its `side`,
+its alpha mode and its two surface numbers — everything it has. One stack per glTF material is built
+however many meshes wear it. A stack over the twelve-sampler ceiling sheds its per-layer relief with a
+warning rather than refusing; one that still will not build warns naming the mesh and leaves that one
+mesh on its plain material.
+
+The meshes of an instantiated tree carry a **MeshRef** as their geometry, so `o.geometry.layers`,
+`o.geometry.material` and `o.geometry.bounds` answer for the piece a node draws without going back
+through `asset.meshAt(o.geometry.mesh)`.
 
 For a rigged file, the skeleton is left out by default and the character is posed from a table baked
 once at load, so a hundred of them is a hundred nodes, one draw call and one uint per copy per frame —
@@ -1134,6 +1224,16 @@ give each a phase with `play(name, { time })`.
 - `{ skinning: 'compute' }` poses the vertices in a compute pass instead of in the vertex shader. It
   splits the character into its own draw call and holds a posed copy of the mesh, and only pays off
   when the same character is drawn more than once a frame.
+
+`{ lights: true }` fills `three.lights` from the file's `KHR_lights_punctual` lights and
+`{ camera: true }` aims `three.camera` from the file's camera — a level laid out in Blender arrives lit
+and framed the way it was composed. Both are `instantiate()`'s alone: a file's lighting is a property of
+the file and not of one piece of it, so `node(name)` parses them and does nothing with them. There are
+four light slots and a file may author twenty, so the import takes the directional one as the sun and the
+point lights nearest the camera, and names the rest in one `console.warn`. `asset.lights` and
+`asset.cameras` are the file's own list, for a script that wants to choose differently. `three.lights`
+and the two `## asset.instantiate` entries in `docs/functions.md` have the intensity conversion, which is
+a stated convention and not a unit change.
 
 `asset.imageAt(i)` is the file's own pictures as ordinary Textures, numbered the way the glTF numbers
 them and counted by `asset.images`. It answers the same slot a placed mesh is drawing with, so what you
@@ -1157,6 +1257,8 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `animations` — clip names
 - `images` — how many pictures the file holds
 - `bones` — the rig's joint names — what `socket(name)` takes. Empty for a file with no skin
+- `lights` — the file's `KHR_lights_punctual` lights, placed in world space, in the file's own units. Read on demand
+- `cameras` — the file's cameras, placed in world space. Read on demand
 
 ### Methods
 
@@ -1167,8 +1269,8 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `meshAtAsync(index)`
 - `node(name, { skeleton, skinning, materials })`
 - `nodeAsync(name, { skeleton, skinning, materials })`
-- `instantiate(name?, { skeleton, skinning, materials })`
-- `instantiateAsync(name?, { skeleton, skinning, materials })`
+- `instantiate(name?, { skeleton, skinning, materials, lights, camera })`
+- `instantiateAsync(name?, { skeleton, skinning, materials, lights, camera })`
 - `toJSON()`
 
 ## Level

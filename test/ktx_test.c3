@@ -28,6 +28,7 @@ import image;
 import gltf;
 import ktx::container;
 import ktx::basis;
+import ktx::bc7;
 import ktx::codec;
 import std::core::test;
 import std::io::file;
@@ -285,6 +286,125 @@ fn void a_block_compressed_texture_decodes() @test
 	test::@check(kept.levels[0].len == blocks.len,
 		"level 0 is %d bytes of blocks, not the %d that were encoded",
 		(int)kept.levels[0].len, (int)blocks.len);
+}
+
+<*
+ A Basis file has no blocks to lend, so its levels are made — every one of them,
+ and they hold the picture.
+
+ `decode_ktx2_blocks` above refuses a Basis file and `transcode_ktx2_blocks` is
+ the door it refuses it towards, so what is asserted is that the door leads
+ somewhere: the file's whole chain, in BC7, decoding back to what the RGBA8 path
+ next door would have handed over.
+
+ The tolerance is against **the transcoder's own RGBA8 output** rather than
+ against `source`. ETC1S has already quantised these texels and the BC7 encode
+ is the only step this function owns; comparing against the original would be
+ measuring both, and a regression in the half that is here would hide inside the
+ half that is not.
+*>
+fn void a_basis_texture_becomes_blocks() @test
+{
+	const uint SIDE = 32;
+
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+	for (uint y = 0; y < SIDE; y++)
+	{
+		for (uint x = 0; x < SIDE; x++)
+		{
+			sz at = ((sz)y * SIDE + x) * 4;
+			bool right = x >= SIDE / 2;
+			bool low = y >= SIDE / 2;
+			source[at + 0] = (char)(right ? 0xf0 : 0x10);
+			source[at + 1] = (char)(low ? 0xf0 : 0x10);
+			source[at + 2] = (char)(right == low ? 0xf0 : 0x10);
+			source[at + 3] = (char)0xff;
+		}
+	}
+
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::ETC1S, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = true }
+	)!!;
+	defer free(blob);
+
+	test::@check(three::is_basis_ktx2(blob), "the encoder did not write a Basis KTX2");
+	test::@check(@catch(three::decode_ktx2_blocks(blob, three::ColorSpace.SRGB)),
+		"the blocks path accepted a Basis file, which has no blocks to lend");
+
+	three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, bc7)!!;
+	defer made.free();
+
+	uint chain = three::mip_levels(SIDE, SIDE);
+	test::@check(made.format.equals(bc7), "the transcode did not report BC7 sRGB");
+	test::@check(made.width == SIDE && made.height == SIDE,
+		"the transcode reports %dx%d", made.width, made.height);
+	test::@check(made.levels.len == chain,
+		"the file's %d levels became %d", chain, (int)made.levels.len);
+
+	// Every level is a whole number of blocks for its own extents, which is what
+	// `create_texture_levels` checks before it copies anything.
+	for (uint i = 0; i < chain; i++)
+	{
+		uint side = three::level_extent(SIDE, i);
+		test::@check(made.levels[i].len == bc7.image_size(side, side),
+			"level %d is %d bytes, not the %d a %dx%d BC7 image is",
+			i, (int)made.levels[i].len, (int)bc7.image_size(side, side), side, side);
+	}
+
+	image::Image reference = three::decode_ktx2(blob)!!;
+	defer reference.free();
+	char[] back = bc7::decode(mem, made.levels[0], SIDE, SIDE)!!;
+	defer free(back);
+
+	uint worst = worst_channel(reference.pixels, back);
+	test::@check(worst <= 8, "the blocks lost the picture, worst channel off by %d", worst);
+}
+
+<*
+ A Basis file that shipped no chain still gets one.
+
+ The levels are the file's wherever it has any, and this is the one case where
+ it has none. The RGBA8 path this replaced had the device blit a chain from
+ level 0, so a transcode handing back a single level would be trading aliasing
+ in the distance for the memory — a worse picture, quietly, on exactly the files
+ a small exporter writes.
+*>
+fn void a_chainless_basis_texture_gets_a_chain() @test
+{
+	const uint SIDE = 16;
+
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+	foreach (i, &byte : source) *byte = (char)(i % 4 == 3 ? 0xff : (i * 7) & 0xff);
+
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::UASTC_4X4, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = false }
+	)!!;
+	defer free(blob);
+
+	test::@check(basis::info(blob)!!.levels == 1,
+		"the fixture already has a chain, so this asserts nothing");
+
+	three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.LINEAR };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, bc7)!!;
+	defer made.free();
+
+	test::@check(made.levels.len == three::mip_levels(SIDE, SIDE),
+		"a one-level file gave %d levels, not the full %d",
+		(int)made.levels.len, three::mip_levels(SIDE, SIDE));
+	for (uint i = 0; i < made.levels.len; i++)
+	{
+		uint side = three::level_extent(SIDE, i);
+		test::@check(made.levels[i].len == bc7.image_size(side, side),
+			"generated level %d is %d bytes, not the %d a %dx%d BC7 image is",
+			i, (int)made.levels[i].len, (int)bc7.image_size(side, side), side, side);
+	}
 }
 
 // ============================================================================

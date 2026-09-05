@@ -109,6 +109,19 @@ const uint FLAG_STOCHASTIC                  = 256;
 const uint FLAG_HAS_EMISSIVE_MAP            = 512;
 
 <*
+ This mesh's COLOR_0 is a layer mask rather than a tint, so `mesh.slang` leaves it
+ out of the albedo.
+
+ Off the *mesh* and not off the material, like `FLAG_HAS_COLORS` beside it and
+ unlike the four map bits: what the attribute means was decided by whoever painted
+ it, and `Assets.upload_primitive` reads that off the glTF material the primitive
+ names — a material carrying `CUSTOM_materials_layers` masks its layers with
+ channels of this stream. A stack with no layers left in it counts too, because
+ the paint is on the mesh either way and the alternative is a rainbow.
+*>
+const uint FLAG_COLORS_ARE_MASK             = 1024;
+
+<*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so

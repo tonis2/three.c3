@@ -2510,6 +2510,119 @@ fn void js_asset_nodes(
 }
 
 <*
+ `assetLights(index, generation)` — the file's `KHR_lights_punctual` lights,
+ placed in world space.
+
+ A description and not a light. The renderer holds four slots and a level may
+ author twenty, so which of them get lit is a choice, and this is what the choice
+ is made from — `asset.instantiate({ lights: true })` is one policy over it and a
+ script is free to write another.
+
+ `kind` is `gltf::LightType`'s ordinal, passed through untranslated for the same
+ reason the layer stack's blend modes are: the extension's enum is the authority
+ and naming it twice is two tables to keep in step.
+
+ `direction` is the way the light *travels* — the node's -Z — which is the
+ negation of the surface-to-light vector `three.light.direction` holds. The
+ negation belongs in the importer, once.
+
+ @return `An array of [name, kind, r, g, b, intensity, range, innerCone, outerCone, px, py, pz, dx, dy, dz, gltfNode].`
+*>
+fn void js_asset_lights(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	qjs::Value list = js.array();
+	foreach (i, &light : self.pass.assets.slot(id).lights)
+	{
+		qjs::Value row = js.array();
+		js.set_index(row, 0, js.string(light.name));
+		js.set_index(row, 1, qjs::int_value((int)light.kind));
+		js.set_index(row, 2, qjs::number_value(light.color[0]));
+		js.set_index(row, 3, qjs::number_value(light.color[1]));
+		js.set_index(row, 4, qjs::number_value(light.color[2]));
+		js.set_index(row, 5, qjs::number_value(light.intensity));
+		js.set_index(row, 6, qjs::number_value(light.range));
+		js.set_index(row, 7, qjs::number_value(light.inner_cone));
+		js.set_index(row, 8, qjs::number_value(light.outer_cone));
+		js.set_index(row, 9, qjs::number_value(light.position.x));
+		js.set_index(row, 10, qjs::number_value(light.position.y));
+		js.set_index(row, 11, qjs::number_value(light.position.z));
+		js.set_index(row, 12, qjs::number_value(light.direction.x));
+		js.set_index(row, 13, qjs::number_value(light.direction.y));
+		js.set_index(row, 14, qjs::number_value(light.direction.z));
+		js.set_index(row, 15, qjs::int_value(light.gltf_node));
+		js.set_index(list, (uint)i, row);
+	}
+	*out = list;
+}
+
+<*
+ `assetCameras(index, generation)` — the file's cameras, placed in world space.
+
+ `distance` is the one number the file does not carry: a glTF camera is an eye and
+ a heading and this renderer's is a turntable, so the orbit point has to be chosen.
+ `record_lights` chooses it — where the view ray passes the middle of the asset's
+ bounds — and says why there.
+
+ `yfov` is radians and vertical, exactly as the file states it and exactly what
+ `Camera.projection` wants. An orthographic camera reports zeroes for all four
+ lens numbers, because there is no orthographic projection here to describe.
+
+ @return `An array of [name, px, py, pz, fx, fy, fz, ux, uy, uz, distance, yfov, znear, zfar, aspect, gltfNode].`
+*>
+fn void js_asset_cameras(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	qjs::Value list = js.array();
+	foreach (i, &camera : self.pass.assets.slot(id).cameras)
+	{
+		qjs::Value row = js.array();
+		js.set_index(row, 0, js.string(camera.name));
+		js.set_index(row, 1, qjs::number_value(camera.position.x));
+		js.set_index(row, 2, qjs::number_value(camera.position.y));
+		js.set_index(row, 3, qjs::number_value(camera.position.z));
+		js.set_index(row, 4, qjs::number_value(camera.forward.x));
+		js.set_index(row, 5, qjs::number_value(camera.forward.y));
+		js.set_index(row, 6, qjs::number_value(camera.forward.z));
+		js.set_index(row, 7, qjs::number_value(camera.up.x));
+		js.set_index(row, 8, qjs::number_value(camera.up.y));
+		js.set_index(row, 9, qjs::number_value(camera.up.z));
+		js.set_index(row, 10, qjs::number_value(camera.distance));
+		js.set_index(row, 11, qjs::number_value(camera.yfov));
+		js.set_index(row, 12, qjs::number_value(camera.znear));
+		js.set_index(row, 13, qjs::number_value(camera.zfar));
+		js.set_index(row, 14, qjs::number_value(camera.aspect));
+		js.set_index(row, 15, qjs::int_value(camera.gltf_node));
+		js.set_index(list, (uint)i, row);
+	}
+	*out = list;
+}
+
+<*
  `assetClips(index, generation)` — the names of a file's animations.
 
  Free: names and durations are read at load out of the JSON chunk, so this
