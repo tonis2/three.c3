@@ -48,6 +48,7 @@ import ktx::basis;
 import ktx::bc7;
 import ktx::codec;
 import ktx::mipgen;
+import std::time;
 
 
 <*
@@ -214,6 +215,23 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
 }
 
 <*
+ How much work a Basis image is, near enough to order a queue by.
+
+ Texels rather than bytes, because the transcode's cost is per block and a mip
+ chain adds a fixed third to it. One number, and it is enough: a file whose
+ images are sixty 1024x1024s and one 4096x4096 is one image that costs sixteen
+ times the rest, and a pool that starts that one last waits for it alone.
+
+ Zero for anything that is not a Basis KTX2.
+*>
+fn ulong basis_image_cost(char[] encoded)
+{
+	basis::Info? info = basis::info(encoded);
+	if (catch info) return 0;
+	return (ulong)info.width * info.height;
+}
+
+<*
  A KTX2's blocks, kept rather than narrowed — every level, in the file's format.
 
  The fast path this whole section exists for. `decode_ktx2` above expands blocks
@@ -305,21 +323,23 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  `BC7_UNORM` are the same blocks read two ways and picking the wrong one shifts
  every colour.
 
- ## What it costs, and why the encode is the fast one
+ ## What it costs: a block rewrite, not an encode
 
- `ktx.c3l` has no block-level Basis-to-BC7 mapper: `basis::transcode` decodes to
- RGBA8 and `bc7::encode` re-encodes, which is a real encode. So this trades load
- time for device memory, and it is only ever asked of a file that chose to ship
- Basis — a `.ktx2` already holding BCn goes the other way and costs nothing.
+ `ktx.c3l` maps blocks now. Each of UASTC's nineteen modes is a BC7 mode with
+ the same partition, endpoints and weights, and an ETC1S block is a base colour,
+ an intensity table and sixteen 2-bit selectors — BC7 mode 6's shape once the
+ four levels are placed on its weights. So a block is an unpack and a repack, no
+ pixel in between and no search at all, running per block row across every core.
+ `evil_forest.glb`'s 61 images went from a 31.7 s load to 4.5 s, and the UASTC
+ export of the same scene from 33.1 s to 2.1 s. What is left is the slice
+ decode, not the mapping: an ETC1S slice is one Huffman bitstream with
+ cross-block prediction and has nothing to split, and it is 21 ms of the 39 ms a
+ 1024x1024 image with eleven levels costs. `--debug` prints that per image.
 
- `fast` is what keeps the trade worth making. It stops the encoder after mode 6
- instead of also searching mode 1's sixty-four partitions, and on one of
- `evil_forest.glb`'s 1024x1024 images that is 250ms against 1813ms for 52.8dB
- against 57.2dB — both far above where a difference is visible, because **the
- source is already quantised**. ETC1S threw the detail away before these bytes
- existed; the two-subset modes are searching for something that is no longer
- there. Encoding full-precision pixels is the other case entirely, and
- `encode_ktx2_bc7` below still asks for the whole search.
+ One call for the whole chain rather than `basis::transcode` per level, because
+ the shared part of a file — a UASTC container's Zstd stream, an ETC1S file's
+ codebooks — is read once that way and once per level the other, which on an
+ eleven-level image is about as much work again as the mapping.
 
  ## A file with no chain still gets one
 
@@ -328,13 +348,39 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  without mips is the one case where they cannot be, and it does not get to lose
  them here: the RGBA8 path this replaces had the device blit a chain, so one is
  built from the transcoded base instead. `mipgen` filters at full precision and
- in the right space, which is a better chain than the blit was, and each level
- is encoded like any other.
+ in the right space, which is a better chain than the blit was.
+
+ This is the one path that still encodes, and it has to: a filtered level is
+ pixels and has no blocks to rewrite. `fast` is what keeps it affordable — it
+ stops after mode 6 instead of also searching mode 1's sixty-four partitions,
+ 250ms against 1813ms on a 1024x1024 image for 52.8dB against 57.2dB, both far
+ above where a difference is visible because the source was quantised before
+ these bytes existed. `encode_ktx2_bc7` below encodes full-precision pixels and
+ still asks for the whole search.
+
+ ## One image at a time, or several at once
+
+ A file with sixty-one of these spends its load running this function sixty-one
+ times, and the mapping inside it is already across every core — so the cores
+ are busy for the mapping and idle for the slice decode that precedes it, which
+ on ETC1S is the larger half. `Assets.load`'s pre-pass runs whole *images*
+ concurrently instead, and `threads` is what stops each of them then asking for
+ the whole machine again; `pretranscode_basis_images` argues the split it picks.
+ `quiet` goes with it: the per-image line is printed by the caller after the
+ join rather than by sixteen threads into one stream.
 
  @param format : `The target. BC7 in the caller's space; nothing else is encoded here.`
+ @param threads : `The block mapper's thread count. 0 decides from the core count; 1 pins it to this thread.`
+ @param quiet : `True to leave the --debug line to a caller that is timing this itself.`
  @return ? UNSUPPORTED_IMAGE : `Not a Basis KTX2, an unencodable target, or a level that would not transcode.`
 *>
-fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Allocator allocator = mem)
+fn BlockImage? transcode_ktx2_blocks(
+	char[] encoded,
+	TextureFormat format,
+	Allocator allocator = mem,
+	uint threads = 0,
+	bool quiet = false
+)
 {
 	if (format.family != TextureFamily.BC7) return UNSUPPORTED_IMAGE~;
 
@@ -348,6 +394,8 @@ fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Alloc
 	bool generated = info.levels == 1 && (info.width > 1 || info.height > 1);
 	uint count = generated ? mipgen::chain_length(info.width, info.height) : info.levels;
 	if (count > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
+
+	Clock started = clock::now();
 
 	BlockImage out = {
 		.width = info.width,
@@ -363,9 +411,29 @@ fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Alloc
 	bool ok = false;
 	defer if (!ok) out.free();
 
+	if (!generated)
+	{
+		// Face 0 of layer 0, exactly as `decode_ktx2_plain` picks its image: a
+		// material's map is one picture, and a cube is `ktx_faces`' business.
+		basis::Transcoded[]? mapped = basis::transcode_levels(allocator, encoded, 0, 0, basis::TF_BC7_RGBA, threads);
+		if (catch mapped) return UNSUPPORTED_IMAGE~;
+		// The blocks are already the caller's allocation; only the array that
+		// listed them is this function's to give back.
+		for (uint level = 0; level < count; level++) out.levels[level] = mapped[level].data;
+		alloc::free(allocator, mapped.ptr);
+
+		ok = true;
+		if (!quiet)
+		{
+			@debug_log("basis: %dx%d, %d levels mapped to BC7 in %d ms",
+				info.width, info.height, count, (long)started.to_now() / 1_000_000);
+		}
+		return out;
+	}
+
 	mipgen::Options options = { .srgb = format.space == ColorSpace.SRGB, .renormalize = false };
-	// The level being encoded, as pixels. Carried across iterations on the
-	// generated path, because each level is filtered from the one above it.
+	// The level being encoded, as pixels. Carried across iterations, because each
+	// level is filtered from the one above it.
 	char[] pixels;
 	defer if (pixels.len) alloc::free(allocator, pixels.ptr);
 	uint lw;
@@ -373,7 +441,7 @@ fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Alloc
 
 	for (uint level = 0; level < count; level++)
 	{
-		if (generated && level > 0)
+		if (level > 0)
 		{
 			char[] next = mipgen::next_level(allocator, pixels, lw, lh, options);
 			alloc::free(allocator, pixels.ptr);
@@ -383,23 +451,24 @@ fn BlockImage? transcode_ktx2_blocks(char[] encoded, TextureFormat format, Alloc
 		}
 		else
 		{
-			if (pixels.len) alloc::free(allocator, pixels.ptr);
-			pixels = {};
-			// Face 0 of layer 0, exactly as `decode_ktx2_plain` picks its image:
-			// a material's map is one picture, and a cube is `ktx_faces`' business.
-			basis::Transcoded? rgba = basis::transcode(allocator, encoded, level, 0, 0, basis::TF_RGBA32, 4);
+			basis::Transcoded? rgba = basis::transcode(allocator, encoded, 0, 0, 0, basis::TF_RGBA32, 4);
 			if (catch rgba) return UNSUPPORTED_IMAGE~;
 			pixels = rgba.data;
 			lw = rgba.width;
 			lh = rgba.height;
 		}
 
-		char[]? blocks = bc7::encode(allocator, pixels, lw, lh, true, 0, true);
+		char[]? blocks = bc7::encode(allocator, pixels, lw, lh, true, threads, true);
 		if (catch blocks) return UNSUPPORTED_IMAGE~;
 		out.levels[level] = blocks;
 	}
 
 	ok = true;
+	if (!quiet)
+	{
+		@debug_log("basis: %dx%d, %d levels encoded to BC7 in %d ms (the file shipped no chain)",
+			info.width, info.height, count, (long)started.to_now() / 1_000_000);
+	}
 	return out;
 }
 

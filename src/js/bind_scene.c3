@@ -72,9 +72,11 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "meshMaterial", &js_mesh_material, 3);
 	self.bind(host, "splitMesh", &js_split_mesh, 3);
 	self.bind(host, "merge", &js_merge, 5);
-	self.bind(host, "assetNodes", &js_asset_nodes, 3);
+	self.bind(host, "assetNodes", &js_asset_nodes, 4);
 	self.bind(host, "assetLights", &js_asset_lights, 2);
 	self.bind(host, "assetCameras", &js_asset_cameras, 2);
+	self.bind(host, "assetBodies", &js_asset_bodies, 2);
+	self.bind(host, "assetJoints", &js_asset_joints, 2);
 	self.bind(host, "assetClips", &js_asset_clips, 2);
 	self.bind(host, "assetBones", &js_asset_bones, 2);
 	self.bind(host, "bindAnimation", &js_bind_animation, 6);
@@ -106,6 +108,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setVisible", &js_set_visible, 3);
 	self.bind(host, "setStatic", &js_set_static, 3);
 	self.bind(host, "setCollides", &js_set_collides, 3);
+	self.bind(host, "setCollisionOnly", &js_set_collision_only, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
@@ -1297,6 +1300,32 @@ fn void js_set_collides(
 }
 
 <*
+ `setCollisionOnly(index, generation, on)` — whether this node is swept against
+ and never drawn.
+
+ The half of `setCollides` that has no opposite: a node with this on is in every
+ query and in no draw list, which is what a `KHR_implicit_shapes` box needs to be
+ and what nothing else here can be. `Node.collision_only` has the argument.
+*>
+fn void js_set_collision_only(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	ref.scene.set_collision_only(ref.id, arg_truth(&js, argc, args, 2));
+}
+
+<*
  `setStatic(index, generation, on)` — put this node in the cached half of the
  shadow map, and say whether it went.
 
@@ -1779,6 +1808,16 @@ fn void js_stats(
 	// until the first frame a `material.alphaTest` caster is drawn, and true from
 	// then on: it reports a pipeline that exists, not one that was used this frame.
 	js.set_property(object, "shadowCutout", qjs::bool_value(stats.shadow_cutout));
+	// The frame's sweeps, as one nested object — the only nested one here, because
+	// the four are ratios of each other and a script printing a frame breakdown
+	// should not have to know which of thirty flat keys belong together. See
+	// `SweepCounters`.
+	qjs::Value sweep = js.object();
+	js.set_property(sweep, "calls", qjs::int_value((int)stats.sweep.calls));
+	js.set_property(sweep, "sweeps", qjs::int_value((int)stats.sweep.sweeps));
+	js.set_property(sweep, "gathered", qjs::int_value((int)stats.sweep.gathered));
+	js.set_property(sweep, "steps", qjs::int_value((int)stats.sweep.steps));
+	js.set_property(object, "sweep", sweep);
 	FrameTiming timing = self.renderer != null ? self.renderer.timing() : (FrameTiming) { };
 	js.set_property(object, "gpuMs", qjs::number_value(timing.total));
 	js.set_property(object, "prepareMs", qjs::number_value(timing.prepare));

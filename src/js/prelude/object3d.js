@@ -40,6 +40,14 @@ export class Object3D {
 		// default, because the surprising answer is a wall walked through
 		// rather than a pickup that blocks.
 		this._collides = true;
+		// Whether this object is collision geometry and nothing else — see the
+		// accessor. Off by default; only the collision proxy an implicit shape
+		// gets from `instantiate({ physics: true })` sets it.
+		this._collisionOnly = false;
+		// Something to do the moment this object is in a scene, or null — which
+		// is every object but the root of an `instantiate({ physics: true })`.
+		// A body hangs on a host node and there is no host node until an `add`.
+		this._onAdded = null;
 		// Whether this object is in the half of the shadow map that is drawn
 		// once and kept — `plan.md` §19.3. Off by default, and the host refuses
 		// it on anything with a skin, which is why the setter reads the answer
@@ -145,6 +153,26 @@ export class Object3D {
 	set collides(v) {
 		this._collides = !!v;
 		if (this._i >= 0) H.setCollides(this._i, this._g, this._collides);
+	}
+
+	// **"This is a shape, not a picture."** On, the object is swept against,
+	// raycast and reported by every query, and drawn by nothing — no draw call,
+	// no instance, no triangles in `three.stats()`.
+	//
+	// It is what a `KHR_implicit_shapes` box or capsule becomes:
+	// `instantiate({ physics: true })` gives the shape a low-poly proxy mesh and
+	// sets this, so a barrel collides as a box and a soldier as a capsule while
+	// the art draws as itself. Hiding the proxy with `visible = false` would not
+	// do — an invisible node is skipped when a query is *answered*, which is
+	// right for a hidden character and wrong for a collider.
+	//
+	// Setting it by hand is the other half of `collides = false`: the two
+	// together are how a script writes an invisible wall over a mesh it also
+	// wants to see.
+	get collisionOnly() { return this._collisionOnly; }
+	set collisionOnly(v) {
+		this._collisionOnly = !!v;
+		if (this._i >= 0) H.setCollisionOnly(this._i, this._g, this._collisionOnly);
 	}
 
 	// What this object draws, or null for a group. Overridden by Mesh.
@@ -290,6 +318,7 @@ export class Object3D {
 		this._flush();
 		if (!this._visible) H.setVisible(i, g, false);
 		if (!this._collides) H.setCollides(i, g, false);
+		if (this._collisionOnly) H.setCollisionOnly(i, g, true);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(i, g, material);
@@ -326,6 +355,14 @@ export class Object3D {
 		// After the children, because the map is of the whole subtree and they have
 		// only just been given host nodes.
 		if (this._liveSkin && this._asset) this._bindAnimation();
+		// Last, because it is the only thing here that may look at the finished
+		// subtree — the file's bodies do. Cleared before it runs, so an object
+		// added, removed and added again does it once.
+		if (this._onAdded) {
+			const run = this._onAdded;
+			this._onAdded = null;
+			run(this);
+		}
 	}
 
 	// The host node is gone; this object is a detached description again, and
@@ -793,6 +830,7 @@ export class Object3D {
 			scale: this.scale.toJSON(),
 			visible: this._visible,
 			collides: this._collides,
+			collisionOnly: this._collisionOnly,
 			inScene: this._i >= 0,
 			children: this.children.length,
 		};

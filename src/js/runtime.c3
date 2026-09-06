@@ -349,6 +349,13 @@ struct JsRuntime
 	// The game frame policy, set by `--assets` through `set_assets_root`: a game
 	// is warned and counted where an agent is stopped.
 	bool game_frames;
+
+	// Whether the two "this happened and is not fatal" sentences have been said
+	// yet: the fixed loop dropping steps, and a loop callback overrunning the
+	// frame budget without being taken away. Both can happen on every frame of a
+	// slow patch, and both are worth saying exactly once.
+	bool dropped_reported;
+	bool loop_overrun_reported;
 	long frame_overruns;
 	// Where the last frame went, split by span — `frame_loop.c3`'s `FrameSpend`,
 	// filled by every `tick` and read by the overrun report and `three.frame.ms`.

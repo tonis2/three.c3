@@ -365,6 +365,119 @@ fn void a_basis_texture_becomes_blocks() @test
 }
 
 <*
+ UASTC becomes BC7 by being *mapped*, and the check is that no picture is lost.
+
+ `transcode_ktx2_blocks` no longer decodes and re-encodes: `ktx::uastc_bc7`
+ rewrites each UASTC block as a BC7 block, endpoints requantized and weights
+ remapped, with no pixel in between. So this asserts against the transcoder's
+ own RGBA8 output, which is what the mapping has to agree with — the source
+ would be measuring UASTC's quantisation as well.
+
+ A detailed source rather than flat quadrants, deliberately: flat blocks take
+ UASTC's solid mode, which maps exactly, and would pass whatever the rest of
+ the mapper did.
+*>
+fn void a_uastc_texture_becomes_blocks() @test
+{
+	const uint SIDE = 32;
+
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+	for (uint y = 0; y < SIDE; y++)
+	{
+		for (uint x = 0; x < SIDE; x++)
+		{
+			sz at = ((sz)y * SIDE + x) * 4;
+			source[at + 0] = (char)(x * 8 + y);
+			source[at + 1] = (char)(255 - y * 7);
+			source[at + 2] = (char)((x * y) & 0xff);
+			source[at + 3] = (char)(x + y < SIDE ? 0xff : 0x40);
+		}
+	}
+
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::UASTC_4X4, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 4, .srgb = true, .mipmaps = true }
+	)!!;
+	defer free(blob);
+
+	three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, bc7)!!;
+	defer made.free();
+
+	uint chain = three::mip_levels(SIDE, SIDE);
+	test::@check(made.levels.len == chain,
+		"the file's %d levels became %d", chain, (int)made.levels.len);
+
+	// Every level, not just the base: a mapper that got a mode wrong would show
+	// it on whichever level happened to use that mode.
+	for (uint level = 0; level < chain; level++)
+	{
+		uint side = three::level_extent(SIDE, level);
+		basis::Transcoded want = basis::transcode(mem, blob, level, 0, 0, basis::TF_RGBA32, 4)!!;
+		defer free(want.data);
+		char[] back = bc7::decode(mem, made.levels[level], side, side)!!;
+		defer free(back);
+
+		// 9 is what the mapper is allowed to be off by, and it is the library's
+		// number rather than this file's: `uastc_bc7_tests::every_mode_maps`
+		// measures every one of UASTC's nineteen modes over uniformly random
+		// blocks and the worst is mode 18's 9, its 5-bit weight grid folded onto
+		// BC7's 4-bit one. Anything tighter would be a bound this image happens
+		// to meet — it measures 5 — and not one the mapper promises.
+		uint worst = worst_channel(want.data, back);
+		test::@check(worst <= 9,
+			"level %d lost the picture, worst channel off by %d", level, worst);
+	}
+}
+
+<*
+ And the same file, uploaded — BC7 blocks on the device, not RGBA8.
+
+ `claim_blocks_if_possible` is the only caller of the transcode, and what it
+ decides is whether a Basis file reaches the device as blocks at all. The slot
+ it returns records the format and the level count, which is where a transcode
+ that quietly fell back to the decoder would show up.
+*>
+fn void a_basis_texture_uploads_as_blocks() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		if (!renderer.gpu.supports(bc7)) return;   // no BC7 here; the RGBA8 path is correct
+
+		const uint SIDE = 32;
+		char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+		defer free(source);
+		for (uint i = 0; i < source.len; i += 4)
+		{
+			source[i] = (char)(i / 4);
+			source[i + 1] = (char)(255 - i / 4);
+			source[i + 2] = (char)((i / 4) * 3);
+			source[i + 3] = 255;
+		}
+
+		char[][1] images = { source };
+		char[] blob = basis::encode(
+			mem, basis::ETC1S, images[..], SIDE, SIDE, basis::TexType.D2,
+			{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = true }
+		)!!;
+		defer free(blob);
+
+		three::Assets* assets = &renderer.pass.assets;
+		int slot = assets.claim_blocks_if_possible(&renderer.gpu, blob, three::ColorSpace.SRGB, true, false)!!;
+		defer assets.release_texture(&renderer.gpu, slot);
+
+		test::@check(assets.textures[slot].texture.format.equals(bc7),
+			"the upload is not BC7 sRGB");
+		test::@check(assets.textures[slot].texture.levels == three::mip_levels(SIDE, SIDE),
+			"the upload has %d levels, not the file's %d",
+			assets.textures[slot].texture.levels, three::mip_levels(SIDE, SIDE));
+	};
+}
+
+<*
  A Basis file that shipped no chain still gets one.
 
  The levels are the file's wherever it has any, and this is the one case where
@@ -631,5 +744,368 @@ fn void a_glb_with_a_basisu_texture_arrives_shaded() @test
 			"the KTX2 base colour map reached a texture slot; -1 is the old answer");
 		test::@check(assets.textures[slot].texture.width == SIZE,
 			"and it is the picture, %d wide", assets.textures[slot].texture.width);
+	};
+}
+
+// ============================================================================
+// The load's pre-pass
+// ============================================================================
+
+<*
+ A `.glb` with several KTX2 images, each on a quad of its own.
+
+ `write_basisu_glb`'s many-image sibling, which is what the pre-pass needs to be
+ asked anything at all: one image is a loop that runs once. Every image gets a
+ texture, so every one is queued; `with_materials` is what decides whether
+ anything ever *claims* one, which is the other half of the ownership question.
+
+ The geometry is one quad reused by every primitive — the same four vertices and
+ six indices — because nothing here is about geometry and a second copy would
+ only be a second thing to get wrong.
+*>
+fn void write_basisu_glb_multi(String path, char[][] ktx2s, bool with_materials)
+{
+	float[12] positions = {
+		-1, -1, 0,   1, -1, 0,   1, 1, 0,   -1, 1, 0,
+	};
+	float[12] normals = {
+		0, 0, 1,   0, 0, 1,   0, 0, 1,   0, 0, 1,
+	};
+	float[8] uvs = { 0, 1,   1, 1,   1, 0,   0, 0 };
+	ushort[6] indices = { 0, 1, 2, 0, 2, 3 };
+
+	List{char} bin;
+	bin.init(mem);
+	defer bin.free();
+
+	List{sz} image_at;
+	List{sz} image_len;
+	image_at.init(mem);
+	image_len.init(mem);
+	defer image_at.free();
+	defer image_len.free();
+
+	sz pos_at = bin.len();
+	bin.push_all(((char*)&positions)[:(sz)48]);
+	sz nrm_at = bin.len();
+	bin.push_all(((char*)&normals)[:(sz)48]);
+	sz uv_at = bin.len();
+	bin.push_all(((char*)&uvs)[:(sz)32]);
+	sz idx_at = bin.len();
+	bin.push_all(((char*)&indices)[:(sz)12]);
+	foreach (ktx2 : ktx2s)
+	{
+		while (bin.len() % 4 != 0) bin.push(0);
+		image_at.push(bin.len());
+		image_len.push(ktx2.len);
+		bin.push_all(ktx2);
+	}
+	while (bin.len() % 4 != 0) bin.push(0);
+
+	DString json;
+	json.init(mem);
+	defer json.free();
+	json.appendf(`{"asset":{"version":"2.0"},`);
+	json.appendf(`"extensionsUsed":["KHR_texture_basisu"],`);
+	json.appendf(`"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],`);
+
+	json.appendf(`"meshes":[{"name":"quads","primitives":[`);
+	foreach (i, ktx2 : ktx2s)
+	{
+		if (i > 0) json.appendf(`,`);
+		json.appendf(`{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3`);
+		if (with_materials) json.appendf(`,"material":%d`, i);
+		json.appendf(`}`);
+	}
+	json.appendf(`]}],`);
+
+	if (with_materials)
+	{
+		json.appendf(`"materials":[`);
+		foreach (i, ktx2 : ktx2s)
+		{
+			if (i > 0) json.appendf(`,`);
+			json.appendf(`{"pbrMetallicRoughness":{"baseColorTexture":{"index":%d}}}`, i);
+		}
+		json.appendf(`],`);
+	}
+
+	json.appendf(`"textures":[`);
+	foreach (i, ktx2 : ktx2s)
+	{
+		if (i > 0) json.appendf(`,`);
+		json.appendf(`{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":%d}}}`, i);
+	}
+	json.appendf(`],"samplers":[{}],`);
+
+	json.appendf(`"images":[`);
+	foreach (i, ktx2 : ktx2s)
+	{
+		if (i > 0) json.appendf(`,`);
+		json.appendf(`{"mimeType":"image/ktx2","bufferView":%d}`, 4 + i);
+	}
+	json.appendf(`],`);
+
+	json.appendf(
+		`"accessors":[`
+		`{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-1,-1,0],"max":[1,1,0]},`
+		`{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"},`
+		`{"bufferView":2,"componentType":5126,"count":4,"type":"VEC2"},`
+		`{"bufferView":3,"componentType":5123,"count":6,"type":"SCALAR"}],`,
+	);
+	json.appendf(
+		`"bufferViews":[`
+		`{"buffer":0,"byteOffset":%d,"byteLength":%d},`
+		`{"buffer":0,"byteOffset":%d,"byteLength":%d},`
+		`{"buffer":0,"byteOffset":%d,"byteLength":%d},`
+		`{"buffer":0,"byteOffset":%d,"byteLength":%d}`,
+		pos_at, (sz)48, nrm_at, (sz)48, uv_at, (sz)32, idx_at, (sz)12
+	);
+	foreach (i, at : image_at)
+	{
+		json.appendf(`,{"buffer":0,"byteOffset":%d,"byteLength":%d}`, at, image_len[i]);
+	}
+	json.appendf(`],`);
+	json.appendf(`"buffers":[{"byteLength":%d}]}`, bin.len());
+	while (json.len() % 4 != 0) json.append_char(' ');
+
+	List{char} glb;
+	glb.init(mem);
+	defer glb.free();
+	uint total = 12 + 8 + (uint)json.len() + 8 + (uint)bin.len();
+	@append_u32(&glb, 0x46546C67);   // "glTF"
+	@append_u32(&glb, 2);
+	@append_u32(&glb, total);
+	@append_u32(&glb, (uint)json.len());
+	@append_u32(&glb, 0x4E4F534A);   // "JSON"
+	glb.push_all(json.str_view());
+	@append_u32(&glb, (uint)bin.len());
+	@append_u32(&glb, 0x004E4942);   // "BIN\0"
+	glb.push_all(bin.array_view());
+
+	file::save(path, glb.array_view())!!;
+}
+
+<*
+ Four small pictures, two in each codec, no two of them the same.
+
+ Different content on purpose: a mapper bug that only shows on flat blocks, or
+ only on an alpha slice, would pass a set of four identical images. Encoded with
+ the same options `encode_ktx2_basis` uses, so these are the files a real export
+ writes.
+*>
+fn char[] pre_pass_blob(uint which)
+{
+	const uint SIDE = 32;
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+
+	for (uint y = 0; y < SIDE; y++)
+	{
+		for (uint x = 0; x < SIDE; x++)
+		{
+			sz at = ((sz)y * SIDE + x) * 4;
+			switch (which % 4)
+			{
+				case 0:
+					// Flat quadrants — the case every codec maps exactly.
+					source[at + 0] = (char)(x >= SIDE / 2 ? 0xf0 : 0x10);
+					source[at + 1] = (char)(y >= SIDE / 2 ? 0xf0 : 0x10);
+					source[at + 2] = 0x80;
+					source[at + 3] = 0xff;
+				case 1:
+					// A gradient, which takes the interpolated modes.
+					source[at + 0] = (char)(x * 8);
+					source[at + 1] = (char)(255 - y * 7);
+					source[at + 2] = (char)((x * y) & 0xff);
+					source[at + 3] = 0xff;
+				case 2:
+					// Alpha, so the second slice of an ETC1S file is exercised.
+					source[at + 0] = (char)(y * 8);
+					source[at + 1] = (char)(x * 3);
+					source[at + 2] = (char)(x + y);
+					source[at + 3] = (char)(x + y < SIDE ? 0xff : 0x40);
+				default:
+					// Noise, which takes whichever mode is left.
+					source[at + 0] = (char)((x * 37 + y * 11) & 0xff);
+					source[at + 1] = (char)((x * 13 + y * 53) & 0xff);
+					source[at + 2] = (char)((x * 7 + y * 97) & 0xff);
+					source[at + 3] = 0xff;
+			}
+		}
+	}
+
+	char[][1] images = { source };
+	uint codec = which < 2 ? basis::ETC1S : basis::UASTC_4X4;
+	return basis::encode(
+		mem, codec, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = true }
+	)!!;
+}
+
+<*
+ The pre-pass and the one-at-a-time transcode produce the same bytes.
+
+ **This is the whole claim.** `Assets.load` now transcodes every Basis image the
+ file names before any material asks for one, on a pool, with the block mapper
+ pinned to fewer threads inside — three things that could each move a byte. So
+ the check is byte equality against `transcode_ktx2_blocks` called the way it
+ was called before, on the same blobs, for both codecs and four different
+ pictures.
+
+ The last two checks are what `PreBlocks` rests on: the same file asked for as
+ sRGB and as linear is the same blocks, so one transcode serves both and the
+ space is written on at claim time.
+*>
+fn void the_pre_pass_matches_the_serial_transcode() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		if (!renderer.gpu.supports(bc7)) return;   // no BC7 here; the pre-pass declines
+
+		char[][4] blobs;
+		for (uint i = 0; i < 4; i++) blobs[i] = pre_pass_blob(i);
+		defer for (uint i = 0; i < 4; i++) free(blobs[i]);
+
+		String path = "build/ktx_pre_pass.glb";
+		write_basisu_glb_multi(path, blobs[..], true);
+		defer (void)file::delete(path);
+
+		three::Assets* assets = &renderer.pass.assets;
+		three::AssetId id = assets.load(&renderer.gpu, path)!!;
+		three::Asset* asset = assets.slot(id);
+
+		test::@check(asset.images.blocks.len() == 4,
+			"the pre-pass queued %d images, not the file's 4", asset.images.blocks.len());
+
+		foreach (image_index, blob : blobs)
+		{
+			three::BlockImage want = three::transcode_ktx2_blocks(blob, bc7)!!;
+			defer want.free();
+
+			three::BlockImage* got = null;
+			foreach (&pre : asset.images.blocks)
+			{
+				if (pre.image == (int)image_index) got = &pre.blocks;
+			}
+			test::@check(got != null, "image %d was not pre-transcoded", image_index);
+
+			test::@check(got.width == want.width && got.height == want.height,
+				"image %d is %dx%d, not %dx%d",
+				image_index, got.width, got.height, want.width, want.height);
+			test::@check(got.levels.len == want.levels.len,
+				"image %d has %d levels, not %d",
+				image_index, (int)got.levels.len, (int)want.levels.len);
+
+			foreach (level, bytes : want.levels)
+			{
+				test::@check(got.levels[level] == bytes,
+					"image %d level %d differs from the serial transcode", image_index, level);
+			}
+		}
+
+		three::TextureFormat linear = { three::TextureFamily.BC7, three::ColorSpace.LINEAR };
+		three::BlockImage as_srgb = three::transcode_ktx2_blocks(blobs[0], bc7)!!;
+		defer as_srgb.free();
+		three::BlockImage as_linear = three::transcode_ktx2_blocks(blobs[0], linear)!!;
+		defer as_linear.free();
+		test::@check(as_srgb.levels.len == as_linear.levels.len,
+			"the two spaces gave different level counts");
+		foreach (level, bytes : as_srgb.levels)
+		{
+			test::@check(as_linear.levels[level] == bytes,
+				"level %d differs between sRGB and linear; one transcode cannot serve both", level);
+		}
+	};
+}
+
+<*
+ A material claiming a pre-transcoded image uploads BC7, and takes it away.
+
+ The pre-pass would be a memory leak dressed as a speed-up if the claim quietly
+ transcoded again and left the queued copy sitting there. So this asserts both
+ ends: the slot on the device is BC7 with the file's own chain, and the queue
+ entry is gone.
+*>
+fn void a_claim_after_the_pre_pass_uploads_blocks() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		if (!renderer.gpu.supports(bc7)) return;
+
+		char[][4] blobs;
+		for (uint i = 0; i < 4; i++) blobs[i] = pre_pass_blob(i);
+		defer for (uint i = 0; i < 4; i++) free(blobs[i]);
+
+		String path = "build/ktx_pre_pass_claim.glb";
+		write_basisu_glb_multi(path, blobs[..], true);
+		defer (void)file::delete(path);
+
+		three::Assets* assets = &renderer.pass.assets;
+		three::AssetId id = assets.load(&renderer.gpu, path)!!;
+
+		uint chain = three::mip_levels(32, 32);
+		for (uint mesh = 0; mesh < 4; mesh++)
+		{
+			assets.ensure_uploaded(id, mesh);
+			int slot = assets.mesh(id, mesh).texture;
+			test::@check(slot >= 0, "primitive %d did not resolve its KTX2 map", mesh);
+			test::@check(assets.textures[slot].texture.format.equals(bc7),
+				"primitive %d uploaded something that is not BC7 sRGB", mesh);
+			test::@check(assets.textures[slot].texture.levels == chain,
+				"primitive %d uploaded %d levels, not the file's %d",
+				mesh, assets.textures[slot].texture.levels, chain);
+		}
+
+		three::Asset* asset = assets.slot(id);
+		foreach (pre : asset.images.blocks)
+		{
+			test::@check(pre.image < 0,
+				"image %d was still queued after its material claimed it", pre.image);
+		}
+	};
+}
+
+<*
+ A file whose images no material ever names gives every one of them back.
+
+ The pre-pass transcodes what a `texture` points at, and a `texture` nothing
+ samples is perfectly legal glTF — so this file queues four chains that nobody
+ will ever claim. Freeing them is `AssetImages.free_blocks`' job, reached from
+ `free_stream`, reached from both `free_slot` here and `Assets.free` when the
+ device is given back.
+
+ There is no assertion on the bytes: the check is the runner's own, which
+ reports whatever the test allocated and did not free.
+*>
+fn void unclaimed_pre_transcodes_are_given_back() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		if (!renderer.gpu.supports(bc7)) return;
+
+		char[][4] blobs;
+		for (uint i = 0; i < 4; i++) blobs[i] = pre_pass_blob(i);
+		defer for (uint i = 0; i < 4; i++) free(blobs[i]);
+
+		String path = "build/ktx_pre_pass_orphan.glb";
+		write_basisu_glb_multi(path, blobs[..], false);
+		defer (void)file::delete(path);
+
+		three::Assets* assets = &renderer.pass.assets;
+		three::AssetId id = assets.load(&renderer.gpu, path)!!;
+
+		test::@check(assets.slot(id).images.blocks.len() == 4,
+			"the pre-pass queued %d images, so this asserts nothing",
+			assets.slot(id).images.blocks.len());
+
+		// Nothing ever drew it, so the sweep takes the whole file — and with it
+		// four BC7 chains no material asked for.
+		three::UnloadReport report = assets.unload_unused(&renderer.gpu);
+		test::@check(report.assets == 1, "the sweep took %d assets, not the one", report.assets);
+		test::@check(assets.slot(id) == null, "the handle still names a live asset");
 	};
 }

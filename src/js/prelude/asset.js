@@ -24,6 +24,27 @@ const H = globalThis.__three;
 // through untranslated and this names it, for `BLEND_BY_ORDINAL`'s reason.
 const LIGHT_BY_ORDINAL = ['directional', 'point', 'spot'];
 
+// `AssetShape`'s order, written out here the way `LIGHT_BY_ORDINAL` writes out
+// the light types: the host passes the ordinal through untranslated and this is
+// the one place the two tables have to agree.
+const COLLIDER_BY_ORDINAL = ['mesh', 'hull', 'box', 'sphere', 'capsule', 'cylinder'];
+
+// What each of them becomes in the solver. A mesh and a convex hull are both
+// `hull` there — the solver holds no triangle mesh, so the file's triangles are
+// collision geometry for every sweep and every raycast and their convex hull is
+// what a body rests on.
+//
+// A **cylinder** is `hull` as well, and that is the nearest thing this solver can
+// hold: it has a box, a sphere, a capsule, a hull and a heightfield, and of those
+// only a hull has flat ends and a round side. It is the hull of the *proxy*, which
+// is the lathe built from the file's own height and radii, so a sixteen-sided drum
+// rather than a capsule with the corners rounded off — a shape that is right
+// everywhere except between two facets. A capsule wearing the name would be wrong
+// at the rim, which is the only place a cylinder is ever stood on.
+const SOLVER_SHAPE = {
+	mesh: 'hull', hull: 'hull', box: 'box', sphere: 'sphere', capsule: 'capsule', cylinder: 'hull',
+};
+
 // ---- The file's intensities, in this renderer's units -----------------------
 //
 // **These three numbers are a convention and not physics, and there is no
@@ -403,6 +424,48 @@ function stackTextures(stack) {
 // convention and find the typo.
 const NAMES_SHOWN = 24;
 
+// The Scene an object is in, or null when the tree has not been added to one.
+// By marker rather than `instanceof Scene`, for `Object3D.add`'s reason: the
+// class lives in a module that imports this one.
+function sceneRoot(object) {
+	let top = object;
+	while (top.parent) top = top.parent;
+	return top._isScene === true ? top : null;
+}
+
+// Whether an object sits at the same place with a different parent — nothing
+// between it and the scene root turns, moves or scales it.
+function isPlain(object) {
+	const { position: p, rotation: r, scale: s } = object;
+	if (p.x !== 0 || p.y !== 0 || p.z !== 0) return false;
+	if (s.x !== 1 || s.y !== 1 || s.z !== 1) return false;
+	if (r.x !== 0 || r.y !== 0 || r.z !== 0) return false;
+	const q = object._q;
+	return !q || (q[0] === 0 && q[1] === 0 && q[2] === 0 && q[3] === 1);
+}
+
+// Whether this object can become a direct child of the scene without moving,
+// which is what the solver requires of a body — world space has to be what a
+// body's transform is measured from. True when it is one already, or when
+// everything between it and the root is at identity; false when the move would
+// take the object somewhere else, which is a body the caller has to report.
+function canStandAtRoot(object, scene) {
+	if (object.parent === scene) return true;
+	for (let up = object.parent; up && up !== scene; up = up.parent) {
+		if (!isPlain(up)) return false;
+	}
+	return true;
+}
+
+// `to` ends up where `from` is. The quaternion goes last, because writing the
+// Euler triple clears it.
+function copyPlacement(to, from) {
+	to.position.set(from.position.x, from.position.y, from.position.z);
+	to.rotation.set(from.rotation.x, from.rotation.y, from.rotation.z);
+	to._q = from._q ? [...from._q] : null;
+	to.scale.set(from.scale.x, from.scale.y, from.scale.z);
+}
+
 function nameList(names) {
 	if (!names.length) return '(none)';
 	if (names.length <= NAMES_SHOWN) return names.join(', ');
@@ -484,11 +547,14 @@ export class Asset {
 	//
 	// The array never leaves this object: `_build` and `node` read it and nothing
 	// hands it to a caller, so there is nobody to mutate the cache from.
-	_rows(skeleton) {
+	_rows(skeleton, physics = false) {
 		H.checkAsset(this._a, this._g);
-		const at = skeleton ? 1 : 0;
-		if (!this._nodeRows) this._nodeRows = [null, null];
-		if (!this._nodeRows[at]) this._nodeRows[at] = H.assetNodes(this._a, this._g, skeleton);
+		// Four entries, because the walk depends on two flags and on nothing
+		// else: keeping the bone nodes or dropping them, and letting the file's
+		// colliders decide the index or leaving every mesh in it.
+		const at = (skeleton ? 1 : 0) + (physics ? 2 : 0);
+		if (!this._nodeRows) this._nodeRows = [null, null, null, null];
+		if (!this._nodeRows[at]) this._nodeRows[at] = H.assetNodes(this._a, this._g, skeleton, physics);
 		return this._nodeRows[at];
 	}
 
@@ -588,6 +654,81 @@ export class Asset {
 			});
 		}
 		return this._cameras;
+	}
+
+	// What the file said collides — its `KHR_physics_rigid_bodies` blocks, node
+	// by node.
+	//
+	//     for (const c of asset.colliders) console.log(c.name, c.shape, c.mass);
+	//
+	// A description and not a body, for `lights`' reason: the file states what
+	// collides and which of it this engine can hold is a choice.
+	// `instantiate({ physics: true })` is one policy over this list and a script
+	// is free to write another.
+	//
+	// `{ node, name, shape, collider, trigger, motion, kinematic, mass,
+	// gravityFactor, linearDamping, angularDamping, linearVelocity,
+	// angularVelocity, material, friction, restitution, proxy, filtered }`.
+	// `node` is the glTF node index — `object._gltfNode` on an instantiated tree
+	// — and `shape` is one of `'mesh'`, `'hull'`, `'box'`, `'sphere'`,
+	// `'capsule'` or `'cylinder'`. Every number is **the file's own**, which for
+	// mass, friction and restitution is also this engine's.
+	//
+	// `proxy` says the shape got a collision-only mesh of its own, which is what
+	// a box or a capsule needs to be in a query at all. `filtered` says the file
+	// named a `collisionFilter`; this solver has no layers to put one in and it
+	// is reported rather than applied.
+	//
+	// Read at load out of the JSON chunk, so this costs no upload; cached, for
+	// `nodes`' reason.
+	get colliders() {
+		if (!this._colliders) {
+			H.checkAsset(this._a, this._g);
+			this._colliders = H.assetBodies(this._a, this._g).map((row) => {
+				const [
+					node, name, shape, collider, trigger, motion, kinematic, mass,
+					gravityFactor, linearDamping, angularDamping,
+					lvx, lvy, lvz, avx, avy, avz,
+					material, friction, restitution, proxy, filtered,
+				] = row;
+				return {
+					node, name,
+					shape: COLLIDER_BY_ORDINAL[shape] || 'mesh',
+					collider, trigger, motion, kinematic, mass,
+					gravityFactor, linearDamping, angularDamping,
+					linearVelocity: [lvx, lvy, lvz],
+					angularVelocity: [avx, avy, avz],
+					material, friction, restitution, proxy, filtered,
+				};
+			});
+		}
+		return this._colliders;
+	}
+
+	// The file's `physicsJoints`, each resolved to the two nodes it holds.
+	//
+	// `{ a, b, pivot, collide, limits }`, with `a` and `b` glTF node indices and
+	// each limit `{ linearAxes | angularAxes, min, max, stiffness, damping }` —
+	// which is exactly what `three.physics.joint` takes, because a glTF joint's
+	// description and this one are the same object.
+	get physicsJoints() {
+		if (!this._physicsJoints) {
+			H.checkAsset(this._a, this._g);
+			this._physicsJoints = H.assetJoints(this._a, this._g).map((row) => {
+				const [a, b, px, py, pz, collide, limits] = row;
+				return {
+					a, b, pivot: [px, py, pz], collide,
+					limits: limits.map(([kind, axes, min, max, stiffness, damping]) => {
+						const list = [];
+						for (let i = 0; i < 3; i++) if (axes & (1 << i)) list.push(i);
+						const out = { min, max, stiffness, damping };
+						out[kind === 0 ? 'linearAxes' : 'angularAxes'] = list;
+						return out;
+					}),
+				};
+			});
+		}
+		return this._physicsJoints;
 	}
 
 	mesh(name) {
@@ -762,7 +903,7 @@ export class Asset {
 	// than once a frame. Not a switch to flip on a crowd.
 	instantiate(name, options = undefined) {
 		const opt = this._instanceOptions(options);
-		const rows = this._rows(opt.skeleton);
+		const rows = this._rows(opt.skeleton, opt.physics);
 		const root = new Object3D();
 		// The name is what the tree is *called*, not which part of the file it is.
 		// `node(name)` is the one that picks — see it for why the two are separate.
@@ -809,7 +950,7 @@ export class Asset {
 	// outside the subtree drives nothing rather than failing.
 	node(name, options = undefined) {
 		const opt = this._instanceOptions(options);
-		const rows = this._rows(opt.skeleton);
+		const rows = this._rows(opt.skeleton, opt.physics);
 		const at = rows.findIndex((row) => row[0] === name);
 		if (at < 0) {
 			throw new Error(`no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`);
@@ -835,7 +976,7 @@ export class Asset {
 	_instanceOptions(options) {
 		const {
 			skeleton = false, skinning = 'vertex', materials = false,
-			lights = false, camera = false,
+			lights = false, camera = false, physics = false,
 		} = options || {};
 		return {
 			skeleton: !!skeleton,
@@ -843,6 +984,7 @@ export class Asset {
 			materials: !!materials,
 			lights: !!lights,
 			camera,
+			physics: !!physics,
 		};
 	}
 
@@ -962,6 +1104,162 @@ export class Asset {
 		three.camera.roll = rollOf(cam.node.direction, cam.up);
 	}
 
+	// `three.physics` filled from the file — `instantiate({ physics: true })`.
+	//
+	// **The index is decided by the tree and the bodies are decided here.** Which
+	// meshes collide is already settled by the time this runs: the walk gave every
+	// node the file's answer and gave every implicit shape a collision-only proxy,
+	// and that is what the character controller and every raycast read. What is
+	// left is the solver, which is a smaller thing and a stricter one.
+	//
+	// Every collider node gets `object.body` — the description
+	// `three.physics.add(object)` reads with no options — whether or not a body is
+	// made here, so a script can make its own later with one call.
+	//
+	// **A body is made when the file describes something that moves.** A `motion`
+	// or a `trigger` is that; a plain collider is a wall, and a wall exists in the
+	// solver only to hold a body up. So a file with no motion and no trigger in it
+	// — a level, which is the common case — gets no solver bodies at all and pays
+	// for none, while a file with a crate in it gets the ground under the crate.
+	//
+	// **A body's transform is world space**, which is the solver's rule and not
+	// this importer's: a body has to be a direct child of the scene. A node the
+	// file made a body is therefore lifted to the scene root when everything
+	// between it and the root sits at identity — which is where `instantiate`
+	// leaves its own group — and reported when it does not, because moving it then
+	// would move the object.
+	//
+	// Everything that did not fit is named once by `console.warn`, the way
+	// `_placeLights` names the lanterns it could not light.
+	_placePhysics(root) {
+		const bodies = this.colliders;
+		if (!bodies.length) return;
+
+		const scene = sceneRoot(root);
+		if (scene === null) return;
+
+		const byNode = new Map();
+		root.traverse((o) => { if (o._gltfNode >= 0) byNode.set(o._gltfNode, o); });
+
+		// A wall is only worth a body when something can fall onto it.
+		const moving = bodies.some((b) => b.motion || b.trigger);
+		const skipped = [];
+		const made = new Map();
+		let filtered = 0;
+
+		for (const body of bodies) {
+			if (!body.collider) {
+				// A `motion` with no collider of its own is a compound body, whose
+				// pieces are the colliders on the nodes under it. The solver holds one
+				// shape per body, so it cannot be that.
+				if (body.motion) skipped.push(`${body.name} is a compound body, which the solver has no shape for`);
+				continue;
+			}
+			const object = byNode.get(body.node);
+			if (object === undefined) continue;
+
+			const shape = SOLVER_SHAPE[body.shape];
+			if (shape === null) {
+				skipped.push(`${body.name} is a ${body.shape}, which the solver has no shape for`);
+				continue;
+			}
+
+			const kind = body.trigger ? 'trigger'
+				: body.motion ? (body.kinematic ? 'kinematic' : 'dynamic')
+				: 'static';
+			const spec = {
+				shape,
+				mass: body.motion ? body.mass : 0,
+				friction: body.material ? body.friction : 0.5,
+				restitution: body.material ? body.restitution : 0.2,
+				gravityFactor: body.gravityFactor,
+				linearDamping: body.linearDamping,
+				angularDamping: body.angularDamping,
+			};
+			if (body.kinematic) spec.kinematic = true;
+			if (body.trigger) spec.trigger = true;
+			// The description goes on whether or not a body is made from it, so
+			// `three.physics.add(object)` later needs no arguments.
+			object.body = spec;
+
+			if (!moving && kind === 'static') continue;
+
+			if (!canStandAtRoot(object, scene)) {
+				skipped.push(`${body.name} sits under a transformed parent, and a body's transform is world space`);
+				continue;
+			}
+
+			let carrier;
+			if (kind === 'static' || kind === 'trigger') {
+				// **A wall does not move, so its body is a copy standing where the
+				// wall stands** — the file's tree is left exactly as it was, and the
+				// copy is made from the *shape*, so a solver body and the proxy the
+				// sweep uses are the same box. `Entity`'s trigger volume is the same
+				// arrangement, made from a class instead of a file.
+				const shaped = (body.proxy && object.children.find((c) => c.collisionOnly)) || object;
+				if (!shaped.geometry) {
+					skipped.push(`${body.name} has no mesh for the solver to measure`);
+					continue;
+				}
+				carrier = new Mesh(shaped.geometry);
+				// `<node>.body`, so it is not confused with `<node>.collider`, which
+				// is the proxy standing in the same place for the sweep.
+				carrier.name = `${object.name}.body`;
+				carrier.visible = false;
+				// The drawing — or its proxy — is already in the index; a second box
+				// there would be a second thing every sweep tests.
+				carrier.collides = false;
+				copyPlacement(carrier, object);
+				scene.add(carrier);
+			} else {
+				// **A body that moves is the object itself**, so that
+				// `crate.position` is the crate's and a script that knows the node by
+				// name knows the body. It leaves the file's tree to be one: the
+				// solver writes world transforms, and a body has to hang off the
+				// scene root. The size comes from the drawing rather than from the
+				// implicit shape beside it, which is the same mesh the shape was
+				// measured from.
+				if (!object.geometry) {
+					skipped.push(`${body.name} draws nothing, so the solver has no shape to measure`);
+					continue;
+				}
+				scene.add(object);
+				carrier = object;
+			}
+
+			scene.physics.add(carrier, spec);
+			made.set(body.node, carrier);
+			if (body.filtered) filtered++;
+			if (body.motion && !body.kinematic) {
+				const [lx, ly, lz] = body.linearVelocity;
+				const [ax, ay, az] = body.angularVelocity;
+				if (lx || ly || lz) scene.physics.setVelocity(carrier, [lx, ly, lz]);
+				if (ax || ay || az) scene.physics.setAngularVelocity(carrier, [ax, ay, az]);
+			}
+		}
+
+		for (const joint of this.physicsJoints) {
+			const a = made.get(joint.a);
+			const b = made.get(joint.b);
+			if (a === undefined || b === undefined || !joint.limits.length) {
+				skipped.push(`a joint between nodes ${joint.a} and ${joint.b} holds something that has no body`);
+				continue;
+			}
+			scene.physics.joint(a, b, { limits: joint.limits, pivot: joint.pivot, collide: joint.collide });
+		}
+
+		// One line for the file, not one per collider: a level names the same
+		// filter on all of them and would otherwise say so a hundred times.
+		if (filtered) {
+			skipped.push(`${filtered} name a collision filter, which this solver has no layers for`);
+		}
+		if (skipped.length) {
+			console.warn(
+				`${this.path}: ${made.size} of ${bodies.length} colliders became bodies — ${skipped.join('; ')}`
+			);
+		}
+	}
+
 	// What a tree's root has to carry whether it is the whole file or one node of
 	// it: the clips, the asset it came from, and the bone names `socket()` needs.
 	_carry(root, opt) {
@@ -976,6 +1274,10 @@ export class Asset {
 		// is asked for a bone it has not. A baked instantiation drops the bone
 		// nodes, so the tree itself cannot answer.
 		root._bones = this.bones;
+		// The solver's half of `physics: true`, deferred to the moment the tree is
+		// in a scene: a body hangs on a host node and there is no host node until
+		// something adds this. The index's half is already in the tree.
+		if (opt.physics) root._onAdded = (added) => this._placePhysics(added);
 	}
 
 	// The rows as objects. `from` is -1 for the whole file, parenting the roots
@@ -995,7 +1297,7 @@ export class Asset {
 		const built = new Array(rows.length);
 		let root = into;
 		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
-			const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin] = rows[i];
+			const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin, collides, collisionOnly] = rows[i];
 			if (from >= 0 && i !== from && !(parent >= 0 && built[parent])) continue;
 			// **A `MeshRef` rather than the bare `{ asset, mesh }` this used to
 			// build.** A Mesh only needs the three numbers, so the plain object drew
@@ -1025,6 +1327,11 @@ export class Asset {
 			// remember.
 			node._skin = skin;
 			node._preskinned = opt.compute && skin >= 0;
+			// What the file said collides. True and false for every row of every
+			// file walked without `physics: true`, so this writes the defaults it
+			// found and `_materialize` sends nothing.
+			node._collides = collides;
+			node._collisionOnly = collisionOnly;
 			// Only a copy an instanced node placed has anything but white
 			// here, and only a Mesh has anywhere to put it — a group's row
 			// carries the identity and setting it would define a channel on

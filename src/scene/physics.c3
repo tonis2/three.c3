@@ -503,6 +503,8 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
  bodies nothing can name.
 
  @param mass : `Ignored for anything but a dynamic body — a static one is mass 0 by definition.`
+ @param gravity_factor : `How much of the world's gravity this body feels. 1 is all of it, 0 floats. Ignored for anything but a dynamic body, which is the only kind gravity acts on.`
+ @param linear_damping : `Velocity bled off per second, 0 for none. A glTF motion block carries both of these, which is why they are parameters rather than constants.`
 *>
 fn void? Physics.add(
 	&self,
@@ -513,7 +515,10 @@ fn void? Physics.add(
 	ColliderShape shape,
 	float mass,
 	float friction,
-	float restitution
+	float restitution,
+	float gravity_factor = 1.0f,
+	float linear_damping = 0,
+	float angular_damping = 0
 )
 {
 	self.open();
@@ -549,7 +554,9 @@ fn void? Physics.add(
 		.id = body.id,
 		.collider = self.transformed(&body, node),
 		.mass = dynamic ? mass : 0,
-		.gravity_factor = dynamic ? 1.0f : 0,
+		.gravity_factor = dynamic ? gravity_factor : 0,
+		.linear_dampening = linear_damping,
+		.angular_dampening = angular_damping,
 		.is_kinematic = kind == BodyKind.KINEMATIC,
 		.can_sleep = dynamic,
 		.material = {

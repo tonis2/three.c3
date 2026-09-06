@@ -12,8 +12,11 @@
   arrives once the count starts doubling past four.
 - `colliders` — Of those, the meshes in the spatial index — what every sweep and raycast tests a box
   against. Drawable meshes are collision geometry by default, so this grows as a level is decorated
-  whether anyone meant it to or not; `object.collides = false` takes one out. Read it beside `nodes`:
-  a large gap plus slowing sweeps is a field of grass acting as a fence.
+  whether anyone meant it to or not; `object.collides = false` takes one out, and
+  `asset.instantiate(name, { physics: true })` lets the file's own colliders decide instead. Read it
+  beside `nodes`: a large gap plus slowing sweeps is a field of grass acting as a fence. A collider
+  that is not a drawing — the proxy a `KHR_implicit_shapes` box or capsule gets — is counted here and
+  in `nodes`, and in none of `drawCalls`, `instances` or `triangles`.
 - `assets` — Loaded files and generated shapes resident on the device. Watch it across
   `scene.unload()`.
 - `triangles` — Summed over instances, so 1000 copies of a 500-triangle mesh is 500000.
@@ -64,6 +67,21 @@
 - `poseBytes` — Device memory holding baked animation poses, uploaded once per rigged file and shared
   by every copy. There is no per-frame palette upload behind a baked character, which is why a
   hundred of them is affordable.
+- `sweep` — What the frame's capsule sweeps cost, as `{ calls, sweeps, gathered, steps }`, zeroed at
+  the top of every host tick. The only block here about *work already done* rather than about the
+  scene as it stands, and it exists because a slow `three.moveAndSlide` is one of three things and no
+  other number can tell them apart: too many triangles per sweep, too many advancement steps per
+  sweep, or too many sweeps per call. Read the ratios, not the totals.
+  - `calls` — `three.moveAndSlide` calls, plus one per agent of a `three.moveAndSlideAll`.
+  - `sweeps` — capsule sweeps under them, plus `three.query.sweep` and the nav bake. About four per
+    call for a character walking: the depenetration, the grounded probe, one slide, the floor probe.
+    Ten means it is sliding on ground it should be walking along, or climbing every frame.
+  - `gathered` — triangles handed to the narrow phase, summed over sweeps. Divided by `sweeps` it is
+    what one sweep tests; a few dozen is a level, a few thousand is a field of grass in the index and
+    `colliders` above is where to look next.
+  - `steps` — conservative advancement steps, summed over sweeps. Divided by `sweeps` it is under two
+    for anything a character does; near the cap of 24 is a sweep grazing a surface it never quite
+    reaches.
 - `gpuMs` — Milliseconds the GPU spent on the frame you just asked for, on the GPU's own clock.
   `three.render()` and a screenshot each leave their own measurement, so render first and read after.
   0 before anything is drawn and 0 for a run with no device — use `renderSize()` to tell those apart.

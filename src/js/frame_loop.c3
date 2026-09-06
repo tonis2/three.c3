@@ -42,6 +42,7 @@
 *>
 module three;
 
+import std::io;
 import std::time;
 import std::math::vector;
 import qjs;
@@ -283,6 +284,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 
 	self.take_input(frame);
 
+	// The sweep counters, zeroed before anything in the frame can add to them, so
+	// `three.stats().sweep` read from a system or the animation callback is about
+	// the frame it is being read in. Every scene, not just the rendered one: a
+	// script that sweeps the level it is building would otherwise accumulate there
+	// for ever. See `SweepCounters`.
+	foreach (each : self.pass.scenes) each.sweep = { };
+
 	// The clock first, before anything asks what a frame is worth. One conversion,
 	// one answer: the clip player, the solver, the fixed loop, the follow camera
 	// and the callback are all handed this number rather than differencing the
@@ -297,6 +305,20 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	// here and spent below, inside the budget, because spending it is calling into
 	// JavaScript.
 	int fixed_steps = self.pass.clock.take_fixed_steps();
+
+	// Said once rather than once a frame. A game that has fallen behind drops
+	// steps on every frame it is behind on, and a line per frame would bury the
+	// sentence under itself; `three.frame.droppedSteps` is the running count for
+	// whoever goes looking.
+	if (self.pass.clock.dropped_steps > 0 && !self.dropped_reported)
+	{
+		self.dropped_reported = true;
+		io::printfn(
+			"three: the fixed loop is behind and dropped %d step(s). "
+				"three.frame.droppedSteps is the running count.",
+			self.pass.clock.dropped_steps
+		);
+	}
 
 	// Animation next, and above the early return: the step happens in the host
 	// frame *before* the callback, so a callback can read where a character got to
@@ -406,6 +428,9 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 
 	spend.handlers_ns = after_handlers;
 	spend.fixed_ns = after_fixed - after_handlers;
+	// What the steps cost, handed back to the clock so the next frame's cap is on
+	// the time they took and not only on how many there were — `take_fixed_steps`.
+	self.pass.clock.note_fixed_spend(spend.fixed_ns / 1e6);
 	spend.frame_ns = after_frame - after_fixed;
 	spend.jobs_ns = after_jobs - after_frame;
 	self.frame_spend = spend;
@@ -461,8 +486,20 @@ fn void JsRuntime.call_fixed(&self, int steps)
 	for (int i = 0; i < steps; i++)
 	{
 		if (self.timed_out) break;
-		if (!self.call_loop(self.fixed_fn, dt, FIXED_CALLBACK))
+		if (!self.call_loop(self.fixed_fn, dt, FIXED_CALLBACK, keep_on_timeout: true))
 		{
+			// **A step that ran out of budget is not a step that misbehaved.** Of
+			// the three ways a callback can fail, a throw and a promise are the
+			// script being wrong about what a callback *is*, and there is nothing
+			// to do with those but take it away. The wall is the game having been
+			// slow for one frame, and taking the gameplay loop away for that
+			// leaves a window that still draws and no longer plays — which reads
+			// as the game having crashed while the picture kept moving.
+			//
+			// So the rest of this frame's steps are skipped, `take_fixed_steps`
+			// keeps the next frame from owing them back, and the loop runs again
+			// next frame.
+			if (self.timed_out) return;
 			self.clear_fixed();
 			return;
 		}
@@ -478,9 +515,10 @@ fn void JsRuntime.call_fixed(&self, int steps)
  does the clearing.
 
  @param what : `Which callback, for the sentence: FRAME_CALLBACK or FIXED_CALLBACK.`
- @return `false when it misbehaved and must be taken away. The reason is already reported.`
+ @param keep_on_timeout : `The caller will keep the callback if the budget was what stopped it — see call_fixed. The reason is still reported, once.`
+ @return `false when the call did not finish. The reason is already reported.`
 *>
-fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what)
+fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what, bool keep_on_timeout = false)
 {
 	bool survived = true;
 	@pool()
@@ -490,10 +528,35 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what)
 
 		if (catch err = answer)
 		{
-			self.report_frame_failure(
-				self.timed_out ? self.loop_timeout_message(what)
-					: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem))
-			);
+			if (self.timed_out && keep_on_timeout)
+			{
+				// Drained rather than left pending: the context is being handed
+				// back to a loop that will call into it again next frame, and an
+				// exception nobody took would surface there instead.
+				self.js.exception(tmem);
+				// Once, for the reason above `report_frame_failure`: this one can
+				// happen on every frame of a slow patch, where the other two
+				// happen once and end the loop.
+				if (!self.loop_overrun_reported)
+				{
+					self.loop_overrun_reported = true;
+					self.report_frame_failure(
+						string::tformat(
+							"%s ran for longer than %d ms in one frame. The rest of that frame's steps "
+								"were dropped and the loop is still running",
+							what,
+							self.budget_ns / 1_000_000
+						)
+					);
+				}
+			}
+			else
+			{
+				self.report_frame_failure(
+					self.timed_out ? self.loop_timeout_message(what)
+						: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem))
+				);
+			}
 			survived = false;
 		}
 		else
@@ -860,6 +923,11 @@ fn void js_frame_stats(
 	js.set_property(object, "running", qjs::bool_value(self.frame_active));
 	js.set_property(object, "ticks", qjs::number_value((double)self.frame_ticks));
 	js.set_property(object, "overruns", qjs::number_value((double)self.frame_overruns));
+	// Fixed steps the clock owed and gave up on — `GameClock.take_fixed_steps`.
+	// A running total rather than this frame's, because the number worth reading
+	// is "has this game ever fallen behind", and a per-frame reading would be zero
+	// on every frame anybody happened to look at.
+	js.set_property(object, "droppedSteps", qjs::number_value((double)self.pass.clock.dropped_steps));
 	js.set_property(object, "ms", ms);
 	*out = object;
 }

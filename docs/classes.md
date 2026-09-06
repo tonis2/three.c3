@@ -44,6 +44,7 @@ topic. It is an Object3D, so moving it moves everything.
      travel with the scene: they are the active scene's, and listing them here would suggest a
      scene that is not on screen could be lit through them. -->
 - `collides` — on the root, which draws nothing; set it on the meshes
+- `collisionOnly` — the same: a root draws nothing and is queried by nothing
 
 ### Methods
 
@@ -128,6 +129,7 @@ material is one draw call.
 - `variant` — per copy, free: which row of the material's table
 - `static` — this will not move again: drawn into the shadow map once and kept
 - `collides` — false takes it out of every spatial query — scenery, not a wall
+- `collisionOnly` — true puts it in every query and in no draw — a shape, not a picture
 - `animations` — empty unless this came from `asset.instantiate()`
 - `morphs` — how many morph targets the geometry has, 0 for most
 - `weights` — per copy, free: how much of each morph target this one wears
@@ -930,6 +932,7 @@ clip outright is `play()` without a fade.
 - `parent`
 - `static` — this will not move again — see the static-casters topic
 - `collides` — per node and not inherited; set it on the meshes, not on the Group
+- `collisionOnly` — the same: set it on the meshes, not on the Group
 - `animations` — clip names, from `asset.instantiate()`
 
 ### Methods
@@ -1225,10 +1228,22 @@ give each a phase with `play(name, { time })`.
   splits the character into its own draw call and holds a posed copy of the mesh, and only pays off
   when the same character is drawn more than once a frame.
 
+`{ physics: true }` lets the file say what collides. Every drawable mesh is collision geometry by
+default, which is right for a scene a script builds and wrong for a level — a forest is 580 colliders of
+which 449 are plants — so with this on, a node the file gave a `KHR_physics_rigid_bodies` collider is in
+the spatial index and **every other mesh of that file is out**. A box, sphere, capsule or cylinder from
+`KHR_implicit_shapes` gets a low-poly proxy of its own, drawn by nothing and swept by everything, so a
+barrel collides as a box and a soldier as a capsule; a `convexHull` collider gets the hull of its own
+triangles the same way, so a rock of four thousand triangles is swept as forty. A mesh collider is the
+one that is still the drawing. `motion` becomes a body, `trigger` a volume and `joint` a constraint in
+`three.physics` — a cylinder there is its own hull, which is the nearest shape the solver holds. Without it the file draws and collides exactly as it always
+did. `asset.colliders` is the file's own list, and `## asset.instantiate(name, { physics: true })` in
+`docs/functions.md` has what reaches the solver and what does not.
+
 `{ lights: true }` fills `three.lights` from the file's `KHR_lights_punctual` lights and
 `{ camera: true }` aims `three.camera` from the file's camera — a level laid out in Blender arrives lit
-and framed the way it was composed. Both are `instantiate()`'s alone: a file's lighting is a property of
-the file and not of one piece of it, so `node(name)` parses them and does nothing with them. There are
+and framed the way it was composed. Those two are `instantiate()`'s alone: a file's lighting is a
+property of the file and not of one piece of it, so `node(name)` parses them and does nothing with them. There are
 four light slots and a file may author twenty, so the import takes the directional one as the sun and the
 point lights nearest the camera, and names the rest in one `console.warn`. `asset.lights` and
 `asset.cameras` are the file's own list, for a script that wants to choose differently. `three.lights`
@@ -1259,6 +1274,8 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `bones` — the rig's joint names — what `socket(name)` takes. Empty for a file with no skin
 - `lights` — the file's `KHR_lights_punctual` lights, placed in world space, in the file's own units. Read on demand
 - `cameras` — the file's cameras, placed in world space. Read on demand
+- `colliders` — the file's `KHR_physics_rigid_bodies` blocks, node by node, in the file's own units. Read on demand
+- `physicsJoints` — the file's joints, each resolved to the two nodes it holds. Read on demand
 
 ### Methods
 
@@ -1267,10 +1284,10 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `imageAt(index, { colorSpace, generateMipmaps })`
 - `meshAsync(name)`
 - `meshAtAsync(index)`
-- `node(name, { skeleton, skinning, materials })`
-- `nodeAsync(name, { skeleton, skinning, materials })`
-- `instantiate(name?, { skeleton, skinning, materials, lights, camera })`
-- `instantiateAsync(name?, { skeleton, skinning, materials, lights, camera })`
+- `node(name, { skeleton, skinning, materials, physics })`
+- `nodeAsync(name, { skeleton, skinning, materials, physics })`
+- `instantiate(name?, { skeleton, skinning, materials, lights, camera, physics })`
+- `instantiateAsync(name?, { skeleton, skinning, materials, lights, camera, physics })`
 - `toJSON()`
 
 ## Level
@@ -2207,6 +2224,7 @@ the times it is inside a wall.
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
+- `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2262,6 +2280,7 @@ moving it.
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
+- `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2311,6 +2330,7 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
+- `collisionOnly` — meaningless here: a helper is drawn and never queried
 
 ### Methods
 
@@ -2363,6 +2383,7 @@ live. Divisions are capped at 256.
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
+- `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2421,6 +2442,7 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
+- `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods

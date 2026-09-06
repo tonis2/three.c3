@@ -850,6 +850,29 @@ fn AssetId? Assets.upload_built(
 	bool lines = false
 )
 {
+	// Everything that can fail is in there, and it cleans up after itself — so
+	// there is nothing left here for a `defer catch` to undo.
+	GpuMesh mesh = self.upload_geometry(gpu, label, geometry, lines)!;
+
+	Asset asset = { .path = key.copy(mem) };
+	asset.meshes.init(mem, 1);
+	asset.bounds = mesh.bounds;
+	asset.meshes.push(mesh);
+	return self.claim_slot(asset);
+}
+
+<*
+ The same upload, as one mesh rather than as an asset.
+
+ Split out for the one caller that wants a mesh *inside* a file's own asset: an
+ implicit shape's collision proxy belongs to the glTF it came from, so that a
+ node placed from that file can name it the way it names any other of the file's
+ meshes. Everything else wants the asset and goes through `upload_built`.
+
+ @return `A GpuMesh already on the device — a generated shape has no file to go back to, so nothing lazy is left.`
+*>
+fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilder* geometry, bool lines = false)
+{
 	// The generated streams sample the white stand-in, exactly as an untextured
 	// glTF primitive does: the binding is pushed for every draw whether or not the
 	// mesh carries uvs, so it has to be occupied either way.
@@ -871,17 +894,12 @@ fn AssetId? Assets.upload_built(
 		.bounds = bounds_of(geometry.positions.array_view()),
 	};
 
-	Asset asset = { .path = key.copy(mem) };
-	asset.meshes.init(mem, 1);
-	asset.bounds = mesh.bounds;
-
 	// Nothing below is on `self.assets` yet, so a failure part-way is this scope's
 	// to undo — the same argument `Assets.load` makes.
 	defer catch
 	{
 		mesh.free_buffers(gpu);
-		asset.meshes.free();
-		asset.path.free(mem);
+		if (mesh.name.len > 0) mesh.name.free(mem);
 	}
 
 	mesh.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * geometry.positions.len())!;
@@ -912,8 +930,7 @@ fn AssetId? Assets.upload_built(
 	mesh.uploaded = true;
 	mesh.gltf_mesh = -1;
 	mesh.gltf_primitive = -1;
-	asset.meshes.push(mesh);
-	return self.claim_slot(asset);
+	return mesh;
 }
 
 <*

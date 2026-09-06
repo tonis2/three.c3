@@ -1124,6 +1124,15 @@ const clock = {
 // frame whose script is not the problem, and reading only `total` there is
 // how somebody optimises the wrong file.
 //
+// `droppedSteps` is fixed steps the clock owed and gave up on, since the
+// process started. A frame whose fixed steps together cost more wall time
+// than the game time they were catching up takes one step and drops the
+// rest, so the game falls behind honestly instead of owing eight more of
+// them to the next frame — which is the difference between a stutter and a
+// ten-second freeze. It is said once by the engine and counted here; a
+// number that keeps climbing while you play is a fixed system that is too
+// slow for the rate it asked for.
+//
 // `three.systems.report()` is the rolling per-system version and the one
 // to reach for next: this splits the frame into four spans, that splits
 // two of those spans by name.
@@ -1132,6 +1141,7 @@ const frame = {
 	get running() { return H.frameStats().running; },
 	get ticks() { return H.frameStats().ticks; },
 	get overruns() { return H.frameStats().overruns; },
+	get droppedSteps() { return H.frameStats().droppedSteps; },
 	get ms() { return H.frameStats().ms; },
 };
 

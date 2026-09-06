@@ -117,6 +117,30 @@ const int QUERY_MAX_TOTAL = 1 << 18;
 const sz QUERY_MAX_LOOSE = 128;
 
 <*
+ What the frame's sweeps actually cost, counted rather than argued.
+
+ Three ratios come out of these four numbers — triangles per sweep, advancement
+ steps per sweep, sweeps per call — and every one of them used to be inferred
+ from mesh sizes and loop bounds. Zeroed at the top of each host tick, so
+ `three.stats().sweep` is about the frame the caller is in.
+*>
+struct SweepCounters
+{
+	// `Scene.move_capsule` calls: one per `three.moveAndSlide`, one per agent of
+	// a crowd.
+	uint calls;
+	// `Scene.sweep_capsule` calls — the controller's four or so per move, plus
+	// `three.query.sweep` and the nav bake.
+	uint sweeps;
+	// Triangles handed to the narrow phase, summed over sweeps. What a sweep
+	// tests, which is the call's list filtered by that sweep's own box, and not
+	// what the index walk found.
+	uint gathered;
+	// Conservative advancement steps taken, summed over sweeps.
+	uint steps;
+}
+
+<*
  The broad phase over a scene's drawable nodes.
 
  Every list here is `clear()`ed and refilled by `rebuild`, so a scene that
@@ -318,7 +342,10 @@ fn void Scene.ensure_query_index(&self, Assets* assets)
 		self.refile_moved(assets);
 		return;
 	}
-	if (!self.matrices_current) self.rebuild_query_index(assets);
+	if (!self.matrices_current)
+	{
+		self.rebuild_query_index(assets);
+	}
 }
 
 <*
@@ -1106,6 +1133,134 @@ fn bool Scene.ignored(&self, NodeId id, IgnoreSet set)
 }
 
 <*
+ One triangle list for a whole `move_capsule`, gathered once and filtered by
+ every sweep in the call.
+
+ A move is about ten sweeps — the depenetration, the grounded probe, the slides,
+ three inside `try_step_up` and the floor probe — and each of them used to walk
+ the index and transform every triangle it found afresh, over boxes that overlap
+ almost completely. So the call gathers once over a box that covers all of them
+ and each sweep takes the part of that list its own box touches: one box test per
+ triangle, against a tree walk and three matrix multiplies per triangle found.
+
+ It is gathered once and never grown. A sweep that reaches outside it — a step-up,
+ or a slide that turned far enough — gathers for itself, which is one small gather
+ against re-gathering everything already in hand over a box every other sweep in
+ the call would then be filtering.
+*>
+struct TriangleSoup
+{
+	List{collision::TriangleVerts} triangles;
+	List{NodeId} owners;
+
+	// Each triangle's own bounds and each node's run of them, both built once per
+	// gather so a sweep's filter is a box compare rather than six min/max over
+	// three vertices — see `SoupRun`.
+	List{collision::Aabb3} boxes;
+	List{SoupRun} runs;
+
+	collision::Aabb3 box;
+	bool filled;
+}
+
+<*
+ One node's triangles inside a soup, and the box around them.
+
+ `gather_triangles` appends a node's triangles consecutively, so a run needs no
+ sorting — it is where the owner changed. It is what makes the per-sweep filter
+ sublinear in the dense case: a weed is three thousand triangles, all of them in
+ the call's list because its box overlapped, and one compare against this takes
+ all three thousand out of the sweep that is nowhere near it.
+*>
+struct SoupRun
+{
+	uint first;
+	uint count;
+	collision::Aabb3 box;
+}
+
+<*
+ Gathers the call's list, once, over `box`.
+
+ Not grown afterwards. A sweep that reaches outside it gathers for itself instead,
+ because widening means re-gathering everything already in hand over a box every
+ other sweep in the call then has to filter. Measured on the Evil Forest probe,
+ widening on demand cost 1.9 gathers a call and was slower than both.
+
+ @param soup : `Its lists must already be initialised, on an allocator that outlives every sweep of the call. Scene.move_capsule uses the heap for exactly that reason.`
+*>
+fn void Scene.fill_soup(&self, Assets* assets, TriangleSoup* soup, collision::Aabb3 box, IgnoreSet skip)
+{
+	soup.box = box;
+	soup.triangles.clear();
+	soup.owners.clear();
+	self.gather_triangles(assets, soup.box, skip, &soup.triangles, &soup.owners);
+	soup.filled = true;
+
+	// The filter's index, built here so every sweep in the call shares it.
+	soup.boxes.clear();
+	soup.runs.clear();
+	NodeId[] owners                  = soup.owners.array_view();
+	collision::TriangleVerts[] found = soup.triangles.array_view();
+	SoupRun run                      = { .first = 0, .count = 0 };
+	foreach (i, tri : found)
+	{
+		collision::Aabb3 bounds = triangle_box(tri);
+		soup.boxes.push(bounds);
+		if (run.count > 0 && owners[i] == owners[run.first])
+		{
+			run.box.expand_by_aabb(bounds);
+			run.count++;
+			continue;
+		}
+		if (run.count > 0) soup.runs.push(run);
+		run = { .first = (uint)i, .count = 1, .box = bounds };
+	}
+	if (run.count > 0) soup.runs.push(run);
+}
+
+<*
+ The triangles of `soup` that reach into `box`, as indices into its list.
+
+ @param live : `Written, and must hold one uint per triangle in the soup.`
+ @return `How many of it were written.`
+*>
+fn usz soup_in_box(TriangleSoup* soup, collision::Aabb3 box, uint[] live)
+{
+	collision::Aabb3[] boxes = soup.boxes.array_view();
+	usz count                = 0;
+	foreach (run : soup.runs.array_view())
+	{
+		if (!run.box.collides(box)) continue;
+		for (uint i = run.first; i < run.first + run.count; i++)
+		{
+			if (boxes[i].collides(box)) live[count++] = i;
+		}
+	}
+	return count;
+}
+
+<*
+ Whether a soup can answer a sweep over `box` — it is filled and holds all of it.
+
+ `Aabb3.collides` answers about overlap, which is a different question: a list
+ that covers half a sweep's box is a wall the sweep does not see.
+*>
+fn bool soup_covers(TriangleSoup* soup, collision::Aabb3 box)
+{
+	if (soup == null || !soup.filled) return false;
+	collision::Aabb3 outer = soup.box;
+	return outer.min.x <= box.min.x && outer.min.y <= box.min.y && outer.min.z <= box.min.z
+		&& outer.max.x >= box.max.x && outer.max.y >= box.max.y && outer.max.z >= box.max.z;
+}
+
+// A triangle's own bounds, for the per-sweep filter over a call's list.
+fn collision::Aabb3 triangle_box(collision::TriangleVerts tri)
+{
+	return { math::min(tri[0], math::min(tri[1], tri[2])), math::max(tri[0], math::max(tri[1], tri[2])) };
+}
+
+<*
  Every triangle of every drawable node overlapping `box`, in *world* space.
 
  The triangles are transformed rather than the query shape being pushed into each
@@ -1213,11 +1368,14 @@ fn SweepHit Scene.sweep_capsule(
 	float radius,
 	float half_height,
 	float skin = 0.0f,
-	IgnoreSet skip = { }
+	IgnoreSet skip = { },
+	TriangleSoup* soup = null
 )
 {
 	SweepHit miss = { .hit = false, .fraction = 1.0f, .distance = 0.0f };
 	if (assets == null) return miss;
+
+	self.sweep.sweeps++;
 
 	float r         = math::max(radius, 0.0f);
 	float half      = math::max(half_height, 0.0f);
@@ -1235,21 +1393,60 @@ fn SweepHit Scene.sweep_capsule(
 
 	@pool()
 	{
-		List{collision::TriangleVerts} triangles;
-		triangles.tinit(64);
-		List{NodeId} owners;
-		owners.tinit(64);
-		self.gather_triangles(assets, box, skip, &triangles, &owners);
+		// The call's list when there is a call around this sweep, and one gathered
+		// here for `three.query.sweep` and the nav bake, which have no call.
+		List{collision::TriangleVerts} mine;
+		List{NodeId} mine_owners;
+		collision::TriangleVerts[] triangles;
+		NodeId[] owners;
 
-		if (triangles.len() == 0) return miss;
+		bool shared = soup_covers(soup, box);
+		if (shared)
+		{
+			triangles = soup.triangles.array_view();
+			owners = soup.owners.array_view();
+		}
+		else
+		{
+			mine.tinit(64);
+			mine_owners.tinit(64);
+			self.gather_triangles(assets, box, skip, &mine, &mine_owners);
+			triangles = mine.array_view();
+			owners = mine_owners.array_view();
+		}
+		if (triangles.len == 0) return miss;
+
+		// What this sweep still has to test, as indices into the list above. It
+		// only ever shrinks: a triangle outside this sweep's box, or further away
+		// than the travel left, cannot come back on this heading.
+		uint[] live = alloc::new_array(tmem, uint, triangles.len);
+		usz count   = 0;
+		if (shared)
+		{
+			count = soup_in_box(soup, box, live);
+		}
+		else
+		{
+			// Gathered over this box already, so the filter would reject nothing.
+			for (usz i = 0; i < triangles.len; i++) live[count++] = (uint)i;
+		}
+		if (count == 0) return miss;
+		self.sweep.gathered += (uint)count;
 
 		bool still     = length <= 1e-9f;
 		Vec3 direction = still ? (Vec3) { 0, 0, 0 } : travel / length;
 		float at       = 0.0f;
-		float touch    = clearance + SWEEP_TOUCH * math::max(1.0f, length);
+		float scale    = math::max(1.0f, length);
+		float touch    = clearance + SWEEP_TOUCH * scale;
+		// Two steps this short in a row is a grazing path rather than a closing
+		// one — see `SWEEP_MAX_STEPS` for what the 24 were being spent on.
+		float creep = SWEEP_TOUCH * scale;
+		int grazes  = 0;
 
 		for (int step = 0; step < SWEEP_MAX_STEPS; step++)
 		{
+			self.sweep.steps++;
+
 			Vec3 centre = from + direction * at;
 			Vec3 head   = centre + (Vec3) { 0, half, 0 };
 			Vec3 tail   = centre - (Vec3) { 0, half, 0 };
@@ -1257,15 +1454,24 @@ fn SweepHit Scene.sweep_capsule(
 			// The smallest distance the capsule may travel before *some* triangle
 			// could be within reach. Conservative, per triangle, and the minimum of
 			// them is the safe step.
-			float soonest  = float::max;
-			bool blocked   = false;
+			float soonest   = float::max;
+			bool blocked    = false;
 			SegmentTriangle best;
-			Vec3 best_axis = { 0, 1, 0 };
-			sz best_index  = 0;
+			Vec3 best_axis  = { 0, 1, 0 };
+			uint best_index = 0;
 
-			foreach (i, tri : triangles)
+			// What is left of the motion. The distance to a triangle falls by at
+			// most the distance travelled, so anything further away than this plus
+			// the clearance is out of reach for the rest of the sweep and is
+			// dropped rather than measured again on every remaining step.
+			float remaining = length - at;
+			usz keep        = 0;
+
+			for (usz slot = 0; slot < count; slot++)
 			{
-				SegmentTriangle pair = segment_triangle_closest(tail, head, tri);
+				uint index                   = live[slot];
+				collision::TriangleVerts tri = triangles[index];
+				SegmentTriangle pair         = segment_triangle_closest(tail, head, tri);
 
 				// The separating axis: the unit direction from the capsule to the
 				// triangle. This is what makes the bound directional.
@@ -1305,11 +1511,19 @@ fn SweepHit Scene.sweep_capsule(
 						blocked = true;
 						best = pair;
 						best_axis = axis;
-						best_index = i;
+						best_index = index;
 						break;
 					}
+					live[keep++] = index;
 					continue;
 				}
+
+				// Out of reach for the rest of this sweep, whatever the heading does
+				// to the closest pair. Kept otherwise, including when it is not
+				// closing now: a slide along a floor turns towards a wall it was
+				// moving parallel to a moment ago.
+				if (pair.distance > clearance + remaining) continue;
+				live[keep++] = index;
 
 				// Moving along it or away from it: no amount of travel on this
 				// heading brings the capsule to this triangle.
@@ -1333,6 +1547,10 @@ fn SweepHit Scene.sweep_capsule(
 				};
 			}
 
+			// The survivors, for the next step. Set after the loop rather than in
+			// it, so a `blocked` break leaves the set alone.
+			count = keep;
+
 			// Nothing can be reached at all, or nothing before the motion ends.
 			if (soonest >= float::max || at + soonest >= length) return miss;
 
@@ -1341,6 +1559,17 @@ fn SweepHit Scene.sweep_capsule(
 			// taking 95% of it leaves a geometric series that never arrives, which
 			// is what the resting-contact case exposed.
 			at += soonest;
+
+			// Twice in a row under the touch tolerance and the loop is converging on
+			// a contact it will never call one. The 24 steps were spent here.
+			if (soonest < creep)
+			{
+				if (++grazes >= 2) return miss;
+			}
+			else
+			{
+				grazes = 0;
+			}
 		}
 
 		// Did not converge — see SWEEP_MAX_STEPS.

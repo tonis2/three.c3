@@ -238,7 +238,7 @@ struct SceneStats
 	*>
 	uint materials;
 	<*
-	 How many drawable nodes are collision geometry.
+	 How many nodes are collision geometry.
 
 	 What `object.collides = false` is for, seen from the other side. Every mesh
 	 counted here is a box in the spatial index and a box tested by every sweep and
@@ -255,6 +255,12 @@ struct SceneStats
 	 The number to watch when a sweep gets slow. Decoration defaults to collision
 	 geometry, so a scene grows this without being asked to, and the gap between
 	 this and `nodes` is what a level's author has said out loud.
+
+	 A `KHR_implicit_shapes` proxy — the box a barrel collides as, placed by
+	 `instantiate({ physics: true })` — is counted here and in `nodes`, and in
+	 none of `drawCalls`, `instances` or `triangles`. It is a collider that is
+	 not a drawing, which is exactly what those three numbers should say about
+	 it.
 	*>
 	uint colliders;
 
@@ -372,6 +378,21 @@ struct SceneStats
 	usz target_bytes;
 	usz post_bytes;
 	usz geometry_bytes;
+
+	<*
+	 What the sweeps since the last host tick cost — `SweepCounters`.
+
+	 The one block here that is about *work already done* rather than about the
+	 scene as it stands, and it is here because the alternative was reading the
+	 three ratios off mesh sizes and loop bounds. A slow `three.moveAndSlide` is
+	 one of three things — too many triangles per sweep, too many advancement
+	 steps per sweep, too many sweeps per call — and no other number in this
+	 struct can tell them apart.
+
+	 Zeroed by the tick, so a script reading it inside a frame is told about that
+	 frame; a `--script` run with no frames in it accumulates over the script.
+	*>
+	SweepCounters sweep;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
@@ -574,6 +595,12 @@ struct Scene
 	 nothing for it.
 	*>
 	QueryIndex query;
+
+	// What the sweeps since the last host tick cost — `SweepCounters`, reported
+	// as `three.stats().sweep`. Beside the index because it is the index's
+	// consumers being counted, and zeroed by the tick rather than by a query, so
+	// a script reading it inside a frame is told about that frame.
+	SweepCounters sweep;
 
 	// How many nodes are marked static right now. Maintained by the two writers of
 	// `Node.static_caster` and by `kill`, and read by `MeshPass.prepare` to decide
@@ -942,7 +969,8 @@ fn NodeId Scene.instantiate(
 	NodeId parent = NO_NODE,
 	String name = "",
 	bool skeleton = false,
-	bool compute_skin = false
+	bool compute_skin = false,
+	bool physics = false
 )
 {
 	if (self.assets == null) return NO_NODE;
@@ -954,7 +982,7 @@ fn NodeId Scene.instantiate(
 	List{PlacedNode} placed;
 	placed.init(mem, 16);
 	defer placed.free();
-	self.assets.flatten(asset, &placed, skeleton);
+	self.assets.flatten(asset, &placed, skeleton, physics);
 
 	// Parents precede their children in the walk, so `created` always has the entry
 	// a child needs by the time the child is reached. One pass, no fixups.
@@ -977,6 +1005,11 @@ fn NodeId Scene.instantiate(
 		// already left it white, so the branch would save an assignment and cost a
 		// comparison.
 		node.color = entry.color;
+		// What the file said collides, or the default when it was not asked.
+		// Written rather than routed through `set_collides`, which would drop the
+		// query index once per node of the level.
+		node.collides = entry.collides;
+		node.collision_only = entry.collision_only;
 		// The rest pose, which is a baked frame like any other — so this node draws
 		// correctly before anything is played and needs no branch to.
 		self.set_skin(id, entry.skin);
@@ -1410,6 +1443,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// Reset for `material`'s reason: a recycled slot that stayed non-colliding
 	// would put a new node into the scene that nothing can sweep against.
 	node.collides = true;
+	// And the other way round: a recycled slot that stayed collision-only would
+	// be a mesh that never draws, which reads as a failed upload.
+	node.collision_only = false;
 	node.dirty = true;
 	node.generation = generation;
 	node.alive = true;
@@ -1678,6 +1714,20 @@ fn void Scene.set_collides(&self, NodeId id, bool collides)
 	if (node == null || node.collides == collides) return;
 	node.collides = collides;
 	self.query.drop();
+}
+
+<*
+ Whether this node is only ever swept against — in every query and in no draw.
+
+ `Node.collision_only` has the argument. The index is untouched, unlike
+ `set_collides`: this decides what the *draw list* does with the node, and that
+ is rebuilt from scratch every frame.
+*>
+fn void Scene.set_collision_only(&self, NodeId id, bool only)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.collision_only = only;
 }
 
 <*
@@ -2195,6 +2245,10 @@ fn void Scene.build_draw_list(
 	{
 		if (!node.alive || !node.world_visible) continue;
 		if (!node.asset.is_set() || node.mesh == NO_MESH) continue;
+		// A collision proxy: in the spatial index and in no draw. Skipped here
+		// rather than filtered later, so it costs no instance, no bucket and no
+		// line in `stats().triangles` — see `Node.collision_only`.
+		if (node.collision_only) continue;
 
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
@@ -2570,6 +2624,9 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.texture_bytes = assets.texture_bytes(),
 		.culled_last_frame = self.culled_last_frame,
 		.shadow_culled_last_frame = self.shadow_culled_last_frame,
+		// Copied out rather than recounted: they are what the sweeps since the last
+		// tick actually did, and nothing this call does adds to them.
+		.sweep = self.sweep,
 	};
 
 	foreach (&node : self.nodes)
@@ -2629,6 +2686,9 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 	foreach (&node : self.nodes)
 	{
 		if (!node.alive || !node.asset.is_set() || node.mesh == NO_MESH) continue;
+		// Not drawable, so not part of what the camera frames or the shadow map
+		// fits — a collision proxy is a shape, not a picture.
+		if (node.collision_only) continue;
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
@@ -2693,7 +2753,7 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 	Node* node = self.node(id);
 	if (node == null || !node.alive) return;
 
-	if (assets != null && node.asset.is_set() && node.mesh != NO_MESH)
+	if (assets != null && node.asset.is_set() && node.mesh != NO_MESH && !node.collision_only)
 	{
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh != null)

@@ -222,6 +222,9 @@ fn Vec3 Scene.depenetrate_capsule(&self, Assets* assets, Vec3 centre, MoveOption
 		bool moved = false;
 		@pool()
 		{
+			// Its own list, not the call's: this runs *before* the call gathers
+			// one, because where it leaves the capsule is where that list has to be
+			// gathered around — see `Scene.move_capsule`.
 			List{collision::TriangleVerts} triangles;
 			triangles.tinit(64);
 			List{NodeId} owners;
@@ -281,10 +284,20 @@ fn Vec3 Scene.slide_step(
 	Vec3 motion,
 	MoveOptions options,
 	IgnoreSet skip,
-	SweepHit* out
+	SweepHit* out,
+	TriangleSoup* soup = null
 )
 {
-	SweepHit hit = self.sweep_capsule(assets, at, at + motion, options.radius, options.half_height, options.skin, skip);
+	SweepHit hit = self.sweep_capsule(
+		assets,
+		at,
+		at + motion,
+		options.radius,
+		options.half_height,
+		options.skin,
+		skip,
+		soup
+	);
 	*out = hit;
 	if (!hit.hit) return at + motion;
 
@@ -335,18 +348,44 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 		return result;
 	}
 
+	self.sweep.calls++;
+
 	if (options.max_slides <= 0) options.max_slides = MOVE_DEFAULT_SLIDES;
 	float skin = math::max(options.skin, 1e-4f);
 	options.skin = skin;
 
+	// The depenetration first, and gathering for itself: it is what pushes a capsule
+	// out of the wall it was spawned in, and a list gathered around where the
+	// capsule *was* is then a list of the wall's triangles that every sweep after
+	// it has to filter and none of them can use. Its box is a quarter of the
+	// call's, so paying for it separately is cheap — measured on the Evil Forest
+	// probe, the worst call went from 202 ms to 67 ms.
 	Vec3 at = self.depenetrate_capsule(assets, centre, options, skip);
+
+	// One triangle list for the whole call — see `TriangleSoup`. On the heap and
+	// not the temp arena because every sweep below opens a pool of its own, and a
+	// list grown inside one would be handed back on the way out of it.
+	TriangleSoup soup;
+	soup.triangles.init(mem, 128);
+	soup.owners.init(mem, 128);
+	soup.boxes.init(mem, 128);
+	soup.runs.init(mem, 16);
+	defer
+	{
+		soup.triangles.free();
+		soup.owners.free();
+		soup.boxes.free();
+		soup.runs.free();
+	}
+	self.fill_soup(assets, &soup, call_box(at, motion, options), skip);
 
 	// Was it standing on something before the move? The snap below is only for a
 	// character that was already walking — a jump must not be pulled straight back
 	// to the floor it just left, and the difference is exactly this reading, taken
 	// before anything moved.
 	bool was_grounded = false;
-
+	// And what it was standing on, which the first sweep is projected onto.
+	Vec3 ground_normal = { 0, 1, 0 };
 
 	{
 		SweepHit probe = self.sweep_capsule(
@@ -356,20 +395,36 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 			options.radius,
 			options.half_height,
 			skin,
-			skip
+			skip,
+			&soup
 		);
 		was_grounded = probe.hit && walkable(probe.normal, options.slope_limit);
+		if (was_grounded) ground_normal = probe.normal;
 	}
 
 	Vec3 left   = motion;
 	uint slides = 0;
+
+	// **The floor is not a wall to slide off.** A step along ground the capsule is
+	// standing on has a component into that ground — the caller's gravity, or the
+	// slope itself — and swept unprojected it reports the floor as a hit and spends
+	// a slide on it: 584 of the Evil Forest's 2116 probe calls slid twice and 86 hit
+	// the cap of four, on ground a few degrees off level. Projected first, the step
+	// runs parallel to what it is standing on and there is nothing to report.
+	//
+	// Only into the plane. A jump is a motion *out* of it and has to survive.
+	if (was_grounded)
+	{
+		float into = left.dot(ground_normal);
+		if (into < 0.0f) left -= ground_normal * into;
+	}
 
 	for (int i = 0; i < options.max_slides; i++)
 	{
 		if (left.length_sq() < 1e-12f) break;
 
 		SweepHit hit;
-		Vec3 next = self.slide_step(assets, at, left, options, skip, &hit);
+		Vec3 next = self.slide_step(assets, at, left, options, skip, &hit, &soup);
 		at = next;
 
 		if (!hit.hit)
@@ -380,22 +435,32 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 
 		result.hit = hit.node;
 		result.normal = hit.normal;
-		slides++;
 
 		// What is left of the motion after the part that was used up.
 		Vec3 travelled = hit.distance > 0.0f ? left.normalize() * hit.distance : (Vec3) { 0, 0, 0 };
 		Vec3 rest      = left - travelled;
 
+		// Ground rather than a wall: carry on with the remainder along it, and do
+		// not spend a slide. It is the same projection either way — what differs is
+		// that walking onto a rise is not the character running out of moves.
+		if (walkable(hit.normal, options.slope_limit))
+		{
+			left = rest - hit.normal * rest.dot(hit.normal);
+			continue;
+		}
+
+		slides++;
+
 		// The step-up, and only for a wall: a slope under the limit is walked up
 		// by the slide below, and trying to climb it as well would let a character
 		// hop up an incline it is already smoothly ascending.
-		if (options.step_height > 0.0f && !walkable(hit.normal, options.slope_limit))
+		if (options.step_height > 0.0f)
 		{
 			Vec3 flat = { rest.x, 0, rest.z };
 			if (flat.length_sq() > 1e-12f)
 			{
 				Vec3 climbed;
-				if (self.try_step_up(assets, at, flat, options, skip, &climbed))
+				if (self.try_step_up(assets, at, flat, options, skip, &climbed, &soup))
 				{
 					at = climbed;
 					result.stepped = true;
@@ -427,7 +492,8 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 		options.radius,
 		options.half_height,
 		skin,
-		skip
+		skip,
+		&soup
 	);
 
 	if (floor.hit && walkable(floor.normal, options.slope_limit))
@@ -460,6 +526,34 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 }
 
 <*
+ The box one whole `move_capsule` can reach into.
+
+ The motion, the capsule around it, the step height above, the snap below and the
+ skin — every sweep the call makes. Measured from where the depenetration left the
+ capsule rather than from where the caller put it, so a capsule pushed out of a
+ wall gets a list of what is around it now.
+*>
+fn collision::Aabb3 call_box(Vec3 centre, Vec3 motion, MoveOptions options) @local
+{
+	// Along the motion, plus the motion's own length as a margin, because a slide
+	// turns the remainder and the capsule can end up anywhere within the motion of
+	// where it started. At a character's step that is eight centimetres on a
+	// capsule two metres tall; a slide that still leaves the box is the one sweep
+	// that gathers for itself — see `Scene.fill_soup`.
+	float pad = options.radius + options.skin * 4.0f + motion.length();
+	// Below, because the floor probe drops by `snap` on every grounded call. Not
+	// above by the step height: `try_step_up` runs only on a wall.
+	float down = math::max(options.snap, 0.0f);
+	float up   = math::max(options.step_height, 0.0f);
+	Vec3 lo    = math::min(centre, centre + motion);
+	Vec3 hi    = math::max(centre, centre + motion);
+	return {
+		{ lo.x - pad, lo.y - options.half_height - pad - down, lo.z - pad },
+		{ hi.x + pad, hi.y + options.half_height + pad + up, hi.z + pad },
+	};
+}
+
+<*
  Tries to climb what is in front of the capsule: up, across, and back down.
 
  Accepted only when the down sweep lands on something walkable *and* lands higher
@@ -470,19 +564,28 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
  @param flat : `The horizontal motion left over, which is what the climb is trying to spend.`
  @return `Whether the climb was taken, with the new centre in out.`
 *>
-fn bool Scene.try_step_up(&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions options, IgnoreSet skip, Vec3* out)
+fn bool Scene.try_step_up(
+	&self,
+	Assets* assets,
+	Vec3 at,
+	Vec3 flat,
+	MoveOptions options,
+	IgnoreSet skip,
+	Vec3* out,
+	TriangleSoup* soup = null
+)
 {
 	SweepHit ignored;
 
 	// Up. A ceiling low enough to stop the lift is a ledge that cannot be climbed
 	// from here, whatever is in front.
-	Vec3 lifted = self.slide_step(assets, at, (Vec3) { 0, options.step_height, 0 }, options, skip, &ignored);
+	Vec3 lifted = self.slide_step(assets, at, (Vec3) { 0, options.step_height, 0 }, options, skip, &ignored, soup);
 	if (lifted.y - at.y < options.step_height * 0.5f) return false;
 
 	// Across. A climb that cannot make meaningful horizontal progress is a wall
 	// simply taller than the step, and taking it would leave the character
 	// standing on top of its own foot.
-	Vec3 across = self.slide_step(assets, lifted, flat, options, skip, &ignored);
+	Vec3 across = self.slide_step(assets, lifted, flat, options, skip, &ignored, soup);
 	Vec3 gained = { across.x - at.x, 0, across.z - at.z };
 	if (gained.length_sq() < flat.length_sq() * 0.04f) return false;
 
@@ -490,7 +593,7 @@ fn bool Scene.try_step_up(&self, Assets* assets, Vec3 at, Vec3 flat, MoveOptions
 	// the capsule hovering a step above the ledge it just climbed.
 	SweepHit landing;
 	Vec3 drop   = { 0, -(options.step_height + options.skin * 2.0f), 0 };
-	Vec3 landed = self.slide_step(assets, across, drop, options, skip, &landing);
+	Vec3 landed = self.slide_step(assets, across, drop, options, skip, &landing, soup);
 
 	if (!landing.hit) return false;
 	if (!walkable(landing.normal, options.slope_limit)) return false;

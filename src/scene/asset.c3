@@ -45,6 +45,9 @@ module three;
 import std::io;
 import std::io::file;
 import std::collections::list;
+import std::thread;
+import std::thread::cpu;
+import std::time;
 import std::math;
 import std::math::vector;
 import std::math::matrix;
@@ -409,6 +412,11 @@ struct AssetNode
 	// instance, so two skins can share a bucket and still draw correctly.
 	int skin;
 
+	// Which of `Asset.bodies` this node's `KHR_physics_rigid_bodies` block became,
+	// or -1 for the ordinary node the file said nothing about. Filled by
+	// `record_physics`, which runs after this list is built.
+	int body;
+
 	// Indices into `Asset.nodes`. Owned.
 	List{uint} children;
 }
@@ -597,6 +605,13 @@ struct Asset
 	List{AssetLight} lights;
 	List{AssetCamera} cameras;
 
+	// What the file said collides — `scene/collider.c3`. Empty, and `has_physics`
+	// false, for every file that does not carry `KHR_physics_rigid_bodies`, which
+	// is what keeps `instantiate({ physics: true })` a no-op on one.
+	List{AssetBody} bodies;
+	List{AssetJoint} joints;
+	bool has_physics;
+
 	// How a generated shape was described, for the exporter and for nothing else.
 	// `Primitive.build` regenerates its positions, normals and uvs from these eight
 	// numbers, which is why they are kept and the CPU streams are not — thirty-two
@@ -629,9 +644,10 @@ struct Asset
 	gltf::GltfStream stream;
 	bool has_stream;
 
-	// The decode memo, which outlives one `load` for the same reason the stream
-	// does: two meshes sharing a material may be uploaded an hour apart.
-	List{ImageMemo} images;
+	// The decode memo and the pre-pass's blocks, which outlive one `load` for the
+	// same reason the stream does: two meshes sharing a material may be uploaded
+	// an hour apart.
+	AssetImages images;
 
 	// The file's animation clips, named and measured at load and with their curves
 	// read on first play — `scene/animation.c3`. On the asset because keyframes are
@@ -719,6 +735,65 @@ struct ImageMemo
 }
 
 <*
+ One of the file's Basis images, already BC7 — what `pretranscode_basis_images`
+ leaves behind for the material that eventually asks for it.
+
+ Keyed on the image index alone and not on the colourspace, unlike `ImageMemo`.
+ `BC7_SRGB` and `BC7_UNORM` are the same sixteen bytes a block read two ways, so
+ one transcode serves either; the space is written onto `blocks.format` when the
+ image is handed over.
+
+ `image` goes to -1 the moment it is: the levels are the claimer's to upload and
+ then to free, and an entry that is still holding them is one nothing has asked
+ for yet.
+*>
+struct PreBlocks
+{
+	int image;
+	BlockImage blocks;
+}
+
+<*
+ One open file's images: what has been uploaded, and what has been transcoded
+ but not yet claimed.
+
+ Two lists that live and die together, so they cross as one parameter rather
+ than as two. Everything from `upload_primitive` down to `decode_material_texture`
+ takes this, which is what lets a material's texture ask "did the load already
+ do this image" without any of them having to be handed the asset.
+*>
+struct AssetImages
+{
+	List{ImageMemo} memo;
+	List{PreBlocks} blocks;
+}
+
+<*
+ Give back every level the pre-pass transcoded and nothing claimed.
+
+ The other end of `pretranscode_basis_images`. A file whose materials name only
+ half its images leaves the other half here, and it is megabytes: `free_stream`
+ calls this on every path that closes a file, which is `free_slot`,
+ `Assets.free` and `load`'s own failure path.
+*>
+fn void AssetImages.free_blocks(&self)
+{
+	foreach (&pre : self.blocks)
+	{
+		if (pre.image >= 0) pre.blocks.free();
+		pre.image = -1;
+	}
+}
+
+fn void AssetImages.free(&self)
+{
+	self.free_blocks();
+	self.memo.free();
+	self.blocks.free();
+	*self = { };
+}
+
+<*
  What one call to `unload_unused` gave back.
 
  Reported rather than merely done, because an agent that cannot watch the number
@@ -786,6 +861,15 @@ struct PlacedNode
 	// consumers can seed `Node.pose` with the skin's rest offset without either of
 	// them having to look the node back up in the file.
 	int skin;
+
+	// Whether this entry is collision geometry, and whether it is *only* that.
+	//
+	// True and false for every entry of every file flattened without
+	// `physics: true`, which is the engine's default and the reason no existing
+	// scene changes. With the option on, the file's colliders decide the first
+	// and the implicit shapes' proxies are the second — see `scene/collider.c3`.
+	bool collides;
+	bool collision_only;
 }
 
 <*
@@ -1211,6 +1295,7 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	}
 	asset.meshes.free();
 	free_nodes(asset);
+	free_physics(asset);
 	free_stream(asset);
 	// Before the zeroing below, for `free_nodes`' reason: after it the slot no
 	// longer says it had one.
@@ -1257,10 +1342,15 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 
  `out` is appended to and is not cleared.
 *>
-fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleton = false)
+fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleton = false, bool physics = false)
 {
 	Asset* loaded = self.slot(asset);
 	if (loaded == null) return;
+
+	// The option is asked of a file that has nothing to say about physics on
+	// every kit and every prop, so it costs one bool and the walk below is the
+	// one it always was.
+	bool authored = physics && loaded.has_physics;
 
 	if (loaded.nodes.len() == 0)
 	{
@@ -1278,6 +1368,9 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 					.color = NO_TINT, // No nodes means no skins to name one: a file that declares meshes
 					// and no scene cannot have said which skin poses them.
 					.skin = -1,
+					// A file with no node tree has no collider either: a collider is a
+					// node's, and there are none.
+					.collides = true,
 				}
 			);
 		}
@@ -1293,7 +1386,7 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 		prunable = skeleton ? (bool[]) { } : prunable_joints(loaded);
 		foreach (root : loaded.roots)
 		{
-			self.flatten_node(asset, root, -1, out, prunable);
+			self.flatten_node(asset, root, -1, out, prunable, authored);
 		}
 	};
 }
@@ -1372,12 +1465,32 @@ fn bool mark_prunable(Asset* loaded, uint index, bool[] joint, bool[] prunable) 
  `record_nodes` derives roots from "nothing claims it" and a cycle claims all of
  its own members, so a cyclic subtree has no root and is never reached.
 *>
-fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{PlacedNode}* out, bool[] prunable = { })
+fn void Assets.flatten_node(
+	&self,
+	AssetId asset,
+	uint index,
+	int parent,
+	List{PlacedNode}* out,
+	bool[] prunable = { },
+	bool physics = false
+)
 {
 	Asset* loaded = self.slot(asset);
 	if (loaded == null || index >= loaded.nodes.len()) return;
 	if (index < prunable.len && prunable[index]) return;
 	AssetNode* source = &loaded.nodes[index];
+
+	// **The file says what collides.** With the option on, a node is in the
+	// spatial index exactly when the file gave it a collider whose geometry *is*
+	// the drawn mesh, and every other mesh node of the file is out. A collider
+	// with a proxy — an implicit shape, or a convex hull — is swept as the proxy
+	// child below and its drawing is out with the rest.
+	AssetBody* body = physics && source.body >= 0 ? &loaded.bodies[(sz)source.body] : null;
+	bool draws_collide = !physics
+		|| (body != null && body.has_collider && body.proxy < 0 && body.geometry_node == (int)index);
+	// A proxy is placed only where there is one to place: a file loaded with no
+	// device has none, and a mesh collider never had one.
+	int proxy = body != null && body.has_collider && body.proxy >= 0 ? body.proxy : -1;
 
 	// An instanced node is a group over its copies, for the same reason a node
 	// whose glTF mesh has several primitives is: the transform being placed is
@@ -1411,8 +1524,15 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 			.scale = skinned ? (Vec3) { 1, 1, 1 } : source.scale,
 			.color = NO_TINT,
 			.skin = source.skin,
+			.collides = draws_collide,
 		}
 	);
+
+	// The implicit shape's proxy, at identity under the node — so the node's own
+	// world transform, scale included, is what places it, which is exactly how
+	// `Gltf.collider_world_shape` composes one. An instanced node places one per
+	// copy instead; see below.
+	if (proxy >= 0 && !instanced) out.push(collider_proxy(body, proxy, here, { 0, 0, 0 }, NO_ROTATION, { 1, 1, 1 }));
 
 	if (instanced)
 	{
@@ -1438,9 +1558,17 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 							// the extension positions each copy and a skin ignores the
 							// position. A file doing both is malformed and gets the copies.
 						.skin = -1,
+						// Every copy is its own node, so the file's statement about the
+						// node it was placed from applies to each of them separately —
+						// which is what keeps a thousand instanced weeds out of the index
+						// rather than merely rejected a thousand times.
+						.collides = draws_collide,
 					}
 				);
 			}
+			// One proxy per copy, carrying the copy's own transform. The copies are
+			// siblings under the node group, so the proxy is too.
+			if (proxy >= 0) out.push(collider_proxy(body, proxy, here, copy.position, copy.rotation, copy.scale));
 		}
 	}
 	else if (!draws_itself)
@@ -1460,6 +1588,7 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 					// is the entry above, which is already sitting at the root with an
 					// identity transform, so they inherit the right space.
 					.skin = source.skin,
+					.collides = draws_collide,
 				}
 			);
 		}
@@ -1470,8 +1599,33 @@ fn void Assets.flatten_node(&self, AssetId asset, uint index, int parent, List{P
 	sz children = self.slot(asset).nodes[index].children.len();
 	for (sz i = 0; i < children; i++)
 	{
-		self.flatten_node(asset, self.slot(asset).nodes[index].children[i], here, out, prunable);
+		self.flatten_node(asset, self.slot(asset).nodes[index].children[i], here, out, prunable, physics);
 	}
+}
+
+<*
+ One implicit shape's placement: the proxy mesh, on a node that draws nothing.
+
+ `collision_only` is what makes it work — `build_draw_list` steps over the node
+ and `rebuild_query_index` files it, so the shape is swept against and never
+ seen. Without the flag a node that draws nothing is in no query at all, which
+ is why a box collider had no way to exist here before.
+*>
+fn PlacedNode collider_proxy(AssetBody* body, int mesh, int parent, Vec3 position, Quaternionf rotation, Vec3 scale) @local
+{
+	return {
+		.name = body.name,
+		.parent = parent,
+		.mesh = mesh,
+		.gltf_node = -1,
+		.position = position,
+		.rotation = rotation,
+		.scale = scale,
+		.color = NO_TINT,
+		.skin = -1,
+		.collides = true,
+		.collision_only = true,
+	};
 }
 
 <*
@@ -1590,6 +1744,11 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 		foreach (m, &mesh : asset.meshes)
 		{
 			if (!mesh.uploaded || mesh.refs > 0) continue;
+			// A mesh with no primitive behind it was generated rather than read —
+			// an implicit shape's collision proxy — and `ensure_uploaded` has
+			// nothing to read it back from, so giving it up would be giving it up
+			// for good. It is a dozen triangles either way.
+			if (mesh.gltf_mesh < 0) continue;
 			self.release_texture(gpu, mesh.texture);
 			// The stack is re-resolved when the mesh uploads again, exactly as the
 			// base colour map is, so giving it back here is what keeps a sweep of an
@@ -1617,6 +1776,287 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 // ============================================================================
 // Loading
 // ============================================================================
+
+<*
+ One image on its way through the pre-pass — what to read, what came back, and
+ how long it took.
+
+ The duration is carried rather than printed. Sixteen threads writing the
+ `--debug` line into one stream would interleave them; `pretranscode_basis_images`
+ prints them after the join, in the order the queue ran — biggest image first —
+ which is the order two runs can be compared in.
+*>
+struct TranscodeSlot @local
+{
+	char[] encoded;
+	BlockImage blocks;
+	int image;
+	// Texels, from `basis_image_cost`. The queue is ordered by it.
+	ulong cost;
+	long ms;
+	bool ok;
+}
+
+<*
+ What every worker in the pre-pass shares. Read-only except for its own slot.
+*>
+struct TranscodeJob @local
+{
+	TranscodeSlot[] slots;
+	TextureFormat format;
+	// Captured on the calling thread rather than left to `mem` inside a worker.
+	// A spawned thread's `mem` is libc's directly, and the levels are freed back
+	// on the calling side — which under `c3c test` is the leak tracker, and being
+	// handed a pointer it never saw is a panic rather than a miscount.
+	alloc::Allocator allocator;
+	// The thread that started the pool. Its own share runs inline, and it is the
+	// one thread here that already has a temp allocator.
+	Thread owner;
+	// What each image's block mapper gets. See `pretranscode_basis_images`.
+	uint threads;
+}
+
+// A worker's temp arena, matching the main thread's default. The transcoder
+// spends it on an ETC1S file's codebooks or a UASTC container's inflated
+// levels, both of which grow it on demand rather than needing it reserved.
+const sz TRANSCODE_POOL_BYTES = 256 * 1024;
+
+// The ceiling on the pre-pass's own threads, `ktx::parallel`'s number for the
+// same reason: the shards are stack arrays and a machine with more cores than
+// this would be spending the saving on scheduling.
+const uint MAX_TRANSCODE_THREADS = 64;
+
+fn void transcode_slot(TranscodeJob* job, TranscodeSlot* slot) @local
+{
+	Clock started = clock::now();
+	BlockImage? made = transcode_ktx2_blocks(
+		slot.encoded, job.format, job.allocator, job.threads, true
+	);
+	if (try made)
+	{
+		slot.blocks = made;
+		slot.ok = true;
+	}
+	slot.ms = (long)started.to_now() / 1_000_000;
+}
+
+<*
+ One thread's share of the images: every `stride`th one from `first`.
+
+ Interleaved rather than blocked, the way `ktx::parallel` shards a block row,
+ so a file whose big images are next to each other spreads them evenly.
+*>
+struct TranscodeShard @local
+{
+	TranscodeJob* job;
+	usz first;
+	usz stride;
+}
+
+fn void transcode_range(TranscodeShard* shard) @local
+{
+	TranscodeJob* job = shard.job;
+	for (usz i = shard.first; i < job.slots.len; i += shard.stride)
+	{
+		transcode_slot(job, &job.slots[i]);
+	}
+}
+
+fn int transcode_shard(void* arg) @local
+{
+	TranscodeShard* shard = (TranscodeShard*)arg;
+
+	// The calling thread's own share, and a share whose thread would not spawn,
+	// run here — and this thread has a temp allocator already.
+	if (thread::current().equals(shard.job.owner))
+	{
+		transcode_range(shard);
+		return 0;
+	}
+
+	// A spawned thread has none, and the standard library refuses to create one
+	// implicitly off the load thread: the transcoder's `@pool()` aborts rather
+	// than allocating. One arena for the whole share rather than one per image,
+	// which is where it would be if this wrapped the work item instead.
+	@pool_init(mem, TRANSCODE_POOL_BYTES)
+	{
+		transcode_range(shard);
+	};
+	return 0;
+}
+
+<*
+ Every Basis image in the file, transcoded to BC7 at once, before any material
+ asks for one.
+
+ **The load was one image at a time.** `decode_material_texture` reaches
+ `transcode_ktx2_blocks` when a mesh is uploaded, so `evil_forest.glb`'s
+ sixty-one 1024x1024 ETC1S images were sixty-one transcodes in a row. The block
+ mapper inside each is already spread across the cores, but the slice decode in
+ front of it is not and cannot be — one BasisLZ Huffman bitstream an image, with
+ cross-block prediction, nothing to split — and it is the larger half. So the
+ cores sat idle through most of a 39 ms image, sixty-one times.
+
+ Here the *images* are what runs concurrently, which has no such serial part.
+
+ ## Both dimensions, not one
+
+ The obvious budget — one image per hardware thread, one thread per image — is
+ the worst of the measured ones: 1940 ms against 790 for the UASTC export. Two
+ reasons, and they are the same two the split has to answer.
+
+ The first is the tail. A mip chain is mostly small levels, and `parallel::shares`
+ correctly refuses to spread a 32x32 level over sixteen threads, so an image
+ cannot keep the machine busy for its whole life however many threads it is
+ given. The second is one image: `evil_forest.glb` is sixty 1024x1024s and one
+ 4096x4096 that costs sixteen times as much, so a pool that starts it last waits
+ for it alone — which is why the queue is ordered by `basis_image_cost` and why
+ the mapper still gets threads of its own.
+
+ So both: as many images at once as the machine has hardware threads, and half
+ the machine to each image's mapper. They overlap rather than add, because most
+ of each image's life is in the parts that do not fan out. Measured on the
+ RX 7800 XT box (8 cores, 16 threads), sixty-one images: 790 ms for the UASTC
+ export and 1060 ms for the ETC1S one, against 1940 and 1700 for one thread an
+ image and 6300 and 8000 for one image at a time.
+
+ ## What it costs to hold
+
+ A 1024x1024 BC7 chain is 1.4 MiB, so `evil_forest.glb`'s sixty-one images —
+ with the 4096x4096 among them — peak at about 105 MiB held between this and the
+ last mesh that names one, against the 373 MiB of RGBA8 the same file used to
+ put on the device. Nothing is decoded to pixels on the way, and each chain goes
+ back as it is claimed, so the peak is at the end of this function and falls
+ from there; `AssetImages.free_blocks` covers whatever no material ever asked
+ for.
+
+ Only images a `texture` names are transcoded. An image nothing points at is
+ dead weight in the file and would be dead weight here.
+*>
+fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
+{
+	if (gpu == null) return;
+
+	// The device decides, exactly as `claim_blocks_if_possible` lets it: without
+	// BC7 every one of these images takes the RGBA8 path and a transcode here
+	// would be work nothing collects.
+	TextureFormat target = { TextureFamily.BC7, ColorSpace.SRGB };
+	if (!gpu.supports(target)) return;
+
+	sz image_count = (sz)asset.stream.gltf.images.len();
+	if (image_count == 0 || asset.stream.gltf.textures.len() == 0) return;
+
+	bool[] named = mem::new_array(bool, image_count);
+	defer free(named);
+	foreach (texture : asset.stream.gltf.textures)
+	{
+		if (texture.source >= 0 && texture.source < image_count) named[texture.source] = true;
+	}
+
+	List{TranscodeSlot} slots;
+	slots.init(mem, 8);
+	defer slots.free();
+
+	foreach (index, wanted : named)
+	{
+		if (!wanted) continue;
+		char[]? encoded = asset.stream.get_image_data((uint)index);
+		if (catch encoded) continue;
+		if (!is_basis_ktx2(encoded)) continue;
+		slots.push({ .encoded = encoded, .image = (int)index, .cost = basis_image_cost(encoded) });
+	}
+
+	if (slots.len() == 0) return;
+
+	// Biggest first. `evil_forest.glb` is sixty 1024x1024 images and one
+	// 4096x4096 that costs sixteen times as much, and a pool that reaches it
+	// last spends the tail of every load on one thread finishing it alone.
+	// Insertion sort because the list is one entry per image in one file.
+	for (sz i = 1; i < slots.len(); i++)
+	{
+		TranscodeSlot moving = slots[i];
+		sz j = i;
+		while (j > 0 && slots[j - 1].cost < moving.cost)
+		{
+			slots[j] = slots[j - 1];
+			j--;
+		}
+		slots[j] = moving;
+	}
+
+	int detected = cpu::native_cpu();
+	uint cores = detected < 1 ? 1 : (uint)detected;
+
+	TranscodeJob job = {
+		.slots = slots.array_view(),
+		.format = target,
+		.allocator = mem,
+		.owner = thread::current(),
+		// Half the machine to each image's mapper — see the header.
+		.threads = cores > 1 ? cores / 2 : 1,
+	};
+	uint outer = (sz)cores > slots.len() ? (uint)slots.len() : cores;
+	if (outer > MAX_TRANSCODE_THREADS) outer = MAX_TRANSCODE_THREADS;
+
+	Clock started = clock::now();
+	TranscodeShard[MAX_TRANSCODE_THREADS] shards;
+	Thread[MAX_TRANSCODE_THREADS] workers;
+	bool[MAX_TRANSCODE_THREADS] live;
+	for (uint t = 1; t < outer; t++)
+	{
+		shards[t] = { .job = &job, .first = t, .stride = outer };
+		live[t] = true;
+		if (@catch(workers[t].create(&transcode_shard, &shards[t]))) live[t] = false;
+	}
+
+	TranscodeShard own = { .job = &job, .first = 0, .stride = outer };
+	transcode_range(&own);
+
+	// A thread that would not spawn has its share run here rather than dropped,
+	// so the pre-pass is a speed-up and never a missing image.
+	for (uint t = 1; t < outer; t++)
+	{
+		if (live[t])
+		{
+			workers[t].join();
+			continue;
+		}
+		transcode_shard(&shards[t]);
+	}
+
+	foreach (&slot : slots)
+	{
+		if (!slot.ok) continue;
+		asset.images.blocks.push({ .image = slot.image, .blocks = slot.blocks });
+		@debug_log("basis: %dx%d, %d levels mapped to BC7 in %d ms",
+			slot.blocks.width, slot.blocks.height, (int)slot.blocks.levels.len, slot.ms);
+	}
+	@debug_log("basis: %d images on %d threads (%d each) in %d ms",
+		slots.len(), outer, job.threads, (long)started.to_now() / 1_000_000);
+}
+
+<*
+ A pre-transcoded image, if the pre-pass left one for this index.
+
+ Handed over rather than lent: the entry stops holding the levels the moment
+ this returns true, and the caller uploads them and frees them. A second ask for
+ the same image — the one file in a hundred whose image is both a colour map and
+ a mask — transcodes again, which is the right price for not holding several
+ megabytes against a case that mostly does not happen.
+*>
+fn bool take_pretranscoded(AssetImages* images, int image_index, BlockImage* out) @local
+{
+	if (images == null || image_index < 0) return false;
+	foreach (&pre : images.blocks)
+	{
+		if (pre.image != image_index) continue;
+		*out = pre.blocks;
+		pre.image = -1;
+		pre.blocks = { };
+		return true;
+	}
+	return false;
+}
 
 <*
  Load a `.glb` or `.gltf`, upload everything it needs to draw, and close the
@@ -1673,7 +2113,14 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	if (asset.stream.gltf.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
 	asset.meshes.init(mem, 8);
-	asset.images.init(mem, 4);
+	asset.images.memo.init(mem, 4);
+	asset.images.blocks.init(mem, 4);
+
+	// Every `KHR_texture_basisu` image at once, before a material asks for one.
+	// After the mesh check because a file with nothing to draw has nothing to
+	// draw with either, and before the primitive walk because the walk is where
+	// the first upload could otherwise reach the transcoder one image at a time.
+	self.pretranscode_basis_images(gpu, &asset);
 
 	bool first_bounds = true;
 
@@ -1720,6 +2167,10 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	record_skins(&asset, &asset.stream);
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
 	record_lights(&asset, &asset.stream);
+	// After the nodes, which it writes `AssetNode.body` into, and after the mesh
+	// loop, because an implicit shape's proxy is pushed onto the end of
+	// `asset.meshes` and would otherwise shift the ranges the nodes just took.
+	self.record_physics(gpu, &asset, &asset.stream);
 	record_clips(&asset);
 
 	return self.claim_slot(asset);
@@ -1909,7 +2360,7 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 
 	foreach (&source : stream.gltf.nodes)
 	{
-		AssetNode node = { .scale = { 1, 1, 1 }, .rotation = NO_ROTATION, .skin = -1 };
+		AssetNode node = { .scale = { 1, 1, 1 }, .rotation = NO_ROTATION, .skin = -1, .body = -1 };
 		if (source.name.len > 0) node.name = source.name.copy(mem);
 
 		decompose(source.local_matrix(), &node.position, &node.rotation, &node.scale);
@@ -2341,7 +2792,6 @@ fn void free_stream(Asset* asset) @local
 		asset.has_stream = false;
 	}
 	asset.images.free();
-	asset.images = { };
 }
 
 <*
@@ -2571,7 +3021,7 @@ fn GpuMesh? Assets.upload_primitive(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
-	List{ImageMemo}* images,
+	AssetImages* images,
 	gltf::Mesh mesh,
 	gltf::Primitive primitive
 )
@@ -2966,7 +3416,7 @@ fn int? Assets.load_material_texture(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
-	List{ImageMemo}* images,
+	AssetImages* images,
 	gltf::TextureInfo info,
 	ColorSpace space = ColorSpace.SRGB
 )
@@ -2978,7 +3428,7 @@ fn int? Assets.load_material_texture(
 	int image_index = stream.gltf.textures[texture_index].source;
 	if (image_index < 0 || image_index >= stream.gltf.images.len()) return -1;
 
-	foreach (memo : *images)
+	foreach (memo : images.memo)
 	{
 		if (memo.image != image_index || memo.space != space) continue;
 		// The retain the decode path would have done, either by pushing a fresh
@@ -2989,8 +3439,8 @@ fn int? Assets.load_material_texture(
 		return memo.texture;
 	}
 
-	int resolved = self.decode_material_texture(gpu, stream, image_index, space)!;
-	images.push({ .image = image_index, .space = space, .texture = resolved });
+	int resolved = self.decode_material_texture(gpu, stream, images, image_index, space)!;
+	images.memo.push({ .image = image_index, .space = space, .texture = resolved });
 	return resolved;
 }
 
@@ -3036,7 +3486,7 @@ fn void? Assets.load_material_layers(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
-	List{ImageMemo}* images,
+	AssetImages* images,
 	gltf::Material material,
 	GpuLayers* out
 )
@@ -3253,7 +3703,7 @@ fn void? Assets.load_material_record(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
-	List{ImageMemo}* images,
+	AssetImages* images,
 	gltf::Material material,
 	bool with_uvs,
 	GpuMaterial* out
@@ -3341,12 +3791,14 @@ fn void GpuMesh.release_layers(&self, Assets* assets, Gpu* gpu)
  for why the space belongs in that sentence. Split out from the lookup above so
  that the memo has something whose cost is obvious to be standing in front of.
 
+ @param images : `The file's image cache. The block path reads the pre-pass's transcode out of it rather than doing the image again.`
  @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
 *>
 fn int? Assets.decode_material_texture(
 	&self,
 	Gpu* gpu,
 	gltf::GltfStream* stream,
+	AssetImages* images,
 	int image_index,
 	ColorSpace space = ColorSpace.SRGB,
 	bool mips = true
@@ -3363,7 +3815,7 @@ fn int? Assets.decode_material_texture(
 	//
 	// No `nearest`: a glTF sampler's filter is the material's business and this
 	// door has never taken one.
-	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, false);
+	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, false, images, image_index);
 	if (try claimed) return claimed;
 
 	// A texture that will not decode costs that material its texture and
@@ -3458,7 +3910,7 @@ fn int? Assets.load_asset_image(
 
 	if (mips)
 	{
-		foreach (memo : owner.images)
+		foreach (memo : owner.images.memo)
 		{
 			if (memo.image != image_index || memo.space != space) continue;
 			self.retain_texture(memo.texture);
@@ -3466,7 +3918,7 @@ fn int? Assets.load_asset_image(
 		}
 	}
 
-	int resolved = self.decode_material_texture(gpu, &owner.stream, image_index, space, mips)!;
+	int resolved = self.decode_material_texture(gpu, &owner.stream, &owner.images, image_index, space, mips)!;
 	// Re-read rather than reuse: the decode took `&self` and grew the texture
 	// table, and the pointer above was taken before it.
 	owner = self.slot(id);
@@ -3476,7 +3928,7 @@ fn int? Assets.load_asset_image(
 	// *consumer* counts and the memo only remembers where to find it.
 	if (mips && resolved >= 0)
 	{
-		owner.images.push({ .image = image_index, .space = space, .texture = resolved });
+		owner.images.memo.push({ .image = image_index, .space = space, .texture = resolved });
 	}
 	return resolved;
 }
@@ -3748,6 +4200,9 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
  **The device decides which.** `supports` is asked before the transcode and not
  after, because the fallback is a decode that has not happened yet — hardware
  without BC7 gets the RGBA8 it always got, and pays nothing for the question.
+
+ @param images : `The file's image cache, when this is a glTF's own image. Null for a path a script named, which has no pre-pass behind it.`
+ @param image_index : `Which of the file's images these bytes are, so the pre-pass's answer can be found. -1 for anything else.`
 *>
 fn int? Assets.claim_blocks_if_possible(
 	&self,
@@ -3755,7 +4210,9 @@ fn int? Assets.claim_blocks_if_possible(
 	char[] encoded,
 	ColorSpace space,
 	bool mips,
-	bool nearest
+	bool nearest,
+	AssetImages* images = null,
+	int image_index = -1
 )
 {
 	// A caller that asked for no chain is obeyed by decoding, because a block
@@ -3771,7 +4228,16 @@ fn int? Assets.claim_blocks_if_possible(
 	{
 		TextureFormat target = { TextureFamily.BC7, space };
 		if (!gpu.supports(target)) return UNSUPPORTED_IMAGE~;
-		blocks = transcode_ktx2_blocks(encoded, target)!;
+		// The load's pre-pass has almost always been here first, and taking its
+		// answer is the whole saving: sixty-one images transcoded across the
+		// cores at load rather than one at a time as the meshes are uploaded.
+		// The space is written on rather than compared, because the blocks are
+		// the same bytes either way — see `PreBlocks`.
+		if (!take_pretranscoded(images, image_index, &blocks))
+		{
+			blocks = transcode_ktx2_blocks(encoded, target)!;
+		}
+		blocks.format = target;
 	}
 	else
 	{
@@ -4019,6 +4485,7 @@ fn void Assets.free(&self, Gpu* gpu)
 		foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
 		asset.meshes.free();
 		free_nodes(asset);
+		free_physics(asset);
 		free_stream(asset);
 		// The one owned allocation a generated shape can carry — a terrain's
 		// grid. `free_slot` frees it on the unload path and this is the other

@@ -372,9 +372,12 @@ PNG rather than failing the export.
 `CUSTOM_texture_ktx2`, so a Blender importer or another engine handed one of those files declines
 it; `basis` writes ETC1S under `KHR_texture_basisu`, which every glTF toolchain implements, at
 about a fifth of BC7's size. What it costs is quality — it is visibly lossy where BC7 is nearly not
-— and load time back here, since no device samples ETC1S and the loader has to re-encode every
-level to BC7 before it can upload one. So it is for a file leaving the engine. `'png'` stays the
-default, and anything else throws.
+— and a little load time back here, since no device samples ETC1S and the loader maps every level
+to BC7 before it can upload one. That mapping is block arithmetic rather than an encode, and
+`three.load` runs the whole file's images across every core before the first material asks for one,
+so a scene of sixty 1024x1024 images spends about a second on it rather than the four it cost one
+image at a time. So it is for a file leaving the engine. `'png'` stays the default, and anything
+else throws.
 
 **Both are build steps.** BC7 encoding searches per block and saturates every core, and a single
 2048x2048 texture still takes around half a minute. A scene with twenty of them is minutes, not
@@ -783,6 +786,27 @@ limbs does not collide with its own chest. It takes an array too, for up to eigh
 throws rather than being silently dropped. It is per call; a thing that should never be collision
 geometry for anybody is `object.collides = false`.
 
+### What one call costs, on a terrain
+
+**The cost is the geometry near the capsule, and almost nothing else about the call.** One call is
+about four sweeps over one gathered list of triangles, so the number that decides everything is how
+many triangles a metre of your level has in it and how many of them are collision geometry.
+`three.stats().sweep` is the reading; `stats().colliders` is the cause.
+
+Measured on the Evil Forest — a 1.2 M-triangle Blender level, 2116 calls over a 1 m grid of its
+walkable area with an 8 cm step:
+
+| the scene | mean | p95 | worst |
+| --- | --- | --- | --- |
+| the file says what collides (122 colliders) | 1.24 ms | 6.99 ms | 30.8 ms |
+| every drawable mesh collides (580 colliders) | 3.95 ms | 21.8 ms | 67.8 ms |
+| five metres above all of it | 16 µs | | |
+
+The 8.32 µs quoted under `three.moveAndSlideAll` is the *call's* own overhead, measured against a
+scene of a few boxes: what the crossing and the result object cost, not what sweeping a forest costs.
+On a level the level is the whole of it — which is why `asset.instantiate(name, { physics: true })`
+is the first thing to reach for and `object.collides = false` is the second.
+
 ## three.batch(objects, options)
 
 A Float32Array-shaped bulk write over many nodes. `batch.positions` is three floats per object, seeded
@@ -798,9 +822,13 @@ of a frame, and the trigger for this is about two thousand nodes a frame.
 ## three.moveAndSlideAll(positions, motions, options) / three.moveBuffer(n) / three.moveResult
 
 `three.moveAndSlide` for a whole crowd, in one call — the same controller and the same sweeps. It
-exists for the shape of the answer rather than for the crossing: the single form measures 8.32 µs per
-agent and this one 1.43 µs, so two hundred agents cost 0.29 ms of a fixed step instead of 1.66 ms. What
-went away is a JavaScript result object per agent.
+exists for the shape of the answer rather than for the crossing: over a scene of a few boxes the single
+form measures 8.32 µs per agent and this one 1.43 µs, so two hundred agents cost 0.29 ms of a fixed
+step instead of 1.66 ms. What went away is a JavaScript result object per agent.
+
+Both are the call's own overhead and neither is what a level costs — "What one call costs, on a
+terrain" above has the numbers for one, where the single form is 1.24 ms. The saving here is flat, so
+it matters most where the sweeps themselves are cheap.
 
 - `positions` is the capsule centre, three floats per agent, read and written in place — it is your
   position column, so there is nothing to copy back.
@@ -1265,12 +1293,18 @@ synchronous, one of them, null stops it.
 
 ## three.frame
 
-How the frames have gone, and where the last one went: `{ running, ticks, overruns, ms }`.
+How the frames have gone, and where the last one went: `{ running, ticks, overruns, droppedSteps, ms }`.
 
 `overruns` is how many frames spent more than 8 ms in JavaScript — half a 60 Hz frame, the point at which the
 script has stopped leaving room for the draw it sets up. Nothing is logged when it happens, so this is the
 number to read if you suspect hitching. Under `--mcp` alone it stays 0, because there an overrun stops the
 callback instead of counting it.
+
+`droppedSteps` is fixed steps the clock owed and gave up on, since the process started. A frame whose fixed
+steps together cost more wall time than the game time they were catching up takes one step and drops the
+rest, so the game falls behind honestly instead of owing eight more of them to the next frame — the
+difference between a stutter and a ten-second freeze. The engine says so once and counts the rest here; a
+number that keeps climbing while you play is a fixed system too slow for the rate it asked for.
 
 `ms` is the last finished frame, split five ways — read it from inside a system and it describes the frame
 before, which is complete. `{ handlers, fixed, frame, jobs }` are the four spans that add up to `total` and
@@ -1434,6 +1468,10 @@ Give an object a body and answer with the object.
 The description is `object.body` if it has one and `options` wins over it, so a scene can be described once
 and tweaked at the call: `{ shape: 'box' | 'sphere' | 'capsule' | 'hull' | 'heightfield', mass: 1,
 friction: 0.5, restitution: 0.2, kinematic: false, trigger: false }`. Mass 0 means static.
+
+`{ gravityFactor: 1, linearDamping: 0, angularDamping: 0 }` are the three knobs a glTF `motion` block
+carries and are read only on a dynamic body: all of gravity and no drag, which is what every body here had
+before they were options. `gravityFactor: 0` floats.
 
 The object has to be in the scene already — a body is placed at a world position — and has to be a child of
 the scene rather than of another object, because the solver works in world space and a parent transform would
@@ -1875,6 +1913,105 @@ an instantiated tree.
 
 Read out of the JSON chunk at load, so it costs no upload, and cached.
 
+## asset.instantiate(name, { physics: true })
+
+Let the file say what collides.
+
+Every drawable mesh here is collision geometry by default, which is the right answer for a scene a script
+builds and the wrong one for a level: the Evil Forest is 580 colliders of which 449 are plants, and a
+character sweep gathers every triangle of every one of them. With this on, a node the file gave a
+`KHR_physics_rigid_bodies` collider is in the spatial index and **every other mesh of that file is out** —
+copies expanded from `EXT_mesh_gpu_instancing` included, since each copy is its own node. So
+`three.moveAndSlide` and `scene.raycast` walk the file's collision geometry and nothing else.
+
+A mesh collider reuses the drawn mesh's BVH and costs nothing, which is what a mesh collider means.
+
+Everything else gets a **proxy**: a low-poly mesh of the shape the file named, placed as a child of the
+node with `collisionOnly` set — in every query, in no draw list — and the drawing itself out of the index.
+
+- An implicit shape — a box, sphere, capsule or cylinder from `KHR_implicit_shapes` — has no triangles at
+  all, and a node that draws nothing is in no query. Each distinct shape in the file becomes one proxy,
+  built in the shape's own units and sitting at identity under the node, so the node's world transform
+  places and scales it. That is where the soldiers become capsules and the barrels boxes.
+- A **convex hull** is the hull of the drawn triangles, built once at load with the same quickhull behind
+  `three.physics.add({ shape: 'hull' })` and `new three.ConvexGeometry(points)`. It is smaller and simpler
+  than the drawing — a rock of four thousand triangles is a hull of forty — and it is the shape the file
+  actually named. One hull per glTF mesh, so forty crates authored from one mesh are one quickhull.
+
+`three.stats()` counts a proxy in `colliders` and in `nodes`, and in none of `drawCalls`, `instances` or
+`triangles` — it is a collider that is not a drawing, which is what those numbers should say about it.
+
+### What reaches the solver
+
+The index is the whole of the first half and it needs no bodies. `three.physics` gets the smaller, stricter
+half:
+
+- `motion` becomes a **dynamic** body — **kinematic** when `isKinematic` — carrying the file's mass,
+  `gravityFactor`, damping and initial velocities. It is the object itself, so `crate.position` is the
+  crate's, and it leaves the file's tree to be one: a body's transform is world space, so the node hangs
+  off the scene root. Its size comes from the drawing, which is the same mesh the file's implicit shape
+  was measured from.
+- `trigger` becomes a trigger volume, and a plain collider becomes a **static** body — both as an
+  invisible copy standing where the file put it, so the file's tree is untouched. The copy is made from
+  the collider's own shape, so what a body rests on and what a sweep hits are the same box.
+- **A static body is only made when the file describes something that moves.** A wall exists in the solver
+  to hold a body up, so a file with no `motion` and no `trigger` in it — a level, which is the common case
+  — gets no solver bodies at all and pays for none. Its colliders are still in the index, which is what the
+  character controller reads.
+- `physicsMaterial` becomes `friction` and `restitution`.
+- `joint` becomes `three.physics.joint` with the file's limits. glTF's limits and this engine's are the
+  same description, so nothing is translated; the joint *frame* is the solver's, whose axis 0 is the
+  joint's `axis`.
+- A **cylinder** becomes a **hull** — the hull of its own proxy lathe, so a sixteen-sided drum rather than
+  a capsule with the corners rounded off. The solver holds a box, a sphere, a capsule, a hull and a
+  heightfield, and of those only a hull has flat ends and a round side; a capsule wearing the name would
+  be wrong at the rim, which is the only place a cylinder is ever stood on. It is still exact in the index,
+  where the proxy is the lathe itself.
+- **Collision filters are reported, not applied**: there are no layers or masks here to put one in.
+
+Everything that did not fit is named once by `console.warn`, the way the lights import names the lanterns
+it could not light.
+
+Without the option none of this happens and the file draws and collides exactly as it always did — no
+existing scene changes. It is also a no-op on a file that carries neither extension, which is what a script
+that turns it on for a whole kit gets on the pieces nobody authored bodies for.
+
+### Authoring it
+
+In Blender this is the **Rigid Body** panel and nothing else: give a blocking object a **Passive** body and
+pick its shape — *Mesh* for ground, walls and props whose triangles are the collision, *Box*, *Sphere*,
+*Capsule* or *Cylinder* for the ones a primitive describes better — and leave everything without one. The
+exporter writes those as `KHR_physics_rigid_bodies` colliders and `KHR_implicit_shapes` shapes, and the
+rigid body world's own settings are never read here. Passive is the important word: an Active body carries
+a `motion` and becomes a *dynamic* body in the solver, which for a level means the ground falls.
+
+An object hidden in the view layer exports as `KHR_node_visibility` false, so give it no body either —
+otherwise the level has a wall nobody can see.
+
+## asset.colliders
+
+What the file said collides, node by node, whether or not any of it ever becomes a body.
+
+```js
+for (const c of asset.colliders) console.log(c.name, c.shape, c.mass);
+```
+
+`{ node, name, shape, collider, trigger, motion, kinematic, mass, gravityFactor, linearDamping,
+angularDamping, linearVelocity, angularVelocity, material, friction, restitution, proxy, filtered }`.
+`node` is the glTF node index, which is `object._gltfNode` on an instantiated tree; `name` is the proxy's
+name, `"<node>.collider"`; and `shape` is one of `'mesh'`, `'hull'`, `'box'`, `'sphere'`, `'capsule'` or
+`'cylinder'`. Every number is the file's own, which for mass, friction and restitution is also this
+engine's.
+
+`proxy` says the shape got a collision-only mesh of its own. `filtered` says the file named a
+`collisionFilter`, which is reported and not applied.
+
+`asset.physicsJoints` is the same door onto the file's joints: `{ a, b, pivot, collide, limits }`, with
+`a` and `b` glTF node indices and each limit `{ linearAxes | angularAxes, min, max, stiffness, damping }`
+— exactly what `three.physics.joint` takes.
+
+Read out of the JSON chunk at load, so it costs no upload, and cached.
+
 ## three.light.shadow
 
 The shadow this light casts, off until you ask. `three.light.shadow = true` turns it on;
@@ -2155,9 +2292,14 @@ compressed or not, and a `.glb` whose textures are KTX2 loads with them. The for
 bytes rather than its name.
 
 It reaches the device as blocks wherever it can. A BCn file lends its own, untouched. A Basis one is transcoded
-to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8, and the
-one case that is slow, because no device samples ETC1S and the re-encode is real CPU work at load. Anything
-else, and any device that cannot sample BC7, arrives as RGBA8 with a chain built on the device.
+to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8. No device
+samples ETC1S or UASTC, but both are BC7's own shape, so the transcode rewrites each block as a BC7 block instead
+of decoding and re-encoding: a 1024x1024 image with its eleven levels is tens of milliseconds. Anything else, and
+any device that cannot sample BC7, arrives as RGBA8 with a chain built on the device.
+
+One image at a time is what a path costs. A `.glb`'s own images are not: `three.load` transcodes every one the
+file names at once, across every core, before any material asks for one, which is what keeps a scene of sixty of
+them near a second rather than near five.
 
 Deduplicated by the decoded image, so the same picture reached by two paths — or by a path and a `.glb` — is one
 upload, and `three.stats().textures` counts it once.
