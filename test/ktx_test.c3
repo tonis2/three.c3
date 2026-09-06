@@ -520,6 +520,72 @@ fn void a_chainless_basis_texture_gets_a_chain() @test
 	}
 }
 
+<*
+ And the base of that chain is the file's own blocks, not an encode of them.
+
+ A chainless file used to be decoded to pixels and encoded level by level, level
+ 0 among them — three quarters of the blocks in a chain, through the slowest
+ thing in the transcoder, to arrive at an approximation of blocks the file
+ already had. `evil_forest.glb`'s sixty-one images cost 28.8 s of a 30 s load
+ that way, against 1.0 s for the same images with their chains. Level 0 takes
+ the mapper now and only the levels the chain invents are encoded.
+
+ Byte equality against the mapper alone is what says so: an encode of the same
+ pixels would be close and would not be equal.
+*>
+fn void a_generated_chain_maps_its_base() @test
+{
+	const uint SIDE = 64;
+
+	char[] source = mem::new_array(char, (sz)SIDE * SIDE * 4);
+	defer free(source);
+	for (uint y = 0; y < SIDE; y++)
+	{
+		for (uint x = 0; x < SIDE; x++)
+		{
+			sz at = ((sz)y * SIDE + x) * 4;
+			source[at + 0] = (char)(x * 4 + y);
+			source[at + 1] = (char)(255 - y * 3);
+			source[at + 2] = (char)((x * y) & 0xff);
+			source[at + 3] = 255;
+		}
+	}
+
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::ETC1S, images[..], SIDE, SIDE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = false }
+	)!!;
+	defer free(blob);
+
+	test::@check(basis::info(blob)!!.levels == 1,
+		"the fixture already has a chain, so this asserts nothing");
+
+	three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, bc7)!!;
+	defer made.free();
+
+	basis::Transcoded[] mapped = basis::transcode_levels(mem, blob, 0, 0, basis::TF_BC7_RGBA, 1)!!;
+	defer free(mapped.ptr);
+	defer free(mapped[0].data);
+
+	test::@check(made.levels[0] == mapped[0].data,
+		"level 0 is an encode of the picture, not the file's own blocks");
+
+	// The chain below it is still there, and at the sizes a chain has: mapping
+	// the base must not have cost the levels it is the base of.
+	uint chain = three::mip_levels(SIDE, SIDE);
+	test::@check(made.levels.len == chain,
+		"a one-level file gave %d levels, not the full %d", (int)made.levels.len, chain);
+	for (uint level = 1; level < chain; level++)
+	{
+		uint side = three::level_extent(SIDE, level);
+		test::@check(made.levels[level].len == bc7.image_size(side, side),
+			"generated level %d is %d bytes, not the %d a %dx%d BC7 image is",
+			level, (int)made.levels[level].len, (int)bc7.image_size(side, side), side, side);
+	}
+}
+
 // ============================================================================
 // Getting there
 // ============================================================================

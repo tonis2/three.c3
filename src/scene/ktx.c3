@@ -232,6 +232,23 @@ fn ulong basis_image_cost(char[] encoded)
 }
 
 <*
+ Does this Basis file leave `transcode_ktx2_blocks` a chain to build?
+
+ One level and more than one texel: an export written with mips off. The rule
+ lives here rather than twice, beside `basis_image_cost` and read the same way,
+ because the pre-pass reports the two branches apart and would otherwise be
+ guessing which one an image took.
+
+ False for anything that is not a Basis KTX2, which has no branch to take.
+*>
+fn bool basis_needs_chain(char[] encoded)
+{
+	basis::Info? info = basis::info(encoded);
+	if (catch info) return false;
+	return info.levels == 1 && (info.width > 1 || info.height > 1);
+}
+
+<*
  A KTX2's blocks, kept rather than narrowed — every level, in the file's format.
 
  The fast path this whole section exists for. `decode_ktx2` above expands blocks
@@ -343,20 +360,35 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 
  ## A file with no chain still gets one
 
- The levels are the file's wherever the file has any — every image in
- `evil_forest.glb` carries a full eleven or thirteen. A Basis file written
- without mips is the one case where they cannot be, and it does not get to lose
- them here: the RGBA8 path this replaces had the device blit a chain, so one is
- built from the transcoded base instead. `mipgen` filters at full precision and
- in the right space, which is a better chain than the blit was.
+ The levels are the file's wherever the file has any. A Basis file written
+ without mips — which is what an exporter with the switch off writes, and what
+ `evil_forest.glb` became on 2026-09-06 — is the one case where they cannot be,
+ and it does not get to lose them here: the RGBA8 path this replaces had the
+ device blit a chain, so one is built from the transcoded base instead. `mipgen`
+ filters at full precision and in the right space, which is a better chain than
+ the blit was.
 
- This is the one path that still encodes, and it has to: a filtered level is
- pixels and has no blocks to rewrite. `fast` is what keeps it affordable — it
- stops after mode 6 instead of also searching mode 1's sixty-four partitions,
- 250ms against 1813ms on a 1024x1024 image for 52.8dB against 57.2dB, both far
- above where a difference is visible because the source was quantised before
- these bytes existed. `encode_ktx2_bc7` below encodes full-precision pixels and
- still asks for the whole search.
+ Level 0 is not one of them. It has blocks, and they are the file's, so it goes
+ through the mapper exactly as it would in a file that shipped a chain — 79 ms
+ on a 1024x1024 against the 504 ms encoding it costs, and it is three quarters
+ of the blocks in the chain. Only the levels this function invents are encoded.
+ The base is still decoded to RGBA8 once, because `mipgen` filters pixels; that
+ is 36 ms, and with the 37 ms of filtering it is the whole extra price of a file
+ with no mips.
+
+ A filtered level has no blocks to rewrite, so those do encode, and `fast` is
+ what keeps them affordable — mode 6 alone, two least-squares passes, the p-bit
+ pair read off the endpoints rather than searched. 184 ms for the ten generated
+ levels of a 1024x1024 image; the whole chain cost 3.3 s before either saving,
+ and a no-mip `evil_forest.glb` went from a 30.1 s load to 4.0 s against the
+ 2.3 s the same file with its chains takes. `encode_ktx2_bc7` below encodes
+ full-precision pixels and still asks for the whole search.
+
+ `threads` is the mapper's and `encode_threads` the encoder's, because a caller
+ running whole images at once has already filled the machine and the two do not
+ want the same answer — see `pretranscode_basis_images`. The encoder's count
+ goes to `mipgen` as well, whose rows are the other thing on this path that
+ fans out.
 
  ## One image at a time, or several at once
 
@@ -372,6 +404,7 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  @param format : `The target. BC7 in the caller's space; nothing else is encoded here.`
  @param threads : `The block mapper's thread count. 0 decides from the core count; 1 pins it to this thread.`
  @param quiet : `True to leave the --debug line to a caller that is timing this itself.`
+ @param encode_threads : `The generated levels' encoder, when the file ships no chain. 0 follows the mapper's count; a caller already running whole images at once passes 1.`
  @return ? UNSUPPORTED_IMAGE : `Not a Basis KTX2, an unencodable target, or a level that would not transcode.`
 *>
 fn BlockImage? transcode_ktx2_blocks(
@@ -379,7 +412,8 @@ fn BlockImage? transcode_ktx2_blocks(
 	TextureFormat format,
 	Allocator allocator = mem,
 	uint threads = 0,
-	bool quiet = false
+	bool quiet = false,
+	uint encode_threads = 0
 )
 {
 	if (format.family != TextureFamily.BC7) return UNSUPPORTED_IMAGE~;
@@ -391,7 +425,7 @@ fn BlockImage? transcode_ktx2_blocks(
 	if (info.width == 0 || info.height == 0) return UNSUPPORTED_IMAGE~;
 	if (info.levels == 0 || info.levels > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
 
-	bool generated = info.levels == 1 && (info.width > 1 || info.height > 1);
+	bool generated = basis_needs_chain(encoded);
 	uint count = generated ? mipgen::chain_length(info.width, info.height) : info.levels;
 	if (count > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
 
@@ -431,34 +465,35 @@ fn BlockImage? transcode_ktx2_blocks(
 		return out;
 	}
 
+	// Level 0 has blocks of its own, so it takes the same door the whole chain
+	// takes above — one level, rewritten rather than encoded, for a fraction of
+	// what encoding it would cost. The array that listed it is this function's to
+	// give back; the blocks are already the caller's allocation.
+	basis::Transcoded[]? base = basis::transcode_levels(allocator, encoded, 0, 0, basis::TF_BC7_RGBA, threads);
+	if (catch base) return UNSUPPORTED_IMAGE~;
+	out.levels[0] = base[0].data;
+	alloc::free(allocator, base.ptr);
+
 	mipgen::Options options = { .srgb = format.space == ColorSpace.SRGB, .renormalize = false };
-	// The level being encoded, as pixels. Carried across iterations, because each
-	// level is filtered from the one above it.
-	char[] pixels;
+	// The base as pixels, decoded once and then carried: each generated level is
+	// filtered from the one above it, and nothing here decodes a level twice.
+	basis::Transcoded? rgba = basis::transcode(allocator, encoded, 0, 0, 0, basis::TF_RGBA32, 4);
+	if (catch rgba) return UNSUPPORTED_IMAGE~;
+	char[] pixels = rgba.data;
 	defer if (pixels.len) alloc::free(allocator, pixels.ptr);
-	uint lw;
-	uint lh;
+	uint lw = rgba.width;
+	uint lh = rgba.height;
+	uint encoder = encode_threads == 0 ? threads : encode_threads;
 
-	for (uint level = 0; level < count; level++)
+	for (uint level = 1; level < count; level++)
 	{
-		if (level > 0)
-		{
-			char[] next = mipgen::next_level(allocator, pixels, lw, lh, options);
-			alloc::free(allocator, pixels.ptr);
-			pixels = next;
-			lw = lw > 1 ? lw >> 1 : 1;
-			lh = lh > 1 ? lh >> 1 : 1;
-		}
-		else
-		{
-			basis::Transcoded? rgba = basis::transcode(allocator, encoded, 0, 0, 0, basis::TF_RGBA32, 4);
-			if (catch rgba) return UNSUPPORTED_IMAGE~;
-			pixels = rgba.data;
-			lw = rgba.width;
-			lh = rgba.height;
-		}
+		char[] next = mipgen::next_level(allocator, pixels, lw, lh, options, encoder);
+		alloc::free(allocator, pixels.ptr);
+		pixels = next;
+		lw = lw > 1 ? lw >> 1 : 1;
+		lh = lh > 1 ? lh >> 1 : 1;
 
-		char[]? blocks = bc7::encode(allocator, pixels, lw, lh, true, threads, true);
+		char[]? blocks = bc7::encode(allocator, pixels, lw, lh, true, encoder, true);
 		if (catch blocks) return UNSUPPORTED_IMAGE~;
 		out.levels[level] = blocks;
 	}
@@ -466,8 +501,8 @@ fn BlockImage? transcode_ktx2_blocks(
 	ok = true;
 	if (!quiet)
 	{
-		@debug_log("basis: %dx%d, %d levels encoded to BC7 in %d ms (the file shipped no chain)",
-			info.width, info.height, count, (long)started.to_now() / 1_000_000);
+		@debug_log("basis: %dx%d, level 0 mapped and %d levels encoded to BC7 in %d ms (the file shipped no chain)",
+			info.width, info.height, count - 1, (long)started.to_now() / 1_000_000);
 	}
 	return out;
 }
