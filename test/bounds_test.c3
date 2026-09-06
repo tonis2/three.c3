@@ -22,7 +22,10 @@ module three_tests::bounds;
 import three;
 import three_tests::device;
 import vk;
+import collision;
 import std::core::test;
+import std::math;
+import std::math::vector;
 
 <*
  A runtime with a headless device.
@@ -1364,5 +1367,206 @@ fn void bounds_from_a_stale_reference_throw() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == `"threw"`, "a stale reference throws, got '%s'", result.value);
+	};
+}
+
+// ============================================================================
+// The per-node cache — `Node.world_box`
+// ============================================================================
+
+<*
+ A runtime with a pass and no script, for the checks that read the cache itself.
+
+ `@with_js` above is the right harness for anything the API promises; these two
+ are about *how* the box is arrived at, which is a host-side question and has no
+ JavaScript spelling.
+*>
+macro @with_pass(; @body(three::Renderer* renderer))
+{
+	three::Renderer* renderer = device::borrow(200, 150);
+	defer device::release();
+
+	@body(renderer);
+}
+
+// Two quads, so there is a second mesh index to re-assign a slot to.
+const String PAIR = "test/fixtures/textured.glb";
+
+// The first node in the pool that contributes to `Scene.bounds` — the fixture's,
+// whatever the exporter called it, and only wanted for the asset handle it holds.
+fn three::NodeId first_drawable(three::Scene* scene)
+{
+	foreach (i, &node : scene.nodes)
+	{
+		if (!node.alive || !node.asset.is_set() || node.mesh == three::NO_MESH) continue;
+		if (node.collision_only) continue;
+		return { .index = (uint)i, .generation = node.generation };
+	}
+	test::@check(false, "the fixture put nothing drawable in the scene");
+	return three::NO_NODE;
+}
+
+<*
+ `Scene.bounds` written out with no cache anywhere in it.
+
+ The reference the cached answer is held against. Deliberately a copy of the loop
+ rather than a call into it: a helper that shared code with the thing under test
+ would agree with it by construction, including when both are wrong.
+*>
+fn collision::Aabb3 uncached_bounds(three::Scene* scene, three::Assets* assets)
+{
+	scene.update_world_matrices();
+
+	bool found = false;
+	collision::Aabb3 total;
+	foreach (&node : scene.nodes)
+	{
+		if (!node.alive || !node.asset.is_set() || node.mesh == three::NO_MESH) continue;
+		if (node.collision_only) continue;
+		three::GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
+		if (mesh == null) continue;
+
+		collision::Aabb3 box = three::world_mesh_bounds(node.world, mesh);
+		if (!found)
+		{
+			total = box;
+			found = true;
+		}
+		else
+		{
+			total.expand_by_aabb(box);
+		}
+	}
+	if (!found) total = { .min = { -1, -1, -1 }, .max = { 1, 1, 1 } };
+	return total;
+}
+
+fn void boxes_agree(three::Scene* scene, three::Assets* assets, String step)
+{
+	collision::Aabb3 cached = scene.bounds(assets);
+	collision::Aabb3 fresh  = uncached_bounds(scene, assets);
+	bool same = math::abs(cached.min.x - fresh.min.x) < 0.0001f
+		&& math::abs(cached.min.y - fresh.min.y) < 0.0001f
+		&& math::abs(cached.min.z - fresh.min.z) < 0.0001f
+		&& math::abs(cached.max.x - fresh.max.x) < 0.0001f
+		&& math::abs(cached.max.y - fresh.max.y) < 0.0001f
+		&& math::abs(cached.max.z - fresh.max.z) < 0.0001f;
+	test::@check(same,
+		"%s: the cache says [%f %f %f]..[%f %f %f], a from-scratch walk says [%f %f %f]..[%f %f %f]",
+		step,
+		cached.min.x, cached.min.y, cached.min.z, cached.max.x, cached.max.y, cached.max.z,
+		fresh.min.x, fresh.min.y, fresh.min.z, fresh.max.x, fresh.max.y, fresh.max.z);
+}
+
+<*
+ The cached box is the box, after every kind of change there is.
+
+ `Scene.bounds` unions a box cached per node rather than re-walking every vertex
+ in the level, so the question is no longer "is the box right" but "is it still
+ right after the thing that should have invalidated it". A stale entry is not a
+ crash — it is a shadow fit around where a building used to be, and a camera
+ framed on a node that has been dead for an hour — so this asserts at every step
+ rather than only at the end: a cache rescued by a later change would pass a
+ check that only looked once.
+
+ The four events are the four that can move an entry: a transform, a
+ re-parenting (which moves a whole subtree without the setter having heard of any
+ of it), a death, and a slot recycled by a node naming a different mesh.
+*>
+fn void the_cached_box_survives_every_kind_of_change() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, PAIR)!!;
+		three::Scene* scene   = renderer.pass.scene;
+		three::Assets* assets = &renderer.pass.assets;
+
+		three::AssetId asset = scene.node(first_drawable(scene)).asset;
+		three::Asset* slot   = assets.slot(asset);
+		test::@check(slot != null && slot.meshes.len() >= 2,
+			"%s should carry two meshes, for the re-assignment below", PAIR);
+
+		// A tree of our own on top of the fixture's flat placement, so there is
+		// something to re-parent and something to kill that is not the whole scene.
+		three::NodeId a = scene.attach(scene.root, asset, 0, "a");
+		three::NodeId b = scene.attach(a, asset, 1, "b");
+		three::NodeId c = scene.attach(scene.root, asset, 1, "c");
+		scene.set_position(a, { 3, 0, 0 });
+		scene.set_position(b, { 0, 2, 0 });
+		scene.set_position(c, { -4, 0, 1 });
+		boxes_agree(scene, assets, "as built");
+
+		// Turned as well as moved: at 45 degrees the exact box and the re-bounded
+		// one differ, so a cache that quietly fell back to the conservative answer
+		// would show up here rather than passing on a right angle.
+		scene.set_position(a, { 5, 1, -3 });
+		scene.set_rotation(a, { 0, (float)math::PI / 4, 0 });
+		boxes_agree(scene, assets, "after a move and a turn");
+
+		scene.set_parent(c, b);
+		boxes_agree(scene, assets, "after a re-parenting");
+
+		scene.remove(a);
+		boxes_agree(scene, assets, "after killing the subtree");
+
+		// The slot the kill freed, taken by a node naming the other mesh — the case
+		// `create_slot` resets the cached box for. Nothing else in the API writes
+		// `Node.mesh`, so this *is* mesh re-assignment.
+		three::NodeId recycled = scene.attach(scene.root, asset, 1, "recycled");
+		scene.set_position(recycled, { -8, 4, 2 });
+		boxes_agree(scene, assets, "after a recycled slot took a different mesh");
+	};
+}
+
+<*
+ Moving one node refits one box.
+
+ The whole point, and not a thing the answer can be asked about: a box that cost
+ a million vertex transforms and a box that came out of a cache are the same six
+ floats. `Scene.bounds_fits` counts the fits, and it exists for this check.
+
+ The reference scene is 1.2M triangles with one character walking through it, and
+ before this the walk was 92% of the frame.
+*>
+fn void moving_one_node_refits_one_box() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load(&renderer.gpu, PAIR)!!;
+		three::Scene* scene   = renderer.pass.scene;
+		three::Assets* assets = &renderer.pass.assets;
+
+		three::AssetId asset = scene.node(first_drawable(scene)).asset;
+		three::NodeId parent = scene.attach(scene.root, asset, 0, "parent");
+		three::NodeId child  = scene.attach(parent, asset, 1, "child");
+		three::NodeId lone   = scene.attach(scene.root, asset, 0, "lone");
+		scene.set_position(lone, { -4, 0, 0 });
+
+		scene.bounds(assets);
+		uint fitted = scene.bounds_fits;
+		test::@check(fitted >= 5, "the scene should have at least five drawable nodes, it fitted %d", fitted);
+
+		// A frame in which nothing moved fits nothing — the whole-scene short
+		// circuit, which is what a still level costs.
+		scene.bounds(assets);
+		test::@check(scene.bounds_fits == fitted,
+			"a second call with nothing moved refitted %d boxes", scene.bounds_fits - fitted);
+
+		// One leaf moved: one box, and the rest of the level is not touched.
+		scene.set_position(lone, { -5, 0, 0 });
+		scene.bounds(assets);
+		test::@check(scene.bounds_fits == fitted + 1,
+			"moving one childless node refitted %d boxes, expected 1", scene.bounds_fits - fitted);
+
+		// A group moved: its own box and its child's, because `update_branch`
+		// carries `changed` down and both world matrices really did move.
+		fitted = scene.bounds_fits;
+		scene.set_position(parent, { 0, 7, 0 });
+		scene.bounds(assets);
+		test::@check(scene.bounds_fits == fitted + 2,
+			"moving a parent of one refitted %d boxes, expected 2", scene.bounds_fits - fitted);
+
+		// And the box is still the right one at the end of all that.
+		boxes_agree(scene, assets, "after the counted moves");
 	};
 }
