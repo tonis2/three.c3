@@ -555,10 +555,28 @@ struct Scene
 	 that finished uploading after the box was taken would have hull positions the
 	 box was not fitted around. It cannot happen — `create_slot` retains the mesh it
 	 names and retaining is what uploads, so every node in a scene is past that
-	 point before the node exists.
+	 point before the node exists. `Node.world_box` keys on the hull length anyway,
+	 because the per-node cache below outlives a single call and is therefore
+	 exposed to it in a way this flag is not.
+
+	 This flag is the *whole-scene* short circuit and is all a still frame pays.
+	 The frame where something did move falls through to a union over
+	 `Node.world_box`, which refits only the nodes whose matrices were recomputed —
+	 a character walking through a level is one box, not the level.
 	*>
 	collision::Aabb3 bounds_box;
 	bool bounds_current;
+
+	<*
+	 How many per-node world boxes have been fitted since this scene was created.
+
+	 A diagnostic rather than a number anything renders from. `Scene.bounds` is only
+	 cheap because this stops counting when the nodes it unions stand still, and
+	 that is not a property the box itself can be asked about — a correct box and a
+	 box that cost a million vertex transforms to get look identical. `bounds_test`
+	 asserts on it directly; nothing else reads it.
+	*>
+	uint bounds_fits;
 
 	<*
 	 Bumped whenever something a *static* caster contributes to the shadow map
@@ -766,6 +784,14 @@ fn Scene* Scene.init(&self)
  caller says "this change is one subtree and nothing else". Everything that is
  not — an add, a removal, a re-parenting, a node joining or leaving the query set
  — leaves it unset and pays for a rebuild.
+
+ `Node.world_box` is deliberately *not* on this list, and it is the exception
+ that keeps the list short rather than a fifth entry someone forgot. Clearing it
+ here would mean touching every node in the pool on every setter call, which is
+ the cost the cache exists to remove; it is invalidated where the thing it is
+ derived from actually changes — `update_branch` for the matrix, `create_slot`
+ for the mesh — and the box over the *scene* is a union of those, refitted here
+ like the other three.
 
  @param node : `The node that changed, or null for a change that is not about one node — an add, a removal, a re-parenting. Only read to decide whether the static half of the shadow map has to be rebuilt; a null is treated as "it might have been static", which is the conservative answer.`
  @param moved : `The id of that node when the change is a movement of its transform and nothing else. NO_NODE otherwise, which drops the query index rather than re-filing.`
@@ -1416,6 +1442,14 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.normal = matrix::IDENTITY4{float};
 	node.asset = asset;
 	node.mesh = mesh;
+	// Reset for `material`'s reason: a recycled slot that kept its world box would
+	// report the *previous* occupant's mesh, at the previous occupant's transform,
+	// to the camera and to the shadow fit. `node.dirty` below gets there first for
+	// any node that is in the tree, because the walk clears this — so what this
+	// line is really for is the slot that is not: `Scene.bounds` reads the node
+	// *pool* rather than the tree, so a slot `update_branch` never reaches would
+	// answer with a stranger's box instead of with its own identity transform.
+	node.world_box_current = false;
 	// Reset like everything else here, and for a sharper reason: this slot may have
 	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
 	// would draw with a stranger's shader.
@@ -1910,6 +1944,11 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 			node.had_world = true;
 		}
 		node.dirty = false;
+		// And where the node's own bounding box is really invalidated, for the same
+		// reason and with the same reach: `changed` carries down the tree, so a group
+		// that moved invalidates the box of everything under it without the setter
+		// that moved it having heard of any of them. See `Node.world_box`.
+		node.world_box_current = false;
 		// Where the cached shadow map is really invalidated, and it is here rather
 		// than in the setters because this is the only place that knows a node
 		// *actually* moved. A static wall parented to a dynamic group is the case
@@ -2083,6 +2122,33 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 		}
 	}
 	return box;
+}
+
+<*
+ The above, cached on the node.
+
+ What `Scene.bounds` and `Scene.grow_bounds` actually call, and the difference
+ between them is the whole of the fix: the scene's box is a union of per-node
+ boxes, so the frame where one character moved refits one box rather than every
+ vertex in the level. `Node.world_box` carries what invalidates an entry.
+
+ Exactness is unchanged — a cache hit returns the box `world_mesh_bounds` would
+ have returned — which is why the fallback and the hull length are keyed rather
+ than ignored: a box fitted around the conservative local box before the mesh
+ uploaded is not the exact one, and reusing it would quietly turn the promise
+ into "exact, eventually".
+*>
+fn collision::Aabb3 Scene.node_world_box(&self, Node* node, GpuMesh* mesh)
+{
+	if (node.world_box_current && node.world_box_hull == mesh.hull_positions.len)
+	{
+		return node.world_box;
+	}
+	node.world_box = world_mesh_bounds(node.world, mesh);
+	node.world_box_hull = mesh.hull_positions.len;
+	node.world_box_current = true;
+	self.bounds_fits++;
+	return node.world_box;
 }
 
 // ============================================================================
@@ -2671,11 +2737,15 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 *>
 fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 {
-	// Cached, because this is the most expensive query in the project. Every vertex
-	// of every drawable node goes through a matrix here — `world_mesh_bounds`
-	// explains why it is exact rather than conservative — which is 100k to 370k of
-	// them per call on the reference village, twice a frame. `Scene.bounds_box`
-	// carries what invalidates it.
+	// Cached twice over, because this is the most expensive query in the project.
+	// The flag is the still-frame case; the loop below is the moving one, and it
+	// unions per-node boxes rather than re-walking vertices so that the price of a
+	// frame is the geometry that *moved* rather than the geometry that exists. On a
+	// scene of 1.2M triangles with one character walking that is the difference
+	// between 50 ms a frame and nothing measurable.
+	//
+	// `Scene.bounds_box` carries what invalidates the flag and `Node.world_box`
+	// what invalidates an entry.
 	if (self.bounds_current) return self.bounds_box;
 
 	self.update_world_matrices();
@@ -2692,7 +2762,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
-		collision::Aabb3 box = world_mesh_bounds(node.world, mesh);
+		collision::Aabb3 box = self.node_world_box(node, mesh);
 		if (!found)
 		{
 			total = box;
@@ -2758,7 +2828,10 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh != null)
 		{
-			collision::Aabb3 box = world_mesh_bounds(node.world, mesh);
+			// The same cache `Scene.bounds` fills, and filled here for the same reason:
+			// a script measuring one piece per frame while the level stands still
+			// should pay for the piece.
+			collision::Aabb3 box = self.node_world_box(node, mesh);
 			if (!*found)
 			{
 				*total = box;

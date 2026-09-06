@@ -40,6 +40,7 @@ import std::math;
 import std::math::vector;
 import std::math::matrix;
 import std::math::quaternion;
+import collision;
 
 // A node that draws nothing — a group, or the scene root. `NO_ASSET` is an
 // `AssetId` and lives in `scene/asset.c3` beside the handle it is the absence of.
@@ -105,6 +106,32 @@ struct Node
 	// node hands *back* (to a raycast hit, to the draw list) is a whole handle.
 	AssetId asset;
 	uint mesh;
+
+	<*
+	 The exact world box of this node's mesh, cached, and whether it is still the
+	 one this node's world matrix implies.
+
+	 The per-node half of `Scene.bounds`, and the reason a walking character does
+	 not cost the level a million vertex transforms a frame. `world_mesh_bounds` is
+	 exact rather than conservative — every vertex of the mesh through a matrix —
+	 so the scene-wide box has to be a union of per-node boxes if it is to be
+	 refitted for the one node that moved rather than for all of them.
+
+	 Invalidated in exactly two places, which are the only two that can change the
+	 answer: `update_branch`, the one place that knows a node's world matrix was
+	 actually recomputed, and `create_slot`, the only writer of `asset` and `mesh`.
+	 A node dying needs nothing — `Scene.bounds` skips it and re-unions, because
+	 `invalidate` cleared `Scene.bounds_current` on the way past.
+
+	 `world_box_hull` is the third thing that can move it and the reason this is
+	 not one bool. `world_mesh_bounds` answers with the conservative *local* box
+	 until the mesh has uploaded, so a box taken before the upload is not the exact
+	 one; the hull length is part of the key rather than a separate signal, because
+	 `upload_primitive` is what fills `hull_positions` and it runs once.
+	*>
+	collision::Aabb3 world_box;
+	usz world_box_hull;
+	bool world_box_current;
 
 	// How this node draws. Indexes `MeshPass.materials`; `DEFAULT_MATERIAL` is
 	// the built-in shader every node starts on, and it is a shared index rather
