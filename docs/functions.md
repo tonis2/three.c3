@@ -447,7 +447,8 @@ KHR_lights_punctual directional light, each on its own node, so the file opens f
 three had it. The ambient floor has no glTF equivalent and is the one thing lost. Materials carry
 `side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform, and a source material's
 normal, occlusion and emissive maps with the metalness and roughness the specular term drew them
-with. Reflectance has no glTF slot that round trips, and lines are not written yet.
+with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
+what an import applies, so a material that came in at 0.5 comes back at 0.5. Lines are not written yet.
 
 ## three.renderSize()
 
@@ -1816,6 +1817,27 @@ The floor a face turned right away from every light gets, 0 to 1: at 0 it is bla
 all and everything is its own flat colour. On `three.light` rather than on each light because it is not a light.
 Defaults to 0.25.
 
+## three.light.world
+
+Blender's world colour, as a light: `[r, g, b]` linear, **added** under everything and multiplied by an
+occlusion map. Black by default, and a new Scene restores it.
+
+It is not `three.light.ambient` under another name, and the difference is the arithmetic. The floor is a
+lerp — a face keeps `ambient` of its own colour where no light reaches it, and the direct term is faded
+against it — so raising the floor takes light off the lit side in the same stroke. This is a term that
+arrives from every direction at once, which is what a uniform world in a path tracer is, so it lifts the
+shadowed side and leaves the lit side where the sun put it. Both exist so that neither has to change
+meaning: every scene written against `ambient` renders exactly as it did.
+
+- Takes what `three.light.color` takes — a hex, a triple or an `{r, g, b}` — and answers with the
+  triple. Not clamped to 1: a world colour times a strength is a brightness, not a swatch.
+- An occlusion map darkens it, exactly as it darkens the floor and the environment reflection, and for
+  the same reason: a crevice that cannot see the sky cannot see the world either. A lamp shining into
+  that crevice still lights it.
+- To match a Blender scene, set it to the world shader's colour times its strength and put the floor at
+  zero: `three.light.ambient = 0; three.light.world = [0.028, 0.06, 0.056]`. What is missing after that
+  is the global illumination that darkens Blender's crevices, which is what an occlusion map is for.
+
 ## three.light.set(direction, ambient)
 
 The sun and the floor at once. `ambient` may be omitted to leave it alone, and it is the floor rather than a
@@ -1863,25 +1885,27 @@ lights a sphere — there is no cone here — and everything that did not fit is
 because a lantern that quietly does not light is what somebody spends an afternoon looking for in a shader.
 `asset.lights` is the whole list, so a script that wants a different three picks them itself.
 
-### The intensities are a convention, and it is this one
+### The intensities are Blender's, and the conversion is arithmetic
 
-**There is no conversion here that could be physics.** glTF measures a directional light in lux and a point
-light in candela; Blender's glTF exporter writes neither — it writes the lamp's own Watts; and this
-renderer's `intensity` is a bare multiplier over a colour that saturates at 1. No two links of that chain
-share a unit. What follows is the pair of factors that put `evil_forest.glb` — a sun of 2.2 W and lanterns
-of 45 and 60 W — where its Blender render had it, and it is a starting point rather than an answer:
+**The convention is Blender's, because Blender's is the only one the numbers in the file have.** glTF
+measures a directional light in lux and a point light in candela; Blender's glTF exporter writes neither
+— it writes the lamp's own Watts — so the units to convert out of are the ones Blender's own shading gives
+those Watts, and the conversion is division with nothing tuned in it.
 
-| the file says | `three.lights` gets |
-| --- | --- |
-| `directional`, intensity *w* | `intensity = w * 0.75` |
-| `point` or `spot`, intensity *w* | `intensity = w / 9` |
-| `range` *r*, or none | `range = r`, or 10 metres |
+- `directional`, intensity *w* → `intensity = w / pi`. A sun of *w* W/m² lights a white diffuse face to
+  *w*/pi, which is Lambert's 1/pi and the whole of it. 2.2 W arrives as 0.700.
+- `point` or `spot`, intensity *w* → `intensity = w / (4 pi²)`. A lamp of *w* W delivers *w*/(4 pi² d²) at
+  *d* metres — 4 pi for the sphere it radiates into, pi again for the same Lambert term — and this
+  renderer's point falloff is inverse-square from one metre, so that factor *is* the brightness at one
+  metre and the distance takes care of itself. 45 W arrives as 1.140, 60 W as 1.520.
+- `range` *r* → `range = r`. A light that names none reaches to where Blender would have stopped tracing
+  it: EEVEE's `light_threshold` is the illumination it drops a lamp below, its default is 0.01, so the
+  reach is `sqrt(intensity / 0.01)` — 10.7 metres for a 45 W lantern, 12.3 for a 60 W one.
 
-A point light's Watts are read as **the brightness the artist wanted three metres out**, which is the same
-three metres this page already uses to say what a point light's `intensity` means — 9 is 3², so 45 W arrives
-as 5 and 60 W as 6.7. A directional light has no distance to anchor to and its 0.75 is bare: it put that
-file's 2.2 W sun at 1.65, and 1.6 was what the frame wanted by eye. It also leaves Blender's own default
-sun of 1 W at 0.75, a little under this renderer's default sun of 1, which the ambient floor makes up.
+A spot light converts as a point and lights a sphere, because there is no cone here. Blender's own default
+sun of 1 W arrives at 0.318, against this renderer's default sun of 1 — the file is dimmer than the
+default, which is what a physical unit against an arbitrary one looks like, and `three.light.world` and
+`three.light.ambient` are the two knobs that answer for what is not being simulated.
 
 **A file this renderer exported does not round trip through it.** `scene.export` writes `three.lights`'s own
 numbers straight into the file, because there is no unit to convert them to; the import reads them back as
@@ -2450,6 +2474,54 @@ keep their index and their shader — which is what lets a script animate every 
 `removePass`: dropping one out of the middle would renumber the handles after it, and a `setPost` followed by the
 `addPass` calls you want is the same effect said in a way that cannot leave a handle pointing at somebody else's
 shader.
+
+## three.toneMapping
+
+The curve the finished frame ends on: `'none'` or `'agx'`. Anything else throws.
+
+`'none'` is the default and is the identity — the chain hands its linear values straight to the display encode,
+and anything above 1 clips. It is the default because every scene in this project was graded against it, so a
+curve switched on for all of them would restyle work nobody asked to have restyled.
+
+`'agx'` is AgX — the operator Blender ships as its default view transform, in the polynomial fit three.js calls
+`AgXToneMapping`. Two things change. Values above 1 roll off instead of clipping, so a highlight keeps its shape
+past the top of the range rather than becoming a flat white shape. And a bright saturated colour desaturates
+towards white on the way up, instead of clipping one channel at a time and sliding into a pure primary — that
+path through the colour cube is what the *inset* matrix in the middle of it buys. The cost is mid-tone contrast:
+a linear 0.18 grey comes out around sRGB 128 under AgX against 118 under the identity, and the whole frame reads
+a little flatter and a little cooler in the shadows.
+
+It is a fit and not Blender's own curve, and the two part company in the deep shadows: below about four stops
+under middle grey this reads a few levels lighter than EEVEE puts the same colour. Through the mid-tones and the
+highlights they agree.
+
+**The sRGB encode is not this.** It happens at the attachment, after the curve, on both settings — so a post body
+still returns linear whichever mode is selected, and a screenshot is sRGB either way.
+
+The clear colour goes through it too: `scene.background` is written into the image the chain reads, so a
+background lands where a Blender world of the same colour lands rather than beside it.
+
+Changing it retires one pipeline and compiles another, which makes it a setting rather than something to animate
+— `three.toneMappingExposure` is the knob that costs nothing. Like the post chain it belongs to the renderer and
+not to the scene, so `new three.Scene()` does not reset it. Needs a GPU device.
+
+```js
+three.toneMapping = 'agx';
+three.toneMappingExposure = 1;
+```
+
+## three.toneMappingExposure
+
+What the frame is multiplied by before the curve, 1 by default. A stop of exposure in the photographic sense: 2
+is one stop up, 0.5 one stop down. Wants a finite number of 0 or more.
+
+**Only `'agx'` reads it.** Under `'none'` there is no curve for it to be the exposure of, and a multiply followed
+by a clip is not one. The value is kept across a change of mode either way, so setting it before switching the
+curve on works.
+
+It is a uniform on the tonemap rather than part of its shader, so writing it is a four-byte push that takes
+effect on the next frame with no compile. That is what makes it the half of this pair that can be animated —
+a fade to white is this, a change of curve is not.
 
 ## the handle three.setPost() and three.addPass() answer with
 

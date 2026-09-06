@@ -196,6 +196,18 @@ struct PostPass
 	// not the script's and cannot be reordered, removed or replaced.
 	PostStage tonemap;
 
+	// Which curve that pass is, and which one it was last compiled as. Two fields
+	// because they disagree for exactly as long as it takes `ensure_tonemap` to
+	// notice — the mode is a script's to write at any moment, and the pipeline is
+	// rebuilt at the next call rather than inside the setter.
+	ToneMap tonemap_mode;
+	ToneMap tonemap_built;
+
+	// What AgX multiplies the frame by before the curve. A field rather than a
+	// number in the body, so changing it is a 4-byte write into the push block
+	// instead of a recompile. `PostPass.init` is what makes it 1 rather than 0.
+	float tonemap_exposure;
+
 	// The game clock as of the last frame recorded, in seconds. Written by
 	// `record_chain` and read by `build_stage`, which is the only reader: a stage
 	// has to be stamped with the time it was set at, and `set` is reached between
@@ -213,6 +225,9 @@ struct PostPass
 fn void PostPass.init(&self)
 {
 	self.stages.init(mem, 2);
+	// Not the zero a fresh struct has: an exposure of 0 is a black frame, and
+	// every path that reaches a `PostPass` comes through here.
+	self.tonemap_exposure = 1.0;
 }
 
 <*
@@ -579,8 +594,12 @@ fn uint PostPass.count(&self) => (uint)self.stages.len();
  disagreement produces is a black one — image A written by nobody. The "read it
  exactly once" rule `Renderer.record_scene` needs is served by the local it
  already copies this into.
+
+ A tone curve counts, with or without a stage in front of it. `three.toneMapping
+ = 'agx'` and no `setPost` is a chain of exactly one pass, the engine's own, and
+ the frame has to be routed through image A for it to have anything to read.
 *>
-fn bool PostPass.active(&self) => self.stages.len() > 0;
+fn bool PostPass.active(&self) => self.stages.len() > 0 || self.tonemap_mode != ToneMap.NONE;
 
 <*
  Points a uniform at new values.

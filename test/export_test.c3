@@ -2306,9 +2306,9 @@ fn void a_point_light_is_a_place_in_the_file() @test
 
  **The intensities do not round trip, deliberately.** `scene.export` writes this
  renderer's own multiplier because glTF has no unit to convert it to, and the
- import reads a file's number as Blender's Watts — 2 out and 1.5 back for the
- sun, 9 out and 1 back for the point. `asset.lights` reports the file's raw
- numbers either way, which is the door out of both defaults, and
+ import reads a file's number as Blender's Watts — 2 out and 2/pi back for the
+ sun, 9 out and 9/(4 pi²) back for the point. `asset.lights` reports the file's
+ raw numbers either way, which is the door out of both defaults, and
  `docs/functions.md` says all of this once.
 *>
 fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
@@ -2373,15 +2373,15 @@ fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
 			"the sun points back the way it was aimed, and not at the other side: %s", result.value);
 		test::@check(result.value.contains(`"sunColor":[1,0.5,0.25]`),
 			"with its colour: %s", result.value);
-		test::@check(result.value.contains(`"sunIntensity":1.5`),
-			"and 2 Watts read as 1.5 here: %s", result.value);
+		test::@check(result.value.contains(`"sunIntensity":0.6366`),
+			"and 2 Watts read as 2/pi here: %s", result.value);
 
 		test::@check(result.value.contains(`"lamp":[2,3,4]`),
 			"the point light stands where it stood: %s", result.value);
 		test::@check(result.value.contains(`"lampRange":9`),
 			"reaching as far as it did: %s", result.value);
-		test::@check(result.value.contains(`"lampIntensity":1`),
-			"and 9 Watts read as brightness three metres out: %s", result.value);
+		test::@check(result.value.contains(`"lampIntensity":0.228`),
+			"and 9 Watts read as 9/(4 pi squared), Blender's own arithmetic: %s", result.value);
 
 		test::@check(result.value.contains(`"fov":60`),
 			"the camera gets its field of view back, in degrees: %s", result.value);

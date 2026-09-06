@@ -45,36 +45,43 @@ const SOLVER_SHAPE = {
 	mesh: 'hull', hull: 'hull', box: 'box', sphere: 'sphere', capsule: 'capsule', cylinder: 'hull',
 };
 
-// ---- The file's intensities, in this renderer's units -----------------------
+// ---- The file's intensities, in Blender's units -----------------------------
 //
-// **These three numbers are a convention and not physics, and there is no
-// conversion that could be.** glTF measures a directional light in lux and a
-// point light in candela; Blender's exporter writes neither, it writes the
-// lamp's own Watts; and this renderer's `intensity` is a bare multiplier over a
-// colour that saturates at 1. There is no shared unit anywhere in that chain, so
-// what follows is the factor that put `evil_forest.glb` — a sun of 2.2 W and
-// lanterns of 45 and 60 W — where its Blender render had it, and nothing more.
-// A file authored to a different exposure wants its own numbers; that is what
-// `asset.lights` reports the file's raw ones for.
+// **The convention is Blender's, and it is arithmetic rather than taste.** glTF
+// measures a directional light in lux and a point light in candela; Blender's
+// exporter writes neither — it writes the lamp's own Watts — so Blender's own
+// shading is the only place those Watts already mean something, and converting
+// out of it is division and nothing else.
 //
-// A point light's Watts are read as **the brightness the artist wanted three
-// metres out**, which is the same three metres `docs/functions.md` already uses
-// to say what a point light's `intensity` means — so 45 W arrives as 5 and 60 W
-// as 6.7, against the 5 to 6 the reference frame was lit by hand with.
-const POINT_ANCHOR_METRES = 3;
-const POINT_FROM_WATTS = 1 / (POINT_ANCHOR_METRES * POINT_ANCHOR_METRES);
+// A **sun** of S W/m² lights a white diffuse face to S/pi, which is Lambert's
+// 1/pi and the whole of the first factor.
+//
+// A **point** lamp of P W delivers P/(4 pi² d²) at d metres — 4 pi for the
+// sphere it radiates into and pi again for the same Lambert term — and that is a
+// number this renderer already speaks: `lambert` sums `colour * intensity * n·l`
+// and `light_toward` in `shaders/surface.slang` falls off inverse-square from one
+// metre, so `intensity = P/(4 pi²)` *is* the brightness at one metre and the
+// falloff does the rest of the distance. There is no anchor and nothing to tune:
+// 2.2 W of sun arrives as 0.700, a 45 W lantern as 1.140, a 60 W one as 1.520.
+const DIRECTIONAL_FROM_WATTS = 1 / Math.PI;
+const POINT_FROM_WATTS = 1 / (4 * Math.PI * Math.PI);
 
-// A directional light has no distance to anchor to, so this one is bare: 2.2 W
-// of Blender sun read as 1.65 here, and 1.6 was the number the reference frame
-// wanted. It leaves Blender's own default sun of 1 W at 0.75, a little under
-// this renderer's default sun of 1, which the ambient floor makes up.
-const DIRECTIONAL_FROM_WATTS = 0.75;
+// Where a point light stops when the file names no `range`. glTF's answer for an
+// absent range is "infinite", which a windowed falloff has no way to draw; EEVEE's
+// is `light_threshold`, the illumination it stops tracing a lamp below, and its
+// default is 0.01. So the reach is where `intensity / d²` falls under it —
+// `sqrt(intensity / 0.01)`, 10.7 m for a 45 W lantern and 12.3 m for a 60 W one.
+const LIGHT_THRESHOLD = 0.01;
 
-// What a point light reaches when the file names no `range`. glTF's answer for
-// an absent range is "infinite", which a windowed falloff has no way to draw, and
-// ten metres is what `three.lights.add({ position })` already picks for a script
-// that does not say.
-const DEFAULT_RANGE_METRES = 10;
+// What an imported material's `reflectance` is, against 0 for one a script wrote.
+//
+// **Because glTF does state it.** The specification fixes a dielectric's F0 at
+// 0.04 and offers no slot to say otherwise, so every material in every file is
+// one — and 0.5 is Filament's spelling of that 4%, which is the mapping
+// `specular()` in `shaders/surface.slang` already uses. The default stays 0 for a
+// scripted material, where nothing has said anything; `scene/material.c3` carries
+// that half of the argument.
+const IMPORTED_REFLECTANCE = 0.5;
 
 // The extension's `LayerBlendMode` and `LayerMaskChannel`, by ordinal.
 //
@@ -1008,6 +1015,10 @@ export class Asset {
 	// the same slots as a point standing where it stands: this renderer has no
 	// cone, so its `cone` angles are dropped and it lights a sphere.
 	//
+	// **The Watts are Blender's and so is the arithmetic** — a sun of S becomes
+	// S/pi and a lamp of P becomes P/(4 pi²), which is already this renderer's
+	// brightness-at-one-metre. See DIRECTIONAL_FROM_WATTS at the top of this file.
+	//
 	// Everything that did not fit is named once by `console.warn`, because a
 	// lantern that quietly does not light is the kind of thing somebody spends an
 	// afternoon looking for in a shader.
@@ -1041,11 +1052,14 @@ export class Asset {
 		const room = three.lights.max - 1;
 		const lit = near.slice(0, room);
 		for (const point of lit) {
+			const intensity = point.intensity * POINT_FROM_WATTS;
 			three.lights.add({
 				position: point.node.position,
-				range: point.range > 0 ? point.range : DEFAULT_RANGE_METRES,
+				// The file's own reach, or the distance Blender would have stopped
+				// tracing it at — see LIGHT_THRESHOLD.
+				range: point.range > 0 ? point.range : Math.sqrt(intensity / LIGHT_THRESHOLD),
 				color: point.color,
-				intensity: point.intensity * POINT_FROM_WATTS,
+				intensity,
 			});
 		}
 
@@ -1459,6 +1473,14 @@ export class Asset {
 			alphaTest,
 			roughness: d.roughness,
 			metalness: d.metalness,
+			// **An imported material is a dielectric and glTF says so.** 0 is the
+			// default because a scripted material is one nothing states — see
+			// `scene/material.c3` — but a file is not silent here: the
+			// specification fixes a non-metal's F0 at 0.04, which is Filament's
+			// 0.5 and is Blender's Specular IOR Level of 0.5 as well. Leaving it at
+			// 0 draws the file's wet stone, glazed pot and varnished wheel as
+			// perfectly matte.
+			reflectance: IMPORTED_REFLECTANCE,
 			normalMap: d.normalMap,
 			aoMap: d.aoMap,
 			metalnessRoughnessMap: d.metalnessRoughnessMap,
@@ -1518,6 +1540,8 @@ export class Asset {
 			transparent: look.transparent,
 			roughness: d.roughness,
 			metalness: d.metalness,
+			// The plain path's, for the plain path's reason.
+			reflectance: IMPORTED_REFLECTANCE,
 		};
 		// Two meshes wearing one glTF material read two descriptions of one stack,
 		// and the images in them are the same slots — so the signature dedupes them

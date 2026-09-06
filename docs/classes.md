@@ -209,7 +209,8 @@ pipeline you can build draws triangles.
 - `opacity` — 0 to 1, settable and free
 - `roughness` — 0 to 1, 1 by default: how spread out the highlight is
 - `metalness` — 0 to 1, 0 by default: a metal has no diffuse
-- `reflectance` — 0 to 1, 0 by default: how strongly a non-metal reflects, and the switch that turns
+- `reflectance` — 0 to 1, 0 by default on a material a script builds and 0.5 on one an import built:
+  how strongly a non-metal reflects, and the switch that turns
   the specular term on at all
 - `alphaTest` — 0 to 1, 0 by default and off: the alpha below which a fragment is discarded rather
   than drawn — the leaf-card property, and the one that reaches the shadow pass
@@ -258,6 +259,9 @@ and is dark.
 #### reflectance
 
 0.5 is the 4% that ordinary dielectrics reflect — use it for anything wet, polished or glazed.
+
+A material a script builds starts at 0 and one an import built starts at 0.5, and the difference is that
+glTF fixes a dielectric's F0 at 0.04 while a script has said nothing.
 
 A name Three.js does not have, because Three.js defaults every material to having a highlight and
 this one defaults to none.
@@ -1200,7 +1204,9 @@ the file's clips, and a channel naming a node outside the subtree drives nothing
 `{ materials: true }` builds a material per glTF material and puts it on the meshes that wear it, which
 is how a `.glb` authored with `alphaMode BLEND` renders blended and how a file's normal maps and
 emissive maps reach the frame. Without it the file draws with its base colour and base colour map and
-nothing else. It builds nothing for a material that is opaque, single-sided and has no maps and this
+nothing else. Every material it builds gets `reflectance` 0.5 — the 4% glTF fixes a dielectric's F0 at,
+which is a number the file states even though it has no slot for it — where a material a script builds
+starts at 0. It builds nothing for a material that is opaque, single-sided and has no maps and this
 renderer's own surface defaults, because that is the default material already. Off by default because
 it compiles a shader per distinct material.
 

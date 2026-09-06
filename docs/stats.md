@@ -32,7 +32,9 @@
   image per tapped pass, at eight bytes a pixel against the target's four — so a two-pass chain at
   1080p is around 40 MB. 0 until a post shader is first set, and a high-water mark after that:
   `three.setPost(null)` retires the shaders and keeps the images for the next chain at the same
-  extent. A nonzero reading with nothing running is that, not a leak.
+  extent. A nonzero reading with nothing running is that, not a leak. `three.toneMapping = 'agx'`
+  with no pass of your own is Image A alone — about 8 MB at 1080p — because the tonemap reads the
+  scene rather than a ping-pong slot.
 - `shadowBytes` — Two D32 images at `size` squared once anything in the scene is static, one before
   that. 2048 is 34 MB, 4096 is 134 MB, 8192 — the ceiling — is 536 MB: the largest thing one
   assignment can do to a process, which is why the setter says so above the default. 0 until shadows

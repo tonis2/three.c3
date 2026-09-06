@@ -8,6 +8,8 @@
  inactive scene
  ─────────────────────────────────────────►
  target.color ─► blit
+ tone only scene ─► A ──────────────────────► tonemap ─►
+ target.color ─► blit
  one pass scene ─► A ─► P0 ─────────────────────► tonemap ─►
  target.color ─► blit
  three      scene ─► A ─► P0 ─► P1 ─► P0 ─► tonemap ─► target.color ─► blit
@@ -17,6 +19,11 @@
  first writes and the next one reads. A chain of one uses P0 and never allocates
  P1; a chain of none allocates nothing and is byte-identical to a frame from
  before any of this existed.
+
+ `three.toneMapping = 'agx'` is the second row: no pass of the script's, so the
+ tonemap reads A the way a first pass does and neither ping-pong image is
+ allocated. That is the whole of what a tone curve costs when nothing else is
+ running — one attachment and one draw.
 
  The two rules are the whole scheduler:
 
@@ -299,9 +306,12 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	// pipelines render into, and they declare their colour format at build time.
 	if (!self.scene.exists()) self.scene.init(gpu, target.color_format, self.extent)!;
 
-	// P0 whenever there is a chain at all, because the tonemap reads a pong image
-	// rather than A. P1 only from the second pass on.
-	if (!self.pong[0].exists()) self.pong[0].init(gpu, POST_CHAIN_FORMAT, self.extent)!;
+	// P0 from the first script pass on, because the tonemap reads a pong image
+	// rather than A once there is one; P1 only from the second. A chain that is
+	// the tonemap alone — `three.toneMapping` with no `setPost` — reads A and
+	// allocates neither, which is what keeps a tone curve one image rather than
+	// two.
+	if (stages >= 1 && !self.pong[0].exists()) self.pong[0].init(gpu, POST_CHAIN_FORMAT, self.extent)!;
 	if (stages >= 2 && !self.pong[1].exists()) self.pong[1].init(gpu, POST_CHAIN_FORMAT, self.extent)!;
 
 	self.ensure_sampler(gpu)!;
@@ -364,18 +374,30 @@ fn void PostPass.destroy_images(&self, Gpu* gpu)
 // ============================================================================
 
 <*
- What the engine's last pass does, as a post body.
+ Which curve the engine's last pass puts the frame through.
 
- The identity, and not a placeholder for a missing tonemap operator. Its job
- today is entirely the *encode*: it reads linear float out of the chain and
- writes an `_SRGB` attachment, which is the hardware conversion, and it clamps
- above 1.0 because a UNORM attachment does. Nothing in this renderer produces a
- value above 1.0 yet, so a Reinhard or an ACES curve here would be shaping a
- range nothing occupies.
+ The frame reaches the tonemap in linear float, and something has to decide what
+ a value of 8 looks like on a display that stops at 1. This is that decision, and
+ it is one of two rather than a number because the two are different shaders:
+ `ensure_tonemap` compiles the body this names, and changing it is a recompile.
 
- Where it stops being the identity is physical light intensities, at which point
- this string is the one place a curve goes and every pass in the chain is already
- in linear float in front of it.
+ `NONE` is the default and is deliberately the boring one. Every scene in this
+ project was graded against the identity, so making a curve the default would
+ restyle all of them in a release nobody asked for it in; a scene that wants the
+ filmic answer says so.
+*>
+enum ToneMap : char
+{
+	NONE,
+	AGX,
+}
+
+<*
+ The identity: hand the frame back and let the attachment encode it.
+
+ Its job is entirely the *encode* — it reads linear float out of the chain and
+ writes an `_SRGB` attachment, which is the hardware conversion — and it clamps
+ above 1.0 because a UNORM attachment does.
 
  It goes through `post_source` like any other body, which is the load-bearing
  test of the whole design: the engine's own pass is expressible in the interface
@@ -384,11 +406,94 @@ fn void PostPass.destroy_images(&self, Gpu* gpu)
 const String TONEMAP_BODY = "float3 post(Post p) { return p.color; }";
 
 <*
- Compiles the tonemap, once.
+ AgX, as three.js writes it in `tonemapping_pars_fragment.glsl.js` — a polynomial
+ fit of the operator Blender ships as its default view transform.
 
- Kept for the life of the renderer rather than retired with each `set`: it does
- not depend on what the script wrote, and rebuilding it per set would mean
- recompiling the one shader in the chain that never changes.
+ A fit, and worth saying so: through the mid-tones and the highlights it lands
+ where EEVEE lands, and below about four stops under middle grey it sits a few
+ display levels above Blender's own curve. Close enough that a scene graded in
+ Blender reads as itself here, and not the same numbers.
+
+ The shape of it: rotate into Rec.2020, pull the primaries in (the *inset*, which
+ is what desaturates a blown highlight into white instead of into a clipped
+ primary), take the log2 of a 16.5-stop window from -12.47 EV to +4.03 EV,
+ run a sigmoid over the 0..1 that produces, rotate back out and undo the 2.2 the
+ fit was made against. The result is linear again — the `_SRGB` attachment does
+ the display encode after this, exactly as it does under the identity.
+
+ The matrices are three.js's, transposed: GLSL's `mat3(a, b, c)` takes columns
+ and Slang's `float3x3(a, b, c)` takes rows, so every one of these is the
+ transpose of the literal in that file. `mul(M, v)` is then the row-times-column
+ product the original wrote as `M * v`.
+
+ `exposure` is a uniform rather than a constant folded into the string, which is
+ the whole reason `three.toneMappingExposure` is a 4-byte write instead of a
+ recompile.
+*>
+const String TONEMAP_AGX_BODY = `static const float3x3 AGX_SRGB_TO_REC2020 = float3x3(
+	float3(0.6274, 0.3293, 0.0433),
+	float3(0.0691, 0.9195, 0.0113),
+	float3(0.0164, 0.0880, 0.8956));
+
+static const float3x3 AGX_REC2020_TO_SRGB = float3x3(
+	float3(1.6605, -0.5876, -0.0728),
+	float3(-0.1246, 1.1329, -0.0083),
+	float3(-0.0182, -0.1006, 1.1187));
+
+static const float3x3 AGX_INSET = float3x3(
+	float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
+	float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
+	float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
+
+static const float3x3 AGX_OUTSET = float3x3(
+	float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
+	float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
+	float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
+
+// The seven-term fit of AgX's tone curve, over the 0..1 the log2 window
+// produced. Horner would be fewer multiplies and this is the published form.
+float3 agx_contrast(float3 x)
+{
+	float3 x2 = x * x;
+	float3 x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
+float3 post(Post p)
+{
+	float3 c = p.color * exposure;
+	c = mul(AGX_SRGB_TO_REC2020, c);
+	c = mul(AGX_INSET, c);
+	// -12.47393 EV to +4.026069 EV, which is the 16.5-stop window AgX is defined
+	// over. The floor keeps log2(0) out of it.
+	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
+	c = agx_contrast(c);
+	c = mul(AGX_OUTSET, c);
+	c = pow(max(c, 0.0), 2.2);
+	c = mul(AGX_REC2020_TO_SRGB, c);
+	// Still linear: the attachment encodes. The clamp is what a UNORM does to the
+	// out-of-gamut values the rotation back to sRGB can produce.
+	return clamp(c, 0.0, 1.0);
+}`;
+
+// The body one mode is.
+fn String tonemap_body(ToneMap mode) => mode == ToneMap.AGX ? TONEMAP_AGX_BODY : TONEMAP_BODY;
+
+// What AgX's exposure uniform is called, in the body and in the push block.
+const String TONEMAP_EXPOSURE = "exposure";
+
+<*
+ Compiles the tonemap, and recompiles it when the mode changes.
+
+ Not once for the life of the renderer, which is what it used to be: the body is
+ no longer a constant, so the pipeline is retired and rebuilt when
+ `three.toneMapping` moves. Everything else about it still is — a `setPost` does
+ not touch this, because what a script wrote is not what this pass does.
+
+ The exposure survives the recompile because it is a uniform, not part of the
+ string: `apply_exposure` writes it into the block against the *new* module's
+ reflected offset, so a mode change carries the current value across rather than
+ resetting it to one.
 
  Its pipeline is built with `target.color_format` — the only pipeline in the
  chain that is — which is what makes the format decision *not* a property of the
@@ -396,20 +501,89 @@ const String TONEMAP_BODY = "float3 post(Post p) { return p.color; }";
 *>
 fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 {
-	if (self.tonemap.pipeline.handle != null) return;
+	if (self.tonemap.pipeline.handle != null && self.tonemap_built == self.tonemap_mode) return;
+
+	// Retired rather than destroyed: this can run on a live renderer, and frames
+	// in flight may still have the old pipeline bound.
+	if (self.tonemap.pipeline.handle != null) gpu.retire_pipeline(self.tonemap.pipeline);
+	self.tonemap.pipeline = { };
+
+	ToneMap mode = self.tonemap_mode;
+	// Only AgX declares one. The identity would have Slang drop an unread uniform
+	// before reflection saw it, which is a push field that is there on one build
+	// and not on the next.
+	MaterialUniform[1] uniforms = { { .name = TONEMAP_EXPOSURE, .components = 1, .rows = 1 } };
+	MaterialUniform[] declared = mode == ToneMap.AGX ? uniforms[..] : {};
 
 	@pool()
 	{
-		String source    = post_source(TONEMAP_BODY, { }, tmem)!;
+		String source    = post_source(tonemap_body(mode), declared, tmem)!;
 		ShaderModule mod = compile_slang_cached(source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
 		self.tonemap.pipeline.init_post(gpu, &mod, target.color_format)!;
 	};
-	// Stamped against the clock like any other stage, though `TONEMAP_BODY` reads
-	// no time: leaving it at whatever the struct started with would be one stage
+	self.tonemap_built = mode;
+	self.apply_exposure();
+	// Stamped against the clock like any other stage, though neither body reads
+	// the time: leaving it at whatever the struct started with would be one stage
 	// out of N whose `p.time` meant something different.
 	self.tonemap.set_at = self.now;
+}
+
+<*
+ Puts `tonemap_exposure` into the tonemap's push block.
+
+ A 4-byte write against the reflected offset, which is what keeps a change of
+ exposure off the compiler entirely — the same door `PostPass.set_uniform` opens
+ for a script's own pass, minus the stage lookup, because the tonemap is not in
+ `stages` and never will be.
+
+ Silent on the identity, where there is no such field. That is not a failure to
+ report: the body ignores exposure by construction, and `three.toneMappingExposure`
+ keeps the number for whenever a mode that reads it is selected.
+*>
+fn void PostPass.apply_exposure(&self)
+{
+	if (self.tonemap.pipeline.handle == null) return;
+	ShaderField* field = self.tonemap.pipeline.shader.field_of(TONEMAP_EXPOSURE);
+	if (field == null || field.offset < POST_PUSH_START || field.size != float::size) return;
+	float value = self.tonemap_exposure;
+	mem::copy(&self.tonemap.block[field.offset], &value, float::size);
+}
+
+<*
+ `three.toneMapping = 'agx'` — which curve the frame ends on.
+
+ Eager rather than lazy, and that is the whole of what this function adds over
+ assigning the field: with no script pass in the chain the tonemap is the only
+ thing in it, so the images and the pipeline have to exist before the next frame
+ asks `active()` and gets told to render into an image A that was never created.
+
+ @param mode : `The curve. NONE is the identity and is where a renderer starts.`
+*>
+fn void? PostPass.set_tonemap(&self, Gpu* gpu, Target* target, ToneMap mode)
+{
+	if (mode == self.tonemap_mode) return;
+	self.tonemap_mode = mode;
+	// Nothing to build for a chain that is about to be inert. The identity with
+	// no stage in front of it is `active() == false` and no frame goes near the
+	// chain, so allocating image A for it would be a full-size attachment
+	// nothing reads.
+	if (!self.active()) return;
+	self.ensure_images(gpu, target, self.stages.len())!;
+	self.ensure_tonemap(gpu, target)!;
+}
+
+<*
+ `three.toneMappingExposure = 2` — a stop up, and no compile.
+
+ @param value : `A multiplier applied before the curve. Only AgX reads it.`
+*>
+fn void PostPass.set_tonemap_exposure(&self, float value)
+{
+	self.tonemap_exposure = value;
+	self.apply_exposure();
 }
 
 // ============================================================================
@@ -458,7 +632,10 @@ fn void? PostPass.record_chain(
 )
 {
 	sz count = self.stages.len();
-	if (count == 0) return;
+	// The chain runs for the tonemap alone — that is what `three.toneMapping`
+	// switches on — so there is no early return for an empty stage list, only the
+	// loop below running zero times and the tonemap reading A.
+	if (count == 0 && self.tonemap_mode == ToneMap.NONE) return;
 
 	// Kept so a stage compiled *between* frames has something to stamp itself
 	// against. At worst one frame stale, which is the difference between `p.time`
@@ -517,20 +694,27 @@ fn void? PostPass.record_chain(
 	// The one pass that writes `target.color`, and the one pipeline in the chain
 	// built with its format.
 	FullscreenPass tone = &self.tonemap;
+	// A that reads its own predecessor, and A again with no predecessor to read:
+	// a tonemap-only chain is the first pass of a chain, and its `prev` is what
+	// every first pass's is.
+	vk::ImageView last = count == 0 ? self.scene.view : self.output_of(count - 1).view;
 	tone.record(
 		cmd,
 		{
-			.prev = self.output_of(count - 1)
-		.view, .scene = self.scene
-			.view, .dst = target
-				.color, .dst_view = target
-					.color_view, .extent = self
-						.extent, .sampler = self
-							.sampler, .depth = target
-								.depth_view, .depth_sampler = self
-									.depth_sampler, .near_plane = near_plane, .far_plane = far_plane, // The tonemap is the engine's and reads no third source. Image A, for the
-									// reason `PassIo.tap` gives.
-									.tap = self
-										.scene
-										.view, .assets = assets, .time = now, })!;
+			.prev = last,
+			.scene = self.scene.view,
+			.dst = target.color,
+			.dst_view = target.color_view,
+			.extent = self.extent,
+			.sampler = self.sampler,
+			.depth = target.depth_view,
+			.depth_sampler = self.depth_sampler,
+			.near_plane = near_plane,
+			.far_plane = far_plane, // The tonemap is the engine's and reads no third source. Image A, for the
+			// reason `PassIo.tap` gives.
+			.tap = self.scene.view,
+			.assets = assets,
+			.time = now,
+		}
+	)!;
 }

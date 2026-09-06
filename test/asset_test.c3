@@ -50,6 +50,14 @@ const String SHARED = "test/fixtures/shared_material.glb";
 *>
 const String HIERARCHY = "test/fixtures/hierarchy.glb";
 
+<*
+ Two triangles, two materials: `bulb` carries `KHR_materials_emissive_strength`
+ at 8, `plain` carries no extension at all. The pair is the whole point — a
+ loader that never reads the extension leaves both at glTF's 1.0 default and
+ looks identical on the second material alone.
+*>
+const String EMISSIVE = "test/fixtures/emissive.glb";
+
 const uint W = 200;
 const uint H = 150;
 
@@ -631,5 +639,48 @@ fn void a_piece_of_a_kit_unloads_while_the_kit_stays() @test
 
 		renderer.render_offscreen()!!;
 		(void)keep;
+	};
+}
+
+<*
+ `KHR_materials_emissive_strength` reaches the material record.
+
+ The extension is how a file says a light source is brighter than its colour:
+ `emissiveFactor` is clamped to 0..1 by the core spec, so a bulb meant to blow
+ out states [1, 0.86, 0.62] and a strength of 8 beside it. Dropping the strength
+ loses nothing a validator would notice and everything the frame does — the
+ shader multiplies the two, so a bulb that should clip white draws as its
+ unscaled tint instead.
+
+ Asserted on `GpuMaterial` rather than through a script because the number
+ crosses to JS from here (`bind_asset.c3` hands it over as `emissiveIntensity`);
+ this is the end of the road the parse is on.
+*>
+fn void emissive_strength_crosses_from_the_file() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+		three::Scene* scene = renderer.pass.scene;
+
+		three::AssetId id = assets.load(&renderer.gpu, EMISSIVE)!!;
+		scene.instantiate(id, scene.root, "lantern");
+
+		int bulb = assets.find_mesh(id, "bulb");
+		int plain = assets.find_mesh(id, "plain");
+		test::@check(bulb >= 0 && plain >= 0, "the fixture lost a mesh: bulb %d, plain %d", bulb, plain);
+
+		float strength = assets.slot(id).meshes[(uint)bulb].material.emissive_strength;
+		test::@check(strength == 8.0,
+			"`bulb` states KHR_materials_emissive_strength 8 and arrived as %.3f", strength);
+
+		float[3] emissive = assets.slot(id).meshes[(uint)bulb].material.emissive_factor;
+		test::@check(emissive[0] == 1.0, "`bulb`'s emissive factor arrived as %.3f on red", emissive[0]);
+
+		// The default, and the reason it is 1 rather than 0: a material with no
+		// extension multiplies its emissive by one, not by nothing.
+		float unstated = assets.slot(id).meshes[(uint)plain].material.emissive_strength;
+		test::@check(unstated == 1.0,
+			"`plain` names no extension and came back at %.3f, expected glTF's 1.0 default", unstated);
 	};
 }

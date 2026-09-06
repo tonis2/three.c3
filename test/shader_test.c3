@@ -587,7 +587,7 @@ fn void the_frame_block_matches_the_shader() @test
 		"{ return mul(push.view_projection, push.lighting) + push.live_poses[0][0] + push.camera; }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
 		"{ return mul(push.light_view_projection, push.shadow) + push.debug\n"
-		"  + push.lights[0].direction + push.lights[3].color; }\n",
+		"  + push.lights[0].direction + push.lights[3].color + push.world; }\n",
 		source[light_start : light_end],
 		source[start : end]
 	);
@@ -616,7 +616,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 352, "and the block is 352 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 368, "and the block is 368 bytes, got %d", three::FrameBlock::size);
 }
 
 <*

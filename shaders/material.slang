@@ -77,7 +77,7 @@ struct Light
     float4 color;
 };
 
-// What every draw in the frame shares, written once per frame. 352 bytes, and
+// What every draw in the frame shares, written once per frame. 368 bytes, and
 // the size is pinned against this declaration by `FRAME_BLOCK_FIELDS` in
 // `src/gpu/pipeline.c3` — three files declare this struct and a field added to
 // two of them is a buffer read at the wrong offset with nothing to say so.
@@ -131,6 +131,11 @@ struct FrameBlock
     // every field kept the offset it had, so nothing that reads this block by
     // offset had to change.
     float* morph_weights;
+    // The world itself as a light — `three.light.world`, xyz linear rgb. Added
+    // under the shading rather than lerped into it, and last in the block for the
+    // reason `morph_weights` is: every offset above it is the one it had. See
+    // `mesh.slang`.
+    float4 world;
 };
 
 // One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
@@ -815,7 +820,8 @@ static float3 g_position = float3(0.0, 0.0, 0.0);
 // surface, which is what every body written before the specular term existed
 // asked for and still gets.
 //
-// **`occlusion` multiplies the ambient floor and nothing else.** An occlusion map
+// **`occlusion` multiplies the ambient floor and the world light, and nothing
+// else.** An occlusion map
 // records how much of the *sky* a crevice can see and says nothing about a lamp,
 // so applying it to the direct term reads as dirt painted where a light is
 // pointing. `mesh.slang` carries the long form of the argument beside its own
@@ -840,7 +846,7 @@ float3 lambert(float3 normal, float occlusion)
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient * occlusion + (1.0 - ambient) * direct;
+    return ambient * occlusion + (1.0 - ambient) * direct + push.frame[0].world.rgb * occlusion;
 #endif
 }
 

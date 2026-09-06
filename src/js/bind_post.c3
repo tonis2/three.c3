@@ -52,6 +52,8 @@ fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
 	self.bind(host, "clearPost", &js_clear_post, 0);
 	self.bind(host, "setPostUniform", &js_set_post_uniform, 7);
 	self.bind(host, "setPostTexture", &js_set_post_texture, 3);
+	self.bind(host, "toneMapGet", &js_tone_map_get, 0);
+	self.bind(host, "toneMapSet", &js_tone_map_set, 2);
 }
 
 <*
@@ -397,6 +399,94 @@ fn void js_clear_post(
 	// With the table, so the shader's images are given back rather than held by a
 	// pass that is no longer running.
 	self.renderer.post.clear(&self.renderer.gpu, &self.pass.assets);
+}
+
+// ============================================================================
+// The tonemap — the engine's own pass, which is not one of the script's
+// ============================================================================
+
+<*
+ `toneMapGet()` — the tonemap, as `[mode, exposure]`.
+
+ The mode crosses as a number and not as a string, for the reason every other
+ enum on this boundary does: the shim reads numbers and arrays of them, and the
+ spelling of a mode is a thing `prelude.js` owns along with the message a bad one
+ gets.
+
+ Answers with the defaults on a runtime with no device, rather than raising.
+ Reading `three.toneMapping` is harmless where there is nothing to tone map, and
+ a getter that throws would make the property unreadable in a script that never
+ asked for a device.
+*>
+fn void js_tone_map_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	ToneMap mode = ToneMap.NONE;
+	float exposure = 1.0;
+	if (self.renderer != null)
+	{
+		mode     = self.renderer.post.tonemap_mode;
+		exposure = self.renderer.post.tonemap_exposure;
+	}
+
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value((double)mode.ordinal));
+	js.set_index(list, 1, qjs::number_value((double)exposure));
+	*out = list;
+}
+
+<*
+ `toneMapSet(mode, exposure)` — the curve, and what it multiplies by.
+
+ Both at once for `shadowSet`'s reason: two properties over one pair of verbs is
+ one crossing per write and one place where the two can be read back consistent
+ with each other.
+
+ The mode is the expensive half — it retires a pipeline and compiles a new one,
+ and with no script pass in the chain it also allocates image A — so it goes
+ through `PostPass.set_tonemap`, which does nothing at all when the mode has not
+ moved. The exposure is a 4-byte write and always cheap.
+
+ Needs a device, for `post_verb`'s reason: the tonemap is a pipeline and a
+ full-size attachment, and there is neither without one.
+*>
+fn void js_tone_map_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("the tonemap is a shader over the finished frame, and this context has no GPU device");
+		return;
+	}
+
+	int mode = arg_int(&js, argc, args, 0);
+	// Read defensively rather than as a second copy of the prelude's list: an
+	// ordinal this does not know is the identity, not an out-of-range enum.
+	ToneMap wanted = mode == 1 ? ToneMap.AGX : ToneMap.NONE;
+
+	self.renderer.post.set_tonemap_exposure((float)arg_float(&js, argc, args, 1));
+	if (catch err = self.renderer.post.set_tonemap(&self.renderer.gpu, &self.renderer.target, wanted))
+	{
+		*out = js.raise(string::tformat("the tonemap could not be built: %s", err));
+	}
 }
 
 <*

@@ -222,6 +222,28 @@ Object.defineProperties(light, {
 		set(v) { H.ambientSet(+v); },
 	},
 
+	// The world itself as a light: `[r, g, b]` linear, added under everything
+	// and multiplied by an occlusion map. Black by default, and a new Scene
+	// puts it back.
+	//
+	// **Added rather than lerped, which is what makes it not `ambient`.**
+	// This is Blender's world colour — a uniform light arriving from every
+	// direction — so it raises a shadowed face without taking anything from a
+	// lit one, where `ambient` fades the direct term against itself. Both
+	// exist so that neither has to change meaning.
+	//
+	// Takes what `three.light.color` takes and answers with the triple, for
+	// its reason. Not clamped to 1: a world colour times a strength is a
+	// brightness, not a swatch.
+	world: {
+		enumerable: true,
+		get() { return H.worldGet(); },
+		set(v) {
+			const c = readColor(v, 'three.light.world');
+			H.worldSet(c[0], c[1], c[2]);
+		},
+	},
+
 	// The sun and the floor at once, because setting them one at a time is
 	// two host crossings and reads worse at a call site that always means
 	// one change.
@@ -1446,6 +1468,11 @@ const debug = {
 // -----------------------------------------------------------------------
 // The module
 
+// The two tone curves, by the names a script writes. The index is what
+// crosses — `toneMapSet` takes an ordinal, and the spelling is this side's,
+// along with the message a misspelling gets.
+const TONE_MAPPINGS = ['none', 'agx'];
+
 export const three = {
 	Scene,
 	Mesh,
@@ -2050,6 +2077,67 @@ export const three = {
 			throw new TypeError('three.screenshot(path) wants a path to write a .png to');
 		}
 		return H.screenshot(path);
+	},
+
+	// The curve the finished frame ends on, `'none'` or `'agx'`.
+	//
+	// `'none'` is the default and is the identity: the chain hands its linear
+	// values to the display encode and anything above 1 clips. That is what
+	// every scene in this project was graded against, which is why a curve is
+	// not switched on for them.
+	//
+	// `'agx'` is AgX — three.js's `AgXToneMapping`, a polynomial fit of the
+	// operator Blender ships as its default view transform, so a scene
+	// authored there and rendered here land close to each other. What it does
+	// that the identity cannot: values above 1 roll off instead of clipping,
+	// and a bright saturated colour desaturates towards white on its way up
+	// rather than clipping one channel at a time into a primary. It costs
+	// contrast in the mid-tones, which is the trade — a 0.18 grey comes out
+	// around sRGB 128 rather than 118. Being a fit, it reads a few levels
+	// lighter than Blender's own curve in the deep shadows.
+	//
+	// The encode to sRGB is not this. It happens at the attachment either
+	// way, after the curve, so a body in the chain still returns linear and
+	// a screenshot is still sRGB whichever mode is selected.
+	//
+	// Changing it retires one pipeline and compiles another, so it is a
+	// setting rather than something to animate; `toneMappingExposure` is the
+	// knob that costs nothing. Like the post chain, it belongs to the
+	// renderer rather than to the scene: `new three.Scene()` does not reset
+	// it. Needs a GPU device.
+	get toneMapping() { return TONE_MAPPINGS[H.toneMapGet()[0]] ?? 'none'; },
+	set toneMapping(v) {
+		const name = String(v);
+		const index = TONE_MAPPINGS.indexOf(name);
+		// By name here rather than by a number the host would range-check, for
+		// `three.debug.view`'s reason: a typo is the whole failure mode of a
+		// string enum and it should say so rather than quietly render.
+		if (index < 0) {
+			throw new TypeError(
+				`three.toneMapping: unknown mode '${name}' — one of ${TONE_MAPPINGS.join(', ')}`
+			);
+		}
+		H.toneMapSet(index, H.toneMapGet()[1]);
+	},
+
+	// What the frame is multiplied by before the curve, 1 by default.
+	//
+	// A stop of exposure, in the photographic sense: 2 is one stop up and 0.5
+	// one stop down. **Only `'agx'` reads it** — under `'none'` there is no
+	// curve for it to be an exposure of, and a multiply followed by a clip is
+	// not one. It is kept across a mode change either way, so setting it
+	// before switching the curve on works.
+	//
+	// It is a uniform rather than part of the shader, so writing it is a
+	// four-byte push that takes effect on the next frame with no compile —
+	// which is what makes it the one of this pair that can be animated.
+	get toneMappingExposure() { return H.toneMapGet()[1]; },
+	set toneMappingExposure(v) {
+		const n = +v;
+		if (!Number.isFinite(n) || n < 0) {
+			throw new TypeError(`three.toneMappingExposure wants a finite number of 0 or more, got ${v}`);
+		}
+		H.toneMapSet(H.toneMapGet()[0], n);
 	},
 
 	// The shaders that run over the finished frame.

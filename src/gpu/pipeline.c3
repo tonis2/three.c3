@@ -325,6 +325,18 @@ struct FrameBlock
 	 offset and nothing had to be recompiled to agree.
 	*>
 	ulong morph_weights; // float*
+	<*
+	 The world itself as a light — `three.light.world`. xyz linear rgb, w unused.
+
+	 Added under the shading rather than lerped into it, which is what makes it
+	 Blender's world colour and not a second `lighting.x` — `Lighting.world` in
+	 `render/pass.c3` carries the argument.
+
+	 **After `lights` and after `morph_weights`**, for the rule the two comments
+	 above state: every field keeps the offset it had, so `shaders/shadow.slang`
+	 goes on reading `light_view_projection` at 88 by that offset.
+	*>
+	float[4] world;
 }
 
 <*
@@ -573,7 +585,7 @@ $assert @layout_matches(
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert DrawRecord::size == 280 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 352 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 368 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
@@ -648,7 +660,9 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  debug                  168    16
  camera                 184    16
  environment            200    16
- lights                 216   128    = 344, and no tail padding
+ lights                 216   128
+ morph_weights          344     8
+ world                  352    16    = 368, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "view_projection", 0, 64 },
@@ -661,6 +675,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "environment", 200, 16 },
 	{ "lights", 216, 128 },
 	{ "morph_weights", 344, 8 },
+	{ "world", 352, 16 },
 };
 
 <*

@@ -107,6 +107,9 @@ struct FrameBlock
     // every field kept the offset it had, so nothing that reads this block by
     // offset had to change.
     float* morph_weights;
+    // `three.light.world` — nothing in this pass reads it, and it is here because
+    // the offsets are the contract. See `mesh.slang`.
+    float4 world;
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.

@@ -193,6 +193,18 @@ struct FrameBlock
     // every field kept the offset it had, so nothing that reads this block by
     // offset had to change.
     float* morph_weights;
+    // The world itself as a light: `three.light.world`, xyz linear rgb, w unused.
+    //
+    // **Added under the shading rather than lerped into it**, which is the whole
+    // difference between this and `lighting.x`. It is Blender's world colour — a
+    // uniform light arriving from every direction at once — so it raises a
+    // shadowed face without taking anything away from a lit one, where the
+    // ambient floor fades the direct term against itself. Black in every scene
+    // that does not ask for it.
+    //
+    // **After `lights` and after `morph_weights`**, which is the rule the two
+    // comments above state: every field kept the offset it had.
+    float4 world;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -905,9 +917,10 @@ static float3 g_position = float3(0.0, 0.0, 0.0);
 // **Only light zero is shadowed**, because only light zero was fitted — see
 // `struct Light`.
 //
-// **`occlusion` multiplies the ambient floor and nothing else**, which is the
-// one thing about an occlusion map that is easy to get wrong and looks plausible
-// either way. An AO map records how much of the *sky* a crevice can see; it says
+// **`occlusion` multiplies the ambient floor and the world light, and nothing
+// else** — the two terms that arrive from everywhere — which is the one thing
+// about an occlusion map that is easy to get wrong and looks plausible either
+// way. An AO map records how much of the *sky* a crevice can see; it says
 // nothing about a lamp, and a lamp shining straight into that crevice lights it.
 // Applied to the direct term as well it reads as dirt painted into the wrong
 // places — darkest exactly where a light is pointing — and the mistake survives
@@ -928,7 +941,7 @@ float3 lambert(float3 normal, float occlusion)
         if (i == 0u) n_dot_l *= g_shadow;
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient * occlusion + (1.0 - ambient) * direct;
+    return ambient * occlusion + (1.0 - ambient) * direct + push.frame[0].world.rgb * occlusion;
 }
 
 // The same light with nothing occluding it, which is every caller that has no
