@@ -1792,3 +1792,380 @@ fn void each_stage_has_its_own_uniform_block() @test
 			"a uniform written past the end of the chain is refused, got %s", past);
 	};
 }
+
+// ============================================================================
+// The tonemap
+//
+// The one pass in the chain that is the engine's. Everything above this line
+// runs with it as the identity, which is the default and is what every other
+// suite in this project renders through; these are the checks that it is a
+// curve when a script asks for one, that the curve is AgX's, and that the two
+// knobs cost what they claim — a recompile for the mode and a push for the
+// exposure.
+// ============================================================================
+
+<*
+ A renderer with a script attached, for the tonemap checks.
+
+ `@with_pass` reaches the chain in C3 and that is the right door for a body an
+ agent typed; the tonemap is reached through `three.toneMapping`, so these go
+ through the property and the host verb behind it rather than around them.
+*>
+macro @with_tonemap(; @body(three::JsRuntime* run, three::Renderer* renderer))
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	@body(&runtime, renderer);
+}
+
+// The middle pixel, as three bytes. The quad below fills the frame, so this is
+// the quad wherever it is read; the middle is where a camera aimed at the
+// origin puts it.
+fn char[3] middle_pixel(image::Image* img)
+{
+	sz bpp = img.bytes_per_pixel();
+	sz at  = ((sz)(img.height / 2) * (sz)img.width + (sz)(img.width / 2)) * bpp;
+	return { img.pixels[at], img.pixels[at + 1], img.pixels[at + 2] };
+}
+
+<*
+ A frame that is one emissive colour and nothing else.
+
+ An emissive rather than a lit surface, because a lit one is the product of a
+ light, a normal and a base colour and this needs a number it can predict: the
+ emissive term is the material's colour decoded to linear, times the intensity,
+ with no shading in it at all — which is why the sun and the ambient floor are
+ both turned off here.
+
+ @param hex : `The emissive colour, sRGB, as a script writes it.`
+ @param intensity : `What it is multiplied by. Above 1 is the range a tone curve exists for.`
+*>
+fn void emissive_frame(three::JsRuntime* run, String hex, String intensity)
+{
+	@pool()
+	{
+		three::RunResult result = run.run(
+			string::tformat(
+				`const scene = new three.Scene();
+				scene.background = 0x000000;
+				const quad = new three.Mesh(
+					new three.PlaneGeometry(40, 40),
+					new three.MeshLambertMaterial({ color: 0x000000, emissive: %s, emissiveIntensity: %s }),
+				);
+				scene.add(quad);
+				three.camera.orbit(0, 0, 3);
+				three.camera.lookAt(0, 0, 0);
+				three.light.intensity = 0;
+				three.light.ambient = 0;
+				three.render(scene);
+				return 1;`,
+				hex, intensity
+			)
+		);
+		defer result.free();
+		test::@check(result.ok, "the emissive fixture ran: %s", result.error);
+	};
+}
+
+// `three.toneMapping = mode`, through the property. Fails the test rather than
+// throwing, so a check reads as a sequence of frames.
+fn void set_tonemap(three::JsRuntime* run, String mode)
+{
+	@pool()
+	{
+		three::RunResult result = run.run(string::tformat("three.toneMapping = '%s'; return three.toneMapping;", mode));
+		defer result.free();
+		test::@check(result.ok, "three.toneMapping = '%s': %s", mode, result.error);
+		test::@check(result.value.contains(mode), "and it reads back as '%s', got '%s'", mode, result.value);
+	};
+}
+
+<*
+ AgX rolls a blown highlight off; the identity clips it.
+
+ The headline, and the one frame where the two modes cannot be confused. White
+ at eight times intensity is far past anything a display can show, so the
+ identity's only answer is 255 — every channel pinned at the top with no shape
+ left in it. AgX's answer is a value below it, because the curve's whole job is
+ to have somewhere above white left to go.
+
+ It is under 255 rather than at a number, because the exact value depends on
+ where the chain clamps on the way in: image A is 8-bit, so what actually
+ reaches the tonemap here is 1.0 rather than 8, and AgX of 1.0 is about 202.
+ That the clamp is upstream is a fact about `TARGET_COLOR_FORMAT` and not about
+ this curve — a float image A would put a genuine 8 through it and the answer
+ would move. What must hold either way is that one mode clips and the other
+ does not.
+*>
+fn void agx_rolls_a_blown_highlight_off_and_the_identity_clips_it() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		emissive_frame(run, "0xffffff", "8");
+
+		set_tonemap(run, "none");
+		image::Image clipped = renderer.capture()!!;
+		defer clipped.free();
+		char[3] plain = middle_pixel(&clipped);
+		test::@check(
+			(int)plain[0] == 255 && (int)plain[1] == 255 && (int)plain[2] == 255,
+			"the identity clips it to white — got %d,%d,%d",
+			(int)plain[0], (int)plain[1], (int)plain[2]
+		);
+
+		set_tonemap(run, "agx");
+		image::Image curved = renderer.capture()!!;
+		defer curved.free();
+		char[3] agx = middle_pixel(&curved);
+		test::@check(
+			(int)agx[0] < 255 && (int)agx[0] > 150,
+			"AgX rolls it off instead — expected about 202, got %d,%d,%d",
+			(int)agx[0], (int)agx[1], (int)agx[2]
+		);
+		// Neutral in, neutral out. The inset and outset matrices are the half of
+		// AgX most likely to be transposed the wrong way, and a transposed pair
+		// tints a grey rather than failing to compile.
+		test::@check(
+			math::abs((int)agx[0] - (int)agx[2]) <= 2,
+			"and it stays neutral — got %d,%d,%d",
+			(int)agx[0], (int)agx[1], (int)agx[2]
+		);
+	};
+}
+
+<*
+ Middle grey lands in the same place under either mode.
+
+ The other end of the argument, and the reason a curve can be switched on
+ without relighting a scene: AgX is built so that 0.18 comes out near where the
+ identity puts it. The identity encodes it to 118 exactly; AgX answers about
+ 128, which is the mid-tone contrast it trades for the roll-off above.
+
+ Fifteen levels is the window both have to sit inside. Wider than the ten that
+ actually separates them, and narrower than any of the ways this can go wrong —
+ a matrix pair applied in the wrong order lands in the forties, and a missing
+ `pow(c, 2.2)` lands above 190.
+*>
+fn void middle_grey_lands_in_the_same_place_under_either_tonemap() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		// 0x76 is sRGB 118, which is linear 0.181 — middle grey, as a script
+		// writes it.
+		emissive_frame(run, "0x767676", "1");
+
+		set_tonemap(run, "none");
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		char[3] identity = middle_pixel(&plain);
+		test::@check(
+			math::abs((int)identity[0] - 118) <= 15,
+			"the identity leaves middle grey at 118 — got %d",
+			(int)identity[0]
+		);
+
+		set_tonemap(run, "agx");
+		image::Image curved = renderer.capture()!!;
+		defer curved.free();
+		char[3] agx = middle_pixel(&curved);
+		test::@check(
+			math::abs((int)agx[0] - 118) <= 15,
+			"and AgX leaves it within fifteen levels of that — got %d",
+			(int)agx[0]
+		);
+	};
+}
+
+<*
+ A mode change reaches the next frame, and costs exactly one recompile.
+
+ Two claims in one check because they are the same fact seen from either side.
+ The pipeline handle is what `ensure_tonemap` builds, so a handle that moved is
+ a shader that was rebuilt: it has to move when the mode does — otherwise the
+ old body is still running and the frame would not change — and it has to stay
+ where it is when the mode is written again with the same value, which is the
+ claim that a script assigning `three.toneMapping` every frame is free.
+*>
+fn void a_tonemap_change_recompiles_once_and_reaches_the_next_frame() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		emissive_frame(run, "0xffffff", "8");
+
+		set_tonemap(run, "none");
+		image::Image before = renderer.capture()!!;
+		defer before.free();
+		void* identity_pipeline = (void*)renderer.post.tonemap.pipeline.handle;
+
+		set_tonemap(run, "agx");
+		void* agx_pipeline = (void*)renderer.post.tonemap.pipeline.handle;
+		test::@check(agx_pipeline != identity_pipeline, "the mode change rebuilt the tonemap");
+
+		image::Image after = renderer.capture()!!;
+		defer after.free();
+		test::@check(
+			worst_channel_delta(&before, &after) > 20,
+			"and the very next frame is the new curve's"
+		);
+
+		set_tonemap(run, "agx");
+		test::@check(
+			(void*)renderer.post.tonemap.pipeline.handle == agx_pipeline,
+			"writing the same mode again compiled nothing"
+		);
+	};
+}
+
+<*
+ The exposure is a push and not a shader.
+
+ What makes `three.toneMappingExposure` the half of this pair a script can
+ animate: it is a uniform in the tonemap's own push block, so a stop up is four
+ bytes and the same `VkPipeline` draws the next frame. A constant folded into
+ the body would have been a Slang call per change.
+
+ The brightening is checked as well as the handle, because a uniform written to
+ the wrong offset also leaves the handle alone.
+*>
+fn void the_tonemap_exposure_is_a_push_rather_than_a_recompile() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		emissive_frame(run, "0x767676", "1");
+		set_tonemap(run, "agx");
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		char[3] at_one = middle_pixel(&plain);
+		void* pipeline = (void*)renderer.post.tonemap.pipeline.handle;
+
+		three::RunResult up = run.run("three.toneMappingExposure = 2; return String(three.toneMappingExposure);");
+		defer up.free();
+		test::@check(up.ok, "the exposure was set: %s", up.error);
+		test::@check(up.value.contains("2"), "and reads back as 2, got '%s'", up.value);
+
+		test::@check(
+			(void*)renderer.post.tonemap.pipeline.handle == pipeline,
+			"and nothing was recompiled for it"
+		);
+
+		image::Image brighter = renderer.capture()!!;
+		defer brighter.free();
+		char[3] at_two = middle_pixel(&brighter);
+		test::@check(
+			(int)at_two[0] > (int)at_one[0] + 10,
+			"a stop of exposure brightens the grey — %d then %d",
+			(int)at_one[0], (int)at_two[0]
+		);
+
+		// And the number survives a mode change, which is what lets a script set
+		// the exposure before switching the curve on. The identity has no such
+		// uniform at all, so this is the one path where it could be lost.
+		set_tonemap(run, "none");
+		set_tonemap(run, "agx");
+		image::Image again = renderer.capture()!!;
+		defer again.free();
+		test::@check(
+			(int)middle_pixel(&again)[0] == (int)at_two[0],
+			"and it is still two stops after a round trip through the identity — %d, was %d",
+			(int)middle_pixel(&again)[0], (int)at_two[0]
+		);
+	};
+}
+
+<*
+ A mode that is not one of the two is refused by name.
+
+ The whole failure mode of a string enum is a typo, and the answer to one has to
+ say what the alternatives are — `three.debug.view`'s argument, applied to the
+ other property on `three` that takes a word.
+
+ The exposure's refusals are here too because they are the same claim: a
+ setting that silently accepted a negative number or a NaN would be a black
+ frame with nothing to search for.
+*>
+fn void an_unknown_tonemap_mode_is_refused_by_name() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult bad = run.run("three.toneMapping = 'aces'; return 1;");
+		defer bad.free();
+		test::@check(!bad.ok, "'aces' is not a mode this has");
+		test::@check(
+			bad.error.contains("none") && bad.error.contains("agx"),
+			"and the message names both of the ones it does — %s",
+			bad.error
+		);
+
+		three::RunResult negative = run.run("three.toneMappingExposure = -1; return 1;");
+		defer negative.free();
+		test::@check(!negative.ok, "a negative exposure is refused");
+
+		three::RunResult nan = run.run("three.toneMappingExposure = NaN; return 1;");
+		defer nan.free();
+		test::@check(!nan.ok, "and so is a non-finite one");
+
+		// Refused and not half-applied: the mode is what it always was.
+		three::RunResult still = run.run("return three.toneMapping;");
+		defer still.free();
+		test::@check(still.ok && still.value.contains("none"), "the mode is untouched, got '%s'", still.value);
+	};
+}
+
+<*
+ The background goes through the curve.
+
+ `scene.background` is the one colour that never meets a shader — it is a clear
+ value on an attachment — so it is the one that could quietly miss the tonemap.
+ It does not, and the reason is structural rather than lucky: with a chain
+ running, the scene clears into image A, and the tonemap reads image A.
+
+ The check is that the frame moves at all. What it moves *to* is
+ `three_tests::post`'s business only in that it must not be the number that went
+ in — a background that came out unchanged under AgX would mean the clear was
+ landing in `target.color` behind the chain's back.
+*>
+fn void the_background_goes_through_the_tonemap() @test
+{
+	@with_tonemap(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@pool()
+		{
+			three::RunResult built = run.run(
+				`const scene = new three.Scene();
+				scene.background = 0x2f4543;
+				three.render(scene);
+				return 1;`
+			);
+			defer built.free();
+			test::@check(built.ok, "the background fixture ran: %s", built.error);
+		};
+
+		set_tonemap(run, "none");
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		char[3] cleared = middle_pixel(&plain);
+		// The identity gives a background back exactly as it was written, which is
+		// the promise `backgroundSet` already makes.
+		test::@check(
+			(int)cleared[0] == 0x2f && (int)cleared[1] == 0x45 && (int)cleared[2] == 0x43,
+			"the identity gives the background back as written — got %d,%d,%d",
+			(int)cleared[0], (int)cleared[1], (int)cleared[2]
+		);
+
+		set_tonemap(run, "agx");
+		image::Image curved = renderer.capture()!!;
+		defer curved.free();
+		char[3] toned = middle_pixel(&curved);
+		test::@check(
+			(int)toned[0] != (int)cleared[0] || (int)toned[1] != (int)cleared[1],
+			"and AgX moves it — got %d,%d,%d",
+			(int)toned[0], (int)toned[1], (int)toned[2]
+		);
+	};
+}

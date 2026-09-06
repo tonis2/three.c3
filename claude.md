@@ -17,3 +17,4 @@ c3c build --trust=full --safe=no -O3    # the fast one: no contracts, optimised
 
 There is no -D DEBUG. Validation layers and debug logging are `./build/three --debug`
 at run time, and the suite asks for the layer itself, so every build has both.
+Always delete done tasks from plan.md

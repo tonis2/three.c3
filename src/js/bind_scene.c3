@@ -181,6 +181,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightRemove", &js_light_remove, 1);
 	self.bind(host, "ambientGet", &js_ambient_get, 0);
 	self.bind(host, "ambientSet", &js_ambient_set, 1);
+	self.bind(host, "worldGet", &js_world_get, 0);
+	self.bind(host, "worldSet", &js_world_set, 3);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
 	self.bind(host, "shadowSet", &js_shadow_set, 6);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
@@ -3009,6 +3011,57 @@ fn void js_ambient_set(
 
 	Lighting lighting = self.pass.lighting;
 	lighting.ambient = math::clamp(arg_float(&js, argc, args, 0), 0.0f, 1.0f);
+	self.set_lighting(lighting);
+}
+
+<*
+ `worldGet()` — the world light, as `[r, g, b]` linear.
+*>
+fn void js_world_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	qjs::Value list = js.array();
+	for (uint i = 0; i < 3; i++)
+	{
+		js.set_index(list, i, qjs::number_value(self.pass.lighting.world[i]));
+	}
+	*out = list;
+}
+
+<*
+ `worldSet(r, g, b)` — the world light, floored at zero and not ceilinged.
+
+ Not clamped to 1, unlike a light's colour: this is Blender's world colour times
+ its strength, which is a brightness rather than a swatch, and a bright sky over a
+ dark scene is exactly the case it exists for. `Lighting.world` has why it is
+ added rather than lerped.
+*>
+fn void js_world_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Lighting lighting = self.pass.lighting;
+	for (uint i = 0; i < 3; i++)
+	{
+		lighting.world[i] = math::max(arg_float(&js, argc, args, (int)i), 0.0f);
+	}
 	self.set_lighting(lighting);
 }
 

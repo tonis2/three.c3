@@ -3893,10 +3893,13 @@ fn void a_files_lights_arrive_where_their_nodes_put_them() @test
  direction the light travels, so a sun straight overhead has to come back as +Y.
  Getting that backwards lights the underside of everything.
 
- The three conversions are asserted as the numbers they produce rather than as
- factors, because the factors are a convention `docs/functions.md` writes down and
- nothing about the file implies them: a sun of 2 W at 1.5, 9 W at 1 and 18 W at 2
- three metres out, and ten metres of reach for the lamp that named none.
+ The conversions are asserted as the numbers they produce rather than as factors,
+ because the arithmetic is Blender's and the point is that it lands: a sun of 2 W
+ at 2/pi, a 9 W lamp at 9/(4 pi²) and an 18 W one at twice that. The lamp that
+ named no range reaches to where Blender would have stopped tracing it —
+ `sqrt(intensity / 0.01)`, 6.75 metres for 18 W — and the two that named one keep
+ it. `three_tests::asset` has the same arithmetic against a file whose numbers are
+ the Evil Forest's.
 *>
 fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
 {
@@ -3940,14 +3943,15 @@ fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
 			"every slot there is: %s", result.value);
 		test::@check(result.value.contains(`"sun":[0,1,0]`),
 			"the sun is the file's directional light, negated into surface-to-light: %s", result.value);
-		test::@check(result.value.contains(`"sunIntensity":1.5`),
-			"2 Watts of sun at 1.5: %s", result.value);
+		test::@check(result.value.contains(`"sunIntensity":0.6366`),
+			"2 Watts of sun at 2/pi: %s", result.value);
 
-		test::@check(result.value.contains(`"one":[[0,0,8],4,[1,0,0],1]`),
+		test::@check(result.value.contains(`"one":[[0,0,8],4,[1,0,0],0.228]`),
 			"the nearest point light is slot one, with the file's own range: %s", result.value);
-		test::@check(result.value.contains(`"two":[[0,1,7],10,[0,1,0],2]`),
-			"then the parented lamp, ten metres for having named no range: %s", result.value);
-		test::@check(result.value.contains(`"three":[[0,0,4],6,[0,0,1],3]`),
+		test::@check(result.value.contains(`"two":[[0,1,7],6.7524,[0,1,0],0.4559]`),
+			"then the parented lamp, reaching to Blender's own threshold for having named no range: %s",
+			result.value);
+		test::@check(result.value.contains(`"three":[[0,0,4],6,[0,0,1],0.6839]`),
 			"then the third nearest, and the two far ones do not fit: %s", result.value);
 
 		// 0.5 radians is 28.6478897 degrees.
@@ -3959,6 +3963,111 @@ fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
 			"orbiting the middle of the file, from where the file put the eye: %s", result.value);
 		test::@check(result.value.contains(`"roll":0`),
 			"and level, as the node's up says: %s", result.value);
+	};
+}
+
+<*
+ Blender's Watts arrive as Blender's own arithmetic, and nothing is tuned.
+
+ `watts.glb` is the Evil Forest's two numbers and nothing else: a 2.2 W sun and a
+ 45 W lantern that names no range. Those are the lamps the old convention was
+ fitted to by eye — a bare 0.75 on the sun and a three-metre anchor on the point —
+ and the numbers here are what falls out of the conversion instead:
+
+ - a sun of S W/m² lights a white diffuse face to S/pi, so 2.2 arrives as 0.7003
+ - a lamp of P W delivers P/(4 pi² d²), and this renderer's point falloff is
+   inverse-square from one metre, so `intensity` *is* P/(4 pi²) — 45 arrives as
+   1.1399
+ - a lamp with no `range` reaches to where Blender stops tracing it, which is
+   EEVEE's `light_threshold` of 0.01: `sqrt(intensity / 0.01)`, 10.6764 metres
+
+ `asset.lights` still reports the file's raw Watts, which is the door a script
+ that wants its own exposure goes through — asserted here so that the conversion
+ cannot quietly move to the wrong side of it.
+*>
+fn void a_files_watts_convert_by_blenders_own_arithmetic() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const watts = three.load("test/fixtures/watts.glb");
+			// Somewhere else entirely, so nothing below passes by being left alone.
+			three.light.direction = [1, 0, 0];
+			three.light.intensity = 99;
+
+			const scene = new three.Scene();
+			scene.add(watts.instantiate("watts", { lights: true }));
+
+			const round = n => Math.round(n * 1e4) / 1e4;
+			return {
+				count: three.lights.length,
+				sun: round(three.light.intensity),
+				lamp: round(three.lights[1].intensity),
+				range: round(three.lights[1].range),
+				raw: watts.lights.map(l => round(l.intensity)),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"count":2`),
+			"a sun and one lantern: %s", result.value);
+		test::@check(result.value.contains(`"sun":0.7003`),
+			"2.2 Watts of sun is 2.2/pi: %s", result.value);
+		test::@check(result.value.contains(`"lamp":1.1399`),
+			"45 Watts of lantern is 45/(4 pi squared): %s", result.value);
+		test::@check(result.value.contains(`"range":10.6764`),
+			"and it reaches to Blender's light threshold: %s", result.value);
+		test::@check(result.value.contains(`"raw":[2.2,45]`),
+			"while asset.lights still reports the file's own Watts: %s", result.value);
+	};
+}
+
+<*
+ An imported material reflects 4%, and a scripted one still reflects nothing.
+
+ **Because glTF states it and a script does not.** The specification fixes a
+ dielectric's F0 at 0.04 — Filament's `reflectance` of 0.5, which is the mapping
+ `specular()` uses — and offers no slot to say otherwise, so every material in
+ every file is one and reading it off the format invents nothing. A scripted
+ material keeps 0 for the reason `scene/material.c3` gives: every scene in this
+ project was written against a Lambert renderer, and turning a highlight on for
+ all of them would relight all of them.
+
+ Both halves in one check, because either alone is satisfied by a renderer that
+ sets the same number everywhere.
+*>
+fn void an_imported_material_is_a_dielectric_and_a_scripted_one_is_not() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const watts = three.load("test/fixtures/watts.glb");
+			const scene = new three.Scene();
+			const root = watts.instantiate("watts", { materials: true });
+			scene.add(root);
+
+			let imported = null;
+			root.traverse(o => { if (o.material) imported = o.material; });
+			const scripted = new three.MeshLambertMaterial({});
+			return {
+				found: imported !== null,
+				imported: imported === null ? -1 : imported.reflectance,
+				roughness: imported === null ? -1 : imported.roughness,
+				scripted: scripted.reflectance,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"found":true`),
+			"the file's material reached the mesh: %s", result.value);
+		test::@check(result.value.contains(`"imported":0.5`),
+			"an imported material reflects the 4% glTF fixes a dielectric at: %s", result.value);
+		test::@check(result.value.contains(`"roughness":0.5`),
+			"beside the roughness the file also states: %s", result.value);
+		test::@check(result.value.contains(`"scripted":0`),
+			"and a scripted material still reflects nothing: %s", result.value);
 	};
 }
 

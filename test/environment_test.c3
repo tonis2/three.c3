@@ -49,6 +49,22 @@ macro @with_render(; @body(three::JsRuntime* run, three::Renderer* renderer))
 }
 
 <*
+ The same device with no runtime over it, for the checks that pin the frame block
+ by hand.
+
+ `three.light.world` has a JavaScript door and an arithmetic one, and the
+ arithmetic is what the pixel checks are about: writing the script would put the
+ clamping and the colour reader between the number and the shader.
+*>
+macro @with_pass(; @body(three::Renderer* renderer))
+{
+	three::Renderer* renderer = device::borrow(120, 90);
+	defer device::release();
+
+	@body(renderer);
+}
+
+<*
  The pixel in the middle of the rendered image, as three bytes.
 
  The middle rather than a corner, because that is where a camera aimed at the
@@ -1213,6 +1229,113 @@ fn void a_new_scene_restores_the_default_light() @test
 			"a new Scene should restore DEFAULT_LIGHT's ambient of 0.25: %s", result.value);
 		test::@check(result.value.contains(`"dir":0.8`),
 			"and its direction: %s", result.value);
+	};
+}
+
+<*
+ The world light is added under the shading, and nothing else is in the frame.
+
+ **Blender's world colour, and the reason it is not `three.light.ambient`.** A
+ floor is a lerp — `ambient * occlusion + (1 - ambient) * direct` — so raising it
+ takes the direct term away in the same stroke, and a scene lit to a reference
+ render cannot be given a world without relighting it. This term is added, so it
+ raises the shadowed side and leaves the lit side where the sun put it.
+
+ The arrangement is the strongest one available: a **white** plane with the sun
+ turned away from it and the floor at zero, so every photon at the centre pixel
+ came from the world. `PRIMITIVE_COLOR` is taken out for the reason
+ `three_tests::color` takes it out — with it in, the number would be asserting a
+ constant — and what is left is the sRGB encode of 0.5 exactly, 188.
+
+ Proved by injection: drop the `+ world * occlusion` from `lambert` and the plane
+ is black.
+*>
+fn void the_world_light_is_added_under_the_shading() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId plane = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+		renderer.pass.assets.mesh(plane, 0).base_color = { 1.0f, 1.0f, 1.0f, 1.0f };
+		renderer.pass.scene.add_mesh(plane, 0);
+		renderer.pass.frame_camera();
+
+		// `plane_shape` builds its face along +z, so this light points at its back.
+		renderer.pass.lighting = {
+			.count = 1,
+			.ambient = 0,
+			.lights = { { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
+			.world = { 0, 0, 0, 0 },
+		};
+
+		image::Image dark = renderer.capture()!!;
+		defer dark.free();
+		char[3] unlit = centre_pixel(&dark);
+		test::@check(
+			unlit[0] < 4 && unlit[1] < 4 && unlit[2] < 4,
+			"a face turned away with no floor and no world is black, got %d,%d,%d",
+			(int)unlit[0], (int)unlit[1], (int)unlit[2]
+		);
+
+		renderer.pass.lighting.world = { 0.5f, 0, 0, 0 };
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		char[3] pixel = centre_pixel(&shot);
+
+		int want = (int)math::round(three::linear_to_srgb(0.5f) * 255.0f);
+		test::@check(
+			math::abs((int)pixel[0] - want) <= 2,
+			"a world of 0.5 red on a white face reads back as %d, got %d",
+			want, (int)pixel[0]
+		);
+		test::@check(
+			pixel[1] < 4 && pixel[2] < 4,
+			"and it is red and nothing else, got %d,%d,%d",
+			(int)pixel[0], (int)pixel[1], (int)pixel[2]
+		);
+	};
+}
+
+<*
+ The world reads back as it was written, is black to start with, and a new Scene
+ puts it back.
+
+ The same claim `a_new_scene_restores_the_default_light` makes about the floor,
+ for the same reason: a script that sets a world and a script that does not have
+ to render the same first frame. It rides on `SceneLook` — the world is a field of
+ `Lighting`, so it travels with a scene rather than beside one, and this is what
+ says so.
+*>
+fn void the_world_light_is_black_until_asked_for_and_a_new_scene_restores_it() @test
+{
+	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const start = three.light.world;
+			three.light.world = [0.028, 0.06, 0.056];
+			const kept = three.light.world.map(n => Math.round(n * 1e4) / 1e4);
+			// Brighter than white is a world colour times a strength, and is not
+			// a swatch — so it is not clamped the way three.light.color is.
+			three.light.world = [2, 0, 0];
+			const bright = three.light.world[0];
+			// And below zero is not a colour at all.
+			three.light.world = [-1, 0, 0];
+			const floored = three.light.world[0];
+			new three.Scene();
+			return { start, kept, bright, floored, back: three.light.world };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"start":[0,0,0]`),
+			"a renderer starts with no world light: %s", result.value);
+		test::@check(result.value.contains(`"kept":[0.028,0.06,0.056]`),
+			"and the triple round trips: %s", result.value);
+		test::@check(result.value.contains(`"bright":2`),
+			"a world brighter than white is kept: %s", result.value);
+		test::@check(result.value.contains(`"floored":0`),
+			"and a negative one is floored at zero: %s", result.value);
+		test::@check(result.value.contains(`"back":[0,0,0]`),
+			"a new Scene restores the black it started on: %s", result.value);
 	};
 }
 

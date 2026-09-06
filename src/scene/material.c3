@@ -385,19 +385,24 @@ struct Material
 	// 
 	// ## Why reflectance is 0 rather than the 4% that real dielectrics reflect
 	// 
-	// Because the standing constraint at the bottom of `plan.md` says a default is
-	// invented when the answer stops depending on the scene, and this one has not:
-	// every scene in this project was authored against a Lambert renderer, and
-	// turning a 4% highlight on for all of them would relight all of them. So the
-	// physical value is one line away — `material.reflectance = 0.5` — and off
-	// until asked for, exactly as shadows are.
+	// **For a material a script wrote**, because the standing constraint at the
+	// bottom of `plan.md` says a default is invented when the answer stops
+	// depending on the scene, and this one has not: every scene in this project was
+	// authored against a Lambert renderer, and turning a 4% highlight on for all of
+	// them would relight all of them. So the physical value is one line away —
+	// `material.reflectance = 0.5` — and off until asked for, exactly as shadows
+	// are.
 	// 
-	// The importer *does* apply the file's `metallicFactor` and `roughnessFactor`,
-	// and the difference is that those are numbers a file states while this is one
-	// nothing states — glTF has no reflectance, so applying the file's would mean
-	// inventing it. `scene.environment` is what closed the other half: a metal now
-	// has something to reflect, so a file that says it is metallic can be drawn as
-	// one. `js/prelude/asset.js` has the import rule.
+	// **An imported material gets 0.5, and the difference is that the file states
+	// it.** This used to read as "glTF has no reflectance, so applying the file's
+	// would mean inventing it", which had the specification backwards: glTF fixes a
+	// dielectric's F0 at 0.04 and gives no slot to say otherwise, so every material
+	// in every file *is* one — 0.5 being Filament's spelling of that 4%. Nothing is
+	// invented; the number is read off the format. `js/prelude/asset.js` is where
+	// the import applies it, beside `metallicFactor` and `roughnessFactor`, which
+	// are numbers a file states in the same way. `scene.environment` closed the
+	// other half: a metal now has something to reflect, so a file that says it is
+	// metallic can be drawn as one.
 	float metalness;
 	float reflectance;
 

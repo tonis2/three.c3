@@ -36,6 +36,8 @@
    `(ambient + (1 - ambient) * direct) * occlusion`, which is the plausible
    mistake this file exists to keep out: "a fully occluded surface under a direct
    light is exactly as lit as it was: 0 against 199".
+ - The world term moved outside its `* occlusion`: "half the sky is half the
+   world in linear: 146 wanted, 199 got, 199 open".
 *>
 module three_tests::maps;
 
@@ -355,6 +357,76 @@ fn void occlusion_darkens_the_ambient_floor_and_not_a_light() @test
 			"and the ambient floor is what it does darken: %d occluded, %d open",
 			floor_occluded,
 			floor_open
+		);
+	};
+}
+
+<*
+ **The world light is occluded exactly as the floor is.**
+
+ The other term that arrives from everywhere, and so the other one an occlusion
+ map has anything to say about: `three.light.world` is Blender's world colour,
+ added under everything, and a crevice that cannot see the sky cannot see it
+ either. Added to this file rather than beside the world's own check because the
+ mistake it guards is this file's mistake — a world term written outside the
+ `* occlusion` and lighting every crack in the level flat.
+
+ The sun is turned away and the floor is zero, so the world is the whole frame,
+ and a map of mid grey has to halve it *in linear* — 199 open, 146 under the map,
+ rather than the 100 a halving of the encoded byte would give.
+
+ Proved by injection: move the world term outside the multiply and the two
+ numbers become equal.
+*>
+fn void the_world_light_is_occluded_like_the_ambient_floor() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		uint material     = renderer.pass.create_texture_material(three::NO_TEXTURE)!!;
+		three::NodeId lit = lit_plane(renderer);
+		renderer.pass.scene.set_material(lit, material);
+
+		// Green, so `centre` above is reading the channel the world is in.
+		renderer.pass.lighting = {
+			.count = 1,
+			.ambient = 0,
+			.lights = { { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
+			.world = { 0, 1, 0, 0 },
+		};
+
+		uint open = centre(renderer);
+		test::@check(open > 150, "a world light with nothing occluding it is bright, got %d", open);
+
+		image::Image shut = solid(0, 0, 0);
+		defer shut.free();
+		int dark = renderer.pass.assets.claim_texture(&renderer.gpu, shut, three::ColorSpace.LINEAR)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, dark)!!;
+
+		uint closed = centre(renderer);
+		test::@check(
+			closed < 4,
+			"a fully occluded surface sees no world at all, got %d against %d open",
+			closed,
+			open
+		);
+
+		image::Image half = solid(128, 128, 128);
+		defer half.free();
+		int dim = renderer.pass.assets.claim_texture(&renderer.gpu, half, three::ColorSpace.LINEAR)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, dim)!!;
+
+		// The albedo is `PRIMITIVE_COLOR` and the map is 128 of 255, both linear
+		// by the time the shader has them, so the answer is stated rather than
+		// compared.
+		float albedo = three::srgb_to_linear(three::PRIMITIVE_COLOR[1]);
+		int want = (int)math::round(three::linear_to_srgb(albedo * (128.0f / 255.0f)) * 255.0f);
+		uint dimmed = centre(renderer);
+		test::@check(
+			math::abs((int)dimmed - want) <= 2,
+			"and half the sky is half the world in linear: %d wanted, %d got, %d open",
+			want,
+			dimmed,
+			open
 		);
 	};
 }

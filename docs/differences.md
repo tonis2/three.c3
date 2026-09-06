@@ -641,14 +641,28 @@ at 1 there is no shading at all and everything is its own flat colour.
 It is on `three.light` rather than on each light because it is not a light — it stands in for every bounce
 this renderer does not simulate, and four of them summed would be four times the same fudge.
 `three.light.set(direction, ambient)` sets the sun and the floor at once; the second argument is the floor
-and not a colour. Defaults to 0.25, and a new Scene restores it.
+and not a colour. Defaults to 0.25, and a new Scene restores it. `three.light.world` is the other term
+under a scene and is not this one — it adds where this lerps.
+
+## world
+
+`three.light.world` is Blender's world colour as a light: `[r, g, b]` linear, added under everything and
+multiplied by an occlusion map. Black by default, and a new Scene restores it. Three.js has no equivalent
+— its nearest is an AmbientLight, which is an Object3D and is a lerp in the shading rather than a term
+added under it.
+
+It is separate from `three.light.ambient` because the arithmetic is: a floor is a lerp, so raising it takes
+light off the lit side, while this lifts the shadowed side and leaves the lit side alone. To match a
+Blender scene, set this to the world shader's colour times its strength and put the floor at zero.
 
 ## specular
 
 There is a specular term and it is off on every material until you ask.
 
-- `material.reflectance` is the switch: 0 by default (no highlight at all), and 0.5 is the 4% that ordinary
-  dielectrics reflect — what to use for anything wet, polished or glazed.
+- `material.reflectance` is the switch: 0 by default on a material a script builds (no highlight at all),
+  and 0.5 is the 4% that ordinary dielectrics reflect — what to use for anything wet, polished or glazed.
+  An **imported** material gets 0.5, because glTF fixes a dielectric's F0 at 0.04 and so the file does
+  state it.
 - `material.roughness` spreads the highlight out. 1 by default and perfectly diffuse.
 - `material.metalness` moves a surface's colour out of the diffuse and into the highlight. With no
   environment map to reflect, a fully metallic surface is its highlights and the ambient floor and nothing
@@ -803,6 +817,9 @@ The chain runs in linear float, so a pass may return values above 1 and the next
 what a bright pass followed by a blur needs; the encode to the display happens once, at the end. It applies to
 the window, to `render()` and to screenshots alike, and it belongs to the renderer rather than to the scene, so
 it survives `new three.Scene()` and outlives the script that set it.
+
+The last pass of the chain is always the engine's own, and `three.toneMapping` is what it does: the identity, or
+AgX. It runs with or without a pass in front of it, so a curve is one assignment rather than a shader to write.
 
 ## mesh-no-material
 

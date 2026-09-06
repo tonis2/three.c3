@@ -36,7 +36,8 @@ import collision;
 const sz INITIAL_INSTANCES = 64;
 
 <*
- Every light in one world, and the floor underneath them.
+ Every light in one world, and the two terms underneath them: the floor a face
+ keeps where nothing reaches it, and the world's own colour added under all of it.
 
  One struct because there is one moment they all change — `activate()` — and
  because adding a light and raising the floor are the same kind of statement:
@@ -63,6 +64,22 @@ struct Lighting
 	// them summed would be four times the same fudge.
 	float ambient;
 	Light[MAX_LIGHTS] lights;
+	<*
+	 The world itself as a light — `three.light.world`, rgb linear, w unused.
+
+	 **Added under everything rather than lerped into it**, which is the whole
+	 difference between this and `ambient`. Blender's world colour is a uniform
+	 light arriving from every direction at once, so it raises a shadowed face
+	 without taking anything away from a lit one; `ambient` is a floor the direct
+	 term is faded against, and a scene written to one of them is not a scene
+	 written to the other. Both are here so neither has to change meaning.
+
+	 Black by default, so a scene that never mentions it renders exactly as it did.
+	 `occlusion` multiplies it for the reason the comment above `lambert` gives: it
+	 is the term that arrives from everywhere, which is the one an occlusion map
+	 records.
+	*>
+	float[4] world;
 }
 
 <*
@@ -82,6 +99,9 @@ const Lighting DEFAULT_LIGHTING = {
 	.ambient = 0.25, // The three unlit slots are zero, which is the value they hold until something
 	// fills them and is never read while `count` is one.
 	.lights = { { .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
+	// Black: a renderer with no world light is the renderer every scene so far was
+	// written against.
+	.world = { 0, 0, 0, 0 },
 };
 
 <*
@@ -192,7 +212,7 @@ struct MeshPass
 	// place the resolution happens.
 	vk::Rect2D scene_rect;
 	bool scene_rect_partial;
-	// The lights this frame is drawn with, and the ambient floor under them. The
+	// The lights this frame is drawn with, and the floor and world under them. The
 	// active scene's own — `SceneLook` is where a script's writes land, and
 	// `activate_scene` is the only thing that copies one here.
 	Lighting lighting;
@@ -1073,6 +1093,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	FrameBlock frame = {
 		.view_projection = view_projection,
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time, 0 },
+		.world = self.lighting.world,
 		.live_poses = live_address,
 		.morph_weights = morph_address,
 		.light_view_projection = self.shadows.light_view_projection,
