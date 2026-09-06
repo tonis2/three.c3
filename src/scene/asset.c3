@@ -1795,6 +1795,14 @@ struct TranscodeSlot @local
 	ulong cost;
 	long ms;
 	bool ok;
+	// The file shipped no chain, so this image took the encode branch. Read from
+	// the file rather than from the result, because a built chain and a file's
+	// own look the same once they are blocks.
+	bool generated;
+	// Which of the pre-pass's threads runs it, and what its encoder may spawn.
+	// See `pretranscode_basis_images`.
+	uint shard;
+	uint encode_threads;
 }
 
 <*
@@ -1830,7 +1838,7 @@ fn void transcode_slot(TranscodeJob* job, TranscodeSlot* slot) @local
 {
 	Clock started = clock::now();
 	BlockImage? made = transcode_ktx2_blocks(
-		slot.encoded, job.format, job.allocator, job.threads, true
+		slot.encoded, job.format, job.allocator, job.threads, true, slot.encode_threads
 	);
 	if (try made)
 	{
@@ -1841,24 +1849,24 @@ fn void transcode_slot(TranscodeJob* job, TranscodeSlot* slot) @local
 }
 
 <*
- One thread's share of the images: every `stride`th one from `first`.
+ One thread's share of the images: the ones the queue gave it.
 
- Interleaved rather than blocked, the way `ktx::parallel` shards a block row,
- so a file whose big images are next to each other spreads them evenly.
+ A scan of the whole list rather than a slice of it, because the shares are not
+ contiguous — `pretranscode_basis_images` balances them by cost — and sixty-one
+ comparisons a thread is not worth an index array to avoid.
 *>
 struct TranscodeShard @local
 {
 	TranscodeJob* job;
-	usz first;
-	usz stride;
+	uint mine;
 }
 
 fn void transcode_range(TranscodeShard* shard) @local
 {
 	TranscodeJob* job = shard.job;
-	for (usz i = shard.first; i < job.slots.len; i += shard.stride)
+	foreach (&slot : job.slots)
 	{
-		transcode_slot(job, &job.slots[i]);
+		if (slot.shard == shard.mine) transcode_slot(job, slot);
 	}
 }
 
@@ -1920,6 +1928,25 @@ fn int transcode_shard(void* arg) @local
  export and 1060 ms for the ETC1S one, against 1940 and 1700 for one thread an
  image and 6300 and 8000 for one image at a time.
 
+ ## And a file with no chain, where an image is an encode
+
+ An image whose file shipped no mips is a chain built and encoded rather than
+ blocks rewritten, which is five times the work and none of it serial — so the
+ two numbers above are the wrong ones twice over.
+
+ The encoder's share is per image. One thread for an image the other fifteen
+ hide, because sixteen images asking for eight threads each is the machine
+ spending the difference on scheduling; the mapper's share for an image larger
+ than its own slice of the queue, because nothing hides that one — this file's
+ 4096x4096 is a fifth of the work and the last thing still running.
+
+ And the images go to the threads by cost rather than every sixteenth to each,
+ which is what the sort above was always for: interleaved, the 4096x4096 and
+ three 1024s landed on one thread and that thread was the whole tail. Measured
+ on the same box, `evil_forest.glb` exported with mips off: 2.8 s for the
+ pre-pass and 4.0 s to the first frame, against 28.8 s and 30.1 s when level 0
+ was encoded too, and 1.0 s and 2.3 s for the same scene with its chains.
+
  ## What it costs to hold
 
  A 1024x1024 BC7 chain is 1.4 MiB, so `evil_forest.glb`'s sixty-one images —
@@ -1963,7 +1990,12 @@ fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
 		char[]? encoded = asset.stream.get_image_data((uint)index);
 		if (catch encoded) continue;
 		if (!is_basis_ktx2(encoded)) continue;
-		slots.push({ .encoded = encoded, .image = (int)index, .cost = basis_image_cost(encoded) });
+		slots.push({
+			.encoded = encoded,
+			.image = (int)index,
+			.cost = basis_image_cost(encoded),
+			.generated = basis_needs_chain(encoded),
+		});
 	}
 
 	if (slots.len() == 0) return;
@@ -1987,16 +2019,49 @@ fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
 	int detected = cpu::native_cpu();
 	uint cores = detected < 1 ? 1 : (uint)detected;
 
+	uint outer = (sz)cores > slots.len() ? (uint)slots.len() : cores;
+	if (outer > MAX_TRANSCODE_THREADS) outer = MAX_TRANSCODE_THREADS;
+
+	// Half the machine to each image's mapper — see the header.
+	uint mapper = cores > 1 ? cores / 2 : 1;
+
+	// Each image to the thread with the least work in front of it, biggest first,
+	// which is what the sort above was for. Every `outer`th image instead put the
+	// 4096x4096 and three 1024s on one thread and left another with three, and a
+	// file with no chain — where an image is a mip chain built and encoded rather
+	// than blocks rewritten — is slow enough for that to be the whole tail.
+	ulong total = 0;
+	foreach (&slot : slots) total += slot.cost;
+
+	ulong[MAX_TRANSCODE_THREADS] load;
+	foreach (&slot : slots)
+	{
+		uint pick = 0;
+		for (uint t = 1; t < outer; t++)
+		{
+			if (load[t] < load[pick]) pick = t;
+		}
+		slot.shard = pick;
+		load[pick] += slot.cost;
+		// An encode has no part that does not fan out — block after block over a
+		// whole level — so sixteen images asking for eight threads each is the
+		// machine spending the difference on scheduling. One thread, then, for an
+		// image the other fifteen hide. Two images cannot hide anything and are
+		// given the mapper's share for the same reason it has it; and an image
+		// larger than its own slice of the queue is hidden by nothing however
+		// many there are — `evil_forest.glb`'s 4096x4096 is a fifth of the work
+		// and the last thing still running.
+		bool alone = outer < cores || slot.cost * outer > total;
+		slot.encode_threads = alone ? mapper : 1;
+	}
+
 	TranscodeJob job = {
 		.slots = slots.array_view(),
 		.format = target,
 		.allocator = mem,
 		.owner = thread::current(),
-		// Half the machine to each image's mapper — see the header.
-		.threads = cores > 1 ? cores / 2 : 1,
+		.threads = mapper,
 	};
-	uint outer = (sz)cores > slots.len() ? (uint)slots.len() : cores;
-	if (outer > MAX_TRANSCODE_THREADS) outer = MAX_TRANSCODE_THREADS;
 
 	Clock started = clock::now();
 	TranscodeShard[MAX_TRANSCODE_THREADS] shards;
@@ -2004,12 +2069,12 @@ fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
 	bool[MAX_TRANSCODE_THREADS] live;
 	for (uint t = 1; t < outer; t++)
 	{
-		shards[t] = { .job = &job, .first = t, .stride = outer };
+		shards[t] = { .job = &job, .mine = t };
 		live[t] = true;
 		if (@catch(workers[t].create(&transcode_shard, &shards[t]))) live[t] = false;
 	}
 
-	TranscodeShard own = { .job = &job, .first = 0, .stride = outer };
+	TranscodeShard own = { .job = &job, .mine = 0 };
 	transcode_range(&own);
 
 	// A thread that would not spawn has its share run here rather than dropped,
@@ -2024,12 +2089,31 @@ fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
 		transcode_shard(&shards[t]);
 	}
 
+	// The two branches are printed apart, because which one an image took is the
+	// one thing this log can tell a user about their own export: a line that says
+	// "encoded" says the file was written with mips off, and that the encode is
+	// what the load is waiting for.
+	uint made_chain = 0;
 	foreach (&slot : slots)
 	{
 		if (!slot.ok) continue;
 		asset.images.blocks.push({ .image = slot.image, .blocks = slot.blocks });
+		if (slot.generated) made_chain++;
+		int levels = (int)slot.blocks.levels.len;
+		if (slot.generated)
+		{
+			@debug_log("basis: %dx%d, level 0 mapped and %d levels encoded to BC7 in %d ms (no chain in the file)",
+				slot.blocks.width, slot.blocks.height, levels - 1, slot.ms);
+			continue;
+		}
 		@debug_log("basis: %dx%d, %d levels mapped to BC7 in %d ms",
-			slot.blocks.width, slot.blocks.height, (int)slot.blocks.levels.len, slot.ms);
+			slot.blocks.width, slot.blocks.height, levels, slot.ms);
+	}
+	if (made_chain > 0)
+	{
+		@debug_log("basis: %d images on %d threads (%d each) in %d ms — %d shipped no chain and had one built and encoded",
+			slots.len(), outer, job.threads, (long)started.to_now() / 1_000_000, made_chain);
+		return;
 	}
 	@debug_log("basis: %d images on %d threads (%d each) in %d ms",
 		slots.len(), outer, job.threads, (long)started.to_now() / 1_000_000);
