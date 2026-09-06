@@ -35,7 +35,7 @@ import std::math::vector;
 
 fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "physicsAdd", &js_physics_add, 7);
+	self.bind(host, "physicsAdd", &js_physics_add, 10);
 	self.bind(host, "physicsRemove", &js_physics_remove, 2);
 	self.bind(host, "physicsGravitySet", &js_physics_gravity_set, 4);
 	self.bind(host, "physicsGravityGet", &js_physics_gravity_get, 1);
@@ -59,7 +59,11 @@ fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
 }
 
 <*
- `physicsAdd(index, generation, kind, shape, mass, friction, restitution)`.
+ `physicsAdd(index, generation, kind, shape, mass, friction, restitution,
+ gravityFactor, linearDamping, angularDamping)`.
+
+ The last three are glTF's `motion`, and they default to this engine's own — all
+ of gravity and no damping — for every caller that says nothing about them.
 
  Strings for the two enums rather than numbers, because they cross once per body
  and a script that mistypes one should be told which word was wrong rather than
@@ -124,6 +128,10 @@ fn void js_physics_add(
 		float friction    = arg_float(&js, argc, args, 5);
 		float restitution = arg_float(&js, argc, args, 6);
 
+		float gravity_factor = argc > 7 ? arg_float(&js, argc, args, 7) : 1.0f;
+		float linear_damping = argc > 8 ? arg_float(&js, argc, args, 8) : 0;
+		float angular_damping = argc > 9 ? arg_float(&js, argc, args, 9) : 0;
+
 		// The scene the object is in, not the one being rendered: bodies for the
 		// next level are built while it is still off screen, which is most of what
 		// owning a world per scene is for.
@@ -135,7 +143,10 @@ fn void js_physics_add(
 			shape,
 			mass,
 			friction,
-			restitution
+			restitution,
+			gravity_factor,
+			linear_damping,
+			angular_damping
 		))
 		{
 			*out = js.raise(physics_add_message(err, shape_name));

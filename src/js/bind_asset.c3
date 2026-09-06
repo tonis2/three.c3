@@ -2463,10 +2463,15 @@ fn void js_asset_nodes(
 	// would drive nothing. See `Assets.flatten`.
 	bool skeleton = argc > 2 ? arg_truth(&js, argc, args, 2) : false;
 
+	// Whether the file's own `KHR_physics_rigid_bodies` decides what collides.
+	// False by default, which is every file loaded without the option and the
+	// reason no existing scene changes. See `scene/collider.c3`.
+	bool physics = argc > 3 ? arg_truth(&js, argc, args, 3) : false;
+
 	List{PlacedNode} placed;
 	placed.init(mem, 16);
 	defer placed.free();
-	self.pass.assets.flatten(id, &placed, skeleton);
+	self.pass.assets.flatten(id, &placed, skeleton, physics);
 
 	qjs::Value nodes = js.array();
 	foreach (i, &entry : placed)
@@ -2503,6 +2508,12 @@ fn void js_asset_nodes(
 		// builds its nodes through the ordinary `add`, not through
 		// `Scene.instantiate`, so nothing else would ever set it.
 		js.set_index(row, 21, qjs::int_value(entry.skin));
+		// What the file said about this entry, or the engine's default when it was
+		// not asked. `collides` is false on every mesh of a file whose colliders
+		// decide the index and did not name this one; `collisionOnly` is true on
+		// the proxy an implicit shape got.
+		js.set_index(row, 22, qjs::bool_value(entry.collides));
+		js.set_index(row, 23, qjs::bool_value(entry.collision_only));
 
 		js.set_index(nodes, (uint)i, row);
 	}
@@ -2618,6 +2629,132 @@ fn void js_asset_cameras(
 		js.set_index(row, 14, qjs::number_value(camera.aspect));
 		js.set_index(row, 15, qjs::int_value(camera.gltf_node));
 		js.set_index(list, (uint)i, row);
+	}
+	*out = list;
+}
+
+<*
+ `assetBodies(index, generation)` — what the file's `KHR_physics_rigid_bodies`
+ says, node by node.
+
+ A description and not a body, for `assetLights`' reason: the file states what
+ collides and what to do about it is a policy over the statement.
+ `instantiate({ physics: true })` is one policy and a script is free to write
+ another — `asset.colliders` is the list it reads.
+
+ `shape` is `AssetShape`'s ordinal — 0 mesh, 1 convex hull, then box, sphere,
+ capsule, cylinder — passed through untranslated, the same bargain
+ `assetLights`' `kind` strikes.
+
+ Everything is in the file's own units, which are also this engine's: mass in
+ kilograms, friction and restitution 0..1, velocities per second. The implicit
+ shape's own numbers are not here — they are already in the proxy mesh the
+ loader built, and a script that wants them reads that mesh's bounds.
+
+ @return `An array of [gltfNode, name, shape, hasCollider, trigger, hasMotion, kinematic, mass, gravityFactor, linearDamping, angularDamping, lvx, lvy, lvz, avx, avy, avz, hasMaterial, friction, restitution, hasProxy, filtered].`
+*>
+fn void js_asset_bodies(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	qjs::Value list = js.array();
+	foreach (i, &body : self.pass.assets.slot(id).bodies)
+	{
+		qjs::Value row = js.array();
+		js.set_index(row, 0, qjs::int_value(body.gltf_node));
+		js.set_index(row, 1, js.string(body.name));
+		js.set_index(row, 2, qjs::int_value((int)body.shape.ordinal));
+		js.set_index(row, 3, qjs::bool_value(body.has_collider));
+		js.set_index(row, 4, qjs::bool_value(body.trigger));
+		js.set_index(row, 5, qjs::bool_value(body.has_motion));
+		js.set_index(row, 6, qjs::bool_value(body.kinematic));
+		js.set_index(row, 7, qjs::number_value(body.mass));
+		js.set_index(row, 8, qjs::number_value(body.gravity_factor));
+		js.set_index(row, 9, qjs::number_value(body.linear_damping));
+		js.set_index(row, 10, qjs::number_value(body.angular_damping));
+		js.set_index(row, 11, qjs::number_value(body.linear_velocity.x));
+		js.set_index(row, 12, qjs::number_value(body.linear_velocity.y));
+		js.set_index(row, 13, qjs::number_value(body.linear_velocity.z));
+		js.set_index(row, 14, qjs::number_value(body.angular_velocity.x));
+		js.set_index(row, 15, qjs::number_value(body.angular_velocity.y));
+		js.set_index(row, 16, qjs::number_value(body.angular_velocity.z));
+		js.set_index(row, 17, qjs::bool_value(body.has_material));
+		js.set_index(row, 18, qjs::number_value(body.friction));
+		js.set_index(row, 19, qjs::number_value(body.restitution));
+		js.set_index(row, 20, qjs::bool_value(body.proxy >= 0));
+		js.set_index(row, 21, qjs::bool_value(body.filtered));
+		js.set_index(list, (uint)i, row);
+	}
+	*out = list;
+}
+
+<*
+ `assetJoints(index, generation)` — the file's `physicsJoints`, each resolved to
+ the two nodes it holds.
+
+ glTF hangs a joint on a pivot node parented to one body and names a second pivot
+ parented to the other, so the bodies are the pivots' parents; `record_joints`
+ walks that and this reports the answer. A pivot with no parent reports -1, which
+ is a joint the consumer cannot make.
+
+ The limits are already `three.physics.joint`'s: an axis mask, a min and a max, a
+ stiffness and a damping, split into a linear row and an angular row exactly as
+ the JS side packs them. glTF's description of a joint and this one are the same
+ object, which is why nothing is translated on the way through.
+
+ @return `An array of [bodyA, bodyB, px, py, pz, collide, limits], with each limit [kind, axes, min, max, stiffness, damping] and kind 0 linear, 1 angular.`
+*>
+fn void js_asset_joints(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	AssetId id = arg_asset(self, &js, argc, args, 0, out);
+	if (!id.is_set()) return;
+
+	qjs::Value list = js.array();
+	foreach (i, &joint : self.pass.assets.slot(id).joints)
+	{
+		qjs::Value limits = js.array();
+		foreach (k, &limit : joint.limits)
+		{
+			qjs::Value row = js.array();
+			js.set_index(row, 0, qjs::int_value((int)limit.kind));
+			js.set_index(row, 1, qjs::int_value((int)limit.axes));
+			js.set_index(row, 2, qjs::number_value(limit.min));
+			js.set_index(row, 3, qjs::number_value(limit.max));
+			js.set_index(row, 4, qjs::number_value(limit.stiffness));
+			js.set_index(row, 5, qjs::number_value(limit.damping));
+			js.set_index(limits, (uint)k, row);
+		}
+
+		qjs::Value entry = js.array();
+		js.set_index(entry, 0, qjs::int_value(joint.body_a));
+		js.set_index(entry, 1, qjs::int_value(joint.body_b));
+		js.set_index(entry, 2, qjs::number_value(joint.pivot.x));
+		js.set_index(entry, 3, qjs::number_value(joint.pivot.y));
+		js.set_index(entry, 4, qjs::number_value(joint.pivot.z));
+		js.set_index(entry, 5, qjs::bool_value(joint.collide));
+		js.set_index(entry, 6, limits);
+		js.set_index(list, (uint)i, entry);
 	}
 	*out = list;
 }

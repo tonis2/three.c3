@@ -131,7 +131,9 @@ export function makeScenePhysics(scene) {
 		//
 		// `shape` is one of 'box', 'sphere', 'capsule', 'hull' or
 		// 'heightfield', and every one of them comes from the mesh rather
-		// than from numbers you supply. 'heightfield' is the odd one and
+		// than from numbers you supply. `gravityFactor`, `linearDamping` and
+		// `angularDamping` are glTF's three motion knobs and are read only on
+		// a dynamic body: 1, 0 and 0 are all of gravity and no drag. 'heightfield' is the odd one and
 		// is the reason it is worth naming here: it is only for a
 		// TerrainGeometry, and it is the terrain's own grid of heights
 		// handed to the solver as one shape — so a body rests on the same
@@ -146,8 +148,18 @@ export function makeScenePhysics(scene) {
 			const mass = desc.mass === undefined ? 1 : Number(desc.mass);
 			const friction = desc.friction === undefined ? 0.5 : Number(desc.friction);
 			const restitution = desc.restitution === undefined ? 0.2 : Number(desc.restitution);
+			// glTF's `motion` block carries all three, which is why they are
+			// options rather than constants — and they default to this engine's
+			// own, so a body described without them behaves as every body did.
+			const gravityFactor = desc.gravityFactor === undefined ? 1 : Number(desc.gravityFactor);
+			const linearDamping = desc.linearDamping === undefined ? 0 : Number(desc.linearDamping);
+			const angularDamping = desc.angularDamping === undefined ? 0 : Number(desc.angularDamping);
 
-			for (const [name, value] of [['mass', mass], ['friction', friction], ['restitution', restitution]]) {
+			for (const [name, value] of [
+				['mass', mass], ['friction', friction], ['restitution', restitution],
+				['gravityFactor', gravityFactor],
+				['linearDamping', linearDamping], ['angularDamping', angularDamping],
+			]) {
 				if (!Number.isFinite(value)) {
 					throw new TypeError(`body.${name} must be a finite number, not ${value}`);
 				}
@@ -162,8 +174,14 @@ export function makeScenePhysics(scene) {
 				: (desc.static || mass === 0) ? 'static'
 				: 'dynamic';
 
-			H.physicsAdd(target[0], target[1], kind, shape, mass, friction, restitution);
-			object.body = { shape, mass, friction, restitution, kind };
+			H.physicsAdd(
+				target[0], target[1], kind, shape, mass, friction, restitution,
+				gravityFactor, linearDamping, angularDamping,
+			);
+			object.body = {
+				shape, mass, friction, restitution, kind,
+				gravityFactor, linearDamping, angularDamping,
+			};
 			object._solverOwned = kind === 'dynamic';
 			return object;
 		},

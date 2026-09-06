@@ -240,6 +240,7 @@ import std::collections::list;
 import gltf;
 import image;
 import image::png;
+import collision;
 
 faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
 
@@ -803,7 +804,10 @@ fn int? Exporter.walk(&self, NodeId id)
 	}
 
 	int entry = -1;
-	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
+	// A collision proxy is a shape and not a picture — the file is what the frame
+	// shows, and the frame does not show it. The *node* is still written, because
+	// its collider and whatever hangs off it are worth keeping.
+	if (node.asset.is_set() && !node.collision_only && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
 		// Tinted: this node is written as itself, so its colour has nowhere to go
 		// but its material. A copy that ends up in a batch takes the other path.
@@ -822,7 +826,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	defer children.free();
 	self.place_children(node, &children)!;
 
-	if (entry < 0 && children.len() == 0)
+	if (entry < 0 && children.len() == 0 && self.pass.scene.physics.body_for(id) == null)
 	{
 		// Not counted as skipped: nothing was left out, there was nothing there.
 		return -1;
@@ -1116,7 +1120,7 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 		return;
 	}
 
-	if (node.asset.is_set() && self.pass.assets.mesh(node.asset, node.mesh) != null)
+	if (node.asset.is_set() && !node.collision_only && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
 		// `collapsible`'s two refusals, in the walk that never consults it: here a
 		// copy *is* a batch, so refusing to share one is how a skinned or morphing
@@ -1211,12 +1215,16 @@ fn int? Exporter.draw_node(
 		uint plain = self.out.add_node(node.name, entry, -1, position, rotation, scale);
 		self.report.nodes++;
 		self.write_node_weights(id, entry, plain);
+		self.write_node_physics(id, plain, entry >= 0);
 		if (children != null) foreach (child : *children) self.out.add_child(plain, child);
 		return (int)plain;
 	}
 
 	uint wrapper = self.out.add_node(node.name, -1, -1, position, rotation, scale);
 	self.report.nodes++;
+	// On the wrapper, which is where the placement is: a body moves the copy, and
+	// the mesh node under it deliberately has no transform of its own.
+	self.write_node_physics(id, wrapper, false);
 	foreach (bone : bones) self.out.add_child(wrapper, bone);
 
 	// Named after the mesh rather than after the copy, so a viewer's outline reads
@@ -1231,6 +1239,103 @@ fn int? Exporter.draw_node(
 
 	if (children != null) foreach (child : *children) self.out.add_child(wrapper, child);
 	return (int)wrapper;
+}
+
+<*
+ This node's body, as `KHR_physics_rigid_bodies`.
+
+ **The solver's bodies and nothing else.** What a scene *sweeps* against is
+ `Node.collides`, which is on by default and true of nearly every node in nearly
+ every scene — writing a collider for each of those would say the file is nothing
+ but colliders, which is the opposite of what the extension is for. A body is the
+ thing somebody asked for by name, through `three.physics.add` or through
+ `instantiate({ physics: true })` reading it out of a file in the first place, so
+ that is what comes back out.
+
+ The shape is measured the way `Physics.build_collider` measured it — from the
+ same mesh bounds — so the file states the collider the solver actually holds
+ rather than the one the caller asked for. A heightfield has no words in the
+ extension and is left out; the terrain it came from is in the file as geometry.
+
+ @param mesh_written : `Whether this node carries the mesh. A hull collider says nothing about its geometry, which the parser then reads as the node's own mesh — so a node with no mesh has to name a shape instead or the file describes a collider over nothing.`
+*>
+fn void Exporter.write_node_physics(&self, NodeId id, uint written, bool mesh_written)
+{
+	Scene* scene       = self.pass.scene;
+	PhysicsBody* body  = scene.physics.body_for(id);
+	if (body == null) return;
+	Node* node = scene.node(id);
+	if (node == null) return;
+
+	GpuMesh* shape_mesh = self.pass.assets.mesh(node.asset, node.mesh);
+	if (shape_mesh == null) return;
+	Vec3 extent = (shape_mesh.bounds.max - shape_mesh.bounds.min) * 0.5f;
+
+	gltf::Collider collider = {
+		.shape = -1,
+		.node = -1,
+		.mesh = -1,
+		.material = -1,
+		.collision_filter = -1,
+		.base_node = -1,
+		.is_trigger = body.kind == BodyKind.TRIGGER,
+	};
+
+	switch (body.shape)
+	{
+		case HULL:
+			// Nothing named, plus the hull flag: the reader takes the node's own
+			// mesh, which is exactly what the solver did.
+			if (!mesh_written) return;
+			collider.convex_hull = true;
+		case BOX:
+			collider.shape = (int)self.out.add_shape({ .type = BOX, .size = extent * 2.0f });
+		case SPHERE:
+			float radius = math::max(extent.x, math::max(extent.y, extent.z));
+			collider.shape = (int)self.out.add_shape({ .type = SPHERE, .radius = radius });
+		case CAPSULE:
+			float radius = math::max(extent.x, extent.z);
+			collider.shape = (int)self.out.add_shape(
+				{
+					.type = CAPSULE,
+					.height = math::max(0.0f, (extent.y - radius) * 2.0f),
+					.radius_top = radius,
+					.radius_bottom = radius,
+				}
+			);
+		case HEIGHTFIELD:
+			return;
+	}
+
+	collision::Rigidbody* rigid = scene.physics.rigidbody_for(id);
+	if (rigid != null)
+	{
+		collider.material = (int)self.out.add_physics_material(
+			{
+				.static_friction = rigid.material.static_friction,
+				.dynamic_friction = rigid.material.dynamic_friction,
+				.restitution = rigid.material.restitution,
+			}
+		);
+	}
+
+	self.out.add_collider(written, collider);
+
+	// A static body is a collider and nothing more — glTF says "this is a body"
+	// with `motion`, and a wall is not one.
+	if (rigid == null || body.kind == BodyKind.STATIC || body.kind == BodyKind.TRIGGER) return;
+	self.out.add_motion(
+		written,
+		{
+			.is_kinematic = body.kind == BodyKind.KINEMATIC,
+			.mass = rigid.mass,
+			.gravity_factor = rigid.gravity_factor,
+			.linear_dampening = rigid.linear_dampening,
+			.angular_dampening = rigid.angular_dampening,
+			.linear_velocity = rigid.linear_velocity,
+			.angular_velocity = rigid.angular_velocity,
+		}
+	);
 }
 
 <*

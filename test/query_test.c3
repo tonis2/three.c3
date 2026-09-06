@@ -654,6 +654,83 @@ fn void a_wall_stops_a_character_and_a_ramp_does_not() @test
 }
 
 <*
+ Walking on flat ground is not a slide, and `stats().sweep` is how you know.
+
+ **What the numbers are for.** A slow `three.moveAndSlide` is one of three things
+ — too many triangles per sweep, too many advancement steps per sweep, too many
+ sweeps per call — and before `stats().sweep` all three were inferred from mesh
+ sizes and loop bounds. On the Evil Forest that inference was wrong about which:
+ the sweeps were cheap and there were four times as many of them as anyone
+ thought, because a step along the ground reported the ground as a hit and spent a
+ slide on it.
+
+ So this walks a capsule along open ground and asks both questions at once. The
+ slide count is 0 on level ground and on the shallow ramp, and one call is a
+ handful of sweeps rather than ten: the depenetration, the grounded probe, one
+ slide that hits nothing, and the floor probe.
+*>
+fn void walking_on_the_floor_is_not_a_slide() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(80, 1, 80));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			// Far enough along that the flat walk below never reaches its lip: a
+			// twelve-degree ramp twenty metres long has its low end two metres
+			// under the floor, and walking into that is a wall, not open ground.
+			const ramp = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			ramp.position.set(30, 2, 0);
+			ramp.rotation.z = 12 * Math.PI / 180;
+			scene.add(ramp);
+
+			const MOVE = { radius: 0.3, height: 1.8 };
+			// The warmup steps are walked and not counted: dropping onto a surface is
+			// a contact, and this is about what walking *along* one costs.
+			const walk = (from, n, warmup = 0) => {
+				let p = from;
+				let slid = 0;
+				for (let i = 0; i < n; i++) {
+					const r = three.moveAndSlide(p, [0.1, -0.02, 0], MOVE);
+					p = r.position.toArray();
+					if (i >= warmup) slid += r.slides;
+				}
+				return [p, slid];
+			};
+
+			// One call first, to build the index, so the counters below are the
+			// walk's and not the rebuild's.
+			walk([0, 0.9, 0], 1);
+
+			const before = three.stats().sweep;
+			const [flatEnd, flatSlides] = walk([0, 0.9, 0], 100);
+			const s = three.stats().sweep;
+
+			// And the same up the ramp, dropped onto it clear of its lip.
+			const [rampEnd, rampSlides] = walk([26, 3.0, 0], 100, 20);
+
+			return [
+				flatSlides,
+				rampSlides <= 1,
+				s.calls - before.calls === 100,
+				(s.sweeps - before.sweeps) / 100 <= 5,
+				(s.steps - before.steps) > 0,
+				(s.gathered - before.gathered) > 0,
+				flatEnd[0] > 9 && rampEnd[0] > 33,
+			];
+		`, "the floor-projection script ran");
+
+		test::@check(
+			value == "[0,true,true,true,true,true,true]",
+			"no slides on open ground, and the counters say what a call cost; got %s",
+			value
+		);
+	};
+}
+
+<*
  A ledge under the step height is climbed, and one over it is not.
 
  Written as two runs of the same loop against two ledge heights, because the

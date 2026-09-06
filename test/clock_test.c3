@@ -462,6 +462,93 @@ fn void a_very_long_frame_catches_up_and_stops() @test
 	};
 }
 
+<*
+ A frame whose fixed steps cost more than they bought takes one step, not eight.
+
+ `CLOCK_MAX_FIXED_STEPS` bounds the *count* and says nothing about what a step
+ costs, and eight steps of a hundred milliseconds is a one-second frame that owes
+ eight again — the Evil Forest's ten-second freeze in one sentence. So the cap is
+ also on the time: a frame whose steps together ran longer than the game time they
+ were catching up takes one step this frame and drops the rest.
+
+ The callback here spends 25 ms a step against a 16.7 ms step, which is the shape
+ of a game that cannot keep up. The first long frame still catches up the full
+ eight — nothing has gone wrong yet — and the frame after it does not.
+*>
+fn void a_frame_that_cost_more_than_it_caught_up_takes_one_step() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		@ok(
+			run,
+			"globalThis.steps = 0; three.setFixedLoop(() => { globalThis.steps++; "
+				"const t = performance.now(); while (performance.now() - t < 25) {} });"
+		);
+
+		run.tick(0);
+		// 200 ms of wall, clamped to the clock's 100, which is six steps owed.
+		run.tick(200);
+
+		String first = @answer(run, "return globalThis.steps;");
+		defer first.free(mem);
+		test::@check(first.to_long() ?? 0 > 1, "the first slow frame still caught up, got '%s' steps", first);
+
+		@ok(run, "globalThis.steps = 0;");
+		run.tick(400);
+
+		String next = @answer(run, "return globalThis.steps;");
+		defer next.free(mem);
+		test::@check(next == "1", "and the frame after it took one step, got '%s'", next);
+
+		String dropped = @answer(run, "return three.frame.droppedSteps > 0;");
+		defer dropped.free(mem);
+		test::@check(dropped == "true", "the steps it gave up on are counted, got '%s'", dropped);
+	};
+}
+
+<*
+ A fixed step that runs out of budget does not take the gameplay loop away.
+
+ The three ways a callback stops are a throw, a promise and the wall. The first
+ two are the script being wrong about what a callback is; the third is the game
+ having been slow for one frame, and a window that still draws and no longer
+ plays is a worse answer to that than a stutter. So the rest of that frame's steps
+ are skipped and the loop runs again on the next one.
+
+ The reason is still reported, once — the test above this one's neighbour checks
+ the sentence for a throw, and this checks that the overrun's is different.
+*>
+fn void a_fixed_step_that_runs_long_keeps_the_loop() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		@ok(
+			run,
+			"globalThis.steps = 0; three.setFixedLoop(() => { globalThis.steps++; "
+				"if (globalThis.steps === 1) { while (true) {} } });"
+		);
+
+		run.tick(0);
+		run.tick(20);
+
+		three::RunResult after = run.run("return globalThis.steps;");
+		defer after.free();
+		test::@check(after.ok, "the reading script ran: %s", after.error);
+		test::@check(after.value == "1", "the step that hung ran once, got '%s'", after.value);
+		test::@check(
+			after.frame_error.contains("still running"),
+			"and the reason says the loop was kept: '%s'",
+			after.frame_error
+		);
+
+		// The frame after it: still registered, still called.
+		run.tick(200);
+		String steps = @answer(run, "return globalThis.steps;");
+		defer steps.free(mem);
+		test::@check(steps.to_long() ?? 0 > 1, "and it ran again next frame, got '%s'", steps);
+	};
+}
+
 // A paused clock owes nothing, for the same reason it moves nothing else.
 fn void a_paused_clock_owes_no_fixed_steps() @test
 {

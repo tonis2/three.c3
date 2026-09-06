@@ -115,6 +115,30 @@ struct GameClock
 	// The fixed step's accumulator, in game milliseconds, and its rate.
 	double fixed_ms;
 	double fixed_hz;
+
+	<*
+	 What the last frame's fixed steps cost in *wall* milliseconds, and how many
+	 there were.
+
+	 The pair `take_fixed_steps` caps on. Wall rather than game milliseconds
+	 because the question is whether catching up is affordable, and that is asked
+	 of the clock on the wall — a time scale of ten does not make eight slow steps
+	 cheaper.
+
+	 Written by the host at the end of every frame, so a frame that ran no fixed
+	 callback at all does not inherit the last one's reading.
+	*>
+	double fixed_spent_ms;
+	int fixed_last_steps;
+
+	<*
+	 Fixed steps this clock owed and gave up on, since it started.
+
+	 Counted rather than silent, because dropping them is the game falling behind
+	 honestly and a script has no other way to see it happen —
+	 `three.frame.droppedSteps`.
+	*>
+	long dropped_steps;
 }
 
 <*
@@ -199,20 +223,55 @@ fn void GameClock.advance(&self, double seconds)
  How many fixed steps this frame owes, consuming them from the accumulator.
 
  Asked every frame whether or not anything is registered to run them — see
- `JsRuntime.tick`. A remainder past one step is dropped rather than carried,
- which is the cap doing its job.
+ `JsRuntime.tick`. A remainder past the cap is dropped rather than carried, which
+ is the cap doing its job.
+
+ ## The cap is on the time as well as the count
+
+ `CLOCK_MAX_FIXED_STEPS` bounds how many steps a frame may take and says nothing
+ about what one costs, and a count is the wrong unit the moment a step costs more
+ wall time than the game time it buys: eight steps of a hundred milliseconds is a
+ one-second frame, which owes eight again, which is a freeze rather than a
+ stutter. So a frame whose fixed steps together ran longer than the game time they
+ were catching up takes *one* step and drops the rest.
+
+ Same cap, different units. It cannot make a game slower than it was — a frame
+ that was keeping up never trips it — and what it costs when it does trip is game
+ time, which is the thing a game can afford to lose. `dropped_steps` is where that
+ goes on the record.
 *>
 fn int GameClock.take_fixed_steps(&self)
 {
 	double step_ms = self.fixed_step_ms();
-	int steps      = 0;
-	while (self.fixed_ms >= step_ms && steps < CLOCK_MAX_FIXED_STEPS)
+
+	int limit = CLOCK_MAX_FIXED_STEPS;
+	if (self.fixed_last_steps > 0 && self.fixed_spent_ms > self.fixed_last_steps * step_ms) limit = 1;
+
+	int steps = 0;
+	while (self.fixed_ms >= step_ms && steps < limit)
 	{
 		self.fixed_ms -= step_ms;
 		steps++;
 	}
-	if (self.fixed_ms > step_ms) self.fixed_ms = 0;
+
+	if (self.fixed_ms >= step_ms)
+	{
+		self.dropped_steps += (long)(self.fixed_ms / step_ms);
+		self.fixed_ms = 0;
+	}
+
+	self.fixed_last_steps = steps;
+	// Zeroed here and written again at the end of the frame, so a frame that ran
+	// none of them is not judged on the last frame that did.
+	self.fixed_spent_ms = 0;
 	return steps;
+}
+
+// What this frame's fixed callbacks actually cost, for the cap above. Called once
+// per frame by the host, after the callbacks have run.
+fn void GameClock.note_fixed_spend(&self, double wall_ms)
+{
+	self.fixed_spent_ms = wall_ms;
 }
 
 // One fixed step in game milliseconds. Infinite on a zero-value clock, which

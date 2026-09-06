@@ -326,6 +326,17 @@ toggling `collides` costs a rebuild.
 `stats().colliders` is how many meshes are in the index. Reading it beside `stats().nodes` is how you find
 out that a level is mostly scenery pretending to be walls.
 
+**A level should not need the flag at all**, and `asset.instantiate(name, { physics: true })` is why: with
+it on, the file's own `KHR_physics_rigid_bodies` colliders decide the index and every other mesh of that
+file is out, so nothing collides unless it was authored to. `object.collides = false` is then the tool for
+the pickup a script made, not for the four hundred and forty-nine plants somebody has to remember to name.
+
+The other half of that is `object.collisionOnly`, which is the flag with no opposite in Three.js: on, the
+object is in every query and in no draw — no draw call, no instance, no triangles in `three.stats()`. It is
+what a `KHR_implicit_shapes` box or capsule becomes, so a barrel collides as a twelve-triangle box while its
+art draws as itself. `visible = false` cannot stand in for it: an invisible node is skipped when a query
+*answers*, which is right for a hidden character and wrong for a collider.
+
 ## systems-and-casts
 
 A big animation loop is the problem this solves, not a slow one. `three.systems.step(name, fn)` and
@@ -845,6 +856,14 @@ arrive and hands the callback the same `dt` every call. Drawing the consequence 
 The accumulator is the host's: one written in the animation callback spends the script budget catching up and
 gets the callback stopped for good instead of merely stuttering.
 
+It is capped in both units, which is the other half of the same argument. A frame takes at most eight steps,
+*and* a frame whose steps together ran longer than the game time they were catching up takes one and drops
+the rest — because eight steps of a hundred milliseconds is a one-second frame that owes eight again, which
+is a freeze rather than a stutter. `three.frame.droppedSteps` counts what was given up on, the engine says
+so once, and the game clock falls behind honestly. A step that trips the frame budget outright is skipped
+and the loop is kept: a window that still draws and no longer plays is a worse answer to one slow frame
+than a stutter is.
+
 ## animation-loop-freezes-render
 
 A running animation loop makes `render()` and `screenshot()` no longer repeatable — the scene has moved between
@@ -988,6 +1007,14 @@ A collider comes from the mesh, not from numbers you supply.
   the alternative is a chain of invisible boxes and a path forced flat to have them.
 - `'hull'` is the convex hull of its points, from the same quickhull that built a ConvexGeometry, so a convex rock's
   collider is exactly its own geometry rather than an approximation of it.
+
+There is no triangle-mesh shape, which is what `{ physics: true }` means when it says a file's *mesh*
+collider is `'hull'` in the solver: the file's real triangles are what every sweep and every raycast walk,
+and their convex hull is what a body rests on. Exact for a floor or a convex prop, coarse for a cave.
+
+There is no cylinder either. A file's cylinder collider is `'hull'` too — the hull of the sixteen-sided
+lathe the shape becomes, so flat ends and a round side, which is what a cylinder is for and what a capsule
+of the same bounds would get wrong at the rim.
 
 ## export-round-trips
 

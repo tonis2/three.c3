@@ -226,6 +226,26 @@ struct Node
 	*>
 	bool collides;
 
+	<*
+	 Whether this node is collision geometry and *nothing else* — in every query
+	 and in no draw.
+
+	 The other half of `collides`, and the reason an implicit shape can exist
+	 here at all. A `KHR_implicit_shapes` box on a barrel is a collider with no
+	 triangles, and a node that draws nothing is queried by nothing — so the
+	 importer gives the shape a low-poly proxy mesh and sets this, and
+	 `build_draw_list` steps over the node while `rebuild_query_index` files it.
+
+	 `visible = false` is not the same thing and cannot stand in for it:
+	 `query_node` skips an invisible node at answer time, which is exactly the
+	 behaviour a hidden character wants and exactly the wrong one here.
+
+	 Off by default, and only `Assets.flatten` and `Scene.set_collision_only`
+	 turn it on. A node with no mesh is unaffected — it was in neither list to
+	 begin with.
+	*>
+	bool collision_only;
+
 	// Slot bookkeeping. `generation` is bumped when the slot is reused, which is
 	// what makes a stale NodeId detectable rather than silently valid.
 	uint generation;
