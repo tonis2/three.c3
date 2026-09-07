@@ -98,7 +98,10 @@ const Lighting DEFAULT_LIGHTING = {
 	.count = 1,
 	.ambient = 0.25, // The three unlit slots are zero, which is the value they hold until something
 	// fills them and is never read while `count` is one.
-	.lights = { { .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
+	.lights = {
+		{ .direction = { 0.35, 0.80, 0.45, 0 }, .color = { 1, 1, 1, 1 } },
+		{ }, { }, { }, { }, { }, { }, { },
+	},
 	// Black: a renderer with no world light is the renderer every scene so far was
 	// written against.
 	.world = { 0, 0, 0, 0 },
@@ -309,6 +312,7 @@ struct MeshPass
 	// `three.light.shadow.enabled`. `render/shadow.c3` is the whole of it; what
 	// lives here is the two lines of the frame that reach it.
 	ShadowMap shadows;
+	PointShadowMap point_shadows;
 	<*
 	 Which draw record each bucket got, or `NOT_DRAWN`.
 
@@ -401,6 +405,8 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// rather than four assignments here, because `new three.Scene()` restores the
 	// same four and two spellings of a default drift.
 	self.shadows.defaults();
+	self.point_shadows.settings = DEFAULT_POINT_SHADOW;
+	self.point_shadows.ensure_fallback(gpu)!;
 	// Running, at ordinary speed. The zero value of a `GameClock` is a stopped one
 	// — see `GameClock.defaults`.
 	self.clock.defaults();
@@ -980,6 +986,33 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// derived from the size it was actually created at; and it needs the world
 	// bounds, which `update_world_matrices` above has just made current.
 	self.shadows.live = false;
+	self.point_shadows.live = false;
+	self.point_shadows.ensure_fallback(gpu)!;
+	bool has_point_light = false;
+	for (uint i = 1; i < self.lighting.count; i++)
+	{
+		if (self.lighting.lights[i].direction[3] > 0.0f) { has_point_light = true; break; }
+	}
+	if (self.point_shadows.enabled && has_point_light)
+	{
+		if (catch self.point_shadows.ensure(gpu))
+		{
+			io::eprintn("three: the point shadow cube array could not be created — point shadows are off");
+			self.point_shadows.enabled = false;
+		}
+		else
+		{
+			// Both maps select the same sampleable depth format, and the caster
+			// pipeline must be created against the attachment it will render into.
+			self.shadows.format = self.point_shadows.format;
+			if (catch self.shadows.build_pipeline(gpu))
+			{
+				io::eprintn("three: the point shadow shader could not be built — point shadows are off");
+				self.point_shadows.enabled = false;
+			}
+			else { self.point_shadows.live = true; }
+		}
+	}
 	if (self.shadows.enabled)
 	{
 		// A shadow map that will not build turns shadows off rather than killing the
@@ -1076,7 +1109,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			margins,
 			self.shadows.live ? &self.shadows.light_view_projection : null,
 			&reserve_instances,
-			&copies
+			&copies,
+			self.point_shadows.live
 		);
 	};
 	if (self.scene.buckets.len() == 0)
@@ -1102,6 +1136,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.camera = { eye.x, eye.y, eye.z, 0 },
 		.environment = self.environment_params(),
 		.lights = self.lighting.lights,
+		.point_shadow = { self.point_shadows.created > 0 ? 1.0f / (float)self.point_shadows.created : 0.0f,
+			self.point_shadows.bias, self.point_shadows.intensity, self.point_shadows.live ? 1.0f : 0.0f },
 	};
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
@@ -1164,7 +1200,7 @@ fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 {
 	self.shadows.plan = SHADOW_PLAN_FULL;
 	self.shadows.sample_static = false;
-	if (!self.shadows.live) return;
+	if (!self.shadows.live && !self.point_shadows.live) return;
 
 	uint statics = 0;
 	uint movers  = 0;
@@ -1201,6 +1237,9 @@ fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 			self.shadows.cutout_refused = true;
 		}
 	}
+	// Point faces are rebuilt live and have no static cache. They still needed the
+	// cut-out pipeline above; everything below is directional-cache planning.
+	if (!self.shadows.live) return;
 
 	if (statics == 0 || self.shadows.static_refused) return;
 
@@ -1486,6 +1525,10 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 			int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
 			samplers.add(ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
 		}
+		if (pipeline_declares_binding(pipeline, POINT_SHADOW_BINDING))
+		{
+			samplers.add(POINT_SHADOW_BINDING, self.point_shadows.descriptor());
+		}
 		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
 
@@ -1603,7 +1646,38 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 {
 	self.shadows.draws = 0;
 	self.shadows.static_draws = 0;
-	if (!self.prepared || !self.shadows.live) return;
+	self.point_shadows.draws = 0;
+	if (self.point_shadows.fallback_image != null && !self.point_shadows.fallback_initialized)
+	{
+		self.point_shadows.begin_all(cmd, true);
+		for (uint face = 0; face < POINT_SHADOW_FACES; face++)
+		{
+			self.point_shadows.begin_face(cmd, self.point_shadows.fallback_faces[face], 1);
+			vk::cmdEndRendering(cmd);
+		}
+		self.point_shadows.finish_all(cmd, true);
+		self.point_shadows.fallback_initialized = true;
+	}
+	if (!self.prepared) return;
+	if (self.point_shadows.live)
+	{
+		self.point_shadows.begin_all(cmd, false);
+		for (uint i = 1; i < self.lighting.count; i++)
+		{
+			Light light = self.lighting.lights[i];
+			if (light.direction[3] <= 0.0f) continue;
+			for (uint face = 0; face < POINT_SHADOW_FACES; face++)
+			{
+				uint layer = (i - 1) * POINT_SHADOW_FACES + face;
+				self.point_shadows.begin_face(cmd, self.point_shadows.faces[layer], self.point_shadows.created);
+				self.point_shadows.draws += self.record_casters(cmd, CASTERS_ALL, point_shadow_matrix(light, face));
+				vk::cmdEndRendering(cmd);
+			}
+		}
+		self.point_shadows.finish_all(cmd, false);
+		self.point_shadows.initialized = true;
+	}
+	if (!self.shadows.live) return;
 
 	// The renderer as it was before caching: one clear, every caster, one image.
 	if (self.shadows.plan == SHADOW_PLAN_FULL)
@@ -1643,7 +1717,7 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
  @param which : `CASTERS_ALL, CASTERS_STATIC or CASTERS_DYNAMIC — see Bucket.static_first for the layout these select out of each bucket.`
  @return `How many draw calls were recorded, which is what stats() reports.`
 *>
-fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
+fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which, Matrix4f projection = self.shadows.light_view_projection)
 {
 	// Two pipelines at most, and one in nearly every scene. There is no material
 	// in a depth pass and so nothing to change pipelines for — except
@@ -1708,7 +1782,7 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 				// `count`, not `visible` — the counterpart of the line in `record`.
 				// This pass wants every copy the light's box kept, which is the
 				// visible prefix plus the tail of casters the camera cannot see.
-				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count, projection);
 			case CASTERS_STATIC:
 				recorded += self.draw_casters(
 					cmd,
@@ -1717,11 +1791,12 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which)
 					bucket,
 					at,
 					bucket.static_first,
-					bucket.static_count
+					bucket.static_count,
+					projection
 				);
 			case CASTERS_DYNAMIC:
-				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first);
-				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first, projection);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at, projection);
 			default:
 				break;
 		}
@@ -1745,7 +1820,8 @@ fn uint MeshPass.draw_casters(
 	Bucket bucket,
 	uint at,
 	uint offset,
-	uint count
+	uint count,
+	Matrix4f projection
 )
 {
 	if (count == 0) return 0;
@@ -1759,10 +1835,11 @@ fn uint MeshPass.draw_casters(
 	// The instance address carries the run's own offset, for `record`'s reason: the
 	// shader reads copy zero of its own slice. It is also what makes a sub-range
 	// legal at all — `SV_InstanceID` is relative to what is pushed here.
-	MeshPush push = {
+	ShadowPush push = {
 		.frame = self.frame_address,
 		.instances = self.instance_address + (ulong)(bucket.first + offset) * Instance::size,
 		.draw = self.draw_address + (ulong)at * DrawRecord::size,
+		.projection = projection,
 	};
 
 	// The reflected size, for the reason `record` gives at length: the range
@@ -2374,7 +2451,7 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// property of its material and of the pass — see `casts_shadow`. It is last
 	// frame's number, like `culled_last_frame` beside it, and for the same reason:
 	// `stats()` is a query and does not record a pass to count.
-	stats.shadow_draws = self.shadows.draws;
+	stats.shadow_draws = self.shadows.draws + self.point_shadows.draws;
 	stats.shadow_static_draws = self.shadows.static_draws;
 	// A fact about right now rather than about last frame, and it stays true once
 	// it is: the pipeline is kept until the pass is freed, the way the ordinary
@@ -2391,7 +2468,7 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// belong to the `Renderer` and are filled in a layer up — `SceneStats` has the
 	// split. Both are process-wide rather than per scene, and say so: geometry is
 	// shared across every scene holding it, and there is one shadow map.
-	stats.shadow_bytes = self.shadows.bytes();
+	stats.shadow_bytes = self.shadows.bytes() + self.point_shadows.bytes();
 	stats.geometry_bytes = self.assets.geometry_bytes();
 	return stats;
 }
@@ -3213,6 +3290,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// The device is idle by the time a pass is torn down, so the shadow map's
 	// pipeline is destroyed outright rather than retired — see `ShadowMap.free`.
 	self.shadows.free(gpu);
+	self.point_shadows.free(gpu);
 	self.posed_offsets.free();
 	self.soft_offsets.free();
 	self.draw_indices.free();

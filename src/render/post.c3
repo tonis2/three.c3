@@ -231,8 +231,8 @@ fn void PostPass.init(&self)
 }
 
 <*
- What the chain costs, in bytes, and 0 for a runtime that never set a post
- shader.
+ What the chain costs, in bytes. Image A is always resident because every scene
+ renders in HDR before the final display encode.
 
  Image A plus as much of the ping-pong pair as the chain needed, plus one image
  for every stage another stage taps. `POST_CHAIN_FORMAT` is eight bytes a pixel
@@ -599,7 +599,9 @@ fn uint PostPass.count(&self) => (uint)self.stages.len();
  = 'agx'` and no `setPost` is a chain of exactly one pass, the engine's own, and
  the frame has to be routed through image A for it to have anything to read.
 *>
-fn bool PostPass.active(&self) => self.stages.len() > 0 || self.tonemap_mode != ToneMap.NONE;
+// Image A and the final display encode are always active: the scene attachment
+// is HDR even when the selected tone map is the identity.
+fn bool PostPass.active(&self) => true;
 
 <*
  Points a uniform at new values.

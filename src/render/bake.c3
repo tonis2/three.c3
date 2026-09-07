@@ -314,6 +314,10 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		{
 			samplers.add(SHADOW_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
 		}
+		if (pipeline_declares_binding(pipeline, POINT_SHADOW_BINDING))
+		{
+			samplers.add(POINT_SHADOW_BINDING, self.pass.point_shadows.descriptor());
+		}
 		samplers.collect(pipeline, &material.textures, &self.pass.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
 

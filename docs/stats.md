@@ -28,18 +28,21 @@
   thousand vertices is tens of megabytes on each side. Falls to zero across a full unload.
 - `targetBytes` — The offscreen frame: one colour and one depth image at the render size. About
   17 MB at 1080p, held before a single mesh loads, and the floor under everything else here.
-- `postBytes` — The post chain: Image A, as much of the ping-pong pair as the chain needed, and one
+- `postBytes` — The post chain: the always-resident HDR scene image A, as much of the ping-pong pair as the chain needed, and one
   image per tapped pass, at eight bytes a pixel against the target's four — so a two-pass chain at
-  1080p is around 40 MB. 0 until a post shader is first set, and a high-water mark after that:
+  1080p is around 50 MB. It starts around 16.6 MB at 1080p for A and is a high-water mark after that:
   `three.setPost(null)` retires the shaders and keeps the images for the next chain at the same
   extent. A nonzero reading with nothing running is that, not a leak. `three.toneMapping = 'agx'`
-  with no pass of your own is Image A alone — about 8 MB at 1080p — because the tonemap reads the
+  with no pass of your own is Image A alone — about 16.6 MB at 1080p — because the tonemap reads the
   scene rather than a ping-pong slot.
-- `shadowBytes` — Two D32 images at `size` squared once anything in the scene is static, one before
-  that. 2048 is 34 MB, 4096 is 134 MB, 8192 — the ceiling — is 536 MB: the largest thing one
-  assignment can do to a process, which is why the setter says so above the default. 0 until shadows
-  are first turned on; after that it follows `shadow.size` up and down, but
-  `three.light.shadow.enabled = false` keeps the last map rather than freeing it.
+- `shadowBytes` — Actual Vulkan allocations for shadow depth images: the directional map (and its
+  optional static cache), the always-valid tiny point-shadow descriptor fallback, and—only after
+  `three.lights.shadow.enabled`—the point-light cube array. The cube array has six faces for each
+  of the seven point-light slots, so at D32 its nominal texel payload is `size² × 42 × 4`; the
+  reported number includes allocator alignment and is the number to budget.
+  The directional map stays allocated after it is disabled. The point cube array is likewise
+  retained after first use so a menu toggle does not repeatedly stall and allocate; before first
+  opt-in, only the allocator-aligned fallback is present.
 - `materials` — Materials built and not yet collected; the two built-in ones are not counted. A
   material holds a compiled pipeline until `material.dispose()`, so a script that builds one per run
   and drops the handle grows this forever — the host says so past 64. It falls when the material is

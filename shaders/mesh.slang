@@ -84,10 +84,10 @@ struct Instance
     uint morph;
 };
 
-// One light, and there are four slots for them in the frame block.
+// One light, and there are eight slots for them in the frame block.
 
-// **Light zero is the sun.** It is the one `render/shadow.c3` fits the shadow map
-// around and the only one that casts; the rest light and do not shadow. That is a
+// **Light zero is the sun.** It is the one `render/shadow.c3` fits the directional
+// shadow map around. Point lights may use the separate opt-in six-face array. That is a
 // limitation with a price on it rather than an oversight — a second caster is a
 // second fit and a second depth pass, and `plan.md` §19 has the atlas that turns
 // that into a tiling question.
@@ -111,7 +111,7 @@ struct FrameBlock
     //
     //   x  the ambient floor: how much of its own colour a surface keeps where no
     //      light reaches it. `three.light.ambient`.
-    //   y  how many of `lights` are lit this frame, 0 to 4. The rest of the array
+    //   y  how many of `lights` are lit this frame, 0 to 8. The rest of the array
     //      is stale bytes the loop never reaches.
     //   z  game clock seconds — `three.clock.time`, the same number `p.time` is.
     //   w unused.
@@ -179,7 +179,7 @@ struct FrameBlock
     // **At the end of the block on purpose.** Everything above kept the offset it
     // had when there was one light, and `shaders/shadow.slang` reads
     // `light_view_projection` at 88 by that offset.
-    Light lights[4];
+    Light lights[8];
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -205,6 +205,7 @@ struct FrameBlock
     // **After `lights` and after `morph_weights`**, which is the rule the two
     // comments above state: every field kept the offset it had.
     float4 world;
+    float4 point_shadow;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -447,7 +448,7 @@ static const uint POSE_MASK = 0x7fffffffu;
 // **Binding 1 is the shadow map, in every shader that shades a surface.** It is
 // reserved the way `base_color_map` is — declared by the template rather than by
 // anything a script writes — which, with the environment map below it, is why
-// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// `MATERIAL_BINDING_FIRST` is 4 and an agent's first sampler is numbered from
 // there. `shader/assemble.c3` has the
 // argument for why reserving a binding is a constant and never a shared bump.
 //
@@ -459,10 +460,11 @@ static const uint POSE_MASK = 0x7fffffffu;
 // and turning them on is a different image in the same slot rather than a
 // recompile.
 [vk::binding(1, 0)] Sampler2D shadow_map;
+[vk::binding(3, 0)] Sampler2DArray point_shadow_map;
 
 // **Binding 2 is the environment map, in every shader that shades a surface.**
 // The third and last binding a template reserves, which is why
-// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// `MATERIAL_BINDING_FIRST` is 4 and an agent's first sampler is numbered from
 // there.
 //
 // Always bound and always valid, exactly like the two above: with no sky it
@@ -478,7 +480,7 @@ static const uint POSE_MASK = 0x7fffffffu;
 
 // **Bindings 3, 4 and 5 are the built-in material's other three maps**, and they
 // are this shader's alone: `material.slang` reserves three bindings and numbers
-// an agent's first sampler at `MATERIAL_BINDING_FIRST`, which is also 3. Two
+// an agent's first sampler at `MATERIAL_BINDING_FIRST`, which is also 4. Two
 // templates, two meanings for one number, and nothing is confused by it because
 // a binding is only ever resolved against the pipeline that declared it — see
 // `render/bind.c3`, where the write site walks the *reflected* layout.
@@ -497,22 +499,22 @@ static const uint POSE_MASK = 0x7fffffffu;
 // bends every value: a normal that means "no tilt" arrives leaning, and a
 // roughness of 0.5 arrives at 0.21. `js/prelude/texture.js` is where a script
 // says so, and the glTF importer already does.
-[vk::binding(3, 0)] Sampler2D normal_map;
+[vk::binding(4, 0)] Sampler2D normal_map;
 // glTF's packing, and the reason this is one image rather than two: **green is
 // roughness and blue is metalness**, which is what `pbrMetallicRoughness` in
 // glTF 2.0 defines and what every exporter writes. Red is unused here and is
 // where the specification allows an occlusion map to be packed alongside; this
 // renderer keeps occlusion in its own binding so the two can come from different
 // files.
-[vk::binding(4, 0)] Sampler2D metalness_roughness_map;
+[vk::binding(5, 0)] Sampler2D metalness_roughness_map;
 // Ambient occlusion, red channel, glTF's `occlusionTexture`. What it multiplies
 // is in `fragmentMain` and is the whole of why it is worth having a term rather
 // than folding it into albedo.
-[vk::binding(5, 0)] Sampler2D occlusion_map;
+[vk::binding(6, 0)] Sampler2D occlusion_map;
 // glTF's `emissiveTexture`, multiplied by `Draw.emissive` and added after the
 // shading. **A picture and not data** — it is the colour of the light this
 // surface gives off — so it uploads sRGB, unlike the three above it.
-[vk::binding(6, 0)] Sampler2D emissive_map;
+[vk::binding(7, 0)] Sampler2D emissive_map;
 
 // The four influences of one vertex against one palette, summed into the matrix
 // that poses it.
@@ -894,6 +896,36 @@ static float g_shadow = 1.0;
 // anywhere. `specular_light` already takes the position and uses its own.
 static float3 g_position = float3(0.0, 0.0, 0.0);
 
+// Visibility from point-light `index`. Cube faces use a conventional 90 degree
+// perspective projection, whose depth is a function of the face-forward
+// distance (the largest absolute component), not radial distance.
+float point_shadow_factor(uint index, Light light, float3 position)
+{
+    if (push.frame[0].point_shadow.w == 0.0 || light.direction.w <= 0.0) return 1.0;
+    float3 ray = position - light.direction.xyz;
+    float face_distance = max(max(abs(ray.x), abs(ray.y)), abs(ray.z));
+    float far_plane = light.direction.w;
+    if (face_distance >= far_plane) return 1.0;
+    float near_plane = max(far_plane * 0.001, min(0.01, far_plane * 0.5));
+    float expected = far_plane / (far_plane - near_plane)
+        - (far_plane * near_plane) / ((far_plane - near_plane) * max(face_distance, near_plane));
+    float3 a = abs(ray);
+    float2 face_uv;
+    uint face;
+    if (a.x >= a.y && a.x >= a.z) { face = ray.x >= 0.0 ? 0u : 1u; face_uv = ray.x >= 0.0 ? float2(-ray.z, -ray.y) / a.x : float2(ray.z, -ray.y) / a.x; }
+    else if (a.y >= a.z) { face = ray.y >= 0.0 ? 2u : 3u; face_uv = ray.y >= 0.0 ? float2(ray.x, ray.z) / a.y : float2(ray.x, -ray.z) / a.y; }
+    else { face = ray.z >= 0.0 ? 4u : 5u; face_uv = ray.z >= 0.0 ? float2(ray.x, -ray.y) / a.z : float2(-ray.x, -ray.y) / a.z; }
+    float layer = (float)((index - 1u) * 6u + face);
+    float2 uv = face_uv * 0.5 + 0.5;
+    float visible = 0.0;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
+    {
+        float stored = point_shadow_map.SampleLevel(float3(clamp(uv + float2(x, y) * push.frame[0].point_shadow.x, 0.0, 1.0), layer), 0.0).r;
+        visible += expected - push.frame[0].point_shadow.y <= stored ? 1.0 / 9.0 : 0.0;
+    }
+    return lerp(1.0, visible, push.frame[0].point_shadow.z);
+}
+
 
 // The direct light reaching this point, as a colour.
 //
@@ -939,6 +971,7 @@ float3 lambert(float3 normal, float occlusion)
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
         if (i == 0u) n_dot_l *= g_shadow;
+        else n_dot_l *= point_shadow_factor(i, light, g_position);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
     return ambient * occlusion + (1.0 - ambient) * direct + push.frame[0].world.rgb * occlusion;
@@ -1010,7 +1043,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
         // The shadow multiplies the light rather than the geometry term, unlike in
         // `lambert` where the two are the same multiply: an occluded light delivers
         // less energy, it does not change the shape of the microfacets.
-        float occlusion = i == 0u ? g_shadow : 1.0;
+        float occlusion = i == 0u ? g_shadow : point_shadow_factor(i, light, position);
         sum += light.color.rgb * light.color.w * occlusion * reach
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
@@ -1144,8 +1177,12 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
     return true;
 }
 
+// `front_facing` is a parameter rather than a field of `VertexOutput`: that struct
+// is the vertex stage's output as well as this stage's input, and a system value
+// the rasteriser produces has no meaning there. `material.slang` declares it the
+// same way, for the same reason.
 [shader("fragment")]
-float4 fragmentMain(VertexOutput input) : SV_Target
+float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
 {
     // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
     // 0]` works with no material at all — which is the point of it being here
@@ -1174,6 +1211,16 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // take it away — and `material.slang` looks the shadow up with `s.normal` for
     // the same reason, so the two shaders shadow a surface identically.
     float3 geometric = normalize(input.normal);
+    // **A back face is shaded with its normal turned toward the eye**, which is
+    // Blender's rule and every other renderer's. Only a double-sided material
+    // ever rasterises one — `material.side` picks the cull mode, so a single
+    // sided draw never reaches this line with `front_facing` false — and the
+    // face the eye can see is by definition the lit side of a leaf, a sheet of
+    // cloth, or a slab the file wound inside-out. Taken as it came, `n·l` is
+    // negative and the surface is black; worse, `shadow_factor` lifts its
+    // sample along this normal and so lifts it *into* the slab, and the wall
+    // shadows itself. The shadow pass reads no normal and needs none of this.
+    if (!front_facing) geometric = -geometric;
     float3 normal = geometric;
     float4 surface = draw.surface;
     float occlusion = 1.0;

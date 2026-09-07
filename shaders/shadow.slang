@@ -93,7 +93,7 @@ struct FrameBlock
     //      `roughness` into a blur.
     //   w  unused.
     float4 environment;
-    Light lights[4];
+    Light lights[8];
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -110,6 +110,7 @@ struct FrameBlock
     // `three.light.world` — nothing in this pass reads it, and it is here because
     // the offsets are the contract. See `mesh.slang`.
     float4 world;
+    float4 point_shadow;
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.
@@ -189,6 +190,8 @@ struct PushData
     FrameBlock* frame;
     Instance* instances;
     Draw* draw;
+    uint2 padding;
+    float4x4 projection;
 };
 [vk_push_constant] const PushData push;
 
@@ -320,7 +323,7 @@ float4 posed_clip(uint vid, uint iid)
     // camera, and the only order that makes sense: a joint matrix is in the
     // character's space, the model matrix puts the character in the world, and
     // the light looks at the world.
-    return mul(push.frame[0].light_view_projection, mul(instance.model, float4(position, 1.0)));
+    return mul(push.projection, mul(instance.model, float4(position, 1.0)));
 }
 
 #ifdef THREE_SHADOW_CUTOUT

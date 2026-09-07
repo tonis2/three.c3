@@ -386,7 +386,7 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Seven descriptors, and every one of them is the template's own: the
+	// Eight descriptors, and every one of them is the template's own: the
 	// material's map at 0, the shadow map at 1, the environment map at 2, and the
 	// four maps the built-in material shades with at 3 to 6. Derived, not declared
 	// — until M4 this was a literal in `MeshPipeline.init`, and it was one binding
@@ -398,7 +398,7 @@ fn void the_mesh_push_block_matches_the_struct() @test
 	// an agent's first sampler at 3; this file reserves seven and has no agent. A
 	// binding is only ever resolved against the pipeline that declared it, so the
 	// two meanings of "3" never meet — see `NORMAL_MAP_BINDING`.
-	test::@check(mod.layout.bindings.len() == 7, "seven descriptors, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 8, "eight descriptors, got %d", mod.layout.bindings.len());
 	test::@check(
 		mod.layout.binding_of("normal_map") != null
 			&& mod.layout.binding_of("metalness_roughness_map") != null
@@ -587,7 +587,7 @@ fn void the_frame_block_matches_the_shader() @test
 		"{ return mul(push.view_projection, push.lighting) + push.live_poses[0][0] + push.camera; }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
 		"{ return mul(push.light_view_projection, push.shadow) + push.debug\n"
-		"  + push.lights[0].direction + push.lights[3].color + push.world; }\n",
+		"  + push.lights[0].direction + push.lights[7].color + push.world + push.point_shadow; }\n",
 		source[light_start : light_end],
 		source[start : end]
 	);
@@ -616,7 +616,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 368, "and the block is 368 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 512, "and the block is 512 bytes, got %d", three::FrameBlock::size);
 }
 
 <*
@@ -862,7 +862,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 7, "from seven reflected bindings");
+		test::@check(pipeline.shader.bindings.len() == 8, "from eight reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
 		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");

@@ -445,9 +445,9 @@ construction is picked up — the export reads live samplers and uniforms.
 The scene around the meshes goes too: the camera as a glTF camera and every light as a
 KHR_lights_punctual directional light, each on its own node, so the file opens framed and lit the way
 three had it. The ambient floor has no glTF equivalent and is the one thing lost. Materials carry
-`side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform, and a source material's
-normal, occlusion and emissive maps with the metalness and roughness the specular term drew them
-with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
+`side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform — which an import reads back
+onto the same two properties, so a tiling survives the round trip — and a source material's normal,
+occlusion and emissive maps with the metalness and roughness the specular term drew them with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
 what an import applies, so a material that came in at 0.5 comes back at 0.5. Lines are not written yet.
 
 ## three.renderSize()
@@ -1307,7 +1307,7 @@ rest, so the game falls behind honestly instead of owing eight more of them to t
 difference between a stutter and a ten-second freeze. The engine says so once and counts the rest here; a
 number that keeps climbing while you play is a fixed system too slow for the rate it asked for.
 
-`ms` is the last finished frame, split five ways — read it from inside a system and it describes the frame
+`ms` is the last finished frame — read it from inside a system and it describes the frame
 before, which is complete. `{ handlers, fixed, frame, jobs }` are the four spans that add up to `total` and
 are what the 8 ms is measured against:
 
@@ -1319,6 +1319,18 @@ are what the 8 ms is measured against:
 `solver` is outside `total`, because it is outside the budget: the physics step runs above the script's window
 and is the host's own work, so a callback is never stopped or counted for it. It is reported because a frame
 that spends 10 ms in the solver and 3 ms in script is a frame whose script is not the problem.
+
+`host` is residual wall time across the engine's tick-and-render boundary: scene preparation and bounds,
+draw-list and shadow fitting, uploads and command recording, after subtracting the measured script and solver
+spans and the waits instrumented around steady-state Vulkan fences, swapchain acquire/present and headless
+completion/readback. It is not the whole host thread: event polling and MCP request handling happen before
+this boundary. Resize and swapchain-rebuild work is inside it, including any device-idle wait that exceptional
+path needs. A `--screenshot` frame also includes PNG encoding and file I/O after its readback wait.
+
+It is therefore neither `total` nor “wall minus GPU”: GPU timestamps are a separate clock and are never
+subtracted to manufacture a CPU number. Windowed and fixed-count headless renders publish it only after the
+draw completes, so a callback consistently sees the previous completed frame. A server running headless
+without drawing reports the residual work around its tick alone.
 
 `three.systems.report()` is the rolling per-system version and the one to reach for next: this splits a frame
 into four spans, that splits two of those spans by name.
@@ -1841,15 +1853,15 @@ meaning: every scene written against `ambient` renders exactly as it did.
 ## three.light.set(direction, ambient)
 
 The sun and the floor at once. `ambient` may be omitted to leave it alone, and it is the floor rather than a
-colour — `three.light.color` is how the sun is coloured. There are up to four lights; `three.lights` is the list.
+colour — `three.light.color` is how the sun is coloured. There are up to eight lights; `three.lights` is the list.
 
 ## three.lights
 
-The list of lights, four slots, the sun in the first — `three.lights[0] === three.light`. `length` is how many
+The list of lights, eight slots, the sun in the first — `three.lights[0] === three.light`. `length` is how many
 are lit and `max` is how many there can be.
 
 `add(direction, color, intensity)` fills the next slot and answers with it, and also takes
-`add({ direction, color, intensity })`; it throws once four are lit rather than dropping the fifth.
+`add({ direction, color, intensity })`; it throws once eight are lit rather than dropping the ninth.
 
 `add({ position, range, color, intensity })` is the other kind: a point light standing at `position` and
 reaching `range` metres, which is a campfire, a torch, a lamp. `range` defaults to 10 and naming both a
@@ -1867,7 +1879,19 @@ throws rather than silently aiming the shadow pass somewhere nobody asked for.
 held across a remove names a different light. Light zero cannot be removed — it is the one the shadow map is
 fitted around — so turn it off with `three.light.intensity = 0`.
 
-It is iterable: `for (const l of three.lights)`. Only light zero casts; the rest light and do not shadow.
+It is iterable: `for (const l of three.lights)`. Light zero owns the fitted directional map. Point lights
+share an independent opt-in cube-array setting:
+
+```js
+three.lights.shadow = { enabled: true, size: 512, bias: 0.00001, intensity: 1 };
+```
+
+`size` must be stated before enabling; no resolution-sized point map or six-face pass exists by default.
+Every live point light gets all six faces at that resolution. The comparison uses that light's `range` as
+its far plane. `bias` is normalized depth and defaults to zero because useful values scale with range.
+`stats().shadowBytes` reports the allocator's actual cube-array allocation.
+The point-map ceiling is 2048; because one shared resolution covers 42 faces, that ceiling is about 672
+MiB of D32 texels before allocator alignment. Sizes above 512 warn with their nominal cost.
 
 ## asset.instantiate(name, { lights: true })
 
@@ -2292,6 +2316,11 @@ and scaling one by -1 instead does nothing, because a negative scale does not re
 
 `DoubleSide` keeps both and is what a plane seen from either direction wants — a flag, a leaf card, a piece of a
 wall you can walk past.
+
+A back face is shaded with its normal turned toward the camera — Blender's rule, and every other renderer's. The
+side you can see is the side the light has to reach, so a leaf card, a sheet of cloth or a wall a file wound
+inside-out lights and self-shadows the same whichever way its triangles happen to face. Only `DoubleSide` ever
+draws a back face, so this changes nothing a `FrontSide` material does.
 
 # Textures
 

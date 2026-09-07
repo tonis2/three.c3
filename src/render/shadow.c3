@@ -339,6 +339,51 @@ const ShadowSettings DEFAULT_SHADOW = {
 	.follow = true,
 };
 
+const uint POINT_SHADOW_FACES = 6;
+const uint POINT_SHADOW_LAYERS = (MAX_LIGHTS - 1) * POINT_SHADOW_FACES;
+const uint POINT_SHADOW_MAX_SIZE = 2048;
+
+struct PointShadowSettings
+{
+	bool enabled;
+	uint size;
+	float bias;
+	float intensity;
+}
+
+// Zero-resolution work is opt-in. `size` is retained while disabled so toggling
+// does not reinterpret the requested quality.
+const PointShadowSettings DEFAULT_POINT_SHADOW = {
+	.enabled = false,
+	.size = 0,
+	.bias = 0.0,
+	.intensity = 1.0,
+};
+
+// One cube-array image, cube i-1 for light i. A 1x1x6 fallback is always made
+// valid for binding 3; the resolution-sized 42-layer image is first created only
+// after a scene explicitly enables point shadows, then retained across toggles.
+struct PointShadowMap
+{
+	inline PointShadowSettings settings;
+	vk::Image image;
+	vk::ImageView view;
+	vk::ImageView[POINT_SHADOW_LAYERS] faces;
+	vk::Memory memory;
+	vk::Sampler sampler;
+	vk::Format format;
+	uint created;
+	bool initialized;
+
+	vk::Image fallback_image;
+	vk::ImageView fallback_view;
+	vk::ImageView[POINT_SHADOW_FACES] fallback_faces;
+	vk::Memory fallback_memory;
+	bool fallback_initialized;
+	bool live;
+	uint draws;
+}
+
 <*
  One directional shadow map: what a script asked for, the device objects that
  answer it, and this frame's fit.
@@ -1476,4 +1521,154 @@ fn void ShadowMap.free(&self, Gpu* gpu)
 	if (self.cutout_ready) self.cutout_pipeline.free(gpu);
 	self.cutout_ready = false;
 	self.cutout_refused = false;
+}
+
+fn void? PointShadowMap.create_image(
+	&self,
+	Gpu* gpu,
+	uint size,
+	uint layers,
+	vk::Image* image,
+	vk::ImageView* cube_view,
+	vk::Memory* memory,
+	vk::ImageView* face_views
+)
+{
+	if (self.format == FORMAT_UNDEFINED)
+	{
+		vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+		self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
+	}
+	*image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
+		.setExtent({ .width = size, .height = size, .depth = 1 }).setMipLevels(1)
+		.setArrayLayers(layers).setSamples(SAMPLE_COUNT_1_BIT).setTiling(IMAGE_TILING_OPTIMAL)
+		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
+	*memory = vk::create_image_buffer(*image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+	*cube_view = vk::imageViewCreateInfo()
+		.setViewType(IMAGE_VIEW_TYPE_2D_ARRAY)
+		.setFormat(self.format).setSubresourceRange({ .aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+			.baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = layers })
+		.setImage(*image).build(gpu.handle)!;
+	for (uint i = 0; i < layers; i++)
+	{
+		face_views[i] = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
+			.setSubresourceRange({ .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
+				.levelCount = 1, .baseArrayLayer = i, .layerCount = 1 })
+			.setImage(*image).build(gpu.handle)!;
+	}
+}
+
+fn void? PointShadowMap.ensure_fallback(&self, Gpu* gpu)
+{
+	if (self.fallback_image != null) return;
+	self.create_image(gpu, 1, POINT_SHADOW_FACES, &self.fallback_image, &self.fallback_view,
+		&self.fallback_memory, &self.fallback_faces[0])!;
+	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
+		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+		.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
+		.setMinLod(0.0).setMaxLod(0.0).setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
+}
+
+fn void? PointShadowMap.ensure(&self, Gpu* gpu)
+{
+	self.ensure_fallback(gpu)!;
+	if (!self.enabled) return;
+	if (self.image != null && self.created == self.size) return;
+	if (self.image != null)
+	{
+		// Size changes are rare settings changes. Waiting is the bounded, correct
+		// retirement for the 42 attachment views, which the generic retire queue
+		// intentionally represents as one view per allocation.
+		gpu.wait_idle();
+		for (uint i = 0; i < POINT_SHADOW_LAYERS; i++) vk::destroyImageView(gpu.handle, self.faces[i], null);
+		vk::destroyImageView(gpu.handle, self.view, null);
+		// The device is idle and every view of this image has been destroyed, so
+		// the allocation is safe to return immediately. This also lets the
+		// replacement image reuse the same allocator page instead of temporarily
+		// requiring a second full point-shadow allocation.
+		self.memory.free();
+		self.memory = { };
+		self.image = (vk::Image)null;
+	}
+	self.create_image(gpu, self.size, POINT_SHADOW_LAYERS, &self.image, &self.view,
+		&self.memory, &self.faces[0])!;
+	self.created = self.size;
+	self.initialized = false;
+}
+
+fn vk::DescriptorImageInfo PointShadowMap.descriptor(&self)
+{
+	return { .sampler = self.sampler,
+		.imageView = self.live ? self.view : self.fallback_view,
+		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+}
+
+fn Matrix4f point_shadow_matrix(Light light, uint face)
+{
+	Vec3[6] directions = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+	Vec3[6] ups = { { 0, -1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, -1, 0 }, { 0, -1, 0 } };
+	Vec3 eye = { light.direction[0], light.direction[1], light.direction[2] };
+	float far_plane = light.direction[3];
+	float near_plane = math::max(far_plane * 0.001f, math::min(0.01f, far_plane * 0.5f));
+	return matrix::perspective{float}(math::PI / 2.0f, 1.0f, near_plane, far_plane)
+		* matrix::look_at{float}(eye, eye + directions[face], ups[face]);
+}
+
+fn void PointShadowMap.begin_all(&self, vk::CommandBuffer cmd, bool fallback)
+{
+	vk::Image target = fallback ? self.fallback_image : self.image;
+	uint layers = fallback ? POINT_SHADOW_FACES : POINT_SHADOW_LAYERS;
+	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = target,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED, .newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
+			.levelCount = 1, .baseArrayLayer = 0, .layerCount = layers } };
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
+}
+
+fn void PointShadowMap.begin_face(&self, vk::CommandBuffer cmd, vk::ImageView view, uint size)
+{
+	vk::RenderingAttachmentInfo depth = vk::renderingAttachmentInfo().setImageView(view)
+		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL).setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE).setClearValue({ .depthStencil = { 1.0, 0 } });
+	vk::Extent2D extent = { .width = size, .height = size };
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
+		.setDepthAttachment(&depth);
+	vk::cmdBeginRendering(cmd, &rendering);
+	set_full_viewport(cmd, extent, true);
+}
+
+fn void PointShadowMap.finish_all(&self, vk::CommandBuffer cmd, bool fallback)
+{
+	vk::Image target = fallback ? self.fallback_image : self.image;
+	uint layers = fallback ? POINT_SHADOW_FACES : POINT_SHADOW_LAYERS;
+	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = target,
+		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, .dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
+			.levelCount = 1, .baseArrayLayer = 0, .layerCount = layers } };
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
+}
+
+fn usz PointShadowMap.bytes(&self) => (usz)(self.memory.size + self.fallback_memory.size);
+
+fn void PointShadowMap.free(&self, Gpu* gpu)
+{
+	if (gpu.handle == null) return;
+	gpu.wait_idle();
+	for (uint i = 0; i < POINT_SHADOW_LAYERS; i++) if (self.faces[i] != null) vk::destroyImageView(gpu.handle, self.faces[i], null);
+	for (uint i = 0; i < POINT_SHADOW_FACES; i++) if (self.fallback_faces[i] != null) vk::destroyImageView(gpu.handle, self.fallback_faces[i], null);
+	if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
+	if (self.fallback_view != null) vk::destroyImageView(gpu.handle, self.fallback_view, null);
+	if (self.memory.image != null) self.memory.free();
+	if (self.fallback_memory.image != null) self.fallback_memory.free();
+	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
+	// `MeshPass` is re-initialised in place by the GPU regression harness. Leaving
+	// destroyed handles here makes the next `ensure_fallback` mistake them for live
+	// resources and record barriers against freed images.
+	*self = { };
 }

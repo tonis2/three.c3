@@ -36,7 +36,7 @@ import vk;
 
 // One past the last binding each kind of shader can have: its template's
 // reserved bindings plus what an agent may declare on top of them. A material
-// reserves three and a post pass four — see `MATERIAL_BINDING_FIRST`.
+// reserves four and a post pass four — see `MATERIAL_BINDING_FIRST`.
 //
 // `mesh.slang` is not in the arithmetic and does not need to be: it declares seven
 // bindings of its own and no agent ever adds to them, so it fits under whichever

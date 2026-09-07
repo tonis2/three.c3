@@ -1263,7 +1263,7 @@ fn void the_world_light_is_added_under_the_shading() @test
 		renderer.pass.lighting = {
 			.count = 1,
 			.ambient = 0,
-			.lights = { { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { } },
+			.lights = { { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
 			.world = { 0, 0, 0, 0 },
 		};
 
@@ -1507,7 +1507,7 @@ fn void an_intensity_of_zero_turns_a_light_off() @test
  Proved by injection: let `js_light_add` write past `MAX_LIGHTS` and the refusal
  becomes a buffer overrun instead of a message.
 *>
-fn void the_list_is_four_long_and_closes_its_gaps() @test
+fn void the_list_is_eight_long_and_closes_its_gaps() @test
 {
 	@with_render(; three::JsRuntime* run, three::Renderer* renderer)
 	{
@@ -1515,6 +1515,7 @@ fn void the_list_is_four_long_and_closes_its_gaps() @test
 			three.lights.add([1, 0, 0], 0xff0000);
 			three.lights.add([0, 1, 0], 0x00ff00);
 			three.lights.add([0, 0, 1], 0x0000ff);
+			for (let i = 0; i < 4; i++) three.lights.add([1, 1, 1]);
 			const full = (() => {
 				try { three.lights.add([1, 1, 1]); return "added"; } catch (e) { return e.message; }
 			})();
@@ -1525,14 +1526,14 @@ fn void the_list_is_four_long_and_closes_its_gaps() @test
 		`);
 		defer result.free();
 		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value.contains(`"max":4`), "four slots: %s", result.value);
-		test::@check(result.value.contains(`"before":4`), "all four filled: %s", result.value);
+		test::@check(result.value.contains(`"max":8`), "eight slots: %s", result.value);
+		test::@check(result.value.contains(`"before":8`), "all eight filled: %s", result.value);
 		test::@check(result.value.contains("all of them are in use"),
 			"a fifth is refused by name: %s", result.value);
-		test::@check(result.value.contains(`"after":3`), "and removing one leaves three: %s", result.value);
+		test::@check(result.value.contains(`"after":7`), "and removing one leaves seven: %s", result.value);
 		// The green one was slot 1; blue moves down into it rather than a hole
 		// staying where it was.
-		test::@check(result.value.contains(`"colours":[[1,1,1],[0,1,0],[0,0,1]]`),
+		test::@check(result.value.contains(`"colours":[[1,1,1],[0,1,0],[0,0,1],`),
 			"the slots above the removed one moved down: %s", result.value);
 	};
 }

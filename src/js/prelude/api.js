@@ -100,7 +100,7 @@ const renderedNav = makeSceneNav(renderedScene);
 // a script that wants to know cannot ask the host for it, and
 // `three.lights.max` matching what `add` refuses past is a test rather than a
 // comment.
-const MAX_LIGHTS = 4;
+const MAX_LIGHTS = 8;
 
 // One light, by slot.
 //
@@ -432,9 +432,43 @@ Object.defineProperties(light, {
 // Array-shaped rather than a set of methods, because the thing a script wants
 // to do with more than one light is loop over them — and because
 // `three.lights[0] === three.light` is the sentence that says the two views
-// are of the same four slots.
+// are of the same eight slots.
 const lights = {
 	get length() { return H.lightCount(); },
+
+	// Shared cube-array quality for point lights. Off means no resolution-sized
+	// image and no six-face passes; enabling covers every point slot currently in
+	// the list and ones added later.
+	get shadow() {
+		return {
+			get enabled() { return H.pointShadowGet()[0] !== 0; },
+			set enabled(v) {
+				const [,s,b,i] = H.pointShadowGet();
+				if (v && !s) throw new RangeError('set three.lights.shadow.size before enabling point shadows');
+				H.pointShadowSet(v ? 1 : 0, s, b, i);
+			},
+			get size() { return H.pointShadowGet()[1]; },
+			set size(v) { const [e,,b,i] = H.pointShadowGet(); H.pointShadowSet(e, +v, b, i); },
+			get bias() { return H.pointShadowGet()[2]; },
+			set bias(v) { const [e,s,,i] = H.pointShadowGet(); H.pointShadowSet(e, s, +v, i); },
+			get intensity() { return H.pointShadowGet()[3]; },
+			set intensity(v) { const [e,s,b] = H.pointShadowGet(); H.pointShadowSet(e, s, b, +v); },
+		};
+	},
+	set shadow(v) {
+		const [e,s,b,i] = H.pointShadowGet();
+		if (typeof v === 'boolean' || v == null) {
+			if (v && !s) throw new RangeError('three.lights.shadow = true needs an explicit size first');
+			H.pointShadowSet(v ? 1 : 0, s, b, i); return;
+		}
+		if (typeof v !== 'object') throw new TypeError('three.lights.shadow takes true, false, or an object');
+		const nextSize = 'size' in v ? +v.size : s;
+		const nextEnabled = 'enabled' in v ? !!v.enabled : e;
+		if (nextEnabled && !(nextSize > 0)) throw new RangeError('enabling point shadows needs an explicit size');
+		H.pointShadowSet(nextEnabled ? 1 : 0,
+			nextSize, 'bias' in v ? +v.bias : b,
+			'intensity' in v ? +v.intensity : i);
+	},
 
 	// How many there can be, and the number `add` refuses past. Four, and
 	// `plan.md` §19 has why: the fifth light is the trigger for a compute
@@ -504,7 +538,7 @@ const lights = {
 	},
 };
 
-// The four slots, by index. Getters rather than an array because the list is
+// The eight slots, by index. Getters rather than an array because the list is
 // live: a script that reads `three.lights[1]` after a `remove` should see the
 // light that is there now, not the one that was.
 //
@@ -1062,6 +1096,8 @@ const clock = {
 	// something against the step.
 	get fixedDelta() { return 1 / H.clockRateGet(); },
 	set fixedDelta(_) { throw new TypeError('three.clock.fixedDelta follows three.clock.fixedRate — set the rate'); },
+	get fixedAlpha() { return H.clockAlpha(); },
+	set fixedAlpha(_) { throw new TypeError('three.clock.fixedAlpha is the fixed-step remainder and is read-only'); },
 
 	// The PROCESS's own monotonic clock, in milliseconds, and the one reading
 	// here that is not game time.
@@ -1128,9 +1164,18 @@ const clock = {
 // says about it. Under `--mcp` alone it stays 0, because there an overrun
 // stops the callback instead of counting it.
 //
-// `ms` is the last FINISHED frame, split five ways, and the split is the
-// point. Read from inside a system it describes the frame before this one,
-// because this one is still three spans short of existing.
+// `ms` is the last FINISHED frame. Read from inside a system it describes the
+// frame before this one, because the current one has not rendered yet.
+// `host` is residual wall time inside the outer tick-and-render boundary after
+// subtracting the script spans, solver and instrumented steady-state Vulkan
+// fence, image-acquire, present and headless completion/readback waits. It
+// includes preparation, bounds, draw-list and shadow fitting, recording and
+// uploads. Event polling and MCP handling are outside the boundary; exceptional
+// resize/rebuild work (including its device-idle wait) is inside. Screenshot
+// frames also include PNG encoding and file I/O. It is not derived from GPU
+// timestamps; `gpuMs` remains the GPU's separate clock.
+//
+// The four script spans that add up to `total` are:
 // The four that add up to `total` are what the eight-millisecond budget is
 // measured against:
 //
