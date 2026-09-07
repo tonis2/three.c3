@@ -177,6 +177,8 @@ struct ShadowView
 	uint static_revision;
 	uint signature;
 	bool static_valid;
+	// The live atlas may be reused when a combined update is deferred.
+	bool live_valid;
 	bool live;
 	bool wanted;
 }
@@ -262,6 +264,7 @@ fn uint ShadowViewSet.admit(&self, ShadowViewKey key, uint size, usz bytes_per_t
 	{
 		// Resolution changes retain the identity but never the stored depths.
 		self.views[at].static_valid = false;
+		self.views[at].live_valid = false;
 	}
 	self.views[at].size = size;
 	self.views[at].live = true;
@@ -317,6 +320,7 @@ fn void ShadowView.invalidate(&self, uint signature, uint revision)
 	self.signature = signature;
 	self.static_revision = revision;
 	self.static_valid = false;
+	self.live_valid = false;
 }
 
 <*

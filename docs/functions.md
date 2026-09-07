@@ -1922,10 +1922,11 @@ The scene-local budget accepts partial, atomic updates:
 - `maxUpdateTexels`: rasterized shadow texels per frame; default 33,554,432.
   A static rebuild plus dynamic overlay counts both passes.
 
-Unchanged valid static views use no update budget. A dirty view that cannot be refreshed is
-temporarily unshadowed, rather than sampling outdated visibility. Its light remains active.
-Admission favors projected influence and retains a small preference for cached entries.
-Requested tile resolution may be reduced to fit the allocation budget.
+Unchanged valid static views use no update budget. A new or invalid view that cannot be
+refreshed is temporarily unshadowed. A combined static-plus-dynamic view instead keeps its
+last complete live depth until the budget refreshes it, avoiding light changes when another
+cached view rebuilds. Admission favors projected influence and retains a small preference for
+cached entries. Requested tile resolution may be reduced to fit the allocation budget.
 
 Mark fixed scenery with `object.static = true`. Stable light identities preserve independent
 cached entries across packed-list reordering. Static geometry/material changes invalidate the
