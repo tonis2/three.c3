@@ -88,7 +88,7 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 {
 	self.extent = { .width = width, .height = height };
 	self.color_format = TARGET_COLOR_FORMAT;
-	// Both features, for `ShadowMap.ensure`'s reason. The depth buffer is an
+	// Both features, for the shared shadow atlas's reason. The depth buffer is an
 	// attachment first and a sampled image second — `p.depth` in a post body
 	// reads it — and a format that could be written and not read would fail at
 	// the descriptor write rather than here. D32_SFLOAT is required by the spec

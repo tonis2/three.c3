@@ -2868,19 +2868,125 @@ fn void point_shadow_resources_survive_resize_toggle_and_light_removal() @test
 		// permanent page cannot be misreported as this lifecycle's host-memory leak.
 		device::reserve_point_shadow_pages(renderer);
 		renderer.capture()!!.free();
-		usz large = renderer.pass.point_shadows.bytes();
+		usz large = renderer.pass.shadow_manager.atlas.bytes();
+		test::@check(renderer.pass.shadow_manager.atlas.static_image == null,
+			"a scene with no static caster allocates no atlas cache");
 
 		three::RunResult resized = run.run(`three.lights.shadow.size = 256`);
 		defer resized.free();
 		renderer.capture()!!.free();
-		usz small = renderer.pass.point_shadows.bytes();
-		test::@check(small < large, "a resize replaces the cube allocation: %d then %d", large, small);
+		usz small = renderer.pass.shadow_manager.atlas.bytes();
+		test::@check(small < large, "a resize replaces the atlas allocation: %d then %d", large, small);
 
 		three::RunResult removed = run.run(`three.lights.shadow.enabled = false; three.lights.remove(1)`);
 		defer removed.free();
 		renderer.capture()!!.free();
-		test::@check(renderer.pass.point_shadows.bytes() == small,
+		test::@check(renderer.pass.shadow_manager.atlas.bytes() == small,
 			"disable/remove retains the reusable allocation without another pass");
 		test::@check(renderer.pass.point_shadows.draws == 0, "no point light records no faces");
+	};
+}
+
+fn void static_point_casters_are_drawn_once_and_invalidated_by_the_light() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			const wall = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+			s.add(wall); wall.static = true;
+			three.light.intensity = 0;
+			three.lights.add({ position: [3, 2, 1], range: 10, intensity: 8 });
+			three.lights.shadow = { enabled: true, size: 256 };
+		`);
+		defer built.free();
+		test::@check(built.ok, "the cached point-shadow scene built: %s", built.error);
+
+		renderer.capture()!!.free();
+		three::RunResult warm = run.run(`three.render(); return three.stats().shadowStaticDraws`);
+		defer warm.free();
+		test::@check(warm.ok && warm.value == `0`, "an unchanged point map records no static draws: %s", warm.value);
+
+		three::RunResult moved = run.run(`three.lights[1].position.x += 1; three.render(); return three.stats().shadowStaticDraws`);
+		defer moved.free();
+		test::@check(moved.ok && moved.value != `0`, "moving the point light rebuilds its static depth: %s", moved.value);
+
+		three::RunResult ranged = run.run(`three.render(); three.lights[1].range = 6; three.render(); return three.stats().shadowStaticDraws`);
+		defer ranged.free();
+		test::@check(ranged.ok && ranged.value != `0`, "changing point range rebuilds static depth: %s", ranged.value);
+	};
+}
+
+fn void point_cutout_state_invalidates_the_static_cache() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			globalThis.cachedPointMaterial = new three.MeshLambertMaterial({ alphaTest: .4 });
+			const card = new three.Mesh(new three.PlaneGeometry(2, 2), cachedPointMaterial);
+			s.add(card); card.static = true;
+			three.lights.add({ position: [2, 2, 2], range: 8, intensity: 8 });
+			three.lights.shadow = { enabled: true, size: 256 };
+		`);
+		defer built.free();
+		test::@check(built.ok, "the static cutout scene built: %s", built.error);
+		renderer.capture()!!.free();
+
+		three::RunResult changed = run.run(`
+			three.render();
+			cachedPointMaterial.alphaTest = .6;
+			cachedPointMaterial.repeat = [2, 1];
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer changed.free();
+		test::@check(changed.ok && changed.value != `0`,
+			"alpha threshold and UV state rebuild cached point depth: %s", changed.value);
+	};
+}
+
+fn void a_point_mover_over_cached_depth_matches_a_full_map() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			three.light.intensity = 0; three.light.ambient = .03;
+			const floor = new three.Mesh(new three.BoxGeometry(10, .2, 10));
+			floor.position.y = -1.1; s.add(floor); floor.static = true;
+			globalThis.pointMover = new three.Mesh(new three.BoxGeometry(1, 2, 1));
+			s.add(pointMover);
+			three.lights.add({ position: [3, 3, 2], range: 12, intensity: 24 });
+			three.lights.shadow = { enabled: true, size: 256, bias: .00001 };
+			three.camera.target.set(0, 0, 0); three.camera.orbit(35, 18, 10);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the mixed point-shadow scene built: %s", built.error);
+		renderer.capture()!!.free();
+
+		three::RunResult moved = run.run(`pointMover.position.x = 1.25`);
+		defer moved.free();
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		three::RunResult full = run.run(`floor.static = false`);
+		defer full.free();
+		image::Image uncached = renderer.capture()!!;
+		defer uncached.free();
+		test::@check(differing_bytes(&cached, &uncached) == 0,
+			"a moving point caster over cached depth matches a full rebuild, %d bytes differ",
+			differing_bytes(&cached, &uncached));
+
+		three::RunResult removed = run.run(`floor.static = true; s.remove(pointMover); three.render()`);
+		defer removed.free();
+		image::Image cached_removed = renderer.capture()!!;
+		defer cached_removed.free();
+		three::RunResult removed_full = run.run(`floor.static = false`);
+		defer removed_full.free();
+		image::Image full_removed = renderer.capture()!!;
+		defer full_removed.free();
+		test::@check(differing_bytes(&cached_removed, &full_removed) == 0,
+			"removing the mover leaves the same point map as a full rebuild, %d bytes differ",
+			differing_bytes(&cached_removed, &full_removed));
 	};
 }

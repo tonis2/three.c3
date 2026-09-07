@@ -59,8 +59,10 @@ const char[*] EMBED_MATERIAL = $embed("../../shaders/material.slang");
 const char[*] EMBED_POST     = $embed("../../shaders/post.slang");
 const char[*] EMBED_SHADOW   = $embed("../../shaders/shadow.slang");
 const char[*] EMBED_SKIN     = $embed("../../shaders/skin.slang");
+const char[*] EMBED_CLUSTER  = $embed("../../shaders/cluster.slang");
 const char[*] EMBED_SKY      = $embed("../../shaders/sky.slang");
 const char[*] EMBED_SURFACE  = $embed("../../shaders/surface.slang");
+const char[*] EMBED_LIGHTING = $embed("../../shaders/lighting.slang");
 
 struct EmbeddedShader
 {
@@ -68,21 +70,23 @@ struct EmbeddedShader
 	String source;
 }
 
-const EmbeddedShader[7] EMBEDDED = {
+const EmbeddedShader[9] EMBEDDED = {
 	{ "mesh.slang", (String)EMBED_MESH[..] },
 	{ "material.slang", (String)EMBED_MATERIAL[..] },
 	{ "post.slang", (String)EMBED_POST[..] },
 	{ "shadow.slang", (String)EMBED_SHADOW[..] },
 	{ "skin.slang", (String)EMBED_SKIN[..] },
+	{ "cluster.slang", (String)EMBED_CLUSTER[..] },
 	{ "sky.slang", (String)EMBED_SKY[..] },
 	{ SHARED_TEMPLATE, (String)EMBED_SURFACE[..] },
+	{ LIGHTING_TEMPLATE, (String)EMBED_LIGHTING[..] },
 };
 
 <*
  The line a template writes where the shared surface maths should go, and the
  file those come from.
 
- One marker rather than a Slang `import`: nothing here compiles from a path — a
+ Text markers rather than a Slang `import`: nothing here compiles from a path — a
  shipped binary has no `shaders/` directory and hands Slang a string — so an
  include would have to be resolved against a virtual file system this project's
  bindings do not expose. Splicing text is the same mechanism `//@shade` already
@@ -90,10 +94,12 @@ const EmbeddedShader[7] EMBEDDED = {
 *>
 const String MARKER_SHARED   = "//@shared";
 const String SHARED_TEMPLATE = "surface.slang";
+const String MARKER_LIGHTING = "//@lighting";
+const String LIGHTING_TEMPLATE = "lighting.slang";
 
 <*
- A template by name — the disk first, then the copy in the binary, with the
- shared surface maths spliced into it.
+ A template by name — the disk first, then the copy in the binary, with its
+ requested shared maths spliced into it.
 
  What the render passes and `shader/assemble.c3` ask for, and the reason none of
  them needs to know whether a `shaders/` directory exists. A name that is neither
@@ -113,9 +119,10 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem, bool ren
 	@pool()
 	{
 		String template = template_source(name, tmem)!;
-		if (!template.contains(MARKER_SHARED)) return template.copy(allocator);
+		if (!template.contains(MARKER_SHARED) && !template.contains(MARKER_LIGHTING)) return template.copy(allocator);
 
 		String shared = template_source(SHARED_TEMPLATE, tmem)!;
+		String lighting = template_source(LIGHTING_TEMPLATE, tmem)!;
 
 		DString out;
 		out.tinit(template.len + shared.len + 64);
@@ -134,15 +141,17 @@ fn String? shader_source(String name, alloc::Allocator allocator = mem, bool ren
 			start = end + 1;
 			line++;
 
-			if (text.trim() != MARKER_SHARED)
+			String marker = text.trim();
+			if (marker != MARKER_SHARED && marker != MARKER_LIGHTING)
 			{
 				out.append_string(text);
 				out.append_char('\n');
 				continue;
 			}
 
-			out.append_string(shared);
-			if (shared.len > 0 && shared[shared.len - 1] != '\n') out.append_char('\n');
+			String insertion = marker == MARKER_SHARED ? shared : lighting;
+			out.append_string(insertion);
+			if (insertion.len > 0 && insertion[insertion.len - 1] != '\n') out.append_char('\n');
 			// Nothing for a template the assembler is going to renumber: its own
 			// restores are absolute against the module it generates, and a template
 			// line number in the middle would leave the preamble numbered two ways.

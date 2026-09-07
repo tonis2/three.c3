@@ -129,7 +129,7 @@ fn three::NodeId lit_plane(three::Renderer* renderer)
 	renderer.pass.lighting = {
 		.count = 1,
 		.ambient = 0,
-		.lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+		.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
 	};
 	return node;
 }
@@ -343,7 +343,7 @@ fn void occlusion_darkens_the_ambient_floor_and_not_a_light() @test
 		renderer.pass.lighting = {
 			.count = 1,
 			.ambient = 1.0f,
-			.lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+			.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
 		};
 		uint floor_occluded = centre(renderer);
 
@@ -390,7 +390,7 @@ fn void the_world_light_is_occluded_like_the_ambient_floor() @test
 		renderer.pass.lighting = {
 			.count = 1,
 			.ambient = 0,
-			.lights = { { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+			.lights = { [0] = { .direction = { 0, 0, -1, 0 }, .color = { 1, 1, 1, 1 } } },
 			.world = { 0, 1, 0, 0 },
 		};
 

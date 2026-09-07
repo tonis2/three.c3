@@ -35,14 +35,23 @@
   extent. A nonzero reading with nothing running is that, not a leak. `three.toneMapping = 'agx'`
   with no pass of your own is Image A alone — about 16.6 MB at 1080p — because the tonemap reads the
   scene rather than a ping-pong slot.
-- `shadowBytes` — Actual Vulkan allocations for shadow depth images: the directional map (and its
-  optional static cache), the always-valid tiny point-shadow descriptor fallback, and—only after
-  `three.lights.shadow.enabled`—the point-light cube array. The cube array has six faces for each
-  of the seven point-light slots, so at D32 its nominal texel payload is `size² × 42 × 4`; the
-  reported number includes allocator alignment and is the number to budget.
-  The directional map stays allocated after it is disabled. The point cube array is likewise
-  retained after first use so a menu toggle does not repeatedly stall and allocate; before first
-  opt-in, only the allocator-aligned fallback is present.
+- `shadowBytes` — Actual Vulkan allocation bytes for the shared live shadow atlas and its lazy
+  static-cache twin, including allocator alignment. All light types share these images. They are
+  retained across off/on toggles and recreated together when the chosen atlas extent changes.
+- `clusterBytes` — Allocated light/cluster storage across frame slots. The compute grid and its
+  fixed-stride index lists are included, even when few lights are present.
+- `clusterOverflow` — Local-light references that exceeded cluster capacity in the most recently
+  completed frame slot. Overflow clusters use the all-light loop, preserving illumination at extra cost.
+- `shadowViews` — Resident atlas tiles, including six per admitted point light.
+- `shadowRejected` — Lights denied shadow residency by the view, texel or atlas limits.
+- `shadowUpdates` — Views requiring rendering this frame.
+- `shadowUpdateTexels` — Total rasterized shadow texels this frame. Rebuilding static depth and
+  drawing dynamic depth into the same view counts its texels twice.
+- `shadowDeferred` — Views awaiting an update budget. Invalid deferred views contribute light without
+  shadows; valid untouched static views need no update budget.
+- `occlusionBytes` — The current ambient-occlusion depth image's actual Vulkan allocation. It is
+  zero until `three.light.occlusion` first runs, then remains allocated across off/on toggles and
+  follows the render target's extent.
 - `materials` — Materials built and not yet collected; the two built-in ones are not counted. A
   material holds a compiled pipeline until `material.dispose()`, so a script that builds one per run
   and drops the handle grows this forever — the host says so past 64. It falls when the material is

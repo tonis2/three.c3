@@ -2592,6 +2592,16 @@ fn void js_asset_lights(
 		js.set_index(row, 13, qjs::number_value(light.direction.y));
 		js.set_index(row, 14, qjs::number_value(light.direction.z));
 		js.set_index(row, 15, qjs::int_value(light.gltf_node));
+		js.set_index(row, 16, qjs::int_value((int)light.area_shape));
+		js.set_index(row, 17, qjs::number_value(light.width));
+		js.set_index(row, 18, qjs::number_value(light.height));
+		js.set_index(row, 19, qjs::number_value(light.spread));
+		js.set_index(row, 20, qjs::number_value(light.right.x));
+		js.set_index(row, 21, qjs::number_value(light.right.y));
+		js.set_index(row, 22, qjs::number_value(light.right.z));
+		js.set_index(row, 23, qjs::number_value(light.up.x));
+		js.set_index(row, 24, qjs::number_value(light.up.y));
+		js.set_index(row, 25, qjs::number_value(light.up.z));
 		js.set_index(list, (uint)i, row);
 	}
 	*out = list;

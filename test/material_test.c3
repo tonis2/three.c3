@@ -302,8 +302,8 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	// because the claim is "a material reserves exactly what the mesh pass
 	// reserves" and that constant is the other half of it.
 	test::@check(
-		mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST,
-		"%d descriptors, got %d", three::MATERIAL_BINDING_FIRST, mod.layout.bindings.len()
+		mod.layout.bindings.len() == 4,
+		"four template descriptors, got %d", mod.layout.bindings.len()
 	);
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
 	test::@check(map != null, "and one is base_color_map");
@@ -311,12 +311,12 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
 	test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
 
-	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
-	test::@check(shadow != null, "and the other is shadow_map");
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
+	test::@check(shadow != null, "and the shared shadow atlas is present");
 	if (shadow == null) return;
 	test::@check(
-		shadow.set == 0 && shadow.binding == three::SHADOW_BINDING,
-		"at 0,%d — got %d,%d", three::SHADOW_BINDING, shadow.set, shadow.binding
+		shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
+		"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
 	);
 }
 
@@ -1235,8 +1235,8 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST + 3,
-		"the template's two and the three the body asked for, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 7,
+		"four template samplers and three user samplers, got %d", mod.layout.bindings.len());
 
 	three::ShaderBinding* noise = mod.layout.binding_of("noise_map");
 	test::@check(noise != null, "the first is there by name");
@@ -1251,10 +1251,10 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 	// of this — a declared texture is numbered *past* them and never into them.
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
 	test::@check(map != null && map.binding == 0, "and the base colour map is still binding 0");
-	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
 	test::@check(
-		shadow != null && shadow.binding == three::SHADOW_BINDING,
-		"and the shadow map is still binding %d", three::SHADOW_BINDING
+		shadow != null && shadow.binding == three::SHADOW_ATLAS_BINDING,
+		"and the shared shadow atlas is still binding %d", three::SHADOW_ATLAS_BINDING
 	);
 }
 
@@ -1475,9 +1475,16 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 		// `>` and not `>=`.
 		three::MaterialTexture[LIMIT] exactly;
 		for (uint i = 0; i < LIMIT; i++) exactly[i] = { string::tformat("t%d_map", i) };
-		String source = three::material_source(PLAN_EXAMPLE, {}, mem, exactly[..])!!;
+		String source = three::material_source(
+			`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`, {}, mem, exactly[..]
+		)!!;
 		defer source.free(mem);
 		test::@check(source.len > 0, "and the limit itself is allowed");
+		test::@check(source.contains("#define THREE_NO_AO 1"),
+			"a twelve-texture material keeps its portable sampler layout");
+		three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+		defer mod.free();
+		test::@check(mod.ok, "and compiles without the AO sampler: %s", mod.diagnostic);
 	};
 }
 
@@ -1559,7 +1566,7 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
 		"with the push block it always had, got %d", mod.layout.push_size);
 	test::@check(
-		mod.layout.bindings.len() == three::MATERIAL_BINDING_FIRST,
+		mod.layout.bindings.len() == 4,
 		"and the template's own bindings, got %d", mod.layout.bindings.len()
 	);
 }

@@ -38,6 +38,7 @@
 // never sees the define — which is what makes this one template rather than a
 // second copy of a 44 000-byte shader to keep in step.
 //@bake
+//@features
 
 // One instance: where a copy of the mesh is, how its normals rotate, and the
 // three things copies of one mesh may disagree about without costing a draw call.
@@ -75,12 +76,22 @@ struct Light
 {
     float4 direction;
     float4 color;
+    float4 area_right;
+    float4 area_up;
+    uint4 meta;
 };
 
 // What every draw in the frame shares, written once per frame. 496 bytes, and
 // the size is pinned against this declaration by `FRAME_BLOCK_FIELDS` in
 // `src/gpu/pipeline.c3` — three files declare this struct and a field added to
 // two of them is a buffer read at the wrong offset with nothing to say so.
+struct ShadowGpuView
+{
+    float4x4 view_projection;
+    float4 atlas;
+    float4 params;
+};
+
 struct FrameBlock
 {
     float4x4 view_projection;
@@ -117,7 +128,7 @@ struct FrameBlock
     float4 environment;
     // The frame's lights, `lighting.y` of them. At the end of the block so that
     // every offset above it is the one it had when there was a single light.
-    Light lights[8];
+    Light* lights;
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -137,6 +148,13 @@ struct FrameBlock
     // `mesh.slang`.
     float4 world;
     float4 point_shadow;
+    float4x4 inverse_view_projection;
+    float4 ambient_occlusion;
+    ShadowGpuView* shadow_views;
+    uint* cluster_counts;
+    uint* cluster_indices;
+    uint4 cluster_grid;
+    float4 cluster_screen;
 };
 
 // One vertex as the compute pass leaves it, byte for byte what `mesh.slang` and
@@ -340,8 +358,44 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
 // in a frame with no shadow pass. **This is part of why
 // `MATERIAL_BINDING_FIRST` is 4**: a material's own samplers are numbered from
 // the first binding the template does not claim, and this file claims three.
-[vk::binding(1, 0)] Sampler2D shadow_map;
-[vk::binding(3, 0)] Sampler2DArray point_shadow_map;
+[vk::binding(17, 0)] Sampler2D shadow_atlas;
+#ifndef THREE_NO_AO
+[vk::binding(4, 0)] Sampler2D ambient_occlusion_depth;
+#endif
+
+float crevice_occlusion(float3 position, float3 normal)
+{
+#if defined(THREE_BAKE) || defined(THREE_NO_AO)
+    return 1.0;
+#else
+    float4 settings = push.frame[0].ambient_occlusion;
+    if (settings.x <= 0.0) return 1.0;
+    float4 clip = mul(push.frame[0].view_projection, float4(position, 1.0));
+    float2 uv = float2(0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w);
+    if (clip.w <= 0.0) return 1.0;
+    float3 right = normalize(mul(push.frame[0].inverse_view_projection, float4(1,0,0,0)).xyz);
+    float3 up = normalize(mul(push.frame[0].inverse_view_projection, float4(0,1,0,0)).xyz);
+    float4 clip_right = mul(push.frame[0].view_projection, float4(position + right * settings.y, 1.0));
+    float4 clip_up = mul(push.frame[0].view_projection, float4(position + up * settings.y, 1.0));
+    float2 axis_x = float2(0.5 * clip_right.x / clip_right.w + 0.5 - uv.x, 0.5 - 0.5 * clip_right.y / clip_right.w - uv.y);
+    float2 axis_y = float2(0.5 * clip_up.x / clip_up.w + 0.5 - uv.x, 0.5 - 0.5 * clip_up.y / clip_up.w - uv.y);
+    const float2 taps[12] = { float2(.25,0), float2(0,.25), float2(-.25,0), float2(0,-.25), float2(.424,.424), float2(-.424,.424), float2(-.424,-.424), float2(.424,-.424), float2(1,0), float2(0,1), float2(-1,0), float2(0,-1) };
+    float blocked = 0.0;
+    for (uint i = 0; i < 12; i++) {
+        float2 at = uv + axis_x * taps[i].x + axis_y * taps[i].y;
+        if (any(at <= 0.0) || any(at >= 1.0)) continue;
+        float depth = ambient_occlusion_depth.SampleLevel(at, 0.0).r;
+        if (depth >= 0.999999) continue;
+        float4 world = mul(push.frame[0].inverse_view_projection, float4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, depth, 1.0));
+        if (abs(world.w) <= 1e-6) continue;
+        float3 delta = world.xyz / world.w - position;
+        float distance = length(delta);
+        if (distance > settings.y || distance <= 1e-5) continue;
+        blocked += step(settings.z, dot(normalize(normal), delta)) * (1.0 - distance / settings.y);
+    }
+    return 1.0 - settings.x * blocked / 12.0;
+#endif
+}
 
 // **Binding 2 is the environment map, in every shader that shades a surface.**
 // The third and last binding a template reserves, which is why
@@ -648,38 +702,44 @@ float3 srgb_to_linear(float3 c)
 // to land in the same shadow no material at all lands in. `mesh.slang` holds the
 // long account of the four early exits and the two biases; this copy is the
 // function and not the argument.
+
+
+float shadow_view_factor(uint index, float3 position, float3 normal)
+{
+    if (index == 0xffffffffu) return 1.0;
+    ShadowGpuView view = push.frame[0].shadow_views[index];
+    if (view.params.w <= 0.0) return 1.0;
+    float3 offset = position + normal * view.params.z;
+    float4 clip = mul(view.view_projection, float4(offset, 1.0));
+    if (clip.w <= 0.0) return 1.0;
+    float3 ndc = clip.xyz / clip.w;
+    float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+    if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
+    float2 step = view.params.x * view.atlas.xy;
+    float2 uv = local * view.atlas.xy + view.atlas.zw;
+    float2 lo = view.atlas.zw + step * 0.5;
+    float2 hi = view.atlas.zw + view.atlas.xy - step * 0.5;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
+    {
+        float depth = shadow_atlas.SampleLevel(clamp(uv + float2(x,y) * step, lo, hi), 0.0).r;
+        lit += ndc.z - view.params.y <= depth ? 1.0 : 0.0;
+    }
+    return lerp(1.0, lit / 9.0, view.params.w);
+}
+
 float shadow_factor(float3 position, float3 normal)
 {
-#ifdef THREE_BAKE
-    // Nothing is occluded in a bake, which is also what lets the bake pipeline
-    // leave binding 1 unbound: with the sampler unread, Slang drops it from the
-    // layout and `pipeline_declares_binding` answers no.
-    return 1.0;
-#else
-    float4 params = push.frame[0].shadow;
-    if (params.w <= 0.0) return 1.0;
+    return shadow_view_factor(push.frame[0].lights[0].meta.y, position, normal);
+}
 
-    float3 offset = position + normalize(normal) * params.z;
-    float4 clip = mul(push.frame[0].light_view_projection, float4(offset, 1.0));
-    float3 ndc = clip.xyz / clip.w;
-    if (ndc.z < 0.0 || ndc.z > 1.0) return 1.0;
-
-    float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-
-    float reference = ndc.z - params.y;
-    float lit = 0.0;
-    for (int y = -1; y <= 1; y++)
-    {
-        for (int x = -1; x <= 1; x++)
-        {
-            float depth = shadow_map.SampleLevel(uv + float2(x, y) * params.x, 0.0).r;
-            lit += reference <= depth ? 1.0 : 0.0;
-        }
-    }
-
-    return 1.0 - params.w * (1.0 - lit / 9.0);
-#endif
+float shadow_debug_depth(float2 local)
+{
+    uint index = push.frame[0].lights[0].meta.y;
+    if (index == 0xffffffffu) return 1.0;
+	ShadowGpuView view = push.frame[0].shadow_views[index];
+	if (view.params.w <= 0.0) return 1.0;
+	return shadow_atlas.SampleLevel(saturate(local) * view.atlas.xy + view.atlas.zw, 0.0).r;
 }
 
 // This fragment's shadow, looked up **once** and left where `lambert` can reach
@@ -777,7 +837,7 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
         return true;
     }
 
-    answer = float3(shadow_map.SampleLevel(uv, 0.0).r);
+    answer = float3(shadow_debug_depth(uv));
     return true;
 #endif
 }
@@ -795,32 +855,43 @@ static float g_shadow = 1.0;
 // directional lights alone, which is a scene missing a campfire and no diagnostic
 // anywhere. `specular_light` already takes the position and uses its own.
 static float3 g_position = float3(0.0, 0.0, 0.0);
+static float4 g_screen_position = float4(0.0);
+static float g_crevice = 1.0;
+//@lighting
+
+uint fragment_cluster()
+{
+    return shared_fragment_cluster(push.frame,g_screen_position,g_position);
+}
+
+float area_diffuse(Light light, float3 position, float3 normal)
+{
+    return shared_area_diffuse(light,position,normal);
+}
+
+bool cluster_contains(uint lightIndex)
+{
+    return shared_cluster_contains(push.frame,fragment_cluster(),lightIndex);
+}
+
+float3 area_specular_term(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
+{return shared_area_specular(light,position,normal,view,f0,f90,a2,k,nv);}
 
 float point_shadow_factor(uint index, Light light, float3 position)
 {
-    if (push.frame[0].point_shadow.w == 0.0 || light.direction.w <= 0.0) return 1.0;
-    float3 ray = position - light.direction.xyz;
-    float face_distance = max(max(abs(ray.x), abs(ray.y)), abs(ray.z));
-    float far_plane = light.direction.w;
-    if (face_distance >= far_plane) return 1.0;
-    float near_plane = max(far_plane * 0.001, min(0.01, far_plane * 0.5));
-    float expected = far_plane / (far_plane - near_plane)
-        - (far_plane * near_plane) / ((far_plane - near_plane) * max(face_distance, near_plane));
-    float3 a = abs(ray);
-    float2 face_uv;
-    uint face;
-    if (a.x >= a.y && a.x >= a.z) { face = ray.x >= 0.0 ? 0u : 1u; face_uv = ray.x >= 0.0 ? float2(-ray.z, -ray.y) / a.x : float2(ray.z, -ray.y) / a.x; }
-    else if (a.y >= a.z) { face = ray.y >= 0.0 ? 2u : 3u; face_uv = ray.y >= 0.0 ? float2(ray.x, ray.z) / a.y : float2(ray.x, -ray.z) / a.y; }
-    else { face = ray.z >= 0.0 ? 4u : 5u; face_uv = ray.z >= 0.0 ? float2(ray.x, -ray.y) / a.z : float2(-ray.x, -ray.y) / a.z; }
-    float layer = (float)((index - 1u) * 6u + face);
-    float2 uv = face_uv * 0.5 + 0.5;
-    float visible = 0.0;
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
+    uint view = light.meta.y;
+    if (view == 0xffffffffu) return 1.0;
+    if (light.meta.z == 1u)
     {
-        float stored = point_shadow_map.SampleLevel(float3(clamp(uv + float2(x, y) * push.frame[0].point_shadow.x, 0.0, 1.0), layer), 0.0).r;
-        visible += expected - push.frame[0].point_shadow.y <= stored ? 1.0 / 9.0 : 0.0;
+        float3 ray = position - light.direction.xyz;
+        float3 a = abs(ray);
+        uint face;
+        if (a.x >= a.y && a.x >= a.z) face = ray.x >= 0.0 ? 0u : 1u;
+        else if (a.y >= a.z) face = ray.y >= 0.0 ? 2u : 3u;
+        else face = ray.z >= 0.0 ? 4u : 5u;
+        view += face;
     }
-    return lerp(1.0, visible, push.frame[0].point_shadow.z);
+    return shadow_view_factor(view, position, float3(0.0));
 }
 
 
@@ -869,6 +940,7 @@ float3 lambert(float3 normal, float occlusion)
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
+        if (light.meta.z != 0u) continue;
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
@@ -876,7 +948,15 @@ float3 lambert(float3 normal, float occlusion)
         else n_dot_l *= point_shadow_factor(i, light, g_position);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient * occlusion + (1.0 - ambient) * direct + push.frame[0].world.rgb * occlusion;
+    uint cluster=fragment_cluster(); uint packedCount=push.frame[0].cluster_grid.w==0u?0x80000000u:push.frame[0].cluster_counts[cluster];
+    bool overflow=(packedCount&0x80000000u)!=0u; uint localCount=overflow?count:packedCount;
+    for(uint k=0u;k<localCount;++k){ uint i=overflow?k:push.frame[0].cluster_indices[cluster*push.frame[0].cluster_grid.w+k];
+        Light light=push.frame[0].lights[i]; if(light.meta.z==2u||light.meta.z==3u){direct+=light.color.rgb*area_diffuse(light,g_position,normal)*point_shadow_factor(i,light,g_position);continue;} if(light.meta.z!=1u&&light.meta.z!=4u)continue; float reach;
+        float3 toward=light_toward(light.direction,g_position,reach); float n=max(dot(normal,toward),0.0)*reach;
+        if(light.meta.z==4u)n*=shared_spot_reach(light,toward);
+        n*=point_shadow_factor(i,light,g_position); direct+=light.color.rgb*light.color.w*n; }
+    float ambient_visibility = occlusion * g_crevice;
+    return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
 #endif
 }
 
@@ -935,8 +1015,11 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
+        if(light.meta.z!=0u&&!cluster_contains(i))continue;
+        if(light.meta.z==2u||light.meta.z==3u){sum+=area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v)*point_shadow_factor(i,light,position);continue;}
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
+        if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
         float n_dot_l = max(dot(normal, to_light), 0.0);
         if (n_dot_l <= 0.0) continue;
 
@@ -1065,7 +1148,7 @@ float3 standard(Surface s, float3 albedo, float3 normal, float ao)
 #else
     return albedo * lambert(normal, ao) * (1.0 - s.metalness)
          + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance)
-         + environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * ao
+         + environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * ao * g_crevice
          // Last, and reached by nothing above it — not the occlusion, not the
          // shadow, not the metalness. A surface that gives off light gives it off
          // in a crevice, in shadow and on a metal. `mesh.slang` adds it in exactly
@@ -1466,6 +1549,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
 {
+    g_screen_position = input.sv_position;
     Draw draw = push.draw[0];
 
     Surface s;
@@ -1536,6 +1620,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     s.shadow = shadow_factor(s.position, s.normal);
     g_shadow = s.shadow;
     g_position = s.position;
+    g_crevice = crevice_occlusion(s.position, s.normal);
     // Straight off the record, unclamped: `setSurface` clamps at the boundary, so
     // a second clamp here would be a second place for the range to be decided.
     s.roughness = draw.surface.x;

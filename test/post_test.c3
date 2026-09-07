@@ -629,6 +629,10 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					// unlit uv-space variant is not asked for and the marker is
 					// replaced by zero lines. `three_tests::export` has the bake.
 					break;
+				case "//@features":
+					// No early feature define: this material has neither a vertex body
+					// nor twelve textures, so it receives screen occlusion.
+					break;
 				case "//@table":
 					// Nothing: this material's uniforms fit the push block, so no
 					// table struct is generated and the marker is replaced by zero

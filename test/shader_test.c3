@@ -415,14 +415,14 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
 	}
 
-	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_map");
-	test::@check(shadow != null, "and the second is shadow_map");
+	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
+	test::@check(shadow != null, "and shadows share shadow_atlas");
 	if (shadow != null)
 	{
 		test::@check(shadow.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler too");
 		test::@check(
-			shadow.set == 0 && shadow.binding == three::SHADOW_BINDING,
-			"at 0,%d — got %d,%d", three::SHADOW_BINDING, shadow.set, shadow.binding
+			shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
+			"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
 		);
 	}
 
@@ -569,6 +569,12 @@ fn void the_frame_block_matches_the_shader() @test
 	sz? light_end = source[light_start..].index_of("};");
 	test::@check(@ok(light_end), "and it is closed");
 	if (catch light_end) return;
+	sz? shadow_start = source.index_of("struct ShadowGpuView");
+	test::@check(@ok(shadow_start), "mesh.slang declares a `struct ShadowGpuView`");
+	if (catch shadow_start) return;
+	sz? shadow_end = source[shadow_start..].index_of("};");
+	test::@check(@ok(shadow_end), "the shadow view declaration is closed");
+	if (catch shadow_end) return;
 
 	sz? start = source.index_of("struct FrameBlock");
 	test::@check(@ok(start), "mesh.slang declares a `struct FrameBlock`");
@@ -577,9 +583,9 @@ fn void the_frame_block_matches_the_shader() @test
 	test::@check(@ok(end), "and it is closed");
 	if (catch end) return;
 
-	// `Light` as well as the block, because the block holds an array of them and
-	// a probe without it does not compile.
+	// Include both pointer target types so the probe checks the real frame ABI.
 	String probe = string::tformat(
+		"%s};\n"
 		"%s};\n"
 		"%s};\n"
 		"[vk_push_constant] const FrameBlock push;\n"
@@ -587,8 +593,10 @@ fn void the_frame_block_matches_the_shader() @test
 		"{ return mul(push.view_projection, push.lighting) + push.live_poses[0][0] + push.camera; }\n"
 		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
 		"{ return mul(push.light_view_projection, push.shadow) + push.debug\n"
-		"  + push.lights[0].direction + push.lights[7].color + push.world + push.point_shadow; }\n",
+		"  + push.lights[0].direction + push.lights[7].color + push.world + push.point_shadow"
+		" + push.inverse_view_projection[0] + push.ambient_occlusion; }\n",
 		source[light_start : light_end],
+		source[shadow_start : shadow_end],
 		source[start : end]
 	);
 
@@ -616,7 +624,7 @@ fn void the_frame_block_matches_the_shader() @test
 
 	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
 	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 512, "and the block is 512 bytes, got %d", three::FrameBlock::size);
+	test::@check(three::FrameBlock::size == 400, "and the block is 400 bytes, got %d", three::FrameBlock::size);
 }
 
 <*
@@ -636,6 +644,53 @@ fn void the_frame_block_matches_the_shader() @test
  other files against `mesh.slang`. Between them each declaration is checked
  against something that is not a copy of itself.
 *>
+macro @check_storage_record($Type, String header, String expression)
+{
+	String source = three::load_source(MESH_PATH)!!;
+	defer source.free(mem);
+	sz? start = source.index_of(header);
+	test::@check(@ok(start), "mesh shader declares %s", header);
+	if (try start)
+	{
+		sz? end = source[start..].index_of("};");
+		test::@check(@ok(end), "%s is closed", header);
+		if (try end)
+		{
+			String probe = string::tformat(
+				"%s};\n[vk_push_constant] const %s push;\n"
+				"[shader(\"vertex\")] float4 vertexMain() : SV_Position { return %s; }\n"
+				"[shader(\"fragment\")] float4 fragmentMain() : SV_Target { return %s; }\n",
+				source[start : end], header[7..], expression, expression);
+			three::ShaderModule mod = three::compile_slang(probe, "storage_record.slang", both_stages())!!;
+			defer mod.free();
+			test::@check(mod.ok, "%s compiles: %s", header, mod.diagnostic);
+			$foreach $member : $Type::members:
+			{
+				three::ShaderField* field = mod.layout.field_of($member.name);
+				test::@check(field != null, "%s contains %s", header, $member.name);
+				if (field != null)
+				{
+					test::@check(field.offset == $member.offset && field.size == $member.size,
+						"%s.%s matches C3 offset and size", header, $member.name);
+				}
+			}
+			$endforeach
+			test::@check(mod.layout.push_fields.len() == $Type::members.len,
+				"%s has exactly the C3 fields", header);
+			test::@check(mod.layout.push_size == $Type::size,
+				"%s has the C3 record size %d, got %d", header, $Type::size, mod.layout.push_size);
+		}
+	}
+}
+
+fn void storage_light_and_shadow_records_match_c3() @test
+{
+	@check_storage_record(three::Light, "struct Light",
+		"push.direction + push.color + push.area_right + push.area_up + float4(push.meta)");
+	@check_storage_record(three::ShadowGpuView, "struct ShadowGpuView",
+		"mul(push.view_projection, push.params) + push.atlas");
+}
+
 fn void every_shader_declares_the_same_contract() @test
 {
 	String[3] paths = { MESH_PATH, "", "" };
@@ -649,7 +704,7 @@ fn void every_shader_declares_the_same_contract() @test
 	String mesh = three::load_source(paths[0])!!;
 	defer mesh.free(mem);
 
-	String[5] structs = { "struct Instance", "struct Light", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
+	String[6] structs = { "struct Instance", "struct Light", "struct ShadowGpuView", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
 
 	for (uint file = 1; file < 3; file++)
 	{
@@ -864,7 +919,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
 		test::@check(pipeline.shader.bindings.len() == 8, "from eight reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
-		test::@check(pipeline.shader.binding_of("shadow_map") != null, "and so is the shadow map");
+		test::@check(pipeline.shader.binding_of("shadow_atlas") != null, "and so is the shared shadow atlas");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");
 		test::@check(
 			pipeline.shader.binding_of("normal_map") != null,

@@ -1,124 +1,9 @@
 <*
- The directional shadow map: one depth image, one fit, one comparison.
+ Shadow settings, directional fitting, cache keys and caster pipelines.
 
- `c3c test --trust=full --test-noleak --test-filter three_tests::shadow`
-
- ## What a frame does
-
- prepare        fit the light's box around the scene, write it into FrameBlock
- record_shadow  UNDEFINED -> DEPTH_ATTACHMENT, draw every caster, -> SAMPLED
- the scene      binding 1 is the map; `shadow_factor` reads it back
-
- ...where "draw every caster" is one of three shapes — see `SHADOW_PLAN_FULL`.
-
- The two ends agree because there is one matrix, written once into the frame
- block both passes read: `shaders/shadow.slang` rasterises with it and
- `shaders/mesh.slang` projects into it. A second fit, or a matrix pushed to one
- pass and derived in the other, is the failure this rules out — a shadow map that
- is correct and a lookup that reads the wrong texel is a scene lit through a
- shape nobody drew.
-
- The pass owns both ends of its image's life, because the map is its own image at
- its own extent rather than the target's depth buffer; there is nothing to fold
- into `begin_render_to`'s existing barrier array.
-
- ## The honest costs, each with the trigger that would change it
-
- **The whole scene, one map, no cascades.** The box is fitted around
- `Scene.bounds` every frame, so texel density is `extent / size` and a village is
- coarser than a room. 2048 across a 40-unit village is 2 cm a texel, which is
- fine; 2048 across a 4 km terrain is 2 m a texel, which is not.
- `three.light.shadow.size` is the knob, and the trigger for cascades is a scene
- where the largest size a device will allocate is still too coarse.
-
- **Every drawable casts, and the camera frustum stops culling while it does.** A
- caster outside the camera's view still throws a shadow into it, so the draw list
- cannot be the camera-culled one — `Scene.update` is told there is a shadow pass
- and builds the list without the frustum. What that costs is vertex work in the
- *main* pass for geometry that is then clipped away; what it buys is that panning
- the camera does not make shadows appear and disappear. It costs no draw calls:
- culling drops instances from buckets, never buckets. The trigger for a second
- draw list is a scene where that vertex work is measurable.
-
- **Every drawable casts every frame, until something says it will not.**
- `object.static = true` puts a node in a second depth image that is drawn when it
- changes and kept when it does not, and a frame in which nothing casting is
- moving records no shadow pass at all. On the reference village at 1280x720 that
- took the whole pass from 0.334 ms to nothing — a settled shadowed frame costs
- 0.344 against 0.276 with shadows off, and the difference left is the nine PCF
- taps the colour pass runs — while a frame with a mover over the cache costs
- 0.078. `SHADOW_PLAN_FULL` has the three shapes, `ShadowMap.static_fit` has the
- invalidation, and `Bucket.static_first` has the reason the flag does not split a
- draw bucket.
-
- ## The cached half, and what it asked of the fit
-
- A stored depth image is only depths *in a particular projection*, so a cache is
- worth exactly as much as the fit is stable — and the fit follows the camera,
- which is what makes a village's shadows sharp. The two are reconciled in `fit`'s
- `stable` parameter: fit a square a little larger than the focus needs, then keep
- it for as long as the focus stays inside it. `SHADOW_FIT_SLACK` is the number,
- 13% of the texel density is the price, and it is charged only to scenes that
- marked something static.
-
- Nothing else about the pass changes: the lookup is one sampler and one
- projection, the two images are the same format at the same extent under the same
- fit, and `descriptor` is the only place either view is named. The alternative —
- two maps — puts a second sampler and a second projection into
- `shaders/mesh.slang`, which every `ShaderMaterial` in every scene shares.
-
- ## The fragment stage there is, and the one there still is not
-
- A depth pass has no fragment stage and needs none — depth is what the rasteriser
- already produced. Two things followed from that, and one of them no longer does.
-
- **`material.alphaTest` cuts the shadow.** A second compile of
- `shaders/shadow.slang` under `THREE_SHADOW_CUTOUT` declares the base colour map
- and a fragment stage that discards below the threshold, so a leaf card casts the
- shadow of the leaf rather than of its quad. It is a second pipeline and not a
- sampler on the one every caster shares, so a scene with no cut-outs in it
- declares no binding, pushes no descriptor and taps no texture —
- `build_cutout_pipeline` compiles it the first frame something asks and never
- before. `Material.alpha_test` has what the property means and why it is not
- `opacity`.
-
- **A `ShaderMaterial` with a `vertex:` body still casts the shadow of its
- undisplaced geometry**, and that one is unchanged. The displacement needs the
- material's own assembled vertex body, which would make a shadow pipeline per
- material where there are now exactly two.
-
- ## The two barriers rest on the specification, not on the layer
-
- `ShadowMap.begin` and `ShadowMap.end` own both ends of this image's life, and
- deleting either left every check in `three_tests::shadow` green — the pictures
- included, with the ordinary validation layer and with synchronization validation
- requested through `create_instance(sync: true)`. Measured by injection, twice.
-
- The check that carried that measurement is gone: it asked the loader for
- `VK_EXT_validation_features`, which this machine refuses, so it failed for the
- machine rather than for the pass. The finding stands on the injections, which is
- all it ever stood on — a green check was never the evidence here.
-
- The post chain does measure that way: comment out `record_chain`'s
- `shader_read_barrier` and `VUID-vkCmdDraw-imageLayout-00344` names the image,
- the binding and both layouts. So the instrument is present and works through a
- push descriptor — and it does not fire for a *depth* image sampled the same way.
- Anything relying on "the layer would have told us" about a depth attachment
- should not.
-
- ## What is deliberately not here
-
- No `castShadow` or `receiveShadow` per object. Two named channels vary per copy
- — `color` and `variant` — and a third would split buckets: two copies of one
- mesh disagreeing about casting are two draws. Everything opaque casts and
- everything shaded receives.
-
- `Node.static_caster` is not a counter-example. `castShadow` would decide
- *whether* a copy is drawn into the map, which the pass would have to key a draw
- on; `static` decides *when* — both halves are rasterised, in different frames,
- into images that are then one image. So it orders copies inside their bucket
- instead of keying one, and two copies of a wall disagreeing about it are still
- one draw call in the colour pass.
+ ShadowManager projects every light into ordinary views and ShadowAtlas owns all
+ depth images, tile rendering and static-cache copies. This file keeps the
+ projection policy and the shared depth-only pipelines used by those views.
 *>
 module three;
 
@@ -251,6 +136,188 @@ const uint SHADOW_PLAN_COMBINED = 2;
 const uint CASTERS_ALL     = 0;
 const uint CASTERS_STATIC  = 1;
 const uint CASTERS_DYNAMIC = 2;
+const uint CASTERS_VISIBLE = 3;
+
+// Every casting light is reduced to one or more ordinary atlas views. Keeping
+// the distinction here, instead of in the image owner, makes allocation,
+// invalidation and rendering identical for all light shapes.
+enum ShadowViewKind : char
+{
+	DIRECTIONAL,
+	POINT,
+	SPOT,
+	AREA,
+}
+
+const uint SHADOW_VIEW_NONE = uint::max;
+const uint SHADOW_MAX_VIEWS = 64;
+
+struct ShadowViewKey
+{
+	// Stable light identity, never its position in the packed lighting array.
+	uint light;
+	// Cascade or cube face. Zero for spot and representative area views.
+	uint part;
+	ShadowViewKind kind;
+}
+
+fn bool ShadowViewKey.equals(ShadowViewKey a, ShadowViewKey b) @inline =>
+	a.light == b.light && a.part == b.part && a.kind == b.kind;
+
+// CPU and shader-visible description of one atlas tile. `atlas` is scale.xy
+// and offset.zw. Area lights deliberately use a representative perspective
+// view: this is stable and useful, but is not exact extended-source visibility.
+struct ShadowView
+{
+	ShadowViewKey key;
+	Matrix4f view_projection;
+	float[4] atlas;
+	float[4] params; // texel, bias, normal offset, intensity
+	uint size;
+	uint static_revision;
+	uint signature;
+	bool static_valid;
+	bool live;
+	bool wanted;
+}
+
+// Device-addressed tail written for active views. Kept free of CPU cache keys:
+// shaders index it through Light.meta.y and need only projection and sampling.
+struct ShadowGpuView
+{
+	Matrix4f view_projection;
+	float[4] atlas;
+	float[4] params;
+}
+
+struct ShadowBudget
+{
+	// Limits are resources, not a magic number of lights. A point light consumes
+	// six views and six tiles, exactly as the allocator and renderer do.
+	uint max_views;
+	usz max_texels;
+	usz max_bytes;
+	uint max_updates;
+	usz max_update_texels;
+}
+
+const ShadowBudget DEFAULT_SHADOW_BUDGET = {
+	.max_views = SHADOW_MAX_VIEWS,
+	.max_texels = 8192 * 8192,
+	.max_bytes = 256 * 1024 * 1024,
+	.max_updates = 64,
+	.max_update_texels = 32 * 1024 * 1024,
+};
+
+struct ShadowViewSet
+{
+	ShadowView[SHADOW_MAX_VIEWS] views;
+	uint count;
+	uint active;
+	usz texels;
+	usz bytes;
+	ShadowBudget budget;
+}
+
+fn void ShadowViewSet.reset(&self)
+{
+	for (uint i = 0; i < self.count; i++)
+	{
+		self.views[i].live = false;
+		self.views[i].wanted = false;
+	}
+	self.active = 0;
+	self.texels = 0;
+	self.bytes = 0;
+	if (self.budget.max_views == 0) self.budget = DEFAULT_SHADOW_BUDGET;
+}
+
+// Admission is deliberately expressed in views, texels and device bytes. It
+// therefore makes the cost difference between a spot and a six-face point
+// light explicit and remains correct when depth formats change size.
+fn uint ShadowViewSet.admit(&self, ShadowViewKey key, uint size, usz bytes_per_texel = 4)
+{
+	usz texels = (usz)size * (usz)size;
+	usz bytes = texels * bytes_per_texel;
+	if (self.active >= self.budget.max_views) return SHADOW_VIEW_NONE;
+	if (self.texels + texels > self.budget.max_texels) return SHADOW_VIEW_NONE;
+	if (self.bytes + bytes > self.budget.max_bytes) return SHADOW_VIEW_NONE;
+	uint at = self.find(key);
+	if (at == SHADOW_VIEW_NONE)
+	{
+		// Recycle only a view that was not selected this frame. Cache identity is
+		// the stable key, so packed light reordering never aliases another light.
+		if (self.count < SHADOW_MAX_VIEWS)
+		{
+			at = self.count++;
+		}
+		else
+		{
+			for (uint i = 0; i < self.count; i++) if (!self.views[i].wanted) { at = i; break; }
+			if (at == SHADOW_VIEW_NONE) return SHADOW_VIEW_NONE;
+		}
+		self.views[at] = { .key = key, .view_projection = matrix::IDENTITY4{float} };
+	}
+	else if (self.views[at].size != size)
+	{
+		// Resolution changes retain the identity but never the stored depths.
+		self.views[at].static_valid = false;
+	}
+	self.views[at].size = size;
+	self.views[at].live = true;
+	self.views[at].wanted = true;
+	self.active++;
+	self.texels += texels;
+	self.bytes += bytes;
+	return at;
+}
+
+// Call for every candidate before admission. This two-phase mark stops an
+// early high-priority light recycling the cached slot of a later candidate.
+fn void ShadowViewSet.want_light(&self, uint stable_light, ShadowViewKind kind)
+{
+	uint parts = shadow_view_parts(kind);
+	for (uint part = 0; part < parts; part++)
+	{
+		uint at = self.find({ .light = stable_light, .part = part, .kind = kind });
+		if (at != SHADOW_VIEW_NONE) self.views[at].wanted = true;
+	}
+}
+
+fn uint shadow_view_parts(ShadowViewKind kind) @inline => kind == ShadowViewKind.POINT ? 6 : 1;
+
+// A light is admitted atomically: a point light never receives three useful
+// faces and three missing ones merely because the budget ended halfway through.
+fn uint ShadowViewSet.admit_light(&self, uint stable_light, ShadowViewKind kind, uint size,
+	usz bytes_per_texel = 4)
+{
+	uint parts = shadow_view_parts(kind);
+	usz texels = (usz)size * (usz)size * parts;
+	usz bytes = texels * bytes_per_texel;
+	if (self.active + parts > self.budget.max_views || self.texels + texels > self.budget.max_texels
+		|| self.bytes + bytes > self.budget.max_bytes) return SHADOW_VIEW_NONE;
+	uint first = SHADOW_VIEW_NONE;
+	for (uint part = 0; part < parts; part++)
+	{
+		uint at = self.admit({ .light = stable_light, .part = part, .kind = kind }, size, bytes_per_texel);
+		if (first == SHADOW_VIEW_NONE) first = at;
+	}
+	return first;
+}
+
+fn uint ShadowViewSet.find(&self, ShadowViewKey key)
+{
+	for (uint i = 0; i < self.count; i++) if (self.views[i].key.equals(key)) return i;
+	return SHADOW_VIEW_NONE;
+}
+
+fn void ShadowView.invalidate(&self, uint signature, uint revision)
+{
+	if (self.signature == signature && self.static_revision == revision) return;
+	self.signature = signature;
+	self.static_revision = revision;
+	self.static_valid = false;
+}
 
 <*
  The five numbers a script set, apart from everything that answers them.
@@ -360,33 +427,31 @@ const PointShadowSettings DEFAULT_POINT_SHADOW = {
 	.intensity = 1.0,
 };
 
-// One cube-array image, cube i-1 for light i. A 1x1x6 fallback is always made
-// valid for binding 3; the resolution-sized 42-layer image is first created only
-// after a scene explicitly enables point shadows, then retained across toggles.
+// Compatibility state for the point-shadow scripting API. ShadowAtlas owns the
+// shared depth storage and ShadowManager owns per-light cache validity.
 struct PointShadowMap
 {
 	inline PointShadowSettings settings;
-	vk::Image image;
-	vk::ImageView view;
-	vk::ImageView[POINT_SHADOW_LAYERS] faces;
-	vk::Memory memory;
-	vk::Sampler sampler;
-	vk::Format format;
 	uint created;
-	bool initialized;
-
-	vk::Image fallback_image;
-	vk::ImageView fallback_view;
-	vk::ImageView[POINT_SHADOW_FACES] fallback_faces;
-	vk::Memory fallback_memory;
-	bool fallback_initialized;
+	bool sample_static;
+	uint plan;
+	uint static_draws;
 	bool live;
 	uint draws;
 }
 
+fn void PointShadowMap.apply(&self, PointShadowSettings settings)
+{
+	self.settings = settings;
+	self.live = false;
+	self.draws = 0;
+	self.static_draws = 0;
+	self.sample_static = false;
+	self.plan = SHADOW_PLAN_FULL;
+}
+
 <*
- One directional shadow map: what a script asked for, the device objects that
- answer it, and this frame's fit.
+ Directional settings, fitted projection and shared caster pipelines.
 
  Everything in `settings` survives everything below it — a size change destroys
  and rebuilds the image and leaves `bias` and `intensity` alone, which makes the
@@ -401,33 +466,11 @@ struct ShadowMap
 {
 	inline ShadowSettings settings;
 
-	// ---- the device objects ----
-
-	vk::Image image;
-	vk::ImageView view;
-	vk::Sampler sampler;
-	vk::Memory memory;
 	vk::Format format;
 	// The size the image above really has, and 0 when there is no image. Compared
 	// against `size` rather than trusted, because a script may write `size` at any
 	// moment and the image can only change between frames.
 	uint created;
-
-	// ---- the cached half ----
-
-	<*
-	 A second depth image holding everything marked `Node.static_caster`, drawn
-	 when something about it changes and kept otherwise.
-
-	 Allocated only once a scene actually has a static caster, so a project that
-	 never sets the flag pays neither the 16 MB nor the copy. Same format, same
-	 extent and same fit as `image` — it has to be, because the whole point is that
-	 one can be copied into the other and the lookup cannot tell which it read.
-	*>
-	vk::Image static_image;
-	vk::ImageView static_view;
-	vk::Memory static_memory;
-	uint static_created;
 
 	<*
 	 What the cached image is a picture of, and the whole of the invalidation.
@@ -475,11 +518,6 @@ struct ShadowMap
 	// This frame's shape — one of the three `SHADOW_PLAN_` constants. Decided by
 	// `MeshPass.plan_shadow` once the draw list exists, read by `record_shadow`.
 	uint plan;
-	// Set when the cached image would not allocate, so the diagnostic is one
-	// sentence and not one per frame. Cleared by a resize, which is a different
-	// allocation and may well succeed.
-	bool static_refused;
-
 	// ---- the fit, as it last landed ----
 
 	<*
@@ -522,8 +560,7 @@ struct ShadowMap
 	bool cutout_ready;
 	// Set when the cut-out shader would not compile, so the diagnostic is one
 	// sentence and not one per frame. Cut-out casters then draw as whole quads,
-	// which is the picture this pass drew before the variant existed — the same
-	// answer `static_refused` gives, and for the same reason.
+	// which is the picture this pass drew before the variant existed.
 	bool cutout_refused;
 
 	// ---- this frame ----
@@ -578,9 +615,7 @@ fn bool same_matrix(Matrix4f a, Matrix4f b) @local
  image: the fit was a projection of a scene that is no longer on screen, and the
  cached half is a picture of it.
 
- The image and the pipeline are **not** freed — they are the expensive part,
- they are correct for whatever comes next, and `ensure` hands the same one back
- the moment anything turns shadows on again.
+ The fitted projection and pipelines are retained for the next scene.
 *>
 fn void ShadowMap.apply(&self, ShadowSettings settings)
 {
@@ -588,10 +623,7 @@ fn void ShadowMap.apply(&self, ShadowSettings settings)
 	self.light_view_projection = matrix::IDENTITY4{float};
 	self.live = false;
 	self.draws = 0;
-	// The cached half is forgotten rather than freed: the static image is a picture
-	// of the scene that was on screen, and the one coming on is a different world.
-	// The image itself is worth keeping — the next scene will want one the same
-	// size — and it is rebuilt on the first frame that needs it.
+	// The compatibility key is forgotten when the active scene changes.
 	self.invalidate_static();
 	self.static_draws = 0;
 	self.sample_static = false;
@@ -650,160 +682,7 @@ fn void ShadowMap.mark_static_built(&self, uint revision)
 }
 
 <*
- Creates the depth image, its view and its sampler at the requested size, or does
- nothing if one that size already exists.
-
- The image is one object shared by every frame in flight rather than one per
- slot, so destroying it while an earlier frame may still be sampling it is
- undefined behaviour that shows up as a corrupt frame later. `gpu/retire.c3`
- keeps the two apart: the old image's three handles go on the queue and are
- destroyed two frames later, so a script that changes `shadow.size` between
- frames pays an allocation and no stall.
-
- @return ? SHADOW_FORMAT_UNSUPPORTED : `No depth format on this device can be both rendered to and sampled. Cannot happen on a conformant device — D32_SFLOAT is required to do both — so this is a sentence rather than a fallback.`
-*>
-fn void? ShadowMap.ensure(&self, Gpu* gpu)
-{
-	if (self.image != null && self.created == self.size) return;
-	if (self.image != null) self.destroy_image(gpu);
-	// The cached half is the same extent as the live one by construction — one is
-	// copied into the other — so a resize takes both, and what the old one held is
-	// a picture at a resolution nothing is going to ask for again.
-	if (self.static_image != null) self.destroy_static_image(gpu);
-	self.invalidate_static();
-	// A different allocation, and one that may well succeed where the last one did
-	// not — a script halving `shadow.size` after running out of memory is exactly
-	// the recovery this allows.
-	self.static_refused = false;
-
-	// Both features, and the second one is the half `Target` does not need. The
-	// target's depth buffer is only ever an attachment, so it asks for
-	// DEPTH_STENCIL_ATTACHMENT alone; this one is read by a sampler afterwards,
-	// and a format that can be written and not read would fail at the descriptor
-	// rather than here.
-	vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-	self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
-
-	// `findDepthFormat` answers with its first candidate when none of them matched,
-	// which is a sensible fallback for a caller that has to have *a* depth format
-	// and a silent wrong answer for one that needs specific features. So the answer
-	// is checked rather than taken: without this, a device with no sampleable depth
-	// format would fail at `vkCreateImage` with a validation message about usage
-	// flags, several layers away from the reason.
-	vk::FormatProperties properties;
-	vk::getPhysicalDeviceFormatProperties(gpu.pdevice, self.format, &properties);
-	if ((properties.optimalTilingFeatures & wanted) != wanted) return SHADOW_FORMAT_UNSUPPORTED~;
-
-	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
-		.setExtent({ .width = self.size, .height = self.size, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(
-			IMAGE_TILING_OPTIMAL
-		)/* TRANSFER_DST because the cached half is copied in before the movers are *//* drawn over it. Asked for unconditionally rather than only when something *//* is static: the flag is set per node at any moment and the image can only *//* be created between frames, so the alternative is a resize-and-stall the *//* first time a script writes `mesh.static = true`. */
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		)
-		.setImage(self.image)
-		.build(gpu.handle)!;
-
-	// `FILTER_NEAREST`, and not a shortcut. The comparison happens in the shader,
-	// after the sample, so a linear filter would average *depths* and then compare
-	// the average — not a soft edge but a wrong one, putting a halo of half-shadow
-	// around every silhouette at the wrong distance. The nine taps in
-	// `shadow_factor` are where the softening comes from: they average the
-	// *comparisons*, which is what PCF means. It is also the only filter a depth
-	// format is guaranteed to support as a sampled image.
-	// 
-	// CLAMP_TO_EDGE with the uv bounds check in the shader on top of it. Either
-	// alone is nearly right and both together are exact: the clamp keeps the sample
-	// legal and the bounds check keeps the *answer* from being the edge texel's
-	// shadow smeared across everything outside the fitted box.
-	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
-		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-		.setMinLod(0.0)
-		.setMaxLod(0.0)
-		.setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE)
-		.build(gpu.handle)!;
-
-	self.created = self.size;
-}
-
-<*
- Creates the cached image, or does nothing if one at the live map's size exists.
-
- Only ever called from a frame that has something to cache, so a scene with
- shadows on and nothing marked static allocates one image, not two.
-
- The sampler is `image`'s, shared rather than duplicated. It is a comparison-free
- nearest sampler with no state that could differ between the two, and the lookup
- must not be able to tell which image it read.
-
- `ensure` has already run and settled `format` and `created`, so this borrows
- both rather than deciding again. Two images that disagreed about either would
- fail at the copy, several frames from the reason.
-*>
-fn void? ShadowMap.ensure_static(&self, Gpu* gpu)
-{
-	if (self.static_image != null && self.static_created == self.created) return;
-	if (self.static_image != null) self.destroy_static_image(gpu);
-	if (self.created == 0) return;
-
-	self.static_image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
-		.setExtent({ .width = self.created, .height = self.created, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(
-			IMAGE_TILING_OPTIMAL
-		)/* SAMPLED as well as TRANSFER_SRC: a frame in which *everything* is static *//* reads this image directly and never copies it, which is the case the whole *//* section exists for. See `sample_static`. */
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.static_memory = vk::create_image_buffer(self.static_image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	self.static_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		)
-		.setImage(self.static_image)
-		.build(gpu.handle)!;
-
-	self.static_created = self.created;
-	// A fresh image holds nothing, whatever the keys happen to say.
-	self.invalidate_static();
-}
-
-<*
- Compiles `shaders/shadow.slang` and builds the depth-only pipeline, once.
-
- Late rather than in `MeshPass.init`, for the reason the compute skinning
- pipeline is late: this is a Slang compile and a `VkPipeline` that a project which
- never turns shadows on should not pay for.
-
- @return ? SHADER_MISSING_ENTRY_POINT : `The shadow shader would not compile. The diagnostic is printed, because a Slang error with a line and a column is the only actionable form of it.`
+ Compiles the depth-only caster pipeline on first use.
 *>
 fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 {
@@ -1201,407 +1080,13 @@ fn ShadowFit ShadowMap.report(&self)
 	};
 }
 
-<*
- The descriptor write for binding 1.
-
- SHADER_READ_ONLY_OPTIMAL because `end` put it there, in the same command buffer,
- before anything sampled it. The main pass binds this only when `live` is set and
- binds the white 1x1 otherwise — see `MeshPass.record`.
-
- A frame in which nothing casting is moving samples the cached image itself
- rather than a copy of it (see `sample_static`), and both are left in
- SHADER_READ_ONLY_OPTIMAL by the frame that last wrote them. This is the only
- place either view is named, so the choice is made once and the rest of the pass
- cannot disagree with it.
-*>
-fn vk::DescriptorImageInfo ShadowMap.descriptor(&self)
-{
-	return {
-		.sampler = self.sampler,
-		.imageView = self.sample_static ? self.static_view : self.view,
-		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-	};
-}
-
-<*
- Transitions in, begins rendering with depth alone, and sets the map's own
- viewport.
-
- Not `Target.begin_render_to`: no colour attachment, an extent that is the map's
- rather than the target's, and a depth image that is this one. Sharing the
- function would mean four parameters that mean nothing to every other caller.
-
- The barrier is `ALL_COMMANDS` with no source access, which is
- `color_attachment_barrier`'s argument one image over: the hazard is that *last*
- frame sampled this map in the fragment stage and this frame writes it, and a
- write-after-read wants ordering rather than a cache flush. `vk::depthBarrier`
- would be the obvious reuse and is subtly wrong — its source stage is the
- depth-test stages, which do not cover a fragment shader's sampled read.
-
- The viewport height is negative, exactly as `Target.begin_render_to`'s is, so
- this pass rasterises under the same convention as every other pass.
-*>
-fn void ShadowMap.begin(&self, vk::CommandBuffer cmd)
-{
-	self.begin_depth(cmd, self.image, self.view, IMAGE_LAYOUT_UNDEFINED, true);
-}
-
-<*
- The cached half's own pass — the one that runs on the frames a static caster
- actually changed, and on no others.
-
- UNDEFINED as the old layout for `begin`'s reason: this clears, so whatever the
- image held is being thrown away. True on the first rebuild and on every one
- after it, which is why there is no layout to track between frames.
-*>
-fn void ShadowMap.begin_static(&self, vk::CommandBuffer cmd)
-{
-	self.begin_depth(cmd, self.static_image, self.static_view, IMAGE_LAYOUT_UNDEFINED, true);
-}
-
-<*
- The movers' pass, over a map that already holds the buildings.
-
- `ATTACHMENT_LOAD_OP_LOAD` rather than a clear, and the depths it loads are the
- ones `copy_static` put there a moment ago. The old layout is TRANSFER_DST for
- the same reason — the copy is what wrote them — and reading the loaded values
- back means asking for DEPTH_STENCIL_ATTACHMENT_READ as well as WRITE.
-*>
-fn void ShadowMap.begin_over_copy(&self, vk::CommandBuffer cmd)
-{
-	self.begin_depth(cmd, self.image, self.view, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, false);
-}
-
-<*
- Transitions a depth image in and starts rendering to it at the map's own extent.
-
- The three passes above differ by three things and share everything else, which
- is why they are one function with three arguments rather than three copies of a
- barrier, a `RenderingInfo` and a viewport.
-
- The barrier is `ALL_COMMANDS` with no source access, which is
- `color_attachment_barrier`'s argument one image over: the hazard is that *last*
- frame sampled this map in the fragment stage and this frame writes it, and a
- write-after-read wants ordering rather than a cache flush. `vk::depthBarrier`
- would be the obvious reuse and is subtly wrong — its source stage is the
- depth-test stages, which do not cover a fragment shader's sampled read. Coming
- out of a copy the hazard is the other kind, so the source is the transfer stage
- and its write.
-
- The viewport height is negative, exactly as `Target.begin_render_to`'s is.
-
- @param from : `The layout the image is in. UNDEFINED discards the contents, which is what a clearing pass wants; TRANSFER_DST preserves what the copy left.`
- @param clear : `Whether to clear on load. False loads what is already there, which is only legal because the caller put it there in this same command buffer.`
-*>
-fn void ShadowMap.begin_depth(
-	&self,
-	vk::CommandBuffer cmd,
-	vk::Image image,
-	vk::ImageView view,
-	vk::ImageLayout from,
-	bool clear
-)
-{
-	bool loading = from == IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	vk::ImageMemoryBarrier2 to_attachment = {
-		...IMAGE_BARRIER,
-		.image = image,
-		.srcStageMask = loading ? PIPELINE_STAGE_2_COPY_BIT : PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		.srcAccessMask = loading ? ACCESS_2_TRANSFER_WRITE_BIT : (vk::AccessFlags2)0,
-		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-		.oldLayout = from,
-		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_attachment }));
-
-	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(view)
-		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-		.setLoadOp(clear ? ATTACHMENT_LOAD_OP_CLEAR : ATTACHMENT_LOAD_OP_LOAD)
-		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
-		.setClearValue({ .depthStencil = { 1.0, 0 } });
-
-	vk::Extent2D extent = { .width = self.created, .height = self.created };
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
-		.setDepthAttachment(&depth_attachment);
-
-	vk::cmdBeginRendering(cmd, &rendering);
-
-	set_full_viewport(cmd, extent, true);
-}
-
-<*
- Ends rendering and hands the map to the fragment shaders that sample it.
-
- The read side of the pair `begin` opened. `LATE_FRAGMENT_TESTS ->
- FRAGMENT_SHADER` is exactly the dependency: depth was written by the tests and
- is about to be read by a sampler, in the same submission, so this needs the
- access masks a layout change alone would not give.
-*>
-fn void ShadowMap.end(&self, vk::CommandBuffer cmd) => self.end_depth(cmd, self.image);
-
-<*
- The same for the cached image, and it always lands in SHADER_READ_ONLY_OPTIMAL.
-
- One resting layout for the static image and no field tracking which it is in. It
- is read two ways — sampled directly in a frame where nothing moves, and copied
- in a frame where something does — and the copy is the rarer of the two by a long
- way once a scene is playing. So the rebuild leaves it sampleable and
- `copy_static` borrows it for the length of one copy and puts it back, which
- costs one extra barrier on the frames there is a mover and removes a piece of
- state that could be wrong.
-*>
-fn void ShadowMap.end_static(&self, vk::CommandBuffer cmd) => self.end_depth(cmd, self.static_image);
-
-fn void ShadowMap.end_depth(&self, vk::CommandBuffer cmd, vk::Image image)
-{
-	vk::cmdEndRendering(cmd);
-
-	vk::ImageMemoryBarrier2 to_sampled = {
-		...IMAGE_BARRIER,
-		.image = image,
-		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_sampled }));
-}
-
-<*
- Puts the buildings back into the live map so the movers can be drawn over them.
-
- The one full-image copy this costs, and what it buys is the geometry. A depth
- image cannot be loaded from one attachment and stored to another, and the movers
- cannot be drawn into the cached image without ruining it — the next frame would
- find last frame's character baked into the buildings. So the cached depths are
- copied and the movers are drawn over the copy. At 2048 that is 16 MB read and 16
- MB written against 4178 instances of geometry it removes, and the frame where
- nothing moves does not do it at all.
-
- Three barriers in two calls. The first pair is one `vkCmdPipelineBarrier2` with
- both images in it: the cached one from sampleable to transfer-source, the live
- one from whatever it was to transfer-destination, and UNDEFINED is right for the
- live one because the copy overwrites every texel. The second puts the cached
- image back where `end_static` leaves it.
-*>
-fn void ShadowMap.copy_static(&self, vk::CommandBuffer cmd)
-{
-	vk::ImageMemoryBarrier2 source = {
-		...IMAGE_BARRIER,
-		.image = self.static_image,
-		.srcStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-		.srcAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_COPY_BIT,
-		.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
-		.oldLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::ImageMemoryBarrier2 destination = {
-		...IMAGE_BARRIER,
-		.image = self.image,
-		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		.srcAccessMask = (vk::AccessFlags2)0,
-		.dstStageMask = PIPELINE_STAGE_2_COPY_BIT,
-		.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-		.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ source, destination }));
-
-	vk::ImageSubresourceLayers layer = {
-		.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-		.mipLevel = 0,
-		.baseArrayLayer = 0,
-		.layerCount = 1,
-	};
-	vk::ImageCopy region = {
-		.srcSubresource = layer,
-		.dstSubresource = layer,
-		.extent = { .width = self.created, .height = self.created, .depth = 1 },
-	};
-	vk::cmdCopyImage(
-		cmd,
-		self.static_image,
-		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		self.image,
-		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1,
-		&region
-	);
-
-	vk::ImageMemoryBarrier2 restore = {
-		...IMAGE_BARRIER,
-		.image = self.static_image,
-		.srcStageMask = PIPELINE_STAGE_2_COPY_BIT,
-		.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-		.oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ restore }));
-}
-
-<*
- The image, its view and its sampler — everything a resize rebuilds.
-
- `vk::Memory.free` destroys the image it was bound to, so the image must not be
- destroyed again here.
-*>
-fn void ShadowMap.destroy_image(&self, Gpu* gpu)
-{
-	// Retired rather than destroyed, so a size change mid-play costs nothing —
-	// `gpu/retire.c3` holds the three handles for the frames that may still be
-	// sampling the map. `memory.free` is what destroys the image, so `image` is not
-	// handed over and is only cleared here.
-	gpu.retire_memory(self.memory, self.view, self.sampler);
-	self.memory = { };
-	self.image = (vk::Image)null;
-	self.view = (vk::ImageView)null;
-	self.sampler = (vk::Sampler)null;
-	self.created = 0;
-}
-
-<*
- The cached image and its view.
-
- No sampler: there is one, it belongs to `image`, and both views are read through
- it — see `ensure_static`. Retiring it here would take the live map's sampler
- away from the frames still using it.
-*>
-fn void ShadowMap.destroy_static_image(&self, Gpu* gpu)
-{
-	gpu.retire_memory(self.static_memory, self.static_view, (vk::Sampler)null);
-	self.static_memory = { };
-	self.static_image = (vk::Image)null;
-	self.static_view = (vk::ImageView)null;
-	self.static_created = 0;
-	self.invalidate_static();
-}
-
-<*
- What the map costs, in bytes, and 0 before there is one.
-
- Two D32 images at `size` squared once a scene has a static caster, one before
- that — which is why this is read off the allocations rather than computed from
- `size`. The number matters out of all proportion to how easy it is to set:
- `three.light.shadow.size = 4096` is a single assignment and 134 MB, larger than
- everything else in a frame put together, and until this there was nothing in
- `stats()` that moved when it was written.
-
- A resize destroys the old images and this follows it down as well as up, but
- turning shadows OFF does not: nothing frees the map until the size changes or
- `free` runs, so this keeps reading what the last enabled size cost. That is the
- honest answer — the memory really is still held — and it is why the number is
- worth having rather than inferring from `shadow.enabled`.
-*>
-fn usz ShadowMap.bytes(&self) => (usz)(self.memory.size + self.static_memory.size);
-
-<*
- Everything the map owns, including the pipeline.
-
- Called from `MeshPass.free` with the device already idle, so the pipeline is
- destroyed rather than retired — the deletion queue is for objects given back
- while frames are still running, and a teardown is neither.
-*>
 fn void ShadowMap.free(&self, Gpu* gpu)
 {
-	self.destroy_image(gpu);
-	self.destroy_static_image(gpu);
 	if (self.pipeline_ready) self.pipeline.free(gpu);
 	self.pipeline_ready = false;
 	if (self.cutout_ready) self.cutout_pipeline.free(gpu);
 	self.cutout_ready = false;
 	self.cutout_refused = false;
-}
-
-fn void? PointShadowMap.create_image(
-	&self,
-	Gpu* gpu,
-	uint size,
-	uint layers,
-	vk::Image* image,
-	vk::ImageView* cube_view,
-	vk::Memory* memory,
-	vk::ImageView* face_views
-)
-{
-	if (self.format == FORMAT_UNDEFINED)
-	{
-		vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-		self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
-	}
-	*image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
-		.setExtent({ .width = size, .height = size, .depth = 1 }).setMipLevels(1)
-		.setArrayLayers(layers).setSamples(SAMPLE_COUNT_1_BIT).setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
-	*memory = vk::create_image_buffer(*image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-	*cube_view = vk::imageViewCreateInfo()
-		.setViewType(IMAGE_VIEW_TYPE_2D_ARRAY)
-		.setFormat(self.format).setSubresourceRange({ .aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-			.baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = layers })
-		.setImage(*image).build(gpu.handle)!;
-	for (uint i = 0; i < layers; i++)
-	{
-		face_views[i] = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
-			.setSubresourceRange({ .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
-				.levelCount = 1, .baseArrayLayer = i, .layerCount = 1 })
-			.setImage(*image).build(gpu.handle)!;
-	}
-}
-
-fn void? PointShadowMap.ensure_fallback(&self, Gpu* gpu)
-{
-	if (self.fallback_image != null) return;
-	self.create_image(gpu, 1, POINT_SHADOW_FACES, &self.fallback_image, &self.fallback_view,
-		&self.fallback_memory, &self.fallback_faces[0])!;
-	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
-		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-		.setMinLod(0.0).setMaxLod(0.0).setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
-}
-
-fn void? PointShadowMap.ensure(&self, Gpu* gpu)
-{
-	self.ensure_fallback(gpu)!;
-	if (!self.enabled) return;
-	if (self.image != null && self.created == self.size) return;
-	if (self.image != null)
-	{
-		// Size changes are rare settings changes. Waiting is the bounded, correct
-		// retirement for the 42 attachment views, which the generic retire queue
-		// intentionally represents as one view per allocation.
-		gpu.wait_idle();
-		for (uint i = 0; i < POINT_SHADOW_LAYERS; i++) vk::destroyImageView(gpu.handle, self.faces[i], null);
-		vk::destroyImageView(gpu.handle, self.view, null);
-		// The device is idle and every view of this image has been destroyed, so
-		// the allocation is safe to return immediately. This also lets the
-		// replacement image reuse the same allocator page instead of temporarily
-		// requiring a second full point-shadow allocation.
-		self.memory.free();
-		self.memory = { };
-		self.image = (vk::Image)null;
-	}
-	self.create_image(gpu, self.size, POINT_SHADOW_LAYERS, &self.image, &self.view,
-		&self.memory, &self.faces[0])!;
-	self.created = self.size;
-	self.initialized = false;
-}
-
-fn vk::DescriptorImageInfo PointShadowMap.descriptor(&self)
-{
-	return { .sampler = self.sampler,
-		.imageView = self.live ? self.view : self.fallback_view,
-		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 }
 
 fn Matrix4f point_shadow_matrix(Light light, uint face)
@@ -1615,60 +1100,7 @@ fn Matrix4f point_shadow_matrix(Light light, uint face)
 		* matrix::look_at{float}(eye, eye + directions[face], ups[face]);
 }
 
-fn void PointShadowMap.begin_all(&self, vk::CommandBuffer cmd, bool fallback)
-{
-	vk::Image target = fallback ? self.fallback_image : self.image;
-	uint layers = fallback ? POINT_SHADOW_FACES : POINT_SHADOW_LAYERS;
-	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = target,
-		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.oldLayout = IMAGE_LAYOUT_UNDEFINED, .newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
-			.levelCount = 1, .baseArrayLayer = 0, .layerCount = layers } };
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
-}
-
-fn void PointShadowMap.begin_face(&self, vk::CommandBuffer cmd, vk::ImageView view, uint size)
-{
-	vk::RenderingAttachmentInfo depth = vk::renderingAttachmentInfo().setImageView(view)
-		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL).setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
-		.setStoreOp(ATTACHMENT_STORE_OP_STORE).setClearValue({ .depthStencil = { 1.0, 0 } });
-	vk::Extent2D extent = { .width = size, .height = size };
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
-		.setDepthAttachment(&depth);
-	vk::cmdBeginRendering(cmd, &rendering);
-	set_full_viewport(cmd, extent, true);
-}
-
-fn void PointShadowMap.finish_all(&self, vk::CommandBuffer cmd, bool fallback)
-{
-	vk::Image target = fallback ? self.fallback_image : self.image;
-	uint layers = fallback ? POINT_SHADOW_FACES : POINT_SHADOW_LAYERS;
-	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = target,
-		.srcStageMask = PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, .dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
-			.levelCount = 1, .baseArrayLayer = 0, .layerCount = layers } };
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
-}
-
-fn usz PointShadowMap.bytes(&self) => (usz)(self.memory.size + self.fallback_memory.size);
-
 fn void PointShadowMap.free(&self, Gpu* gpu)
 {
-	if (gpu.handle == null) return;
-	gpu.wait_idle();
-	for (uint i = 0; i < POINT_SHADOW_LAYERS; i++) if (self.faces[i] != null) vk::destroyImageView(gpu.handle, self.faces[i], null);
-	for (uint i = 0; i < POINT_SHADOW_FACES; i++) if (self.fallback_faces[i] != null) vk::destroyImageView(gpu.handle, self.fallback_faces[i], null);
-	if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
-	if (self.fallback_view != null) vk::destroyImageView(gpu.handle, self.fallback_view, null);
-	if (self.memory.image != null) self.memory.free();
-	if (self.fallback_memory.image != null) self.fallback_memory.free();
-	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
-	// `MeshPass` is re-initialised in place by the GPU regression harness. Leaving
-	// destroyed handles here makes the next `ensure_fallback` mistake them for live
-	// resources and record barriers against freed images.
 	*self = { };
 }

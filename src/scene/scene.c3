@@ -342,6 +342,11 @@ struct SceneStats
 	 cached map to rebuild rather than a cheap one.
 	*>
 	uint shadow_static_draws;
+	uint shadow_views;
+	uint shadow_rejected;
+	uint shadow_updates;
+	usz shadow_update_texels;
+	uint shadow_deferred;
 
 	<*
 	 Whether the cut-out shadow pipeline exists.
@@ -375,9 +380,12 @@ struct SceneStats
 	 no device, along with everything else here that needs one.
 	*>
 	usz shadow_bytes;
+	usz occlusion_bytes;
 	usz target_bytes;
 	usz post_bytes;
 	usz geometry_bytes;
+	usz cluster_bytes;
+	uint cluster_overflow;
 
 	<*
 	 What the sweeps since the last host tick cost — `SweepCounters`.
@@ -700,6 +708,8 @@ struct SceneLook
 	ShadowSettings shadow;
 	// Shared opt-in cube-array settings for every point light in this scene.
 	PointShadowSettings point_shadow;
+	ShadowBudget shadow_budget;
+	AmbientOcclusionSettings ambient_occlusion;
 	// `scene.background` when it is an image, and `scene.environment` — see
 	// `SkyLook`. Both are counted references and `Scene.free_sky` gives them back.
 	SkyLook sky;
@@ -713,6 +723,8 @@ const SceneLook DEFAULT_LOOK = {
 	.lighting = DEFAULT_LIGHTING,
 	.shadow = DEFAULT_SHADOW,
 	.point_shadow = DEFAULT_POINT_SHADOW,
+	.shadow_budget = DEFAULT_SHADOW_BUDGET,
+	.ambient_occlusion = DEFAULT_AMBIENT_OCCLUSION,
 	.sky = DEFAULT_SKY,
 };
 
