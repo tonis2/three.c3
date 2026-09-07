@@ -196,15 +196,13 @@ const uint SKIN_WORKGROUP = 64;
  spell it as a literal in their `FrameBlock` declarations, because those are a
  wire format and `FrameBlock::size` is what holds the two together.
 *>
-const uint MAX_LIGHTS = 4;
+const uint MAX_LIGHTS = 8;
 
 <*
  One light, as the three shading shaders declare it.
 
- **Light zero is the sun.** `render/shadow.c3` fits the shadow map around it and
- it is the only one that casts; the rest light and do not shadow. A second caster
- is a second fit and a second depth pass — `plan.md` §19's atlas is what turns
- that into a tiling question rather than an allocation one.
+ **Light zero is the sun.** `render/shadow.c3` fits the directional map around
+ it. Point lights use the separate opt-in six-face array in that file.
 *>
 struct Light
 {
@@ -337,6 +335,13 @@ struct FrameBlock
 	 goes on reading `light_view_projection` at 88 by that offset.
 	*>
 	float[4] world;
+	<*
+	 Point-light cube-shadow parameters. x is one texel in a cube face, y is the
+	 depth bias, z is shadow intensity and w is nonzero when the cube array is
+	 live. Kept after the established block so every older field retains its
+	 offset.
+	*>
+	float[4] point_shadow;
 }
 
 <*
@@ -515,6 +520,15 @@ struct MeshPush
 	ulong draw; // DrawRecord*, this bucket's own
 }
 
+struct ShadowPush
+{
+	ulong frame;
+	ulong instances;
+	ulong draw;
+	ulong padding;
+	Matrix4f projection;
+}
+
 <*
  What one compute-skinning dispatch is handed, as `shaders/skin.slang`'s
  `SkinPush` declares it.
@@ -584,8 +598,9 @@ $assert @layout_matches(
 // with `shaders/mesh.slang` and a silent change to either side is a misread
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
+$assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
 $assert DrawRecord::size == 280 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 368 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 512 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
@@ -660,9 +675,10 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  debug                  168    16
  camera                 184    16
  environment            200    16
- lights                 216   128
- morph_weights          344     8
- world                  352    16    = 368, and no tail padding
+ lights                 216   256
+ morph_weights          472     8
+ world                  480    16
+ point_shadow           496    16    = 512, and no tail padding
 *>
 const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "view_projection", 0, 64 },
@@ -673,9 +689,10 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "debug", 168, 16 },
 	{ "camera", 184, 16 },
 	{ "environment", 200, 16 },
-	{ "lights", 216, 128 },
-	{ "morph_weights", 344, 8 },
-	{ "world", 352, 16 },
+	{ "lights", 216, 256 },
+	{ "morph_weights", 472, 8 },
+	{ "world", 480, 16 },
+	{ "point_shadow", 496, 16 },
 };
 
 <*
@@ -1299,7 +1316,7 @@ fn MeshPipeline? MeshPipeline.init(
 			.setName("fragmentMain"), };
 
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
-		.setColorAttachmentFormats((vk::Format[]) { target.color_format })
+		.setColorAttachmentFormats((vk::Format[]) { POST_CHAIN_FORMAT })
 		.setDepthAttachmentFormat(target.depth_format);
 
 	// Baked in, because it cannot be anything else on this device. Every

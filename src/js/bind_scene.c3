@@ -172,6 +172,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "clockScaleGet", &js_clock_scale_get, 0);
 	self.bind(host, "clockScaleSet", &js_clock_scale_set, 1);
 	self.bind(host, "clockRateGet", &js_clock_rate_get, 0);
+	self.bind(host, "clockAlpha", &js_clock_alpha, 0);
 	self.bind(host, "clockRateSet", &js_clock_rate_set, 1);
 	self.bind(host, "clockAdvance", &js_clock_advance, 1);
 	self.bind(host, "lightCount", &js_light_count, 0);
@@ -185,6 +186,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "worldSet", &js_world_set, 3);
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
 	self.bind(host, "shadowSet", &js_shadow_set, 6);
+	self.bind(host, "pointShadowGet", &js_point_shadow_get, 0);
+	self.bind(host, "pointShadowSet", &js_point_shadow_set, 4);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -663,6 +666,7 @@ fn void JsRuntime.activate_scene(&self, Scene* target)
 	// The image and the pipeline are **not** freed — see `ShadowMap.apply`, which
 	// keeps them and forgets only what the outgoing scene's fit meant.
 	self.pass.shadows.apply(target.look.shadow);
+	self.pass.point_shadows.settings = target.look.point_shadow;
 	// The camera stops tracking a node in a scene it is no longer looking at. The
 	// follow names a `NodeId`, and one from the outgoing scene would resolve to
 	// nothing every frame — a camera that silently stopped following rather than
@@ -692,6 +696,12 @@ fn void JsRuntime.set_shadow(&self, ShadowSettings settings)
 {
 	self.pass.shadows.settings = settings;
 	if (self.pass.scene != null) self.pass.scene.look.shadow = settings;
+}
+
+fn void JsRuntime.set_point_shadow(&self, PointShadowSettings settings)
+{
+	self.pass.point_shadows.settings = settings;
+	if (self.pass.scene != null) self.pass.scene.look.point_shadow = settings;
 }
 
 <*
@@ -2608,6 +2618,22 @@ fn void js_clock_rate_get(
 	*out = qjs::number_value(clock.fixed_hz);
 }
 
+fn void js_clock_alpha(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	GameClock* clock = self.clock_or_raise(&js, out);
+	if (clock == null) return;
+	*out = qjs::number_value(clock.fixed_alpha());
+}
+
 <*
  `clockRateSet(hz)` — change what a fixed step is.
 
@@ -3117,6 +3143,46 @@ fn void js_shadow_get(
  Positional for the same reason `shadowGet` is: `api.js` names the fields once,
  at the property, and one array is one host crossing.
 *>
+fn void js_point_shadow_get(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	PointShadowSettings settings = self.pass.point_shadows.settings;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value(settings.enabled ? 1.0 : 0.0));
+	js.set_index(list, 1, qjs::number_value((double)settings.size));
+	js.set_index(list, 2, qjs::number_value((double)settings.bias));
+	js.set_index(list, 3, qjs::number_value((double)settings.intensity));
+	*out = list;
+}
+
+fn void js_point_shadow_set(
+	qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	PointShadowSettings settings;
+	settings.enabled = arg_float(&js, argc, args, 0) != 0.0f;
+	float requested = arg_float(&js, argc, args, 1);
+	uint wanted = requested > 0.0f
+		? (uint)math::clamp(requested, (float)SHADOW_MIN_SIZE, (float)POINT_SHADOW_MAX_SIZE) : 0;
+	uint rounded = wanted > 0 ? SHADOW_MIN_SIZE : 0;
+	while (rounded > 0 && rounded * 2 <= wanted) rounded *= 2;
+	settings.size = rounded;
+	if (rounded > 512)
+	{
+		usz nominal = (usz)rounded * rounded * POINT_SHADOW_LAYERS * 4;
+		@advise("three: lights.shadow.size = %d reserves 42 D32 faces, about %d MiB before allocator alignment; stats().shadowBytes reports the allocation", rounded, nominal / (1024 * 1024));
+	}
+	float bias = arg_float(&js, argc, args, 2);
+	settings.bias = bias > 0.0f ? bias : 0.0f;
+	settings.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+	self.set_point_shadow(settings);
+}
+
 fn void js_shadow_fit(
 	qjs::ContextRef ctx,
 	qjs::Value* this_val,

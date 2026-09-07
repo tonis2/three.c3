@@ -2793,17 +2793,34 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 	foreach (&layer : source.script_layers.layers)
 	{
 		float[4] params = source.layer_params(layer);
+		float[4] base_uv = source.uv_transform_or_identity();
+		gltf::WriteTextureRef layer_map = self.script_layer_texture(source, layer.map_binding);
+		layer_map.scale = {
+			base_uv[0] * layer.uv_scale[0], base_uv[1] * layer.uv_scale[1]
+		};
+		layer_map.offset = {
+			base_uv[2] * layer.uv_scale[0] + layer.uv_offset[0],
+			base_uv[3] * layer.uv_scale[1] + layer.uv_offset[1],
+		};
 
 		gltf::WriteMaterialLayer written = gltf::material_layer(layer.name);
 		written.baseColorFactor = { params[0], params[1], params[2], 1.0 };
 		written.opacity = params[3];
-		written.baseColorTexture = self.script_layer_texture(source, layer.map_binding);
+		written.baseColorTexture = layer_map;
 		written.normalTexture = self.script_layer_texture(source, layer.normal_binding);
 		written.emissiveTexture = self.script_layer_texture(source, layer.emissive_binding);
 		written.metallicRoughnessTexture = self.script_layer_texture(source, layer.mr_binding);
+		written.normalTexture.scale = layer_map.scale;
+		written.normalTexture.offset = layer_map.offset;
+		written.emissiveTexture.scale = layer_map.scale;
+		written.emissiveTexture.offset = layer_map.offset;
+		written.metallicRoughnessTexture.scale = layer_map.scale;
+		written.metallicRoughnessTexture.offset = layer_map.offset;
 		written.metallicFactor = layer.metallic;
 		written.roughnessFactor = layer.roughness;
 		written.heightTexture = self.script_layer_texture(source, layer.height_binding);
+		written.heightTexture.scale = layer_map.scale;
+		written.heightTexture.offset = layer_map.offset;
 		written.bump = { .strength = layer.bump_strength, .distance = layer.bump_distance };
 		written.emissiveFactor = { layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2] };
 		written.blend_mode = (gltf::LayerBlendMode)layer.blend_mode;

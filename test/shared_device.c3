@@ -43,6 +43,7 @@
 module three_tests::device;
 import three;
 import vk;
+import image;
 
 alias HeapAlloc = std::core::mem::alloc::Allocator;
 
@@ -185,15 +186,63 @@ fn void warm_uploads(Slot* slot) @private
 	three::RunResult result = warm.run(`
 		const scene = new three.Scene();
 		scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), new three.MeshBasicMaterial({ color: 0xffffff })));
+		three.lights.add({ position: [2, 2, 2], range: 8, intensity: 1 });
+		three.lights.shadow = { enabled: true, size: 512 };
 		return 1;
 	`);
 	defer result.free();
+	// Hold one array-sized allocation while the renderer creates its own. Other
+	// tests can fragment one warmed page before the lifecycle test is reached, so
+	// warming only one page still made that test the owner of a second process-long
+	// allocator page. Two concurrent arrays pin the actual high-water case while
+	// `real_heap` is active.
+	vk::Image point_reserve = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D)
+		.setFormat(vk::findDepthFormat(features: FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+			| FORMAT_FEATURE_SAMPLED_IMAGE_BIT, device: slot.renderer.gpu.pdevice))
+		.setExtent({ .width = 512, .height = 512, .depth = 1 }).setMipLevels(1).setArrayLayers(42)
+		.setSamples(SAMPLE_COUNT_1_BIT).setTiling(IMAGE_TILING_OPTIMAL)
+		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(slot.renderer.gpu.handle)!!;
+	vk::Memory reserve_memory = vk::create_image_buffer(point_reserve, &slot.renderer.gpu.allocator,
+		MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!!;
+	image::Image point_warm = slot.renderer.capture()!!;
+	point_warm.free();
+	reserve_memory.free();
 
 	// The interface allocates buffers of its own the first time anything draws
 	// one — `cui`'s canvas pass, reached from `three.ui` and from
 	// `three.debug.overlay` alike. `reset` frees the layer, so a test still
 	// starts without one; what has to happen here is the page underneath it.
 	slot.renderer.ui.ensure(&slot.renderer.gpu, &slot.renderer.target)!!;
+}
+
+<*
+ Ensure the shared allocator has two point-array-sized free regions immediately
+ before a lifecycle test. One region may be split by the always-valid fallback;
+ the other remains large enough for the real 42-layer map. Page bookkeeping is
+ process-lived with the shared device, so any new pages must be created on the
+ process allocator rather than attributed to the test that first needs them.
+*>
+fn void reserve_point_shadow_pages(three::Renderer* renderer)
+{
+	HeapAlloc tracked = mem;
+	mem = real_heap;
+	defer mem = tracked;
+
+	vk::Memory[2] reservations;
+	for (uint i = 0; i < 2; i++)
+	{
+		vk::Image reserve = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D)
+			.setFormat(vk::findDepthFormat(features: FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+				| FORMAT_FEATURE_SAMPLED_IMAGE_BIT, device: renderer.gpu.pdevice))
+			.setExtent({ .width = 512, .height = 512, .depth = 1 }).setMipLevels(1).setArrayLayers(42)
+			.setSamples(SAMPLE_COUNT_1_BIT).setTiling(IMAGE_TILING_OPTIMAL)
+			.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
+			.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(renderer.gpu.handle)!!;
+		reservations[i] = vk::create_image_buffer(reserve, &renderer.gpu.allocator,
+			MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!!;
+	}
+	foreach (&reservation : reservations) reservation.free();
 }
 
 <*

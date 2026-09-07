@@ -698,6 +698,8 @@ struct SceneLook
 	Lighting lighting;
 	// `three.light.shadow`, the five settings and none of the device objects.
 	ShadowSettings shadow;
+	// Shared opt-in cube-array settings for every point light in this scene.
+	PointShadowSettings point_shadow;
 	// `scene.background` when it is an image, and `scene.environment` — see
 	// `SkyLook`. Both are counted references and `Scene.free_sky` gives them back.
 	SkyLook sky;
@@ -710,6 +712,7 @@ const SceneLook DEFAULT_LOOK = {
 	.clear = DEFAULT_CLEAR,
 	.lighting = DEFAULT_LIGHTING,
 	.shadow = DEFAULT_SHADOW,
+	.point_shadow = DEFAULT_POINT_SHADOW,
 	.sky = DEFAULT_SKY,
 };
 
@@ -2198,7 +2201,8 @@ fn void Scene.update(
 	float[] margins = { },
 	Matrix4f* light_view_projection = null,
 	InstanceReserve reserve = null,
-	void* reserve_context = null
+	void* reserve_context = null,
+	bool shadow_all = false
 )
 {
 	self.update_world_matrices();
@@ -2221,7 +2225,8 @@ fn void Scene.update(
 		light_view_projection != null ? &light : null,
 		false,
 		reserve,
-		reserve_context
+		reserve_context,
+		shadow_all
 	);
 	// Promoted here rather than inside `build_draw_list`, because this call is what
 	// "a frame happened" means and the other caller is a query. Assigned
@@ -2298,7 +2303,8 @@ fn void Scene.build_draw_list(
 	Frustum* light = null,
 	bool counts_only = false,
 	InstanceReserve reserve = null,
-	void* reserve_context = null
+	void* reserve_context = null,
+	bool shadow_all = false
 )
 {
 	self.draws.clear();
@@ -2353,7 +2359,7 @@ fn void Scene.build_draw_list(
 		// cost nothing: with no frustum and no light there is no box to compute and
 		// no test to run.
 		bool visible = true;
-		if (frustum != null || light != null || sorted)
+		if (frustum != null || light != null || shadow_all || sorted)
 		{
 			// A skinned node is measured by the poses it can reach, not by the pose
 			// it was authored in. The bake unioned every joint matrix of every frame
@@ -2399,7 +2405,7 @@ fn void Scene.build_draw_list(
 			// rejected would put an instance in the array neither pass will read.
 			if (!visible)
 			{
-				bool casts = light != null && !is_transparent && light.contains(box);
+				bool casts = !is_transparent && (shadow_all || (light != null && light.contains(box)));
 				if (!casts)
 				{
 					if (light != null) self.shadow_culled++;

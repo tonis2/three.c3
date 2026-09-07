@@ -581,6 +581,8 @@ struct ScriptLayer
 	// nothing else; a file wants both, so this is where both survive.
 	float bump_strength;
 	float bump_distance;
+	float[2] uv_scale;
+	float[2] uv_offset;
 }
 
 <*

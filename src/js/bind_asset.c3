@@ -1993,7 +1993,12 @@ fn void js_asset_image(
  1  alphaCutoff           5  emissiveFactor g     9  roughness
  2  doubleSided           6  emissiveFactor b    10  normal texture
  3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
- 12  emissive texture
+ 12  emissive texture     13  repeat u            15  offset u
+                          14  repeat v            16  offset v
+
+ The last four are the material's `KHR_texture_transform`, one for every map it
+ has — `texture_transform` in `scene/asset.c3` says why one and not five — and
+ they cross under the names of the two properties they go on.
 
  Reading this uploads the mesh, and every read holds new references, exactly as
  `meshLayers` does: the images exist only once the primitive is on the device,
@@ -2042,6 +2047,10 @@ fn void js_mesh_material(
 	js.set_index(row, 10, layer_texture_value(self, &js, material.normal_texture));
 	js.set_index(row, 11, layer_texture_value(self, &js, material.metallic_roughness_texture));
 	js.set_index(row, 12, layer_texture_value(self, &js, material.emissive_texture));
+	js.set_index(row, 13, qjs::number_value(material.uv_scale[0]));
+	js.set_index(row, 14, qjs::number_value(material.uv_scale[1]));
+	js.set_index(row, 15, qjs::number_value(material.uv_offset[0]));
+	js.set_index(row, 16, qjs::number_value(material.uv_offset[1]));
 	*out = row;
 }
 
@@ -2308,7 +2317,12 @@ fn void js_merge(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value
  are named on the far side, which keeps `gltf.c3l`'s enum the single authority
  for what the ordinals mean.
 
- @return `[maskTexture, [layer...], height, bumpStrength, bumpDistance] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture, metallic, roughness, metallicRoughness, height, bumpStrength, bumpDistance], or null.`
+ A layer's four uv numbers are its `KHR_texture_transform` **relative to the base
+ material's**, which is what `LayeredMaterial` means by `uvScale` and `uvOffset`:
+ the base's own transform is already on `s.uv` by the time a layer's uv is
+ computed. `relative_uv` in `scene/asset.c3` has the arithmetic.
+
+ @return `[maskTexture, [layer...], height, bumpStrength, bumpDistance] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture, metallic, roughness, metallicRoughness, height, bumpStrength, bumpDistance, uvScaleU, uvScaleV, uvOffsetU, uvOffsetV], or null.`
 *>
 fn void js_mesh_layers(
 	qjs::ContextRef ctx,
@@ -2363,6 +2377,10 @@ fn void js_mesh_layers(
 		js.set_index(row, 21, layer_texture_value(self, &js, layer.height_texture));
 		js.set_index(row, 22, qjs::number_value(layer.bump_strength));
 		js.set_index(row, 23, qjs::number_value(layer.bump_distance));
+		js.set_index(row, 24, qjs::number_value(layer.uv_scale[0]));
+		js.set_index(row, 25, qjs::number_value(layer.uv_scale[1]));
+		js.set_index(row, 26, qjs::number_value(layer.uv_offset[0]));
+		js.set_index(row, 27, qjs::number_value(layer.uv_offset[1]));
 		js.set_index(layers, (uint)i, row);
 	}
 

@@ -1717,7 +1717,7 @@ fn void a_vertex_body_moves_geometry_without_moving_the_node() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::MeshPass* pass = &renderer.pass;
-		pass.lighting = { .count = 1, .ambient = 1, .lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {} } };
+		pass.lighting = { .count = 1, .ambient = 1, .lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {}, {}, {}, {}, {} } };
 
 		uint material;
 		@pool()
@@ -1797,7 +1797,7 @@ fn void a_displacement_is_culled_unless_the_material_says_how_far() @test
 	@with_pass(; three::Renderer* renderer)
 	{
 		three::MeshPass* pass = &renderer.pass;
-		pass.lighting = { .count = 1, .ambient = 1, .lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {} } };
+		pass.lighting = { .count = 1, .ambient = 1, .lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {}, {}, {}, {}, {} } };
 		pass.camera.target = { 0, 0, 0 };
 		pass.camera.yaw = 0;
 		pass.camera.pitch = 0;

@@ -32,6 +32,21 @@ import std::math;
 const uint W = 64;
 const uint H = 48;
 
+// Enough raw bytes at the tail is not enough when the binding offset has an
+// alignment requirement. This is the exact 64 MB page shape that used to pass
+// selection and then cross the allocation in vkBindImageMemory.
+fn void allocation_room_includes_alignment_padding() @test
+{
+	test::@check(
+		!vk::allocation_fits(64_000_000, 62_950_000, 1_048_576, 65_536),
+		"a page whose aligned tail is too short was selected"
+	);
+	test::@check(
+		vk::allocation_fits(64_000_000, 62_900_000, 1_048_576, 65_536),
+		"a page with room after alignment was rejected"
+	);
+}
+
 <*
  A headless instance + device, torn down on the way out.
 
@@ -883,4 +898,3 @@ fn void an_empty_phase_costs_a_zero_and_not_the_reading() @test
 		test::@check(t.post < 0.01, "an unposted frame spent %f of %f ms in the post chain", t.post, t.total);
 	};
 }
-

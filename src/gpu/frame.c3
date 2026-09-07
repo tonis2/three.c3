@@ -33,6 +33,7 @@ module three;
 
 import vk;
 import image;
+import std::time;
 
 const uint MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -247,6 +248,10 @@ fn Renderer? Renderer.init(
 	}
 	self.frames.init(&self.gpu, image_count)!;
 	self.timer.init(&self.gpu)!;
+	// Every scene renders into the float post input. The identity tone map is the
+	// ordinary no-post path and performs only the final sRGB encode.
+	self.post.ensure_images(&self.gpu, &self.target, 0)!;
+	self.post.ensure_tonemap(&self.gpu, &self.target)!;
 
 	return *self;
 }
@@ -304,7 +309,7 @@ fn void? Renderer.resize_target(&self, uint width, uint height)
 	self.target = next;
 	self.ui.resize(&self.target);
 
-	if (self.post.active()) self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
+	self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
 }
 
 fn void Renderer.free(&self)
@@ -371,6 +376,11 @@ fn void Renderer.free(&self)
 *>
 fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false)
 {
+	// A shared test/device renderer may predate this frame path, and a resize can
+	// retire A between frames. Make the always-on HDR input and display encoder
+	// present at the recording boundary as well as at normal construction.
+	self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
+	self.post.ensure_tonemap(&self.gpu, &self.target)!;
 	// Read once: `active` must not change between the begin and the end of one
 	// recording, and reading it twice is how that becomes possible.
 	bool posted = self.post.active();
@@ -567,8 +577,9 @@ fn void Renderer.follow_window(&self)
 
  @return `false when nothing was presented (minimised, or the swapchain was rebuilt instead).`
 *>
-fn bool? Renderer.frame(&self)
+fn bool? Renderer.frame(&self, long* wait_ns = null)
 {
+	if (wait_ns != null) *wait_ns = 0;
 	if (!self.windowed) return false;
 
 	self.follow_window();
@@ -584,9 +595,12 @@ fn bool? Renderer.frame(&self)
 	vk::Fence fence        = self.frames.fences[slot];
 	vk::Semaphore acquired = self.frames.image_available[slot];
 
+	Clock waited = clock::now();
 	fence.wait(self.gpu.handle)!;
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 
 	uint index;
+	waited = clock::now();
 	vk::Result acquire = vk::extensions.vkAcquireNextImageKHR(
 		self.gpu.handle,
 		self.viewer.handle,
@@ -595,6 +609,7 @@ fn bool? Renderer.frame(&self)
 		(vk::Fence)null,
 		&index
 	);
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 	// The fence is deliberately still signalled here: nothing was submitted, so
 	// resetting it would deadlock the next frame's wait.
 	if (acquire == ERROR_OUT_OF_DATE_KHR)
@@ -658,7 +673,9 @@ fn bool? Renderer.frame(&self)
 		.setSwapchains({ self.viewer.handle })
 		.setImageIndices({ index });
 
+	waited = clock::now();
 	vk::Result presented = vk::extensions.vkQueuePresentKHR(self.gpu.graphics.handle, &present);
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -686,14 +703,17 @@ fn bool? Renderer.frame(&self)
 
  @return `An Image owning its pixels — free it with Image.free.`
 *>
-fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
+fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long* wait_ns = null)
 {
+	if (wait_ns != null) *wait_ns = 0;
 	vk::Memory readback = self.target.create_readback(&self.gpu)!;
 	defer readback.free();
 
 	uint slot       = self.frames.slot;
 	vk::Fence fence = self.frames.fences[slot];
+	Clock waited = clock::now();
 	fence.wait(self.gpu.handle)!;
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 	fence.reset(self.gpu.handle)!;
 	self.gpu.begin_frame();
 
@@ -711,7 +731,9 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
 
 	// The buffer is host-coherent and the fence covers the copy, so there is
 	// nothing to invalidate and nothing to map — vk::Memory pages stay mapped.
+	waited = clock::now();
 	fence.wait(self.gpu.handle)!;
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 
 	// Collected here rather than left to this slot's next `begin`, which is two
 	// frames away: a caller that captures and then asks what it cost should be
@@ -731,11 +753,14 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem)
  copy each time. It exists rather than `render()` being a no-op so that a scene
  which cannot be drawn says so at the line that asked for it.
 *>
-fn void? Renderer.render_offscreen(&self)
+fn void? Renderer.render_offscreen(&self, long* wait_ns = null)
 {
+	if (wait_ns != null) *wait_ns = 0;
 	uint slot       = self.frames.slot;
 	vk::Fence fence = self.frames.fences[slot];
+	Clock waited = clock::now();
 	fence.wait(self.gpu.handle)!;
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 	fence.reset(self.gpu.handle)!;
 	self.gpu.begin_frame();
 
@@ -753,7 +778,9 @@ fn void? Renderer.render_offscreen(&self)
 	// Waited on here rather than left to the next frame's fence: the instance
 	// buffer for this slot is rewritten on the next record, and it may not be
 	// while the GPU is still reading it.
+	waited = clock::now();
 	fence.wait(self.gpu.handle)!;
+	if (wait_ns != null) *wait_ns += (long)waited.to_now();
 	// The wait is already paid for, so the frame's own timing is free to take —
 	// same argument as in `capture`.
 	self.timer.collect(&self.gpu, slot)!;
@@ -763,9 +790,9 @@ fn void? Renderer.render_offscreen(&self)
 <*
  Renders one frame and writes it to `path` as a PNG.
 *>
-fn void? Renderer.screenshot(&self, String path)
+fn void? Renderer.screenshot(&self, String path, long* wait_ns = null)
 {
-	image::Image shot = self.capture()!;
+	image::Image shot = self.capture(wait_ns: wait_ns)!;
 	defer shot.free();
 	write_png(&shot, path)!;
 }

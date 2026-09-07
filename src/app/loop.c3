@@ -600,13 +600,16 @@ fn void? live(
 			// After `pump` and before the draw: a script that registers a callback
 			// gets its first frame on this iteration, and the frame presented is the
 			// one the callback just built.
+			Clock host_started = clock::now();
 			runtime.tick((double)elapsed_ns / 1_000_000.0, input);
 
 			// Kept running whether or not anything arrived: a window that only
 			// redrew when a tool was called would stop responding between requests,
 			// which reads as a hung application.
 			bool ui_idle   = renderer.ui.idle();
-			bool presented = renderer.frame()!;
+			long wait_ns;
+			bool presented = renderer.frame(&wait_ns)!;
+			runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
 
 			// When the next fetch is allowed to sleep in the kernel. Every term is
 			// something that would be lost by sleeping through it:
@@ -645,7 +648,9 @@ fn void? live(
 				// No window, so no keyboard: the default empty state, and
 				// `three.input.isDown` answers false rather than throwing. A script
 				// written for a window still runs here; it just gets no input.
+				Clock host_started = clock::now();
 				runtime.tick((double)elapsed_ns / 1_000_000.0);
+				runtime.complete_host_frame((long)host_started.to_now());
 			}
 			if (handled == 0)
 			{
@@ -719,6 +724,7 @@ fn void? play_frames(
 	uint shots = 0;
 	for (uint i = 0; i < frames; i++)
 	{
+		Clock host_started = clock::now();
 		runtime.tick((double)i * (double)HEADLESS_FRAME_MS);
 
 		said.clear();
@@ -751,7 +757,9 @@ fn void? play_frames(
 		// reads back, so a frame that is being captured must not also be drawn.
 		if (!shot)
 		{
-			renderer.render_offscreen()!;
+			long wait_ns;
+			renderer.render_offscreen(&wait_ns)!;
+			runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
 			continue;
 		}
 
@@ -759,7 +767,9 @@ fn void? play_frames(
 		// PNG is what was asked for rather than wherever `camera.attach` left it.
 		aim_camera(renderer, camera);
 		String out = frame_path(screenshot, shots);
-		renderer.screenshot(out)!;
+		long wait_ns;
+		renderer.screenshot(out, &wait_ns)!;
+		runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
 		io::printfn("wrote %s (frame %d)", out, i + 1);
 		shots++;
 	}
@@ -870,4 +880,3 @@ fn String frame_path(String pattern, uint index)
 	out.append(pattern[stop..]);
 	return out.str_view();
 }
-

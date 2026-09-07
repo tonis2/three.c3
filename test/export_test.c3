@@ -1880,10 +1880,13 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 						name: 'gravel', map: gravel, mask: 'r', blend: 'multiply', opacity: 0.5,
 						roughness: 0.3, metalness: 0.7, metallicRoughness: surface,
 						height: bumps, bump: { strength: 0.25, distance: 0.08 },
+						uvScale: [2.5, 3.5], uvOffset: [0.125, -0.25],
 					},
 					{ name: 'snow', tint: [0.9, 0.95, 1], mask: 'g', invert: true, blend: 'screen' },
 				],
 			});
+			mat.repeat = [3, 4];
+			mat.offset = [0.2, -0.1];
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
 
 			const report = scene.export("build/export_script_layers.glb");
@@ -1913,6 +1916,8 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 					stack.layers[0].height !== null,
 					round(stack.layers[0].bump.strength), round(stack.layers[0].bump.distance),
 				].join(","),
+				gravelUv: [...stack.layers[0].uvScale, ...stack.layers[0].uvOffset]
+					.map(round).join(","),
 				// The layer that said nothing about either still says nothing on the
 				// way back: glTF writes 1 and 1 for it, and a default is not a
 				// statement.
@@ -1945,6 +1950,8 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 			"and a layer with no map did not acquire one: %s", result.value);
 		test::@check(result.value.contains(`"shared":true`),
 			"the mask both layers read is one texture: %s", result.value);
+		test::@check(result.value.contains(`"gravelUv":"2.5,3.5,0.125,-0.25"`),
+			"the layer's tiling and offset survived the export: %s", result.value);
 
 		// Still a generated shader, so still counted as one. The two numbers
 		// answer different questions and this is the scene where that shows.

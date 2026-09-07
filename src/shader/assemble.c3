@@ -83,7 +83,7 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  that could write `[vk::binding(3, 0)]` itself could collide with the reserved
  names.
 *>
-const uint MATERIAL_BINDING_FIRST = 3;
+const uint MATERIAL_BINDING_FIRST = 4;
 
 // Where a post pass's own samplers begin: after `prev` at 0, `scene` at 1, the
 // frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST`
@@ -123,6 +123,9 @@ const uint SHADOW_BINDING = 1;
 *>
 const uint ENVIRONMENT_BINDING = 2;
 
+// A six-face 2D-array depth sampler reserved for the opt-in point-light shadow pass.
+const uint POINT_SHADOW_BINDING = 3;
+
 <*
  Where the built-in material's other four maps are bound, in `mesh.slang` and
  nowhere else.
@@ -139,10 +142,10 @@ const uint ENVIRONMENT_BINDING = 2;
  make `normal_map` part of the script-facing API. `MeshPass.set_material_slot` is
  the one door, and `MATERIAL_SLOT_*` is what a script names instead.
 *>
-const uint NORMAL_MAP_BINDING              = 3;
-const uint METALNESS_ROUGHNESS_MAP_BINDING = 4;
-const uint OCCLUSION_MAP_BINDING           = 5;
-const uint EMISSIVE_MAP_BINDING            = 6;
+const uint NORMAL_MAP_BINDING              = 4;
+const uint METALNESS_ROUGHNESS_MAP_BINDING = 5;
+const uint OCCLUSION_MAP_BINDING           = 6;
+const uint EMISSIVE_MAP_BINDING            = 7;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the

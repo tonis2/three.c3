@@ -129,6 +129,11 @@ struct GpuLayer
 	// the two numbers the file had.
 	float bump_strength;
 	float bump_distance;
+	// This layer's `KHR_texture_transform`, **relative to the base material's** —
+	// `relative_uv` has why, and it is the whole of why a layer tiles right on a
+	// material that already tiles. Scale 1 offset 0 for a layer that states none.
+	float[2] uv_scale;
+	float[2] uv_offset;
 	// The extension's `LayerBlendMode` and `LayerMaskChannel` ordinals, passed
 	// through to the JS side as numbers and turned into names there. Kept as the
 	// enum's own numbering rather than re-spelled, so the two ends cannot drift.
@@ -238,6 +243,13 @@ struct GpuMaterial
 	float emissive_strength;
 	float metallic;
 	float roughness;
+
+	// The one `KHR_texture_transform` every map of this material shares, as
+	// `material.repeat` and `material.offset`. `material_uv_transform` has why
+	// there is one rather than five; scale 1 offset 0 is the identity either
+	// setter would take, and is what a file that wrote none arrives with.
+	float[2] uv_scale;
+	float[2] uv_offset;
 }
 
 <*
@@ -3252,12 +3264,12 @@ fn GpuMesh? Assets.upload_primitive(
 				// **Gated on uvs for the same reason the base colour map is.** Every
 				// image in a stack is sampled by uv, so a mesh without them would
 				// hold references to pictures nothing can read.
-				self.load_material_layers(gpu, stream, images, material, &out.layers)!;
+				self.load_material_layers(gpu, stream, images, material, mesh.name, &out.layers)!;
 			}
 			// **Not gated on uvs**, unlike the maps: the factors and the alpha mode
 			// are numbers, and a mesh with no uvs still has an alpha mode. The
 			// images inside it are, and `load_material_maps` is where that happens.
-			self.load_material_record(gpu, stream, images, material, out.has_uvs, &out.material)!;
+			self.load_material_record(gpu, stream, images, material, out.has_uvs, mesh.name, &out.material)!;
 		}
 	}
 
@@ -3529,6 +3541,161 @@ fn int? Assets.load_material_texture(
 }
 
 <*
+ One `KHR_texture_transform`, as this renderer can put it on a uv.
+
+ `rotation` and `mixed` are carried only as far as `warn_uv_transform` — neither
+ has a slot on the far side, and a field the renderer stores and never evaluates
+ is what `GpuLayer`'s header says is worse than an absence.
+*>
+struct UvTransform @local
+{
+	float[2] scale;
+	float[2] offset;
+	float rotation;
+	// Two maps of one material, or of one layer, disagreed about their transform.
+	bool mixed;
+	// A map named an image and so had a transform to state, even if what it stated
+	// was the identity. False means the file said nothing here, which is not the
+	// same answer once a layer's transform is measured against its base's.
+	bool stated;
+}
+
+<*
+ The transform a set of maps is drawn at, and whether they agreed on it.
+
+ **There is one uv per material here and one per layer**, and glTF puts a
+ transform on every `textureInfo` separately — so the maps have to agree and this
+ is where that is decided. The base colour map's is the answer, because it is the
+ one map every material has; the rest are read only to notice that they differed.
+ An exporter writes the Mapping node once per layer, so agreeing is what a file
+ actually does.
+
+ A slot naming no image states nothing. glTF's default is scale 1 offset 0, so an
+ absent map would otherwise outvote the one map a material has.
+
+ A scale of zero is read as no transform at all, for `Material.uv_transform`'s
+ reason: it collapses the whole surface onto one texel, which is never what
+ anybody meant and is exactly what an unset field looks like.
+*>
+fn UvTransform texture_transform(gltf::TextureInfo[] maps) @local
+{
+	UvTransform out = { .scale = { 1, 1 }, .offset = { 0, 0 } };
+	bool found = false;
+	foreach (map : maps)
+	{
+		if (map.source < 0) continue;
+		if (map.scale.x == 0 || map.scale.y == 0) continue;
+		if (!found)
+		{
+			found = true;
+			out.stated = true;
+			out.scale = { map.scale.x, map.scale.y };
+			out.offset = { map.offset.x, map.offset.y };
+			out.rotation = map.rotation;
+			continue;
+		}
+		if (map.scale.x != out.scale[0] || map.scale.y != out.scale[1]) out.mixed = true;
+		if (map.offset.x != out.offset[0] || map.offset.y != out.offset[1]) out.mixed = true;
+		if (map.rotation != out.rotation) out.mixed = true;
+	}
+	return out;
+}
+
+// The core material's five maps plus the stack's base height map, which is the
+// sixth: the extension puts it there because core glTF has nowhere for one, and
+// it is sampled at the same uv as the other five.
+fn UvTransform material_uv_transform(gltf::Material material) @local
+{
+	gltf::TextureInfo[6] maps;
+	usz count = 0;
+	maps[count++] = material.baseColorTexture;
+	maps[count++] = material.normalTexture;
+	maps[count++] = material.metallicRoughnessTexture;
+	maps[count++] = material.occlusionTexture;
+	maps[count++] = material.emissiveTexture;
+	if (material.layers_ext.present) maps[count++] = material.layers_ext.heightTexture;
+	return texture_transform(maps[0:count]);
+}
+
+// One layer's six. The mask is in here with the rest even though it is sampled at
+// `s.mesh_uv` rather than at the layer's own uv — a mask that disagrees with the
+// maps beside it is still a file saying two things, and the JS side is where the
+// mask's uv is decided.
+fn UvTransform layer_uv_transform(gltf::MaterialLayer layer) @local
+{
+	gltf::TextureInfo[6] maps = {
+		layer.baseColorTexture,
+		layer.normalTexture,
+		layer.metallicRoughnessTexture,
+		layer.emissiveTexture,
+		layer.heightTexture,
+		layer.mask.texture,
+	};
+	return texture_transform(maps[..]);
+}
+
+<*
+ A layer's transform expressed as the step from the base material's.
+
+ **The base's transform is already on the uv a layer starts from.** It crosses as
+ `material.repeat` and `material.offset`, and the fragment stage applies those
+ before the generated body runs (`shaders/material.slang`), so `layers.js` builds
+ a layer's uv as `s.uv * uvScale + uvOffset` over a uv that is already
+ `mesh_uv * base.scale + base.offset`. Handing a layer the file's own numbers
+ there would tile it by the base's scale a second time — a ground whose base
+ tiles at 3 and whose gravel says 7 would draw its gravel at 21.
+
+ So what a layer needs is the difference, and it is the one that makes the two
+ compositions equal: `scale / base.scale`, and the offset that lands on the same
+ texel. A stack whose layers all match its base then states nothing, which is
+ the same answer as before this existed.
+*>
+fn UvTransform relative_uv(UvTransform layer, UvTransform base) @local
+{
+	UvTransform out = layer;
+	for (usz i = 0; i < 2; i++)
+	{
+		out.scale[i] = layer.scale[i] / base.scale[i];
+		out.offset[i] = layer.offset[i] - base.offset[i] * out.scale[i];
+	}
+	out.rotation = layer.rotation - base.rotation;
+	return out;
+}
+
+<*
+ What the file asked for and this renderer will not draw, said once, by name.
+
+ Both are silent failures otherwise. A rotation drops and the surface draws at
+ the right size and the wrong angle; maps that disagree draw at the base colour
+ map's size and light at somebody else's. Neither looks like a load error, and
+ both are fixed in the file — which names the mesh and names the layer.
+*>
+fn void warn_uv_transform(UvTransform uv, String mesh, String layer) @local
+{
+	if (!uv.mixed && uv.rotation == 0) return;
+
+	String where = layer.len > 0
+		? string::tformat(`"%s", layer "%s"`, mesh, layer)
+		: string::tformat(`"%s"`, mesh);
+	if (uv.mixed)
+	{
+		io::printfn(
+			"three: %s gives its maps more than one KHR_texture_transform, and there is one uv "
+				"per material here — they all draw at the base colour map's",
+			where
+		);
+	}
+	if (uv.rotation != 0)
+	{
+		io::printfn(
+			"three: %s asks for a KHR_texture_transform rotation, which nothing here draws — "
+				"its maps are scaled and offset but not turned",
+			where
+		);
+	}
+}
+
+<*
  Resolve a material's `CUSTOM_materials_layers` stack to texture slots.
 
  Does nothing at all — not even an allocation — for a material without the
@@ -3565,6 +3732,14 @@ fn int? Assets.load_material_texture(
 
  Fails with whatever an upload failed with. A material without the extension
  cannot fail, because it does nothing.
+
+ ## The tiling
+
+ Each layer carries its `KHR_texture_transform` as the step from the base
+ material's — `relative_uv` has why the file's own numbers would tile twice — and
+ it reaches `layers.js` as that layer's `uvScale` and `uvOffset`.
+
+ @param named : `The mesh's name, read only by a warning about what the file asked for and this cannot draw.`
 *>
 fn void? Assets.load_material_layers(
 	&self,
@@ -3572,10 +3747,14 @@ fn void? Assets.load_material_layers(
 	gltf::GltfStream* stream,
 	AssetImages* images,
 	gltf::Material material,
+	String named,
 	GpuLayers* out
 )
 {
 	if (!material.has_layers()) return;
+
+	// The uv every layer's own transform is measured against — see `relative_uv`.
+	UvTransform base = material_uv_transform(material);
 
 	out.present = true;
 	out.mask_texture = -1;
@@ -3597,7 +3776,18 @@ fn void? Assets.load_material_layers(
 
 	foreach (source : material.layers_ext.layers)
 	{
+		// A layer that names no image at all states no transform, and the step from
+		// the base's to nothing is not `1 / base` — it is nothing. The two draw the
+		// same (a layer with no map samples nothing), and this is the one that reads
+		// back as what the file said.
+		UvTransform own = layer_uv_transform(source);
+		UvTransform uv = { .scale = { 1, 1 } };
+		if (own.stated) uv = relative_uv(own, base);
+		warn_uv_transform(uv, named, source.name);
+
 		GpuLayer layer = {
+			.uv_scale = uv.scale,
+			.uv_offset = uv.offset,
 			.base_color = {
 				source.baseColorFactor.x,
 				source.baseColorFactor.y,
@@ -3781,7 +3971,12 @@ fn void GpuMesh.release_material(&self, Assets* assets, Gpu* gpu)
  `GpuMaterial`'s header has what each field is for and why the colourspaces are
  the load-bearing part.
 
+ `KHR_texture_transform` crosses too, as `material.repeat` and `material.offset`
+ — one per material rather than one per map, which is `texture_transform`'s rule.
+ It crosses whether or not the mesh has uvs, being numbers.
+
  @param with_uvs : `False for a mesh with no texture coordinates. The factors still cross; the images do not, because nothing could sample them.`
+ @param named : `The mesh's name, read only by a warning about what the file asked for and this cannot draw.`
 *>
 fn void? Assets.load_material_record(
 	&self,
@@ -3790,11 +3985,17 @@ fn void? Assets.load_material_record(
 	AssetImages* images,
 	gltf::Material material,
 	bool with_uvs,
+	String named,
 	GpuMaterial* out
 )
 {
+	UvTransform uv = material_uv_transform(material);
+	warn_uv_transform(uv, named, "");
+
 	*out = {
 		.present = true,
+		.uv_scale = uv.scale,
+		.uv_offset = uv.offset,
 		.alpha_mode = (uint)material.alphaMode.ordinal,
 		.alpha_cutoff = material.alphaCutOff,
 		.double_sided = material.doubleSided,
