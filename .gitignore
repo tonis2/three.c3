@@ -8,7 +8,7 @@
 *.elf
 .claude
 .vscode
-
+.codex
 node_modules
 
 # Linker output
