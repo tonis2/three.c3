@@ -106,7 +106,7 @@ fn void lit_plane(three::Renderer* renderer, uint material)
 	renderer.pass.lighting = {
 		.count = 1,
 		.ambient = 0,
-		.lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+		.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
 	};
 }
 

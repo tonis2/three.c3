@@ -109,7 +109,7 @@ fn three::NodeId lit_plane(three::Renderer* renderer, uint material)
 	renderer.pass.lighting = {
 		.count = 1,
 		.ambient = 0,
-		.lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+		.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
 	};
 	return node;
 }
@@ -424,7 +424,7 @@ fn void two_variants_of_one_mesh_are_one_draw_call() @test
 		renderer.pass.lighting = {
 			.count = 1,
 			.ambient = 0,
-			.lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, { }, { }, { }, { }, { }, { }, { } },
+			.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
 		};
 
 		char[3] left  = at(renderer, 0.3f, 0.5f);

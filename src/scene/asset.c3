@@ -476,6 +476,12 @@ struct AssetLight
 
 	Vec3 position;
 	Vec3 direction;
+	Vec3 right;
+	Vec3 up;
+	uint area_shape;
+	float width;
+	float height;
+	float spread;
 
 	// The glTF node this light hangs on, so a script can find the same node in an
 	// instantiated tree.
@@ -2510,10 +2516,11 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 {
 	sz lights = stream.gltf.lights.len();
+	sz area_lights = stream.gltf.area_lights.len();
 	sz cameras = stream.gltf.cameras.len();
-	if (lights == 0 && cameras == 0) return;
+	if (lights == 0 && area_lights == 0 && cameras == 0) return;
 
-	if (lights > 0) asset.lights.init(mem, lights);
+	if (lights + area_lights > 0) asset.lights.init(mem, lights + area_lights);
 	if (cameras > 0) asset.cameras.init(mem, cameras);
 
 	Vec3 middle = (asset.bounds.min + asset.bounds.max) * 0.5f;
@@ -2521,8 +2528,9 @@ fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 	foreach (&source : stream.gltf.nodes)
 	{
 		bool has_light = source.has_light() && source.light < (int)lights;
+		bool has_area_light = source.area_light >= 0 && source.area_light < (int)area_lights;
 		bool has_camera = source.camera >= 0 && source.camera < (int)cameras;
-		if (!has_light && !has_camera) continue;
+		if (!has_light && !has_area_light && !has_camera) continue;
 
 		Matrix4f world = source.global_matrix();
 		Vec3 place = { world.m[12], world.m[13], world.m[14] };
@@ -2530,6 +2538,7 @@ fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 		// node is a heading, not a size.
 		Vec3 forward = unit((Vec3) { -world.m[8], -world.m[9], -world.m[10] }, (Vec3) { 0, 0, -1 });
 		Vec3 upward = unit((Vec3) { world.m[4], world.m[5], world.m[6] }, (Vec3) { 0, 1, 0 });
+		Vec3 right = unit((Vec3) { world.m[0], world.m[1], world.m[2] }, (Vec3) { 1, 0, 0 });
 
 		if (has_light)
 		{
@@ -2543,6 +2552,28 @@ fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 				.outer_cone = lamp.outer_cone_angle,
 				.position = place,
 				.direction = forward,
+				.gltf_node = (int)source.index,
+			};
+			if (source.name.len > 0) light.name = source.name.copy(mem);
+			asset.lights.push(light);
+		}
+		if (has_area_light)
+		{
+			gltf::AreaLight* lamp = &stream.gltf.area_lights[source.area_light];
+			float sx = ((Vec3) { world.m[0], world.m[1], world.m[2] }).length();
+			float sy = ((Vec3) { world.m[4], world.m[5], world.m[6] }).length();
+			AssetLight light = {
+				.kind = 3u + (uint)lamp.shape.ordinal,
+				.color = lamp.color,
+				.intensity = lamp.power_watts,
+				.position = place,
+				.direction = forward,
+				.right = right,
+				.up = upward,
+				.area_shape = (uint)lamp.shape.ordinal,
+				.width = lamp.width * sx,
+				.height = lamp.height * sy,
+				.spread = lamp.spread,
 				.gltf_node = (int)source.index,
 			};
 			if (source.name.len > 0) light.name = source.name.copy(mem);

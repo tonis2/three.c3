@@ -2301,6 +2301,43 @@ fn void a_point_light_is_a_place_in_the_file() @test
 	};
 }
 
+fn void an_area_light_round_trips_watts_shape_and_basis() @test
+{
+	String path = "build/export_area_light.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult written = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.add({ position: [2, 3, 4], shape: 'ellipse', width: 6, height: 2,
+				right: [0, 0, 1], up: [0, 1, 0], color: 0x80c0ff, intensity: 500 });
+			scene.export("build/export_area_light.glb");
+		`);
+		defer written.free();
+		test::@check(written.ok, "the area export succeeded: %s", written.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"CUSTOM_lights_area"`), "the private extension is declared: %s", json);
+		test::@check(json.contains(`"shape":"ellipse"`) && json.contains(`"powerWatts":500`),
+			"shape and unconverted watts cross: %s", json);
+		test::@check(json.contains(`"width":6`) && json.contains(`"height":2`),
+			"both full dimensions cross: %s", json);
+
+		three::RunResult read = run.run(`
+			const back = three.load("build/export_area_light.glb").lights.find(l => l.powerWatts !== undefined);
+			const q = x => Math.round(x * 1000) / 1000;
+			return [back.type, ...[back.powerWatts, back.width, back.height,
+				...back.node.position, ...back.node.right, ...back.node.up].map(q)].join(',');
+		`);
+		defer read.free();
+		test::@check(read.ok, "the exported area reads back: %s", read.error);
+		test::@check(read.value == `"ellipse,500,6,2,2,3,4,0,0,1,0,1,0"`,
+			"placement and oriented footprint survive: %s", read.value);
+	};
+}
+
 <*
  The lights and the camera come back out of the file.
 

@@ -39,6 +39,7 @@ module three;
 const String MARKER_UNIFORMS @private = "//@uniforms";
 const String MARKER_ROWS @private     = "//@rows";
 const String MARKER_DEFINES @private  = "//@defines";
+const String MARKER_FEATURES @private = "//@features";
 // The line that turns `material.slang` into its unlit, uv-space variant. Replaced
 // by nothing at all when nothing asked for a bake, so an ordinary material's
 // generated source is what it was before the exporter could bake — the same rule
@@ -83,7 +84,7 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
  that could write `[vk::binding(3, 0)]` itself could collide with the reserved
  names.
 *>
-const uint MATERIAL_BINDING_FIRST = 4;
+const uint MATERIAL_BINDING_FIRST = 5;
 
 // Where a post pass's own samplers begin: after `prev` at 0, `scene` at 1, the
 // frame's depth buffer at 2 and `tap_image` at 3 — see `MATERIAL_BINDING_FIRST`
@@ -125,6 +126,8 @@ const uint ENVIRONMENT_BINDING = 2;
 
 // A six-face 2D-array depth sampler reserved for the opt-in point-light shadow pass.
 const uint POINT_SHADOW_BINDING = 3;
+const uint AMBIENT_OCCLUSION_BINDING = 4;
+const uint SHADOW_ATLAS_BINDING = 17;
 
 <*
  Where the built-in material's other four maps are bound, in `mesh.slang` and
@@ -142,10 +145,10 @@ const uint POINT_SHADOW_BINDING = 3;
  make `normal_map` part of the script-facing API. `MeshPass.set_material_slot` is
  the one door, and `MATERIAL_SLOT_*` is what a script names instead.
 *>
-const uint NORMAL_MAP_BINDING              = 4;
-const uint METALNESS_ROUGHNESS_MAP_BINDING = 5;
-const uint OCCLUSION_MAP_BINDING           = 6;
-const uint EMISSIVE_MAP_BINDING            = 7;
+const uint NORMAL_MAP_BINDING              = 5;
+const uint METALNESS_ROUGHNESS_MAP_BINDING = 6;
+const uint OCCLUSION_MAP_BINDING           = 7;
+const uint EMISSIVE_MAP_BINDING            = 8;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the
@@ -379,6 +382,17 @@ fn String? assemble_shader(
 				out.append_string("#define THREE_BAKE 1");
 				out.append_char('\n');
 				physical++;
+				continue;
+			}
+			if (marker == MARKER_FEATURES)
+			{
+				if (template_name == MATERIAL_TEMPLATE
+					&& (textures.len == MATERIAL_TEXTURE_LIMIT || vertex.len > 0))
+				{
+					out.append_string("#define THREE_NO_AO 1");
+					out.append_char('\n');
+					physical++;
+				}
 				continue;
 			}
 			if (marker == MARKER_TABLE)

@@ -638,15 +638,21 @@ export class Asset {
 		if (!this._lights) {
 			H.checkAsset(this._a, this._g);
 			this._lights = H.assetLights(this._a, this._g).map((row) => {
-				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node] = row;
+				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node,
+					areaShape, width, height, spread, rx, ry, rz, ux, uy, uz] = row;
 				const light = {
 					name,
-					type: LIGHT_BY_ORDINAL[kind] || 'point',
+					type: kind >= 3 ? ['square', 'rectangle', 'disk', 'ellipse'][areaShape] : (LIGHT_BY_ORDINAL[kind] || 'point'),
 					color: [r, g, b],
 					intensity,
 					range,
 					node: { index: node, position: [px, py, pz], direction: [dx, dy, dz] },
 				};
+				if (kind >= 3) {
+					light.powerWatts = intensity;
+					light.width = width; light.height = height; light.spread = spread;
+					light.node.right = [rx, ry, rz]; light.node.up = [ux, uy, uz];
+				}
 				if (light.type === 'spot') light.cone = [inner, outer];
 				return light;
 			});
@@ -1034,7 +1040,7 @@ export class Asset {
 	// the direction the light travels, so the one negation in the importer is
 	// here.
 	//
-	// **The remaining slots go to the point lights nearest the file's camera**,
+	// **Local lights are ordered nearest the file's camera**,
 	// or nearest the origin when the file has none. Three slots and six lanterns
 	// is the ordinary case for a level, and "nearest the shot" is the only
 	// ordering that puts the ones you can see in them. A spot light competes for
@@ -1078,7 +1084,30 @@ export class Asset {
 		const room = three.lights.max - 1;
 		const lit = near.slice(0, room);
 		for (const point of lit) {
+			if (point.type === 'square' || point.type === 'rectangle' || point.type === 'disk' || point.type === 'ellipse') {
+				let right = point.node.right.slice(), up = point.node.up.slice();
+				const emitted = [
+					-(right[1]*up[2]-right[2]*up[1]),
+					-(right[2]*up[0]-right[0]*up[2]),
+					-(right[0]*up[1]-right[1]*up[0]),
+				];
+				if (emitted[0]*point.node.direction[0]+emitted[1]*point.node.direction[1]+emitted[2]*point.node.direction[2] < 0)
+					right = right.map((v) => -v);
+				const power = point.powerWatts;
+				three.lights.add({ position: point.node.position, shape: point.type,
+					right, up, width: point.width, height: point.height,
+					range: point.range > 0 ? point.range : Math.sqrt(power / LIGHT_THRESHOLD),
+					color: point.color, intensity: power });
+				continue;
+			}
 			const intensity = point.intensity * POINT_FROM_WATTS;
+			if (point.type === 'spot') {
+				three.lights.add({ position: point.node.position, shape: 'spot', direction: point.node.direction,
+					innerAngle: point.cone[0], outerAngle: point.cone[1],
+					range: point.range > 0 ? point.range : Math.sqrt(intensity / LIGHT_THRESHOLD),
+					color: point.color, intensity });
+				continue;
+			}
 			three.lights.add({
 				position: point.node.position,
 				// The file's own reach, or the distance Blender would have stopped

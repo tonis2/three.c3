@@ -177,8 +177,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "clockAdvance", &js_clock_advance, 1);
 	self.bind(host, "lightCount", &js_light_count, 0);
 	self.bind(host, "lightGet", &js_light_get, 1);
+	self.bind(host, "lightIndex", &js_light_index, 1);
 	self.bind(host, "lightSet", &js_light_set, 8);
-	self.bind(host, "lightAdd", &js_light_add, 7);
+	self.bind(host, "lightAdd", &js_light_add, 17);
 	self.bind(host, "lightRemove", &js_light_remove, 1);
 	self.bind(host, "ambientGet", &js_ambient_get, 0);
 	self.bind(host, "ambientSet", &js_ambient_set, 1);
@@ -188,6 +189,10 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "shadowSet", &js_shadow_set, 6);
 	self.bind(host, "pointShadowGet", &js_point_shadow_get, 0);
 	self.bind(host, "pointShadowSet", &js_point_shadow_set, 4);
+	self.bind(host, "shadowBudgetGet", &js_shadow_budget_get, 0);
+	self.bind(host, "shadowBudgetSet", &js_shadow_budget_set, 5);
+	self.bind(host, "occlusionGet", &js_occlusion_get, 0);
+	self.bind(host, "occlusionSet", &js_occlusion_set, 4);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -666,7 +671,9 @@ fn void JsRuntime.activate_scene(&self, Scene* target)
 	// The image and the pipeline are **not** freed — see `ShadowMap.apply`, which
 	// keeps them and forgets only what the outgoing scene's fit meant.
 	self.pass.shadows.apply(target.look.shadow);
-	self.pass.point_shadows.settings = target.look.point_shadow;
+	self.pass.point_shadows.apply(target.look.point_shadow);
+	self.pass.shadow_view_set.budget = target.look.shadow_budget;
+	self.pass.ambient_occlusion.apply(target.look.ambient_occlusion);
 	// The camera stops tracking a node in a scene it is no longer looking at. The
 	// follow names a `NodeId`, and one from the outgoing scene would resolve to
 	// nothing every frame — a camera that silently stopped following rather than
@@ -702,6 +709,44 @@ fn void JsRuntime.set_point_shadow(&self, PointShadowSettings settings)
 {
 	self.pass.point_shadows.settings = settings;
 	if (self.pass.scene != null) self.pass.scene.look.point_shadow = settings;
+}
+
+fn void JsRuntime.set_shadow_budget(&self, ShadowBudget budget)
+{
+	self.pass.shadow_view_set.budget = budget;
+	if (self.pass.scene != null) self.pass.scene.look.shadow_budget = budget;
+}
+
+fn void JsRuntime.set_ambient_occlusion(&self, AmbientOcclusionSettings settings)
+{
+	self.pass.ambient_occlusion.settings = settings;
+	if (self.pass.scene != null) self.pass.scene.look.ambient_occlusion = settings;
+}
+
+fn void js_occlusion_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	AmbientOcclusionSettings s = self.pass.ambient_occlusion.settings;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value(s.enabled ? 1 : 0));
+	js.set_index(list, 1, qjs::number_value(s.radius));
+	js.set_index(list, 2, qjs::number_value(s.intensity));
+	js.set_index(list, 3, qjs::number_value(s.bias));
+	*out = list;
+}
+
+fn void js_occlusion_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	AmbientOcclusionSettings s = {
+		.enabled = arg_float(&js, argc, args, 0) != 0,
+		.radius = arg_float(&js, argc, args, 1),
+		.intensity = arg_float(&js, argc, args, 2),
+		.bias = arg_float(&js, argc, args, 3),
+	};
+	self.set_ambient_occlusion(s);
 }
 
 <*
@@ -1803,9 +1848,12 @@ fn void js_stats(
 	// All four are process-wide rather than per scene, including when this call
 	// names a scene that is not the rendered one.
 	js.set_property(object, "shadowBytes", qjs::number_value((double)stats.shadow_bytes));
+	js.set_property(object, "occlusionBytes", qjs::number_value((double)stats.occlusion_bytes));
 	js.set_property(object, "targetBytes", qjs::number_value((double)stats.target_bytes));
 	js.set_property(object, "postBytes", qjs::number_value((double)stats.post_bytes));
 	js.set_property(object, "geometryBytes", qjs::number_value((double)stats.geometry_bytes));
+	js.set_property(object, "clusterBytes", qjs::number_value((double)stats.cluster_bytes));
+	js.set_property(object, "clusterOverflow", qjs::int_value((int)stats.cluster_overflow));
 	// The draws the shadow pass made last frame, which is the only place a script
 	// can see that turning shadows on roughly doubled the frame's draw calls —
 	// `drawCalls` above counts the scene pass and always has. Zero with shadows
@@ -1816,6 +1864,11 @@ fn void js_stats(
 	// the next, which is what marking things static is for. See
 	// `SceneStats.shadow_static_draws`.
 	js.set_property(object, "shadowStaticDraws", qjs::int_value((int)stats.shadow_static_draws));
+	js.set_property(object, "shadowViews", qjs::int_value((int)stats.shadow_views));
+	js.set_property(object, "shadowRejected", qjs::int_value((int)stats.shadow_rejected));
+	js.set_property(object, "shadowUpdates", qjs::int_value((int)stats.shadow_updates));
+	js.set_property(object, "shadowUpdateTexels", qjs::number_value((double)stats.shadow_update_texels));
+	js.set_property(object, "shadowDeferred", qjs::int_value((int)stats.shadow_deferred));
 	// Whether anything in the scene has asked for a cut-out shadow — §28. False
 	// until the first frame a `material.alphaTest` caster is drawn, and true from
 	// then on: it reports a pipeline that exists, not one that was used this frame.
@@ -2800,7 +2853,21 @@ fn void js_light_get(
 	// The eighth: the range, 0 for a directional light. Last so that every reader
 	// written when there were seven still reads the seven it knows.
 	js.set_index(list, 7, qjs::number_value(light.direction[3]));
+	js.set_index(list, 8, qjs::number_value((double)light.meta[0]));
 	*out = list;
+}
+
+fn void js_light_index(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	uint id = (uint)arg_int(&js, argc, args, 0);
+	for (uint i = 0; i < self.pass.lighting.count; i++)
+	{
+		if (self.pass.lighting.lights[i].meta[0] == id) { *out = qjs::number_value(i); return; }
+	}
+	*out = qjs::number_value(-1);
 }
 
 <*
@@ -2809,18 +2876,16 @@ fn void js_light_get(
  `range` is optional and 0 — a directional light — is what its absence means, so
  every caller written before point lights existed still sets the light it set.
 
- ## Why there is a list of four and why none of them is an Object3D
+ ## Why lights are not Object3Ds
 
- `render/pass.c3` ships four `Light`s in `FrameBlock` and the shading shaders loop
- over as many as `lighting.y` says are lit. Four because the fifth is the trigger
- for clustered forward — `plan.md` §19 — and one was the whole model until this
- existed, which cost every scene that wanted a fill light a second material.
+ `render/pass.c3` uploads the registry and clustered shading reads its local
+ subset. The registry stays separate from the scene graph.
 
  Three.js's answer is `scene.add(new THREE.DirectionalLight(...))`, and this is
  still deliberately not that. A light here is not in the graph: it has no
  position, nothing can be parented to it, and `scene.remove` does not reach it.
- Putting it in the graph would promise all three. `three.lights` is a list of four
- slots and says so.
+ Putting it in the graph would promise all three. `three.lights` is a packed
+ registry and says so.
 
  **Only light zero casts a shadow**, because only light zero is what the shadow
  map was fitted around. `Light` has the price of the second one.
@@ -2851,6 +2916,14 @@ fn void js_light_set(
 
 	Light light;
 	if (!read_light(&js, argc, args, 1, &light, out)) return;
+	Light previous = self.pass.lighting.lights[index];
+	light.meta = previous.meta;
+	if (light.direction[3] == 0.0f) light.meta[2] = 0;
+	if (light.meta[2] >= 2)
+	{
+		light.area_right = previous.area_right;
+		light.area_up = previous.area_up;
+	}
 
 	// **Light zero is a direction and stays one.** It is the light the shadow map
 	// is fitted around, and the fit takes a direction — `MeshPass.plan_shadow`
@@ -2862,7 +2935,7 @@ fn void js_light_set(
 	if (index == 0 && light.direction[3] > 0.0f)
 	{
 		*out = js.raise(
-			"three.lights[0] is the sun the shadow map is fitted around and is a direction — a point light goes in one of the other three slots"
+			"three.lights[0] is the sun and is a direction — a local light goes in another registry slot"
 		);
 		return;
 	}
@@ -2877,7 +2950,7 @@ fn void js_light_set(
  whose index it answers with. `range` above 0 makes it a point light standing at
  `x, y, z`.
 
- Refused rather than silently dropped once four are lit. A fifth light that did
+ Refused rather than silently dropped once the registry ceiling is reached. A light that did
  nothing would be a scene lit differently from the one the script describes, with
  nothing anywhere saying which light went missing.
 *>
@@ -2908,6 +2981,9 @@ fn void js_light_add(
 	if (!read_light(&js, argc, args, 0, &light, out)) return;
 
 	Lighting lighting = self.pass.lighting;
+	light.meta[0] = lighting.next_light_id++;
+	light.meta[1] = 0xffffffff;
+	if (light.meta[2] < 2) light.meta[2] = light.direction[3] > 0.0f ? 1 : 0;
 	lighting.lights[lighting.count] = light;
 	lighting.count++;
 	self.set_lighting(lighting);
@@ -2996,6 +3072,15 @@ fn bool read_light(qjs::Context* js, int argc, qjs::Value* args, int at, Light* 
 			math::max(arg_float(js, argc, args, at + 6), 0.0f),
 		},
 	};
+	uint kind = (uint)math::max(arg_int(js, argc, args, at + 8), 0);
+	if (kind >= 2)
+	{
+		light.meta[2] = kind;
+		light.area_right = { arg_float(js, argc, args, at + 9), arg_float(js, argc, args, at + 10),
+			arg_float(js, argc, args, at + 11), math::max(arg_float(js, argc, args, at + 12), 0.0f) };
+		light.area_up = { arg_float(js, argc, args, at + 13), arg_float(js, argc, args, at + 14),
+			arg_float(js, argc, args, at + 15), math::max(arg_float(js, argc, args, at + 16), 0.0f) };
+	}
 	return true;
 }
 
@@ -3174,13 +3259,50 @@ fn void js_point_shadow_set(
 	settings.size = rounded;
 	if (rounded > 512)
 	{
-		usz nominal = (usz)rounded * rounded * POINT_SHADOW_LAYERS * 4;
-		@advise("three: lights.shadow.size = %d reserves 42 D32 faces, about %d MiB before allocator alignment; stats().shadowBytes reports the allocation", rounded, nominal / (1024 * 1024));
+		@advise("three: lights.shadow.size = %d requests shared atlas tiles (six per point light); three.shadows.budget limits residency and stats().shadowBytes reports allocation", rounded);
 	}
 	float bias = arg_float(&js, argc, args, 2);
 	settings.bias = bias > 0.0f ? bias : 0.0f;
 	settings.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
 	self.set_point_shadow(settings);
+}
+
+fn void js_shadow_budget_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	ShadowBudget budget = self.pass.shadow_view_set.budget;
+	if (budget.max_views == 0) budget = DEFAULT_SHADOW_BUDGET;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value(budget.max_views));
+	js.set_index(list, 1, qjs::number_value((double)budget.max_texels));
+	js.set_index(list, 2, qjs::number_value((double)budget.max_bytes));
+	js.set_index(list, 3, qjs::number_value(budget.max_updates));
+	js.set_index(list, 4, qjs::number_value((double)budget.max_update_texels));
+	*out = list;
+}
+
+fn void js_shadow_budget_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	int views = arg_int(&js, argc, args, 0);
+	int texels = arg_int(&js, argc, args, 1);
+	int bytes = arg_int(&js, argc, args, 2);
+	int updates = arg_int(&js, argc, args, 3);
+	int update_texels = arg_int(&js, argc, args, 4);
+	if (views < 1 || views > 64 || texels < 65536 || texels > 67108864
+		|| bytes < 1048576 || bytes > 1073741824 || updates < 0 || updates > 64
+		|| update_texels < 0 || update_texels > 67108864)
+	{
+		*out = js.raise("three.shadows.budget is outside its documented resource limits");
+		return;
+	}
+	self.set_shadow_budget({ .max_views = (uint)views, .max_texels = (usz)texels,
+		.max_bytes = (usz)bytes, .max_updates = (uint)updates,
+		.max_update_texels = (usz)update_texels });
 }
 
 fn void js_shadow_fit(
@@ -3282,13 +3404,13 @@ fn void say_shadow_size(uint was, uint now) @local
 {
 	if (now <= SHADOW_DEFAULT_SIZE || now == was) return;
 
-	// D32, one texel per texel. `ShadowMap.bytes` reads the allocations back once
+	// D32, one texel per texel. The shared atlas reports the allocation once
 	// they exist; this has to answer before there are any.
 	usz each = (usz)now * now * 4;
 	@advise(
-		"three: shadow.size = %d is %d MB of depth image, and %d MB once anything in the scene is "
-			"static — image and static_image are the same format at the same extent. "
-			"stats().shadowBytes is what it actually cost.",
+		"three: shadow.size = %d requests a %d MiB depth tile (%d MiB with static cache), "
+			"before atlas packing and alignment; three.shadows.budget may reduce resolution. "
+			"stats().shadowBytes reports actual shared allocation.",
 		now,
 		each / (1024 * 1024),
 		(each * 2) / (1024 * 1024)

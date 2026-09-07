@@ -83,7 +83,7 @@ const renderedNav = makeSceneNav(renderedScene);
 // something to, and a light `scene.remove` reaches. A light here is none of
 // those — it is a direction, a colour and a slot. `plan.md` §4's half-match
 // rule: a name Three.js does not have is a name nobody expects Three.js's
-// behaviour from, and `three.lights` is a list of four rather than a graph.
+// behaviour from, and `three.lights` is a registry rather than a graph.
 //
 // **`three.light` is `three.lights[0]`, the same object.** It is the sun: the
 // one the shadow map is fitted around and the only one that casts, which is
@@ -100,7 +100,7 @@ const renderedNav = makeSceneNav(renderedScene);
 // a script that wants to know cannot ask the host for it, and
 // `three.lights.max` matching what `add` refuses past is a test rather than a
 // comment.
-const MAX_LIGHTS = 8;
+const MAX_LIGHTS = 256;
 
 // One light, by slot.
 //
@@ -109,11 +109,17 @@ const MAX_LIGHTS = 8;
 // object that remembered which light it was would start describing its
 // neighbour. What it remembers is the index, which is exactly what
 // `three.lights[i]` means.
-function lightAt(index) {
+function lightAt(index, stable = true) {
+	const slot = index;
+	const stableId = stable ? H.lightGet(index)[8] : 0;
+	const current = stable ? () => H.lightIndex(stableId) : () => slot;
+	// Host calls coerce indices to integers, so existing accessors resolve the
+	// stable registry id each time even after packed slots move.
+	index = { valueOf: current };
 	return {
 		// Which slot this is. `three.lights.remove(light)` is the reader —
 		// a light has no handle, so the index is how one names itself.
-		get index() { return index; },
+		get index() { return current(); },
 
 		get direction() {
 			const l = H.lightGet(index);
@@ -207,7 +213,9 @@ function lightAt(index) {
 	};
 }
 
-const light = lightAt(0);
+// The primary sun exists as an API object even in device-free runtimes whose
+// mock pass has no active scene yet. Its host reads stay lazy in the getters.
+const light = lightAt(0, false);
 
 Object.defineProperties(light, {
 	// 0 leaves a face turned away from every light black; 1 removes the
@@ -265,6 +273,54 @@ Object.defineProperties(light, {
 });
 
 Object.defineProperties(light, {
+	occlusion: {
+		enumerable: true,
+		get() {
+			return {
+				get enabled() { return H.occlusionGet()[0] !== 0; },
+				set enabled(v) {
+					const [, radius, intensity, bias] = H.occlusionGet();
+					H.occlusionSet(v ? 1 : 0, radius, intensity, bias);
+				},
+				get radius() { return H.occlusionGet()[1]; },
+				set radius(v) {
+					const n = +v;
+					if (!Number.isFinite(n) || n <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
+					const [enabled, , intensity, bias] = H.occlusionGet();
+					H.occlusionSet(enabled, n, intensity, bias);
+				},
+				get intensity() { return H.occlusionGet()[2]; },
+				set intensity(v) {
+					const n = +v;
+					if (!Number.isFinite(n) || n < 0 || n > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
+					const [enabled, radius, , bias] = H.occlusionGet();
+					H.occlusionSet(enabled, radius, n, bias);
+				},
+				get bias() { return H.occlusionGet()[3]; },
+				set bias(v) {
+					const n = +v;
+					if (!Number.isFinite(n) || n < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
+					const [enabled, radius, intensity] = H.occlusionGet();
+					H.occlusionSet(enabled, radius, intensity, n);
+				},
+			};
+		},
+		set(v) {
+			const [enabled, radius, intensity, bias] = H.occlusionGet();
+			if (typeof v === 'boolean' || v == null) {
+				H.occlusionSet(v ? 1 : 0, radius, intensity, bias);
+				return;
+			}
+			if (typeof v !== 'object') throw new TypeError('three.light.occlusion takes true, false, or an object');
+			const nextRadius = 'radius' in v ? +v.radius : radius;
+			const nextIntensity = 'intensity' in v ? +v.intensity : intensity;
+			const nextBias = 'bias' in v ? +v.bias : bias;
+			if (!Number.isFinite(nextRadius) || nextRadius <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
+			if (!Number.isFinite(nextIntensity) || nextIntensity < 0 || nextIntensity > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
+			if (!Number.isFinite(nextBias) || nextBias < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
+			H.occlusionSet('enabled' in v ? (v.enabled ? 1 : 0) : enabled, nextRadius, nextIntensity, nextBias);
+		},
+	},
 
 	// The shadow this light casts. `three.light.shadow.bias` and
 	// `.intensity` are Three.js's own names on Three.js's own object —
@@ -432,13 +488,12 @@ Object.defineProperties(light, {
 // Array-shaped rather than a set of methods, because the thing a script wants
 // to do with more than one light is loop over them — and because
 // `three.lights[0] === three.light` is the sentence that says the two views
-// are of the same eight slots.
+// are views of the same registry.
 const lights = {
 	get length() { return H.lightCount(); },
 
-	// Shared cube-array quality for point lights. Off means no resolution-sized
-	// image and no six-face passes; enabling covers every point slot currently in
-	// the list and ones added later.
+	// Shared shadow quality for local lights; enabling makes them candidates for
+	// the atlas budget.
 	get shadow() {
 		return {
 			get enabled() { return H.pointShadowGet()[0] !== 0; },
@@ -470,9 +525,7 @@ const lights = {
 			'intensity' in v ? +v.intensity : i);
 	},
 
-	// How many there can be, and the number `add` refuses past. Four, and
-	// `plan.md` §19 has why: the fifth light is the trigger for a compute
-	// pass that bins them, and a list this short does not need one.
+	// The registry safety ceiling, and the number `add` refuses past.
 	get max() { return MAX_LIGHTS; },
 
 	// A light in the next free slot, answering with it.
@@ -483,6 +536,7 @@ const lights = {
 	// what they write after.
 	add(direction, color = 0xffffff, intensity = 1) {
 		let d = direction, c = color, i = intensity, range = 0, where = 'direction';
+		let kind = 0, right = [0, 0, 0], up = [0, 0, 0], halfWidth = 0, halfHeight = 0;
 		if (direction !== null && typeof direction === 'object' && !Array.isArray(direction)
 			&& !('x' in direction) && !('0' in direction)) {
 			// `position` is what makes it a point light, and `range` is what the
@@ -490,7 +544,7 @@ const lights = {
 			// gets ten metres rather than a light that reaches nowhere. Naming
 			// both is a contradiction: one of the three numbers is a place and
 			// the other is a heading, and there is one field for them.
-			if ('position' in direction && 'direction' in direction) {
+			if ('position' in direction && 'direction' in direction && direction.shape !== 'spot') {
 				throw new TypeError(
 					'three.lights.add takes a direction or a position, not both — a light is one or the other'
 				);
@@ -499,6 +553,19 @@ const lights = {
 				d = direction.position;
 				where = 'position';
 				range = 'range' in direction ? Math.max(0, +direction.range) : 10;
+				if (direction.shape) {
+					if (direction.shape === 'spot') {
+						kind = 4; right = readVector(direction.direction, 'three.lights.add(spot.direction)');
+						halfWidth = Math.cos(Math.max(0, +(direction.outerAngle ?? Math.PI/4)));
+						halfHeight = Math.cos(Math.max(0, +(direction.innerAngle ?? 0)));
+					} else {
+						kind = direction.shape === 'disk' || direction.shape === 'ellipse' ? 3 : 2;
+						right = readVector(direction.right, 'three.lights.add(area.right)');
+						up = readVector(direction.up, 'three.lights.add(area.up)');
+						halfWidth = Math.max(0, +(direction.width || 0)) * 0.5;
+						halfHeight = Math.max(0, +(direction.height || direction.width || 0)) * 0.5;
+					}
+				}
 			} else {
 				d = direction.direction;
 				range = 0;
@@ -511,7 +578,8 @@ const lights = {
 		}
 		const [x, y, z] = readVector(d, `three.lights.add(${where})`);
 		const rgb = readColor(c, 'three.lights.add(direction, color)');
-		return lightAt(H.lightAdd(x, y, z, rgb[0], rgb[1], rgb[2], +i, range));
+		return lightAt(H.lightAdd(x, y, z, rgb[0], rgb[1], rgb[2], +i, range, kind,
+			right[0], right[1], right[2], halfWidth, up[0], up[1], up[2], halfHeight));
 	},
 
 	// Take one out. The slots above it move down, exactly as
@@ -538,7 +606,36 @@ const lights = {
 	},
 };
 
-// The eight slots, by index. Getters rather than an array because the list is
+const SHADOW_BUDGET_LIMITS = {
+	maxViews: [1, 64], maxTexels: [65536, 67108864], maxBytes: [1048576, 1073741824],
+	maxUpdates: [0, 64], maxUpdateTexels: [0, 67108864],
+};
+
+function shadowBudgetValues() {
+	const [maxViews, maxTexels, maxBytes, maxUpdates, maxUpdateTexels] = H.shadowBudgetGet();
+	return { maxViews, maxTexels, maxBytes, maxUpdates, maxUpdateTexels };
+}
+
+const shadows = {
+	get budget() { return shadowBudgetValues(); },
+	set budget(value) {
+		if (!value || typeof value !== 'object' || Array.isArray(value))
+			throw new TypeError('three.shadows.budget wants an object');
+		const next = shadowBudgetValues();
+		for (const key of Object.keys(SHADOW_BUDGET_LIMITS)) {
+			if (!(key in value)) continue;
+			const number = value[key];
+			const [low, high] = SHADOW_BUDGET_LIMITS[key];
+			if (!Number.isFinite(number) || !Number.isInteger(number) || number < low || number > high)
+				throw new RangeError(`three.shadows.budget.${key} wants an integer from ${low} to ${high}`);
+			next[key] = number;
+		}
+		H.shadowBudgetSet(next.maxViews, next.maxTexels, next.maxBytes,
+			next.maxUpdates, next.maxUpdateTexels);
+	},
+};
+
+// The registry slots, by index. Getters rather than an array because the list is
 // live: a script that reads `three.lights[1]` after a `remove` should see the
 // light that is there now, not the one that was.
 //
@@ -1529,6 +1626,7 @@ export const three = {
 	camera,
 	light,
 	lights,
+	shadows,
 	controls,
 	clock,
 	frame,

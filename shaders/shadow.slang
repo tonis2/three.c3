@@ -69,11 +69,21 @@ struct Light
 {
     float4 direction;
     float4 color;
+    float4 area_right;
+    float4 area_up;
+    uint4 meta;
 };
 
 // Byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare. This pass reads
 // `light_view_projection` and `live_poses` and nothing else in it — the fields
 // are here because the offsets are the contract, not because they are all used.
+struct ShadowGpuView
+{
+    float4x4 view_projection;
+    float4 atlas;
+    float4 params;
+};
+
 struct FrameBlock
 {
     float4x4 view_projection;
@@ -93,7 +103,7 @@ struct FrameBlock
     //      `roughness` into a blur.
     //   w  unused.
     float4 environment;
-    Light lights[8];
+    Light* lights;
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -111,6 +121,13 @@ struct FrameBlock
     // the offsets are the contract. See `mesh.slang`.
     float4 world;
     float4 point_shadow;
+    float4x4 inverse_view_projection;
+    float4 ambient_occlusion;
+    ShadowGpuView* shadow_views;
+    uint* cluster_counts;
+    uint* cluster_indices;
+    uint4 cluster_grid;
+    float4 cluster_screen;
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.

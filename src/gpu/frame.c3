@@ -416,6 +416,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// this timestamp and `stats().shadowMs` reads 0. The alternative is a frame
 	// that reports no timings at all — see `gpu/timing.c3`.
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
+	self.pass.record_ambient_occlusion(cmd);
 
 	if (posted)
 	{

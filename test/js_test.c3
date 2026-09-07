@@ -405,6 +405,49 @@ fn void two_scenes_are_independent() @test
 	};
 }
 
+fn void shadow_budgets_are_partial_atomic_and_scene_local() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			three.shadows.budget = { maxViews: 12, maxUpdates: 3 };
+			const saved = three.shadows.budget;
+			const second = new three.Scene();
+			const fresh = three.shadows.budget;
+			first.activate();
+			return { saved, fresh, restored: three.shadows.budget };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the shadow budget script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"saved":{"maxViews":12,"maxTexels":67108864,"maxBytes":268435456,"maxUpdates":3,"maxUpdateTexels":33554432}`),
+			"a partial write preserves defaults: %s", result.value);
+		test::@check(result.value.contains(`"fresh":{"maxViews":64`), "a new scene gets the default budget: %s", result.value);
+		test::@check(result.value.contains(`"restored":{"maxViews":12`), "reactivation restores the scene budget: %s", result.value);
+	};
+}
+
+fn void invalid_shadow_budget_writes_change_nothing() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const before = JSON.stringify(three.shadows.budget);
+			const bad = [
+				{maxViews:0},{maxViews:65},{maxTexels:65535},{maxTexels:67108865},
+				{maxBytes:1048575},{maxBytes:1073741825},{maxUpdates:-1},{maxUpdates:65},
+				{maxUpdateTexels:-1},{maxUpdateTexels:67108865},{maxViews:1.5},{maxBytes:Infinity},
+			];
+			let refused=0;
+			for(const value of bad){try{three.shadows.budget=value;}catch(e){refused++;}}
+			return [refused,before===JSON.stringify(three.shadows.budget)];
+		`);
+		defer result.free();
+		test::@check(result.ok, "invalid budget checks ran: %s", result.error);
+		test::@check(result.value == `[12,true]`, "all invalid writes were atomic, got %s", result.value);
+	};
+}
+
 <*
  A handle from a scene that is not being rendered reaches its own scene.
 

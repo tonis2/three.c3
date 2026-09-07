@@ -153,6 +153,11 @@ const ShaderEntry[*] MESH_ENTRIES = {
 const ShaderEntry[*] SKIN_ENTRIES = {
 	{ "computeMain", slang::STAGE_COMPUTE },
 };
+const ShaderEntry[*] CLUSTER_ENTRIES = { { "computeMain", slang::STAGE_COMPUTE } };
+const uint CLUSTER_X = 16;
+const uint CLUSTER_Y = 9;
+const uint CLUSTER_Z = 24;
+const uint CLUSTER_LIGHT_CAPACITY = 64;
 
 <*
  `shaders/shadow.slang`'s one entry point.
@@ -188,15 +193,11 @@ const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
 const uint SKIN_WORKGROUP = 64;
 
 <*
- How many lights the frame block carries, and so how many a script may have.
-
- Four because the fifth is `plan.md` §19's trigger for clustered forward: a loop
- this short costs less than the compute pass that would bin it, and the number
- that makes that stop being true is the one the plan already names. The shaders
- spell it as a literal in their `FrameBlock` declarations, because those are a
- wire format and `FrameBlock::size` is what holds the two together.
+ The CPU registry's explicit safety ceiling. GPU storage is variable-length.
 *>
-const uint MAX_LIGHTS = 8;
+// CPU-side safety ceiling. Lights are uploaded through a device-address buffer;
+// this is not part of the shader ABI and no longer controls shader loop storage.
+const uint MAX_LIGHTS = 256;
 
 <*
  One light, as the three shading shaders declare it.
@@ -222,6 +223,12 @@ struct Light
 	// in — so a colour stays a colour a picker can produce and a light can still be
 	// brighter than white.
 	float[4] color;
+	// Area-light axes and half extents. Zero for punctual lights.
+	float[4] area_right;
+	float[4] area_up;
+	// x stable registry id, y shadow-view index, z kind, w flags.
+	// Kind 0 is directional, 1 point, 2 rectangle and 3 disk.
+	uint[4] meta;
 }
 
 <*
@@ -307,7 +314,7 @@ struct FrameBlock
 	 had when there was one light, and `shaders/shadow.slang` reads
 	 `light_view_projection` at 88 by that offset rather than by name.
 	*>
-	Light[MAX_LIGHTS] lights;
+	ulong lights; // Light*
 	<*
 	 This frame's morph weights — `MeshPass.write_morph_weights`. Zero in a frame
 	 where nothing morphs, which is almost every frame of almost every project.
@@ -342,6 +349,14 @@ struct FrameBlock
 	 offset.
 	*>
 	float[4] point_shadow;
+	Matrix4f inverse_view_projection;
+	float[4] ambient_occlusion;
+	// Device address of the unified shadow-view table, or zero when none cast.
+	ulong shadow_views;
+	ulong cluster_counts; // uint*, one count per cluster
+	ulong cluster_indices; // uint*, fixed-stride lists
+	uint[4] cluster_grid; // xyz dimensions, w per-cluster capacity
+	float[4] cluster_screen; // target width and height
 }
 
 <*
@@ -558,6 +573,24 @@ struct SkinPush
 	uint morph_targets;
 }
 
+struct ClusterPush
+{
+	ulong lights;
+	ulong counts;
+	ulong indices;
+	ulong overflow;
+	Matrix4f view_projection;
+	uint light_count;
+	float[4] camera_near; // xyz eye, w near
+	float far_plane;
+}
+
+const PushFieldLayout[*] CLUSTER_PUSH_FIELDS = {
+	{ "lights", 0, 8 }, { "counts", 8, 8 }, { "indices", 16, 8 }, { "overflow", 24, 8 },
+	{ "view_projection", 32, 64 }, { "light_count", 96, 4 },
+	{ "camera_near", 100, 16 }, { "far_plane", 116, 4 },
+};
+
 $assert SkinPush::size <= PUSH_BUDGET : "the skinning push block outgrew the 128 bytes every device must offer";
 
 const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
@@ -600,8 +633,8 @@ $assert @layout_matches(
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
 $assert DrawRecord::size == 280 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 512 : "FrameBlock no longer matches shaders/mesh.slang";
-$assert Light::size == 32 : "Light no longer matches shaders/mesh.slang";
+$assert FrameBlock::size == 400 : "FrameBlock no longer matches shaders/mesh.slang";
+$assert Light::size == 80 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 $assert MorphDelta::size == 24 : "MorphDelta no longer matches shaders/mesh.slang";
@@ -689,10 +722,17 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "debug", 168, 16 },
 	{ "camera", 184, 16 },
 	{ "environment", 200, 16 },
-	{ "lights", 216, 256 },
-	{ "morph_weights", 472, 8 },
-	{ "world", 480, 16 },
-	{ "point_shadow", 496, 16 },
+	{ "lights", 216, 8 },
+	{ "morph_weights", 224, 8 },
+	{ "world", 232, 16 },
+	{ "point_shadow", 248, 16 },
+	{ "inverse_view_projection", 264, 64 },
+	{ "ambient_occlusion", 328, 16 },
+	{ "shadow_views", 344, 8 },
+	{ "cluster_counts", 352, 8 },
+	{ "cluster_indices", 360, 8 },
+	{ "cluster_grid", 368, 16 },
+	{ "cluster_screen", 384, 16 },
 };
 
 <*
@@ -1485,7 +1525,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 
  @param mod : `A module from compile_slang containing vertexMain, and fragmentMain too when cutout is set. Its layout is copied, not moved.`
  @param cutout : `Whether this is the alpha-tested variant — a fragment stage that discards, and the base colour map bound at 0. False builds the pipeline every ordinary caster shares.`
- @param depth_format : `The shadow map's format — see ShadowMap.ensure, which picks one the device will both render to and sample.`
+ @param depth_format : `The atlas format, chosen for both depth attachment and sampling.`
  @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
 *>
@@ -1618,6 +1658,26 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 	mod.layout = { };
 	self.ready = true;
 
+	return *self;
+}
+
+fn SkinPipeline? SkinPipeline.init_cluster(&self, Gpu* gpu, ShaderModule* mod)
+{
+	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
+	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
+	check_entry_points(mod, CLUSTER_ENTRIES[..])!;
+	check_push_block(&mod.layout, CLUSTER_PUSH_FIELDS[..])!;
+	vk::PushConstantRange range = { .stageFlags = SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = mod.layout.push_size };
+	self.layout = vk::pipelineLayoutCreateInfo().setPushConstantRanges({ range }).build(gpu.handle)!;
+	vk::ShaderModule shader = vk::loadShaderModule(gpu.handle, mod.spirv)!;
+	defer shader.free(gpu.handle);
+	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
+		.setStage(vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_COMPUTE_BIT).setMod(shader).setName("computeMain"))
+		.setLayout(self.layout);
+	vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &self.handle)!;
+	self.shader = mod.layout;
+	mod.layout = { };
+	self.ready = true;
 	return *self;
 }
 

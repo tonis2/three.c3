@@ -3427,6 +3427,27 @@ fn void Exporter.write_light(&self)
 	for (uint i = 0; i < self.pass.lighting.count; i++)
 	{
 		Light light   = self.pass.lighting.lights[i];
+		if (light.meta[2] >= 2)
+		{
+			Vec3 right = { light.area_right[0], light.area_right[1], light.area_right[2] };
+			Vec3 up = { light.area_up[0], light.area_up[1], light.area_up[2] };
+			Vec3 outward = right.cross(up).normalize();
+			float width = light.area_right[3] * 2.0f;
+			float height = light.area_up[3] * 2.0f;
+			gltf::AreaLightShape shape = light.meta[2] == 3
+				? (width == height ? gltf::AreaLightShape.DISK : gltf::AreaLightShape.ELLIPSE)
+				: (width == height ? gltf::AreaLightShape.SQUARE : gltf::AreaLightShape.RECTANGLE);
+			String name = string::tformat("area %d", i);
+			uint written = self.out.add_area_light(name, shape, width, height,
+				color: { light.color[0], light.color[1], light.color[2] }, power_watts: light.color[3]);
+			uint node = self.out.add_node(name,
+				translation: { light.direction[0], light.direction[1], light.direction[2] },
+				rotation: quat_from_basis(right.normalize(), up.normalize(), outward));
+			self.out.set_node_area_light(node, written);
+			self.out.add_root(node);
+			self.report.nodes++;
+			continue;
+		}
 		Vec3 where    = { light.direction[0], light.direction[1], light.direction[2] };
 		float range   = light.direction[3];
 		bool punctual = range > 0.0f;
