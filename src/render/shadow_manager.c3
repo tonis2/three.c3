@@ -146,6 +146,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 			for (uint i = 0; i < entries.count; i++)
 			{
 				entries.views[i].static_valid = false;
+				entries.views[i].live_valid = false;
 				manager.tiles[i] = { };
 			}
 		}
@@ -164,6 +165,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 		for (uint i = 0; i < entries.count; i++)
 		{
 			entries.views[i].static_valid = false;
+			entries.views[i].live_valid = false;
 			manager.tiles[i] = { };
 		}
 		manager.scene_id = self.scene.id;
@@ -212,6 +214,7 @@ fn bool MeshPass.place_shadow_tile(&self, uint at)
 			if (!free) continue;
 			manager.tiles[at] = tile;
 			view.static_valid = false;
+			view.live_valid = false;
 			return true;
 		}
 	}
@@ -297,6 +300,7 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 		{
 			manager.tiles[at] = { };
 			entries.views[at].static_valid = false;
+			entries.views[at].live_valid = false;
 		}
 	}
 	ShadowGpuView[SHADOW_MAX_VIEWS] packed;
@@ -336,6 +340,7 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 				{
 					entries.views[at].live = false;
 					entries.views[at].static_valid = false;
+					entries.views[at].live_valid = false;
 					manager.tiles[at] = { };
 				}
 			}
@@ -389,7 +394,11 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	uint signature = self.point_shadow_signature();
 	if (manager.caster_signature != signature)
 	{
-		for (uint at = 0; at < self.shadow_view_set.count; at++) self.shadow_view_set.views[at].static_valid = false;
+		for (uint at = 0; at < self.shadow_view_set.count; at++)
+		{
+			self.shadow_view_set.views[at].static_valid = false;
+			self.shadow_view_set.views[at].live_valid = false;
+		}
 		manager.caster_signature = signature;
 	}
 	self.shadows.plan = manager.plan; self.shadows.sample_static = manager.sample_static;
@@ -404,7 +413,11 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 		{
 			ShadowView* view = &entries.views[at];
 			if (!view.live || manager.gpu_indices[at] != packed) continue;
-			if (manager.plan == SHADOW_PLAN_FULL) view.static_valid = false;
+			if (manager.plan == SHADOW_PLAN_FULL)
+			{
+				view.static_valid = false;
+				view.live_valid = false;
+			}
 			uint passes = manager.plan == SHADOW_PLAN_FULL ? 1u : (view.static_valid ? 0u : 1u);
 			if (manager.plan == SHADOW_PLAN_COMBINED) passes++;
 			usz texels = (usz)view.size * view.size * passes;
@@ -412,9 +425,12 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				&& manager.update_texels + texels <= entries.budget.max_update_texels);
 			if (!fits)
 			{
-				// A dirty depth image is not a valid approximation. Keep its light,
-				// but turn off visibility until the update budget can refresh it.
-				if (uploaded != null) uploaded[packed].params[3] = 0;
+				// Keep the last complete static-plus-dynamic tile while another view
+				// consumes the budget. A view with no complete live depth stays off.
+				if (uploaded != null && !(manager.plan == SHADOW_PLAN_COMBINED && view.live_valid))
+				{
+					uploaded[packed].params[3] = 0;
+				}
 				manager.deferred++;
 				continue;
 			}
@@ -478,6 +494,7 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		if (i == 0) { self.shadows.draws += draws; }
 		else { self.point_shadows.draws += draws; }
 		vk::cmdEndRendering(cmd);
+		view.live_valid = true;
 	}
 	manager.atlas.end_live(cmd);
 }

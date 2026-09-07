@@ -47,8 +47,9 @@
 - `shadowUpdates` — Views requiring rendering this frame.
 - `shadowUpdateTexels` — Total rasterized shadow texels this frame. Rebuilding static depth and
   drawing dynamic depth into the same view counts its texels twice.
-- `shadowDeferred` — Views awaiting an update budget. Invalid deferred views contribute light without
-  shadows; valid untouched static views need no update budget.
+- `shadowDeferred` — Views awaiting an update budget. New or invalid deferred views contribute light
+  without shadows; combined views retain their last complete live depth. Valid untouched static views
+  need no update budget.
 - `occlusionBytes` — The current ambient-occlusion depth image's actual Vulkan allocation. It is
   zero until `three.light.occlusion` first runs, then remains allocated across off/on toggles and
   follows the render target's extent.

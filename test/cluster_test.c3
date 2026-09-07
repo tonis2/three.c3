@@ -243,6 +243,48 @@ fn void shadow_update_budget_defers_new_work_but_keeps_valid_cache() @test
 	test::@check(differing_rgb(&updated,&cached)==0, "a valid cached view costs no update budget");
 }
 
+fn void a_deferred_combined_view_keeps_its_last_complete_depth() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		const floor = new three.Mesh(new three.PlaneGeometry(12, 12));
+		floor.rotation.x = -Math.PI / 2; floor.static = true; scene.add(floor);
+		const wall = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+		wall.position.y = 1; wall.static = true; scene.add(wall);
+		scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+		three.light.set([.2, 1, .1], .2);
+		three.lights.add({ position: [3, 3, 2], range: 12, intensity: 20 });
+		three.light.shadow = { enabled: true, size: 1024, follow: false, distance: 20 };
+		three.lights.shadow = { enabled: true, size: 256 };
+		three.camera.target.set(0, 0, 0); three.camera.orbit(35, 18, 10);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the mixed cached-shadow scene built: %s", built.error);
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+
+	three::RunResult limited = runtime.run(`
+		three.light.direction = [.6, 1, .2];
+		three.shadows.budget = { maxUpdates: 64, maxUpdateTexels: 2097152 };
+	`);
+	defer limited.free();
+	test::@check(limited.ok, "the sun rebuild budget was set: %s", limited.error);
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.stats().shadow_deferred >= 6,
+		"the sun rebuild defers the point-light faces");
+
+	uint slot = renderer.pass.shadow_manager.frame_slot;
+	uint local = renderer.pass.lighting.lights[1].meta[1];
+	three::ShadowGpuView* uploaded = (three::ShadowGpuView*)renderer.pass.shadow_view_buffers[slot].data();
+	test::@check(local != three::SHADOW_VIEW_NONE && uploaded[local].params[3] > 0,
+		"a deferred combined local view retains its complete live shadow");
+}
+
 fn void moving_one_local_light_invalidates_only_its_six_cached_views() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
