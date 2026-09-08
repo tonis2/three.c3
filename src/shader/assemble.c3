@@ -128,6 +128,10 @@ const uint ENVIRONMENT_BINDING = 2;
 const uint POINT_SHADOW_BINDING = 3;
 const uint AMBIENT_OCCLUSION_BINDING = 4;
 const uint SHADOW_ATLAS_BINDING = 17;
+// The same atlas image again, through a depth-compare sampler. Two bindings
+// because one combined image sampler is either a comparison sampler or not, and
+// the debug view still wants the raw depth.
+const uint SHADOW_ATLAS_COMPARE_BINDING = 18;
 
 <*
  Where the built-in material's other four maps are bound, in `mesh.slang` and

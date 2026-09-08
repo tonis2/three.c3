@@ -271,6 +271,7 @@ fn void reset(Slot* slot) @private
 	// to be zero before anything has drawn.
 	renderer.timer.timing = {};
 	renderer.timer.armed = {};
+	renderer.timer.fragments = 0;
 	renderer.clear = three::DEFAULT_CLEAR;
 	renderer.render_size_pinned = false;
 }

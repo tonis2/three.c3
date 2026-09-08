@@ -69,6 +69,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 	self.point_shadows.live = false;
 	ShadowViewSet* entries = &self.shadow_view_set;
 	ShadowManager* manager = &self.shadow_manager;
+	manager.atlas.ensure_compare(gpu)!;
 	if (entries.budget.max_views == 0) entries.budget = DEFAULT_SHADOW_BUDGET;
 	uint sun_size = self.shadows.enabled ? self.shadows.size : 0;
 	uint local_size = self.point_shadows.enabled ? self.point_shadows.size : 0;
@@ -527,6 +528,7 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 {
 	self.shadows.draws = 0; self.shadows.static_draws = 0;
 	self.point_shadows.draws = 0; self.point_shadows.static_draws = 0;
+	self.shadow_manager.atlas.record_blank(cmd);
 	if (!self.prepared || (!self.shadows.live && !self.point_shadows.live)) return;
 	ShadowManager* manager = &self.shadow_manager;
 	ShadowViewSet* entries = &self.shadow_view_set;

@@ -327,6 +327,17 @@ struct SceneStats
 	uint shadow_draws;
 
 	<*
+	 How many draw calls the depth prepass recorded, and 0 in a frame that had none
+	 — `three.depthPrepass` off, or nothing in the scene the prepass can speak for.
+
+	 `shadow_draws`' kind of number: about the frame rather than about the graph,
+	 filled in by `MeshPass.stats`. It is what a script watches to see whether a
+	 scene of custom bodies is actually getting the prepass, since a material whose
+	 vertices or discards the prepass cannot reproduce is left out of it.
+	*>
+	uint prepass_draws;
+
+	<*
 	 How many draw calls went into the cached half of the shadow map, and 0 in a
 	 frame that did not rebuild it — which is most frames, and is the number worth
 	 watching.

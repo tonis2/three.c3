@@ -56,8 +56,8 @@ const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  binding itself.
 *>
 const uint MAX_USER_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
-const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_BINDING + 1
-	? MAX_USER_BINDINGS : SHADOW_ATLAS_BINDING + 1;
+const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_COMPARE_BINDING + 1
+	? MAX_USER_BINDINGS : SHADOW_ATLAS_COMPARE_BINDING + 1;
 
 <*
  The image writes for one draw, gathered before any of them is pushed.
@@ -165,7 +165,8 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
 	ShaderBinding* found = pipeline.shader.binding_of(name);
 	if (found == null) return 0;
 	if (found.binding < first) return 0;
-	if (first == MATERIAL_BINDING_FIRST && found.binding == SHADOW_ATLAS_BINDING) return 0;
+	if (first == MATERIAL_BINDING_FIRST
+		&& (found.binding == SHADOW_ATLAS_BINDING || found.binding == SHADOW_ATLAS_COMPARE_BINDING)) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
 	return found.binding;
 }

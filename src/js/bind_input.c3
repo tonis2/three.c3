@@ -115,6 +115,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "windowTitleSet", &js_window_title_set, 1);
 	self.bind(host, "windowFullscreenGet", &js_window_fullscreen_get, 0);
 	self.bind(host, "windowFullscreenSet", &js_window_fullscreen_set, 1);
+	self.bind(host, "windowMaxFpsGet", &js_window_max_fps_get, 0);
+	self.bind(host, "windowMaxFpsSet", &js_window_max_fps_set, 1);
 }
 
 <*
@@ -1266,4 +1268,68 @@ fn void js_window_fullscreen_set(
 	}
 	self.window.set_fullscreen(wanted);
 	*out = qjs::bool_value(true);
+}
+
+<*
+ The most frames a second a script may ask the loop to present. Above this a
+ cap is indistinguishable from none on any display, and a number a script
+ produced by mistake — a millisecond period passed as a rate — is refused
+ rather than honoured.
+*>
+const uint WINDOW_MAX_FPS = 1000;
+
+<*
+ `windowMaxFpsGet()` — the cap the host loop is pacing to, or 0 for none.
+
+ Remembered under `--headless` too, where the server loop paces its ticks by it.
+*>
+fn void js_window_max_fps_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value((double)self.max_fps);
+}
+
+<*
+ `windowMaxFpsSet(fps)` — cap the frame rate, or lift the cap with 0.
+
+ A cap, not a rate: the swapchain still presents with vsync, so a cap above the
+ display's refresh changes nothing and one below it makes the loop sleep out
+ the rest of each period. Takes effect on the next frame. Rounded to the
+ nearest whole number the loop can pace to, so 59.94 is kept as 60.
+*>
+fn void js_window_max_fps_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	double wanted = arg_number(&js, argc, args, 0);
+	if (wanted != wanted || wanted < 0.0 || wanted > (double)WINDOW_MAX_FPS)
+	{
+		*out = js.raise(
+			string::tformat(
+				"three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
+				WINDOW_MAX_FPS,
+				wanted
+			)
+		);
+		return;
+	}
+	uint fps = (uint)(wanted + 0.5);
+	if (wanted > 0.0 && fps == 0) fps = 1;
+	self.max_fps = fps;
+	*out = qjs::number_value((double)fps);
 }

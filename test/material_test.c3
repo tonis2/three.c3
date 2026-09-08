@@ -297,13 +297,13 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	// The template's two reserved samplers and nothing else, the same two
-	// `mesh.slang` declares. `MATERIAL_BINDING_FIRST` rather than a literal 2,
+	// The template's reserved samplers and nothing else, the same ones
+	// `mesh.slang` declares. `MATERIAL_BINDING_FIRST` rather than a literal,
 	// because the claim is "a material reserves exactly what the mesh pass
 	// reserves" and that constant is the other half of it.
 	test::@check(
-		mod.layout.bindings.len() == 4,
-		"four template descriptors, got %d", mod.layout.bindings.len()
+		mod.layout.bindings.len() == 5,
+		"five template descriptors, got %d", mod.layout.bindings.len()
 	);
 	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
 	test::@check(map != null, "and one is base_color_map");
@@ -317,6 +317,16 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	test::@check(
 		shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
 		"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
+	);
+
+	three::ShaderBinding* compare = mod.layout.binding_of("shadow_atlas_compare");
+	test::@check(compare != null, "and so is the atlas's comparison sampler");
+	if (compare == null) return;
+	test::@check(
+		compare.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+			&& compare.set == 0 && compare.binding == three::SHADOW_ATLAS_COMPARE_BINDING,
+		"a combined image sampler at 0,%d — got %d,%d",
+		three::SHADOW_ATLAS_COMPARE_BINDING, compare.set, compare.binding
 	);
 }
 
@@ -1235,8 +1245,8 @@ fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 7,
-		"four template samplers and three user samplers, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 8,
+		"five template samplers and three user samplers, got %d", mod.layout.bindings.len());
 
 	three::ShaderBinding* noise = mod.layout.binding_of("noise_map");
 	test::@check(noise != null, "the first is there by name");
@@ -1566,7 +1576,7 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
 		"with the push block it always had, got %d", mod.layout.push_size);
 	test::@check(
-		mod.layout.bindings.len() == 4,
+		mod.layout.bindings.len() == 5,
 		"and the template's own bindings, got %d", mod.layout.bindings.len()
 	);
 }

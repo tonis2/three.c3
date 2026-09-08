@@ -1004,6 +1004,10 @@ struct MeshPipeline
 	// What the shader said it wants: bindings by name, push fields by name. Owned
 	// by the pipeline and freed with it — see `MeshPipeline.init`.
 	ShaderLayout shader;
+	// What `init` built it over, so a pass that sets the depth state dynamically
+	// can put back what the pipeline would otherwise have baked in. Left zeroed by
+	// the constructors that declare no dynamic depth.
+	PipelineState state;
 }
 
 <*
@@ -1219,6 +1223,11 @@ struct GraphicsPipelineDesc
 	bool dynamic_cull;
 	bool depth_test;
 	bool depth_write;
+	// Declare the depth write and compare op dynamic and let the pass set them per
+	// draw — what the depth prepass needs, since a prepassed bucket tests EQUAL and
+	// writes nothing while the rest of the frame keeps the state it was built with.
+	// Requires `dynamic_cull`: every pass that sets one sets the other.
+	bool dynamic_depth;
 }
 
 <*
@@ -1285,12 +1294,14 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 	// wants it. Core in Vulkan 1.3 with no feature bit, so there is nothing to
 	// query and nothing to fall back to — see `PipelineState` for why topology is
 	// not here beside it.
-	vk::DynamicState[3] dynamic_states = {
+	vk::DynamicState[5] dynamic_states = {
 		DYNAMIC_STATE_VIEWPORT,
 		DYNAMIC_STATE_SCISSOR,
 		DYNAMIC_STATE_CULL_MODE,
+		DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+		DYNAMIC_STATE_DEPTH_COMPARE_OP,
 	};
-	usz dynamic_used = desc.dynamic_cull ? 3 : 2;
+	usz dynamic_used = desc.dynamic_cull ? (desc.dynamic_depth ? 5 : 3) : 2;
 	vk::PipelineDynamicStateCreateInfo dynamic = vk::pipelineDynamicStateCreateInfo()
 		.setDynamicStates(dynamic_states[:dynamic_used]);
 
@@ -1391,6 +1402,8 @@ fn MeshPipeline? MeshPipeline.init(
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
 
+	self.state = state;
+
 	return self.build_graphics(
 		gpu,
 		mod,
@@ -1407,7 +1420,11 @@ fn MeshPipeline? MeshPipeline.init(
 			.cull = CULL_MODE_BACK_BIT,
 			.dynamic_cull = true,
 			.depth_test = state.depth_test,
+			// Set per draw by everything that binds one of these — `MeshPass.record`
+			// puts a prepassed bucket on EQUAL with no write and everything else back
+			// on what `state` says.
 			.depth_write = state.depth_write,
+			.dynamic_depth = true,
 		}
 	);
 }
@@ -1529,7 +1546,8 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
 *>
-fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format, bool cutout = false)
+fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
+	bool cutout = false, bool dynamic_cull = false)
 {
 	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], cutout ? SHADOW_CUTOUT_ENTRIES[..] : SHADOW_ENTRIES[..])!;
 
@@ -1570,6 +1588,11 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 			.stages = cutout ? stages[..] : stages[..0],
 			.rendering = &rendering,
 			.color_blend = &color_blend,
+			// `CULL_MODE_NONE` for the shadow map, the material's own for the depth
+			// prepass: a prepass that drew a face the colour pass culls would write
+			// depth in front of geometry nothing then covers.
+			.cull = CULL_MODE_NONE,
+			.dynamic_cull = dynamic_cull,
 			.depth_test = true,
 			.depth_write = true,
 		}

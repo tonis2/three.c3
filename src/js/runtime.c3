@@ -391,6 +391,16 @@ struct JsRuntime
 	*>
 	c3w::Window* window;
 
+	<*
+	 The most frames a second the host loop may present — `three.window.maxFps`.
+
+	 Zero is no cap beyond the swapchain's own vsync. Read by the loop after every
+	 presented frame, which sleeps out the remainder of the period; the headless
+	 server loop paces its ticks by it too, so a callback sees the same rate
+	 whether or not there is a window.
+	*>
+	uint max_fps;
+
 	InputState input;
 	// Keys a script is holding down through `three.input.press`. Merged into every
 	// frame beside the window's own, which is what makes an input-driven scene

@@ -1074,7 +1074,33 @@ const windowSurface = {
 	// has pinned it.
 	get fullscreen() { return H.windowFullscreenGet(); },
 	set fullscreen(on) { H.windowFullscreenSet(!!on); },
+
+	// The most frames a second the loop will present, or null for no cap.
+	//
+	//   three.window.maxFps = 60;      // a 144Hz display draws 60
+	//   three.window.maxFps = null;    // back to the display's own rate
+	//
+	// A CAP, not a rate: frames are vsynced regardless, so a number above
+	// the display's refresh changes nothing, and one below it makes the
+	// loop sleep out the rest of each frame — which is what a fan hears
+	// the difference of. Takes effect on the next frame. Kept under
+	// --headless, where the server loop paces its ticks by it.
+	//
+	// A settings screen wants this beside three.setRenderSize: one
+	// halves the pixels, the other halves the frames.
+	get maxFps() { const fps = H.windowMaxFpsGet(); return fps > 0 ? fps : null; },
+	set maxFps(fps) { setMaxFps(fps); },
 };
+
+// null, undefined, 0 and Infinity all mean "no cap"; anything else has to be
+// a finite positive number, and the host bounds it.
+function setMaxFps(fps) {
+	if (fps === null || fps === undefined || fps === Infinity) return H.windowMaxFpsSet(0);
+	if (typeof fps !== 'number' || Number.isNaN(fps)) {
+		throw new TypeError('three.window.maxFps wants a number of frames per second, or null for no cap');
+	}
+	return H.windowMaxFpsSet(fps);
+}
 
 // -----------------------------------------------------------------------
 // Saving
@@ -2283,6 +2309,26 @@ export const three = {
 		H.toneMapSet(H.toneMapGet()[0], n);
 	},
 
+	// Draw the opaque and cut-out geometry depth-only first, so the scene
+	// pass shades each pixel once instead of once per layer of overdraw. On
+	// by default.
+	//
+	// It costs a depth-only pass over the same geometry and is worth it
+	// wherever the fragment shader is expensive and things stand in front of
+	// each other — foliage, a crowd, a corridor. A flat scene with no
+	// overdraw pays the extra pass for nothing, which is what turning it off
+	// is for.
+	//
+	// A material the prepass cannot speak for is drawn the way it always
+	// was: anything transparent, a `vertex:` body, and a `fragment:` body
+	// that discards. `stats().prepassDraws` is how many draw calls it made,
+	// so a scene where that stays 0 is one it could not help.
+	//
+	// Like the post chain it belongs to the renderer rather than to the
+	// scene: `new three.Scene()` does not reset it.
+	get depthPrepass() { return H.depthPrepassGet() !== 0; },
+	set depthPrepass(v) { H.depthPrepassSet(v ? 1 : 0); },
+
 	// The shaders that run over the finished frame.
 	//
 	// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`
@@ -2665,14 +2711,16 @@ export const three = {
 	//   three.configure({
 	//     title: 'Wumpa Run',
 	//     fullscreen: false,
+	//     maxFps: 60,
 	//     saveDir: 'wumpa-run',
 	//   });
 	//
 	// Every key is optional and anything left out is left alone. There are
 	// no command-line flags for these: a player never sees a command line,
 	// and a settings screen has to change the same things at runtime — so
-	// `title` and `fullscreen` are live properties on `three.window` as
-	// well, and this is the one call that sets them before the first frame.
+	// `title`, `fullscreen` and `maxFps` are live properties on
+	// `three.window` as well, and this is the one call that sets them
+	// before the first frame.
 	//
 	// `saveDir` is boot-only and has no property beside it, deliberately:
 	// moving it mid-run would strand everything already written. It is a
@@ -2680,18 +2728,20 @@ export const three = {
 	// answers with where the folder actually is, which is also
 	// `three.save.path`.
 	//
-	// Returns { title, fullscreen, saveDir } as they stand after the call,
-	// so a boot log can print one line and be accurate.
+	// Returns { title, fullscreen, maxFps, saveDir } as they stand after the
+	// call, so a boot log can print one line and be accurate.
 	configure(options = {}) {
 		if (options === null || typeof options !== 'object') {
-			throw new TypeError('three.configure({ title, fullscreen, saveDir }) wants an object');
+			throw new TypeError('three.configure({ title, fullscreen, maxFps, saveDir }) wants an object');
 		}
 		if (options.title !== undefined) H.windowTitleSet(String(options.title));
 		if (options.fullscreen !== undefined) H.windowFullscreenSet(!!options.fullscreen);
+		if (options.maxFps !== undefined) setMaxFps(options.maxFps);
 		if (options.saveDir !== undefined) H.saveDirSet(String(options.saveDir));
 		return {
 			title: H.windowTitleGet(),
 			fullscreen: H.windowFullscreenGet(),
+			maxFps: windowSurface.maxFps,
 			saveDir: H.saveDirGet(),
 		};
 	},

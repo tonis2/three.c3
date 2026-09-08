@@ -359,6 +359,10 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
 // `MATERIAL_BINDING_FIRST` is 4**: a material's own samplers are numbered from
 // the first binding the template does not claim, and this file claims three.
 [vk::binding(17, 0)] Sampler2D shadow_atlas;
+// The same image through a depth-compare sampler: one tap is four texel
+// comparisons filtered in hardware. `shadow_atlas` above stays for the debug
+// view, which wants the depth itself.
+[vk::binding(18, 0)] Sampler2DShadow shadow_atlas_compare;
 #ifndef THREE_NO_AO
 [vk::binding(4, 0)] Sampler2D ambient_occlusion_depth;
 #endif
@@ -694,92 +698,6 @@ float3 srgb_to_linear(float3 c)
     return lerp(hi, lo, step(c, 0.04045));
 }
 
-// How much of the light reaches this point: 1 fully lit, 0 fully shadowed.
-//
-// **Character for character what `mesh.slang` carries**, and the duplication is
-// the same duplication `srgb_to_linear` and `lambert` are: a material is a change
-// of shading and not a second renderer, so a body whose text is the default has
-// to land in the same shadow no material at all lands in. `mesh.slang` holds the
-// long account of the four early exits and the two biases; this copy is the
-// function and not the argument.
-
-
-float shadow_view_factor_filtered(uint index, float3 position, float3 normal, float filter_radius)
-{
-    if (index == 0xffffffffu) return 1.0;
-    ShadowGpuView view = push.frame[0].shadow_views[index];
-    if (view.params.w <= 0.0) return 1.0;
-    float4 clip = mul(view.view_projection, float4(position, 1.0));
-    if (clip.w <= 0.0) return 1.0;
-    if (view.params.z != 0.0)
-    {
-        float distance = view.params.z;
-        if (distance < 0.0)
-        {
-            float2 ndc = clip.xy / clip.w;
-            float4 dx = mul(view.view_projection, float4(1.0, 0.0, 0.0, 0.0));
-            float4 dy = mul(view.view_projection, float4(0.0, 1.0, 0.0, 0.0));
-            float4 dz = mul(view.view_projection, float4(0.0, 0.0, 1.0, 0.0));
-            float sx = length((dx.xy - ndc * dx.w) / clip.w);
-            float sy = length((dy.xy - ndc * dy.w) / clip.w);
-            float sz = length((dz.xy - ndc * dz.w) / clip.w);
-            float ndc_per_world = max(max(sx, sy), sz);
-            distance = (-view.params.z) * (2.0 * view.params.x) / max(ndc_per_world, 1e-6);
-        }
-        clip = mul(view.view_projection, float4(position + normal * distance, 1.0));
-        if (clip.w <= 0.0) return 1.0;
-    }
-    float3 ndc = clip.xyz / clip.w;
-    float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
-    if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
-    float2 step = view.params.x * view.atlas.xy;
-    float2 uv = local * view.atlas.xy + view.atlas.zw;
-    float2 lo = view.atlas.zw + step * 0.5;
-    float2 hi = view.atlas.zw + view.atlas.xy - step * 0.5;
-    float3 axis = abs(normal.y) < 0.999 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-    float3 tangent = normalize(cross(normal, axis));
-    float3 bitangent = cross(normal, tangent);
-    float4 tangentClip = mul(view.view_projection, float4(tangent, 0.0));
-    float4 bitangentClip = mul(view.view_projection, float4(bitangent, 0.0));
-    float3 tangentNdc = (tangentClip.xyz - ndc * tangentClip.w) / clip.w;
-    float3 bitangentNdc = (bitangentClip.xyz - ndc * bitangentClip.w) / clip.w;
-    float determinant = tangentNdc.x * bitangentNdc.y - tangentNdc.y * bitangentNdc.x;
-    float2 depthGradient = abs(determinant) > 1e-8
-        ? float2(tangentNdc.z * bitangentNdc.y - tangentNdc.y * bitangentNdc.z,
-            tangentNdc.x * bitangentNdc.z - tangentNdc.z * bitangentNdc.x) / determinant
-        : float2(0.0);
-    float lit = 0.0;
-    if (filter_radius > 1.0)
-    {
-        float taps = 0.0;
-        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-        {
-            float2 q = (float2(x, y) + 0.5) * 0.5 - 1.0;
-            if (dot(q, q) > 1.0) continue;
-            float2 tap = q * filter_radius;
-            float depth = shadow_atlas.SampleLevel(clamp(uv + tap * step, lo, hi), 0.0).r;
-            float2 sampleLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
-                view.params.x * 0.5, 1.0 - view.params.x * 0.5);
-            float2 tapNdc = (sampleLocal - local) * float2(2.0, -2.0);
-            float receiverDepth = ndc.z + dot(depthGradient, tapNdc);
-            lit += receiverDepth - view.params.y <= depth ? 1.0 : 0.0;
-            taps += 1.0;
-        }
-        return lerp(1.0, lit / taps, view.params.w);
-    }
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
-    {
-        float2 tap = float2(x, y);
-        float depth = shadow_atlas.SampleLevel(clamp(uv + tap * step, lo, hi), 0.0).r;
-        float2 sampleLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
-            view.params.x * 0.5, 1.0 - view.params.x * 0.5);
-        float2 tapNdc = (sampleLocal - local) * float2(2.0, -2.0);
-        float receiverDepth = ndc.z + dot(depthGradient, tapNdc);
-        lit += receiverDepth - view.params.y <= depth ? 1.0 : 0.0;
-    }
-    return lerp(1.0, lit / 9.0, view.params.w);
-}
-
 float shadow_view_factor(uint index, float3 position, float3 normal)
 {
     return shadow_view_factor_filtered(index, position, normal, 1.0);
@@ -990,6 +908,7 @@ float3 lambert(float3 normal, float occlusion)
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
+        if (n_dot_l <= 0.0) continue;
         if (i == 0u) n_dot_l *= g_shadow;
         else n_dot_l *= point_shadow_factor(i, light, g_position, normal);
         direct += light.color.rgb * light.color.w * n_dot_l;
@@ -997,9 +916,12 @@ float3 lambert(float3 normal, float occlusion)
     uint cluster=fragment_cluster(); uint packedCount=push.frame[0].cluster_grid.w==0u?0x80000000u:push.frame[0].cluster_counts[cluster];
     bool overflow=(packedCount&0x80000000u)!=0u; uint localCount=overflow?count:packedCount;
     for(uint k=0u;k<localCount;++k){ uint i=overflow?k:push.frame[0].cluster_indices[cluster*push.frame[0].cluster_grid.w+k];
-        Light light=push.frame[0].lights[i]; if(light.meta.z==2u||light.meta.z==3u){direct+=light.color.rgb*area_diffuse(light,g_position,normal)*point_shadow_factor(i,light,g_position,normal);continue;} if(light.meta.z!=1u&&light.meta.z!=4u)continue; float reach;
+        // Nothing is sampled for a light already at zero: the shadow only scales
+        // what the light delivers, and an area emitter out of range delivers none.
+        Light light=push.frame[0].lights[i]; if(light.meta.z==2u||light.meta.z==3u){float area=area_diffuse(light,g_position,normal); if(area<=0.0)continue; direct+=light.color.rgb*area*point_shadow_factor(i,light,g_position,normal);continue;} if(light.meta.z!=1u&&light.meta.z!=4u)continue; float reach;
         float3 toward=light_toward(light.direction,g_position,reach); float n=max(dot(normal,toward),0.0)*reach;
         if(light.meta.z==4u)n*=shared_spot_reach(light,toward);
+        if(n<=0.0)continue;
         n*=point_shadow_factor(i,light,g_position,normal); direct+=light.color.rgb*light.color.w*n; }
     float ambient_visibility = occlusion * g_crevice;
     return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
@@ -1062,12 +984,12 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if(light.meta.z!=0u&&!cluster_contains(i))continue;
-        if(light.meta.z==2u||light.meta.z==3u){sum+=area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v)*point_shadow_factor(i,light,position,normal);continue;}
+        if(light.meta.z==2u||light.meta.z==3u){float3 area=area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v); if(dot(area,float3(1.0))<=0.0)continue; sum+=area*point_shadow_factor(i,light,position,normal);continue;}
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
         if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
         float n_dot_l = max(dot(normal, to_light), 0.0);
-        if (n_dot_l <= 0.0) continue;
+        if (n_dot_l * reach <= 0.0) continue;
 
         float3 half_vector = normalize(to_light + view);
         float n_dot_h = max(dot(normal, half_vector), 0.0);

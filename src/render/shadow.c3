@@ -698,18 +698,7 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 {
 	if (self.pipeline_ready) return;
 
-	String source = shader_source("shadow.slang", mem)!;
-	defer source.free(mem);
-
-	ShaderModule mod = compile_slang(source, "shadow.slang", SHADOW_ENTRIES[..])!;
-	defer mod.free();
-	if (!mod.ok)
-	{
-		@advise("three: the shadow shader would not compile: %s", mod.diagnostic);
-		return SHADER_MISSING_ENTRY_POINT~;
-	}
-
-	self.pipeline.init_shadow(gpu, &mod, self.format)!;
+	build_depth_pipeline(gpu, &self.pipeline, self.format)!;
 	self.pipeline_ready = true;
 }
 
@@ -743,24 +732,7 @@ fn void? ShadowMap.build_cutout_pipeline(&self, Gpu* gpu)
 {
 	if (self.cutout_ready) return;
 
-	String source = shader_source("shadow.slang", mem)!;
-	defer source.free(mem);
-
-	DString variant;
-	variant.init(mem);
-	defer variant.free();
-	variant.append_string("#define THREE_SHADOW_CUTOUT 1\n#line 1\n");
-	variant.append_string(source);
-
-	ShaderModule mod = compile_slang(variant.str_view(), "shadow.slang", SHADOW_CUTOUT_ENTRIES[..])!;
-	defer mod.free();
-	if (!mod.ok)
-	{
-		@advise("three: the cut-out shadow shader would not compile: %s", mod.diagnostic);
-		return SHADER_MISSING_ENTRY_POINT~;
-	}
-
-	self.cutout_pipeline.init_shadow(gpu, &mod, self.format, cutout: true)!;
+	build_depth_pipeline(gpu, &self.cutout_pipeline, self.format, cutout: true)!;
 	self.cutout_ready = true;
 }
 

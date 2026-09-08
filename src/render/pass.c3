@@ -329,6 +329,9 @@ struct MeshPass
 	ShadowMap shadows;
 	PointShadowMap point_shadows;
 	AmbientOcclusion ambient_occlusion;
+	// The opaque and cut-out buckets drawn depth-only before the scene pass, so
+	// the lighting runs once per pixel. `render/prepass.c3` is the whole of it.
+	DepthPrepass prepass;
 	// CPU mirror of the instance slice used for conservative point-face tests.
 	Instance* shadow_instances;
 	<*
@@ -425,6 +428,9 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	self.shadows.defaults();
 	self.point_shadows.settings = DEFAULT_POINT_SHADOW;
 	self.ambient_occlusion.apply(DEFAULT_AMBIENT_OCCLUSION);
+	// On by default: it is a saving on every scene with overdraw in it and costs a
+	// depth-only pass on the ones without.
+	self.prepass.enabled = true;
 	// Running, at ordinary speed. The zero value of a `GameClock` is a stopped one
 	// — see `GameClock.defaults`.
 	self.clock.defaults();
@@ -1061,6 +1067,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// frame block, the draw list and the pass agreeing about one field.
 		self.shadows.live = false;
 		self.shadows.draws = 0;
+		self.prepass.live = false;
+		self.prepass.draws = 0;
 		return;
 	}
 
@@ -1131,8 +1139,83 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// list: which shape the shadow pass takes follows from how many casters are
 	// static and how many are not, and neither number exists until the buckets do.
 	self.plan_shadow(gpu);
+	self.plan_prepass(gpu, target);
 
 	self.prepared = true;
+}
+
+<*
+ Whether this material's geometry can be spoken for by the depth prepass.
+
+ The prepass draws with `shaders/shadow.slang` against the camera, so it can
+ reproduce exactly what a bucket's *vertices* do — the model matrix, the morph
+ targets and both skinning paths — and exactly one thing its *fragments* do:
+ `material.alphaTest`, which the cut-out variant cuts with the same line and the
+ same texel the colour pass cuts with.
+
+ Everything else is refused, and every refusal is a fragment the prepass would
+ write depth for that the colour pass would not draw — which is a hole showing
+ the background rather than a saving:
+
+ - A blended material, which writes no depth in the colour pass either.
+ - A line, for `casts_shadow`'s reason: `LINE_STATE` neither tests nor writes.
+ - A `vertex:` body. It moves the surface in `material.slang` and this pass does
+   not run it, so the two would disagree about where the vertex is. The same
+   limitation the shadow pass states.
+ - A `fragment:` body containing `discard`. A body may cut its own shape and
+   nothing here can know what shape that is. Read off the body's text once, where
+   it arrives; a body that discards through a function of its own is not
+   reachable from a script, which cannot declare one.
+ - A cut-out sampled stochastically. `material.stochastic` blends three taps in
+   the colour pass and the depth shader takes one, so the two cut different
+   shapes out of the same leaf.
+ - A cut-out at all, when the cut-out pipeline is not built.
+*>
+fn bool MeshPass.prepassed(&self, Material* material)
+{
+	if (!self.prepass.live) return false;
+	if (material.blend != BlendMode.NONE) return false;
+	if (material.pipeline == self.line_pipeline) return false;
+	if (material.vertex.len > 0) return false;
+	if (material.fragment_discards) return false;
+	if (material.alpha_test > 0.0f)
+	{
+		if (!self.prepass.cutout_ready || material.stochastic) return false;
+	}
+	return true;
+}
+
+<*
+ Builds the prepass pipelines this frame's buckets need, and decides whether
+ there is a prepass at all.
+
+ A scene in which nothing is prepassable — every material blended, or every one a
+ body that discards — draws no depth-only pass, because the pass would be a
+ rendering that records nothing and a barrier nobody needs.
+*>
+fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
+{
+	self.prepass.draws = 0;
+	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts());
+	if (!self.prepass.live) return;
+
+	bool found = false;
+	foreach (bucket : self.scene.buckets)
+	{
+		Material* material = self.material(bucket.material);
+		if (material != null && self.prepassed(material)) { found = true; break; }
+	}
+	if (!found) self.prepass.live = false;
+}
+
+fn bool MeshPass.scene_has_cutouts(&self)
+{
+	foreach (bucket : self.scene.buckets)
+	{
+		Material* material = self.material(bucket.material);
+		if (material != null && material.alpha_test > 0.0f && material.blend == BlendMode.NONE) return true;
+	}
+	return false;
 }
 
 <*
@@ -1366,6 +1449,13 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// for no measured gain.
 		vk::cmdSetCullMode(cmd, material.cull);
 
+		// The depth prepass already wrote this bucket's depth, so the fragment
+		// shader runs on the one layer that survived it and writes nothing back.
+		// Everything else keeps the state its pipeline was built with.
+		bool prepassed = self.prepassed(material);
+		vk::cmdSetDepthWriteEnable(cmd, (!prepassed && pipeline.state.depth_write) ? vk::TRUE : vk::FALSE);
+		vk::cmdSetDepthCompareOp(cmd, prepassed ? COMPARE_OP_EQUAL : COMPARE_OP_LESS_OR_EQUAL);
+
 		// Pushed, not bound. There is no descriptor set anywhere in this project:
 		// the image and sampler are specified inline against this pipeline's own
 		// layout, so a material's shader gets its texture through its own layout
@@ -1429,6 +1519,11 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		{
 			samplers.add(SHADOW_ATLAS_BINDING, (self.shadows.live || self.point_shadows.live)
 				? self.shadow_manager.atlas.descriptor(self.shadow_manager.sample_static) : self.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
+				self.shadow_manager.sample_static, self.shadows.live || self.point_shadows.live));
 		}
 		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
@@ -1555,6 +1650,69 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
 	self.record_casters(cmd, CASTERS_VISIBLE, self.frame_view_projection);
 	self.ambient_occlusion.end(cmd);
+}
+
+<*
+ The depth prepass — the opaque and cut-out buckets drawn depth-only, into the
+ target's own depth attachment, before the scene pass begins.
+
+ Its own rendering, opened and closed here, for `record_shadow`'s reason and one
+ more: the pipeline statistics query brackets the scene rendering, so a prepass
+ inside it would count its own cut-out fragments in `stats().fragmentsShaded` and
+ the number would stop meaning "how many times the scene pass shaded a pixel".
+
+ `bucket.visible` and not `bucket.count`, and `material.cull` per bucket: this
+ must draw the same triangles the scene pass draws and no others.
+
+ @return `Whether anything was recorded — which is what tells the caller to keep the depth attachment rather than clear it.`
+*>
+fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* target)
+{
+	if (!self.prepared || !self.prepass.live) return false;
+
+	target.begin_depth(cmd);
+	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
+
+	vk::Pipeline bound = (vk::Pipeline)null;
+	uint recorded = 0;
+
+	foreach (i, bucket : self.scene.buckets)
+	{
+		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+		if (at == NOT_DRAWN || bucket.visible == 0) continue;
+
+		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
+		Material* material = self.material(bucket.material);
+		if (mesh == null || material == null) continue;
+		if (!self.prepassed(material)) continue;
+
+		bool cutout            = material.alpha_test > 0.0f;
+		MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
+
+		if (pipeline.handle != bound)
+		{
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			bound = pipeline.handle;
+		}
+		vk::cmdSetCullMode(cmd, material.cull);
+
+		if (cutout)
+		{
+			// The same image `record` samples, chosen the same way — the material's
+			// own map wins over the mesh's — or the two passes cut different shapes.
+			Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
+				: self.assets.texture_at(material.texture);
+			SampledBindings samplers;
+			samplers.add(0, sampled.descriptor());
+			samplers.push(cmd, pipeline);
+		}
+
+		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, self.frame_view_projection);
+	}
+
+	vk::cmdEndRendering(cmd);
+	self.prepass.draws = recorded;
+	return true;
 }
 
 fn uint point_hash(uint hash, uint value) @local @inline => (hash ^ value) * 16777619;
@@ -2480,6 +2638,7 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// frame's number, like `culled_last_frame` beside it, and for the same reason:
 	// `stats()` is a query and does not record a pass to count.
 	stats.shadow_draws = self.shadows.draws + self.point_shadows.draws;
+	stats.prepass_draws = self.prepass.draws;
 	stats.shadow_static_draws = self.shadows.static_draws + self.point_shadows.static_draws;
 	foreach (tile : self.shadow_manager.tiles) if (tile.size > 0) stats.shadow_views++;
 	stats.shadow_rejected = self.shadow_manager.rejected;
@@ -2575,9 +2734,11 @@ fn uint? MeshPass.create_material(
 				.pipeline = pipeline,
 				.cull = cull_for_side(side),
 				.blend = blend,
-				.fragment = fragment.copy(
-					mem
-				), // Copied only when there is one, so a material without a vertex body
+				.fragment = fragment.copy(mem),
+				// Nothing here can know what shape a body cuts, so a body that cuts one
+				// is left out of the depth prepass — see `MeshPass.prepassed`.
+				.fragment_discards = fragment.contains("discard"),
+				// Copied only when there is one, so a material without a vertex body
 				// carries a zero slice rather than a pointer into static memory that
 				// `Material.free` would hand to the allocator.
 				.vertex = vertex.len > 0 ? vertex.copy(mem)
@@ -3340,6 +3501,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.point_shadows.free(gpu);
 	self.shadow_manager.atlas.free(gpu);
 	self.ambient_occlusion.free(gpu);
+	self.prepass.free(gpu);
 	self.posed_offsets.free();
 	self.soft_offsets.free();
 	self.draw_indices.free();

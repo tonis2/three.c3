@@ -99,6 +99,10 @@ struct GpuLimits
 	// instead of inside the recording, where it would have to be ordered against a
 	// submission that has not happened yet.
 	bool timestamps;
+	// Fragment shader invocation counts for the scene pass — `pipelineStatisticsQuery`,
+	// a core feature handed to `deviceCreateInfo` unchanged, plus `hostQueryReset`
+	// for the same reason `timestamps` needs it.
+	bool pipeline_statistics;
 	// What the *device* reports, not what `create_instance` asked for. The
 	// instance's `apiVersion` is a ceiling; this is the answer, and it decides
 	// whether a 1.4 core feature struct may be chained into `deviceCreateInfo` at
@@ -571,6 +575,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 			// below unchanged, so it is enabled exactly when it is supported: a claim
 			// about the device *and* about what was asked for, which cannot disagree.
 		.timestamps = properties.limits.timestampComputeAndGraphics == vk::TRUE && v12.hostQueryReset == vk::TRUE,
+		.pipeline_statistics = features.features.pipelineStatisticsQuery == vk::TRUE && v12.hostQueryReset == vk::TRUE,
 		.api_version = properties
 			.apiVersion, // Read off the same `v14` that goes to `deviceCreateInfo`, so — as with
 			// `hostQueryReset` — this cannot disagree with what was asked for. False on
@@ -771,6 +776,7 @@ fn void Gpu.report(&self)
 	io::printfn("  maxPushDescriptors   %d", self.limits.max_push_descriptors);
 	io::printfn("  timestamps           %s", self.limits.timestamps);
 	io::printfn("  timestampPeriod      %f", self.limits.timestamp_period);
+	io::printfn("  pipelineStatistics   %s", self.limits.pipeline_statistics);
 }
 
 <*
