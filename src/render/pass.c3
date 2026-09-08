@@ -2041,11 +2041,25 @@ fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
  and it is a different question: *where the vertex blend runs*, not *who writes
  the palette*.
 
+ The same buffer carries the palettes an application wrote itself —
+ `Scene.set_palette`, for a caller whose skeleton is not three's node graph.
+ Those need no bone walk at all: the matrices arrive finished, and the only work
+ left is the copy and the offset. They share the buffer rather than getting one
+ of their own because the shader selects on one bit of `Instance.pose`, so a
+ second live buffer would be a second `FrameBlock` pointer and a third case in
+ `skin_matrix` buying nothing.
+
  Returns zero when nothing is live, which leaves `FrameBlock.live_poses` null —
  and no instance points at it, because `POSE_LIVE` is only set here.
 *>
 fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 {
+	// Entries whose node has gone, before either pass counts one. Here for
+	// `sweep_morphs`' reason — a node's death has several paths and this is the one
+	// place that walks the table anyway — and *first*, so the two passes below
+	// agree about what is in it.
+	if (self.scene.palettes.len() > 0) self.scene.sweep_palettes();
+
 	// Two passes over the players: one to size the buffer, one to fill it. The
 	// alternative is growing while writing, and the addresses handed to instances
 	// would be into a buffer that then moved.
@@ -2062,6 +2076,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 			needed += owner.skins[target.skin].joints.len();
 		}
 	}
+	foreach (&entry : self.scene.palettes) needed += entry.matrices.len();
 	if (needed == 0) return 0;
 
 	if (self.pose_capacity[slot] < needed)
@@ -2117,6 +2132,22 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 			mesh_node.pose = POSE_LIVE | at;
 			at += (uint)skin.joints.len();
 		}
+	}
+
+	// After the players, and the order is arbitrary as long as the two passes
+	// agree — the slice an instance reads is named by the offset written back into
+	// its node, not by where the table happens to put it.
+	foreach (&entry : self.scene.palettes)
+	{
+		Node* mesh_node = self.scene.node(entry.node);
+		// Swept above, so this cannot be a dead node; it can still be one whose
+		// skin was taken away between `set_palette` and now, and pointing that at a
+		// live slice would pose a mesh by matrices nothing sized.
+		if (mesh_node == null || mesh_node.skin < 0) continue;
+
+		foreach (j, pose : entry.matrices) palette[at + j] = pose;
+		mesh_node.pose = POSE_LIVE | at;
+		at += (uint)entry.matrices.len();
 	}
 
 	return self.pose_buffers[slot].address;

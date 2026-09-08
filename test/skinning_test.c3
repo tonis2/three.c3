@@ -1593,3 +1593,367 @@ fn void an_unknown_socket_says_what_the_rig_has() @test
 		);
 	};
 }
+
+// ============================================================================
+// A palette from outside
+// ============================================================================
+
+<*
+ A skinned quad built stream-by-stream, with no file behind it.
+
+ The fixture for the path an application that owns its own rig takes: it hands
+ over triangles and influences, three gives the asset a skin, and the pose
+ arrives as matrices rather than as bone nodes. Nothing here can come out of
+ `skinned.glb`, because the whole point is that there is no glTF.
+
+ Two quads stacked, four vertices each. The lower one rides joint 0 and the upper
+ one rides joint 1, hard-assigned at weight 1 — `make_skinned.py`'s reason
+ exactly: the posed position of every vertex is then one matrix multiply a reader
+ can do by hand, so a check that fails says which joint is wrong rather than that
+ the blend is off somewhere.
+*>
+fn void build_bar(three::GeometryBuilder* out) @local
+{
+	for (uint level = 0; level < 3; level++)
+	{
+		float y = (float)level;
+		// Joint 0 holds the bottom two rows, joint 1 the top one — so a palette that
+		// moves joint 1 moves the upper quad and leaves the lower one standing,
+		// which is what makes the two joints distinguishable in a silhouette.
+		uint joint = level == 2 ? 1 : 0;
+		out.positions.push({ -0.5f, y, 0 });
+		out.positions.push({ 0.5f, y, 0 });
+		out.normals.push({ 0, 0, 1 });
+		out.normals.push({ 0, 0, 1 });
+		out.uvs.push({ 0, y });
+		out.uvs.push({ 1, y });
+		out.joints.push({ joint, 0, 0, 0 });
+		out.joints.push({ joint, 0, 0, 0 });
+		out.weights.push({ 1, 0, 0, 0 });
+		out.weights.push({ 1, 0, 0, 0 });
+	}
+	for (uint quad = 0; quad < 2; quad++)
+	{
+		uint base = quad * 2;
+		out.triangle(base, base + 1, base + 3);
+		out.triangle(base, base + 3, base + 2);
+	}
+}
+
+// The bar, uploaded and given a two-joint skin. Keyed per test so no two share an
+// asset — `Assets.built` dedups by key, and a second test asking for the same one
+// would get the first's skin along with its triangles.
+fn three::AssetId built_bar(three::Renderer* renderer, String key, bool with_skin = true) @local
+{
+	three::GeometryBuilder shape;
+	shape.init();
+	defer shape.free();
+	build_bar(&shape);
+	if (!with_skin)
+	{
+		shape.joints.clear();
+		shape.weights.clear();
+	}
+	return renderer.pass.assets.upload_built(&renderer.gpu, key, key, &shape)!!;
+}
+
+<*
+ A builder's influence streams reach the device, and only as a pair.
+
+ `has_skin` is both-or-neither on this path for the reason it is on the file
+ path: joints without weights poses every vertex by whatever floats happened to
+ be at that address, which is a device-lost rather than a bad picture. The
+ half-filled case is checked here because it is the one a caller can reach by
+ accident — filling one loop and forgetting the other.
+*>
+fn void a_built_mesh_carries_its_influences() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:influences");
+		three::GpuMesh* mesh = renderer.pass.assets.mesh(id, 0);
+		test::@check(mesh != null, "the bar uploaded");
+		if (mesh == null) return;
+
+		test::@check(mesh.has_skin, "a builder with both streams full is skinned");
+		test::@check(mesh.joints.buffer != null, "and has a joints buffer");
+		test::@check(mesh.weights.buffer != null, "and a weights buffer");
+
+		// Half a pair is no pair. Built under its own key, because the dedup would
+		// otherwise hand back the asset above.
+		three::GeometryBuilder half;
+		half.init();
+		defer half.free();
+		build_bar(&half);
+		half.weights.clear();
+		three::AssetId lame = renderer.pass.assets.upload_built(&renderer.gpu, "test:bar:half", "half", &half)!!;
+
+		three::GpuMesh* lame_mesh = renderer.pass.assets.mesh(lame, 0);
+		if (lame_mesh == null) return;
+		test::@check(!lame_mesh.has_skin, "joints without weights is not a skin");
+		test::@check(lame_mesh.weights.buffer == null, "and nothing was uploaded for it");
+	};
+}
+
+<*
+ An attached skin is a rest pose, and it is the identity.
+
+ The same property `the_rest_pose_is_the_identity` checks for a bake, and it
+ matters for the same reason: the mesh a caller uploads is already at rest in
+ model space, so segment zero has to leave it exactly there. Anything else and
+ the model is wrong the moment nothing is posing it, which is most of the time.
+*>
+fn void an_attached_skin_is_a_rest_pose() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:attach");
+		int skin = renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		test::@check(skin == 0, "the first attached skin is skin 0, got %d", skin);
+
+		three::Asset* asset = renderer.pass.assets.slot(id);
+		test::@check(asset != null, "the asset is there");
+		if (asset == null) return;
+
+		test::@check(asset.skins.len() == 1, "one skin, got %d", asset.skins.len());
+		test::@check(asset.pose_matrices == 2, "two matrices, got %d", asset.pose_matrices);
+		test::@check(asset.poses.buffer != null, "and a buffer to hold them");
+		test::@check(asset.skins[0].joints.len() == 2, "the skin names two joints");
+		test::@check(asset.skins[0].rest_offset == 0, "the rest pose is at offset 0");
+		test::@check(asset.skins[0].loaded, "and it does not wait for an accessor that is not coming");
+
+		Matrix4f identity = matrix::IDENTITY4{float};
+		foreach (bound : asset.skins[0].inverse_bind)
+		{
+			// The caller's palette is already `world * inverse_bind`. A second one
+			// folded in here would undo the pose, and quietly.
+			test::@check(bound.m == identity.m, "the inverse binds are identity");
+		}
+
+		// Idempotent by the buffer, the memo `ensure_poses` keeps. A second attach
+		// would file a second skin whose rest offset points at the first's matrices.
+		int again = renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		test::@check(again < 0, "a second attach is refused, got %d", again);
+		test::@check(asset.skins.len() == 1, "and files nothing, got %d skins", asset.skins.len());
+	};
+}
+
+<*
+ A palette that does not fit the skin is refused rather than read.
+
+ Every one of these is a length or an identity mistake a caller can make, and
+ each would otherwise be a read past the end of a slice into whatever the last
+ character left in the buffer — a picture, not an error. The `set_skin` case is
+ the one worth naming: a node without one is a prop, and three has no way to know
+ how long its palette should be.
+*>
+fn void a_palette_that_does_not_fit_is_refused() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:fit");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+
+		Matrix4f[2] two = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float} };
+		Matrix4f[1] one = { matrix::IDENTITY4{float} };
+
+		test::@check(
+			!renderer.pass.scene.set_palette(node, two[..]),
+			"a node with no skin takes no palette"
+		);
+
+		renderer.pass.scene.set_skin(node, 0);
+		test::@check(
+			!renderer.pass.scene.set_palette(node, one[..]),
+			"a palette one matrix short is refused"
+		);
+		test::@check(
+			renderer.pass.scene.set_palette(node, two[..]),
+			"and one of the right length is taken"
+		);
+		test::@check(renderer.pass.scene.palettes.len() == 1, "one entry, not one per call");
+
+		// Twice over, because an application with a palette pushes one every frame.
+		renderer.pass.scene.set_palette(node, two[..]);
+		test::@check(renderer.pass.scene.palettes.len() == 1, "and re-pushing reuses it");
+	};
+}
+
+<*
+ A pushed palette reaches the instance, and clearing puts it back at rest.
+
+ `Instance.pose`'s top bit is the whole of how the shader chooses a buffer, so
+ this is the seam: a palette copied into the frame's buffer that no instance
+ points at draws a rest pose and looks like a palette that was never written.
+
+ The clear is the half that is easy to leave out. An offset left behind names a
+ slice of a buffer nothing wrote this frame, which is last frame's pose on a good
+ day and another character's on a bad one.
+*>
+fn void a_pushed_palette_reaches_the_instance() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:instance");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+
+		three::Node* placed = renderer.pass.scene.node(node);
+		test::@check(placed != null, "the node is there");
+		if (placed == null) return;
+		test::@check(placed.pose == 0, "at rest it points at the rest offset, got %d", placed.pose);
+
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float}.translate({ 1, 0, 0 }) };
+		renderer.pass.scene.set_palette(node, palette[..]);
+
+		renderer.pass.frame_camera();
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		placed = renderer.pass.scene.node(node);
+		test::@check(
+			(placed.pose & three::POSE_LIVE) != 0,
+			"the instance reads the live buffer, got pose %d",
+			placed.pose
+		);
+
+		test::@check(renderer.pass.scene.clear_palette(node), "clearing says it was on the table");
+		placed = renderer.pass.scene.node(node);
+		test::@check(placed.pose == 0, "and the node is back at its rest offset, got %d", placed.pose);
+		test::@check(renderer.pass.scene.palettes.len() == 0, "with nothing left in the table");
+	};
+}
+
+<*
+ A palette moves the mesh, and clearing moves it back.
+
+ The end-to-end check, and the one that would catch every arrangement above
+ being perfect while nothing reads it: influences uploaded, a skin attached, an
+ offset written into the instance and a shader that poses by the identity anyway
+ renders a mesh at rest, validates cleanly, and is completely broken.
+
+ Joint 1 holds the top row only, so a translation along +X shears the bar rather
+ than sliding it — the silhouette gets *wider* on one side, which is a change no
+ camera or clear-colour difference produces.
+*>
+fn void a_pushed_palette_moves_the_mesh() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:moves");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+		renderer.pass.frame_camera();
+
+		image::Image rest_shot = renderer.capture()!!;
+		Silhouette rest = measure(&rest_shot, renderer.clear);
+		rest_shot.free();
+		test::@check(rest.drawn > 0, "the bar rasterises at rest");
+
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float}.translate({ 1.5f, 0, 0 }) };
+		renderer.pass.scene.set_palette(node, palette[..]);
+
+		image::Image posed_shot = renderer.capture()!!;
+		Silhouette posed = measure(&posed_shot, renderer.clear);
+		posed_shot.free();
+
+		test::@check(
+			posed.rightmost > rest.rightmost,
+			"the palette carried the top row right: %d against %d — if these match nothing read it",
+			posed.rightmost, rest.rightmost
+		);
+
+		renderer.pass.scene.clear_palette(node);
+		image::Image back_shot = renderer.capture()!!;
+		Silhouette back = measure(&back_shot, renderer.clear);
+		back_shot.free();
+
+		test::@check(
+			back.rightmost == rest.rightmost,
+			"and clearing put it back: %d against %d",
+			back.rightmost, rest.rightmost
+		);
+	};
+}
+
+<*
+ A limb the palette takes outside the rest box is not culled away.
+
+ The failure this guards is the nastiest kind: correct at the origin, correct
+ facing the camera, and the character vanishing at certain angles on certain
+ frames. An asset `attach_skin` built has no baked frames to union, so its
+ `skinned_bounds` is only the box the modeller drew — the palette's own box is
+ what has to be asked instead, and it is measured the moment the matrices arrive.
+*>
+fn void a_live_palette_is_culled_against_where_it_reaches() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:bounds");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+
+		three::Asset* asset = renderer.pass.assets.slot(id);
+		if (asset == null) return;
+		test::@check(
+			asset.skinned_bounds.max.x <= 0.51f,
+			"the rest box is the bar's own, got max.x %f",
+			asset.skinned_bounds.max.x
+		);
+
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float}.translate({ 4, 0, 0 }) };
+		renderer.pass.scene.set_palette(node, palette[..]);
+
+		three::LivePalette* entry = renderer.pass.scene.live_palette(node);
+		test::@check(entry != null, "the entry is on the table");
+		if (entry == null) return;
+		test::@check(
+			entry.bounds.max.x >= 4.0f,
+			"the box grew to hold the moved joint, got max.x %f",
+			entry.bounds.max.x
+		);
+		test::@check(
+			entry.bounds.min.x <= -0.5f,
+			"and still holds the joint that did not move, got min.x %f",
+			entry.bounds.min.x
+		);
+	};
+}
+
+<*
+ A palette does not outlive the node it poses.
+
+ A `NodeId` carries a generation, so a stale entry can never be written into the
+ slot's next occupant — but it would sit in the table holding a `List` forever if
+ nothing swept it, which is a leak per model a session opens. The sweep runs
+ where the frame already walks the table.
+*>
+fn void a_palette_does_not_outlive_its_node() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:sweep");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float} };
+		renderer.pass.scene.set_palette(node, palette[..]);
+		test::@check(renderer.pass.scene.palettes.len() == 1, "the entry is on the table");
+
+		renderer.pass.scene.remove(node);
+		renderer.pass.frame_camera();
+		image::Image shot = renderer.capture()!!;
+		shot.free();
+
+		test::@check(
+			renderer.pass.scene.palettes.len() == 0,
+			"and the frame swept it, %d left",
+			renderer.pass.scene.palettes.len()
+		);
+	};
+}

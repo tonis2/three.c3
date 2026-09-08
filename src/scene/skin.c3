@@ -47,6 +47,7 @@ import std::math::vector;
 import std::math::quaternion;
 import std::collections::list;
 import collision;
+import vk;
 import gltf;
 
 <*
@@ -539,6 +540,276 @@ fn Matrix4f Asset.bone_matrix(&self, uint skin, uint joint, uint offset)
 	usz at = (usz)offset + (usz)joint;
 	if (at >= self.pose_mirror.len) return matrix::IDENTITY4{float};
 	return self.pose_mirror[at].mul(rig.bind[joint]);
+}
+
+// ============================================================================
+// Skins and palettes a caller owns
+// ============================================================================
+
+<*
+ Gives a *built* asset a skin, so geometry uploaded with influences has
+ something to index.
+
+ The third way an asset gets a skeleton, and the one for a caller that already
+ has one. `Assets.load` reads a skin out of a glTF and `ensure_poses` bakes its
+ clips; both of those start from a file. An application that builds its own rig —
+ crig, which owns a skeleton, a weight solver and a posing tool of its own, and
+ hands three triangles — has no file, no glTF nodes and no clips to bake, so
+ `ensure_poses` returns immediately for its asset and the mesh would draw at rest
+ forever.
+
+ What is created is deliberately the *empty* skin: `joints` numbered 0..N-1 and
+ the inverse binds identity. Both are honest here rather than a stand-in. The
+ caller's palette is already `world * inverse_bind` — it is the whole point of a
+ palette — so folding a second inverse bind through it would undo the pose, and
+ the joint list only ever has to be as long as the palette, because nothing here
+ maps these joints onto nodes. `Scene.set_palette` is what fills the matrices.
+
+ The rest palette is N identities, which is exactly right for a mesh whose
+ vertices are already at rest in model space: a node pointing at offset zero
+ draws the geometry as it was uploaded. That matters beyond tidiness — it is
+ what a mesh looks like the moment the palette is cleared, and what one looks
+ like between the upload and the first frame that poses it.
+
+ Idempotent by the buffer, the same memo `ensure_poses` uses: an asset that
+ already has a pose table keeps it.
+
+ @param joints : `How many matrices a palette for this asset carries. Zero attaches nothing.`
+ @return `The index of the new skin, for Scene.set_skin, or -1 when nothing was attached.`
+*>
+fn int? Assets.attach_skin(&self, Gpu* gpu, AssetId id, uint joints)
+{
+	Asset* asset = self.slot(id);
+	if (asset == null || joints == 0) return -1;
+	// A file's own skins are read at load and baked by `ensure_poses`; adding one
+	// here would be a second skeleton on a character that has one, and a rest
+	// offset of zero pointing into a table this did not plan.
+	if (asset.has_stream) return -1;
+	// The same memo `ensure_poses` keeps, and for the same reason: the buffer is
+	// the record that the work has been done.
+	if (asset.poses.buffer != null) return -1;
+
+	// Identity rather than zero, and built before anything is pushed, so a failed
+	// upload leaves the asset exactly as it was rather than carrying a skin whose
+	// palette is not there.
+	Matrix4f[] rest = mem::new_array(Matrix4f, (usz)joints);
+	defer free(rest);
+	foreach (&entry : rest) *entry = matrix::IDENTITY4{float};
+
+	vk::Memory poses = gpu.upload_stream(rest.ptr, Matrix4f::size * (sz)joints)!;
+
+	AssetSkin skin;
+	skin.joints.init(mem, joints);
+	skin.inverse_bind.init(mem, joints);
+	skin.bind.init(mem, joints);
+	for (uint j = 0; j < joints; j++)
+	{
+		skin.joints.push(j);
+		skin.inverse_bind.push(matrix::IDENTITY4{float});
+		skin.bind.push(matrix::IDENTITY4{float});
+	}
+	skin.rest_offset = 0;
+	skin.loaded = true;
+
+	// A built asset's `skins` is the zero value — `upload_built` fills `path` and
+	// `meshes` and nothing else — and a `List` pushed to with a null allocator
+	// resolves to `tmem`, which any `@pool()` up the stack would free out from
+	// under the asset. Backed explicitly before the first push, for
+	// `GeometryBuilder.init`'s reason.
+	if (asset.skins.len() == 0) asset.skins.init(mem, 1);
+	asset.skins.push(skin);
+
+	asset.poses = poses;
+	asset.pose_matrices = joints;
+	// The rest box, because at rest that is what the mesh occupies. A palette that
+	// takes a limb outside it grows the box that frame — `Scene.set_palette`
+	// measures its own, and `build_draw_list` prefers it. This is what a node with
+	// no palette is culled against.
+	asset.skinned_bounds = asset.bounds;
+	return (int)(asset.skins.len() - 1);
+}
+
+<*
+ One node's joint matrices, written from outside.
+
+ The fourth pose path, beside the baked table, the bone-node palette and the
+ compute skinner — and the one for a caller that owns its own skeleton. Nothing
+ here samples a clip or reads a node: the matrices arrive whole, already
+ `world * inverse_bind`, which is the same contract `write_live_poses` produces
+ from bone nodes and the same one `shaders/mesh.slang` reads.
+
+ A side table rather than a field on `Node`, for `MorphWeights`' reason: almost
+ no node has one, and a `List` per node would be a pointer, a length and a
+ capacity per crate in the level.
+
+ `bounds` is the whole of why this is a struct and not just the matrices. A
+ skinned node is culled against the box its poses can reach, and the asset's
+ `skinned_bounds` is the union over *baked* frames — which for an asset posed
+ from outside is only its rest box. A raised arm would then leave the box and the
+ character would vanish at certain camera angles. Measured here, at the moment
+ the matrices arrive, because that is the only moment they are known and because
+ it is one box transform per joint: tens of matrices, not a pass over vertices.
+*>
+struct LivePalette
+{
+	NodeId node;
+	List{Matrix4f} matrices; // owned
+	collision::Aabb3 bounds;
+}
+
+<*
+ This node's live palette entry, or null.
+
+ A linear scan, like `Scene.player` and `Scene.morph_weights`: the list holds one
+ entry per node an application poses by hand, which is a handful in the scene
+ that has any and zero in every scene that does not. Callers on the hot path —
+ `build_draw_list` — check `palettes.len()` first, so a scene without one pays a
+ compare.
+
+ Stale by construction the moment the table grows, which is why nothing keeps
+ one.
+*>
+fn LivePalette* Scene.live_palette(&self, NodeId id)
+{
+	foreach (&entry : self.palettes)
+	{
+		if (entry.node == id) return entry;
+	}
+	return null;
+}
+
+<*
+ Poses one node's mesh by matrices the caller computed.
+
+ 	`scene.set_palette(model, palette);`
+
+ One matrix per joint of the skin the node names, each taking a *rest-pose*
+ vertex to where it belongs — `world * inverse_bind`, identity at rest. Handing
+ in bone-space transforms instead poses the mesh by its own bind pose twice and
+ turns it inside out around the root, which is the one mistake worth naming here
+ because it produces a picture rather than an error.
+
+ Copied rather than borrowed. The matrices are read by `write_live_poses` during
+ the next `prepare`, which may be several calls after this one, and an
+ application that rebuilds its palette every frame — which is what an application
+ with one is doing — would otherwise hand over an array it is about to free.
+
+ **Refused when the node names no skin.** `Scene.set_skin` is what says which
+ skin poses a node, and the count comes off that skin: a palette shorter than it
+ leaves joints reading past the slice, and one longer names joints the geometry's
+ influences cannot index.
+
+ @param matrices : `Exactly one per joint of the node's skin.`
+ @return `False when the node is gone, names no skin, or the count disagrees — a question rather than an error.`
+*>
+fn bool Scene.set_palette(&self, NodeId id, Matrix4f[] matrices)
+{
+	Node* node = self.node(id);
+	if (node == null || node.skin < 0 || self.assets == null) return false;
+
+	Asset* owner = self.assets.slot(node.asset);
+	if (owner == null || node.skin >= owner.skins.len()) return false;
+	if (matrices.len != owner.skins[node.skin].joints.len()) return false;
+
+	LivePalette* entry = self.live_palette(id);
+	if (entry == null)
+	{
+		LivePalette fresh = { .node = id };
+		fresh.matrices.init(mem, matrices.len);
+		self.palettes.push(fresh);
+		entry = &self.palettes[self.palettes.len() - 1];
+	}
+
+	entry.matrices.clear();
+	foreach (matrix : matrices) entry.matrices.push(matrix);
+
+	// The box this pose actually reaches — see `LivePalette.bounds`. Measured
+	// exactly as `measure_skinned_bounds` measures a bake: the mesh's own bind box
+	// through every joint matrix, unioned. Conservative in the safe direction, a
+	// joint that moves a hand moving the whole box.
+	collision::Aabb3 bind = node.mesh < owner.meshes.len() ? owner.meshes[node.mesh].bounds : owner.bounds;
+	bool first            = true;
+	foreach (pose : entry.matrices)
+	{
+		collision::Aabb3 moved = bind.transform_matrix(pose);
+		if (first)
+		{
+			entry.bounds = moved;
+			first = false;
+			continue;
+		}
+		entry.bounds = {
+			.min = {
+				math::min(entry.bounds.min.x, moved.min.x),
+				math::min(entry.bounds.min.y, moved.min.y),
+				math::min(entry.bounds.min.z, moved.min.z),
+			},
+			.max = {
+				math::max(entry.bounds.max.x, moved.max.x),
+				math::max(entry.bounds.max.y, moved.max.y),
+				math::max(entry.bounds.max.z, moved.max.z),
+			},
+		};
+	}
+	if (first) entry.bounds = bind;
+	return true;
+}
+
+<*
+ Takes a node off the live palette, and puts its mesh back at rest.
+
+ The offset is what has to be undone, not just the entry: an instance carrying
+ `POSE_LIVE | at` into a frame where nothing wrote that slice reads whatever the
+ buffer holds, so the node is pointed back at its skin's rest pose here rather
+ than left for the next writer to fix. That rest pose is the identity for an
+ asset `attach_skin` built and the bind pose for a file's own skin, and in both
+ cases it is the mesh standing as it was modelled.
+
+ @return `Whether it was on it.`
+*>
+fn bool Scene.clear_palette(&self, NodeId id)
+{
+	foreach (i, &entry : self.palettes)
+	{
+		if (entry.node != id) continue;
+		entry.matrices.free();
+		self.palettes.remove_at(i);
+
+		Node* node = self.node(id);
+		if (node == null) return true;
+		node.pose = 0;
+		if (node.skin >= 0 && self.assets != null)
+		{
+			Asset* owner = self.assets.slot(node.asset);
+			if (owner != null && node.skin < owner.skins.len())
+			{
+				node.pose = owner.skins[node.skin].rest_offset;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+<*
+ Every palette whose node is gone, dropped.
+
+ Called from `write_live_poses` for `sweep_morphs`' reason: a node's death has
+ several paths through `Scene.kill`, and sweeping a short list at the one place
+ that walks it anyway is cheaper than a hook on the frequent one.
+
+ A recycled slot cannot be mistaken for the node that died — `Scene.node` is
+ asked, and it compares generations — so the worst a delayed sweep costs is an
+ entry's matrices sitting in the table until the next frame.
+*>
+fn void Scene.sweep_palettes(&self)
+{
+	for (sz i = self.palettes.len(); i > 0; i--)
+	{
+		if (self.node(self.palettes[i - 1].node) != null) continue;
+		self.palettes[i - 1].matrices.free();
+		self.palettes.remove_at(i - 1);
+	}
 }
 
 // ============================================================================
